@@ -8,7 +8,13 @@ export type NonNegativeCount = typeof NonNegativeCount.Type
 
 export const GateRuleVersion = Schema.NonEmptyString.pipe(Schema.brand("GateRuleVersion"))
 export type GateRuleVersion = typeof GateRuleVersion.Type
-export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v8")
+export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v9")
+
+/**
+ * Pure deterministic UTF-16 code-unit string comparator (`-1 | 0 | 1`).
+ * Replaces locale-sensitive `String.prototype.localeCompare` in gate and compiler sorting.
+ */
+export const compareCodeUnits = (a: string, b: string): -1 | 0 | 1 => (a < b ? -1 : a > b ? 1 : 0)
 
 export const WorkspaceFilePath = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),
@@ -160,7 +166,8 @@ export type AstGatePackageTag = typeof AstGatePackageTag.Type
 
 export const inferAstGatePackageTagFromPath = (filePath: string): AstGatePackageTag => {
   if (filePath.includes("/contract/")) return AstGatePackageTag.make("contract")
-  if (filePath.includes("/domain/") || filePath.includes("/core/")) return AstGatePackageTag.make("domain")
+  if (filePath.includes("/domain/") || filePath.includes("/core/"))
+    return AstGatePackageTag.make("domain")
   if (filePath.includes("/service/")) return AstGatePackageTag.make("service")
   if (filePath.includes("/infra/")) return AstGatePackageTag.make("infra")
   return AstGatePackageTag.make("app")
@@ -208,6 +215,8 @@ export const SelfDogfoodingRuleId = Schema.Literals([
   "bare-cause-has-interrupts",
   "process-env-outside-infra-or-app",
   "dynamic-harness-import",
+  "process-exit-outside-app",
+  "locale-dependent-sort",
 ])
 export type SelfDogfoodingRuleId = typeof SelfDogfoodingRuleId.Type
 
@@ -225,10 +234,7 @@ export const SelfDogfoodingViolation = Schema.Struct({
 })
 export type SelfDogfoodingViolation = typeof SelfDogfoodingViolation.Type
 
-export const makeVerdictReportSchema = <
-  V extends Schema.Top,
-  Extra extends Schema.Struct.Fields,
->(
+export const makeVerdictReportSchema = <V extends Schema.Top, Extra extends Schema.Struct.Fields>(
   violationSchema: V,
   extraFields: Extra,
 ) =>

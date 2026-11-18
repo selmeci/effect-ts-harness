@@ -2,8 +2,9 @@
  * @fileoverview Mutation verification gate, mutant discovery, test execution, and span saturation analysis.
  */
 import { join, resolve } from "node:path"
-import { Effect, Result } from "effect"
+import { Result } from "effect"
 import { match } from "ts-pattern"
+import { AstSourceFilePath, SourceLineNumber } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { runVitestTargetList, stripAnsi } from "./mutation-subprocess-helpers.js"
 import {
@@ -17,7 +18,9 @@ import {
   discoverDomainMutants,
   evaluateMutantSchemaInProcess,
   MutantCategory,
+  MutantId,
   MutantOutcome,
+  MutantSourceText,
   type MutantSchemaModule,
   parseGitDiffModifiedLines,
   verifyMutantSchemaSyntax,
@@ -27,20 +30,56 @@ import {
   recoverStartupBackup,
 } from "./mutation/mutation-backup.js"
 import {
+  decideMutationCheck,
+  decideMutationReport,
+  evaluateMutationOutcomes,
+  evaluateSpanSaturationViolations,
+  isMutantMarkedEquivalent,
+  normalizePriorMillis,
+  type MutationEvaluationInput,
+  type MutationOutcomesSummary,
+  type MutationSuiteReport,
+  type SaturationViolation,
+  type SpanSaturationObservation,
+  type SpanSaturationSpec,
+  type TraceSpanObservation,
+  type UntestedMutationFile,
+} from "./mutation/mutation-outcomes.js"
+import {
   type DomainFile,
   findDomainFiles,
+  findDomainFilesChecked,
   findReachingTestFiles,
+  findReachingTestFilesChecked,
   findUnclassifiedModifiedLibFiles,
+  findUnclassifiedModifiedLibFilesChecked,
   partitionReachingTestFiles,
+  partitionReachingTestFilesChecked,
 } from "./mutation/mutation-target-discovery.js"
 
 export {
   stripAnsi,
   MutantCategory,
+  MutantId,
+  MutantSourceText,
   CodeMutant,
   MutantOutcome,
   type MutantSchemaModule,
   type DomainFile,
+  type SpanSaturationSpec,
+  type TraceSpanObservation,
+  type SaturationViolation,
+  type SpanSaturationObservation,
+  type MutationEvaluationInput,
+  type UntestedMutationFile,
+  type MutationOutcomesSummary,
+  type MutationSuiteReport,
+  evaluateSpanSaturationViolations,
+  normalizePriorMillis,
+  isMutantMarkedEquivalent,
+  evaluateMutationOutcomes,
+  decideMutationReport,
+  decideMutationCheck,
   getActiveMutantId,
   setActiveMutantId,
   parseGitDiffModifiedLines,
@@ -53,248 +92,14 @@ export {
   partitionReachingTestFiles,
 }
 
-export interface SpanSaturationSpec {
-  readonly spanQualname: string
-  readonly spanName: string
-  readonly filePath: string
-  readonly declaredErrorTags: ReadonlyArray<string>
-  readonly declaredBranchTags?: ReadonlyArray<string> | undefined
-}
-
-export interface TraceSpanObservation {
-  readonly spanId: string
-  readonly parentSpanId: string | null
-  readonly name: string
-  readonly exitTag?: "Success" | "Failure" | "Defect" | undefined
-  readonly errorTag?: string | null | undefined
-  readonly valueTag?: string | null | undefined
-}
-
-export interface SaturationViolation {
-  readonly ruleId: "SAT-01" | "SAT-02"
-  readonly kind: "unexercised-error-channel" | "shallow-branch-saturation"
-  readonly spanQualname: string
-  readonly spanName: string
-  readonly filePath: string
-  readonly missingTags: ReadonlyArray<string>
-  readonly message: string
-}
-
-export type SpanSaturationObservation = TraceSpanObservation
-
-export interface MutationEvaluationInput {
-  readonly outcomes: ReadonlyArray<MutantOutcome>
-  readonly minScore?: number | undefined
-  readonly equivalencePriors?: Readonly<Record<string, number>> | undefined
-  readonly saturationSpecs?: ReadonlyArray<SpanSaturationSpec> | undefined
-  readonly traceObservations?: ReadonlyArray<TraceSpanObservation> | undefined
-  readonly spanObservations?: ReadonlyArray<SpanSaturationObservation> | undefined
-}
-
-export interface MutationSuiteReport {
-  readonly passed: boolean
-  readonly totalMutants: number
-  readonly killedCount: number
-  readonly survivedCount: number
-  readonly mutationScore: number
-  readonly survivedMutants: ReadonlyArray<CodeMutant>
-  readonly equivalentCount?: number | undefined
-  readonly equivalentMutants?: ReadonlyArray<CodeMutant> | undefined
-  readonly saturationViolations?: ReadonlyArray<SaturationViolation> | undefined
-  readonly diagnostic?: string | undefined
-  readonly diffMode?:
-    | "all-lines"
-    | "explicit-files"
-    | "working-tree"
-    | "branch-base"
-    | "not-git"
-    | undefined
-  readonly scannedCandidateFiles?: number | undefined
-  readonly diffMatchedFiles?: ReadonlyArray<string> | undefined
-  readonly evaluatedFiles?: ReadonlyArray<string> | undefined
-}
-
-export const evaluateSpanSaturationViolations = (
-  specs: ReadonlyArray<SpanSaturationSpec>,
-  observations: ReadonlyArray<TraceSpanObservation>,
-): ReadonlyArray<SaturationViolation> => {
-  const byId = new Map<string, TraceSpanObservation>(observations.map((o) => [o.spanId, o]))
-  const getAncestorSpanNamesAndSelf = (obs: TraceSpanObservation): ReadonlySet<string> => {
-    const names = new Set<string>([obs.name])
-    const visited = new Set<string>([obs.spanId])
-    let curParentId = obs.parentSpanId
-    while (curParentId !== null && !visited.has(curParentId)) {
-      visited.add(curParentId)
-      const parent = byId.get(curParentId)
-      if (parent === undefined) break
-      names.add(parent.name)
-      curParentId = parent.parentSpanId
-    }
-    return names
-  }
-
-  const errorTagsBySpan = new Map<string, Set<string>>()
-  const branchTagsBySpan = new Map<string, Set<string>>()
-  const recordTag = (map: Map<string, Set<string>>, key: string, val: string) => {
-    let s = map.get(key)
-    if (s === undefined) {
-      s = new Set<string>()
-      map.set(key, s)
-    }
-    s.add(val)
-  }
-
-  for (const obs of observations) {
-    for (const spanName of getAncestorSpanNamesAndSelf(obs)) {
-      if (
-        obs.exitTag === "Failure" &&
-        typeof obs.errorTag === "string" &&
-        obs.errorTag.length > 0
-      ) {
-        recordTag(errorTagsBySpan, spanName, obs.errorTag)
-        recordTag(branchTagsBySpan, spanName, obs.errorTag)
-      }
-      if (typeof obs.valueTag === "string" && obs.valueTag.length > 0) {
-        recordTag(branchTagsBySpan, spanName, obs.valueTag)
-      }
-    }
-  }
-
-  const violations: Array<SaturationViolation> = []
-  for (const spec of specs) {
-    const observedErrors = errorTagsBySpan.get(spec.spanName) ?? new Set<string>()
-    const missingErrors = spec.declaredErrorTags.filter((tag) => !observedErrors.has(tag))
-    if (missingErrors.length > 0) {
-      violations.push({
-        ruleId: "SAT-01",
-        kind: "unexercised-error-channel",
-        spanQualname: spec.spanQualname,
-        spanName: spec.spanName,
-        filePath: spec.filePath,
-        missingTags: missingErrors,
-        message: `[SAT-01] Unexercised error channel(s) on '${spec.spanName}' (${spec.spanQualname}): [${missingErrors.join(", ")}] were never observed on '${spec.spanName}' or its descendant spans.`,
-      })
-    }
-    const declaredBranches = spec.declaredBranchTags ?? []
-    if (declaredBranches.length >= 2) {
-      const observedBranches = branchTagsBySpan.get(spec.spanName) ?? new Set<string>()
-      const missingBranches = declaredBranches.filter((tag) => !observedBranches.has(tag))
-      if (missingBranches.length > 0) {
-        violations.push({
-          ruleId: "SAT-02",
-          kind: "shallow-branch-saturation",
-          spanQualname: spec.spanQualname,
-          spanName: spec.spanName,
-          filePath: spec.filePath,
-          missingTags: missingBranches,
-          message: `[SAT-02] Shallow branch saturation on '${spec.spanName}' (${spec.spanQualname}): missing branch/outcome tags [${missingBranches.join(", ")}].`,
-        })
-      }
-    }
-  }
-  return violations
-}
-
-export const normalizePriorMillis = (raw: number): number =>
-  raw > 0 && raw < 1 ? Math.round(raw * 1000) : Math.round(raw)
-
-export const isMutantMarkedEquivalent = (
-  outcome: MutantOutcome,
-  priors: Readonly<Record<string, number>> | undefined,
-  threshold = 850,
-): boolean =>
-  match(outcome.status)
-    .with("equivalent", () => true)
-    .with("killed", "survived", () => {
-      const prior = priors?.[outcome.mutant.id]
-      return prior !== undefined && normalizePriorMillis(prior) >= threshold
-    })
-    .exhaustive()
-
-export const evaluateMutationOutcomes = (
-  outcomes: ReadonlyArray<MutantOutcome>,
-  minScore?: number,
-  equivalencePriors?: Readonly<Record<string, number>>,
-  saturationSpecs?: ReadonlyArray<SpanSaturationSpec>,
-  spanObservations?: ReadonlyArray<SpanSaturationObservation>,
-): MutationSuiteReport => {
-  const equivalentMutantIds = new Set(
-    outcomes
-      .filter((o) =>
-        match(o.status)
-          .with("killed", () => false)
-          .with("survived", "equivalent", () => isMutantMarkedEquivalent(o, equivalencePriors))
-          .exhaustive(),
-      )
-      .map((o) => o.mutant.id),
-  )
-  const equivalentMutants = outcomes
-    .filter((o) => equivalentMutantIds.has(o.mutant.id))
-    .map((o) => o.mutant)
-  const survivedMutants = outcomes
-    .filter((o) =>
-      match(o.status)
-        .with("survived", () => !equivalentMutantIds.has(o.mutant.id))
-        .with("killed", "equivalent", () => false)
-        .exhaustive(),
-    )
-    .map((o) => o.mutant)
-  const survivedCount = survivedMutants.length
-  const killedCount = outcomes.filter((o) =>
-    match(o.status)
-      .with("killed", () => true)
-      .with("survived", "equivalent", () => false)
-      .exhaustive(),
-  ).length
-  const actionableMutants = outcomes.length - equivalentMutants.length
-  const mutationScore = actionableMutants <= 0 ? 1 : killedCount / actionableMutants
-  const saturationViolations =
-    saturationSpecs !== undefined && spanObservations !== undefined
-      ? evaluateSpanSaturationViolations(saturationSpecs, spanObservations)
-      : undefined
-  const passed =
-    survivedCount === 0 &&
-    mutationScore >= (minScore ?? 1) &&
-    (saturationViolations === undefined || saturationViolations.length === 0)
-
-  return {
-    passed,
-    totalMutants: outcomes.length,
-    killedCount,
-    survivedCount,
-    mutationScore,
-    survivedMutants,
-    ...(equivalencePriors !== undefined || equivalentMutants.length > 0
-      ? { equivalentCount: equivalentMutants.length, equivalentMutants }
-      : {}),
-    ...(saturationViolations !== undefined ? { saturationViolations } : {}),
-  } satisfies MutationSuiteReport
-}
-
-export const decideMutationReport = Effect.fn("MutationCheck.decide")(function* (
-  input: MutationEvaluationInput,
-) {
-  return yield* Effect.succeed(
-    evaluateMutationOutcomes(
-      input.outcomes,
-      input.minScore,
-      input.equivalencePriors,
-      input.saturationSpecs,
-      input.spanObservations ?? input.traceObservations,
-    ),
-  )
-})
-
-export const decideMutationCheck = decideMutationReport
-
 export const extractGitDiffModifiedLines = (
   repoRoot: string,
   hostIo: SyncHostIo,
 ): ReadonlyMap<string, ReadonlySet<number>> | undefined =>
   match(extractGitDiffModifiedLinesChecked(repoRoot, hostIo))
-    .with({ kind: "ok" }, ({ lines }) => lines)
-    .with({ kind: "not-git" }, () => undefined)
-    .with({ kind: "failed" }, () => undefined)
+    .with({ _tag: "Ok" }, ({ lines }) => lines)
+    .with({ _tag: "NotGit" }, () => undefined)
+    .with({ _tag: "Failed" }, () => undefined)
     .exhaustive()
 
 export const getWorkspaceGitDiffModifiedLines = extractGitDiffModifiedLines
@@ -334,10 +139,17 @@ export const runDomainMutationSuite = (
   hostIo: SyncHostIo,
   options?: RunMutationOptions,
 ): MutationSuiteReport => {
-  let diffMode: MutationSuiteReport["diffMode"] = undefined
-  let scannedCandidateFiles: number | undefined = undefined
+  let diffMode: MutationSuiteReport["diffMode"] = "working-tree"
+  let scannedCandidateFiles = 0
+  const scannedFiles: Array<string> = []
   const diffMatchedFiles: Array<string> = []
   const evaluatedFiles: Array<string> = []
+  const untestedFiles: Array<UntestedMutationFile> = []
+
+  const isStrictMode = match(options?.enforcementMode)
+    .with("strict", () => true)
+    .with("advisory", undefined, () => false)
+    .exhaustive()
 
   const makeAbortedReport = (
     outcomesSoFar: ReadonlyArray<MutantOutcome>,
@@ -352,10 +164,12 @@ export const runDomainMutationSuite = (
     ),
     passed: false,
     diagnostic,
-    ...(diffMode !== undefined ? { diffMode } : {}),
-    ...(scannedCandidateFiles !== undefined ? { scannedCandidateFiles } : {}),
+    diffMode,
+    scannedCandidateFiles,
+    scannedFiles,
     diffMatchedFiles,
     evaluatedFiles,
+    ...(untestedFiles.length > 0 ? { untestedFiles } : {}),
   })
   const abortWith = (
     outcomesSoFar: ReadonlyArray<MutantOutcome>,
@@ -382,27 +196,59 @@ export const runDomainMutationSuite = (
       : undefined
   if (startupDiag !== undefined) return abortWith([], startupDiag)
 
-  const domainFiles = findDomainFiles(repoRoot, hostIo, options?.scope, options?.targetFiles)
-  const domainByRel = new Map(domainFiles.map((f) => [f.relFile, f]))
-  const targets: ReadonlyArray<DomainFile> = hasOverlays
-    ? Array.from(normalizedOverlays.keys()).map((relFile) => {
-        const existing = domainByRel.get(relFile)
-        if (existing !== undefined) return existing
-        const parts = /^libs\/([^/]+)\/([^/]+)\//.exec(relFile)
-        const scope = parts?.[1] ?? "sample"
-        const pkgDir = parts?.[2] ?? "domain"
-        const tier = match<string, DomainFile["tier"]>(pkgDir)
-          .with("contract", () => "contract")
-          .with("core", "gates", "graph", "decision", "ingest", () => "core")
-          .otherwise(() => "domain")
-        return { scope, pkgDir, tier, fullPath: join(repoRoot, relFile), relFile }
-      })
-    : domainFiles
-  scannedCandidateFiles = targets.length
-
   const targetFilesOpt = options?.targetFiles
   const hasTargetFilesOpt = targetFilesOpt !== undefined
   const isExplicitTarget = (targetFilesOpt?.length ?? 0) > 0
+  if (!hasOverlays && hasTargetFilesOpt && !isExplicitTarget) {
+    return abortWith([], "[mutation-check] Explicit targetFiles (--file) was provided but empty.")
+  }
+
+  const domainFilesRes = findDomainFilesChecked(
+    repoRoot,
+    hostIo,
+    options?.scope,
+    options?.targetFiles,
+  )
+  const domainFiles = match(domainFilesRes)
+    .with({ _tag: "Ok" }, ({ files }) => files)
+    .with({ _tag: "Error" }, () => undefined)
+    .exhaustive()
+  if (domainFiles === undefined) {
+    const errReason = match(domainFilesRes)
+      .with({ _tag: "Error" }, ({ reason }) => reason)
+      .with({ _tag: "Ok" }, () => "")
+      .exhaustive()
+    return abortWith([], `[mutation-check] Target discovery failed: ${errReason}`)
+  }
+
+  const domainByRel = new Map(domainFiles.map((f) => [f.relFile, f]))
+  const targets: Array<DomainFile> = []
+  if (hasOverlays) {
+    for (const relFile of normalizedOverlays.keys()) {
+      const existing = domainByRel.get(relFile)
+      if (existing !== undefined) {
+        targets.push(existing)
+        continue
+      }
+      const parts = /^libs\/([^/]+)\/([^/]+)\//.exec(relFile)
+      if (parts === null) {
+        return abortWith(
+          [],
+          `[mutation-check] Invalid overlay path '${relFile}': expected 'libs/<scope>/<pkg>/...'`,
+        )
+      }
+      const scope = parts[1]!
+      const pkgDir = parts[2]!
+      const tier = match<string, DomainFile["tier"]>(pkgDir)
+        .with("contract", () => "contract")
+        .with("core", "gates", "graph", "decision", "ingest", () => "core")
+        .otherwise(() => "domain")
+      targets.push({ scope, pkgDir, tier, fullPath: join(repoRoot, relFile), relFile })
+    }
+  } else {
+    targets.push(...domainFiles)
+  }
+  scannedCandidateFiles = targets.length
 
   if (!hasOverlays && hasTargetFilesOpt) {
     const discoveredSet = new Set(domainFiles.map((f) => f.relFile))
@@ -416,12 +262,7 @@ export const runDomainMutationSuite = (
       }
     }
   }
-  if (
-    !hasOverlays &&
-    options?.enforcementMode === "strict" &&
-    options?.scope !== undefined &&
-    domainFiles.length === 0
-  ) {
+  if (!hasOverlays && isStrictMode && options?.scope !== undefined && domainFiles.length === 0) {
     return abortWith(
       [],
       `[mutation-check] No domain/core/contract files matched scope '${options.scope}' in strict mode.`,
@@ -429,78 +270,107 @@ export const runDomainMutationSuite = (
   }
 
   const resolvedDiff = hasOverlays
-    ? { kind: "ok" as const, diffMode: "explicit-files" as const, diffLinesMap: undefined }
-    : options?.includeAllLines === true
-      ? { kind: "ok" as const, diffMode: "all-lines" as const, diffLinesMap: undefined }
-      : isExplicitTarget
-        ? { kind: "ok" as const, diffMode: "explicit-files" as const, diffLinesMap: undefined }
-        : match(
-            extractGitDiffModifiedLinesChecked(repoRoot, hostIo, {
-              fallbackBaseRef:
-                options?.baseRef ?? (options?.enforcementMode === "strict" ? "main" : undefined),
-              explicitBaseRef: options?.explicitBaseRef,
-            }),
-          )
-            .with({ kind: "failed" }, ({ reason }) => ({
-              kind: "abort" as const,
-              diagnostic: `[mutation-check] Failed to extract git diff modified lines: ${reason}`,
-            }))
-            .with({ kind: "ok" }, ({ lines, diffMode: extractedMode }) => ({
-              kind: "ok" as const,
-              diffMode: extractedMode,
-              diffLinesMap: lines,
-            }))
-            .with({ kind: "not-git" }, () => ({
-              kind: "ok" as const,
-              diffMode: "not-git" as const,
-              diffLinesMap: undefined,
-            }))
-            .exhaustive()
+    ? { _tag: "Ok" as const, diffMode: "explicit-files" as const, diffLinesMap: undefined }
+    : isExplicitTarget
+      ? { _tag: "Ok" as const, diffMode: "explicit-files" as const, diffLinesMap: undefined }
+      : match(
+          extractGitDiffModifiedLinesChecked(repoRoot, hostIo, {
+            fallbackBaseRef: options?.baseRef ?? (isStrictMode ? "main" : undefined),
+            explicitBaseRef: options?.explicitBaseRef,
+          }),
+        )
+          .with({ _tag: "Failed" }, ({ reason }) => ({
+            _tag: "Abort" as const,
+            diagnostic: `[mutation-check] Failed to extract git diff modified lines: ${reason}`,
+          }))
+          .with({ _tag: "Ok" }, ({ lines, diffMode: extractedMode }) => ({
+            _tag: "Ok" as const,
+            diffMode: options?.includeAllLines === true ? ("all-lines" as const) : extractedMode,
+            diffLinesMap: lines,
+          }))
+          .with({ _tag: "NotGit" }, () => ({
+            _tag: "Ok" as const,
+            diffMode:
+              options?.includeAllLines === true ? ("all-lines" as const) : ("not-git" as const),
+            diffLinesMap: undefined,
+          }))
+          .exhaustive()
 
   const diffAbort = match(resolvedDiff)
-    .with({ kind: "abort" }, ({ diagnostic }) => diagnostic)
-    .with({ kind: "ok" }, (ok) => {
+    .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
+    .with({ _tag: "Ok" }, (ok) => {
       diffMode = ok.diffMode
       return undefined
     })
     .exhaustive()
   if (diffAbort !== undefined) return abortWith([], diffAbort)
   const diffLinesMap = match(resolvedDiff)
-    .with({ kind: "ok" }, ({ diffLinesMap: m }) => m)
-    .with({ kind: "abort" }, () => undefined)
+    .with({ _tag: "Ok" }, ({ diffLinesMap: m }) => m)
+    .with({ _tag: "Abort" }, () => undefined)
     .exhaustive()
 
   if (
-    options?.enforcementMode === "strict" &&
+    isStrictMode &&
     options?.scope === undefined &&
     !hasTargetFilesOpt &&
     diffLinesMap !== undefined
   ) {
-    const unclassified = findUnclassifiedModifiedLibFiles(
+    const unclassifiedRes = findUnclassifiedModifiedLibFilesChecked(
       repoRoot,
       diffLinesMap,
       domainFiles,
       hostIo,
     )
-    if (unclassified.length > 0)
-      return abortWith(
-        [],
-        `[mutation-check] Unclassified modified lib file(s) in strict mode: ${unclassified.join(", ")}`,
+    const unclassifiedErr = match(unclassifiedRes)
+      .with(
+        { _tag: "Error" },
+        ({ reason }) => `[mutation-check] Failed to classify modified lib files: ${reason}`,
       )
+      .with({ _tag: "Ok" }, ({ files }) =>
+        files.length > 0
+          ? `[mutation-check] Unclassified modified lib file(s) in strict mode: ${files.join(", ")}`
+          : undefined,
+      )
+      .exhaustive()
+    if (unclassifiedErr !== undefined) return abortWith([], unclassifiedErr)
   }
 
   const outcomes: Array<MutantOutcome> = []
   for (const file of targets) {
     const overlaySource = normalizedOverlays.get(file.relFile)
-    const bypassDiffFilter =
-      overlaySource !== undefined || options?.includeAllLines === true || isExplicitTarget
-    if (!bypassDiffFilter && diffLinesMap !== undefined) {
-      if (!diffLinesMap.has(file.relFile)) continue
+    if (diffLinesMap !== undefined && diffLinesMap.has(file.relFile)) {
       diffMatchedFiles.push(file.relFile)
     }
+    const bypassDiffFilter =
+      overlaySource !== undefined || options?.includeAllLines === true || isExplicitTarget
+    if (!bypassDiffFilter && diffLinesMap !== undefined && !diffLinesMap.has(file.relFile)) {
+      continue
+    }
 
+    scannedFiles.push(file.relFile)
     const modifiedLines = bypassDiffFilter ? undefined : diffLinesMap?.get(file.relFile)
-    const originalContent = overlaySource ?? hostIo.readTextSync(file.fullPath)
+    const originalContentRes =
+      overlaySource !== undefined
+        ? Result.succeed(overlaySource)
+        : Result.try({
+            try: () => hostIo.readTextSync(file.fullPath),
+            catch: (err) => (err instanceof Error ? err.message : String(err)),
+          })
+    const originalContent = match(originalContentRes)
+      .with({ _tag: "Success" }, ({ success }) => success)
+      .with({ _tag: "Failure" }, () => undefined)
+      .exhaustive()
+    if (originalContent === undefined) {
+      const readErr = match(originalContentRes)
+        .with({ _tag: "Failure" }, ({ failure }) => failure)
+        .with({ _tag: "Success" }, () => "")
+        .exhaustive()
+      return abortWith(
+        outcomes,
+        `[mutation-check] Failed to read source file '${file.relFile}': ${readErr}`,
+      )
+    }
+
     const mutants = discoverDomainMutants(
       file.relFile,
       originalContent,
@@ -523,13 +393,26 @@ export const runDomainMutationSuite = (
       continue
     }
 
-    const reachingTestFiles = findReachingTestFiles(repoRoot, file, hostIo)
-    if (reachingTestFiles.length === 0) {
-      for (const mutant of mutants) outcomes.push({ mutant, status: "survived" })
-      continue
-    }
-
     if (options?.testRunner !== undefined) {
+      const reachingRes = findReachingTestFilesChecked(repoRoot, file, hostIo)
+      const reachingTestFiles = match(reachingRes)
+        .with({ _tag: "Ok" }, ({ files }) => files)
+        .with({ _tag: "Error" }, () => undefined)
+        .exhaustive()
+      if (reachingTestFiles === undefined) {
+        const errReason = match(reachingRes)
+          .with({ _tag: "Error" }, ({ reason }) => reason)
+          .with({ _tag: "Ok" }, () => "")
+          .exhaustive()
+        return abortWith(outcomes, `[mutation-check] ${errReason}`)
+      }
+      if (reachingTestFiles.length === 0) {
+        untestedFiles.push({
+          file: file.relFile,
+          reason: `0 reaching tests found for '${file.relFile}'`,
+        })
+        continue
+      }
       const runner = options.testRunner
       const prevGlobal = getActiveMutantId()
       const prevEnv = process.env["HARNESS_ACTIVE_MUTANT_ID"]
@@ -539,13 +422,13 @@ export const runDomainMutationSuite = (
         else process.env["HARNESS_ACTIVE_MUTANT_ID"] = prevEnv
       }
       const baselineMutant: CodeMutant = {
-        id: "__baseline__",
-        file: file.relFile,
-        line: 1,
+        id: MutantId.make("__baseline__"),
+        file: AstSourceFilePath.make(file.relFile),
+        line: SourceLineNumber.make(1),
         category: "boolean-return",
-        original: "",
-        replacement: "",
-        mutatedSource: originalContent,
+        original: MutantSourceText.make(""),
+        replacement: MutantSourceText.make(""),
+        mutatedSource: MutantSourceText.make(originalContent),
       }
       setActiveMutantId(undefined)
       delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
@@ -598,12 +481,26 @@ export const runDomainMutationSuite = (
     }
     delete baseSubprocessEnv["HARNESS_ACTIVE_MUTANT_ID"]
 
-    const { primaryTests, fallbackTests } = partitionReachingTestFiles(
-      repoRoot,
-      file,
-      originalContent,
-      hostIo,
-    )
+    const partitionRes = partitionReachingTestFilesChecked(repoRoot, file, originalContent, hostIo)
+    const partition = match(partitionRes)
+      .with({ _tag: "Ok" }, ({ partition: p }) => p)
+      .with({ _tag: "Error" }, () => undefined)
+      .exhaustive()
+    if (partition === undefined) {
+      const errReason = match(partitionRes)
+        .with({ _tag: "Error" }, ({ reason }) => reason)
+        .with({ _tag: "Ok" }, () => "")
+        .exhaustive()
+      return abortWith(outcomes, `[mutation-check] ${errReason}`)
+    }
+    const { primaryTests, fallbackTests } = partition
+    if (primaryTests.length === 0 && fallbackTests.length === 0) {
+      untestedFiles.push({
+        file: file.relFile,
+        reason: `0 reaching tests found for '${file.relFile}'`,
+      })
+      continue
+    }
     const primaryRes = runVitestTargetList(
       repoRoot,
       file,
@@ -616,8 +513,8 @@ export const runDomainMutationSuite = (
       mutants,
     )
     const primaryOutcomes = match(primaryRes)
-      .with({ kind: "abort" }, ({ diagnostic }) => diagnostic)
-      .with({ kind: "ok" }, ({ outcomes: resOutcomes }) => resOutcomes)
+      .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
+      .with({ _tag: "Ok" }, ({ outcomes: resOutcomes }) => resOutcomes)
       .exhaustive()
     if (typeof primaryOutcomes === "string") return abortWith(outcomes, primaryOutcomes)
 
@@ -646,8 +543,8 @@ export const runDomainMutationSuite = (
         survivingMutants,
       )
       const fallbackAbort = match(fallbackRes)
-        .with({ kind: "abort" }, ({ diagnostic }) => diagnostic)
-        .with({ kind: "ok" }, ({ outcomes: fbOutcomes }) => {
+        .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
+        .with({ _tag: "Ok" }, ({ outcomes: fbOutcomes }) => {
           for (const fbOutcome of fbOutcomes) {
             match(fbOutcome.status)
               .with("killed", () => {
@@ -667,6 +564,19 @@ export const runDomainMutationSuite = (
     for (const o of fileOutcomes.values()) outcomes.push(o)
   }
 
+  if (isStrictMode && untestedFiles.length > 0) {
+    return abortWith(
+      outcomes,
+      `[mutation-check] Untested modified file(s) in strict mode (0 reaching tests): ${untestedFiles.map((u) => u.file).join(", ")}`,
+    )
+  }
+  if (isStrictMode && outcomes.length === 0) {
+    return abortWith(
+      outcomes,
+      "[mutation-check] Zero mutants evaluated in strict mode (SPEC-0018 REQ-2.2).",
+    )
+  }
+
   return {
     ...evaluateMutationOutcomes(
       outcomes,
@@ -675,10 +585,12 @@ export const runDomainMutationSuite = (
       options?.saturationSpecs,
       options?.spanObservations,
     ),
-    ...(diffMode !== undefined ? { diffMode } : {}),
+    diffMode,
     scannedCandidateFiles,
+    scannedFiles,
     diffMatchedFiles,
     evaluatedFiles,
+    ...(untestedFiles.length > 0 ? { untestedFiles } : {}),
   }
 }
 

@@ -3,17 +3,27 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { computeContentSha256 } from "@harness/contract"
+import { Result } from "effect"
+import { match } from "ts-pattern"
+import { AstSourceFilePath, computeContentSha256, SourceLineNumber } from "@harness/contract"
 import type { SyncHostExecResult, SyncHostIo } from "@harness/service/host-io"
+import { MutantId, MutantSourceText } from "../src/index.js"
 import { checkMigrationFiles } from "../src/migration-check.js"
 import { runDomainMutationSuite, stripAnsi } from "../src/mutation-check.js"
+import {
+  classifyMutantSubprocessResult,
+  runVitestTargetList,
+} from "../src/mutation-subprocess-helpers.js"
+import { isAssertionFailure } from "../src/mutation/mutant-ast-generator.js"
 import {
   extractGitDiffModifiedLinesChecked,
   recoverStartupBackup,
 } from "../src/mutation/mutation-backup.js"
 import { testHostIo } from "./helpers/test-host-io.js"
 
-const setupTempMutationRepo = (domainSource: string): {
+const setupTempMutationRepo = (
+  domainSource: string,
+): {
   readonly repoRoot: string
   readonly domainFile: string
   readonly backupPath: string
@@ -40,6 +50,13 @@ const setupTempMutationRepo = (domainSource: string): {
 const isBaselineInvocation = (env?: Readonly<Record<string, string | undefined>>): boolean =>
   env?.["HARNESS_ACTIVE_MUTANT_ID"] === undefined
 
+const notGitExecResult: SyncHostExecResult = {
+  _tag: "Exited",
+  exitCode: 128,
+  stdout: "",
+  stderr: "not a git repository",
+}
+
 const greenBaselineResult: SyncHostExecResult = {
   _tag: "Exited",
   exitCode: 0,
@@ -54,15 +71,17 @@ describe("mutation-check infrastructure failure and backup recovery (F-4.3, F-5.
     try {
       const spawnErrorHostIo: SyncHostIo = {
         ...testHostIo,
-        execFileSync: (_cmd, _args, options) =>
-          isBaselineInvocation(options?.env)
-            ? greenBaselineResult
-            : {
-                _tag: "SpawnFailed",
-                spawnError: "ENOENT",
-                stdout: "",
-                stderr: "",
-              },
+        execFileSync: (cmd, _args, options) =>
+          cmd === "git"
+            ? notGitExecResult
+            : isBaselineInvocation(options?.env)
+              ? greenBaselineResult
+              : {
+                  _tag: "SpawnFailed",
+                  spawnError: "ENOENT",
+                  stdout: "",
+                  stderr: "",
+                },
       }
       const spawnReport = runDomainMutationSuite(repoRoot, spawnErrorHostIo, {
         includeAllLines: true,
@@ -74,11 +93,14 @@ describe("mutation-check infrastructure failure and backup recovery (F-4.3, F-5.
 
       const baselineTimeoutHostIo: SyncHostIo = {
         ...testHostIo,
-        execFileSync: () => ({
-          _tag: "TimedOut",
-          stdout: "",
-          stderr: "",
-        }),
+        execFileSync: (cmd) =>
+          cmd === "git"
+            ? notGitExecResult
+            : {
+                _tag: "TimedOut",
+                stdout: "",
+                stderr: "",
+              },
       }
       const timeoutReport = runDomainMutationSuite(repoRoot, baselineTimeoutHostIo, {
         includeAllLines: true,
@@ -90,15 +112,17 @@ describe("mutation-check infrastructure failure and backup recovery (F-4.3, F-5.
 
       const pnpmMissingVitestHostIo: SyncHostIo = {
         ...testHostIo,
-        execFileSync: (_cmd, _args, options) =>
-          isBaselineInvocation(options?.env)
-            ? greenBaselineResult
-            : {
-                _tag: "Exited",
-                exitCode: 127,
-                stdout: "",
-                stderr: 'ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL: Command "vitest" not found',
-              },
+        execFileSync: (cmd, _args, options) =>
+          cmd === "git"
+            ? notGitExecResult
+            : isBaselineInvocation(options?.env)
+              ? greenBaselineResult
+              : {
+                  _tag: "Exited",
+                  exitCode: 127,
+                  stdout: "",
+                  stderr: 'ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL: Command "vitest" not found',
+                },
       }
       const missingVitestReport = runDomainMutationSuite(repoRoot, pnpmMissingVitestHostIo, {
         includeAllLines: true,
@@ -152,15 +176,17 @@ describe("mutation-check infrastructure failure and backup recovery (F-4.3, F-5.
       let writeCountToDomainFile = 0
       const failingRestoreHostIo: SyncHostIo = {
         ...testHostIo,
-        execFileSync: (_cmd, _args, options) =>
-          isBaselineInvocation(options?.env)
-            ? greenBaselineResult
-            : {
-                _tag: "Exited",
-                exitCode: 1,
-                stdout: "FAIL  libs/sample/domain/test/logic.test.ts\nTests  1 failed (1)\n",
-                stderr: "test failed as expected",
-              },
+        execFileSync: (cmd, _args, options) =>
+          cmd === "git"
+            ? notGitExecResult
+            : isBaselineInvocation(options?.env)
+              ? greenBaselineResult
+              : {
+                  _tag: "Exited",
+                  exitCode: 1,
+                  stdout: "FAIL  libs/sample/domain/test/logic.test.ts\nTests  1 failed (1)\n",
+                  stderr: "test failed as expected",
+                },
         writeTextSync: (filePath, content) => {
           if (filePath === domainFile) {
             writeCountToDomainFile += 1
@@ -201,15 +227,17 @@ describe("mutation-check infrastructure failure and backup recovery (F-4.3, F-5.
     try {
       const multilineErrHostIo: SyncHostIo = {
         ...testHostIo,
-        execFileSync: (_cmd, _args, options) =>
-          isBaselineInvocation(options?.env)
-            ? greenBaselineResult
-            : {
-                _tag: "Exited",
-                exitCode: 1,
-                stdout: "",
-                stderr: "⎯⎯⎯ Unhandled Errors ⎯⎯⎯\n\nError: Cannot find module '@missing/pkg'\n",
-              },
+        execFileSync: (cmd, _args, options) =>
+          cmd === "git"
+            ? notGitExecResult
+            : isBaselineInvocation(options?.env)
+              ? greenBaselineResult
+              : {
+                  _tag: "Exited",
+                  exitCode: 1,
+                  stdout: "",
+                  stderr: "⎯⎯⎯ Unhandled Errors ⎯⎯⎯\n\nError: Cannot find module '@missing/pkg'\n",
+                },
       }
       const report = runDomainMutationSuite(repoRoot, multilineErrHostIo, { includeAllLines: true })
       expect(report.passed).toBe(false)
@@ -225,7 +253,8 @@ describe("mutation-check infrastructure failure and backup recovery (F-4.3, F-5.
     try {
       const realSpawnHostIo: SyncHostIo = {
         ...testHostIo,
-        execFileSync: (_file, _args, options) => {
+        execFileSync: (file, _args, options) => {
+          if (file === "git") return notGitExecResult
           if (isBaselineInvocation(options?.env)) {
             const baseRes = spawnSync(process.execPath, ["-e", "process.exit(0)"], {
               cwd: options?.cwd,
@@ -263,7 +292,9 @@ describe("mutation-check infrastructure failure and backup recovery (F-4.3, F-5.
           }
         },
       }
-      const realReport = runDomainMutationSuite(repoRoot, realSpawnHostIo, { includeAllLines: true })
+      const realReport = runDomainMutationSuite(repoRoot, realSpawnHostIo, {
+        includeAllLines: true,
+      })
       expect(realReport.passed).toBe(true)
       expect(realReport.killedCount).toBeGreaterThan(0)
     } finally {
@@ -293,8 +324,12 @@ describe("mutation-check infrastructure failure and backup recovery (F-4.3, F-5.
       for (const c of cases) {
         const hostIo: SyncHostIo = {
           ...testHostIo,
-          execFileSync: (_cmd, _args, options) =>
-            isBaselineInvocation(options?.env) ? greenBaselineResult : c.res,
+          execFileSync: (cmd, _args, options) =>
+            cmd === "git"
+              ? notGitExecResult
+              : isBaselineInvocation(options?.env)
+                ? greenBaselineResult
+                : c.res,
         }
         const report = runDomainMutationSuite(repoRoot, hostIo, { includeAllLines: true })
         expect(report.passed, c.label).toBe(false)
@@ -312,17 +347,22 @@ describe("mutation-check infrastructure failure and backup recovery (F-4.3, F-5.
       const makeGitFailHostIo = (diffRes: SyncHostExecResult): SyncHostIo => ({
         ...testHostIo,
         execFileSync: (_cmd, args) => {
-          if (args[0] === "rev-parse") {
+          if (args.includes("rev-parse")) {
             return { _tag: "Exited", exitCode: 0, stdout: "true\n", stderr: "" }
           }
-          if (args[0] === "diff") return diffRes
+          if (args.includes("diff")) return diffRes
           return { _tag: "Exited", exitCode: 0, stdout: "", stderr: "" }
         },
       })
 
       const exit128Report = runDomainMutationSuite(
         repoRoot,
-        makeGitFailHostIo({ _tag: "Exited", exitCode: 128, stdout: "", stderr: "fatal: bad object" }),
+        makeGitFailHostIo({
+          _tag: "Exited",
+          exitCode: 128,
+          stdout: "",
+          stderr: "fatal: bad object",
+        }),
       )
       expect(exit128Report.passed).toBe(false)
       expect(exit128Report.diagnostic).toContain("git diff")
@@ -344,26 +384,31 @@ describe("mutation-check infrastructure failure and backup recovery (F-4.3, F-5.
     try {
       const unlinkFailHostIo: SyncHostIo = {
         ...testHostIo,
-        execFileSync: (_cmd, _args, options) =>
-          isBaselineInvocation(options?.env)
-            ? greenBaselineResult
-            : {
-                _tag: "Exited",
-                exitCode: 1,
-                stdout: "Tests  1 failed (1)\n",
-                stderr: "",
-              },
+        execFileSync: (cmd, _args, options) =>
+          cmd === "git"
+            ? notGitExecResult
+            : isBaselineInvocation(options?.env)
+              ? greenBaselineResult
+              : {
+                  _tag: "Exited",
+                  exitCode: 1,
+                  stdout: "Tests  1 failed (1)\n",
+                  stderr: "",
+                },
         unlinkSync: (path) => {
           if (path === backupPath) throw new Error("EPERM: unlink denied")
           testHostIo.unlinkSync(path)
         },
       }
-      const unlinkReport = runDomainMutationSuite(repoRoot, unlinkFailHostIo, { includeAllLines: true })
+      const unlinkReport = runDomainMutationSuite(repoRoot, unlinkFailHostIo, {
+        includeAllLines: true,
+      })
       expect(unlinkReport.passed).toBe(false)
       expect(unlinkReport.diagnostic).toContain("Failed to unlink")
 
       // Now simulate user editing the file after a stale backup was left behind
-      const userEdited = "export const isSame = (a: number, b: number): boolean => a === b && true\n"
+      const userEdited =
+        "export const isSame = (a: number, b: number): boolean => a === b && true\n"
       writeFileSync(domainFile, userEdited, "utf8")
       writeFileSync(
         backupPath,
@@ -385,6 +430,56 @@ describe("mutation-check infrastructure failure and backup recovery (F-4.3, F-5.
       rmSync(repoRoot, { recursive: true, force: true })
     }
   })
+
+  it("ignores Vitest FAIL breadcrumb test titles containing infra keywords while still aborting on real module load failures", () => {
+    const killedBreadcrumb = classifyMutantSubprocessResult(
+      "m-breadcrumb",
+      Result.succeed({
+        _tag: "Exited",
+        exitCode: 1,
+        stdout:
+          " FAIL  libs/demo.test.ts > suite > Tests no tests and ERR_MODULE_NOT_FOUND abort\nTests  1 failed (1)\n",
+        stderr: "",
+      }),
+    )
+    expect(killedBreadcrumb).toEqual({ kind: "outcome", status: "killed" })
+
+    const realModuleAbort = classifyMutantSubprocessResult(
+      "m-real-module-err",
+      Result.succeed({
+        _tag: "Exited",
+        exitCode: 1,
+        stdout:
+          " FAIL  suiteB.test.ts [ suiteB.test.ts ]\nTests  1 failed (1)\nError [ERR_MODULE_NOT_FOUND]: Cannot find module\n",
+        stderr: "",
+      }),
+    )
+    expect(realModuleAbort.kind).toBe("abort")
+
+    const treeFailBreadcrumb = classifyMutantSubprocessResult(
+      "m-tree-breadcrumb",
+      Result.succeed({
+        _tag: "Exited",
+        exitCode: 1,
+        stdout:
+          " × libs/demo.test.ts > suite > Cannot find module or No test files found\nTests  1 failed (1)\n",
+        stderr: "",
+      }),
+    )
+    expect(treeFailBreadcrumb).toEqual({ kind: "outcome", status: "killed" })
+
+    const assertionNoiseKilled = classifyMutantSubprocessResult(
+      "m-assertion-noise",
+      Result.succeed({
+        _tag: "Exited",
+        exitCode: 1,
+        stdout:
+          "Tests  1 failed (1)\nAssertionError: expected \"Cannot find module '@missing/pkg'\" not to be reached\n",
+        stderr: "",
+      }),
+    )
+    expect(assertionNoiseKilled).toEqual({ kind: "outcome", status: "killed" })
+  })
 })
 
 describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1, F-5.2, F-7.1, M-2.1..M-2.3)", () => {
@@ -399,7 +494,8 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
       const seenEnvs: Array<Readonly<Record<string, string | undefined>> | undefined> = []
       const ansiHostIo: SyncHostIo = {
         ...testHostIo,
-        execFileSync: (_cmd, _args, options) => {
+        execFileSync: (cmd, _args, options) => {
+          if (cmd === "git") return notGitExecResult
           seenEnvs.push(options?.env)
           if (isBaselineInvocation(options?.env)) {
             return greenBaselineResult
@@ -407,7 +503,8 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
           return {
             _tag: "Exited",
             exitCode: 1,
-            stdout: "\x1b[31m FAIL \x1b[39m libs/sample/domain/test/logic.test.ts\n\x1b[31mTests  1 failed\x1b[39m (1)\n",
+            stdout:
+              "\x1b[31m FAIL \x1b[39m libs/sample/domain/test/logic.test.ts\n\x1b[31mTests  1 failed\x1b[39m (1)\n",
             stderr: "",
           }
         },
@@ -434,7 +531,8 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
       let execCalls = 0
       const redBaselineHostIo: SyncHostIo = {
         ...testHostIo,
-        execFileSync: () => {
+        execFileSync: (cmd) => {
+          if (cmd === "git") return notGitExecResult
           execCalls += 1
           return {
             _tag: "Exited",
@@ -473,7 +571,7 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
     const makeRevParseHostIo = (revParseRes: SyncHostExecResult): SyncHostIo => ({
       ...testHostIo,
       execFileSync: (_cmd, args) => {
-        if (args[0] === "rev-parse") return revParseRes
+        if (args.includes("rev-parse")) return revParseRes
         return greenBaselineResult
       },
     })
@@ -482,13 +580,13 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
       "/tmp/nonexistent",
       makeRevParseHostIo({ _tag: "SpawnFailed", spawnError: "ENOENT", stdout: "", stderr: "" }),
     )
-    expect(spawnFailed.kind).toBe("failed")
+    expect(spawnFailed._tag).toBe("Failed")
 
     const timedOut = extractGitDiffModifiedLinesChecked(
       "/tmp/nonexistent",
       makeRevParseHostIo({ _tag: "TimedOut", stdout: "", stderr: "" }),
     )
-    expect(timedOut.kind).toBe("failed")
+    expect(timedOut._tag).toBe("Failed")
 
     const dubiousOwnership = extractGitDiffModifiedLinesChecked(
       "/tmp/nonexistent",
@@ -499,7 +597,7 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
         stderr: "fatal: detected dubious ownership in repository at '/tmp/nonexistent'",
       }),
     )
-    expect(dubiousOwnership.kind).toBe("failed")
+    expect(dubiousOwnership._tag).toBe("Failed")
 
     const notGit = extractGitDiffModifiedLinesChecked(
       "/tmp/nonexistent",
@@ -510,22 +608,25 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
         stderr: "fatal: not a git repository (or any of the parent directories): .git",
       }),
     )
-    expect(notGit).toEqual({ kind: "not-git" })
+    expect(notGit).toEqual({ _tag: "NotGit" })
   })
 
-  it("M-2.3 (3) & (4): Signaled, TimedOut, SyntaxError, and Tests no tests after green baseline count as killed; Signaled on baseline aborts", () => {
+  it("M-2.3 (3) & (4): Signaled/TimedOut after green baseline count as killed; SyntaxError, Tests no tests, 0 test files, and ERR_MODULE_NOT_FOUND abort/fail closed", () => {
     const source = "export const isSame = (a: number, b: number): boolean => a === b\n"
     const { repoRoot } = setupTempMutationRepo(source)
     try {
       // Signaled on baseline aborts
       const signaledBaselineHostIo: SyncHostIo = {
         ...testHostIo,
-        execFileSync: () => ({
-          _tag: "Signaled",
-          signal: "SIGKILL",
-          stdout: "",
-          stderr: "",
-        }),
+        execFileSync: (cmd) =>
+          cmd === "git"
+            ? notGitExecResult
+            : {
+                _tag: "Signaled",
+                signal: "SIGKILL",
+                stdout: "",
+                stderr: "",
+              },
       }
       const baselineSignaledReport = runDomainMutationSuite(repoRoot, signaledBaselineHostIo, {
         includeAllLines: true,
@@ -533,8 +634,11 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
       expect(baselineSignaledReport.passed).toBe(false)
       expect(baselineSignaledReport.diagnostic).toContain("signal=SIGKILL")
 
-      // After green baseline, Signaled, TimedOut, SyntaxError, and Tests no tests count as killed
-      const mutantKillCases: ReadonlyArray<{ readonly label: string; readonly res: SyncHostExecResult }> = [
+      // After green baseline, Signaled and TimedOut count as killed
+      const mutantKillCases: ReadonlyArray<{
+        readonly label: string
+        readonly res: SyncHostExecResult
+      }> = [
         {
           label: "Signaled SIGKILL",
           res: { _tag: "Signaled", signal: "SIGKILL", stdout: "", stderr: "" },
@@ -543,30 +647,85 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
           label: "TimedOut",
           res: { _tag: "TimedOut", stdout: "", stderr: "" },
         },
+      ]
+
+      for (const c of mutantKillCases) {
+        const hostIo: SyncHostIo = {
+          ...testHostIo,
+          execFileSync: (cmd, _args, options) =>
+            cmd === "git"
+              ? notGitExecResult
+              : isBaselineInvocation(options?.env)
+                ? greenBaselineResult
+                : c.res,
+        }
+        const report = runDomainMutationSuite(repoRoot, hostIo, {
+          includeAllLines: true,
+          enforcementMode: "strict",
+        })
+        expect(report.passed, c.label).toBe(true)
+        expect(report.killedCount, c.label).toBe(1)
+      }
+
+      // Runner/loader errors & 0-test runs fail closed / abort in strict mode
+      const abortCases: ReadonlyArray<{
+        readonly label: string
+        readonly res: SyncHostExecResult
+      }> = [
         {
           label: "SyntaxError",
-          res: { _tag: "Exited", exitCode: 1, stdout: "", stderr: "SyntaxError: Unexpected token '}'" },
+          res: {
+            _tag: "Exited",
+            exitCode: 1,
+            stdout: "",
+            stderr: "SyntaxError: Unexpected token '}'",
+          },
         },
         {
           label: "Tests no tests",
           res: {
             _tag: "Exited",
             exitCode: 1,
-            stdout: " FAIL  libs/sample/domain/test/logic.test.ts\n      Tests  no tests\n",
+            stdout: " FAIL  libs/demo.test.ts\n      Tests  no tests\n",
             stderr: "",
+          },
+        },
+        {
+          label: "0 test files",
+          res: {
+            _tag: "Exited",
+            exitCode: 1,
+            stdout: " 0 test files\n",
+            stderr: "",
+          },
+        },
+        {
+          label: "ERR_MODULE_NOT_FOUND",
+          res: {
+            _tag: "Exited",
+            exitCode: 1,
+            stdout: "",
+            stderr: "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/missing.js'",
           },
         },
       ]
 
-      for (const c of mutantKillCases) {
+      for (const c of abortCases) {
         const hostIo: SyncHostIo = {
           ...testHostIo,
-          execFileSync: (_cmd, _args, options) =>
-            isBaselineInvocation(options?.env) ? greenBaselineResult : c.res,
+          execFileSync: (cmd, _args, options) =>
+            cmd === "git"
+              ? notGitExecResult
+              : isBaselineInvocation(options?.env)
+                ? greenBaselineResult
+                : c.res,
         }
-        const report = runDomainMutationSuite(repoRoot, hostIo, { includeAllLines: true })
-        expect(report.passed, c.label).toBe(true)
-        expect(report.killedCount, c.label).toBe(1)
+        const report = runDomainMutationSuite(repoRoot, hostIo, {
+          includeAllLines: true,
+          enforcementMode: "strict",
+        })
+        expect(report.passed, c.label).toBe(false)
+        expect(report.killedCount, c.label).toBe(0)
       }
     } finally {
       rmSync(repoRoot, { recursive: true, force: true })
@@ -576,11 +735,13 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
   it("M-2.3 (5): in-run restoreOriginalFile SHA-256 guard refuses to overwrite concurrent external edits", () => {
     const source = "export const isSame = (a: number, b: number): boolean => a === b\n"
     const { repoRoot, domainFile, backupPath } = setupTempMutationRepo(source)
-    const externalEdit = "export const isSame = (a: number, b: number): boolean => false // user edit\n"
+    const externalEdit =
+      "export const isSame = (a: number, b: number): boolean => false // user edit\n"
     try {
       const concurrentEditHostIo: SyncHostIo = {
         ...testHostIo,
-        execFileSync: (_cmd, _args, options) => {
+        execFileSync: (cmd, _args, options) => {
+          if (cmd === "git") return notGitExecResult
           if (isBaselineInvocation(options?.env)) return greenBaselineResult
           writeFileSync(domainFile, externalEdit, "utf8")
           return {
@@ -591,7 +752,9 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
           }
         },
       }
-      const report = runDomainMutationSuite(repoRoot, concurrentEditHostIo, { includeAllLines: true })
+      const report = runDomainMutationSuite(repoRoot, concurrentEditHostIo, {
+        includeAllLines: true,
+      })
       expect(report.passed).toBe(false)
       expect(report.diagnostic).toContain("modified externally mid-run")
       expect(readFileSync(domainFile, "utf8")).toBe(externalEdit)
@@ -676,5 +839,309 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
     expect(unreadableReport.violations).toHaveLength(1)
     expect(unreadableReport.violations[0]?.kind).toBe("unreadable-migration-file")
     expect(unreadableReport.violations[0]?.message).toContain("EACCES")
+  })
+
+  it("reports explicit untestedFiles and fails closed in strict mode when 0 reaching tests or 0 mutants or empty targetFiles", () => {
+    // 1. 0 reaching tests -> untestedFiles reported, strict fails closed
+    const noTestsRepo = mkdtempSync(join(tmpdir(), "mut-notests-"))
+    try {
+      mkdirSync(join(noTestsRepo, "libs", "sample", "domain", "src"), { recursive: true })
+      writeFileSync(
+        join(noTestsRepo, "libs", "sample", "domain", "src", "logic.ts"),
+        "export const isSame = (a: number, b: number): boolean => a === b\n",
+        "utf8",
+      )
+      const report = runDomainMutationSuite(noTestsRepo, testHostIo, {
+        includeAllLines: true,
+        enforcementMode: "strict",
+      })
+      expect(report.passed).toBe(false)
+      expect(report.untestedFiles).toBeDefined()
+      expect(report.untestedFiles?.length).toBeGreaterThan(0)
+      expect(report.diagnostic).toContain("0 reaching tests")
+    } finally {
+      rmSync(noTestsRepo, { recursive: true, force: true })
+    }
+
+    // 2. 0 mutants in strict mode (SPEC-0018 REQ-2.2) -> fails closed
+    const zeroMutantsRepo = setupTempMutationRepo("export const VERSION = 1\n")
+    try {
+      const zeroReport = runDomainMutationSuite(zeroMutantsRepo.repoRoot, testHostIo, {
+        includeAllLines: true,
+        enforcementMode: "strict",
+      })
+      expect(zeroReport.passed).toBe(false)
+      expect(zeroReport.totalMutants).toBe(0)
+
+      // 3. Empty targetFiles -> fails closed
+      const emptyTargetReport = runDomainMutationSuite(zeroMutantsRepo.repoRoot, testHostIo, {
+        targetFiles: [],
+        enforcementMode: "strict",
+      })
+      expect(emptyTargetReport.passed).toBe(false)
+    } finally {
+      rmSync(zeroMutantsRepo.repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("isAssertionFailure accepts real AssertionError/ExpectError and rejects arbitrary error prose", () => {
+    const assertionErr = new Error("expected 1 to be 2")
+    assertionErr.name = "AssertionError"
+    expect(isAssertionFailure(assertionErr)).toBe(true)
+
+    const expectErr = new Error("mismatch")
+    expectErr.name = "ExpectError"
+    expect(isAssertionFailure(expectErr)).toBe(true)
+
+    const proseErr = new Error("Failed toBe connected toEqual database")
+    expect(isAssertionFailure(proseErr)).toBe(false)
+
+    expect(isAssertionFailure(Object.assign(new Error("assert"), { code: "ERR_ASSERTION" }))).toBe(
+      true,
+    )
+    expect(isAssertionFailure(Object.assign(new Error("enoent"), { code: "ENOENT" }))).toBe(false)
+
+    const noTestsRes = classifyMutantSubprocessResult(
+      "m-no-tests",
+      Result.succeed({
+        _tag: "Exited",
+        exitCode: 1,
+        stdout: " FAIL  libs/demo.test.ts\nTests  no tests\n",
+        stderr: "",
+      }),
+    )
+    match(noTestsRes)
+      .with({ kind: "abort" }, ({ diagnostic }) => {
+        expect(diagnostic).toContain("infraFailure=true")
+      })
+      .with({ kind: "outcome" }, () => {
+        expect.unreachable("Expected abort for Tests no tests")
+      })
+      .exhaustive()
+  })
+
+  it("aborts on mixed failed+infra output, baseline 0-passed, out-of-package overlay, and tracks 0-mutant sibling in --strict --all", () => {
+    // 1. Mixed Tests 1 failed + Tests no tests / ERR_MODULE_NOT_FOUND / SyntaxError abort
+    for (const [label, stdout, stderr] of [
+      ["mixed no tests", "Tests  1 failed (1)\nTests  no tests\n", ""],
+      [
+        "mixed ERR_MODULE_NOT_FOUND",
+        "Tests  1 failed (1)\n",
+        "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/missing.js'",
+      ],
+      ["mixed SyntaxError", "Tests  1 failed (1)\n", "SyntaxError: Unexpected token '}'"],
+    ] as const) {
+      const res = classifyMutantSubprocessResult(
+        label,
+        Result.succeed({ _tag: "Exited", exitCode: 1, stdout, stderr }),
+      )
+      expect(res.kind, label).toBe("abort")
+    }
+
+    // 2. baselineExecRes Tests 0 passed aborts
+    const { repoRoot } = setupTempMutationRepo(
+      "export const isSame = (a: number, b: number): boolean => a === b\n",
+    )
+    try {
+      const zeroBaselineIo: SyncHostIo = {
+        ...testHostIo,
+        execFileSync: (cmd) =>
+          cmd === "git"
+            ? notGitExecResult
+            : {
+                _tag: "Exited",
+                exitCode: 0,
+                stdout: "Tests  0 passed (0)\n",
+                stderr: "",
+              },
+      }
+      const zeroBaselineReport = runDomainMutationSuite(repoRoot, zeroBaselineIo, {
+        includeAllLines: true,
+        enforcementMode: "strict",
+      })
+      expect(zeroBaselineReport.passed).toBe(false)
+
+      // 3. Overlay outside libs/<scope>/<pkg>/ aborts
+      const badOverlayReport = runDomainMutationSuite(repoRoot, testHostIo, {
+        enforcementMode: "strict",
+        sourceCodeOverlays: { "apps/evil/src/index.ts": "export const x = 1\n" },
+      })
+      expect(badOverlayReport.passed).toBe(false)
+
+      // 4. --strict --all populates scannedFiles & diffMatchedFiles for 0-mutant contract sibling
+      const contractDir = join(repoRoot, "libs", "sample", "contract", "src")
+      mkdirSync(contractDir, { recursive: true })
+      writeFileSync(
+        join(repoRoot, "libs", "sample", "contract", "package.json"),
+        JSON.stringify({ name: "@sample/contract", nx: { tags: ["type:contract"] } }),
+        "utf8",
+      )
+      writeFileSync(join(contractDir, "types.ts"), "export const KIND = 'v1'\n", "utf8")
+      const mockGitIo: SyncHostIo = {
+        ...testHostIo,
+        execFileSync: (_cmd, args) => {
+          if (args.includes("rev-parse"))
+            return { _tag: "Exited", exitCode: 0, stdout: "true\n", stderr: "" }
+          if (args.includes("merge-base"))
+            return { _tag: "Exited", exitCode: 0, stdout: "abc123\n", stderr: "" }
+          if (args.includes("ls-files")) {
+            return {
+              _tag: "Exited",
+              exitCode: 0,
+              stdout: "libs/sample/contract/src/types.ts\n",
+              stderr: "",
+            }
+          }
+          return { _tag: "Exited", exitCode: 0, stdout: "", stderr: "" }
+        },
+      }
+      const allReport = runDomainMutationSuite(repoRoot, mockGitIo, {
+        includeAllLines: true,
+        enforcementMode: "strict",
+        testRunner: (m) => (m.id === "__baseline__" ? "survived" : "killed"),
+      })
+      expect(allReport.diagnostic).toBeUndefined()
+      expect(allReport.passed).toBe(true)
+      expect(allReport.scannedFiles).toContain("libs/sample/contract/src/types.ts")
+      expect(allReport.diffMatchedFiles).toContain("libs/sample/contract/src/types.ts")
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("does NOT false-abort classifyMutantSubprocessResult or runVitestTargetList baseline on inner [mutation-check] stderr diagnostics when stdout passes", () => {
+    const innerDiagStderr =
+      "[mutation-check] Runner infrastructure failure for mutant 'm-inner': exitCode=1, infraFailure=true, stderr=Error: Cannot find module '@missing/pkg'\n"
+    const subRes = classifyMutantSubprocessResult(
+      "m-outer",
+      Result.succeed({
+        _tag: "Exited",
+        exitCode: 0,
+        stdout: "Tests  5 passed (5)\n",
+        stderr: innerDiagStderr,
+      }),
+    )
+    expect(subRes).toEqual({ kind: "outcome", status: "survived" })
+
+    const { repoRoot, domainFile, backupPath } = setupTempMutationRepo(
+      "export const isSame = (a: number, b: number): boolean => a === b\n",
+    )
+    try {
+      const testPath = join(repoRoot, "libs", "sample", "domain", "test", "logic.test.ts")
+      const vitestCliPath = join(repoRoot, "node_modules", "vitest", "vitest.mjs")
+      mkdirSync(join(repoRoot, "node_modules", "vitest"), { recursive: true })
+      writeFileSync(vitestCliPath, "// stub\n", "utf8")
+
+      const originalSource = "export const isSame = (a: number, b: number): boolean => a === b\n"
+      const mutatedSource = "export const isSame = (a: number, b: number): boolean => a !== b\n"
+      const baselineHostIo: SyncHostIo = {
+        ...testHostIo,
+        execFileSync: (_cmd, _args, options) => {
+          if (isBaselineInvocation(options?.env)) {
+            return {
+              _tag: "Exited",
+              exitCode: 0,
+              stdout: "Tests  5 passed (5)\n",
+              stderr: innerDiagStderr,
+            }
+          }
+          return {
+            _tag: "Exited",
+            exitCode: 1,
+            stdout: "Tests  1 failed (1)\n",
+            stderr: "",
+          }
+        },
+      }
+      const runRes = runVitestTargetList(
+        repoRoot,
+        {
+          scope: "sample",
+          pkgDir: "domain",
+          pkgName: "@sample/domain",
+          tier: "domain",
+          fullPath: domainFile,
+          relFile: "libs/sample/domain/src/logic.ts",
+        },
+        baselineHostIo,
+        { NO_COLOR: "1" },
+        [testPath],
+        originalSource,
+        mutatedSource,
+        backupPath,
+        [
+          {
+            id: MutantId.make("m-1"),
+            file: AstSourceFilePath.make("libs/sample/domain/src/logic.ts"),
+            line: SourceLineNumber.make(1),
+            category: "equality-operator",
+            original: MutantSourceText.make("==="),
+            replacement: MutantSourceText.make("!=="),
+            mutatedSource: MutantSourceText.make(mutatedSource),
+          },
+        ],
+      )
+      match(runRes)
+        .with({ _tag: "Ok" }, ({ outcomes }) => {
+          expect(outcomes).toHaveLength(1)
+          expect(outcomes[0]?.status).toBe("killed")
+        })
+        .with({ _tag: "Abort" }, ({ diagnostic }) => {
+          expect.unreachable(`Expected Ok without false-abort on baseline, got: ${diagnostic}`)
+        })
+        .exhaustive()
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("ignores Vitest FAIL breadcrumb test titles containing infra keywords while still aborting on real module load failures", () => {
+    const killedBreadcrumb = classifyMutantSubprocessResult(
+      "m-breadcrumb",
+      Result.succeed({
+        _tag: "Exited",
+        exitCode: 1,
+        stdout:
+          " FAIL  libs/demo.test.ts > suite > Tests no tests and ERR_MODULE_NOT_FOUND abort\nTests  1 failed (1)\n",
+        stderr: "",
+      }),
+    )
+    expect(killedBreadcrumb).toEqual({ kind: "outcome", status: "killed" })
+
+    const realModuleAbort = classifyMutantSubprocessResult(
+      "m-real-module-err",
+      Result.succeed({
+        _tag: "Exited",
+        exitCode: 1,
+        stdout:
+          " FAIL  suiteB.test.ts [ suiteB.test.ts ]\nTests  1 failed (1)\nError [ERR_MODULE_NOT_FOUND]: Cannot find module\n",
+        stderr: "",
+      }),
+    )
+    expect(realModuleAbort.kind).toBe("abort")
+
+    const treeFailBreadcrumb = classifyMutantSubprocessResult(
+      "m-tree-breadcrumb",
+      Result.succeed({
+        _tag: "Exited",
+        exitCode: 1,
+        stdout:
+          " × libs/demo.test.ts > suite > Cannot find module or No test files found\nTests  1 failed (1)\n",
+        stderr: "",
+      }),
+    )
+    expect(treeFailBreadcrumb).toEqual({ kind: "outcome", status: "killed" })
+
+    const assertionNoiseKilled = classifyMutantSubprocessResult(
+      "m-assertion-noise",
+      Result.succeed({
+        _tag: "Exited",
+        exitCode: 1,
+        stdout:
+          "Tests  1 failed (1)\nAssertionError: expected \"Cannot find module '@missing/pkg'\" not to be reached\n",
+        stderr: "",
+      }),
+    )
+    expect(assertionNoiseKilled).toEqual({ kind: "outcome", status: "killed" })
   })
 })

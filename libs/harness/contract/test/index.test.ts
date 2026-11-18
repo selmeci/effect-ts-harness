@@ -49,6 +49,7 @@ import {
   PackageDependencyName,
   PackageManifestName,
   PackageManifestPath,
+  PackageUnitDraft,
   PlanSha256,
   PluginId,
   REVIEW_DEPTH_LEVELS,
@@ -67,8 +68,10 @@ import {
   SPECIALIST_REVIEWER_IDS,
   SelfDogfoodingMessage,
   SelfDogfoodingReport,
+  SelfDogfoodingRuleId,
   SelfDogfoodingViolationError,
   SliceBranchName,
+  SliceUnitDraft,
   SourceLineNumber,
   StdinReadError,
   SubprocessArg,
@@ -78,14 +81,16 @@ import {
   TierTopologyMessage,
   TierTopologyRuleId,
   WaveIndex,
+  WorkUnitDraft,
   WorkUnitId,
   WorkflowCompileReason,
   WorkflowLevel,
   WorkflowRunId,
   WorkspaceFilePath,
   WorkspaceFsOperation,
-  getReviewDepthRank,
+  compareCodeUnits,
   computeContentSha256,
+  getReviewDepthRank,
   inferAstGatePackageTagFromPath,
   isPureInterruptCause,
   makeAstGateDecisionReport,
@@ -95,6 +100,7 @@ import {
   makeVerdictReport,
   normalizeNonRootWorkspacePath,
   parseManifestTags,
+  pathsOverlap,
   resolveDefaultAstGateCachePath,
   resolveDefaultDecisionCachePath,
   sanitizeWorktreeIdSegment,
@@ -450,7 +456,16 @@ describe("@harness/contract schemas", () => {
   })
 
   it("computes SHA-256 identically to node:crypto across empty, ASCII, multi-block, and multi-byte UTF-8 inputs", () => {
-    expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v8")
+    expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v9")
+    expect(compareCodeUnits("a", "b")).toBe(-1)
+    expect(compareCodeUnits("b", "a")).toBe(1)
+    expect(compareCodeUnits("a", "a")).toBe(0)
+    expect(Schema.decodeSync(SelfDogfoodingRuleId)("process-exit-outside-app")).toBe(
+      "process-exit-outside-app",
+    )
+    expect(Schema.decodeSync(SelfDogfoodingRuleId)("locale-dependent-sort")).toBe(
+      "locale-dependent-sort",
+    )
     const samples = [
       "",
       "abc",
@@ -762,6 +777,11 @@ describe("@harness/contract schemas", () => {
     expect(CyclicPlanWorkflowError).toBeDefined()
     expect(DisjointOwnershipViolationError).toBeDefined()
     expect(InvalidPlanWorkflowGraphError).toBeDefined()
+    expect(SliceUnitDraft).toBeDefined()
+    expect(PackageUnitDraft).toBeDefined()
+    expect(WorkUnitDraft).toBeDefined()
+    expect(pathsOverlap).toBeTypeOf("function")
+    expect(compareCodeUnits).toBeTypeOf("function")
     expect(wavesOf).toBeTypeOf("function")
 
     const validSha = "0123456789abcdef0123456789abcdef01234567"
@@ -816,7 +836,6 @@ describe("@harness/contract schemas", () => {
 
     const wrappedWaves = Schema.decodeSync(CompiledWaves)({
       units: [unitZ, unitA, unitRoot],
-      waves: sortedWaves,
     })
     expect(wavesOf(wrappedWaves)).toEqual(sortedWaves)
 
@@ -830,10 +849,10 @@ describe("@harness/contract schemas", () => {
     })
     const invalidErr = new InvalidPlanWorkflowGraphError({
       issue: { _tag: "DuplicateWorkUnitId", unitId: WorkUnitId.make("unit-a") },
-      reason: WorkflowCompileReason.make("duplicate"),
     })
     expect(cyclicErr._tag).toBe("CyclicPlanWorkflowError")
     expect(disjointErr._tag).toBe("DisjointOwnershipViolationError")
     expect(invalidErr._tag).toBe("InvalidPlanWorkflowGraphError")
+    expect(invalidErr.message).toContain("unit-a")
   })
 })

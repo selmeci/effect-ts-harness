@@ -9,13 +9,15 @@ import type { SyncHostIo } from "@harness/service/host-io"
 import { parseGitDiffModifiedLines } from "./mutant-ast-generator.js"
 
 export type GitDiffExtractionResult =
-  | { readonly kind: "not-git" }
+  | { readonly _tag: "NotGit" }
   | {
-      readonly kind: "ok"
+      readonly _tag: "Ok"
       readonly lines: ReadonlyMap<string, ReadonlySet<number>>
       readonly diffMode: "working-tree" | "branch-base"
     }
-  | { readonly kind: "failed"; readonly reason: string }
+  | { readonly _tag: "Failed"; readonly reason: string }
+
+export type ExtractGitDiffResult = GitDiffExtractionResult
 
 export interface GitDiffExtractionOptions {
   readonly fallbackBaseRef?: string | undefined
@@ -43,43 +45,47 @@ export const extractGitDiffModifiedLinesChecked = (
 ): GitDiffExtractionResult => {
   const gitOpts = { cwd: repoRoot, timeoutMs: 15_000 }
   const revParseRes = Result.try(() =>
-    hostIo.execFileSync("git", ["rev-parse", "--is-inside-work-tree"], gitOpts),
+    hostIo.execFileSync(
+      "git",
+      ["-c", "core.quotePath=false", "rev-parse", "--is-inside-work-tree"],
+      gitOpts,
+    ),
   )
   const revParseStatus:
-    | { readonly kind: "proceed" }
-    | { readonly kind: "not-git" }
-    | { readonly kind: "failed"; readonly reason: string } = match(revParseRes)
+    | { readonly _tag: "Proceed" }
+    | { readonly _tag: "NotGit" }
+    | { readonly _tag: "Failed"; readonly reason: string } = match(revParseRes)
     .with({ _tag: "Failure" }, ({ failure }) => ({
-      kind: "failed" as const,
+      _tag: "Failed" as const,
       reason: `git rev-parse --is-inside-work-tree threw: ${failure instanceof Error ? failure.message : String(failure)}`,
     }))
     .with({ _tag: "Success" }, ({ success }) =>
       match(success)
         .with({ _tag: "Exited" }, (res) => {
           if (res.exitCode === 0 && res.stdout.trim() === "true")
-            return { kind: "proceed" as const }
+            return { _tag: "Proceed" as const }
           if (
             res.exitCode === 128 &&
             /not a git repository/i.test(`${res.stdout}\n${res.stderr}`)
           ) {
-            return { kind: "not-git" as const }
+            return { _tag: "NotGit" as const }
           }
           const stderrPart = res.stderr.trim().length > 0 ? `, stderr=${res.stderr.trim()}` : ""
           return {
-            kind: "failed" as const,
+            _tag: "Failed" as const,
             reason: `git rev-parse --is-inside-work-tree failed (exitCode=${res.exitCode}${stderrPart})`,
           }
         })
         .with({ _tag: "TimedOut" }, (res) => ({
-          kind: "failed" as const,
+          _tag: "Failed" as const,
           reason: `git rev-parse --is-inside-work-tree failed (timedOut=true${res.stderr.trim().length > 0 ? `, stderr=${res.stderr.trim()}` : ""})`,
         }))
         .with({ _tag: "Signaled" }, (res) => ({
-          kind: "failed" as const,
+          _tag: "Failed" as const,
           reason: `git rev-parse --is-inside-work-tree failed (signal=${res.signal}${res.stderr.trim().length > 0 ? `, stderr=${res.stderr.trim()}` : ""})`,
         }))
         .with({ _tag: "SpawnFailed" }, (res) => ({
-          kind: "failed" as const,
+          _tag: "Failed" as const,
           reason: `git rev-parse --is-inside-work-tree failed (spawnError=${res.spawnError})`,
         }))
         .exhaustive(),
@@ -87,139 +93,173 @@ export const extractGitDiffModifiedLinesChecked = (
     .exhaustive()
 
   const earlyExit = match(revParseStatus)
-    .with({ kind: "proceed" }, () => undefined)
-    .with({ kind: "not-git" }, () => ({ kind: "not-git" as const }))
-    .with({ kind: "failed" }, ({ reason }) => ({ kind: "failed" as const, reason }))
+    .with({ _tag: "Proceed" }, () => undefined)
+    .with({ _tag: "NotGit" }, () => ({ _tag: "NotGit" as const }))
+    .with({ _tag: "Failed" }, ({ reason }) => ({ _tag: "Failed" as const, reason }))
     .exhaustive()
   if (earlyExit !== undefined) return earlyExit
 
-  const runGit = (
-    args: ReadonlyArray<string>,
-  ):
-    | { readonly ok: true; readonly stdout: string }
-    | { readonly ok: false; readonly reason: string } => {
-    const res = Result.try(() => hostIo.execFileSync("git", args, gitOpts))
+  const runGit = (args: ReadonlyArray<string>): Result.Result<string, string> => {
+    const res = Result.try(() =>
+      hostIo.execFileSync("git", ["-c", "core.quotePath=false", ...args], gitOpts),
+    )
     return match(res)
-      .with({ _tag: "Failure" }, ({ failure }) => ({
-        ok: false as const,
-        reason: `git ${args.join(" ")} threw: ${failure instanceof Error ? failure.message : String(failure)}`,
-      }))
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        Result.fail(
+          `git ${args.join(" ")} threw: ${failure instanceof Error ? failure.message : String(failure)}`,
+        ),
+      )
       .with({ _tag: "Success" }, ({ success }) =>
         match(success)
           .with({ _tag: "Exited" }, (r) => {
-            if (r.exitCode === 0) return { ok: true as const, stdout: r.stdout }
+            if (r.exitCode === 0) return Result.succeed(r.stdout)
             const stderrPart = r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""
-            return {
-              ok: false as const,
-              reason: `git ${args.join(" ")} failed (exitCode=${r.exitCode}${stderrPart})`,
-            }
+            return Result.fail(`git ${args.join(" ")} failed (exitCode=${r.exitCode}${stderrPart})`)
           })
-          .with({ _tag: "TimedOut" }, (r) => ({
-            ok: false as const,
-            reason: `git ${args.join(" ")} failed (timedOut=true${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
-          }))
-          .with({ _tag: "Signaled" }, (r) => ({
-            ok: false as const,
-            reason: `git ${args.join(" ")} failed (signal=${r.signal}${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
-          }))
-          .with({ _tag: "SpawnFailed" }, (r) => ({
-            ok: false as const,
-            reason: `git ${args.join(" ")} failed (spawnError=${r.spawnError}${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
-          }))
+          .with({ _tag: "TimedOut" }, (r) =>
+            Result.fail(
+              `git ${args.join(" ")} failed (timedOut=true${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
+            ),
+          )
+          .with({ _tag: "Signaled" }, (r) =>
+            Result.fail(
+              `git ${args.join(" ")} failed (signal=${r.signal}${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
+            ),
+          )
+          .with({ _tag: "SpawnFailed" }, (r) =>
+            Result.fail(
+              `git ${args.join(" ")} failed (spawnError=${r.spawnError}${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
+            ),
+          )
           .exhaustive(),
       )
       .exhaustive()
   }
 
-  const diffFromMergeBase = (
-    baseRef: string,
-  ):
-    | { readonly status: "ok"; readonly lines: ReadonlyMap<string, ReadonlySet<number>> }
-    | { readonly status: "merge-base-failed"; readonly reason: string }
-    | { readonly status: "diff-failed"; readonly reason: string } => {
-    const mb = runGit(["merge-base", "HEAD", baseRef])
-    if (!mb.ok) return { status: "merge-base-failed", reason: mb.reason }
-    const mergeBase = mb.stdout.trim()
-    if (mergeBase.length === 0) {
-      return {
-        status: "merge-base-failed",
-        reason: `git merge-base HEAD ${baseRef} returned empty output`,
-      }
+  const collectUntrackedLibsFiles = (
+    targetMap: Map<string, Set<number>>,
+  ): Result.Result<void, string> =>
+    Result.flatMap(
+      runGit(["ls-files", "--others", "--exclude-standard", "--", "libs/"]),
+      (stdout) => {
+        for (const rawLine of stdout.split(/\r?\n/)) {
+          const relPath = rawLine.trim().replace(/\\/g, "/")
+          if (
+            relPath.length === 0 ||
+            !(relPath.endsWith(".ts") || relPath.endsWith(".tsx")) ||
+            relPath.endsWith(".d.ts")
+          ) {
+            continue
+          }
+          const absPath = join(repoRoot, relPath)
+          const symRes = Result.try({
+            try: () => hostIo.isSymbolicLinkSync(absPath),
+            catch: (err) =>
+              `Failed to check symlink status for untracked file '${relPath}': ${err instanceof Error ? err.message : String(err)}`,
+          })
+          const symErr = match(symRes)
+            .with({ _tag: "Failure" }, ({ failure }) => failure)
+            .with({ _tag: "Success" }, ({ success: isSymlink }) =>
+              isSymlink ? `Refusing symlink untracked file '${relPath}'` : undefined,
+            )
+            .exhaustive()
+          if (symErr !== undefined) return Result.fail(symErr)
+
+          const existsRes = Result.try({
+            try: () => hostIo.existsSync(absPath),
+            catch: (err) =>
+              `Failed to stat untracked file '${relPath}': ${err instanceof Error ? err.message : String(err)}`,
+          })
+          const existsErr = match(existsRes)
+            .with({ _tag: "Failure" }, ({ failure }) => failure)
+            .with({ _tag: "Success" }, ({ success: exists }) => {
+              if (!exists) return undefined
+              return match(Result.try(() => hostIo.readTextSync(absPath)))
+                .with({ _tag: "Success" }, ({ success: content }) => {
+                  const lineCount = content.split(/\r?\n/).length
+                  let lineSet = targetMap.get(relPath)
+                  if (lineSet === undefined) {
+                    lineSet = new Set<number>()
+                    targetMap.set(relPath, lineSet)
+                  }
+                  for (let ln = 1; ln <= lineCount; ln++) lineSet.add(ln)
+                  return undefined
+                })
+                .with(
+                  { _tag: "Failure" },
+                  ({ failure }) =>
+                    `Failed to read untracked file '${relPath}': ${failure instanceof Error ? failure.message : String(failure)}`,
+                )
+                .exhaustive()
+            })
+            .exhaustive()
+          if (existsErr !== undefined) return Result.fail(existsErr)
+        }
+        return Result.succeed(undefined)
+      },
+    )
+
+  const diffFromMergeBase = (baseRef: string): Result.Result<Map<string, Set<number>>, string> => {
+    if (baseRef.startsWith("-")) {
+      return Result.fail(`Invalid baseRef '${baseRef}': must not start with '-'`)
     }
-    const baseDiff = runGit(["diff", "-U0", `${mergeBase}...HEAD`, "--", "libs/"])
-    if (!baseDiff.ok) return { status: "diff-failed", reason: baseDiff.reason }
-    return { status: "ok", lines: parseGitDiffModifiedLines(baseDiff.stdout) }
+    return Result.flatMap(runGit(["rev-parse", "--verify", `${baseRef}^{commit}`]), () =>
+      Result.flatMap(runGit(["merge-base", "HEAD", baseRef]), (mbStdout) => {
+        const mergeBase = mbStdout.trim()
+        if (mergeBase.length === 0) {
+          return Result.fail(`git merge-base HEAD ${baseRef} returned empty output`)
+        }
+        return Result.flatMap(runGit(["diff", "-U0", mergeBase, "--", "libs/"]), (diffStdout) => {
+          const lineMap = new Map<string, Set<number>>()
+          mergeLineMaps(lineMap, parseGitDiffModifiedLines(diffStdout))
+          return Result.map(collectUntrackedLibsFiles(lineMap), () => lineMap)
+        })
+      }),
+    )
   }
 
   if (options?.explicitBaseRef === true) {
     if (options.fallbackBaseRef === undefined) {
-      return { kind: "failed", reason: "explicitBaseRef requires fallbackBaseRef" }
+      return { _tag: "Failed", reason: "explicitBaseRef requires fallbackBaseRef" }
     }
     return match(diffFromMergeBase(options.fallbackBaseRef))
-      .with({ status: "ok" }, ({ lines }) => ({
-        kind: "ok" as const,
+      .with({ _tag: "Success" }, ({ success: lines }) => ({
+        _tag: "Ok" as const,
         lines,
         diffMode: "branch-base" as const,
       }))
-      .with({ status: "merge-base-failed" }, ({ reason }) => ({ kind: "failed" as const, reason }))
-      .with({ status: "diff-failed" }, ({ reason }) => ({ kind: "failed" as const, reason }))
+      .with({ _tag: "Failure" }, ({ failure: reason }) => ({ _tag: "Failed" as const, reason }))
       .exhaustive()
   }
 
-  const primaryDiff = runGit(["diff", "-U0"])
-  if (!primaryDiff.ok) return { kind: "failed", reason: primaryDiff.reason }
+  const workingTreeRes = Result.flatMap(runGit(["diff", "-U0"]), (primaryStdout) =>
+    Result.flatMap(runGit(["diff", "-U0", "HEAD"]), (headStdout) => {
+      const mergedMap = new Map<string, Set<number>>()
+      mergeLineMaps(mergedMap, parseGitDiffModifiedLines(primaryStdout))
+      mergeLineMaps(mergedMap, parseGitDiffModifiedLines(headStdout))
+      return Result.map(collectUntrackedLibsFiles(mergedMap), () => mergedMap)
+    }),
+  )
 
-  const headDiff = runGit(["diff", "-U0", "HEAD"])
-  if (!headDiff.ok) return { kind: "failed", reason: headDiff.reason }
-
-  const mergedMap = new Map<string, Set<number>>()
-  mergeLineMaps(mergedMap, parseGitDiffModifiedLines(primaryDiff.stdout))
-  mergeLineMaps(mergedMap, parseGitDiffModifiedLines(headDiff.stdout))
-
-  const untrackedRes = runGit(["ls-files", "--others", "--exclude-standard", "--", "libs/"])
-  if (!untrackedRes.ok) return { kind: "failed", reason: untrackedRes.reason }
-
-  for (const rawLine of untrackedRes.stdout.split(/\r?\n/)) {
-    const relPath = rawLine.trim().replace(/\\/g, "/")
-    if (
-      relPath.length === 0 ||
-      !(relPath.endsWith(".ts") || relPath.endsWith(".tsx")) ||
-      relPath.endsWith(".d.ts")
-    ) {
-      continue
-    }
-    const absPath = join(repoRoot, relPath)
-    if (!hostIo.existsSync(absPath)) continue
-    const readRes = Result.try(() => hostIo.readTextSync(absPath))
-    match(readRes)
-      .with({ _tag: "Success" }, ({ success: content }) => {
-        const lineCount = content.split(/\r?\n/).length
-        let lineSet = mergedMap.get(relPath)
-        if (lineSet === undefined) {
-          lineSet = new Set<number>()
-          mergedMap.set(relPath, lineSet)
-        }
-        for (let ln = 1; ln <= lineCount; ln++) lineSet.add(ln)
-      })
-      .with({ _tag: "Failure" }, () => {})
-      .exhaustive()
-  }
-
-  const hasLibsDiff = Array.from(mergedMap.keys()).some((k) => k.startsWith("libs/"))
-  if (!hasLibsDiff && options?.fallbackBaseRef !== undefined) {
-    const handled = match(diffFromMergeBase(options.fallbackBaseRef))
-      .with({ status: "ok" }, ({ lines }) => ({
-        kind: "ok" as const,
-        lines,
-        diffMode: "branch-base" as const,
-      }))
-      .with({ status: "diff-failed" }, ({ reason }) => ({ kind: "failed" as const, reason }))
-      .with({ status: "merge-base-failed" }, () => undefined)
-      .exhaustive()
-    if (handled !== undefined) return handled
-  }
-
-  return { kind: "ok", lines: mergedMap, diffMode: "working-tree" }
+  return match(workingTreeRes)
+    .with({ _tag: "Failure" }, ({ failure: reason }) => ({ _tag: "Failed" as const, reason }))
+    .with({ _tag: "Success" }, ({ success: mergedMap }) => {
+      if (options?.fallbackBaseRef !== undefined) {
+        return match(diffFromMergeBase(options.fallbackBaseRef))
+          .with({ _tag: "Failure" }, ({ failure: reason }) => ({ _tag: "Failed" as const, reason }))
+          .with({ _tag: "Success" }, ({ success: branchLines }) => {
+            mergeLineMaps(branchLines, mergedMap)
+            return {
+              _tag: "Ok" as const,
+              lines: branchLines,
+              diffMode: "branch-base" as const,
+            }
+          })
+          .exhaustive()
+      }
+      return { _tag: "Ok" as const, lines: mergedMap, diffMode: "working-tree" as const }
+    })
+    .exhaustive()
 }
 
 export const BackupSchema = Schema.fromJsonString(

@@ -2868,7 +2868,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       )
 
       // 3. runCli(["bench", "--iterations=1"]) passes (exit 0)
-      const passRes = await runCli(["bench", "--iterations=1"], { repoRoot: dir })
+      const passRes = await runCli(["bench", "--iterations=1", "--budget-ms=5000"], {
+        repoRoot: dir,
+      })
       expect(passRes.exitCode).toBe(0)
       const passJson = JSON.parse(passRes.stdout) as {
         readonly overallStatus: string
@@ -3168,14 +3170,25 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
   it("runs handleMutate on a non-empty domain scope and fails when mutants survive", async () => {
     const dir = mkdtempSync(join(tmpdir(), "harness-cli-mutate-demo-"))
     try {
+      symlinkSync(
+        join(resolve(import.meta.dirname, "../../.."), "node_modules"),
+        join(dir, "node_modules"),
+      )
       const domainDir = join(dir, "libs", "demo", "domain", "src")
+      const testDir = join(dir, "libs", "demo", "domain", "test")
       mkdirSync(domainDir, { recursive: true })
+      mkdirSync(testDir, { recursive: true })
       writeFileSync(
         join(domainDir, "decider.ts"),
         `export const decideCount = (count: number): boolean => {\n  if (count >= 1) {\n    return true\n  }\n  return false\n}\n`,
         "utf-8",
       )
-      const res = await runCli(["mutate", "--scope=demo"], { repoRoot: dir })
+      writeFileSync(
+        join(testDir, "decider.test.ts"),
+        `import { expect, it } from "vitest"\nit("noop", () => { expect(1).toBe(1) })\n`,
+        "utf-8",
+      )
+      const res = await runCli(["mutate", "--strict", "--scope=demo"], { repoRoot: dir })
       expect(res.exitCode).toBe(1)
       const payload = JSON.parse(res.stdout) as {
         readonly passed: boolean

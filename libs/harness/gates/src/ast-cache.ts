@@ -3,7 +3,7 @@
  * Content-addressable AST cache and category deciders for Effect-TS Engineering Harness.
  *
  * Implements an in-memory and disk-persisted cache keyed by file path, package tag,
- * and SHA-256 content digest under `HARNESS_GATE_RULE_VERSION` (`ast-gates-v8`).
+ * and SHA-256 content digest under `HARNESS_GATE_RULE_VERSION` (`ast-gates-v9`).
  * Avoids redundant AST parses and visits across repetitive gate runs.
  *
  * Exposes Effect.fn deciders for each gate category:

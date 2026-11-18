@@ -26,13 +26,19 @@ export {
 } from "./policy.js"
 export {
   DstSeedsRunCount,
+  MutantCount,
   MutateDiffMode,
   MutateEnforcementMode,
+  MutateStampPassed,
   MutateStampSchema,
+  StampBranchName,
+  StampIsoTimestamp,
+  StampRelFilePath,
   VerifyStampSchema,
   checkMutateStamp,
   checkVerifyStamp,
   computeWorkspaceTreeHash,
+  computeWorkspaceTreeHashChecked,
   parseDstSeedEnv,
   removeMutateStamp,
   type CheckMutateStampResult,
@@ -114,6 +120,8 @@ export {
   levenshteinDistance,
   loadGovernanceDocsFromDisk,
   parseGovernanceDocFrontmatter,
+  parseGovernanceDocFrontmatterChecked,
+  type ParseGovernanceDocFrontmatterResult,
   type GcReport,
   type GovernanceDocReference,
   type GraphEntropyInput,
@@ -160,7 +168,9 @@ export {
 export {
   CodeMutant,
   MutantCategory,
+  MutantId,
   MutantOutcome,
+  MutantSourceText,
   MutationCheck,
   collectReachingTestAssertions,
   compileMutantSchemaModule,
@@ -185,12 +195,14 @@ export {
   stripAnsi,
   type MutantSchemaModule,
   type MutationEvaluationInput,
+  type MutationOutcomesSummary,
   type MutationSuiteReport,
   type RunMutationOptions,
   type SaturationViolation,
   type SpanSaturationObservation,
   type SpanSaturationSpec,
   type TraceSpanObservation,
+  type UntestedMutationFile,
 } from "./mutation-check.js"
 export {
   decideEarsSpecLint,
@@ -447,7 +459,7 @@ export {
   readTextOrReport,
   readdirOrReport,
 } from "./plugins/gc/gc-helpers.js"
-export { GATE_RULE_SOURCE_FILES } from "./plugins/gc/gc-doc-truth.plugin.js"
+export { GATE_RULE_SOURCE_FILES, evaluateGateRuleDigestCheck } from "./plugins/gc/gc-rule-digest.js"
 export {
   MUTATION_PATTERNS,
   isAssertionFailure,

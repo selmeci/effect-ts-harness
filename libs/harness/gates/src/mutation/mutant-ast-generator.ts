@@ -3,10 +3,17 @@
  */
 import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
+import { AstSourceFilePath, SourceLineNumber } from "@harness/contract"
 import { ts } from "@harness/graph"
 import { getActiveMutantId, setActiveMutantId } from "../services/active-mutant-context.js"
 
 export { getActiveMutantId, setActiveMutantId }
+
+export const MutantId = Schema.NonEmptyString.pipe(Schema.brand("MutantId"))
+export type MutantId = typeof MutantId.Type
+
+export const MutantSourceText = Schema.String.pipe(Schema.brand("MutantSourceText"))
+export type MutantSourceText = typeof MutantSourceText.Type
 
 export const MutantCategory = Schema.Literals([
   "boundary-operator",
@@ -20,13 +27,13 @@ export const MutantCategory = Schema.Literals([
 export type MutantCategory = typeof MutantCategory.Type
 
 export const CodeMutant = Schema.Struct({
-  id: Schema.String,
-  file: Schema.String,
-  line: Schema.Finite,
+  id: MutantId,
+  file: AstSourceFilePath,
+  line: SourceLineNumber,
   category: MutantCategory,
-  original: Schema.String,
-  replacement: Schema.String,
-  mutatedSource: Schema.String,
+  original: MutantSourceText,
+  replacement: MutantSourceText,
+  mutatedSource: MutantSourceText,
 })
 export type CodeMutant = typeof CodeMutant.Type
 
@@ -340,13 +347,13 @@ export const discoverDomainMutants = (
     if (seenMutatedSources.has(mutatedSource)) return
     seenMutatedSources.add(mutatedSource)
     mutants.push({
-      id,
-      file: filePath,
-      line: lineNo,
+      id: MutantId.make(id),
+      file: AstSourceFilePath.make(filePath),
+      line: SourceLineNumber.make(lineNo),
       category,
-      original,
-      replacement,
-      mutatedSource,
+      original: MutantSourceText.make(original),
+      replacement: MutantSourceText.make(replacement),
+      mutatedSource: MutantSourceText.make(mutatedSource),
     })
   }
 
@@ -582,9 +589,8 @@ export const isAssertionFailure = (err: unknown): boolean =>
   (err.name === "AssertionError" ||
     err.name === "ExpectError" ||
     "matcherResult" in err ||
-    /^(?:AssertionError|ExpectError|expect\()/i.test(err.message) ||
-    err.message.includes("toBe") ||
-    err.message.includes("toEqual"))
+    ("code" in err && err.code === "ERR_ASSERTION") ||
+    /^(?:AssertionError|ExpectError|Assertion fail):/.test(err.message))
 
 /**
  * Evaluates all `M` mutants inside a single warm process by toggling

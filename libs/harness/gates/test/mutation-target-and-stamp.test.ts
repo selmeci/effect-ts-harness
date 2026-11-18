@@ -5,22 +5,27 @@ import { pathToFileURL } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
-import { AstSourceContent, AstSourceFilePath } from "@harness/contract"
+import { AstSourceContent, AstSourceFilePath, SourceLineNumber } from "@harness/contract"
 import { ts } from "@harness/graph"
 import type { SyncHostExecResult, SyncHostIo } from "@harness/service/host-io"
 import {
   checkMutateStamp,
   checkVerifyStamp,
   classifyFileWrite,
-  DstSeedsRunCount,
+  computeWorkspaceTreeHashChecked,
   isImmutableTcbPath,
-  MutateDiffMode,
-  MutateEnforcementMode,
+  MutantCount,
+  MutantId,
+  MutantSourceText,
+  MutateStampPassed,
   removeMutateStamp,
+  resolveHarnessStateDir,
   SelfDogfooding,
+  StampRelFilePath,
   writeMutateStamp,
   writeVerifyStamp,
 } from "../src/index.js"
+import { parseDstSeedEnv } from "../src/verify-stamp.js"
 import { evaluateMutationOutcomes, runDomainMutationSuite } from "../src/mutation-check.js"
 import {
   classifyMutantSubprocessResult,
@@ -38,9 +43,13 @@ import {
 import { extractGitDiffModifiedLinesChecked } from "../src/mutation/mutation-backup.js"
 import {
   findDomainFiles,
+  findDomainFilesChecked,
   findUnclassifiedModifiedLibFiles,
+  findUnclassifiedModifiedLibFilesChecked,
   partitionReachingTestFiles,
+  readPackageManifest,
   resolveLibPackageClassification,
+  resolveLibPackageClassificationChecked,
 } from "../src/mutation/mutation-target-discovery.js"
 import { testHostIo } from "./helpers/test-host-io.js"
 
@@ -547,9 +556,9 @@ describe("mutation-backup: untracked files, branch-base fallback, explicitBaseRe
     const untrackedAbs = join("/mock-repo", untrackedRel)
     const hostIo = makeGitMockHostIo(
       (args) => {
-        if (args[0] === "rev-parse")
+        if (args.includes("rev-parse"))
           return { _tag: "Exited", exitCode: 0, stdout: "true\n", stderr: "" }
-        if (args[0] === "ls-files")
+        if (args.includes("ls-files"))
           return { _tag: "Exited", exitCode: 0, stdout: `${untrackedRel}\n`, stderr: "" }
         return { _tag: "Exited", exitCode: 0, stdout: "", stderr: "" }
       },
@@ -557,11 +566,11 @@ describe("mutation-backup: untracked files, branch-base fallback, explicitBaseRe
     )
     const res = extractGitDiffModifiedLinesChecked("/mock-repo", hostIo)
     match(res)
-      .with({ kind: "ok" }, ({ lines, diffMode }) => {
+      .with({ _tag: "Ok" }, ({ lines, diffMode }) => {
         expect(diffMode).toBe("working-tree")
         expect(Array.from(lines.get(untrackedRel) ?? [])).toEqual([1, 2, 3])
       })
-      .with({ kind: "not-git" }, { kind: "failed" }, () => {
+      .with({ _tag: "NotGit" }, { _tag: "Failed" }, () => {
         expect.unreachable("Expected kind: ok")
       })
       .exhaustive()
@@ -569,11 +578,11 @@ describe("mutation-backup: untracked files, branch-base fallback, explicitBaseRe
 
   it("falls back to branch-base when working tree has no libs/ diff and fallbackBaseRef is provided", () => {
     const hostIo = makeGitMockHostIo((args) => {
-      if (args[0] === "rev-parse")
+      if (args.includes("rev-parse"))
         return { _tag: "Exited", exitCode: 0, stdout: "true\n", stderr: "" }
-      if (args[0] === "merge-base")
+      if (args.includes("merge-base"))
         return { _tag: "Exited", exitCode: 0, stdout: "abc123\n", stderr: "" }
-      if (args[0] === "diff" && args[2] === "abc123...HEAD") {
+      if (args.includes("diff") && args.includes("abc123")) {
         return {
           _tag: "Exited",
           exitCode: 0,
@@ -587,11 +596,11 @@ describe("mutation-backup: untracked files, branch-base fallback, explicitBaseRe
       fallbackBaseRef: "main",
     })
     match(res)
-      .with({ kind: "ok" }, ({ lines, diffMode }) => {
+      .with({ _tag: "Ok" }, ({ lines, diffMode }) => {
         expect(diffMode).toBe("branch-base")
         expect(Array.from(lines.get("libs/demo/core/src/a.ts") ?? [])).toEqual([10, 11])
       })
-      .with({ kind: "not-git" }, { kind: "failed" }, () => {
+      .with({ _tag: "NotGit" }, { _tag: "Failed" }, () => {
         expect.unreachable("Expected branch-base ok")
       })
       .exhaustive()
@@ -599,9 +608,9 @@ describe("mutation-backup: untracked files, branch-base fallback, explicitBaseRe
 
   it("fails closed when explicitBaseRef=true without fallbackBaseRef or when merge-base / ls-files fails or times out", () => {
     const baseHostIo = makeGitMockHostIo((args) => {
-      if (args[0] === "rev-parse")
+      if (args.includes("rev-parse"))
         return { _tag: "Exited", exitCode: 0, stdout: "true\n", stderr: "" }
-      if (args[0] === "merge-base")
+      if (args.includes("merge-base"))
         return {
           _tag: "Exited",
           exitCode: 128,
@@ -614,30 +623,30 @@ describe("mutation-backup: untracked files, branch-base fallback, explicitBaseRe
     const missingBase = extractGitDiffModifiedLinesChecked("/mock-repo", baseHostIo, {
       explicitBaseRef: true,
     })
-    expect(missingBase.kind).toBe("failed")
+    expect(missingBase._tag).toBe("Failed")
 
     const failedMergeBase = extractGitDiffModifiedLinesChecked("/mock-repo", baseHostIo, {
       explicitBaseRef: true,
       fallbackBaseRef: "main",
     })
-    expect(failedMergeBase.kind).toBe("failed")
+    expect(failedMergeBase._tag).toBe("Failed")
 
     const lsFilesExitErr = makeGitMockHostIo((args) => {
-      if (args[0] === "rev-parse")
+      if (args.includes("rev-parse"))
         return { _tag: "Exited", exitCode: 0, stdout: "true\n", stderr: "" }
-      if (args[0] === "ls-files")
+      if (args.includes("ls-files"))
         return { _tag: "Exited", exitCode: 128, stdout: "", stderr: "ls-files failed" }
       return { _tag: "Exited", exitCode: 0, stdout: "", stderr: "" }
     })
-    expect(extractGitDiffModifiedLinesChecked("/mock-repo", lsFilesExitErr).kind).toBe("failed")
+    expect(extractGitDiffModifiedLinesChecked("/mock-repo", lsFilesExitErr)._tag).toBe("Failed")
 
     const lsFilesTimeout = makeGitMockHostIo((args) => {
-      if (args[0] === "rev-parse")
+      if (args.includes("rev-parse"))
         return { _tag: "Exited", exitCode: 0, stdout: "true\n", stderr: "" }
-      if (args[0] === "ls-files") return { _tag: "TimedOut", stdout: "", stderr: "" }
+      if (args.includes("ls-files")) return { _tag: "TimedOut", stdout: "", stderr: "" }
       return { _tag: "Exited", exitCode: 0, stdout: "", stderr: "" }
     })
-    expect(extractGitDiffModifiedLinesChecked("/mock-repo", lsFilesTimeout).kind).toBe("failed")
+    expect(extractGitDiffModifiedLinesChecked("/mock-repo", lsFilesTimeout)._tag).toBe("Failed")
   })
 })
 
@@ -672,9 +681,11 @@ describe("mutation-check: strict fail-closed modes and primary/fallback test par
       const gitHostIo: SyncHostIo = {
         ...testHostIo,
         execFileSync: (_cmd, args) => {
-          if (args[0] === "rev-parse")
+          if (args.includes("rev-parse"))
             return { _tag: "Exited", exitCode: 0, stdout: "true\n", stderr: "" }
-          if (args[0] === "ls-files")
+          if (args.includes("merge-base"))
+            return { _tag: "Exited", exitCode: 0, stdout: "abc123\n", stderr: "" }
+          if (args.includes("ls-files"))
             return {
               _tag: "Exited",
               exitCode: 0,
@@ -717,7 +728,7 @@ describe("mutation-check: strict fail-closed modes and primary/fallback test par
       const upgradeHostIo: SyncHostIo = {
         ...testHostIo,
         execFileSync: (_cmd, args, opts) => {
-          if (args[0] === "rev-parse")
+          if (args.includes("rev-parse"))
             return { _tag: "Exited", exitCode: 128, stdout: "", stderr: "not a git repository" }
           const activeId = opts?.env?.["HARNESS_ACTIVE_MUTANT_ID"]
           if (activeId === undefined)
@@ -740,7 +751,7 @@ describe("mutation-check: strict fail-closed modes and primary/fallback test par
       const abortFallbackHostIo: SyncHostIo = {
         ...testHostIo,
         execFileSync: (_cmd, args, opts) => {
-          if (args[0] === "rev-parse")
+          if (args.includes("rev-parse"))
             return { _tag: "Exited", exitCode: 128, stdout: "", stderr: "not a git repository" }
           const activeId = opts?.env?.["HARNESS_ACTIVE_MUTANT_ID"]
           if (args.includes(primaryTest)) {
@@ -771,44 +782,52 @@ describe("verify-stamp, policy, and rule-synthesizer: mutate stamp lifecycle, gu
 
       // Missing stamp
       const missing = checkMutateStamp(dir, testHostIo)
-      expect(missing.valid).toBe(false)
+      expect(missing._tag).toBe("Invalid")
 
       // Corrupt JSON
       mkdirSync(join(dir, ".harness"), { recursive: true })
       writeFileSync(join(dir, ".harness", "mutate-stamp.json"), "{bad-json", "utf8")
       const corrupt = checkMutateStamp(dir, testHostIo)
-      expect(corrupt.valid).toBe(false)
+      expect(corrupt._tag).toBe("Invalid")
 
       // Advisory enforcementMode rejected
       writeMutateStamp(dir, testHostIo, {
-        enforcementMode: MutateEnforcementMode.make("advisory"),
-        diffMode: MutateDiffMode.make("working-tree"),
-        scannedCandidateFiles: DstSeedsRunCount.make(1),
-        diffMatchedFiles: ["libs/demo/domain/src/x.ts"],
-        evaluatedFiles: ["libs/demo/domain/src/x.ts"],
-        totalMutants: DstSeedsRunCount.make(2),
-        killedCount: DstSeedsRunCount.make(2),
+        enforcementMode: "advisory",
+        diffMode: "working-tree",
+        scannedCandidateFiles: MutantCount.make(1),
+        scannedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        diffMatchedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        evaluatedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        totalMutants: MutantCount.make(2),
+        killedCount: MutantCount.make(2),
+        survivedCount: MutantCount.make(0),
+        equivalentCount: MutantCount.make(0),
+        passed: MutateStampPassed.make(true),
       })
       const advisory = checkMutateStamp(dir, testHostIo)
-      expect(advisory.valid).toBe(false)
+      expect(advisory._tag).toBe("Invalid")
 
       // Valid strict stamp accepted
       writeMutateStamp(dir, testHostIo, {
-        enforcementMode: MutateEnforcementMode.make("strict"),
-        diffMode: MutateDiffMode.make("working-tree"),
-        scannedCandidateFiles: DstSeedsRunCount.make(1),
-        diffMatchedFiles: ["libs/demo/domain/src/x.ts"],
-        evaluatedFiles: ["libs/demo/domain/src/x.ts"],
-        totalMutants: DstSeedsRunCount.make(2),
-        killedCount: DstSeedsRunCount.make(2),
+        enforcementMode: "strict",
+        diffMode: "working-tree",
+        scannedCandidateFiles: MutantCount.make(1),
+        scannedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        diffMatchedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        evaluatedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        totalMutants: MutantCount.make(2),
+        killedCount: MutantCount.make(2),
+        survivedCount: MutantCount.make(0),
+        equivalentCount: MutantCount.make(0),
+        passed: MutateStampPassed.make(true),
       })
       const valid = checkMutateStamp(dir, testHostIo)
-      expect(valid.valid).toBe(true)
+      expect(valid._tag).toBe("Valid")
 
       // VerifyStamp carries mutateEnforcementMode + mutantsEvaluated
       const verifyStamp = writeVerifyStamp(dir, testHostIo, "impl/test", undefined, {
-        mutateEnforcementMode: MutateEnforcementMode.make("strict"),
-        mutantsEvaluated: DstSeedsRunCount.make(2),
+        mutateEnforcementMode: "strict",
+        mutantsEvaluated: MutantCount.make(2),
       })
       expect(verifyStamp.mutateEnforcementMode).toBe("strict")
       expect(verifyStamp.mutantsEvaluated).toBe(2)
@@ -818,11 +837,11 @@ describe("verify-stamp, policy, and rule-synthesizer: mutate stamp lifecycle, gu
       // Stale treeHash after file edit rejected
       writeFileSync(srcFile, "export const x = 2\n", "utf8")
       const stale = checkMutateStamp(dir, testHostIo)
-      expect(stale.valid).toBe(false)
+      expect(stale._tag).toBe("Invalid")
 
       // removeMutateStamp cleans up
       removeMutateStamp(dir, testHostIo)
-      expect(checkMutateStamp(dir, testHostIo).valid).toBe(false)
+      expect(checkMutateStamp(dir, testHostIo)._tag).toBe("Invalid")
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -845,7 +864,7 @@ describe("mutation-subprocess-helpers: classifyMutantSubprocessResult", () => {
   const noisyInfraStderr =
     'ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL: Command "vitest" not found\nError: Cannot find module "@missing/pkg"\n'
 
-  it("classifies Vitest test failure evidence as killed even when stderr contains noisy infra strings", () => {
+  it("aborts when Vitest test failure evidence is paired with noisy infra strings in stderr", () => {
     const res = classifyMutantSubprocessResult(
       "m-1",
       Result.succeed({
@@ -855,10 +874,10 @@ describe("mutation-subprocess-helpers: classifyMutantSubprocessResult", () => {
         stderr: noisyInfraStderr,
       }),
     )
-    expect(res).toEqual({ kind: "outcome", status: "killed" })
+    expect(res.kind).toBe("abort")
   })
 
-  it("classifies Vitest passed summary on exitCode 0 as survived even when stderr contains noisy infra strings", () => {
+  it("aborts when stderr contains infra errors even on exitCode 0 with passed summary", () => {
     const res = classifyMutantSubprocessResult(
       "m-2",
       Result.succeed({
@@ -868,7 +887,7 @@ describe("mutation-subprocess-helpers: classifyMutantSubprocessResult", () => {
         stderr: noisyInfraStderr,
       }),
     )
-    expect(res).toEqual({ kind: "outcome", status: "survived" })
+    expect(res.kind).toBe("abort")
   })
 
   it("aborts when stdout is empty and stderr contains infra errors on exitCode 1 or 0", () => {
@@ -902,9 +921,9 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
     const hostIo: SyncHostIo = {
       ...testHostIo,
       execFileSync: (_cmd, args) => {
-        if (args[0] === "rev-parse")
+        if (args.includes("rev-parse"))
           return { _tag: "Exited", exitCode: 0, stdout: "true\n", stderr: "" }
-        if (args[0] === "diff" && args[1] === "-U0" && args.length === 2) {
+        if (args.includes("diff") && !args.includes("HEAD") && !args.includes("deadbeef")) {
           return {
             _tag: "Exited",
             exitCode: 0,
@@ -912,7 +931,7 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
             stderr: "",
           }
         }
-        if (args[0] === "diff" && args[1] === "-U0" && args[2] === "HEAD") {
+        if (args.includes("diff") && args.includes("HEAD")) {
           return {
             _tag: "Exited",
             exitCode: 0,
@@ -920,9 +939,9 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
             stderr: "",
           }
         }
-        if (args[0] === "merge-base")
+        if (args.includes("merge-base"))
           return { _tag: "Exited", exitCode: 0, stdout: "deadbeef\n", stderr: "" }
-        if (args[0] === "diff" && args[2] === "deadbeef...HEAD") {
+        if (args.includes("diff") && args.includes("deadbeef")) {
           return {
             _tag: "Exited",
             exitCode: 0,
@@ -936,11 +955,11 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
 
     const merged = extractGitDiffModifiedLinesChecked("/mock-repo", hostIo)
     match(merged)
-      .with({ kind: "ok" }, ({ lines, diffMode }) => {
+      .with({ _tag: "Ok" }, ({ lines, diffMode }) => {
         expect(diffMode).toBe("working-tree")
         expect(Array.from(lines.get(overlapFile) ?? []).sort((a, b) => a - b)).toEqual([2, 3, 4])
       })
-      .with({ kind: "not-git" }, { kind: "failed" }, () => {
+      .with({ _tag: "NotGit" }, { _tag: "Failed" }, () => {
         expect.unreachable("Expected ok for merged diff")
       })
       .exhaustive()
@@ -949,7 +968,7 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
       explicitBaseRef: true,
     })
     expect(missingBase).toEqual({
-      kind: "failed",
+      _tag: "Failed",
       reason: "explicitBaseRef requires fallbackBaseRef",
     })
 
@@ -958,11 +977,11 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
       fallbackBaseRef: "main",
     })
     match(explicitOk)
-      .with({ kind: "ok" }, ({ diffMode, lines }) => {
+      .with({ _tag: "Ok" }, ({ diffMode, lines }) => {
         expect(diffMode).toBe("branch-base")
         expect(Array.from(lines.get(overlapFile) ?? [])).toEqual([5])
       })
-      .with({ kind: "not-git" }, { kind: "failed" }, () => {
+      .with({ _tag: "NotGit" }, { _tag: "Failed" }, () => {
         expect.unreachable("Expected ok for explicitBaseRef")
       })
       .exhaustive()
@@ -1057,7 +1076,67 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
     }
   })
 
-  it("3. mutation-subprocess-helpers: diagnostics, backup-retry restore, batch vs sequential runner, writeSchemaErr, and mid-run reversion", () => {
+  const makeSubprocessFixture = () => {
+    const dir = mkdtempSync(join(tmpdir(), "mut-sub-63-"))
+    const srcPath = join(dir, "libs", "demo", "core", "src", "mod.ts")
+    const testPath = join(dir, "libs", "demo", "core", "test", "mod.test.ts")
+    const backupPath = join(dir, ".harness", "mutation-backup.json")
+    const vitestCliPath = join(dir, "node_modules", "vitest", "vitest.mjs")
+    const batchRunnerPath = join(dir, "tools", "parallel-vitest-batch.mjs")
+    mkdirSync(join(dir, "libs", "demo", "core", "src"), { recursive: true })
+    mkdirSync(join(dir, "libs", "demo", "core", "test"), { recursive: true })
+    mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true })
+    mkdirSync(join(dir, "tools"), { recursive: true })
+    writeFileSync(vitestCliPath, "// stub\n", "utf8")
+    writeFileSync(batchRunnerPath, "// stub\n", "utf8")
+
+    const originalSource = "export const eq = (a: number, b: number) => a === b\n"
+    const mutatedSchemaSource = "export const eq = (a: number, b: number) => a !== b\n"
+    writeFileSync(srcPath, originalSource, "utf8")
+    writeFileSync(testPath, "// test\n", "utf8")
+
+    const domainFile = {
+      scope: "demo",
+      pkgDir: "core",
+      pkgName: "@demo/core",
+      tier: "core" as const,
+      fullPath: srcPath,
+      relFile: "libs/demo/core/src/mod.ts",
+    }
+    const m1 = {
+      id: MutantId.make("m-1"),
+      file: AstSourceFilePath.make(domainFile.relFile),
+      line: SourceLineNumber.make(1),
+      category: "equality-operator" as const,
+      original: MutantSourceText.make("==="),
+      replacement: MutantSourceText.make("!=="),
+      mutatedSource: MutantSourceText.make(mutatedSchemaSource),
+    }
+    const m2 = {
+      id: MutantId.make("m-2"),
+      file: AstSourceFilePath.make(domainFile.relFile),
+      line: SourceLineNumber.make(1),
+      category: "equality-operator" as const,
+      original: MutantSourceText.make("==="),
+      replacement: MutantSourceText.make("!=="),
+      mutatedSource: MutantSourceText.make(mutatedSchemaSource),
+    }
+    return {
+      dir,
+      srcPath,
+      testPath,
+      backupPath,
+      vitestCliPath,
+      batchRunnerPath,
+      originalSource,
+      mutatedSchemaSource,
+      domainFile,
+      m1,
+      m2,
+    }
+  }
+
+  it("3a. mutation-subprocess-helpers: diagnostics & backup-retry restore", () => {
     const missingEvidence = classifyMutantSubprocessResult(
       "m-x",
       Result.succeed({ _tag: "Exited", exitCode: 1, stdout: "", stderr: "" }),
@@ -1081,53 +1160,18 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
         "[mutation-check] Runner infrastructure failure for mutant 'm-x': exitCode=2, stderr=boom",
     })
 
-    const dir = mkdtempSync(join(tmpdir(), "mut-sub-63-"))
+    const {
+      dir,
+      srcPath,
+      testPath,
+      backupPath,
+      batchRunnerPath,
+      originalSource,
+      mutatedSchemaSource,
+      domainFile,
+      m1,
+    } = makeSubprocessFixture()
     try {
-      const srcPath = join(dir, "libs", "demo", "core", "src", "mod.ts")
-      const testPath = join(dir, "libs", "demo", "core", "test", "mod.test.ts")
-      const backupPath = join(dir, ".harness", "mutation-backup.json")
-      const vitestCliPath = join(dir, "node_modules", "vitest", "vitest.mjs")
-      const batchRunnerPath = join(dir, "tools", "parallel-vitest-batch.mjs")
-      mkdirSync(join(dir, "libs", "demo", "core", "src"), { recursive: true })
-      mkdirSync(join(dir, "libs", "demo", "core", "test"), { recursive: true })
-      mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true })
-      mkdirSync(join(dir, "tools"), { recursive: true })
-      writeFileSync(vitestCliPath, "// stub\n", "utf8")
-      writeFileSync(batchRunnerPath, "// stub\n", "utf8")
-
-      const originalSource = "export const eq = (a: number, b: number) => a === b\n"
-      const mutatedSchemaSource = "export const eq = (a: number, b: number) => a !== b\n"
-      writeFileSync(srcPath, originalSource, "utf8")
-      writeFileSync(testPath, "// test\n", "utf8")
-
-      const domainFile = {
-        scope: "demo",
-        pkgDir: "core",
-        pkgName: "@demo/core",
-        tier: "core" as const,
-        fullPath: srcPath,
-        relFile: "libs/demo/core/src/mod.ts",
-      }
-      const m1 = {
-        id: "m-1",
-        file: domainFile.relFile,
-        line: 1,
-        category: "equality-operator" as const,
-        original: "===",
-        replacement: "!==",
-        mutatedSource: mutatedSchemaSource,
-      }
-      const m2 = {
-        id: "m-2",
-        file: domainFile.relFile,
-        line: 1,
-        category: "equality-operator" as const,
-        original: "===",
-        replacement: "!==",
-        mutatedSource: mutatedSchemaSource,
-      }
-
-      // 3a) Backup-retry restore path (2nd writeTextSync to srcPath throws, 3rd succeeds)
       for (const failUnlink of [true, false]) {
         writeFileSync(srcPath, originalSource, "utf8")
         let srcWriteCount = 0
@@ -1165,28 +1209,45 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
         )
         if (failUnlink) {
           match(retryRes)
-            .with({ kind: "abort" }, ({ diagnostic }) => {
+            .with({ _tag: "Abort" }, ({ diagnostic }) => {
               expect(diagnostic).toContain("from backup retry but Failed to unlink")
             })
-            .with({ kind: "ok" }, () => {
+            .with({ _tag: "Ok" }, () => {
               expect.unreachable("Expected abort when unlink fails")
             })
             .exhaustive()
           if (testHostIo.existsSync(backupPath)) testHostIo.unlinkSync(backupPath)
         } else {
           match(retryRes)
-            .with({ kind: "ok" }, ({ outcomes }) => {
+            .with({ _tag: "Ok" }, ({ outcomes }) => {
               expect(outcomes).toHaveLength(1)
               expect(outcomes[0]?.status).toBe("killed")
             })
-            .with({ kind: "abort" }, ({ diagnostic }) => {
+            .with({ _tag: "Abort" }, ({ diagnostic }) => {
               expect.unreachable(`Expected ok, got: ${diagnostic}`)
             })
             .exhaustive()
         }
       }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 
-      // 3b) Batch runner selection: 1 mutant invokes vitestCliPath directly; 2 mutants invokes batchRunnerPath
+  it("3b. mutation-subprocess-helpers: batch vs sequential runner selection and batch error cases", () => {
+    const {
+      dir,
+      testPath,
+      backupPath,
+      vitestCliPath,
+      batchRunnerPath,
+      originalSource,
+      mutatedSchemaSource,
+      domainFile,
+      m1,
+      m2,
+    } = makeSubprocessFixture()
+    try {
       const seenSingleArgs: Array<ReadonlyArray<string>> = []
       const singleIo: SyncHostIo = {
         ...testHostIo,
@@ -1209,7 +1270,7 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
         backupPath,
         [m1],
       )
-      expect(singleRes.kind).toBe("ok")
+      expect(singleRes._tag).toBe("Ok")
       expect(seenSingleArgs.every((a) => !a.includes(batchRunnerPath))).toBe(true)
       expect(seenSingleArgs.some((a) => a.includes(vitestCliPath))).toBe(true)
 
@@ -1244,10 +1305,10 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
         [m1, m2],
       )
       match(batchOk)
-        .with({ kind: "ok" }, ({ outcomes }) => {
+        .with({ _tag: "Ok" }, ({ outcomes }) => {
           expect(outcomes.map((o) => o.status)).toEqual(["killed", "killed"])
         })
-        .with({ kind: "abort" }, ({ diagnostic }) => {
+        .with({ _tag: "Abort" }, ({ diagnostic }) => {
           expect.unreachable(`Expected batchOk, got: ${diagnostic}`)
         })
         .exhaustive()
@@ -1264,7 +1325,7 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
         [m1, m2],
       )
       expect(
-        batchExit2.kind === "abort" && batchExit2.diagnostic.includes("exited with code 2"),
+        batchExit2._tag === "Abort" && batchExit2.diagnostic.includes("exited with code 2"),
       ).toBe(true)
 
       const batchMissing = runVitestTargetList(
@@ -1289,7 +1350,7 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
         [m1, m2],
       )
       expect(
-        batchMissing.kind === "abort" &&
+        batchMissing._tag === "Abort" &&
           batchMissing.diagnostic.includes("Batch runner missing result"),
       ).toBe(true)
 
@@ -1319,10 +1380,26 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
         [m1, m2],
       )
       expect(
-        batchSpawnFail.kind === "abort" && batchSpawnFail.diagnostic.includes("spawnError="),
+        batchSpawnFail._tag === "Abort" && batchSpawnFail.diagnostic.includes("spawnError="),
       ).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 
-      // 3c) Sequential loop with 2 mutants: both survive vs 1st aborts
+  it("3c. mutation-subprocess-helpers: sequential loop with 2 mutants (survive vs abort)", () => {
+    const {
+      dir,
+      testPath,
+      backupPath,
+      batchRunnerPath,
+      originalSource,
+      mutatedSchemaSource,
+      domainFile,
+      m1,
+      m2,
+    } = makeSubprocessFixture()
+    try {
       const seqSurviveIo: SyncHostIo = {
         ...testHostIo,
         existsSync: (p) => (p === batchRunnerPath ? false : testHostIo.existsSync(p)),
@@ -1345,11 +1422,11 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
         [m1, m2],
       )
       match(seqSurviveRes)
-        .with({ kind: "ok" }, ({ outcomes }) => {
+        .with({ _tag: "Ok" }, ({ outcomes }) => {
           expect(outcomes).toHaveLength(2)
           expect(outcomes.map((o) => o.status)).toEqual(["survived", "survived"])
         })
-        .with({ kind: "abort" }, ({ diagnostic }) => {
+        .with({ _tag: "Abort" }, ({ diagnostic }) => {
           expect.unreachable(`Expected ok, got: ${diagnostic}`)
         })
         .exhaustive()
@@ -1377,10 +1454,25 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
         backupPath,
         [m1, m2],
       )
-      expect(seqAbortRes.kind).toBe("abort")
+      expect(seqAbortRes._tag).toBe("Abort")
       expect(seqExecCalls).toBe(2)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 
-      // 3d) writeSchemaErr when 1st writeTextSync throws (with and without unlink failure)
+  it("3d. mutation-subprocess-helpers: writeSchemaErr when 1st writeTextSync throws", () => {
+    const {
+      dir,
+      srcPath,
+      testPath,
+      backupPath,
+      originalSource,
+      mutatedSchemaSource,
+      domainFile,
+      m1,
+    } = makeSubprocessFixture()
+    try {
       for (const failUnlink of [false, true]) {
         writeFileSync(srcPath, originalSource, "utf8")
         let firstWrite = true
@@ -1416,7 +1508,7 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
           [m1],
         )
         match(writeErrRes)
-          .with({ kind: "abort" }, ({ diagnostic }) => {
+          .with({ _tag: "Abort" }, ({ diagnostic }) => {
             expect(diagnostic).toContain("Failed to write mutated schema")
             if (failUnlink) {
               expect(diagnostic).toContain("Failed to unlink")
@@ -1424,14 +1516,30 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
               expect(diagnostic.endsWith("schema write denied")).toBe(true)
             }
           })
-          .with({ kind: "ok" }, () => {
+          .with({ _tag: "Ok" }, () => {
             expect.unreachable("Expected abort on writeSchemaErr")
           })
           .exhaustive()
         if (testHostIo.existsSync(backupPath)) testHostIo.unlinkSync(backupPath)
       }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 
-      // 3e) Mid-run reversion guard
+  it("3e. mutation-subprocess-helpers: mid-run reversion guard", () => {
+    const {
+      dir,
+      srcPath,
+      testPath,
+      backupPath,
+      batchRunnerPath,
+      originalSource,
+      mutatedSchemaSource,
+      domainFile,
+      m1,
+    } = makeSubprocessFixture()
+    try {
       writeFileSync(srcPath, originalSource, "utf8")
       const clobberIo: SyncHostIo = {
         ...testHostIo,
@@ -1456,11 +1564,60 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
         [m1],
       )
       match(clobberRes)
-        .with({ kind: "abort" }, ({ diagnostic }) => {
+        .with({ _tag: "Abort" }, ({ diagnostic }) => {
           expect(diagnostic).toContain("modified externally mid-run")
         })
-        .with({ kind: "ok" }, () => {
+        .with({ _tag: "Ok" }, () => {
           expect.unreachable("Expected abort on mid-run reversion")
+        })
+        .exhaustive()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("3f. mutation-subprocess-helpers: mid-loop exception always runs restoreOriginalFile and reports restore status", () => {
+    const {
+      dir,
+      srcPath,
+      testPath,
+      backupPath,
+      batchRunnerPath,
+      originalSource,
+      mutatedSchemaSource,
+      domainFile,
+      m1,
+    } = makeSubprocessFixture()
+    try {
+      const throwingIo: SyncHostIo = {
+        ...testHostIo,
+        existsSync: (p) => (p === batchRunnerPath ? false : testHostIo.existsSync(p)),
+        execFileSync: (_cmd, _args, opts) => {
+          if (opts?.env?.["HARNESS_ACTIVE_MUTANT_ID"] === undefined) {
+            return { _tag: "Exited", exitCode: 0, stdout: "Tests  1 passed (1)\n", stderr: "" }
+          }
+          throw new Error("unexpected mid-loop exec crash")
+        },
+      }
+      const res = runVitestTargetList(
+        dir,
+        domainFile,
+        throwingIo,
+        { NO_COLOR: "1" },
+        [testPath],
+        originalSource,
+        mutatedSchemaSource,
+        backupPath,
+        [m1],
+      )
+      expect(testHostIo.readTextSync(srcPath)).toBe(originalSource)
+      expect(testHostIo.existsSync(backupPath)).toBe(false)
+      match(res)
+        .with({ _tag: "Abort" }, ({ diagnostic }) => {
+          expect(diagnostic).toContain("unexpected mid-loop exec crash")
+        })
+        .with({ _tag: "Ok" }, () => {
+          expect.unreachable("Expected abort on mid-loop exception")
         })
         .exhaustive()
     } finally {
@@ -1553,13 +1710,13 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
 
   it("5. mutation-check: saturation specs, makeAbortedReport metadata, overlays, strict/advisory matrix, diff filtering, and testRunner env restoration", () => {
     const dummyMutant = {
-      id: "m-sat",
-      file: "libs/demo/domain/src/a.ts",
-      line: 1,
+      id: MutantId.make("m-sat"),
+      file: AstSourceFilePath.make("libs/demo/domain/src/a.ts"),
+      line: SourceLineNumber.make(1),
       category: "boolean-return" as const,
-      original: "return true",
-      replacement: "return false",
-      mutatedSource: "return false",
+      original: MutantSourceText.make("return true"),
+      replacement: MutantSourceText.make("return false"),
+      mutatedSource: MutantSourceText.make("return false"),
     }
     const satSpecs = [
       {
@@ -1648,8 +1805,8 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
       writeFileSync(backupPath, "{corrupt", "utf8")
       const startupAbort = runDomainMutationSuite(dir, testHostIo, { includeAllLines: true })
       expect(startupAbort.passed).toBe(false)
-      expect("diffMode" in startupAbort).toBe(false)
-      expect("scannedCandidateFiles" in startupAbort).toBe(false)
+      expect("diffMode" in startupAbort).toBe(true)
+      expect("scannedCandidateFiles" in startupAbort).toBe(true)
 
       // Active HARNESS_ACTIVE_BACKUP_PATH is NOT clobbered when running with matching path or sourceCodeOverlays
       const liveBackupContent = JSON.stringify({ sentinel: true })
@@ -1721,7 +1878,7 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
       try {
         expect(
           runDomainMutationSuite(emptyDir, testHostIo, { enforcementMode: "strict" }).passed,
-        ).toBe(true)
+        ).toBe(false)
       } finally {
         rmSync(emptyDir, { recursive: true, force: true })
       }
@@ -1729,11 +1886,11 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
       const branchFallbackIo: SyncHostIo = {
         ...testHostIo,
         execFileSync: (_cmd, args) => {
-          if (args[0] === "rev-parse")
+          if (args.includes("rev-parse"))
             return { _tag: "Exited", exitCode: 0, stdout: "true\n", stderr: "" }
-          if (args[0] === "merge-base")
+          if (args.includes("merge-base"))
             return { _tag: "Exited", exitCode: 0, stdout: "abc123\n", stderr: "" }
-          if (args[0] === "diff" && args[2] === "abc123...HEAD") {
+          if (args.includes("diff") && args.includes("abc123")) {
             return {
               _tag: "Exited",
               exitCode: 0,
@@ -1762,9 +1919,11 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
       const unclassIo: SyncHostIo = {
         ...testHostIo,
         execFileSync: (_cmd, args) => {
-          if (args[0] === "rev-parse")
+          if (args.includes("rev-parse"))
             return { _tag: "Exited", exitCode: 0, stdout: "true\n", stderr: "" }
-          if (args[0] === "ls-files")
+          if (args.includes("merge-base"))
+            return { _tag: "Exited", exitCode: 0, stdout: "abc123\n", stderr: "" }
+          if (args.includes("ls-files"))
             return {
               _tag: "Exited",
               exitCode: 0,
@@ -1780,7 +1939,7 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
       expect(
         runDomainMutationSuite(dir, unclassIo, { enforcementMode: "strict", scope: "@demo/core" })
           .passed,
-      ).toBe(true)
+      ).toBe(false)
       expect(
         runDomainMutationSuite(dir, unclassIo, {
           enforcementMode: "strict",
@@ -1832,6 +1991,626 @@ describe("Wave 2B #63 saturation: mutation-backup, discovery, subprocess-helpers
       if (prevBackupEnv === undefined)
         Reflect.deleteProperty(process.env, "HARNESS_ACTIVE_BACKUP_PATH")
       else process.env["HARNESS_ACTIVE_BACKUP_PATH"] = prevBackupEnv
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("checkMutateStamp exact reason strings across all failure modes and parseDstSeedEnv", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mut-stamp-reasons-"))
+    try {
+      const srcFile = join(dir, "libs", "demo", "domain", "src", "x.ts")
+      mkdirSync(join(dir, "libs", "demo", "domain", "src"), { recursive: true })
+      writeFileSync(srcFile, "export const x = 1\n", "utf8")
+      const stampPath = join(dir, ".harness", "mutate-stamp.json")
+
+      // missing
+      expect(checkMutateStamp(dir, testHostIo)).toEqual({
+        _tag: "Invalid",
+        reason:
+          "Missing .harness/mutate-stamp.json. Run pnpm harness mutate --strict after your latest edits before verify.",
+      })
+
+      // missing
+      mkdirSync(join(dir, ".harness"), { recursive: true })
+      const statFailIo: SyncHostIo = {
+        ...testHostIo,
+        existsSync: (p) => {
+          if (p === stampPath) throw new Error("stat EACCES")
+          return testHostIo.existsSync(p)
+        },
+      }
+      expect(checkMutateStamp(dir, statFailIo)).toEqual({
+        _tag: "Invalid",
+        reason: `Failed to stat '${stampPath}': stat EACCES`,
+      })
+      writeFileSync(stampPath, "{}", "utf8")
+      const readFailIo: SyncHostIo = {
+        ...testHostIo,
+        readTextSync: (p) => {
+          if (p === stampPath) throw new Error("read EIO")
+          return testHostIo.readTextSync(p)
+        },
+      }
+      expect(checkMutateStamp(dir, readFailIo)).toEqual({
+        _tag: "Invalid",
+        reason: `Failed to read '${stampPath}': read EIO`,
+      })
+
+      // corrupt JSON
+      writeFileSync(stampPath, "{not-json", "utf8")
+      expect(checkMutateStamp(dir, testHostIo)).toEqual({
+        _tag: "Invalid",
+        reason:
+          "Invalid .harness/mutate-stamp.json. Run pnpm harness mutate --strict after your latest edits before verify.",
+      })
+
+      // advisory
+      writeMutateStamp(dir, testHostIo, {
+        enforcementMode: "advisory",
+        diffMode: "working-tree",
+        scannedCandidateFiles: MutantCount.make(1),
+        scannedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        diffMatchedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        evaluatedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        totalMutants: MutantCount.make(1),
+        killedCount: MutantCount.make(1),
+        survivedCount: MutantCount.make(0),
+        equivalentCount: MutantCount.make(0),
+        passed: MutateStampPassed.make(true),
+      })
+      expect(checkMutateStamp(dir, testHostIo)).toEqual({
+        _tag: "Invalid",
+        reason:
+          "Advisory .harness/mutate-stamp.json is insufficient for verify. Run pnpm harness mutate --strict after your latest edits before verify.",
+      })
+
+      // totalMutants: 0
+      writeMutateStamp(dir, testHostIo, {
+        enforcementMode: "strict",
+        diffMode: "working-tree",
+        scannedCandidateFiles: MutantCount.make(1),
+        scannedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        diffMatchedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        evaluatedFiles: [],
+        totalMutants: MutantCount.make(0),
+        killedCount: MutantCount.make(0),
+        survivedCount: MutantCount.make(0),
+        equivalentCount: MutantCount.make(0),
+        passed: MutateStampPassed.make(true),
+      })
+      expect(checkMutateStamp(dir, testHostIo)._tag).toBe("Invalid")
+
+      // survivedCount > 0
+      writeMutateStamp(dir, testHostIo, {
+        enforcementMode: "strict",
+        diffMode: "working-tree",
+        scannedCandidateFiles: MutantCount.make(1),
+        scannedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        diffMatchedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        evaluatedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        totalMutants: MutantCount.make(2),
+        killedCount: MutantCount.make(2),
+        survivedCount: MutantCount.make(1),
+        equivalentCount: MutantCount.make(0),
+        passed: MutateStampPassed.make(true),
+      })
+      expect(checkMutateStamp(dir, testHostIo)._tag).toBe("Invalid")
+
+      // killedCount !== totalMutants
+      writeMutateStamp(dir, testHostIo, {
+        enforcementMode: "strict",
+        diffMode: "working-tree",
+        scannedCandidateFiles: MutantCount.make(1),
+        scannedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        diffMatchedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        evaluatedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        totalMutants: MutantCount.make(2),
+        killedCount: MutantCount.make(1),
+        survivedCount: MutantCount.make(0),
+        equivalentCount: MutantCount.make(0),
+        passed: MutateStampPassed.make(true),
+      })
+      expect(checkMutateStamp(dir, testHostIo)._tag).toBe("Invalid")
+
+      // missing requiredDiffFiles coverage
+      writeMutateStamp(dir, testHostIo, {
+        enforcementMode: "strict",
+        diffMode: "working-tree",
+        scannedCandidateFiles: MutantCount.make(1),
+        scannedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        diffMatchedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        evaluatedFiles: [StampRelFilePath.make("libs/demo/domain/src/x.ts")],
+        totalMutants: MutantCount.make(1),
+        killedCount: MutantCount.make(1),
+        survivedCount: MutantCount.make(0),
+        equivalentCount: MutantCount.make(0),
+        passed: MutateStampPassed.make(true),
+      })
+      expect(checkMutateStamp(dir, testHostIo, ["libs/demo/domain/src/other.ts"])).toEqual({
+        _tag: "Invalid",
+        reason:
+          "Mutate stamp does not cover required diff file(s): libs/demo/domain/src/other.ts. Run pnpm harness mutate --strict.",
+      })
+
+      // symlink refusal
+      const symlinkIo: SyncHostIo = {
+        ...testHostIo,
+        isSymbolicLinkSync: (p) => (p === srcFile ? true : testHostIo.isSymbolicLinkSync(p)),
+      }
+      expect(checkMutateStamp(dir, symlinkIo)).toEqual({
+        _tag: "Invalid",
+        reason:
+          "Failed to compute workspace tree hash (Refusing to hash symbolic link 'libs/demo/domain/src/x.ts'). Run pnpm harness mutate --strict after your latest edits before verify.",
+      })
+
+      // unreadable file refusal
+      const unreadIo: SyncHostIo = {
+        ...testHostIo,
+        readBytesSync: (p) => {
+          if (p === srcFile) throw new Error("EACCES")
+          return testHostIo.readBytesSync(p)
+        },
+      }
+      expect(checkMutateStamp(dir, unreadIo)).toEqual({
+        _tag: "Invalid",
+        reason:
+          "Failed to compute workspace tree hash (Failed to read workspace file 'libs/demo/domain/src/x.ts' while computing tree hash: EACCES). Run pnpm harness mutate --strict after your latest edits before verify.",
+      })
+
+      // treeHash mismatch
+      writeFileSync(srcFile, "export const x = 2\n", "utf8")
+      expect(checkMutateStamp(dir, testHostIo)).toEqual({
+        _tag: "Invalid",
+        reason:
+          "Workspace files changed since last mutate --strict. Run pnpm harness mutate --strict after your latest edits before verify.",
+      })
+
+      // Invalid DST_SEED
+      expect(() => parseDstSeedEnv("not-an-int")).toThrow('Invalid DST_SEED value "not-an-int"')
+      expect(() => parseDstSeedEnv("-5")).toThrow('Invalid DST_SEED value "-5"')
+      expect(parseDstSeedEnv("42")).toBe(42)
+      expect(parseDstSeedEnv(undefined)).toBeUndefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("discovery corrupt-manifest & guarded I/O errors + backup unreadable untracked & diffFromMergeBase", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mut-disc-backup-"))
+    try {
+      const pkgDir = writePkg(dir, "demo", "bad", {
+        type: "package.json",
+        name: "@demo/bad",
+        tags: [],
+      })
+      writeFileSync(join(pkgDir, "package.json"), "{corrupt-json", "utf8")
+
+      const corruptManifest = resolveLibPackageClassificationChecked(pkgDir, "bad", testHostIo)
+      expect(corruptManifest._tag).toBe("CorruptManifest")
+
+      const readdirFailIo: SyncHostIo = {
+        ...testHostIo,
+        readdirSync: () => {
+          throw new Error("readdir EIO")
+        },
+      }
+      const domErr = findDomainFilesChecked(dir, readdirFailIo)
+      expect(domErr._tag).toBe("Error")
+
+      writeFileSync(join(pkgDir, "src", "a.ts"), "export const a = 1\n", "utf8")
+      const unclassErr = findUnclassifiedModifiedLibFilesChecked(
+        dir,
+        new Map([["libs/demo/bad/src/a.ts", new Set([1])]]),
+        [],
+        testHostIo,
+      )
+      expect(unclassErr._tag).toBe("Error")
+
+      // Unreadable untracked file fail-closed in mutation-backup.ts
+      const untrackedFile = join(dir, "libs", "demo", "bad", "src", "untracked.ts")
+      writeFileSync(untrackedFile, "export const u = 1\n", "utf8")
+      const mockGitIo: SyncHostIo = {
+        ...testHostIo,
+        execFileSync: (_cmd, args) => {
+          if (args.includes("rev-parse"))
+            return { _tag: "Exited", exitCode: 0, stdout: "true\n", stderr: "" }
+          if (args.includes("merge-base"))
+            return { _tag: "Exited", exitCode: 0, stdout: "abc123\n", stderr: "" }
+          if (args.includes("ls-files")) {
+            return {
+              _tag: "Exited",
+              exitCode: 0,
+              stdout: "libs/demo/bad/src/untracked.ts\n",
+              stderr: "",
+            }
+          }
+          return { _tag: "Exited", exitCode: 0, stdout: "", stderr: "" }
+        },
+        readTextSync: (p) => {
+          if (p === untrackedFile) throw new Error("untracked EACCES")
+          return testHostIo.readTextSync(p)
+        },
+      }
+      const unreadableRes = extractGitDiffModifiedLinesChecked(dir, mockGitIo)
+      expect(unreadableRes._tag).toBe("Failed")
+
+      // diffFromMergeBase includes uncommitted working-tree changes + untracked .ts/.tsx under libs/
+      const mbIo: SyncHostIo = {
+        ...testHostIo,
+        execFileSync: (_cmd, args) => {
+          if (args.includes("rev-parse"))
+            return { _tag: "Exited", exitCode: 0, stdout: "true\n", stderr: "" }
+          if (args.includes("merge-base"))
+            return { _tag: "Exited", exitCode: 0, stdout: "abc123\n", stderr: "" }
+          if (args.includes("diff") && args.includes("abc123")) {
+            return {
+              _tag: "Exited",
+              exitCode: 0,
+              stdout: [
+                "diff --git a/libs/demo/bad/src/committed.ts b/libs/demo/bad/src/committed.ts",
+                "+++ b/libs/demo/bad/src/committed.ts",
+                "@@ -1,0 +1,1 @@",
+                "+export const c = 1",
+              ].join("\n"),
+              stderr: "",
+            }
+          }
+          if (args.includes("ls-files")) {
+            return {
+              _tag: "Exited",
+              exitCode: 0,
+              stdout: "libs/demo/bad/src/untracked.ts\n",
+              stderr: "",
+            }
+          }
+          return { _tag: "Exited", exitCode: 0, stdout: "", stderr: "" }
+        },
+      }
+      const mbRes = extractGitDiffModifiedLinesChecked(dir, mbIo, {
+        explicitBaseRef: true,
+        fallbackBaseRef: "main",
+      })
+      match(mbRes)
+        .with({ _tag: "Ok" }, ({ lines, diffMode }) => {
+          expect(diffMode).toBe("branch-base")
+          expect(lines.has("libs/demo/bad/src/committed.ts")).toBe(true)
+          expect(lines.has("libs/demo/bad/src/untracked.ts")).toBe(true)
+        })
+        .with({ _tag: "Failed" }, { _tag: "NotGit" }, () => {
+          expect.unreachable("Expected ok from diffFromMergeBase")
+        })
+        .exhaustive()
+
+      // merge-base-failed returns { kind: "failed" }
+      const mbFailIo: SyncHostIo = {
+        ...testHostIo,
+        execFileSync: (_cmd, args) => {
+          if (args.includes("rev-parse"))
+            return { _tag: "Exited", exitCode: 0, stdout: "true\n", stderr: "" }
+          if (args.includes("merge-base"))
+            return { _tag: "Exited", exitCode: 1, stdout: "", stderr: "no merge base" }
+          return { _tag: "Exited", exitCode: 0, stdout: "", stderr: "" }
+        },
+      }
+      const mbFailRes = extractGitDiffModifiedLinesChecked(dir, mbFailIo, {
+        explicitBaseRef: true,
+        fallbackBaseRef: "main",
+      })
+      expect(mbFailRes._tag).toBe("Failed")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("P0/P1/P2 saturation: branch-base+working-tree union, core.quotePath=false, --base -foo, SIGINT/partial-write restore, treeHash traversal & symlink refusal, checkMutateStamp modes, HARNESS_STATE_DIR=., conflicting tags, and $foo export match", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mut-p0p1p2-"))
+    const prevStateDir = process.env["HARNESS_STATE_DIR"]
+    try {
+      // 1. HARNESS_STATE_DIR=. rejection
+      process.env["HARNESS_STATE_DIR"] = "."
+      expect(() => resolveHarnessStateDir(dir)).toThrow()
+      Reflect.deleteProperty(process.env, "HARNESS_STATE_DIR")
+
+      // 2. Conflicting type:contract + type:infra -> CorruptManifest
+      const conflictPkg = writePkg(dir, "demo", "conflict", {
+        type: "package.json",
+        name: "@demo/conflict",
+        tags: ["type:contract", "type:infra"],
+      })
+      expect(resolveLibPackageClassificationChecked(conflictPkg, "conflict", testHostIo)._tag).toBe(
+        "CorruptManifest",
+      )
+
+      // 3. $foo export regex match in partitionReachingTestFiles
+      const dollarDomainFile = {
+        scope: "demo",
+        pkgDir: "core",
+        pkgName: "@demo/core",
+        tier: "core" as const,
+        fullPath: join(dir, "libs", "demo", "core", "src", "dollar.ts"),
+        relFile: "libs/demo/core/src/dollar.ts",
+      }
+      mkdirSync(join(dir, "libs", "demo", "core", "src"), { recursive: true })
+      mkdirSync(join(dir, "libs", "demo", "core", "test"), { recursive: true })
+      const dollarSrc = "export const foo$bar = 1\n"
+      writeFileSync(dollarDomainFile.fullPath, dollarSrc, "utf8")
+      const t1 = join(dir, "libs", "demo", "core", "test", "a.test.ts")
+      const t2 = join(dir, "libs", "demo", "core", "test", "b.test.ts")
+      const t3 = join(dir, "libs", "demo", "core", "test", "c.test.ts")
+      const t4 = join(dir, "libs", "demo", "core", "test", "d.test.ts")
+      writeFileSync(t1, "const x = foo$bar\n", "utf8")
+      writeFileSync(t2, "const y = 1\n", "utf8")
+      writeFileSync(t3, "const z = 1\n", "utf8")
+      writeFileSync(t4, "const w = 1\n", "utf8")
+      const part = partitionReachingTestFiles(dir, dollarDomainFile, dollarSrc, testHostIo)
+      expect(part.primaryTests).toEqual([t1])
+
+      // 4. core.quotePath=false & --base -foo rejection & branch-base + working-tree union
+      const seenGitArgs: Array<ReadonlyArray<string>> = []
+      const unionIo: SyncHostIo = {
+        ...testHostIo,
+        execFileSync: (_cmd, args) => {
+          seenGitArgs.push(args)
+          if (args.includes("rev-parse") && args.includes("--is-inside-work-tree")) {
+            return { _tag: "Exited", exitCode: 0, stdout: "true\n", stderr: "" }
+          }
+          if (args.includes("rev-parse") && args.includes("--verify")) {
+            return { _tag: "Exited", exitCode: 0, stdout: "deadbeef\n", stderr: "" }
+          }
+          if (args.includes("merge-base")) {
+            return { _tag: "Exited", exitCode: 0, stdout: "abc123\n", stderr: "" }
+          }
+          if (args.includes("diff") && args.includes("abc123")) {
+            return {
+              _tag: "Exited",
+              exitCode: 0,
+              stdout:
+                "diff --git a/libs/demo/core/src/dollar.ts b/libs/demo/core/src/dollar.ts\n+++ b/libs/demo/core/src/dollar.ts\n@@ -1,0 +1,1 @@\n+export const $foo = 1\n",
+              stderr: "",
+            }
+          }
+          if (args.includes("diff") && !args.includes("HEAD") && !args.includes("abc123")) {
+            return {
+              _tag: "Exited",
+              exitCode: 0,
+              stdout:
+                "diff --git a/libs/demo/core/test/a.test.ts b/libs/demo/core/test/a.test.ts\n+++ b/libs/demo/core/test/a.test.ts\n@@ -1,0 +1,1 @@\n+// test edit\n",
+              stderr: "",
+            }
+          }
+          return { _tag: "Exited", exitCode: 0, stdout: "", stderr: "" }
+        },
+      }
+      const unionRes = extractGitDiffModifiedLinesChecked(dir, unionIo, { fallbackBaseRef: "main" })
+      match(unionRes)
+        .with({ _tag: "Ok" }, ({ lines }) => {
+          expect(lines.has("libs/demo/core/src/dollar.ts")).toBe(true)
+          expect(lines.has("libs/demo/core/test/a.test.ts")).toBe(true)
+        })
+        .with({ _tag: "Failed" }, { _tag: "NotGit" }, () => {
+          expect.unreachable("Expected Ok from branch-base + working-tree union")
+        })
+        .exhaustive()
+      expect(seenGitArgs.some((a) => a.includes("core.quotePath=false"))).toBe(true)
+
+      const badBaseRes = extractGitDiffModifiedLinesChecked(dir, unionIo, {
+        explicitBaseRef: true,
+        fallbackBaseRef: "-foo",
+      })
+      expect(badBaseRes._tag).toBe("Failed")
+
+      // 5. libs/*/src/temp-evil.ts & libs/*/src/dist/evil.ts NOT skipped by computeWorkspaceTreeHashChecked
+      const tempEvil = join(dir, "libs", "demo", "core", "src", "temp-evil.ts")
+      const distEvilDir = join(dir, "libs", "demo", "core", "src", "dist")
+      mkdirSync(distEvilDir, { recursive: true })
+      writeFileSync(tempEvil, "export const e1 = 1\n", "utf8")
+      writeFileSync(join(distEvilDir, "evil.ts"), "export const e2 = 1\n", "utf8")
+      const hashBefore = computeWorkspaceTreeHashChecked(dir, testHostIo)
+      writeFileSync(tempEvil, "export const e1 = 2\n", "utf8")
+      const hashAfterTemp = computeWorkspaceTreeHashChecked(dir, testHostIo)
+      expect(hashAfterTemp).not.toEqual(hashBefore)
+      writeFileSync(join(distEvilDir, "evil.ts"), "export const e2 = 2\n", "utf8")
+      const hashAfterDist = computeWorkspaceTreeHashChecked(dir, testHostIo)
+      expect(hashAfterDist).not.toEqual(hashAfterTemp)
+
+      // 6. Nested dir symlink refusal
+      const symDirIo: SyncHostIo = {
+        ...testHostIo,
+        isSymbolicLinkSync: (p) => (p === distEvilDir ? true : testHostIo.isSymbolicLinkSync(p)),
+      }
+      const symRes = computeWorkspaceTreeHashChecked(dir, symDirIo)
+      match(symRes)
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          expect(failure).toContain("symbolic link")
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("Expected Failure for symlink dir")
+        })
+        .exhaustive()
+
+      // 7. checkMutateStamp passed: false / equivalentCount / all-lines / explicit-files / branch-base / not-git / positive requiredDiffFiles
+      writeMutateStamp(dir, testHostIo, {
+        enforcementMode: "strict",
+        diffMode: "all-lines",
+        scannedCandidateFiles: MutantCount.make(1),
+        scannedFiles: [StampRelFilePath.make("libs/demo/core/src/dollar.ts")],
+        diffMatchedFiles: [],
+        evaluatedFiles: [],
+        totalMutants: MutantCount.make(1),
+        killedCount: MutantCount.make(0),
+        survivedCount: MutantCount.make(0),
+        equivalentCount: MutantCount.make(1),
+        passed: MutateStampPassed.make(true),
+      })
+      expect(checkMutateStamp(dir, testHostIo, ["libs/demo/core/src/dollar.ts"])._tag).toBe("Valid")
+
+      writeMutateStamp(dir, testHostIo, {
+        enforcementMode: "strict",
+        diffMode: "explicit-files",
+        scannedCandidateFiles: MutantCount.make(1),
+        scannedFiles: [],
+        diffMatchedFiles: [],
+        evaluatedFiles: [StampRelFilePath.make("libs/demo/core/src/dollar.ts")],
+        totalMutants: MutantCount.make(1),
+        killedCount: MutantCount.make(1),
+        survivedCount: MutantCount.make(0),
+        equivalentCount: MutantCount.make(0),
+        passed: MutateStampPassed.make(false),
+      })
+      expect(checkMutateStamp(dir, testHostIo)._tag).toBe("Invalid")
+
+      writeMutateStamp(dir, testHostIo, {
+        enforcementMode: "strict",
+        diffMode: "not-git",
+        scannedCandidateFiles: MutantCount.make(1),
+        scannedFiles: [StampRelFilePath.make("libs/demo/core/src/dollar.ts")],
+        diffMatchedFiles: [],
+        evaluatedFiles: [],
+        totalMutants: MutantCount.make(1),
+        killedCount: MutantCount.make(1),
+        survivedCount: MutantCount.make(0),
+        equivalentCount: MutantCount.make(0),
+        passed: MutateStampPassed.make(true),
+      })
+      expect(checkMutateStamp(dir, testHostIo, ["libs/demo/core/src/dollar.ts"])._tag).toBe(
+        "Invalid",
+      )
+
+      writeMutateStamp(dir, testHostIo, {
+        enforcementMode: "strict",
+        diffMode: "branch-base",
+        scannedCandidateFiles: MutantCount.make(1),
+        scannedFiles: [StampRelFilePath.make("libs/demo/core/src/dollar.ts")],
+        diffMatchedFiles: [StampRelFilePath.make("libs/demo/core/src/dollar.ts")],
+        evaluatedFiles: [StampRelFilePath.make("libs/demo/core/src/dollar.ts")],
+        totalMutants: MutantCount.make(1),
+        killedCount: MutantCount.make(1),
+        survivedCount: MutantCount.make(0),
+        equivalentCount: MutantCount.make(0),
+        passed: MutateStampPassed.make(true),
+      })
+      expect(checkMutateStamp(dir, testHostIo, ["libs/demo/core/src/dollar.ts"])._tag).toBe("Valid")
+
+      // 8. evaluateMutationOutcomes with defined equivalencePriors & 0 equivalent mutants
+      const eqReport = evaluateMutationOutcomes(
+        [
+          {
+            mutant: {
+              id: MutantId.make("m-eq-0"),
+              file: AstSourceFilePath.make("libs/demo/core/src/dollar.ts"),
+              line: SourceLineNumber.make(1),
+              category: "equality-operator",
+              original: MutantSourceText.make("==="),
+              replacement: MutantSourceText.make("!=="),
+              mutatedSource: MutantSourceText.make("a !== b"),
+            },
+            status: "killed",
+          },
+        ],
+        undefined,
+        {},
+      )
+      expect("equivalentMutants" in eqReport).toBe(true)
+      expect(eqReport.equivalentMutants).toEqual([])
+
+      // 9. readPackageManifest merges package.json pkgName over project.json
+      const mergedPkgDir = join(dir, "libs", "demo", "merged")
+      mkdirSync(mergedPkgDir, { recursive: true })
+      writeFileSync(join(mergedPkgDir, "package.json"), JSON.stringify({ name: "@demo/from-pkg" }))
+      writeFileSync(
+        join(mergedPkgDir, "project.json"),
+        JSON.stringify({ name: "@demo/from-proj", tags: ["type:domain"] }),
+      )
+      const mergedManifest = readPackageManifest(mergedPkgDir, testHostIo)
+      match(mergedManifest)
+        .with({ _tag: "Ok" }, ({ manifest }) => {
+          expect(manifest.pkgName).toBe("@demo/from-pkg")
+        })
+        .with({ _tag: "Missing" }, { _tag: "CorruptManifest" }, () => {
+          expect.unreachable("Expected Ok from merged readPackageManifest")
+        })
+        .exhaustive()
+
+      // 10. findUnclassifiedModifiedLibFilesChecked ignores apps/ and libs/*/test/
+      mkdirSync(join(dir, "apps", "demo", "src"), { recursive: true })
+      writeFileSync(join(dir, "apps", "demo", "src", "a.ts"), "export const a = 1\n")
+      mkdirSync(join(dir, "libs", "demo", "mystery", "test"), { recursive: true })
+      writeFileSync(
+        join(dir, "libs", "demo", "mystery", "test", "a.test.ts"),
+        "export const t = 1\n",
+      )
+      const unclassIgnored = findUnclassifiedModifiedLibFilesChecked(
+        dir,
+        new Map([
+          ["apps/demo/src/a.ts", new Set([1])],
+          ["libs/demo/mystery/test/a.test.ts", new Set([1])],
+        ]),
+        [],
+        testHostIo,
+      )
+      expect(unclassIgnored).toEqual({ _tag: "Ok", files: [] })
+
+      // 11. writeVerifyStamp taskBranch trimming & removeMutateStamp edge cases
+      expect(writeVerifyStamp(dir, testHostIo, "impl/custom").taskBranch).toBe("impl/custom")
+      expect(writeVerifyStamp(dir, testHostIo, "   ").taskBranch).toBe("unknown")
+
+      const stampFile = join(dir, ".harness", "mutate-stamp.json")
+      expect(Result.isSuccess(removeMutateStamp(dir, testHostIo))).toBe(true)
+      expect(testHostIo.existsSync(stampFile)).toBe(false)
+
+      writeMutateStamp(dir, testHostIo, {
+        enforcementMode: "strict",
+        diffMode: "working-tree",
+        scannedCandidateFiles: MutantCount.make(1),
+        scannedFiles: [StampRelFilePath.make("libs/demo/core/src/dollar.ts")],
+        diffMatchedFiles: [StampRelFilePath.make("libs/demo/core/src/dollar.ts")],
+        evaluatedFiles: [StampRelFilePath.make("libs/demo/core/src/dollar.ts")],
+        totalMutants: MutantCount.make(1),
+        killedCount: MutantCount.make(1),
+        survivedCount: MutantCount.make(0),
+        equivalentCount: MutantCount.make(0),
+        passed: MutateStampPassed.make(true),
+      })
+      const enoentIo: SyncHostIo = {
+        ...testHostIo,
+        unlinkSync: () => {
+          throw { code: "ENOENT" }
+        },
+      }
+      expect(Result.isSuccess(removeMutateStamp(dir, enoentIo))).toBe(true)
+
+      for (const thrownVal of [null, "boom", new Error("EPERM: denied")] as const) {
+        const failUnlinkIo: SyncHostIo = {
+          ...testHostIo,
+          unlinkSync: () => {
+            throw thrownVal
+          },
+        }
+        expect(Result.isFailure(removeMutateStamp(dir, failUnlinkIo))).toBe(true)
+      }
+
+      const outsideRealpathIo: SyncHostIo = {
+        ...testHostIo,
+        realpathSync: (p) =>
+          p === stampFile ? "/outside/mutate-stamp.json" : testHostIo.realpathSync(p),
+      }
+      expect(Result.isFailure(removeMutateStamp(dir, outsideRealpathIo))).toBe(true)
+
+      // 12. computeWorkspaceTreeHashChecked ignores package-root .harness/ while hashing src/.harness/
+      const hashBase = computeWorkspaceTreeHashChecked(dir, testHostIo)
+      mkdirSync(join(dir, "apps", "demo", ".harness"), { recursive: true })
+      writeFileSync(join(dir, "apps", "demo", ".harness", "telemetry-log.jsonl"), '{"ev":1}\n')
+      expect(computeWorkspaceTreeHashChecked(dir, testHostIo)).toEqual(hashBase)
+
+      mkdirSync(join(dir, "libs", "demo", "src", ".harness"), { recursive: true })
+      writeFileSync(
+        join(dir, "libs", "demo", "src", ".harness", "backdoor.ts"),
+        "export const x = 1\n",
+      )
+      expect(computeWorkspaceTreeHashChecked(dir, testHostIo)).not.toEqual(hashBase)
+    } finally {
+      if (prevStateDir === undefined) Reflect.deleteProperty(process.env, "HARNESS_STATE_DIR")
+      else process.env["HARNESS_STATE_DIR"] = prevStateDir
       rmSync(dir, { recursive: true, force: true })
     }
   })

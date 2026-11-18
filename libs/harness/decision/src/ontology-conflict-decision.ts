@@ -28,6 +28,10 @@ export const ONTOLOGY_CONFLICT_KINDS = [
   "adr-constraint-violation",
   "duplicate-overlap",
 ] as const
+
+const decodeOntologyConflictKind = Schema.decodeUnknownOption(
+  Schema.Literals(ONTOLOGY_CONFLICT_KINDS),
+)
 export type OntologyConflictKind = (typeof ONTOLOGY_CONFLICT_KINDS)[number]
 
 export const OntologyConflictV1 = Decision.make({
@@ -76,10 +80,7 @@ export interface OntologyConflictResult {
   readonly timedOutOrUnavailable?: boolean
 }
 
-const runCheckOntologyPairConflict = (
-  input: OntologyConflictInput,
-  timeout: Duration.Input,
-) =>
+const runCheckOntologyPairConflict = (input: OntologyConflictInput, timeout: Duration.Input) =>
   Effect.gen(function* () {
     const outcome = yield* DecisionModel.decide(OntologyConflictV1, { input }).pipe(
       Effect.timeoutOption(timeout),
@@ -113,15 +114,17 @@ const runCheckOntologyPairConflict = (
             "decision.conflictKind": answers.conflictKind.label,
           })
 
+          const parsedConflictKind = match(decodeOntologyConflictKind(answers.conflictKind.label))
+            .with({ _tag: "Some" }, ({ value: kind }) => kind)
+            .with({ _tag: "None" }, () => "none" as const)
+            .exhaustive()
           const hasConflict =
-            answers.contradicts.probability >= 0.7 && answers.conflictKind.label !== "none"
+            answers.contradicts.probability >= 0.7 && parsedConflictKind !== "none"
 
           return {
             hasConflict,
             probability: answers.contradicts.probability,
-            conflictKind: hasConflict
-              ? (answers.conflictKind.label as OntologyConflictKind)
-              : ("none" as const),
+            conflictKind: hasConflict ? parsedConflictKind : ("none" as const),
             reason: hasConflict
               ? `Semantic conflict (${answers.conflictKind.label}, p=${answers.contradicts.probability}) between ${input.sourceId} and ${input.targetId} on ${input.sharedSymbol}.`
               : `No semantic conflict detected between ${input.sourceId} and ${input.targetId}.`,

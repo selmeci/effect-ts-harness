@@ -2,11 +2,15 @@ import { describe, expect, it } from "@effect/vitest"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
-import { Effect, Schema } from "effect"
+import { Effect, Graph, Schema } from "effect"
+import { match } from "ts-pattern"
 import {
   buildHarnessGraph,
+  DatalogRuleId,
   deriveRepoOmnigraphPort,
   loadGraphSnapshotEffect,
+  NodeKey,
+  ProofId,
   RelationId,
   resolveCanonicalRepoRoot,
   resolveOmnigraphClusterDir,
@@ -21,12 +25,23 @@ import {
   PackageDependencyName,
   PackageManifestName,
   PackageManifestPath,
+  SourceLineNumber,
 } from "@harness/contract"
 import { analyzeSqliteMigratorFromRecordAst } from "../src/plugins/sqlite-migrator-ast.js"
 import { visitSourceFileSinglePass } from "../src/plugins/ast-gate-visitors.js"
 import { decideSelfDogfooding } from "../src/plugins/self-dogfooding-plugin.js"
 import { decideHarnessTierTopology } from "../src/plugins/harness-tier-topology.js"
-import { loadGovernanceDocsChecked } from "../src/plugins/gc/gc-helpers.js"
+import {
+  augmentReachabilityWithInference,
+  buildGraphReachabilityContext,
+  extractTopLevelObjectAnalysis,
+  loadGovernanceDocsChecked,
+} from "../src/plugins/gc/gc-helpers.js"
+import {
+  evaluateGateRuleDigestCheck,
+  extractGateRuleIdsFromSources,
+  GATE_RULE_SOURCE_FILES,
+} from "../src/plugins/gc/gc-rule-digest.js"
 import {
   buildSessionHandoff,
   checkLoopThrashing,
@@ -49,11 +64,15 @@ import {
   findClosestMatch,
   levenshteinDistance,
   loadGovernanceDocsFromDisk,
+  MutantId,
+  MutantSourceText,
   parseGovernanceDocFrontmatter,
+  parseGovernanceDocFrontmatterChecked,
   resolveHarnessStateDir,
   type CodeMutant,
   type FrictionCluster,
   type FrictionEvent,
+  type GcFinding,
   type GovernanceDocReference,
   type SpanSample,
 } from "../src/index.js"
@@ -264,77 +283,80 @@ describe("Harness Gates: GC check, Session Handoff, Span Budget, and State Dir",
       expect(findClosestMatch("CompletelyDifferent", candidates)).toBeUndefined()
     })
 
-    it.effect("passes clean: true via decideGraphEntropy when all elements are correctly wired", () =>
-      Effect.gen(function* () {
-      const graph = buildHarnessGraph({
-        fns: [
-          {
-            qualname: "libs/sample/domain/src/index.ts#greet",
-            spanName: "Sample.greet",
-            packageTag: "domain",
-            file: "libs/sample/domain/src/index.ts",
-            line: 5,
-            successType: "string",
-            isStub: false,
-          },
-        ],
-        services: [
-          {
-            tagId: "GreeterService",
-            name: "GreeterService",
-            packageTag: "service",
-            file: "libs/sample/service/src/index.ts",
-          },
-        ],
-        layers: [
-          {
-            qualname: "libs/sample/infra/src/index.ts#GreeterLive",
-            layerKind: "live",
-            packageTag: "infra",
-            file: "libs/sample/infra/src/index.ts",
-          },
-        ],
-        errors: [
-          {
-            errorTag: "GreeterError",
-            file: "libs/sample/contract/src/index.ts",
-          },
-        ],
-        patternDocs: [
-          {
-            slug: "planning",
-            path: "agent-patterns/planning.md",
-            summary: "Planning pattern",
-          },
-        ],
-        requiresService: [
-          {
-            callerQualname: "libs/sample/domain/src/index.ts#greet",
-            tagId: "GreeterService",
-          },
-        ],
-        providesService: [
-          {
-            layerQualname: "libs/sample/infra/src/index.ts#GreeterLive",
-            tagId: "GreeterService",
-          },
-        ],
-        failsWith: [
-          {
-            callerQualname: "libs/sample/domain/src/index.ts#greet",
-            errorTag: "GreeterError",
-          },
-        ],
-      })
+    it.effect(
+      "passes clean: true via decideGraphEntropy when all elements are correctly wired",
+      () =>
+        Effect.gen(function* () {
+          const graph = buildHarnessGraph({
+            fns: [
+              {
+                qualname: "libs/sample/domain/src/index.ts#greet",
+                spanName: "Sample.greet",
+                packageTag: "domain",
+                file: "libs/sample/domain/src/index.ts",
+                line: 5,
+                successType: "string",
+                isStub: false,
+              },
+            ],
+            services: [
+              {
+                tagId: "GreeterService",
+                name: "GreeterService",
+                packageTag: "service",
+                file: "libs/sample/service/src/index.ts",
+              },
+            ],
+            layers: [
+              {
+                qualname: "libs/sample/infra/src/index.ts#GreeterLive",
+                layerKind: "live",
+                packageTag: "infra",
+                file: "libs/sample/infra/src/index.ts",
+              },
+            ],
+            errors: [
+              {
+                errorTag: "GreeterError",
+                file: "libs/sample/contract/src/index.ts",
+              },
+            ],
+            patternDocs: [
+              {
+                slug: "planning",
+                path: "agent-patterns/planning.md",
+                summary: "Planning pattern",
+              },
+            ],
+            requiresService: [
+              {
+                callerQualname: "libs/sample/domain/src/index.ts#greet",
+                tagId: "GreeterService",
+              },
+            ],
+            providesService: [
+              {
+                layerQualname: "libs/sample/infra/src/index.ts#GreeterLive",
+                tagId: "GreeterService",
+              },
+            ],
+            failsWith: [
+              {
+                callerQualname: "libs/sample/domain/src/index.ts#greet",
+                errorTag: "GreeterError",
+              },
+            ],
+          })
 
-      const report = yield* decideGraphEntropy({
-        graph,
-        expectedPatterns: ["planning", "review", "effect"],
-      })
+          const report = yield* decideGraphEntropy({
+            graph,
+            expectedPatterns: ["planning", "review", "effect"],
+          })
 
-      expect(report.clean).toBe(true)
-      expect(report.findings).toHaveLength(0)
-    }))
+          expect(report.clean).toBe(true)
+          expect(report.findings).toHaveLength(0)
+        }),
+    )
 
     it.effect(
       "flags untested domain EffectFn when checkUntestedDomainFns: true, passes once tested",
@@ -726,9 +748,10 @@ errors:
       expect(parsedAdr?.referencedServices).toEqual(["GreeterService"])
       expect(parsedAdr?.referencedErrors).toEqual(["GreeterError"])
 
-      // Test inline lists and default proposed status
+      // Test inline lists and proposed status
       const earsMarkdown = `---
 id: "SPEC-0001"
+status: proposed
 enforced_by: ["libs/sample/domain/src/index.ts"]
 spans: ["Sample.greet", 'Sample.farewell']
 services: [GreeterService]
@@ -754,89 +777,92 @@ errors: []
       expect(parseGovernanceDocFrontmatter("docs/adr/empty-id.md", "---\nid: ''\n---")).toBeNull()
     })
 
-    it.effect("returns clean: true when accepted ADR/Spec references valid files, spans, services, and errors", () =>
-      Effect.gen(function* () {
-      const graph = buildHarnessGraph({
-        fns: [
-          {
-            qualname: "libs/sample/domain/src/index.ts#greet",
-            spanName: "Sample.greet",
-            packageTag: "domain",
-            file: "libs/sample/domain/src/index.ts",
-            line: 5,
-            successType: "string",
-            isStub: false,
-          },
-        ],
-        services: [
-          {
-            tagId: "GreeterService",
-            name: "GreeterService",
-            packageTag: "service",
-            file: "libs/sample/service/src/index.ts",
-          },
-        ],
-        layers: [
-          {
-            qualname: "libs/sample/infra/src/index.ts#GreeterLive",
-            layerKind: "live",
-            packageTag: "infra",
-            file: "libs/sample/infra/src/index.ts",
-          },
-        ],
-        errors: [
-          {
-            errorTag: "GreeterError",
-            file: "libs/sample/contract/src/index.ts",
-          },
-        ],
-        patternDocs: [
-          {
-            slug: "planning",
-            path: "agent-patterns/planning.md",
-            summary: "Planning pattern",
-          },
-        ],
-        requiresService: [
-          {
-            callerQualname: "libs/sample/domain/src/index.ts#greet",
-            tagId: "GreeterService",
-          },
-        ],
-        providesService: [
-          {
-            layerQualname: "libs/sample/infra/src/index.ts#GreeterLive",
-            tagId: "GreeterService",
-          },
-        ],
-        failsWith: [
-          {
-            callerQualname: "libs/sample/domain/src/index.ts#greet",
-            errorTag: "GreeterError",
-          },
-        ],
-      })
+    it.effect(
+      "returns clean: true when accepted ADR/Spec references valid files, spans, services, and errors",
+      () =>
+        Effect.gen(function* () {
+          const graph = buildHarnessGraph({
+            fns: [
+              {
+                qualname: "libs/sample/domain/src/index.ts#greet",
+                spanName: "Sample.greet",
+                packageTag: "domain",
+                file: "libs/sample/domain/src/index.ts",
+                line: 5,
+                successType: "string",
+                isStub: false,
+              },
+            ],
+            services: [
+              {
+                tagId: "GreeterService",
+                name: "GreeterService",
+                packageTag: "service",
+                file: "libs/sample/service/src/index.ts",
+              },
+            ],
+            layers: [
+              {
+                qualname: "libs/sample/infra/src/index.ts#GreeterLive",
+                layerKind: "live",
+                packageTag: "infra",
+                file: "libs/sample/infra/src/index.ts",
+              },
+            ],
+            errors: [
+              {
+                errorTag: "GreeterError",
+                file: "libs/sample/contract/src/index.ts",
+              },
+            ],
+            patternDocs: [
+              {
+                slug: "planning",
+                path: "agent-patterns/planning.md",
+                summary: "Planning pattern",
+              },
+            ],
+            requiresService: [
+              {
+                callerQualname: "libs/sample/domain/src/index.ts#greet",
+                tagId: "GreeterService",
+              },
+            ],
+            providesService: [
+              {
+                layerQualname: "libs/sample/infra/src/index.ts#GreeterLive",
+                tagId: "GreeterService",
+              },
+            ],
+            failsWith: [
+              {
+                callerQualname: "libs/sample/domain/src/index.ts#greet",
+                errorTag: "GreeterError",
+              },
+            ],
+          })
 
-      const doc: GovernanceDocReference = {
-        docPath: "docs/adr/0001-greeter.md",
-        id: "ADR-0001",
-        status: "accepted",
-        enforcedByFiles: ["libs/sample/domain/src/index.ts"],
-        existingFiles: ["libs/sample/domain/src/index.ts"],
-        referencedSpans: ["Sample.greet"],
-        referencedServices: ["GreeterService"],
-        referencedErrors: ["GreeterError"],
-      }
+          const doc: GovernanceDocReference = {
+            docPath: "docs/adr/0001-greeter.md",
+            id: "ADR-0001",
+            status: "accepted",
+            enforcedByFiles: ["libs/sample/domain/src/index.ts"],
+            existingFiles: ["libs/sample/domain/src/index.ts"],
+            referencedSpans: ["Sample.greet"],
+            referencedServices: ["GreeterService"],
+            referencedErrors: ["GreeterError"],
+          }
 
-      const report = yield* decideGraphEntropy({
-        graph,
-        expectedPatterns: ["planning", "review", "effect"],
-        governanceDocs: [doc],
-      })
+          const report = yield* decideGraphEntropy({
+            graph,
+            expectedPatterns: ["planning", "review", "effect"],
+            governanceDocs: [doc],
+          })
 
-      expect(report.clean).toBe(true)
-      expect(report.findings).toHaveLength(0)
-    }))
+          expect(report.clean).toBe(true)
+          expect(report.findings).toHaveLength(0)
+        }),
+    )
 
     it.effect(
       "flags stale-doc-reference when accepted doc references missing elements while ignoring proposed/superseded",
@@ -1578,9 +1604,9 @@ status: accepted
         )
 
         // With HARNESS_WORKTREE_ID set, still points to canonical repo root cluster
-        expect(resolveOmnigraphClusterDir(mainRepo, testHostIo, { HARNESS_WORKTREE_ID: "wt-feature" })).toBe(
-          join(mainRepo, ".harness", "omnigraph-cluster"),
-        )
+        expect(
+          resolveOmnigraphClusterDir(mainRepo, testHostIo, { HARNESS_WORKTREE_ID: "wt-feature" }),
+        ).toBe(join(mainRepo, ".harness", "omnigraph-cluster"))
 
         // Inside linked git worktree, points to canonical repo root cluster
         expect(resolveOmnigraphClusterDir(wtDir, testHostIo, {})).toBe(
@@ -1588,9 +1614,9 @@ status: accepted
         )
 
         // With explicit HARNESS_STATE_DIR
-        expect(resolveOmnigraphClusterDir(mainRepo, testHostIo, { HARNESS_STATE_DIR: ".custom-state" })).toBe(
-          join(mainRepo, ".custom-state", "omnigraph-cluster"),
-        )
+        expect(
+          resolveOmnigraphClusterDir(mainRepo, testHostIo, { HARNESS_STATE_DIR: ".custom-state" }),
+        ).toBe(join(mainRepo, ".custom-state", "omnigraph-cluster"))
       } finally {
         rmSync(mainRepo, { recursive: true, force: true })
         rmSync(wtDir, { recursive: true, force: true })
@@ -1644,7 +1670,9 @@ status: accepted
 
         // With HARNESS_WORKTREE_ID
         expect(
-          resolveOmnigraphTaskBranches(mainRepo, testHostIo, { HARNESS_WORKTREE_ID: "feature-auth" }),
+          resolveOmnigraphTaskBranches(mainRepo, testHostIo, {
+            HARNESS_WORKTREE_ID: "feature-auth",
+          }),
         ).toEqual({
           planBranch: "plan/wt-feature-auth",
           implBranch: "impl/wt-feature-auth",
@@ -1652,7 +1680,9 @@ status: accepted
         })
 
         expect(
-          resolveOmnigraphTaskBranches(mainRepo, testHostIo, { HARNESS_WORKTREE_ID: "feat/nested#branch" }),
+          resolveOmnigraphTaskBranches(mainRepo, testHostIo, {
+            HARNESS_WORKTREE_ID: "feat/nested#branch",
+          }),
         ).toEqual({
           planBranch: "plan/wt-feat_nested_branch",
           implBranch: "impl/wt-feat_nested_branch",
@@ -1868,22 +1898,22 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState => {
     it.effect("evaluates mutation outcomes and computes correct mutation score", () =>
       Effect.gen(function* () {
         const dummyMutant1: CodeMutant = {
-          id: "test:1:>=->>",
-          file: "test.ts",
-          line: 1,
+          id: MutantId.make("test:1:>=->>"),
+          file: AstSourceFilePath.make("test.ts"),
+          line: SourceLineNumber.make(1),
           category: "boundary-operator",
-          original: ">=",
-          replacement: ">",
-          mutatedSource: "x > 1",
+          original: MutantSourceText.make(">="),
+          replacement: MutantSourceText.make(">"),
+          mutatedSource: MutantSourceText.make("x > 1"),
         }
         const dummyMutant2: CodeMutant = {
-          id: "test:2:+ 1->- 1",
-          file: "test.ts",
-          line: 2,
+          id: MutantId.make("test:2:+ 1->- 1"),
+          file: AstSourceFilePath.make("test.ts"),
+          line: SourceLineNumber.make(2),
           category: "arithmetic-operator",
-          original: "+ 1",
-          replacement: "- 1",
-          mutatedSource: "x - 1",
+          original: MutantSourceText.make("+ 1"),
+          replacement: MutantSourceText.make("- 1"),
+          mutatedSource: MutantSourceText.make("x - 1"),
         }
 
         // All killed -> pass with score 1
@@ -1916,9 +1946,11 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState => {
   })
 
   describe("decideEarsSpecQuality (EarsSpecLint.decide)", () => {
-    it.effect("accepts a valid EARS spec with sequential areas, **Source:**, and valid REQ rows", () =>
-      Effect.gen(function* () {
-      const validMarkdown = `## Requirements
+    it.effect(
+      "accepts a valid EARS spec with sequential areas, **Source:**, and valid REQ rows",
+      () =>
+        Effect.gen(function* () {
+          const validMarkdown = `## Requirements
 
 ### 1 · Photo Gallery Core
 **Source (API contract):** Defined in contract package.
@@ -1929,54 +1961,76 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState => {
 | REQ-1.2 | Event-driven | **When** a user requests a photo by ID, The PhotoService **shall** query the repository. | PhotoService.getPhoto | test |
 | REQ-1.3 | Unwanted behaviour | **If** photo is missing, **then** The PhotoService **shall** fail with NotFoundError. | NotFoundError | test |
 `
-      const report = yield* decideEarsSpecQuality({
-        docPath: "docs/specs/valid.md",
-        markdown: validMarkdown,
-      })
-      expect(report.clean).toBe(true)
-      expect(report.requirementCount).toBe(3)
-      expect(report.findings).toHaveLength(0)
-    }),
+          const report = yield* decideEarsSpecQuality({
+            docPath: "docs/specs/valid.md",
+            markdown: validMarkdown,
+          })
+          expect(report.clean).toBe(true)
+          expect(report.requirementCount).toBe(3)
+          expect(report.findings).toHaveLength(0)
+        }),
     )
 
-    it.effect("rejects generic subject, weak modal, compound obligation, pattern mismatch, numbering gap, and forbidden column", () =>
-      Effect.gen(function* () {
-        // 1. Generic subject
-        const genericSubjMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Ubiquitous | The system **shall** validate input. | test |\n`
-        const genericReport = yield* decideEarsSpecQuality({ docPath: "docs/specs/test.md", markdown: genericSubjMd })
-        expect(genericReport.clean).toBe(false)
-        expect(genericReport.findings.some((f) => f.kind === "generic-subject")).toBe(true)
+    it.effect(
+      "rejects generic subject, weak modal, compound obligation, pattern mismatch, numbering gap, and forbidden column",
+      () =>
+        Effect.gen(function* () {
+          // 1. Generic subject
+          const genericSubjMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Ubiquitous | The system **shall** validate input. | test |\n`
+          const genericReport = yield* decideEarsSpecQuality({
+            docPath: "docs/specs/test.md",
+            markdown: genericSubjMd,
+          })
+          expect(genericReport.clean).toBe(false)
+          expect(genericReport.findings.some((f) => f.kind === "generic-subject")).toBe(true)
 
-        // 2. Weak modal
-        const weakModalMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Ubiquitous | The PhotoService should validate input. | test |\n`
-        const weakReport = yield* decideEarsSpecQuality({ docPath: "docs/specs/test.md", markdown: weakModalMd })
-        expect(weakReport.clean).toBe(false)
-        expect(weakReport.findings.some((f) => f.kind === "weak-modal")).toBe(true)
+          // 2. Weak modal
+          const weakModalMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Ubiquitous | The PhotoService should validate input. | test |\n`
+          const weakReport = yield* decideEarsSpecQuality({
+            docPath: "docs/specs/test.md",
+            markdown: weakModalMd,
+          })
+          expect(weakReport.clean).toBe(false)
+          expect(weakReport.findings.some((f) => f.kind === "weak-modal")).toBe(true)
 
-        // 3. Compound obligation
-        const compoundMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Ubiquitous | The PhotoService **shall** save the record **and shall** notify subscribers. | test |\n`
-        const compoundReport = yield* decideEarsSpecQuality({ docPath: "docs/specs/test.md", markdown: compoundMd })
-        expect(compoundReport.clean).toBe(false)
-        expect(compoundReport.findings.some((f) => f.kind === "compound-obligation")).toBe(true)
+          // 3. Compound obligation
+          const compoundMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Ubiquitous | The PhotoService **shall** save the record **and shall** notify subscribers. | test |\n`
+          const compoundReport = yield* decideEarsSpecQuality({
+            docPath: "docs/specs/test.md",
+            markdown: compoundMd,
+          })
+          expect(compoundReport.clean).toBe(false)
+          expect(compoundReport.findings.some((f) => f.kind === "compound-obligation")).toBe(true)
 
-        // 4. Pattern mismatch
-        const patternMismatchMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Event-driven | The PhotoService **shall** save the record immediately. | test |\n`
-        const mismatchReport = yield* decideEarsSpecQuality({ docPath: "docs/specs/test.md", markdown: patternMismatchMd })
-        expect(mismatchReport.clean).toBe(false)
-        expect(mismatchReport.findings.some((f) => f.kind === "pattern-keyword-mismatch")).toBe(true)
+          // 4. Pattern mismatch
+          const patternMismatchMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Event-driven | The PhotoService **shall** save the record immediately. | test |\n`
+          const mismatchReport = yield* decideEarsSpecQuality({
+            docPath: "docs/specs/test.md",
+            markdown: patternMismatchMd,
+          })
+          expect(mismatchReport.clean).toBe(false)
+          expect(mismatchReport.findings.some((f) => f.kind === "pattern-keyword-mismatch")).toBe(
+            true,
+          )
 
-        // 5. Numbering gap
-        const gapMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Ubiquitous | The PhotoService **shall** step 1. | test |\n| REQ-1.3 | Ubiquitous | The PhotoService **shall** step 3. | test |\n`
-        const gapReport = yield* decideEarsSpecQuality({ docPath: "docs/specs/test.md", markdown: gapMd })
-        expect(gapReport.clean).toBe(false)
-        expect(gapReport.findings.some((f) => f.kind === "numbering-gap")).toBe(true)
+          // 5. Numbering gap
+          const gapMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Pattern | Requirement | Verification |\n|---|---|---|---|\n| REQ-1.1 | Ubiquitous | The PhotoService **shall** step 1. | test |\n| REQ-1.3 | Ubiquitous | The PhotoService **shall** step 3. | test |\n`
+          const gapReport = yield* decideEarsSpecQuality({
+            docPath: "docs/specs/test.md",
+            markdown: gapMd,
+          })
+          expect(gapReport.clean).toBe(false)
+          expect(gapReport.findings.some((f) => f.kind === "numbering-gap")).toBe(true)
 
-        // 6. Forbidden column
-        const forbiddenMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Status | Pattern | Requirement | Verification |\n|---|---|---|---|---|\n| REQ-1.1 | Done | Ubiquitous | The PhotoService **shall** step 1. | test |\n`
-        const forbiddenReport = yield* decideEarsSpecQuality({ docPath: "docs/specs/test.md", markdown: forbiddenMd })
-        expect(forbiddenReport.clean).toBe(false)
-        expect(forbiddenReport.findings.some((f) => f.kind === "forbidden-column")).toBe(true)
-      }),
+          // 6. Forbidden column
+          const forbiddenMd = `## Requirements\n\n### 1 · Area\n**Source:** test\n\n| ID | Status | Pattern | Requirement | Verification |\n|---|---|---|---|---|\n| REQ-1.1 | Done | Ubiquitous | The PhotoService **shall** step 1. | test |\n`
+          const forbiddenReport = yield* decideEarsSpecQuality({
+            docPath: "docs/specs/test.md",
+            markdown: forbiddenMd,
+          })
+          expect(forbiddenReport.clean).toBe(false)
+          expect(forbiddenReport.findings.some((f) => f.kind === "forbidden-column")).toBe(true)
+        }),
     )
 
     it.effect(
@@ -2125,9 +2179,9 @@ Currently, this is inside a fenced code block and must be ignored.
             docPath: "docs/specs/proposed.md",
             markdown: proposedMd,
           })
-          expect(
-            proposedReport.findings.some((f) => f.kind === "stale-temporal-context"),
-          ).toBe(false)
+          expect(proposedReport.findings.some((f) => f.kind === "stale-temporal-context")).toBe(
+            false,
+          )
         }),
     )
   })
@@ -2189,54 +2243,63 @@ We need automated mechanical gating.
 
     it.effect("accepts valid canonical ADR documents", () =>
       Effect.gen(function* () {
-        const report = yield* decideAdrDocQuality({ docPath: "docs/adr/test.md", markdown: validCanonicalAdr })
-      expect(report.clean).toBe(true)
-      expect(report.findings).toHaveLength(0)
+        const report = yield* decideAdrDocQuality({
+          docPath: "docs/adr/test.md",
+          markdown: validCanonicalAdr,
+        })
+        expect(report.clean).toBe(true)
+        expect(report.findings).toHaveLength(0)
 
-      let root = process.cwd()
-      while (root !== dirname(root)) {
-        if (existsSync(join(root, "pnpm-workspace.yaml"))) {
-          break
+        let root = process.cwd()
+        while (root !== dirname(root)) {
+          if (existsSync(join(root, "pnpm-workspace.yaml"))) {
+            break
+          }
+          root = dirname(root)
         }
-        root = dirname(root)
-      }
 
-      const harnessAdr = readFileSync(
-        join(root, "libs/harness/docs/adr/0001-deterministic-gates-and-plan-as-code.md"),
-        "utf8",
-      )
-      const harnessReport = yield* decideAdrDocQuality({
-        docPath: "libs/harness/docs/adr/0001-deterministic-gates-and-plan-as-code.md",
-        markdown: harnessAdr,
-      })
-      expect(harnessReport.clean).toBe(true)
-      expect(harnessReport.findings).toHaveLength(0)
+        const harnessAdr = readFileSync(
+          join(root, "libs/harness/docs/adr/0001-deterministic-gates-and-plan-as-code.md"),
+          "utf8",
+        )
+        const harnessReport = yield* decideAdrDocQuality({
+          docPath: "libs/harness/docs/adr/0001-deterministic-gates-and-plan-as-code.md",
+          markdown: harnessAdr,
+        })
+        expect(harnessReport.clean).toBe(true)
+        expect(harnessReport.findings).toHaveLength(0)
 
-      const sampleAdr = readFileSync(
-        join(
-          root,
-          "libs/sample/docs/adr/0001-cloudflare-d1-do-sqlite-and-traceparent-boundaries.md",
-        ),
-        "utf8",
-      )
-      const sampleReport = yield* decideAdrDocQuality({
-        docPath: "libs/sample/docs/adr/0001-cloudflare-d1-do-sqlite-and-traceparent-boundaries.md",
-        markdown: sampleAdr,
-      })
-      expect(sampleReport.clean).toBe(true)
-      expect(sampleReport.findings).toHaveLength(0)
-    }),
+        const sampleAdr = readFileSync(
+          join(
+            root,
+            "libs/sample/docs/adr/0001-cloudflare-d1-do-sqlite-and-traceparent-boundaries.md",
+          ),
+          "utf8",
+        )
+        const sampleReport = yield* decideAdrDocQuality({
+          docPath:
+            "libs/sample/docs/adr/0001-cloudflare-d1-do-sqlite-and-traceparent-boundaries.md",
+          markdown: sampleAdr,
+        })
+        expect(sampleReport.clean).toBe(true)
+        expect(sampleReport.findings).toHaveLength(0)
+      }),
     )
 
-    it.effect("rejects invalid frontmatter (missing enforced_by, missing symbols, superseded without superseded_by)", () =>
-      Effect.gen(function* () {
-        // 1. Missing frontmatter entirely
-        const noFmReport = yield* decideAdrDocQuality({ docPath: "test.md", markdown: "# No Frontmatter" })
-      expect(noFmReport.clean).toBe(false)
-      expect(noFmReport.findings.some((f) => f.kind === "adr-frontmatter-invalid")).toBe(true)
+    it.effect(
+      "rejects invalid frontmatter (missing enforced_by, missing symbols, superseded without superseded_by)",
+      () =>
+        Effect.gen(function* () {
+          // 1. Missing frontmatter entirely
+          const noFmReport = yield* decideAdrDocQuality({
+            docPath: "test.md",
+            markdown: "# No Frontmatter",
+          })
+          expect(noFmReport.clean).toBe(false)
+          expect(noFmReport.findings.some((f) => f.kind === "adr-frontmatter-invalid")).toBe(true)
 
-      // 2. Missing enforced_by
-      const noEnforcedMd = `---
+          // 2. Missing enforced_by
+          const noEnforcedMd = `---
 id: test:ADR-0001
 title: Test
 status: accepted
@@ -2245,16 +2308,19 @@ spans:
   - AdrDocLint.decide
 ---
 `
-      const noEnforcedReport = yield* decideAdrDocQuality({ docPath: "test.md", markdown: noEnforcedMd })
-      expect(noEnforcedReport.clean).toBe(false)
-      expect(
-        noEnforcedReport.findings.some(
-          (f) => f.kind === "adr-frontmatter-invalid" && f.message.includes("enforced_by"),
-        ),
-      ).toBe(true)
+          const noEnforcedReport = yield* decideAdrDocQuality({
+            docPath: "test.md",
+            markdown: noEnforcedMd,
+          })
+          expect(noEnforcedReport.clean).toBe(false)
+          expect(
+            noEnforcedReport.findings.some(
+              (f) => f.kind === "adr-frontmatter-invalid" && f.message.includes("enforced_by"),
+            ),
+          ).toBe(true)
 
-      // 3. Missing governed symbols
-      const noSymbolsMd = `---
+          // 3. Missing governed symbols
+          const noSymbolsMd = `---
 id: test:ADR-0001
 title: Test
 status: accepted
@@ -2263,16 +2329,19 @@ enforced_by:
   - some/file.ts
 ---
 `
-      const noSymbolsReport = yield* decideAdrDocQuality({ docPath: "test.md", markdown: noSymbolsMd })
-      expect(noSymbolsReport.clean).toBe(false)
-      expect(
-        noSymbolsReport.findings.some(
-          (f) => f.kind === "adr-frontmatter-invalid" && f.message.includes("govern"),
-        ),
-      ).toBe(true)
+          const noSymbolsReport = yield* decideAdrDocQuality({
+            docPath: "test.md",
+            markdown: noSymbolsMd,
+          })
+          expect(noSymbolsReport.clean).toBe(false)
+          expect(
+            noSymbolsReport.findings.some(
+              (f) => f.kind === "adr-frontmatter-invalid" && f.message.includes("govern"),
+            ),
+          ).toBe(true)
 
-      // 4. Superseded without superseded_by
-      const supersededMd = `---
+          // 4. Superseded without superseded_by
+          const supersededMd = `---
 id: test:ADR-0001
 title: Test
 status: superseded
@@ -2283,94 +2352,106 @@ spans:
   - AdrDocLint.decide
 ---
 `
-      const supersededReport = yield* decideAdrDocQuality({ docPath: "test.md", markdown: supersededMd })
-      expect(supersededReport.clean).toBe(false)
-      expect(
-        supersededReport.findings.some(
-          (f) => f.kind === "adr-frontmatter-invalid" && f.message.includes("superseded_by"),
-        ),
-      ).toBe(true)
-    }),
+          const supersededReport = yield* decideAdrDocQuality({
+            docPath: "test.md",
+            markdown: supersededMd,
+          })
+          expect(supersededReport.clean).toBe(false)
+          expect(
+            supersededReport.findings.some(
+              (f) => f.kind === "adr-frontmatter-invalid" && f.message.includes("superseded_by"),
+            ),
+          ).toBe(true)
+        }),
     )
 
     it.effect("rejects missing or out-of-order canonical sections", () =>
       Effect.gen(function* () {
-      // Missing section
-      const missingSectionMd = validCanonicalAdr.replace(
-        "## Decision Drivers\n\n* Guarantee canonical 6-section MADR structure across all ADRs.\n* Deterministically verify frontmatter, chosen options, and rejected alternatives.",
-        "",
-      )
-      const missingReport = yield* decideAdrDocQuality({ docPath: "test.md", markdown: missingSectionMd })
-      expect(missingReport.clean).toBe(false)
-      expect(
-        missingReport.findings.some(
-          (f) => f.kind === "adr-section-structure" && f.message.includes("Decision Drivers"),
-        ),
-      ).toBe(true)
+        // Missing section
+        const missingSectionMd = validCanonicalAdr.replace(
+          "## Decision Drivers\n\n* Guarantee canonical 6-section MADR structure across all ADRs.\n* Deterministically verify frontmatter, chosen options, and rejected alternatives.",
+          "",
+        )
+        const missingReport = yield* decideAdrDocQuality({
+          docPath: "test.md",
+          markdown: missingSectionMd,
+        })
+        expect(missingReport.clean).toBe(false)
+        expect(
+          missingReport.findings.some(
+            (f) => f.kind === "adr-section-structure" && f.message.includes("Decision Drivers"),
+          ),
+        ).toBe(true)
 
-      // Out of order sections
-      const outOfOrderMd = validCanonicalAdr
-        .replace("## Decision Drivers", "## TEMP_MARKER")
-        .replace("## Considered Options", "## Decision Drivers")
-        .replace("## TEMP_MARKER", "## Considered Options")
-      const outOfOrderReport = yield* decideAdrDocQuality({ docPath: "test.md", markdown: outOfOrderMd })
-      expect(outOfOrderReport.clean).toBe(false)
-      expect(
-        outOfOrderReport.findings.some(
-          (f) => f.kind === "adr-section-structure" && f.message.includes("out of order"),
-        ),
-      ).toBe(true)
-    }),
+        // Out of order sections
+        const outOfOrderMd = validCanonicalAdr
+          .replace("## Decision Drivers", "## TEMP_MARKER")
+          .replace("## Considered Options", "## Decision Drivers")
+          .replace("## TEMP_MARKER", "## Considered Options")
+        const outOfOrderReport = yield* decideAdrDocQuality({
+          docPath: "test.md",
+          markdown: outOfOrderMd,
+        })
+        expect(outOfOrderReport.clean).toBe(false)
+        expect(
+          outOfOrderReport.findings.some(
+            (f) => f.kind === "adr-section-structure" && f.message.includes("out of order"),
+          ),
+        ).toBe(true)
+      }),
     )
 
     it.effect("rejects missing chosen option in Decision Outcome", () =>
       Effect.gen(function* () {
-      const noChosenMd = validCanonicalAdr.replace(
-        '**Chosen option:** "Option 1" because deterministic gates provide instant mechanical feedback.',
-        "We chose Option 1 after careful evaluation.",
-      )
-      const report = yield* decideAdrDocQuality({ docPath: "test.md", markdown: noChosenMd })
-      expect(report.clean).toBe(false)
-      expect(report.findings.some((f) => f.kind === "adr-missing-chosen-option")).toBe(true)
-    }),
+        const noChosenMd = validCanonicalAdr.replace(
+          '**Chosen option:** "Option 1" because deterministic gates provide instant mechanical feedback.',
+          "We chose Option 1 after careful evaluation.",
+        )
+        const report = yield* decideAdrDocQuality({ docPath: "test.md", markdown: noChosenMd })
+        expect(report.clean).toBe(false)
+        expect(report.findings.some((f) => f.kind === "adr-missing-chosen-option")).toBe(true)
+      }),
     )
 
-    it.effect("rejects malformed rejected alternatives (missing ### 1 · or missing **Why rejected:**)", () =>
-      Effect.gen(function* () {
-      // Missing ### 1 · subsection
-      const noSubMd = validCanonicalAdr.replace(
-        "### 1 · Unstructured Markdown without Linting\n- **Why rejected:** Causes documentation drift and broken references across repos.",
-        "We considered unstructured markdown but didn't write it up.",
-      )
-      const noSubReport = yield* decideAdrDocQuality({ docPath: "test.md", markdown: noSubMd })
-      expect(noSubReport.clean).toBe(false)
-      expect(
-        noSubReport.findings.some((f) => f.kind === "adr-rejected-alternative-structure"),
-      ).toBe(true)
+    it.effect(
+      "rejects malformed rejected alternatives (missing ### 1 · or missing **Why rejected:**)",
+      () =>
+        Effect.gen(function* () {
+          // Missing ### 1 · subsection
+          const noSubMd = validCanonicalAdr.replace(
+            "### 1 · Unstructured Markdown without Linting\n- **Why rejected:** Causes documentation drift and broken references across repos.",
+            "We considered unstructured markdown but didn't write it up.",
+          )
+          const noSubReport = yield* decideAdrDocQuality({ docPath: "test.md", markdown: noSubMd })
+          expect(noSubReport.clean).toBe(false)
+          expect(
+            noSubReport.findings.some((f) => f.kind === "adr-rejected-alternative-structure"),
+          ).toBe(true)
 
-      // Missing **Why rejected:**
-      const noWhyMd = validCanonicalAdr.replace("**Why rejected:**", "Reason for rejection:")
-      const noWhyReport = yield* decideAdrDocQuality({ docPath: "test.md", markdown: noWhyMd })
-      expect(noWhyReport.clean).toBe(false)
-      expect(
-        noWhyReport.findings.some(
-          (f) =>
-            f.kind === "adr-rejected-alternative-structure" && f.message.includes("Why rejected"),
-        ),
-      ).toBe(true)
-    }),
+          // Missing **Why rejected:**
+          const noWhyMd = validCanonicalAdr.replace("**Why rejected:**", "Reason for rejection:")
+          const noWhyReport = yield* decideAdrDocQuality({ docPath: "test.md", markdown: noWhyMd })
+          expect(noWhyReport.clean).toBe(false)
+          expect(
+            noWhyReport.findings.some(
+              (f) =>
+                f.kind === "adr-rejected-alternative-structure" &&
+                f.message.includes("Why rejected"),
+            ),
+          ).toBe(true)
+        }),
     )
 
     it.effect("rejects missing enforcement table under Consequences and Enforcement", () =>
       Effect.gen(function* () {
-      const noTableMd = validCanonicalAdr.replace(
-        /\| Rule \|[\s\S]*\| `AdrDocLint\.decide` \|/,
-        "Enforcement is handled through code review.",
-      )
-      const report = yield* decideAdrDocQuality({ docPath: "test.md", markdown: noTableMd })
-      expect(report.clean).toBe(false)
-      expect(report.findings.some((f) => f.kind === "adr-missing-enforcement-table")).toBe(true)
-    }),
+        const noTableMd = validCanonicalAdr.replace(
+          /\| Rule \|[\s\S]*\| `AdrDocLint\.decide` \|/,
+          "Enforcement is handled through code review.",
+        )
+        const report = yield* decideAdrDocQuality({ docPath: "test.md", markdown: noTableMd })
+        expect(report.clean).toBe(false)
+        expect(report.findings.some((f) => f.kind === "adr-missing-enforcement-table")).toBe(true)
+      }),
     )
 
     it.effect(
@@ -2478,9 +2559,11 @@ ${rejectedAlternatives}
         }),
     )
 
-    it.effect("flags adr-enforcement-mismatch when Governed Symbols entry is not declared in frontmatter or cell is empty", () =>
-      Effect.gen(function* () {
-      const adrWithUndeclaredSymbol = `---
+    it.effect(
+      "flags adr-enforcement-mismatch when Governed Symbols entry is not declared in frontmatter or cell is empty",
+      () =>
+        Effect.gen(function* () {
+          const adrWithUndeclaredSymbol = `---
 id: test:ADR-0001
 title: Test ADR
 status: accepted
@@ -2521,29 +2604,37 @@ Context description here.
 | --- | --- | --- | --- |
 | Check Rule | libs/harness/gates/src/adr-lint.ts | AdrDocLint.decide | \`UndeclaredSymbol\` |
 `
-      const report = yield* decideAdrDocQuality({ docPath: "docs/adr/test.md", markdown: adrWithUndeclaredSymbol })
-      expect(report.clean).toBe(false)
-      const mismatch = report.findings.find((f) => f.kind === "adr-enforcement-mismatch")
-      expect(mismatch).toBeDefined()
-      expect(mismatch?.message).toContain("UndeclaredSymbol")
+          const report = yield* decideAdrDocQuality({
+            docPath: "docs/adr/test.md",
+            markdown: adrWithUndeclaredSymbol,
+          })
+          expect(report.clean).toBe(false)
+          const mismatch = report.findings.find((f) => f.kind === "adr-enforcement-mismatch")
+          expect(mismatch).toBeDefined()
+          expect(mismatch?.message).toContain("UndeclaredSymbol")
 
-      const adrWithPlaceholderCell = adrWithUndeclaredSymbol.replace(
-        "| Check Rule | libs/harness/gates/src/adr-lint.ts | AdrDocLint.decide | `UndeclaredSymbol` |",
-        "| Check Rule | - | AdrDocLint.decide | `AdrDocLint.decide` |",
-      )
-      const placeholderReport = yield* decideAdrDocQuality({ docPath: "docs/adr/test.md", markdown: adrWithPlaceholderCell })
-      expect(placeholderReport.clean).toBe(false)
-      const placeholderMismatch = placeholderReport.findings.find(
-        (f) => f.kind === "adr-enforcement-mismatch",
-      )
-      expect(placeholderMismatch).toBeDefined()
-      expect(placeholderMismatch?.message).toContain("empty or placeholder cell")
-    }),
+          const adrWithPlaceholderCell = adrWithUndeclaredSymbol.replace(
+            "| Check Rule | libs/harness/gates/src/adr-lint.ts | AdrDocLint.decide | `UndeclaredSymbol` |",
+            "| Check Rule | - | AdrDocLint.decide | `AdrDocLint.decide` |",
+          )
+          const placeholderReport = yield* decideAdrDocQuality({
+            docPath: "docs/adr/test.md",
+            markdown: adrWithPlaceholderCell,
+          })
+          expect(placeholderReport.clean).toBe(false)
+          const placeholderMismatch = placeholderReport.findings.find(
+            (f) => f.kind === "adr-enforcement-mismatch",
+          )
+          expect(placeholderMismatch).toBeDefined()
+          expect(placeholderMismatch?.message).toContain("empty or placeholder cell")
+        }),
     )
 
-    it.effect("flags adr-enforcement-mismatch when Enforced By path is not declared in frontmatter enforced_by", () =>
-      Effect.gen(function* () {
-      const adrWithUndeclaredFile = `---
+    it.effect(
+      "flags adr-enforcement-mismatch when Enforced By path is not declared in frontmatter enforced_by",
+      () =>
+        Effect.gen(function* () {
+          const adrWithUndeclaredFile = `---
 id: test:ADR-0001
 title: Test ADR
 status: accepted
@@ -2586,21 +2677,26 @@ Context description here.
 | --- | --- | --- | --- |
 | Check Rule | libs/harness/gates/src/adr-lint.ts | AdrDocLint.decide | \`AdrDocLint.decide\` |
 `
-      const report = yield* decideAdrDocQuality({ docPath: "docs/adr/test.md", markdown: adrWithUndeclaredFile })
-      expect(report.clean).toBe(false)
-      const mismatch = report.findings.find(
-        (f) =>
-          f.kind === "adr-enforcement-mismatch" &&
-          f.message.includes("is not declared in ADR frontmatter 'enforced_by'"),
-      )
-      expect(mismatch).toBeDefined()
-      expect(mismatch?.message).toContain("libs/harness/gates/src/adr-lint.ts")
-    }),
+          const report = yield* decideAdrDocQuality({
+            docPath: "docs/adr/test.md",
+            markdown: adrWithUndeclaredFile,
+          })
+          expect(report.clean).toBe(false)
+          const mismatch = report.findings.find(
+            (f) =>
+              f.kind === "adr-enforcement-mismatch" &&
+              f.message.includes("is not declared in ADR frontmatter 'enforced_by'"),
+          )
+          expect(mismatch).toBeDefined()
+          expect(mismatch?.message).toContain("libs/harness/gates/src/adr-lint.ts")
+        }),
     )
 
-    it.effect("flags adr-enforcement-mismatch when Decision Outcome references unconfigured Nx tag scope:fixture as a rule", () =>
-      Effect.gen(function* () {
-      const adrWithScopeFixture = `---
+    it.effect(
+      "flags adr-enforcement-mismatch when Decision Outcome references unconfigured Nx tag scope:fixture as a rule",
+      () =>
+        Effect.gen(function* () {
+          const adrWithScopeFixture = `---
 id: test:ADR-0001
 title: Test ADR
 status: accepted
@@ -2645,16 +2741,19 @@ Every domain fixture must have the scope:fixture tag applied in project.json.
 | --- | --- | --- | --- |
 | Check Rule | libs/harness/gates/src/adr-lint.ts | AdrDocLint.decide | \`AdrDocLint.decide\` |
 `
-      const report = yield* decideAdrDocQuality({ docPath: "docs/adr/test.md", markdown: adrWithScopeFixture })
-      expect(report.clean).toBe(false)
-      const fixtureMismatch = report.findings.find(
-        (f) => f.kind === "adr-enforcement-mismatch" && f.message.includes("scope:fixture"),
-      )
-      expect(fixtureMismatch).toBeDefined()
-      expect(fixtureMismatch?.message).toContain(
-        "references unconfigured Nx tag 'scope:fixture' as a rule — 'scope:fixture' is not configured in nx.json.",
-      )
-    }),
+          const report = yield* decideAdrDocQuality({
+            docPath: "docs/adr/test.md",
+            markdown: adrWithScopeFixture,
+          })
+          expect(report.clean).toBe(false)
+          const fixtureMismatch = report.findings.find(
+            (f) => f.kind === "adr-enforcement-mismatch" && f.message.includes("scope:fixture"),
+          )
+          expect(fixtureMismatch).toBeDefined()
+          expect(fixtureMismatch?.message).toContain(
+            "references unconfigured Nx tag 'scope:fixture' as a rule — 'scope:fixture' is not configured in nx.json.",
+          )
+        }),
     )
 
     it.effect(
@@ -2843,376 +2942,381 @@ spans:
     )
 
     describe("evaluatePackageAndMigrationPlugin", () => {
-      it.effect("detects empty-source-module and unused-package-dependency with evaluatePackageAndMigrationPlugin", () =>
-        Effect.gen(function* () {
-        const tempDir = mkdtempSync(join(tmpdir(), "harness-hygiene-test-"))
-        try {
-          const domainPkgDir = join(tempDir, "libs", "sample", "domain")
-          const srcDir = join(domainPkgDir, "src")
-          mkdirSync(srcDir, { recursive: true })
+      it.effect(
+        "detects empty-source-module and unused-package-dependency with evaluatePackageAndMigrationPlugin",
+        () =>
+          Effect.gen(function* () {
+            const tempDir = mkdtempSync(join(tmpdir(), "harness-hygiene-test-"))
+            try {
+              const domainPkgDir = join(tempDir, "libs", "sample", "domain")
+              const srcDir = join(domainPkgDir, "src")
+              mkdirSync(srcDir, { recursive: true })
 
-          writeFileSync(
-            join(domainPkgDir, "package.json"),
-            JSON.stringify(
-              {
-                name: "@sample/domain",
-                dependencies: {
-                  "unimported-dependency": "1.0.0",
-                  effect: "4.0.0",
-                },
-              },
-              null,
-              2,
-            ),
-          )
+              writeFileSync(
+                join(domainPkgDir, "package.json"),
+                JSON.stringify(
+                  {
+                    name: "@sample/domain",
+                    dependencies: {
+                      "unimported-dependency": "1.0.0",
+                      effect: "4.0.0",
+                    },
+                  },
+                  null,
+                  2,
+                ),
+              )
 
-          writeFileSync(
-            join(srcDir, "errors.ts"),
-            `// Empty error placeholder module
+              writeFileSync(
+                join(srcDir, "errors.ts"),
+                `// Empty error placeholder module
 /* Block comment */
 export {};
 `,
-          )
+              )
 
-          writeFileSync(join(srcDir, "index.ts"), `export const value = 42\n`)
+              writeFileSync(join(srcDir, "index.ts"), `export const value = 42\n`)
 
-          const findings = yield* evaluatePackageAndMigrationPlugin({
-            graph: buildHarnessGraph({}),
-            workspaceRoot: tempDir,
-            hostIo: testHostIo,
-          })
+              const findings = yield* evaluatePackageAndMigrationPlugin({
+                graph: buildHarnessGraph({}),
+                workspaceRoot: tempDir,
+                hostIo: testHostIo,
+              })
 
-          const emptyModuleFinding = findings.find(
-            (f) =>
-              f.kind === "empty-source-module" && f.nodeId === "libs/sample/domain/src/errors.ts",
-          )
-          expect(emptyModuleFinding).toBeDefined()
-          expect(emptyModuleFinding?.message).toContain(
-            "contains only an empty export ('export {}')",
-          )
+              const emptyModuleFinding = findings.find(
+                (f) =>
+                  f.kind === "empty-source-module" &&
+                  f.nodeId === "libs/sample/domain/src/errors.ts",
+              )
+              expect(emptyModuleFinding).toBeDefined()
+              expect(emptyModuleFinding?.message).toContain(
+                "contains only an empty export ('export {}')",
+              )
 
-          const unusedDepFinding = findings.find(
-            (f) =>
-              f.kind === "unused-package-dependency" &&
-              f.nodeId === "@sample/domain:unimported-dependency",
-          )
-          expect(unusedDepFinding).toBeDefined()
-          expect(unusedDepFinding?.message).toContain(
-            'Package "@sample/domain" declares dependency "unimported-dependency" in package.json, but no file in src/ imports it.',
-          )
-        } finally {
-          rmSync(tempDir, { recursive: true, force: true })
-        }
-      }),
+              const unusedDepFinding = findings.find(
+                (f) =>
+                  f.kind === "unused-package-dependency" &&
+                  f.nodeId === "@sample/domain:unimported-dependency",
+              )
+              expect(unusedDepFinding).toBeDefined()
+              expect(unusedDepFinding?.message).toContain(
+                'Package "@sample/domain" declares dependency "unimported-dependency" in package.json, but no file in src/ imports it.',
+              )
+            } finally {
+              rmSync(tempDir, { recursive: true, force: true })
+            }
+          }),
       )
 
       it.effect("detects unused-contract-export with evaluatePackageAndMigrationPlugin", () =>
         Effect.gen(function* () {
-        const tempDir = mkdtempSync(join(tmpdir(), "harness-contract-test-"))
-        try {
-          const contractSrcDir = join(tempDir, "libs", "sample", "contract", "src")
-          const domainSrcDir = join(tempDir, "libs", "sample", "domain", "src")
-          mkdirSync(contractSrcDir, { recursive: true })
-          mkdirSync(domainSrcDir, { recursive: true })
+          const tempDir = mkdtempSync(join(tmpdir(), "harness-contract-test-"))
+          try {
+            const contractSrcDir = join(tempDir, "libs", "sample", "contract", "src")
+            const domainSrcDir = join(tempDir, "libs", "sample", "domain", "src")
+            mkdirSync(contractSrcDir, { recursive: true })
+            mkdirSync(domainSrcDir, { recursive: true })
 
-          writeFileSync(
-            join(contractSrcDir, "index.ts"),
-            `export const UsedContract = 123;\nexport const DeadContractSymbol = 456;\nexport class DeadContractClass {}\nexport function deadContractFn() {}\n`,
-          )
+            writeFileSync(
+              join(contractSrcDir, "index.ts"),
+              `export const UsedContract = 123;\nexport const DeadContractSymbol = 456;\nexport class DeadContractClass {}\nexport function deadContractFn() {}\n`,
+            )
 
-          writeFileSync(
-            join(domainSrcDir, "index.ts"),
-            `import { UsedContract } from "../contract/src/index.js";\nconsole.log(UsedContract);\n`,
-          )
+            writeFileSync(
+              join(domainSrcDir, "index.ts"),
+              `import { UsedContract } from "../contract/src/index.js";\nconsole.log(UsedContract);\n`,
+            )
 
-          const findings = yield* evaluatePackageAndMigrationPlugin({
-            graph: buildHarnessGraph({}),
-            workspaceRoot: tempDir,
-            hostIo: testHostIo,
-          })
+            const findings = yield* evaluatePackageAndMigrationPlugin({
+              graph: buildHarnessGraph({}),
+              workspaceRoot: tempDir,
+              hostIo: testHostIo,
+            })
 
-          const unusedFindings = findings.filter((f) => f.kind === "unused-contract-export")
-          expect(unusedFindings.length).toBe(3)
-          expect(
-            unusedFindings.some((f) => f.nodeId === "sample/contract:DeadContractSymbol"),
-          ).toBe(true)
-          expect(unusedFindings.some((f) => f.nodeId === "sample/contract:DeadContractClass")).toBe(
-            true,
-          )
-          expect(unusedFindings.some((f) => f.nodeId === "sample/contract:deadContractFn")).toBe(
-            true,
-          )
-          expect(unusedFindings[0]?.message).toContain(
-            'is never imported or used by any downstream package or fixture in scope "sample".',
-          )
-        } finally {
-          rmSync(tempDir, { recursive: true, force: true })
-        }
-      }),
+            const unusedFindings = findings.filter((f) => f.kind === "unused-contract-export")
+            expect(unusedFindings.length).toBe(3)
+            expect(
+              unusedFindings.some((f) => f.nodeId === "sample/contract:DeadContractSymbol"),
+            ).toBe(true)
+            expect(
+              unusedFindings.some((f) => f.nodeId === "sample/contract:DeadContractClass"),
+            ).toBe(true)
+            expect(unusedFindings.some((f) => f.nodeId === "sample/contract:deadContractFn")).toBe(
+              true,
+            )
+            expect(unusedFindings[0]?.message).toContain(
+              'is never imported or used by any downstream package or fixture in scope "sample".',
+            )
+          } finally {
+            rmSync(tempDir, { recursive: true, force: true })
+          }
+        }),
       )
 
-      it.effect("detects dead-tagged-error when a contract Schema.TaggedError is referenced only in type positions and never constructed at runtime", () =>
-        Effect.gen(function* () {
-        const tempDir = mkdtempSync(join(tmpdir(), "harness-dead-error-test-"))
-        try {
-          const contractSrcDir = join(tempDir, "libs", "sample", "contract", "src")
-          const domainSrcDir = join(tempDir, "libs", "sample", "domain", "src")
-          mkdirSync(contractSrcDir, { recursive: true })
-          mkdirSync(domainSrcDir, { recursive: true })
+      it.effect(
+        "detects dead-tagged-error when a contract Schema.TaggedError is referenced only in type positions and never constructed at runtime",
+        () =>
+          Effect.gen(function* () {
+            const tempDir = mkdtempSync(join(tmpdir(), "harness-dead-error-test-"))
+            try {
+              const contractSrcDir = join(tempDir, "libs", "sample", "contract", "src")
+              const domainSrcDir = join(tempDir, "libs", "sample", "domain", "src")
+              mkdirSync(contractSrcDir, { recursive: true })
+              mkdirSync(domainSrcDir, { recursive: true })
 
-          writeFileSync(
-            join(contractSrcDir, "index.ts"),
-            `import { Schema } from "effect";\nexport class ConstructedError extends Schema.TaggedError<ConstructedError>()("ConstructedError", {}) {}\nexport class PhantomError extends Schema.TaggedError<PhantomError>()("PhantomError", {}) {}\n`,
-          )
+              writeFileSync(
+                join(contractSrcDir, "index.ts"),
+                `import { Schema } from "effect";\nexport class ConstructedError extends Schema.TaggedError<ConstructedError>()("ConstructedError", {}) {}\nexport class PhantomError extends Schema.TaggedError<PhantomError>()("PhantomError", {}) {}\n`,
+              )
 
-          writeFileSync(
-            join(domainSrcDir, "index.ts"),
-            `import { Effect } from "effect";\nimport { ConstructedError, type PhantomError } from "../contract/src/index.js";\nexport const run = (): Effect.Effect<void, ConstructedError | PhantomError> => Effect.fail(new ConstructedError({}));\n`,
-          )
+              writeFileSync(
+                join(domainSrcDir, "index.ts"),
+                `import { Effect } from "effect";\nimport { ConstructedError, type PhantomError } from "../contract/src/index.js";\nexport const run = (): Effect.Effect<void, ConstructedError | PhantomError> => Effect.fail(new ConstructedError({}));\n`,
+              )
 
-          const findings = yield* evaluatePackageAndMigrationPlugin({
-            graph: buildHarnessGraph({}),
-            workspaceRoot: tempDir,
-            hostIo: testHostIo,
-          })
-          const deadErrorFindings = findings.filter((f) => f.kind === "dead-tagged-error")
-          expect(deadErrorFindings).toHaveLength(1)
-          expect(deadErrorFindings[0]?.nodeId).toBe("sample/contract:PhantomError")
-          expect(deadErrorFindings[0]?.message).toContain(
-            'Contract TaggedError "PhantomError" in "libs/sample/contract/src/index.ts" is never constructed (new PhantomError(...))',
-          )
-        } finally {
-          rmSync(tempDir, { recursive: true, force: true })
-        }
-      }),
+              const findings = yield* evaluatePackageAndMigrationPlugin({
+                graph: buildHarnessGraph({}),
+                workspaceRoot: tempDir,
+                hostIo: testHostIo,
+              })
+              const deadErrorFindings = findings.filter((f) => f.kind === "dead-tagged-error")
+              expect(deadErrorFindings).toHaveLength(1)
+              expect(deadErrorFindings[0]?.nodeId).toBe("sample/contract:PhantomError")
+              expect(deadErrorFindings[0]?.message).toContain(
+                'Contract TaggedError "PhantomError" in "libs/sample/contract/src/index.ts" is never constructed (new PhantomError(...))',
+              )
+            } finally {
+              rmSync(tempDir, { recursive: true, force: true })
+            }
+          }),
       )
 
       it.effect("enforces SQL migration hygiene and safety across libs/*/infra packages", () =>
         Effect.gen(function* () {
-        const tempDir = mkdtempSync(join(tmpdir(), "harness-sql-hygiene-test-"))
-        try {
-          const infraSrcDir = join(tempDir, "libs", "sample", "infra", "src")
-          mkdirSync(infraSrcDir, { recursive: true })
+          const tempDir = mkdtempSync(join(tmpdir(), "harness-sql-hygiene-test-"))
+          try {
+            const infraSrcDir = join(tempDir, "libs", "sample", "infra", "src")
+            mkdirSync(infraSrcDir, { recursive: true })
 
-          // 1. bad-ddl.ts: runs sql`CREATE TABLE foo (id INT)` without SqliteMigrator
-          writeFileSync(
-            join(infraSrcDir, "bad-ddl.ts"),
-            `import { sql } from "@effect/sql";\nexport const makeTable = sql\`CREATE TABLE foo (id INT);\`;\n`,
-          )
+            // 1. bad-ddl.ts: runs sql`CREATE TABLE foo (id INT)` without SqliteMigrator
+            writeFileSync(
+              join(infraSrcDir, "bad-ddl.ts"),
+              `import { sql } from "@effect/sql";\nexport const makeTable = sql\`CREATE TABLE foo (id INT);\`;\n`,
+            )
 
-          // 2. bad-key.ts: passes "init_Without_Number" and duplicate "1_first" / "1_second" to SqliteMigrator.fromRecord
-          writeFileSync(
-            join(infraSrcDir, "bad-key.ts"),
-            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const badMigrations = SqliteMigrator.fromRecord({\n  "init_Without_Number": sql\`CREATE TABLE IF NOT EXISTS a (id INT);\`,\n  "1_first": sql\`CREATE TABLE IF NOT EXISTS b (id INT);\`,\n  "1_second": sql\`CREATE TABLE IF NOT EXISTS c (id INT);\`,\n});\n`,
-          )
+            // 2. bad-key.ts: passes "init_Without_Number" and duplicate "1_first" / "1_second" to SqliteMigrator.fromRecord
+            writeFileSync(
+              join(infraSrcDir, "bad-key.ts"),
+              `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const badMigrations = SqliteMigrator.fromRecord({\n  "init_Without_Number": sql\`CREATE TABLE IF NOT EXISTS a (id INT);\`,\n  "1_first": sql\`CREATE TABLE IF NOT EXISTS b (id INT);\`,\n  "1_second": sql\`CREATE TABLE IF NOT EXISTS c (id INT);\`,\n});\n`,
+            )
 
-          // 3. drop.ts: contains sql`DROP TABLE foo`
-          writeFileSync(
-            join(infraSrcDir, "drop.ts"),
-            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const dropMigrations = SqliteMigrator.fromRecord({\n  "1_drop_table": sql\`DROP TABLE foo;\`,\n});\n`,
-          )
+            // 3. drop.ts: contains sql`DROP TABLE foo`
+            writeFileSync(
+              join(infraSrcDir, "drop.ts"),
+              `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const dropMigrations = SqliteMigrator.fromRecord({\n  "1_drop_table": sql\`DROP TABLE foo;\`,\n});\n`,
+            )
 
-          // 4. multiline-gen.ts: multi-line Effect.gen block with nested object followed by second invalid key "2_InvalidCamel"
-          writeFileSync(
-            join(infraSrcDir, "multiline-gen.ts"),
-            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nimport { Effect } from "effect";\nexport const complexMigrations = SqliteMigrator.fromRecord({\n  "1_init": Effect.gen(function* () {\n    const nested = { a: 1 };\n    yield* sql\`CREATE TABLE IF NOT EXISTS complex (id INT);\`;\n  }),\n  "2_InvalidCamel": sql\`CREATE TABLE IF NOT EXISTS camel (id INT);\`,\n});\n`,
-          )
+            // 4. multiline-gen.ts: multi-line Effect.gen block with nested object followed by second invalid key "2_InvalidCamel"
+            writeFileSync(
+              join(infraSrcDir, "multiline-gen.ts"),
+              `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nimport { Effect } from "effect";\nexport const complexMigrations = SqliteMigrator.fromRecord({\n  "1_init": Effect.gen(function* () {\n    const nested = { a: 1 };\n    yield* sql\`CREATE TABLE IF NOT EXISTS complex (id INT);\`;\n  }),\n  "2_InvalidCamel": sql\`CREATE TABLE IF NOT EXISTS camel (id INT);\`,\n});\n`,
+            )
 
-          // 5. spread-migrations.ts: spread record with duplicate numeric id "1"
-          writeFileSync(
-            join(infraSrcDir, "spread-migrations.ts"),
-            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nconst aggregateCoreMigrations = {\n  "1_init": sql\`CREATE TABLE IF NOT EXISTS core (id INT);\`,\n};\nexport const migrations = SqliteMigrator.fromRecord({\n  ...aggregateCoreMigrations,\n  "1_second": sql\`CREATE TABLE IF NOT EXISTS duplicate_id (id INT);\`,\n});\n`,
-          )
+            // 5. spread-migrations.ts: spread record with duplicate numeric id "1"
+            writeFileSync(
+              join(infraSrcDir, "spread-migrations.ts"),
+              `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nconst aggregateCoreMigrations = {\n  "1_init": sql\`CREATE TABLE IF NOT EXISTS core (id INT);\`,\n};\nexport const migrations = SqliteMigrator.fromRecord({\n  ...aggregateCoreMigrations,\n  "1_second": sql\`CREATE TABLE IF NOT EXISTS duplicate_id (id INT);\`,\n});\n`,
+            )
 
-          // 6. stray-ddl.ts: file imports SqliteMigrator, has valid fromRecord, but also has stray CREATE TABLE outside migration record
-          writeFileSync(
-            join(infraSrcDir, "stray-ddl.ts"),
-            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const managedMigrations = SqliteMigrator.fromRecord({\n  "1_init_managed": sql\`CREATE TABLE IF NOT EXISTS managed (id INT);\`,\n});\nexport const strayTable = sql\`CREATE TABLE stray_table (id INT);\`;\n`,
-          )
+            // 6. stray-ddl.ts: file imports SqliteMigrator, has valid fromRecord, but also has stray CREATE TABLE outside migration record
+            writeFileSync(
+              join(infraSrcDir, "stray-ddl.ts"),
+              `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const managedMigrations = SqliteMigrator.fromRecord({\n  "1_init_managed": sql\`CREATE TABLE IF NOT EXISTS managed (id INT);\`,\n});\nexport const strayTable = sql\`CREATE TABLE stray_table (id INT);\`;\n`,
+            )
 
-          // 7. .sql file with destructive DROP TABLE in migrations/
-          const migrationsDir = join(tempDir, "libs", "sample", "infra", "migrations")
-          mkdirSync(migrationsDir, { recursive: true })
-          writeFileSync(join(migrationsDir, "0002_drop.sql"), "DROP TABLE old_table;\n")
+            // 7. .sql file with destructive DROP TABLE in migrations/
+            const migrationsDir = join(tempDir, "libs", "sample", "infra", "migrations")
+            mkdirSync(migrationsDir, { recursive: true })
+            writeFileSync(join(migrationsDir, "0002_drop.sql"), "DROP TABLE old_table;\n")
 
-          const findings = yield* evaluatePackageAndMigrationPlugin({
-            graph: buildHarnessGraph({}),
-            workspaceRoot: tempDir,
-            hostIo: testHostIo,
-          })
+            const findings = yield* evaluatePackageAndMigrationPlugin({
+              graph: buildHarnessGraph({}),
+              workspaceRoot: tempDir,
+              hostIo: testHostIo,
+            })
 
-          // Check unmanaged-sql-ddl
-          const unmanagedFindings = findings.filter(
-            (f) =>
-              f.kind === "unmanaged-sql-ddl" && f.nodeId === "libs/sample/infra/src/bad-ddl.ts",
-          )
-          expect(unmanagedFindings).toHaveLength(1)
-          expect(unmanagedFindings[0]?.message).toContain(
-            'Infrastructure module "libs/sample/infra/src/bad-ddl.ts" executes raw SQL DDL without SqliteMigrator',
-          )
+            // Check unmanaged-sql-ddl
+            const unmanagedFindings = findings.filter(
+              (f) =>
+                f.kind === "unmanaged-sql-ddl" && f.nodeId === "libs/sample/infra/src/bad-ddl.ts",
+            )
+            expect(unmanagedFindings).toHaveLength(1)
+            expect(unmanagedFindings[0]?.message).toContain(
+              'Infrastructure module "libs/sample/infra/src/bad-ddl.ts" executes raw SQL DDL without SqliteMigrator',
+            )
 
-          // Check stray CREATE TABLE outside fromRecord in a file importing SqliteMigrator
-          const strayDdlFinding = findings.find(
-            (f) =>
-              f.kind === "unmanaged-sql-ddl" && f.nodeId === "libs/sample/infra/src/stray-ddl.ts",
-          )
-          expect(strayDdlFinding).toBeDefined()
-          expect(strayDdlFinding?.message).toContain(
-            'Infrastructure module "libs/sample/infra/src/stray-ddl.ts" executes raw SQL DDL without SqliteMigrator',
-          )
+            // Check stray CREATE TABLE outside fromRecord in a file importing SqliteMigrator
+            const strayDdlFinding = findings.find(
+              (f) =>
+                f.kind === "unmanaged-sql-ddl" && f.nodeId === "libs/sample/infra/src/stray-ddl.ts",
+            )
+            expect(strayDdlFinding).toBeDefined()
+            expect(strayDdlFinding?.message).toContain(
+              'Infrastructure module "libs/sample/infra/src/stray-ddl.ts" executes raw SQL DDL without SqliteMigrator',
+            )
 
-          // Check invalid-migrator-record-key (invalid format and duplicate id)
-          const invalidKeyFinding = findings.find(
-            (f) =>
-              f.kind === "invalid-migrator-record-key" &&
-              f.nodeId === "libs/sample/infra/src/bad-key.ts:init_Without_Number",
-          )
-          expect(invalidKeyFinding).toBeDefined()
-          expect(invalidKeyFinding?.message).toContain(
-            'Invalid SqliteMigrator.fromRecord migration key "init_Without_Number"',
-          )
+            // Check invalid-migrator-record-key (invalid format and duplicate id)
+            const invalidKeyFinding = findings.find(
+              (f) =>
+                f.kind === "invalid-migrator-record-key" &&
+                f.nodeId === "libs/sample/infra/src/bad-key.ts:init_Without_Number",
+            )
+            expect(invalidKeyFinding).toBeDefined()
+            expect(invalidKeyFinding?.message).toContain(
+              'Invalid SqliteMigrator.fromRecord migration key "init_Without_Number"',
+            )
 
-          const duplicateKeyFinding = findings.find(
-            (f) =>
-              f.kind === "invalid-migrator-record-key" &&
-              f.nodeId === "libs/sample/infra/src/bad-key.ts:1_second",
-          )
-          expect(duplicateKeyFinding).toBeDefined()
-          expect(duplicateKeyFinding?.message).toContain(
-            "Duplicate migration version prefix '1_' in SqliteMigrator.fromRecord",
-          )
+            const duplicateKeyFinding = findings.find(
+              (f) =>
+                f.kind === "invalid-migrator-record-key" &&
+                f.nodeId === "libs/sample/infra/src/bad-key.ts:1_second",
+            )
+            expect(duplicateKeyFinding).toBeDefined()
+            expect(duplicateKeyFinding?.message).toContain(
+              "Duplicate migration version prefix '1_' in SqliteMigrator.fromRecord",
+            )
 
-          // Check multiline Effect.gen second key invalid format
-          const camelKeyFinding = findings.find(
-            (f) =>
-              f.kind === "invalid-migrator-record-key" &&
-              f.nodeId === "libs/sample/infra/src/multiline-gen.ts:2_InvalidCamel",
-          )
-          expect(camelKeyFinding).toBeDefined()
-          expect(camelKeyFinding?.message).toContain(
-            'Invalid SqliteMigrator.fromRecord migration key "2_InvalidCamel"',
-          )
+            // Check multiline Effect.gen second key invalid format
+            const camelKeyFinding = findings.find(
+              (f) =>
+                f.kind === "invalid-migrator-record-key" &&
+                f.nodeId === "libs/sample/infra/src/multiline-gen.ts:2_InvalidCamel",
+            )
+            expect(camelKeyFinding).toBeDefined()
+            expect(camelKeyFinding?.message).toContain(
+              'Invalid SqliteMigrator.fromRecord migration key "2_InvalidCamel"',
+            )
 
-          // Check spread record duplicate id detection
-          const spreadDuplicateFinding = findings.find(
-            (f) =>
-              f.kind === "invalid-migrator-record-key" &&
-              f.nodeId === "libs/sample/infra/src/spread-migrations.ts:1_second",
-          )
-          expect(spreadDuplicateFinding).toBeDefined()
-          expect(spreadDuplicateFinding?.message).toContain(
-            "Duplicate migration version prefix '1_' in SqliteMigrator.fromRecord",
-          )
+            // Check spread record duplicate id detection
+            const spreadDuplicateFinding = findings.find(
+              (f) =>
+                f.kind === "invalid-migrator-record-key" &&
+                f.nodeId === "libs/sample/infra/src/spread-migrations.ts:1_second",
+            )
+            expect(spreadDuplicateFinding).toBeDefined()
+            expect(spreadDuplicateFinding?.message).toContain(
+              "Duplicate migration version prefix '1_' in SqliteMigrator.fromRecord",
+            )
 
-          // Check unsafe-sql-migration from TS file
-          const unsafeFindings = findings.filter(
-            (f) =>
-              f.kind === "unsafe-sql-migration" &&
-              f.nodeId === "libs/sample/infra/src/drop.ts:drop-statement",
-          )
-          expect(unsafeFindings).toHaveLength(1)
-          expect(unsafeFindings[0]?.message).toContain(
-            'Destructive DROP statement in "libs/sample/infra/src/drop.ts" requires human approval (ESCALATE).',
-          )
+            // Check unsafe-sql-migration from TS file
+            const unsafeFindings = findings.filter(
+              (f) =>
+                f.kind === "unsafe-sql-migration" &&
+                f.nodeId === "libs/sample/infra/src/drop.ts:drop-statement",
+            )
+            expect(unsafeFindings).toHaveLength(1)
+            expect(unsafeFindings[0]?.message).toContain(
+              'Destructive DROP statement in "libs/sample/infra/src/drop.ts" requires human approval (ESCALATE).',
+            )
 
-          // Check unsafe-sql-migration from .sql file in migrations/
-          const unsafeSqlFileFinding = findings.find(
-            (f) =>
-              f.kind === "unsafe-sql-migration" &&
-              f.nodeId === "libs/sample/infra/migrations/0002_drop.sql:drop-statement",
-          )
-          expect(unsafeSqlFileFinding).toBeDefined()
-          expect(unsafeSqlFileFinding?.message).toContain(
-            'Destructive DROP statement in "libs/sample/infra/migrations/0002_drop.sql" requires human approval (ESCALATE).',
-          )
-        } finally {
-          rmSync(tempDir, { recursive: true, force: true })
-        }
+            // Check unsafe-sql-migration from .sql file in migrations/
+            const unsafeSqlFileFinding = findings.find(
+              (f) =>
+                f.kind === "unsafe-sql-migration" &&
+                f.nodeId === "libs/sample/infra/migrations/0002_drop.sql:drop-statement",
+            )
+            expect(unsafeSqlFileFinding).toBeDefined()
+            expect(unsafeSqlFileFinding?.message).toContain(
+              'Destructive DROP statement in "libs/sample/infra/migrations/0002_drop.sql" requires human approval (ESCALATE).',
+            )
+          } finally {
+            rmSync(tempDir, { recursive: true, force: true })
+          }
 
-        // 8. Reports 0 findings when SqliteMigrator.fromRecord({ ...aggregateCoreMigrations, "2_init_bar": ... }) is used with additive CREATE TABLE IF NOT EXISTS
-        const cleanTempDir = mkdtempSync(join(tmpdir(), "harness-sql-clean-test-"))
-        try {
-          const cleanInfraSrcDir = join(cleanTempDir, "libs", "sample", "infra", "src")
-          mkdirSync(cleanInfraSrcDir, { recursive: true })
+          // 8. Reports 0 findings when SqliteMigrator.fromRecord({ ...aggregateCoreMigrations, "2_init_bar": ... }) is used with additive CREATE TABLE IF NOT EXISTS
+          const cleanTempDir = mkdtempSync(join(tmpdir(), "harness-sql-clean-test-"))
+          try {
+            const cleanInfraSrcDir = join(cleanTempDir, "libs", "sample", "infra", "src")
+            mkdirSync(cleanInfraSrcDir, { recursive: true })
 
-          writeFileSync(
-            join(cleanInfraSrcDir, "clean.ts"),
-            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nconst aggregateCoreMigrations = {\n  "1_init_foo": sql\`CREATE TABLE IF NOT EXISTS foo (id INT);\`,\n};\nexport const cleanMigrations = SqliteMigrator.fromRecord({\n  ...aggregateCoreMigrations,\n  "2_init_bar": sql\`CREATE TABLE IF NOT EXISTS bar (id INT);\`,\n});\nexport const runAggregateMigrations = SqliteMigrator.run({ loader: cleanMigrations });\nexport const projectorCoreMigrations = {\n  "1_init_projector": sql\`CREATE TABLE IF NOT EXISTS proj (id INT);\`,\n};\nexport const runProjectorMigrations = SqliteMigrator.run({\n  loader: SqliteMigrator.fromRecord(projectorCoreMigrations),\n  table: "es_projector_sql_migrations",\n});\n`,
-          )
+            writeFileSync(
+              join(cleanInfraSrcDir, "clean.ts"),
+              `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nconst aggregateCoreMigrations = {\n  "1_init_foo": sql\`CREATE TABLE IF NOT EXISTS foo (id INT);\`,\n};\nexport const cleanMigrations = SqliteMigrator.fromRecord({\n  ...aggregateCoreMigrations,\n  "2_init_bar": sql\`CREATE TABLE IF NOT EXISTS bar (id INT);\`,\n});\nexport const runAggregateMigrations = SqliteMigrator.run({ loader: cleanMigrations });\nexport const projectorCoreMigrations = {\n  "1_init_projector": sql\`CREATE TABLE IF NOT EXISTS proj (id INT);\`,\n};\nexport const runProjectorMigrations = SqliteMigrator.run({\n  loader: SqliteMigrator.fromRecord(projectorCoreMigrations),\n  table: "es_projector_sql_migrations",\n});\n`,
+            )
 
-          const cleanFindings = yield* evaluatePackageAndMigrationPlugin({
-            graph: buildHarnessGraph({}),
-            workspaceRoot: cleanTempDir,
-            hostIo: testHostIo,
-          })
-          expect(cleanFindings).toHaveLength(0)
-        } finally {
-          rmSync(cleanTempDir, { recursive: true, force: true })
-        }
+            const cleanFindings = yield* evaluatePackageAndMigrationPlugin({
+              graph: buildHarnessGraph({}),
+              workspaceRoot: cleanTempDir,
+              hostIo: testHostIo,
+            })
+            expect(cleanFindings).toHaveLength(0)
+          } finally {
+            rmSync(cleanTempDir, { recursive: true, force: true })
+          }
 
-        // 9. Detects non-1-based migration sequence, non-contiguous sequence, shared default migration table, and untrusted-row-brand-make
-        const collisionTempDir = mkdtempSync(join(tmpdir(), "harness-sql-collision-test-"))
-        try {
-          const collisionInfraSrcDir = join(collisionTempDir, "libs", "sample", "infra", "src")
-          mkdirSync(collisionInfraSrcDir, { recursive: true })
+          // 9. Detects non-1-based migration sequence, non-contiguous sequence, shared default migration table, and untrusted-row-brand-make
+          const collisionTempDir = mkdtempSync(join(tmpdir(), "harness-sql-collision-test-"))
+          try {
+            const collisionInfraSrcDir = join(collisionTempDir, "libs", "sample", "infra", "src")
+            mkdirSync(collisionInfraSrcDir, { recursive: true })
 
-          writeFileSync(
-            join(collisionInfraSrcDir, "aggregate.ts"),
-            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const aggregateCoreMigrations = {\n  "1_init_agg": sql\`CREATE TABLE IF NOT EXISTS agg (id INT);\`,\n  "3_skip_two": sql\`CREATE TABLE IF NOT EXISTS agg2 (id INT);\`,\n};\nexport const runAgg = SqliteMigrator.run({ loader: SqliteMigrator.fromRecord(aggregateCoreMigrations) });\n`,
-          )
+            writeFileSync(
+              join(collisionInfraSrcDir, "aggregate.ts"),
+              `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const aggregateCoreMigrations = {\n  "1_init_agg": sql\`CREATE TABLE IF NOT EXISTS agg (id INT);\`,\n  "3_skip_two": sql\`CREATE TABLE IF NOT EXISTS agg2 (id INT);\`,\n};\nexport const runAgg = SqliteMigrator.run({ loader: SqliteMigrator.fromRecord(aggregateCoreMigrations) });\n`,
+            )
 
-          writeFileSync(
-            join(collisionInfraSrcDir, "projector.ts"),
-            `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const projectorCoreMigrations = {\n  "2_init_projector": sql\`CREATE TABLE IF NOT EXISTS proj (id INT);\`,\n};\nexport const runProj = SqliteMigrator.run({ loader: SqliteMigrator.fromRecord(projectorCoreMigrations) });\nexport const decodeRow = (row: { readonly stream_version: number }) => StreamVersion.make(Math.max(0, row.stream_version));\n`,
-          )
+            writeFileSync(
+              join(collisionInfraSrcDir, "projector.ts"),
+              `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { sql } from "@effect/sql";\nexport const projectorCoreMigrations = {\n  "2_init_projector": sql\`CREATE TABLE IF NOT EXISTS proj (id INT);\`,\n};\nexport const runProj = SqliteMigrator.run({ loader: SqliteMigrator.fromRecord(projectorCoreMigrations) });\nexport const decodeRow = (row: { readonly stream_version: number }) => StreamVersion.make(Math.max(0, row.stream_version));\n`,
+            )
 
-          const collisionFindings = yield* evaluatePackageAndMigrationPlugin({
-            graph: buildHarnessGraph({}),
-            workspaceRoot: collisionTempDir,
-            hostIo: testHostIo,
-          })
+            const collisionFindings = yield* evaluatePackageAndMigrationPlugin({
+              graph: buildHarnessGraph({}),
+              workspaceRoot: collisionTempDir,
+              hostIo: testHostIo,
+            })
 
-          const startAtTwoFinding = collisionFindings.find(
-            (f) =>
-              f.kind === "invalid-migrator-record-key" &&
-              f.nodeId === "libs/sample/infra/src/projector.ts:sequence-start-2",
-          )
-          expect(startAtTwoFinding).toBeDefined()
-          expect(startAtTwoFinding?.message).toContain('starts at id "2" instead of "1"')
+            const startAtTwoFinding = collisionFindings.find(
+              (f) =>
+                f.kind === "invalid-migrator-record-key" &&
+                f.nodeId === "libs/sample/infra/src/projector.ts:sequence-start-2",
+            )
+            expect(startAtTwoFinding).toBeDefined()
+            expect(startAtTwoFinding?.message).toContain('starts at id "2" instead of "1"')
 
-          const gapFinding = collisionFindings.find(
-            (f) =>
-              f.kind === "invalid-migrator-record-key" &&
-              f.nodeId === "libs/sample/infra/src/aggregate.ts:sequence-gap-1-3",
-          )
-          expect(gapFinding).toBeDefined()
-          expect(gapFinding?.message).toContain('jumps from "1" to "3"')
+            const gapFinding = collisionFindings.find(
+              (f) =>
+                f.kind === "invalid-migrator-record-key" &&
+                f.nodeId === "libs/sample/infra/src/aggregate.ts:sequence-gap-1-3",
+            )
+            expect(gapFinding).toBeDefined()
+            expect(gapFinding?.message).toContain('jumps from "1" to "3"')
 
-          const sharedTableFinding = collisionFindings.find(
-            (f) =>
-              f.kind === "invalid-migrator-record-key" &&
-              f.nodeId ===
-                "libs/sample/infra/src/projector.ts:shared-default-migrations-table:projectorCoreMigrations",
-          )
-          expect(sharedTableFinding).toBeDefined()
-          expect(sharedTableFinding?.message).toContain(
-            'Multiple distinct SqliteMigrator loaders (aggregateCoreMigrations, projectorCoreMigrations) in "sample/infra" use the default "effect_sql_migrations" table without a custom "table" option',
-          )
+            const sharedTableFinding = collisionFindings.find(
+              (f) =>
+                f.kind === "invalid-migrator-record-key" &&
+                f.nodeId ===
+                  "libs/sample/infra/src/projector.ts:shared-default-migrations-table:projectorCoreMigrations",
+            )
+            expect(sharedTableFinding).toBeDefined()
+            expect(sharedTableFinding?.message).toContain(
+              'Multiple distinct SqliteMigrator loaders (aggregateCoreMigrations, projectorCoreMigrations) in "sample/infra" use the default "effect_sql_migrations" table without a custom "table" option',
+            )
 
-          const brandMakeFinding = collisionFindings.find(
-            (f) =>
-              f.kind === "untrusted-row-brand-make" &&
-              f.nodeId ===
-                "libs/sample/infra/src/projector.ts:StreamVersion.make(row.stream_version)",
-          )
-          expect(brandMakeFinding).toBeDefined()
-          expect(brandMakeFinding?.message).toContain(
-            'Unvalidated "StreamVersion.make(...row.stream_version...)" on SQLite row column',
-          )
-        } finally {
-          rmSync(collisionTempDir, { recursive: true, force: true })
-        }
-      }),
+            const brandMakeFinding = collisionFindings.find(
+              (f) =>
+                f.kind === "untrusted-row-brand-make" &&
+                f.nodeId ===
+                  "libs/sample/infra/src/projector.ts:StreamVersion.make(row.stream_version)",
+            )
+            expect(brandMakeFinding).toBeDefined()
+            expect(brandMakeFinding?.message).toContain(
+              'Unvalidated "StreamVersion.make(...row.stream_version...)" on SQLite row column',
+            )
+          } finally {
+            rmSync(collisionTempDir, { recursive: true, force: true })
+          }
+        }),
       )
     })
 
@@ -3368,10 +3472,7 @@ errors:
               JSON.stringify({ name: "@sample/infra", nx: { tags: ["type:infra"] } }),
             )
             writeFileSync(join(tempDir, "libs/sample/infra/project.json"), "{bad json")
-            writeFileSync(
-              join(tempDir, "libs/sample/infra/src/index.ts"),
-              "export const ok = 1\n",
-            )
+            writeFileSync(join(tempDir, "libs/sample/infra/src/index.ts"), "export const ok = 1\n")
             writeFileSync(
               join(tempDir, "libs/sample/infra/migrations/0001_init.sql"),
               "CREATE TABLE t (id TEXT PRIMARY KEY);\n",
@@ -3384,14 +3485,8 @@ errors:
               join(tempDir, "README.md"),
               "See `@harness/nonexistent`, `harness/bogus-rule`, `libs/missing/file.ts`.\n",
             )
-            writeFileSync(
-              join(tempDir, "AGENTS.md"),
-              "## Rules\nA\n## Rules\nB\n",
-            )
-            writeFileSync(
-              join(tempDir, "adapters/claude-code/rules/AGENTS.md"),
-              "## Drifted\n",
-            )
+            writeFileSync(join(tempDir, "AGENTS.md"), "## Rules\nA\n## Rules\nB\n")
+            writeFileSync(join(tempDir, "adapters/claude-code/rules/AGENTS.md"), "## Drifted\n")
             writeFileSync(
               join(tempDir, "adapters/claude-code/hooks.json"),
               JSON.stringify({
@@ -3422,9 +3517,9 @@ errors:
                   f.nodeId === "libs/sample/infra/project.json:corrupt-manifest",
               ),
             ).toBe(true)
-            expect(
-              pkgFindings.some((f) => f.kind === "inline-test-ddl-bypassing-migrations"),
-            ).toBe(true)
+            expect(pkgFindings.some((f) => f.kind === "inline-test-ddl-bypassing-migrations")).toBe(
+              true,
+            )
 
             const docFindings = evaluateDocTruthPlugin({
               graph: buildHarnessGraph({}),
@@ -3448,13 +3543,19 @@ errors:
         filePath: "libs/sample/infra/src/m.ts",
         content: `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nimport { importedMigrations } from "./other.js";\nexport const m = SqliteMigrator.fromRecord({ ...importedMigrations });`,
       })
-      expect(unresolvedImport.keyIssues.some((i) => i.message.includes("Unresolved spread '...importedMigrations'"))).toBe(true)
+      expect(
+        unresolvedImport.keyIssues.some((i) =>
+          i.message.includes("Unresolved spread '...importedMigrations'"),
+        ),
+      ).toBe(true)
 
       const onlyParam = analyzeSqliteMigratorFromRecordAst({
         filePath: "libs/sample/infra/src/m.ts",
         content: `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nexport const make = (extra: Record<string, unknown>) => SqliteMigrator.fromRecord({ ...extra });`,
       })
-      expect(onlyParam.keyIssues.some((i) => i.message.includes("Unresolved spread '...extra'"))).toBe(true)
+      expect(
+        onlyParam.keyIssues.some((i) => i.message.includes("Unresolved spread '...extra'")),
+      ).toBe(true)
 
       const paramPlusStatic = analyzeSqliteMigratorFromRecordAst({
         filePath: "libs/sample/infra/src/m.ts",
@@ -3466,13 +3567,21 @@ errors:
         filePath: "libs/sample/infra/src/m.ts",
         content: `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nexport const m = SqliteMigrator.fromRecord({ "1_a": "x", "1_b": "y" });`,
       })
-      expect(dupPrefix.keyIssues.some((i) => i.message.includes("Duplicate migration version prefix '1_'"))).toBe(true)
+      expect(
+        dupPrefix.keyIssues.some((i) =>
+          i.message.includes("Duplicate migration version prefix '1_'"),
+        ),
+      ).toBe(true)
 
       const startAtTwo = analyzeSqliteMigratorFromRecordAst({
         filePath: "libs/sample/infra/src/m.ts",
         content: `import { SqliteMigrator } from "@effect/sql-sqlite-do";\nexport const m = SqliteMigrator.fromRecord({ "2_start": "x" });`,
       })
-      expect(startAtTwo.keyIssues.some((i) => i.message.includes("Non-contiguous migration version sequence"))).toBe(true)
+      expect(
+        startAtTwo.keyIssues.some((i) =>
+          i.message.includes("Non-contiguous migration version sequence"),
+        ),
+      ).toBe(true)
 
       const nsSqlDo = analyzeSqliteMigratorFromRecordAst({
         filePath: "libs/sample/infra/src/m.ts",
@@ -3484,23 +3593,28 @@ errors:
 
     it("catches unscoped-effect-run namespace, computed-element, and destructuring bypasses in ast-gate-visitors", () => {
       const checkFile = (code: string) => {
-        const sf = ts.createSourceFile("libs/sample/domain/src/bypass.ts", code, ts.ScriptTarget.Latest, true)
+        const sf = ts.createSourceFile(
+          "libs/sample/domain/src/bypass.ts",
+          code,
+          ts.ScriptTarget.Latest,
+          true,
+        )
         return visitSourceFileSinglePass(sf, "libs/sample/domain/src/bypass.ts", "domain")
       }
       expect(
-        checkFile(`import * as Fx from "effect"; export const x = Fx.Effect.runSync(Fx.Effect.succeed(1));`).some(
-          (v) => v.rule === "unscoped-effect-run",
-        ),
+        checkFile(
+          `import * as Fx from "effect"; export const x = Fx.Effect.runSync(Fx.Effect.succeed(1));`,
+        ).some((v) => v.rule === "unscoped-effect-run"),
       ).toBe(true)
       expect(
-        checkFile(`import { Effect } from "effect"; export const x = Effect["runSync"](Effect.succeed(1));`).some(
-          (v) => v.rule === "unscoped-effect-run",
-        ),
+        checkFile(
+          `import { Effect } from "effect"; export const x = Effect["runSync"](Effect.succeed(1));`,
+        ).some((v) => v.rule === "unscoped-effect-run"),
       ).toBe(true)
       expect(
-        checkFile(`import * as Fx from "effect"; export const x = Fx["Effect"]["runSync"](Fx.Effect.succeed(1));`).some(
-          (v) => v.rule === "unscoped-effect-run",
-        ),
+        checkFile(
+          `import * as Fx from "effect"; export const x = Fx["Effect"]["runSync"](Fx.Effect.succeed(1));`,
+        ).some((v) => v.rule === "unscoped-effect-run"),
       ).toBe(true)
       expect(
         checkFile(`export const run = (rt: any) => rt["runSync"](1);`).some(
@@ -3508,98 +3622,438 @@ errors:
         ),
       ).toBe(true)
       expect(
-        checkFile(`import { Effect } from "effect"; const { runSync } = Effect; export const x = runSync(Effect.succeed(1));`).some(
-          (v) => v.rule === "unscoped-effect-run",
-        ),
+        checkFile(
+          `import { Effect } from "effect"; const { runSync } = Effect; export const x = runSync(Effect.succeed(1));`,
+        ).some((v) => v.rule === "unscoped-effect-run"),
       ).toBe(true)
       expect(
-        checkFile(`import { Effect } from "effect"; const { runPromise: rp } = Effect; export const x = rp(Effect.succeed(1));`).some(
-          (v) => v.rule === "unscoped-effect-run",
-        ),
+        checkFile(
+          `import { Effect } from "effect"; const { runPromise: rp } = Effect; export const x = rp(Effect.succeed(1));`,
+        ).some((v) => v.rule === "unscoped-effect-run"),
       ).toBe(true)
       expect(
-        checkFile(`import * as Fx from "effect"; const { Effect: { runSync: r } } = Fx; export const x = r(Fx.Effect.succeed(1));`).some(
-          (v) => v.rule === "unscoped-effect-run",
-        ),
+        checkFile(
+          `import * as Fx from "effect"; const { Effect: { runSync: r } } = Fx; export const x = r(Fx.Effect.succeed(1));`,
+        ).some((v) => v.rule === "unscoped-effect-run"),
       ).toBe(true)
     })
 
-    it.effect("catches pipe/match silent-gate-fs-fallback and exposes loadGovernanceDocsChecked", () =>
-      Effect.gen(function* () {
-        const pipeCode = `import { Result } from "effect"; export const f = (io: any) => Result.try(() => io.readTextSync("a")).pipe(Result.getOrElse(() => ""));`
-        const matchCode = `import { Result } from "effect"; import { match } from "ts-pattern"; export const f = (io: any) => match(Result.try(() => io.readTextSync("a"))).with({ _tag: "Success" }, ({ success }) => success).with({ _tag: "Failure" }, () => "").exhaustive();`
+    it.effect(
+      "catches pipe/match silent-gate-fs-fallback and exposes loadGovernanceDocsChecked",
+      () =>
+        Effect.gen(function* () {
+          const pipeCode = `import { Result } from "effect"; export const f = (io: any) => Result.try(() => io.readTextSync("a")).pipe(Result.getOrElse(() => ""));`
+          const matchCode = `import { Result } from "effect"; import { match } from "ts-pattern"; export const f = (io: any) => match(Result.try(() => io.readTextSync("a"))).with({ _tag: "Success" }, ({ success }) => success).with({ _tag: "Failure" }, () => "").exhaustive();`
 
-        const sfPipe = ts.createSourceFile("libs/harness/gates/src/example.ts", pipeCode, ts.ScriptTarget.Latest, true)
-        const sfMatch = ts.createSourceFile("libs/harness/gates/src/example.ts", matchCode, ts.ScriptTarget.Latest, true)
-        expect(visitSourceFileSinglePass(sfPipe, "libs/harness/gates/src/example.ts").some((v) => v.rule === "silent-gate-fs-fallback")).toBe(true)
-        expect(visitSourceFileSinglePass(sfMatch, "libs/harness/gates/src/example.ts").some((v) => v.rule === "silent-gate-fs-fallback")).toBe(true)
-
-        const dogfoodReport = yield* decideSelfDogfooding({
-          files: [
-            { filePath: AstSourceFilePath.make("libs/harness/gates/src/pipe-ex.ts"), content: AstSourceContent.make(pipeCode) },
-            { filePath: AstSourceFilePath.make("libs/harness/gates/src/match-ex.ts"), content: AstSourceContent.make(matchCode) },
-          ],
-        })
-        expect(dogfoodReport.violations.filter((v) => v.rule === "silent-gate-fs-fallback").length).toBeGreaterThanOrEqual(2)
-
-        const checkedEmpty = loadGovernanceDocsChecked("/non/existent/repo/root", testHostIo)
-        expect(checkedEmpty.docs).toEqual([])
-        expect(checkedEmpty.findings).toEqual([])
-      }),
-    )
-
-    it.effect("enforces peerDependencies tier checks and infra->app name fallback when app is omitted from manifests", () =>
-      Effect.gen(function* () {
-        const tempDir = mkdtempSync(join(tmpdir(), "harness-peer-dep-test-"))
-        try {
-          const domDir = join(tempDir, "libs", "sample", "domain")
-          mkdirSync(join(domDir, "src"), { recursive: true })
-          writeFileSync(
-            join(domDir, "package.json"),
-            JSON.stringify({
-              name: "@harness/sample-domain",
-              nx: { tags: ["type:domain"] },
-              peerDependencies: { alchemy: "*" },
-            }),
+          const sfPipe = ts.createSourceFile(
+            "libs/harness/gates/src/example.ts",
+            pipeCode,
+            ts.ScriptTarget.Latest,
+            true,
           )
-          writeFileSync(join(domDir, "src", "index.ts"), "export const x = 1;\n")
-          const findings = yield* evaluatePackageAndMigrationPlugin({
-            graph: buildHarnessGraph({}),
-            workspaceRoot: tempDir,
-            hostIo: testHostIo,
-          })
+          const sfMatch = ts.createSourceFile(
+            "libs/harness/gates/src/example.ts",
+            matchCode,
+            ts.ScriptTarget.Latest,
+            true,
+          )
           expect(
-            findings.some(
-              (f) =>
-                f.kind === "architecture-policy-violation" &&
-                f.nodeId.includes("forbidden-domain-dependency") &&
-                f.message.includes("alchemy"),
+            visitSourceFileSinglePass(sfPipe, "libs/harness/gates/src/example.ts").some(
+              (v) => v.rule === "silent-gate-fs-fallback",
             ),
           ).toBe(true)
-        } finally {
-          rmSync(tempDir, { recursive: true, force: true })
-        }
+          expect(
+            visitSourceFileSinglePass(sfMatch, "libs/harness/gates/src/example.ts").some(
+              (v) => v.rule === "silent-gate-fs-fallback",
+            ),
+          ).toBe(true)
 
-        const topologyReport = yield* decideHarnessTierTopology({
-          manifests: [
-            {
-              manifestPath: PackageManifestPath.make("libs/sample/infra/package.json"),
-              packageName: PackageManifestName.make("@harness/sample-infra"),
-              nxTags: [NxTierTag.make("type:infra")],
-              scopeTags: [],
-              dependencyNames: [PackageDependencyName.make("harness-cli")],
-              nonRuntimeDependencyNames: [],
-            },
-          ],
-          serviceFiles: [],
-          workspaceSourceFiles: [],
-        })
-        expect(
-          topologyReport.violations.some(
-            (v) => v.rule === "forbidden-infra-dependency" && v.message.includes("harness-cli"),
-          ),
-        ).toBe(true)
-      }),
+          const dogfoodReport = yield* decideSelfDogfooding({
+            files: [
+              {
+                filePath: AstSourceFilePath.make("libs/harness/gates/src/pipe-ex.ts"),
+                content: AstSourceContent.make(pipeCode),
+              },
+              {
+                filePath: AstSourceFilePath.make("libs/harness/gates/src/match-ex.ts"),
+                content: AstSourceContent.make(matchCode),
+              },
+            ],
+          })
+          expect(
+            dogfoodReport.violations.filter((v) => v.rule === "silent-gate-fs-fallback").length,
+          ).toBeGreaterThanOrEqual(2)
+
+          const checkedEmpty = loadGovernanceDocsChecked("/non/existent/repo/root", testHostIo)
+          expect(checkedEmpty.docs).toEqual([])
+          expect(checkedEmpty.findings).toEqual([])
+        }),
     )
+
+    it.effect(
+      "enforces peerDependencies tier checks and infra->app name fallback when app is omitted from manifests",
+      () =>
+        Effect.gen(function* () {
+          const tempDir = mkdtempSync(join(tmpdir(), "harness-peer-dep-test-"))
+          try {
+            const domDir = join(tempDir, "libs", "sample", "domain")
+            mkdirSync(join(domDir, "src"), { recursive: true })
+            writeFileSync(
+              join(domDir, "package.json"),
+              JSON.stringify({
+                name: "@harness/sample-domain",
+                nx: { tags: ["type:domain"] },
+                peerDependencies: { alchemy: "*" },
+              }),
+            )
+            writeFileSync(join(domDir, "src", "index.ts"), "export const x = 1;\n")
+            const findings = yield* evaluatePackageAndMigrationPlugin({
+              graph: buildHarnessGraph({}),
+              workspaceRoot: tempDir,
+              hostIo: testHostIo,
+            })
+            expect(
+              findings.some(
+                (f) =>
+                  f.kind === "architecture-policy-violation" &&
+                  f.nodeId.includes("forbidden-domain-dependency") &&
+                  f.message.includes("alchemy"),
+              ),
+            ).toBe(true)
+          } finally {
+            rmSync(tempDir, { recursive: true, force: true })
+          }
+
+          const topologyReport = yield* decideHarnessTierTopology({
+            manifests: [
+              {
+                manifestPath: PackageManifestPath.make("libs/sample/infra/package.json"),
+                packageName: PackageManifestName.make("@harness/sample-infra"),
+                nxTags: [NxTierTag.make("type:infra")],
+                scopeTags: [],
+                dependencyNames: [PackageDependencyName.make("harness-cli")],
+                nonRuntimeDependencyNames: [],
+              },
+            ],
+            serviceFiles: [],
+            workspaceSourceFiles: [],
+          })
+          expect(
+            topologyReport.violations.some(
+              (v) => v.rule === "forbidden-infra-dependency" && v.message.includes("harness-cli"),
+            ),
+          ).toBe(true)
+        }),
+    )
+  })
+
+  it("parseGovernanceDocFrontmatterChecked and loadGovernanceDocsChecked emit governance-doc-read-error on malformed frontmatter / invalid status", () => {
+    const malformed = parseGovernanceDocFrontmatterChecked(
+      "docs/specs/SPEC-9999.md",
+      "no frontmatter",
+    )
+    expect(malformed._tag).toBe("Err")
+
+    const invalidStatus = parseGovernanceDocFrontmatterChecked(
+      "docs/specs/SPEC-9999.md",
+      "---\nid: SPEC-9999\ntitle: Bad\nstatus: bogus-status\n---\n",
+    )
+    expect(invalidStatus._tag).toBe("Err")
+
+    // Strict YAML frontmatter rejections & # preservation inside quotes
+    expect(
+      parseGovernanceDocFrontmatterChecked(
+        "docs/specs/SPEC-9999.md",
+        "---\nid: SPEC-9999\nstatus: proposed\n{{invalid}}\n---\n",
+      )._tag,
+    ).toBe("Err")
+    expect(
+      parseGovernanceDocFrontmatterChecked(
+        "docs/specs/SPEC-9999.md",
+        "---\nid: SPEC-9999\nstatus: proposed\nenforced_by: [foo\n---\n",
+      )._tag,
+    ).toBe("Err")
+    expect(
+      parseGovernanceDocFrontmatterChecked(
+        "docs/specs/SPEC-9999.md",
+        "---\nid: SPEC-9999\nstatus: proposed\nenforced_by: libs/a.ts\n---\n",
+      )._tag,
+    ).toBe("Err")
+    expect(
+      parseGovernanceDocFrontmatterChecked(
+        "docs/specs/SPEC-9999.md",
+        "---\nid: SPEC-9999\nstatus: proposed\nspans: foo\n---\n",
+      )._tag,
+    ).toBe("Err")
+    expect(
+      parseGovernanceDocFrontmatterChecked(
+        "docs/specs/SPEC-9999.md",
+        "---\nid: SPEC-9999\nstatus: proposed\n",
+      )._tag,
+    ).toBe("Err")
+
+    const quotedHash = parseGovernanceDocFrontmatterChecked(
+      "docs/specs/SPEC-9999.md",
+      '---\nid: "SPEC#9999"\nstatus: proposed\n---\n',
+    )
+    match(quotedHash)
+      .with({ _tag: "Ok" }, ({ doc }) => {
+        expect(doc.id).toBe("SPEC#9999")
+      })
+      .with({ _tag: "Err" }, ({ reason }) => {
+        expect.unreachable(`Expected Ok for quoted #, got: ${reason}`)
+      })
+      .exhaustive()
+
+    const tempDir = mkdtempSync(join(tmpdir(), "gc-gov-doc-err-"))
+    try {
+      const specsDir = join(tempDir, "docs", "specs")
+      mkdirSync(specsDir, { recursive: true })
+      const badDoc = join(specsDir, "SPEC-0001.md")
+      writeFileSync(
+        badDoc,
+        "---\nid: SPEC-0001\ntitle: Bad Status\nstatus: invalid_status\n---\n",
+        "utf8",
+      )
+      const symDocPath = join(specsDir, "SPEC-0002.md")
+      writeFileSync(symDocPath, "---\nid: SPEC-0002\nstatus: proposed\n---\n", "utf8")
+
+      const symHostIo: typeof testHostIo = {
+        ...testHostIo,
+        isSymbolicLinkSync: (p) => (p === symDocPath ? true : testHostIo.isSymbolicLinkSync(p)),
+      }
+      const loaded = loadGovernanceDocsChecked(tempDir, symHostIo)
+      const err1 = loaded.findings.find(
+        (f) => f.kind === "governance-doc-read-error" && f.location === "docs/specs/SPEC-0001.md",
+      )
+      expect(err1).toBeDefined()
+      expect(err1?.message).toContain("invalid_status")
+
+      const errSym = loaded.findings.find(
+        (f) => f.kind === "governance-doc-read-error" && f.location === "docs/specs/SPEC-0002.md",
+      )
+      expect(errSym).toBeDefined()
+      expect(errSym?.message).toContain("symlink")
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+
+    // gc-rule-digest: missing file in GATE_RULE_SOURCE_FILES fails closed
+    const digestDir = mkdtempSync(join(tmpdir(), "gc-rule-digest-"))
+    try {
+      const firstRel = GATE_RULE_SOURCE_FILES[0]!
+      mkdirSync(dirname(join(digestDir, firstRel)), { recursive: true })
+      writeFileSync(join(digestDir, firstRel), "// partial\n", "utf8")
+      const digestFindings: Array<GcFinding> = []
+      evaluateGateRuleDigestCheck(digestDir, testHostIo, digestFindings)
+      expect(digestFindings.length).toBeGreaterThan(0)
+      expect(digestFindings.some((f) => f.kind === "stale-gate-rule-version")).toBe(true)
+    } finally {
+      rmSync(digestDir, { recursive: true, force: true })
+    }
+
+    // gc-rule-digest: extractGateRuleIdsFromSources extracts GateRuleId.make and [rule-id] from syntaxBansSource
+    const ruleIds = extractGateRuleIdsFromSources(
+      'GateRuleId.make("sample-gate-rule")',
+      "",
+      "",
+      '"[sample-oxlint-rule] bad"',
+    )
+    expect(ruleIds).toContain("sample-gate-rule")
+    expect(ruleIds).toContain("sample-oxlint-rule")
+  })
+
+  it("gc-helpers: buildGraphReachabilityContext, augmentReachabilityWithInference, findClosestMatch boundary, and extractTopLevelObjectAnalysis", () => {
+    const graph = buildHarnessGraph({
+      services: [
+        { tagId: "SvcA", name: "SvcA", packageTag: "service", file: "libs/a/service/src/svc.ts" },
+        { tagId: "SvcB", name: "SvcB", packageTag: "service", file: "libs/a/service/src/svc.ts" },
+      ],
+      errors: [
+        {
+          errorTag: "ErrA",
+          file: "libs/a/contract/src/err.ts",
+        },
+      ],
+      fns: [
+        {
+          qualname: "libs/a/domain/src/fn.ts#fnA",
+          spanName: "A.fnA",
+          packageTag: "domain",
+          file: "libs/a/domain/src/fn.ts",
+          line: 1,
+          successType: "void",
+          isStub: false,
+        },
+        {
+          qualname: "libs/a/domain/src/callee.ts#calleeOnlyFn",
+          spanName: "A.calleeOnlyFn",
+          packageTag: "domain",
+          file: "libs/a/domain/src/callee.ts",
+          line: 1,
+          successType: "void",
+          isStub: false,
+        },
+      ],
+      tracedCalls: [
+        {
+          callerQualname: "libs/a/domain/src/fn.ts#fnA",
+          calleeQualname: "libs/a/domain/src/callee.ts#calleeOnlyFn",
+          callCount: 1,
+          receiverLayer: null,
+        },
+      ],
+      layers: [
+        {
+          qualname: "LayerA",
+          file: "libs/a/infra/src/layer.ts",
+          packageTag: "infra",
+        },
+      ],
+      layerFlows: [
+        {
+          relationId: RelationId.make("lf:LayerA"),
+          layerQualname: "LayerA",
+          providesServices: ["SvcA"],
+          requiresServices: ["SvcB"],
+          emittedErrors: ["ErrA"],
+          file: "libs/a/infra/src/layer.ts",
+          line: 1,
+        },
+      ],
+      tests: [
+        {
+          testId: "test:prop1",
+          testName: "prop1",
+          testFile: "libs/a/domain/test/fn.test.ts",
+          isPropertyTest: true,
+          hasNonPrimitiveArbitrary: true,
+        },
+      ],
+      exercisesSpans: [
+        {
+          testId: "test:prop1",
+          calleeQualname: "libs/a/domain/src/fn.ts#fnA",
+          callCount: 1,
+          receiverLayer: null,
+        },
+      ],
+      httpEndpointTuples: [
+        {
+          relationId: RelationId.make("ep:Api.get"),
+          endpointGroup: "Api",
+          endpointName: "get",
+          method: "GET",
+          path: "/a",
+          file: "libs/a/app/src/http.ts",
+          line: 1,
+          handlerQualname: "libs/a/domain/src/fn.ts#fnA",
+          requestSchemaQualnames: [],
+          responseSchemaQualnames: [],
+          errorTags: ["ErrA"],
+        },
+      ],
+    })
+
+    const ctx = buildGraphReachabilityContext(graph)
+    const nodes = [...Graph.nodes(graph.graph)]
+    const fnIdx = nodes.find(
+      ([, n]) => n._tag === "EffectFn" && n.qualname === "libs/a/domain/src/fn.ts#fnA",
+    )![0]
+    const calleeIdx = nodes.find(
+      ([, n]) => n._tag === "EffectFn" && n.qualname === "libs/a/domain/src/callee.ts#calleeOnlyFn",
+    )![0]
+    const errIdx = nodes.find(([, n]) => n._tag === "TaggedError" && n.errorTag === "ErrA")![0]
+    expect(ctx.incomingTestOrCall.get(fnIdx)).toBeGreaterThanOrEqual(2)
+    expect(ctx.incomingTestOrCall.get(calleeIdx)).toBe(1)
+    expect(ctx.incomingRichPropertyTests.get(fnIdx)).toBe(1)
+    expect(ctx.incomingFailsWith.get(errIdx)).toBeGreaterThanOrEqual(2)
+
+    // Pre-populate counts to 2 so augmentReachabilityWithInference must NOT clobber >=1 back to 1
+    const svcAIdx = nodes.find(([, n]) => n._tag === "ServiceTag" && n.tagId === "SvcA")![0]
+    const svcBIdx = nodes.find(([, n]) => n._tag === "ServiceTag" && n.tagId === "SvcB")![0]
+    const keyFor = (targetIdx: number): NodeKey =>
+      NodeKey.make([...graph.nodeIndexByKey.entries()].find(([, idx]) => idx === targetIdx)![0])
+    const dummyProof = {
+      proofId: ProofId.make("p1"),
+      ruleId: DatalogRuleId.make("r1"),
+      stratum: 0 as const,
+      conclusion: "c",
+      premises: [],
+      bindings: {},
+      parentProofIds: [],
+    }
+    const customInferred = {
+      effectiveRequires: [
+        {
+          callerKey: NodeKey.make("libs/a/domain/src/fn.ts#fnA"),
+          serviceKey: keyFor(svcAIdx),
+          isDirect: true,
+          path: [],
+          proof: dummyProof,
+        },
+      ],
+      effectiveFailsWith: [
+        {
+          callerKey: NodeKey.make("libs/a/domain/src/fn.ts#fnA"),
+          errorKey: keyFor(errIdx),
+          isDirect: true,
+          path: [],
+          proof: dummyProof,
+        },
+      ],
+      effectiveLayerRequires: [],
+      effectiveLayerDeps: [
+        {
+          layerKey: NodeKey.make("LayerA"),
+          requiredServiceKey: keyFor(svcBIdx),
+          isDirect: true,
+          path: [],
+          proof: dummyProof,
+        },
+      ],
+      effectiveTestReach: [
+        {
+          testKey: NodeKey.make("test:prop1"),
+          targetSpanKey: keyFor(calleeIdx),
+          isPropertyTest: true,
+          isDirect: true,
+          path: [],
+          proof: dummyProof,
+        },
+      ],
+      antiPatterns: [],
+      suggestedEdges: [],
+      proofs: [],
+    }
+    ctx.incomingRequires.set(svcAIdx, 2)
+    ctx.incomingFailsWith.set(errIdx, 2)
+    ctx.incomingLayerRequires.set(svcBIdx, 2)
+    ctx.incomingPropertyTests.set(calleeIdx, 2)
+    augmentReachabilityWithInference(ctx, graph, customInferred)
+    expect(ctx.incomingRequires.get(svcAIdx)).toBe(2)
+    expect(ctx.incomingFailsWith.get(errIdx)).toBe(2)
+    expect(ctx.incomingLayerRequires.get(svcBIdx)).toBe(2)
+    expect(ctx.incomingPropertyTests.get(calleeIdx)).toBe(2)
+
+    // Fresh counts 0 -> 1
+    ctx.incomingRequires.set(svcAIdx, 0)
+    ctx.incomingFailsWith.set(errIdx, 0)
+    ctx.incomingLayerRequires.set(svcBIdx, 0)
+    ctx.incomingPropertyTests.set(calleeIdx, 0)
+    augmentReachabilityWithInference(ctx, graph, customInferred)
+    expect(ctx.incomingRequires.get(svcAIdx)).toBe(1)
+    expect(ctx.incomingFailsWith.get(errIdx)).toBe(1)
+    expect(ctx.incomingLayerRequires.get(svcBIdx)).toBe(1)
+    expect(ctx.incomingPropertyTests.get(calleeIdx)).toBe(1)
+
+    // findClosestMatch exact threshold boundary (distance === threshold)
+    expect(findClosestMatch("abc", ["axc", "zzz"], 1)).toBe("axc")
+
+    // extractTopLevelObjectAnalysis with nested braces, brackets, parens before finalKey
+    const objAnalysis = extractTopLevelObjectAnalysis(
+      "a: f({ x: 1 }), b: g([1, 2]), c: h((1 + 2)), finalKey: true",
+    )
+    expect(objAnalysis.keys).toEqual(["a", "b", "c", "finalKey"])
   })
 })

@@ -4,6 +4,7 @@ import { Result } from "effect"
 import { match } from "ts-pattern"
 import { resolveCanonicalRepoRoot } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
+import type { SyncHostIo } from "@harness/service/host-io"
 
 export const isInsideRoot = (rootDir: string, candidatePath: string): boolean => {
   const rel = relative(resolve(rootDir), resolve(candidatePath))
@@ -82,10 +83,7 @@ export const resolveNearestRealpathChecked = (targetPath: string): RepoPathResol
  * Resolves `targetPath` relative to `repoRoot` and returns a discriminated union
  * distinguishing `Resolved`, `EscapesRoot`, and `IoError`.
  */
-export const resolveRepoPathChecked = (
-  repoRoot: string,
-  userPath: string,
-): RepoPathResolution => {
+export const resolveRepoPathChecked = (repoRoot: string, userPath: string): RepoPathResolution => {
   const trimmed = userPath.trim()
   if (trimmed.length === 0) {
     return { _tag: "EscapesRoot", candidatePath: repoRoot }
@@ -145,8 +143,11 @@ export const resolveClusterRepoRoot = (repoRoot: string): string =>
     ? repoRoot
     : (walkUpForPnpmWorkspace(repoRoot) ?? resolve(repoRoot))
 
-export const isIsolatedExternalWorkspace = (repoRoot: string): boolean => {
-  if (nodeSyncHostIo.existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))) {
+export const isIsolatedExternalWorkspace = (
+  repoRoot: string,
+  hostIo: SyncHostIo = nodeSyncHostIo,
+): boolean => {
+  if (hostIo.existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))) {
     return false
   }
   const explicitEnvUrl =
@@ -155,12 +156,46 @@ export const isIsolatedExternalWorkspace = (repoRoot: string): boolean => {
     return false
   }
   return (
-    resolveCanonicalRepoRoot(repoRoot, nodeSyncHostIo) !==
-    resolveCanonicalRepoRoot(CLI_REPO_ROOT, nodeSyncHostIo)
+    resolveCanonicalRepoRoot(repoRoot, hostIo) !== resolveCanonicalRepoRoot(CLI_REPO_ROOT, hostIo)
   )
 }
 
-export const extractFlag = (subArgs: ReadonlyArray<string>, flagName: string): string | undefined => {
+export type RequiredFlagValue =
+  | { readonly _tag: "Absent" }
+  | { readonly _tag: "MissingValue" }
+  | { readonly _tag: "Value"; readonly value: string }
+
+export const extractRequiredFlagValue = (
+  subArgs: ReadonlyArray<string>,
+  flagName: string,
+): RequiredFlagValue => {
+  for (let i = 0; i < subArgs.length; i++) {
+    const arg = subArgs[i]
+    if (arg === flagName) {
+      if (i + 1 >= subArgs.length) {
+        return { _tag: "MissingValue" }
+      }
+      const next = subArgs[i + 1]
+      if (next === undefined || next.trim().length === 0 || next.startsWith("--")) {
+        return { _tag: "MissingValue" }
+      }
+      return { _tag: "Value", value: next }
+    }
+    if (arg !== undefined && arg.startsWith(`${flagName}=`)) {
+      const value = arg.slice(flagName.length + 1)
+      if (value.trim().length === 0) {
+        return { _tag: "MissingValue" }
+      }
+      return { _tag: "Value", value }
+    }
+  }
+  return { _tag: "Absent" }
+}
+
+export const extractFlag = (
+  subArgs: ReadonlyArray<string>,
+  flagName: string,
+): string | undefined => {
   for (let i = 0; i < subArgs.length; i++) {
     const arg = subArgs[i]
     if (arg === flagName && i + 1 < subArgs.length) {
@@ -177,7 +212,9 @@ export const resolveRepoPathOrMessage = (
   repoRoot: string,
   userPath: string,
   label: string,
-): { readonly ok: true; readonly resolvedPath: string } | { readonly ok: false; readonly message: string } =>
+):
+  | { readonly ok: true; readonly resolvedPath: string }
+  | { readonly ok: false; readonly message: string } =>
   match(resolveRepoPathChecked(repoRoot, userPath))
     .with({ _tag: "Resolved" }, ({ resolvedPath }) => ({ ok: true as const, resolvedPath }))
     .with({ _tag: "EscapesRoot" }, () => ({

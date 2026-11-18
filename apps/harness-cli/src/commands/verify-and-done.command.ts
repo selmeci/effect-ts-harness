@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import { Cause, Duration, Effect } from "effect"
+import { Cause, Duration, Effect, Result } from "effect"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
 import { isPureInterruptCause } from "@harness/contract"
@@ -68,6 +68,7 @@ import {
 } from "./stop-hook-and-transcript.js"
 import {
   evaluateVerifyMutateStampGate,
+  isVerifyMutateStampGateEnforced,
   loadSnapshotPair,
   parseDoneDeadlineMs,
   resolveVerifyStampMutateMeta,
@@ -150,6 +151,24 @@ export const handleVerify = (options: CliEnv | undefined): Effect.Effect<CliResu
       .with({ _tag: "GitFailed" }, () => [] as ReadonlyArray<string>)
       .exhaustive()
 
+    const checkedDocs =
+      options?.governanceDocs !== undefined
+        ? { docs: options.governanceDocs, findings: [] }
+        : loadGovernanceDocsChecked(repoRoot, nodeSyncHostIo)
+    if (checkedDocs.findings.length > 0) {
+      const msg = checkedDocs.findings
+        .map((f) => `[${f.kind}] ${f.location ?? f.nodeId}: ${f.message}`)
+        .join("\n")
+      return verifyFailureWithThrashing(
+        options,
+        repoRoot,
+        checkedDocs.findings[0]?.kind ?? "governance-doc-read-failed",
+        msg,
+        `Verification failed: unreadable governance docs\n${msg}`,
+      )
+    }
+    const governanceDocs = checkedDocs.docs
+
     const graph = yield* extractGraphViaCompilerOverlay({ repoRoot }).pipe(
       Effect.provide(makeTsCompilerOverlayLayer(nodeSyncHostIo)),
       Effect.catchTag("TsCompilerOverlayError", (err) =>
@@ -207,23 +226,6 @@ export const handleVerify = (options: CliEnv | undefined): Effect.Effect<CliResu
       )
     }
 
-    const checkedDocs =
-      options?.governanceDocs !== undefined
-        ? { docs: options.governanceDocs, findings: [] }
-        : loadGovernanceDocsChecked(repoRoot, nodeSyncHostIo)
-    if (checkedDocs.findings.length > 0) {
-      const msg = checkedDocs.findings
-        .map((f) => `[${f.kind}] ${f.location ?? f.nodeId}: ${f.message}`)
-        .join("\n")
-      return verifyFailureWithThrashing(
-        options,
-        repoRoot,
-        checkedDocs.findings[0]?.kind ?? "governance-doc-read-failed",
-        msg,
-        `Verification failed: unreadable governance docs\n${msg}`,
-      )
-    }
-    const governanceDocs = checkedDocs.docs
     const ontologyInvariants = yield* decideOntologyInvariants({ graph, governanceDocs })
     if (!ontologyInvariants.clean) {
       const msg = ontologyInvariants.findings
@@ -326,73 +328,91 @@ export const handleVerify = (options: CliEnv | undefined): Effect.Effect<CliResu
       )
     }
 
-    const dstSuiteResult = yield* runDstSeedSuite({
-      tier: DstExecutionTier.make(process.env.CI === "true" ? "ci_full" : "fast_local"),
-      pinnedSeed: parseDstSeedEnv(process.env["DST_SEED"]),
-      stepCount: DstStepCount.make(8),
-      targets: buildDstTargetsFromGraph(graph),
-    }).pipe(
-      Effect.map((suite) => ({ _tag: "Ok" as const, suite })),
-      Effect.catchTag("DstScheduleError", (err) => Effect.succeed({ _tag: "Err" as const, err })),
-    )
-
-    return yield* match(dstSuiteResult)
-      .with({ _tag: "Err" }, ({ err }) =>
+    const seedRes = Result.try(() => parseDstSeedEnv(process.env["DST_SEED"]))
+    return yield* match(seedRes)
+      .with({ _tag: "Failure" }, ({ failure }) =>
         Effect.succeed<CliResult>({
           exitCode: 1,
           stdout: "",
-          stderr: `[GATE FAILURE] verify:dst-schedule\n${err.reason ?? err.message}`,
+          stderr: `[GATE FAILURE] verify:dst-seed\n${failure instanceof Error ? failure.message : String(failure)}`,
         }),
       )
-      .with({ _tag: "Ok" }, ({ suite }) =>
+      .with({ _tag: "Success" }, ({ success: pinnedSeed }) =>
         Effect.gen(function* () {
-          const spanReadResult = yield* readRecordedSpans(repoRoot).pipe(
-            Effect.map((spans) => ({ _tag: "Ok" as const, spans })),
-            Effect.catchTag("SpanTraceReadError", (err) =>
-              Effect.succeed({ _tag: "SpanReadErr" as const, err }),
+          const dstSuiteResult = yield* runDstSeedSuite({
+            tier: DstExecutionTier.make(process.env.CI === "true" ? "ci_full" : "fast_local"),
+            pinnedSeed,
+            stepCount: DstStepCount.make(8),
+            targets: buildDstTargetsFromGraph(graph),
+          }).pipe(
+            Effect.map((suite) => ({ _tag: "Ok" as const, suite })),
+            Effect.catchTag("DstScheduleError", (err) =>
+              Effect.succeed({ _tag: "Err" as const, err }),
             ),
           )
 
-          return yield* match(spanReadResult)
-            .with({ _tag: "SpanReadErr" }, ({ err }) =>
+          return yield* match(dstSuiteResult)
+            .with({ _tag: "Err" }, ({ err }) =>
               Effect.succeed<CliResult>({
                 exitCode: 1,
                 stdout: "",
-                stderr: `[GATE FAILURE] verify:span-budget\n${err.message}`,
+                stderr: `[GATE FAILURE] verify:dst-schedule\n${err.reason ?? err.message}`,
               }),
             )
-            .with({ _tag: "Ok" }, ({ spans: recordedSpans }) =>
+            .with({ _tag: "Ok" }, ({ suite }) =>
               Effect.gen(function* () {
-                const spanBudgetsResult = yield* decideSpanBudgets({
-                  spans: recordedSpans,
-                  causalityRules: [],
-                  failOnViolation: true,
-                }).pipe(
-                  Effect.map(() => ({ _tag: "Ok" as const })),
-                  Effect.catchTag("SpanCausalityError", (err) =>
-                    Effect.succeed({ _tag: "Err" as const, err }),
+                const spanReadResult = yield* readRecordedSpans(repoRoot).pipe(
+                  Effect.map((spans) => ({ _tag: "Ok" as const, spans })),
+                  Effect.catchTag("SpanTraceReadError", (err) =>
+                    Effect.succeed({ _tag: "SpanReadErr" as const, err }),
                   ),
                 )
 
-                return match(spanBudgetsResult)
-                  .with({ _tag: "Err" }, ({ err }) => ({
-                    exitCode: 1,
-                    stdout: "",
-                    stderr: `[GATE FAILURE] verify:span-budget\n${err.message}`,
-                  }))
-                  .with({ _tag: "Ok" }, () => {
-                    const stamp = writeVerifyStamp(
-                      repoRoot,
-                      nodeSyncHostIo,
-                      taskBranches.implBranch,
-                      {
-                        dstSeed: suite.initialSeed,
-                        dstSeedsRun: suite.seedsRun,
-                      },
-                      resolveVerifyStampMutateMeta(repoRoot),
-                    )
-                    return { exitCode: 0, stdout: JSON.stringify(stamp), stderr: "" }
-                  })
+                return yield* match(spanReadResult)
+                  .with({ _tag: "SpanReadErr" }, ({ err }) =>
+                    Effect.succeed<CliResult>({
+                      exitCode: 1,
+                      stdout: "",
+                      stderr: `[GATE FAILURE] verify:span-budget\n${err.message}`,
+                    }),
+                  )
+                  .with({ _tag: "Ok" }, ({ spans: recordedSpans }) =>
+                    Effect.gen(function* () {
+                      const spanBudgetsResult = yield* decideSpanBudgets({
+                        spans: recordedSpans,
+                        causalityRules: [],
+                        failOnViolation: true,
+                      }).pipe(
+                        Effect.map(() => ({ _tag: "Ok" as const })),
+                        Effect.catchTag("SpanCausalityError", (err) =>
+                          Effect.succeed({ _tag: "Err" as const, err }),
+                        ),
+                      )
+
+                      return match(spanBudgetsResult)
+                        .with({ _tag: "Err" }, ({ err }) => ({
+                          exitCode: 1,
+                          stdout: "",
+                          stderr: `[GATE FAILURE] verify:span-budget\n${err.message}`,
+                        }))
+                        .with({ _tag: "Ok" }, () => {
+                          const stamp = writeVerifyStamp(
+                            repoRoot,
+                            nodeSyncHostIo,
+                            taskBranches.implBranch,
+                            {
+                              dstSeed: suite.initialSeed,
+                              dstSeedsRun: suite.seedsRun,
+                            },
+                            isVerifyMutateStampGateEnforced(repoRoot, options)
+                              ? resolveVerifyStampMutateMeta(repoRoot)
+                              : undefined,
+                          )
+                          return { exitCode: 0, stdout: JSON.stringify(stamp), stderr: "" }
+                        })
+                        .exhaustive()
+                    }),
+                  )
                   .exhaustive()
               }),
             )

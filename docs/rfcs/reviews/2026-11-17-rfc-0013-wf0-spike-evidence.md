@@ -3,7 +3,7 @@
 **Date:** 2026-11-17  
 **Branch:** `rfc0013_spike_wf0` (base commit `c04c15a9f5`)  
 **Target RFC:** [0013-deterministic-workflow-as-code-plan-dag-orchestration.md](../0013-deterministic-workflow-as-code-plan-dag-orchestration.md) (`harness:ADR-0018`, `harness:SPEC-0017`)  
-**Spike Sandbox & Archived Telemetry:** `.harness/wf0-spike/` (git-ignored & verify-stamp-ignored; primary JSON `.harness/wf0-spike/wf0-results.json`, supplementary JSON `.harness/wf0-spike/wf0-supplement-results.json`, archived in conversation scratch dir; **0 production edits** in `libs/**` or `apps/**`)  
+**Spike Sandbox & Archived Telemetry:** `.harness/wf0-spike/` (git-ignored & verify-stamp-ignored; primary JSON `.harness/wf0-spike/wf0-results.json`, supplementary JSON `.harness/wf0-spike/wf0-supplement-results.json`; **no workflow-runtime production code merged** in `libs/**` or `apps/**`)  
 **Overall Milestone WF-0 Verdict:** **CONDITIONAL GO** — Core `effect@4.0.0` `Workflow`/`ClusterWorkflowEngine` semantics and Omnigraph `0.14.0` storage primitives work as designed (ruling out Alternative D custom engine), **provided WF-1..WF-6 close all P0/P1 concurrency, crash-lease, security, lifecycle, and contract gaps identified by WF-0 and the specialist reviews below** (now integrated into RFC-0013).
 
 ---
@@ -66,7 +66,9 @@
 | `saveEnvelope` P50 / P95 / Max                         | **529.46 / 919.13 / 1,001.24 ms** | **135.91 / 829.65 / 1,112.15 ms**   | queued vs contending     |
 | `saveReply` P50 / P95 / Max                            | **334.24 / 790.86 / 995.92 ms**   | **101.81 / 5,779.90 / 6,959.88 ms** | **7.31× worse P95 tail** |
 
-_(Uncontended single-workflow latencies in `Suite 2`, 42 reads / 23 writes / 3 OCC retries: `unprocessedMessages` `1.75–38.13 ms`, `saveEnvelope` `6.06–14.69 ms` on 9/10 calls with 1 OCC retry at `89.31 ms`, `saveReply` `12.47–13.72 ms`, `requestIdForPrimaryKey` `2.40–8.36 ms`, `repliesForUnfiltered` `2.83–3.52 ms`, `clearReplies` `19.08 ms`, `resetShards` `9.23 ms`.)_ 6. **Lance amplification, `optimize`, `cleanup`, and admission lock retention (`Suite 5` + `Probe 2`):**
+_(Uncontended single-workflow latencies in `Suite 2`, 42 reads / 23 writes / 3 OCC retries: `unprocessedMessages` `1.75–38.13 ms`, `saveEnvelope` `6.06–14.69 ms` on 9/10 calls with 1 OCC retry at `89.31 ms`, `saveReply` `12.47–13.72 ms`, `requestIdForPrimaryKey` `2.40–8.36 ms`, `repliesForUnfiltered` `2.83–3.52 ms`, `clearReplies` `19.08 ms`, `resetShards` `9.23 ms`.)_
+
+6. **Lance amplification, `optimize`, `cleanup`, and admission lock retention (`Suite 5` + `Probe 2`):**
 
 - `Suite 5`: `harness-workflows.omni` grew to **172,436,084 B** for 475 entities (**225,271 B** NDJSON = **`~765×`** amplification). Offline `omnigraph optimize` compacted fragments `235 -> 1` (`173,002,572 B`), while **`Probe 2` proved `omnigraph cleanup --keep 1 --confirm` reclaimed `5,553,119 B` (`8,685,497 -> 3,132,378 B`, removing 81 versions across 3 datasets)** while preserving live rows (`rowsAfterCleanup: 1`).
 - **Omnigraph `0.14.0` CLI quirks:** Both `optimize` and `cleanup` reject `--as` (despite `--help` listing it) and `optimize` rejects inline `http://` URLs (`"inline access supports local storage only"`). Worse, inline `file://` runs of `optimize` and `cleanup` **retain `__cluster/lock.json` on exit** (`"command completion alone does not release this lock"`), requiring `omnigraph cluster force-unlock` after confirming quiescence.

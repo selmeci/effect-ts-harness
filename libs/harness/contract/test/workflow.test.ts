@@ -23,6 +23,7 @@ import {
   NxProjectName,
   OwnedRelPath,
   PackageStampHash,
+  PackageUnitDraft,
   PackageVerifyCommand,
   PlanGraphIssue,
   PlanSha256,
@@ -38,6 +39,7 @@ import {
   ShipReceipt,
   ShipStage,
   SliceBranchName,
+  SliceUnitDraft,
   StubSymbolKey,
   TaskRunReceipt,
   type UnitCompletedOutcome,
@@ -47,12 +49,14 @@ import {
   UnitOutcome,
   UnitRejection,
   WaveIndex,
+  WorkUnitDraft,
   WorkUnitId,
   WorkflowCompileReason,
   WorkflowLevel,
   WorkflowRunId,
   WorkspaceFilePath,
   WorkspaceTreeHash,
+  pathsOverlap,
   wavesOf,
 } from "../src/index.js"
 
@@ -150,8 +154,12 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
     expectCases(ShipAttempt, [1, 2, 42], [0, -1, 1.5, "1"])
     expectCases(WaveIndex, [0, 1, 10], [-1, 1.5, "0"])
     expectCases(MaxConcurrency, [1, 4, 8], [0, 9, -1, 1.5, "1"])
-    expectCases(GateExitCode, [0, 1, -1, 127], [1.5, Number.NaN, "0"])
-    expectCases(NxProjectName, ["@harness/contract", "app"], ["", "   ", " app", "app "])
+    expectCases(GateExitCode, [1, 127, 255], [0, -1, 256, 1.5, Number.NaN, "0"])
+    expectCases(
+      NxProjectName,
+      ["@harness/contract", "@harness/u1", "app"],
+      ["", "   ", " app", "app ", "App", "@harness/bad/sub"],
+    )
     expectCases(
       WorkspaceTreeHash,
       [SHA_64_A, "01234567".repeat(8)],
@@ -171,8 +179,33 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
     expectCases(EarsRequirementKey, ["REQ-1.1"], ["", "  ", " REQ-1.1", "REQ-1.1 "])
     expectCases(
       PackageVerifyCommand,
-      ["pnpm nx run @harness/contract:verify"],
-      ["", "  ", " cmd", "cmd "],
+      [
+        "pnpm nx run @harness/contract:verify",
+        "nx run @harness/contract:test",
+        "nx affected -t verify",
+        "pnpm --filter @harness/contract verify",
+      ],
+      [
+        "",
+        "  ",
+        "pnpm",
+        "nx",
+        " pnpm nx run @harness/contract:verify",
+        "pnpm nx run @harness/contract:verify ",
+        "bash -c echo",
+        "pnpm dlx evil",
+        "pnpm exec rm -rf /",
+        "pnpm -C /tmp nx run @harness/contract:verify",
+        "pnpm nx run @harness/contract:verify; rm -rf /",
+        "pnpm nx run @harness/contract:verify && echo hi",
+        "pnpm nx run @harness/contract:verify | cat",
+        "pnpm nx run @harness/contract:verify > out",
+        "pnpm nx run @harness/contract:verify < in",
+        "pnpm nx run @harness/contract:verify `id`",
+        "pnpm nx run @harness/contract:verify $(id)",
+        "pnpm nx run @harness/contract:verify\nrm",
+        "pnpm nx run @harness/contract:verify\rrm",
+      ],
     )
     expectCases(AgentFailureReason, ["timeout"], ["", "  ", " timeout", "timeout "])
     expectCases(WorkflowCompileReason, ["cycle detected"], ["", "  ", " reason", "reason "])
@@ -218,6 +251,14 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
         "file:etc/passwd",
         "http:a.ts",
         "https://evil.com/a.ts",
+        "libs/a:b.ts",
+        "libs/a./b.ts",
+        "libs/a.",
+        ".git/config",
+        ".harness/mutate-stamp.json",
+        "repos/effect/package.json",
+        "repos/alchemy/package.json",
+        "tools/oxlint/syntax-bans.js",
         "a".repeat(513),
         null,
       ],
@@ -249,25 +290,42 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
       expect(label.length).toBeGreaterThan(0)
     }
 
-    const sliceUnit: CompiledWorkUnit = {
+    const sliceDraft: WorkUnitDraft = {
       _tag: "SliceUnit",
       unitId: WorkUnitId.make("unit-slice-1"),
       branch: SliceBranchName.make("slice/epic-unit1"),
-      waveIndex: WaveIndex.make(0),
-      dependsOn: [],
       ownedRelPaths: [OwnedRelPath.make("libs/harness/contract/src/workflow.ts")],
       earsKeys: [EarsRequirementKey.make("REQ-1.1")],
     }
-    const pkgUnit: CompiledWorkUnit = {
+    const pkgDraft: WorkUnitDraft = {
       _tag: "PackageUnit",
       unitId: WorkUnitId.make("unit-pkg-1"),
       projectName: NxProjectName.make("@harness/contract"),
-      waveIndex: WaveIndex.make(1),
-      dependsOn: [WorkUnitId.make("unit-slice-1")],
       ownedRelPaths: [OwnedRelPath.make("libs/harness/contract/test/workflow.test.ts")],
       stubKeys: [StubSymbolKey.make("PlanWorkflowCompiler.decide")],
       earsKeys: [EarsRequirementKey.make("REQ-1.2")],
       packageVerifyCommand: PackageVerifyCommand.make("pnpm nx run @harness/contract:verify"),
+    }
+    roundtrip(SliceUnitDraft, sliceDraft)
+    roundtrip(PackageUnitDraft, pkgDraft)
+    for (const draft of [sliceDraft, pkgDraft]) {
+      const decoded = roundtrip(WorkUnitDraft, draft)
+      const tag = match(decoded)
+        .with({ _tag: "SliceUnit" }, (u) => u.branch)
+        .with({ _tag: "PackageUnit" }, (u) => u.projectName)
+        .exhaustive()
+      expect(tag.length).toBeGreaterThan(0)
+    }
+
+    const sliceUnit: CompiledWorkUnit = {
+      ...sliceDraft,
+      waveIndex: WaveIndex.make(0),
+      dependsOn: [],
+    }
+    const pkgUnit: CompiledWorkUnit = {
+      ...pkgDraft,
+      waveIndex: WaveIndex.make(1),
+      dependsOn: [WorkUnitId.make("unit-slice-1")],
     }
     for (const unit of [sliceUnit, pkgUnit]) {
       const decoded = roundtrip(CompiledWorkUnit, unit)
@@ -282,11 +340,13 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
       from: WorkUnitId.make("unit-slice-1"),
       to: WorkUnitId.make("unit-pkg-1"),
     })
-    roundtrip(CompileInput, { units: [sliceUnit, pkgUnit], dependencies: [dep] })
+    roundtrip(CompileInput, { units: [sliceDraft, pkgDraft], dependencies: [dep] })
 
     const wave0 = roundtrip(CompiledWave, { waveIndex: WaveIndex.make(0), units: [sliceUnit] })
     const wave1 = roundtrip(CompiledWave, { waveIndex: WaveIndex.make(1), units: [pkgUnit] })
-    roundtrip(CompiledWaves, { units: [sliceUnit, pkgUnit], waves: [wave0, wave1] })
+    expect(wave0.units).toHaveLength(1)
+    expect(wave1.units).toHaveLength(1)
+    roundtrip(CompiledWaves, { units: [sliceUnit, pkgUnit] })
 
     roundtrip(CompiledPlan, {
       runId: WorkflowRunId.make("run-0001"),
@@ -370,6 +430,7 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
     })
     roundtrip(TaskRunReceipt, {
       runId: WorkflowRunId.make("run-0001"),
+      planSha: PlanSha256.make(SHA_64_C),
       review: {
         _tag: "ActiveReviewPlan",
         depth: ReviewDepth.make("focused"),
@@ -390,6 +451,12 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
       attempt: ShipAttempt.make(1),
       verifiedTreeHash: WorkspaceTreeHash.make(SHA_64_A),
     })
+    roundtrip(ShipReceipt, {
+      runId: WorkflowRunId.make("run-0001"),
+      planSha: PlanSha256.make(SHA_64_C),
+      attempt: ShipAttempt.make(2),
+      verifiedTreeHash: WorkspaceTreeHash.make(SHA_64_A),
+    })
 
     const issues: ReadonlyArray<PlanGraphIssue> = [
       { _tag: "DuplicateWorkUnitId", unitId: WorkUnitId.make("unit-slice-1") },
@@ -397,14 +464,14 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
         _tag: "DanglingUnitDependency",
         from: WorkUnitId.make("unit-slice-1"),
         to: WorkUnitId.make("unit-missing"),
-        missingUnitId: WorkUnitId.make("unit-missing"),
+        missingUnitIds: [WorkUnitId.make("unit-missing")],
       },
     ]
     for (const issue of issues) {
       const decoded = roundtrip(PlanGraphIssue, issue)
       const msg = match(decoded)
         .with({ _tag: "DuplicateWorkUnitId" }, (i) => i.unitId)
-        .with({ _tag: "DanglingUnitDependency" }, (i) => i.missingUnitId)
+        .with({ _tag: "DanglingUnitDependency" }, (i) => i.missingUnitIds[0])
         .exhaustive()
       expect(msg.length).toBeGreaterThan(0)
     }
@@ -429,11 +496,20 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
 
     const invalidGraphErr = new InvalidPlanWorkflowGraphError({
       issue: { _tag: "DuplicateWorkUnitId", unitId: WorkUnitId.make("dup") },
-      reason: WorkflowCompileReason.make("duplicate id"),
     })
     expect(invalidGraphErr._tag).toBe("InvalidPlanWorkflowGraphError")
     expect(invalidGraphErr.issue._tag).toBe("DuplicateWorkUnitId")
-    expect(invalidGraphErr.reason).toBe("duplicate id")
+    expect(invalidGraphErr.message).toBe("Duplicate work unit id: dup")
+
+    const danglingGraphErr = new InvalidPlanWorkflowGraphError({
+      issue: {
+        _tag: "DanglingUnitDependency",
+        from: WorkUnitId.make("u1"),
+        to: WorkUnitId.make("u2"),
+        missingUnitIds: [WorkUnitId.make("u2")],
+      },
+    })
+    expect(danglingGraphErr.message).toBe("Dangling unit dependency u1 -> u2 (missing: u2)")
   })
 
   it("sorts waves ascending by waveIndex and units lexicographically by unitId via wavesOf (REQ-1.3)", () => {
@@ -459,7 +535,6 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
 
     const compiledWaves: CompiledWaves = {
       units: unsortedUnits,
-      waves: [],
     }
     const fromWaves = wavesOf(compiledWaves)
     expect(fromWaves.map((w) => w.waveIndex)).toEqual([0, 1, 2])
@@ -479,7 +554,7 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
     const fromPlan = wavesOf(compiledPlan)
     expect(fromPlan).toEqual(fromWaves)
 
-    expect(wavesOf({ units: [], waves: [] })).toEqual([])
+    expect(wavesOf({ units: [] })).toEqual([])
   })
 
   it("enforces distinct compile-time brands for hashes and workflow IDs", () => {
@@ -562,7 +637,7 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
 
     const wave0: CompiledWave = { waveIndex: WaveIndex.make(0), units: [sliceUnit] }
     const wave1: CompiledWave = { waveIndex: WaveIndex.make(1), units: [pkgUnit] }
-    const compiledWaves: CompiledWaves = { units: [sliceUnit, pkgUnit], waves: [wave0, wave1] }
+    const compiledWaves: CompiledWaves = { units: [sliceUnit, pkgUnit] }
     const compiledPlan: CompiledPlan = {
       runId: WorkflowRunId.make("run-0001"),
       level: WorkflowLevel.make("epic"),
@@ -618,5 +693,160 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
     for (const outcome of outcomes) {
       roundtripUnknown(UnitOutcome, outcome)
     }
+  })
+
+  it("checks directory-prefix overlap via pathsOverlap without sibling false positives (F-9.1)", () => {
+    const a = OwnedRelPath.make("libs/a")
+    const ab = OwnedRelPath.make("libs/ab")
+    const aChild = OwnedRelPath.make("libs/a/src/index.ts")
+    const aFile = OwnedRelPath.make("libs/a.ts")
+
+    expect(pathsOverlap(a, a)).toBe(true)
+    expect(pathsOverlap(a, aChild)).toBe(true)
+    expect(pathsOverlap(aChild, a)).toBe(true)
+    expect(pathsOverlap(a, ab)).toBe(false)
+    expect(pathsOverlap(ab, a)).toBe(false)
+    expect(pathsOverlap(a, aFile)).toBe(false)
+    expect(pathsOverlap(aFile, a)).toBe(false)
+
+    // Case-folding and NFC/NFD normalization prevent case/Unicode collisions
+    const upperA = OwnedRelPath.make("Libs/A/src/Index.ts")
+    expect(pathsOverlap(a, upperA)).toBe(true)
+    const nfc = OwnedRelPath.make("libs/\u00e9/a.ts")
+    const nfd = OwnedRelPath.make("libs/e\u0301/a.ts")
+    expect(pathsOverlap(nfc, nfd)).toBe(true)
+  })
+
+  it("enforces cross-field invariants on CompiledWaves and CompiledPlan (F-10.1)", () => {
+    const makeUnit = (
+      id: string,
+      wave: number,
+      ownedPath: string,
+      dependsOn: ReadonlyArray<string> = [],
+    ): CompiledWorkUnit => ({
+      _tag: "SliceUnit",
+      unitId: WorkUnitId.make(id),
+      branch: SliceBranchName.make(`slice/epic-${id}`),
+      waveIndex: WaveIndex.make(wave),
+      dependsOn: dependsOn.map((d) => WorkUnitId.make(d)),
+      ownedRelPaths: [OwnedRelPath.make(ownedPath)],
+      earsKeys: [EarsRequirementKey.make("REQ-1.1")],
+    })
+
+    const validPair = [makeUnit("u1", 0, "libs/a"), makeUnit("u2", 1, "libs/b", ["u1"])]
+    expectDecodeSuccess(CompiledWaves, { units: validPair })
+
+    const invalidSchedules: ReadonlyArray<{
+      readonly label: string
+      readonly units: ReadonlyArray<CompiledWorkUnit>
+    }> = [
+      {
+        label: "duplicate unitId",
+        units: [makeUnit("u1", 0, "libs/a"), makeUnit("u1", 1, "libs/b")],
+      },
+      {
+        label: "dangling dependsOn",
+        units: [makeUnit("u1", 0, "libs/a", ["missing"])],
+      },
+      {
+        label: "same-wave dependency",
+        units: [makeUnit("u1", 0, "libs/a"), makeUnit("u2", 0, "libs/b", ["u1"])],
+      },
+      {
+        label: "backward dependency",
+        units: [makeUnit("u1", 0, "libs/a", ["u2"]), makeUnit("u2", 1, "libs/b")],
+      },
+      {
+        label: "same-wave path overlap (prefix)",
+        units: [makeUnit("u1", 0, "libs/a"), makeUnit("u2", 0, "libs/a/sub.ts")],
+      },
+      {
+        label: "empty wave gap",
+        units: [makeUnit("u1", 0, "libs/a"), makeUnit("u2", 2, "libs/b", ["u1"])],
+      },
+    ]
+
+    for (const tc of invalidSchedules) {
+      expectDecodeFailure(CompiledWaves, { units: tc.units })
+      expectDecodeFailure(CompiledPlan, {
+        runId: WorkflowRunId.make("run-0001"),
+        level: "epic",
+        planSha: PlanSha256.make(SHA_64_C),
+        baseSha: GitCommitSha.make(SHA_40),
+        mode: { _tag: "Manual" },
+        units: tc.units,
+        sharedStepPaths: [],
+      })
+    }
+
+    // sharedStepPaths overlapping any unit's ownedRelPaths must fail CompiledPlan decode
+    expectDecodeFailure(CompiledPlan, {
+      runId: WorkflowRunId.make("run-0001"),
+      level: "epic",
+      planSha: PlanSha256.make(SHA_64_C),
+      baseSha: GitCommitSha.make(SHA_40),
+      mode: { _tag: "Manual" },
+      units: validPair,
+      sharedStepPaths: [OwnedRelPath.make("libs/a/shared.ts")],
+    })
+
+    // PackageUnitDraft packageVerifyCommand must target its projectName
+    expectDecodeFailure(PackageUnitDraft, {
+      _tag: "PackageUnit",
+      unitId: WorkUnitId.make("unit-pkg-mismatch"),
+      projectName: NxProjectName.make("@harness/contract"),
+      ownedRelPaths: [OwnedRelPath.make("libs/harness/contract/src/index.ts")],
+      stubKeys: [],
+      earsKeys: [],
+      packageVerifyCommand: PackageVerifyCommand.make("pnpm nx run @harness/gates:verify"),
+    })
+  })
+
+  it("rejects invalid variants and empty NonEmptyArray fields across all closed unions (T-1.3, S-1.3)", () => {
+    expectDecodeFailure(WorkflowLevel, "unknown")
+    expectDecodeFailure(ShipStage, "unknown")
+    expectDecodeFailure(RunnerId, "unknown")
+    expectDecodeFailure(FrictionLogState, "unknown")
+
+    expectDecodeFailure(UnitMode, { _tag: "UnknownMode" })
+    expectDecodeFailure(UnitMode, { _tag: "Automatic", runner: "codex", maxConcurrency: 2 })
+
+    expectDecodeFailure(WorkUnitDraft, { _tag: "UnknownUnit" })
+    expectDecodeFailure(WorkUnitDraft, {
+      _tag: "SliceUnit",
+      unitId: "u1",
+      branch: "invalid-branch",
+      ownedRelPaths: [],
+      earsKeys: [],
+    })
+
+    expectDecodeFailure(CompiledWorkUnit, { _tag: "UnknownCompiledUnit" })
+    expectDecodeFailure(CompiledWave, { waveIndex: 0, units: [] })
+
+    expectDecodeFailure(UnitRejection, { _tag: "UnknownRejection" })
+    expectDecodeFailure(UnitRejection, { _tag: "WriteSetViolation", offendingPaths: [] })
+    expectDecodeFailure(UnitRejection, { _tag: "PackageVerifyFailed", exitCode: 0 })
+
+    expectDecodeFailure(UnitEscalation, { _tag: "UnknownEscalation" })
+    expectDecodeFailure(UnitOutcome, { _tag: "UnknownOutcome" })
+
+    expectDecodeFailure(PlanGraphIssue, { _tag: "UnknownIssue" })
+    expectDecodeFailure(PlanGraphIssue, {
+      _tag: "DanglingUnitDependency",
+      from: "u1",
+      to: "u2",
+      missingUnitIds: [],
+    })
+
+    expectDecodeFailure(CyclicPlanWorkflowError, {
+      _tag: "CyclicPlanWorkflowError",
+      cycleUnits: [],
+      reason: "cycle",
+    })
+    expectDecodeFailure(DisjointOwnershipViolationError, {
+      _tag: "DisjointOwnershipViolationError",
+      waveIndex: 0,
+      overlappingPaths: [],
+    })
   })
 })

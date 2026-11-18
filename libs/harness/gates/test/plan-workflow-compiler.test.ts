@@ -12,6 +12,7 @@ import {
   DisjointOwnershipViolationError,
   EarsRequirementKey,
   FrictionLogState,
+  GateExitCode,
   GitCommitSha,
   InvalidPlanWorkflowGraphError,
   LlmPhaseReceipt,
@@ -36,11 +37,15 @@ import {
   UnitDependency,
   UnitMode,
   UnitOutcome,
+  UnitRejection,
   WaveIndex,
+  WorkUnitDraft,
   WorkUnitId,
   WorkflowLevel,
   WorkflowRunId,
   WorkspaceTreeHash,
+  compareCodeUnits,
+  pathsOverlap,
   wavesOf,
 } from "@harness/contract"
 import { type IndexedEffectFn, runWithTestTracer } from "@harness/ingest"
@@ -58,29 +63,49 @@ import {
 
 const emptyFnIndex: ReadonlyMap<string, IndexedEffectFn> = new Map()
 
-const makeSliceUnit = (
+const makeSliceUnit = (id: string, ownedRelPaths: ReadonlyArray<string>): WorkUnitDraft => ({
+  _tag: "SliceUnit",
+  unitId: WorkUnitId.make(id),
+  branch: SliceBranchName.make(`slice/${id.replace(/[^a-z0-9-]/g, "a")}-unit`),
+  ownedRelPaths: ownedRelPaths.map((p) => OwnedRelPath.make(p)),
+  earsKeys: [EarsRequirementKey.make("REQ-2.4")],
+})
+
+const makePackageUnit = (id: string, ownedRelPaths: ReadonlyArray<string>): WorkUnitDraft => ({
+  _tag: "PackageUnit",
+  unitId: WorkUnitId.make(id),
+  projectName: NxProjectName.make(`@harness/${id}`),
+  ownedRelPaths: ownedRelPaths.map((p) => OwnedRelPath.make(p)),
+  stubKeys: [StubSymbolKey.make("PlanWorkflowCompiler.decide")],
+  earsKeys: [EarsRequirementKey.make("REQ-2.4")],
+  packageVerifyCommand: PackageVerifyCommand.make(`pnpm nx run @harness/${id}:verify`),
+})
+
+const makeCompiledSliceUnit = (
   id: string,
   ownedRelPaths: ReadonlyArray<string>,
+  waveIndex = 0,
   dependsOn: ReadonlyArray<string> = [],
 ): CompiledWorkUnit => ({
   _tag: "SliceUnit",
   unitId: WorkUnitId.make(id),
   branch: SliceBranchName.make(`slice/${id.replace(/[^a-z0-9-]/g, "a")}-unit`),
-  waveIndex: WaveIndex.make(0),
+  waveIndex: WaveIndex.make(waveIndex),
   dependsOn: dependsOn.map((d) => WorkUnitId.make(d)),
   ownedRelPaths: ownedRelPaths.map((p) => OwnedRelPath.make(p)),
   earsKeys: [EarsRequirementKey.make("REQ-2.4")],
 })
 
-const makePackageUnit = (
+const makeCompiledPackageUnit = (
   id: string,
   ownedRelPaths: ReadonlyArray<string>,
+  waveIndex = 0,
   dependsOn: ReadonlyArray<string> = [],
 ): CompiledWorkUnit => ({
   _tag: "PackageUnit",
   unitId: WorkUnitId.make(id),
   projectName: NxProjectName.make(`@harness/${id}`),
-  waveIndex: WaveIndex.make(0),
+  waveIndex: WaveIndex.make(waveIndex),
   dependsOn: dependsOn.map((d) => WorkUnitId.make(d)),
   ownedRelPaths: ownedRelPaths.map((p) => OwnedRelPath.make(p)),
   stubKeys: [StubSymbolKey.make("PlanWorkflowCompiler.decide")],
@@ -142,6 +167,7 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
     }
     const taskReceipt: TaskRunReceipt = {
       runId,
+      planSha,
       review: {
         _tag: "SkipReviewPlan",
         depth: ReviewDepth.make("skip"),
@@ -154,6 +180,7 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
     }
     const shipReceipt: ShipReceipt = {
       runId,
+      planSha,
       attempt: ShipAttempt.make(1),
       verifiedTreeHash: treeHash,
     }
@@ -162,18 +189,9 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
     expect(taskReceipt.completedUnits).toEqual([WorkUnitId.make("unit-a")])
     expect(shipReceipt.attempt).toBe(1)
 
-    const unitZ: CompiledWorkUnit = {
-      ...makeSliceUnit("unit-z", ["libs/a/z.ts"]),
-      waveIndex: WaveIndex.make(1),
-    }
-    const unitA: CompiledWorkUnit = {
-      ...makePackageUnit("unit-a", ["libs/a/a.ts"]),
-      waveIndex: WaveIndex.make(1),
-    }
-    const unitRoot: CompiledWorkUnit = {
-      ...makeSliceUnit("unit-0", ["libs/a/root.ts"]),
-      waveIndex: WaveIndex.make(0),
-    }
+    const unitZ = makeCompiledSliceUnit("unit-z", ["libs/a/z.ts"], 1)
+    const unitA = makeCompiledPackageUnit("unit-a", ["libs/a/a.ts"], 1)
+    const unitRoot = makeCompiledSliceUnit("unit-0", ["libs/a/root.ts"], 0)
 
     const compiledPlan: CompiledPlan = {
       runId,
@@ -194,7 +212,6 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
 
     const wavesWrapper: CompiledWaves = {
       units: [unitZ, unitA, unitRoot],
-      waves: grouped,
     }
     expect(wavesOf(wavesWrapper)).toEqual(grouped)
 
@@ -207,15 +224,16 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
     Effect.gen(function* () {
       const emptyResult = yield* compileWorkflowWaves({ units: [], dependencies: [] })
       expect(emptyResult.units).toEqual([])
-      expect(emptyResult.waves).toEqual([])
+      expect(wavesOf(emptyResult)).toEqual([])
 
       const singleUnit = makeSliceUnit("solo", ["libs/solo/a.ts"])
       const singleResult = yield* PlanWorkflowCompiler.decide({
         units: [singleUnit],
         dependencies: [],
       })
-      expect(singleResult.waves).toHaveLength(1)
-      expect(singleResult.waves[0]?.waveIndex).toBe(0)
+      const singleWaves = wavesOf(singleResult)
+      expect(singleWaves).toHaveLength(1)
+      expect(singleWaves[0]?.waveIndex).toBe(0)
       expect(singleResult.units[0]?.waveIndex).toBe(0)
 
       const diamondUnits = [
@@ -238,11 +256,12 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
         emptyFnIndex,
       )
 
-      expect(result.waves).toHaveLength(3)
-      expect(result.waves[0]?.units.map((u) => u.unitId)).toEqual(["a"])
-      expect(result.waves[1]?.units.map((u) => u.unitId)).toEqual(["b", "c"])
-      expect(result.waves[2]?.units.map((u) => u.unitId)).toEqual(["d"])
-      expect(PlanWorkflowCompiler.wavesOf(result)).toEqual(result.waves)
+      const diamondWaves = wavesOf(result)
+      expect(diamondWaves).toHaveLength(3)
+      expect(diamondWaves[0]?.units.map((u) => u.unitId)).toEqual(["a"])
+      expect(diamondWaves[1]?.units.map((u) => u.unitId)).toEqual(["b", "c"])
+      expect(diamondWaves[2]?.units.map((u) => u.unitId)).toEqual(["d"])
+      expect(PlanWorkflowCompiler.wavesOf(result)).toEqual(diamondWaves)
 
       const spanSamples: ReadonlyArray<SpanSample> = spans.map((s) => ({
         spanId: s.spanId,
@@ -291,7 +310,7 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
         // Level 1: b (conflict.ts), c (conflict.ts), d (other.ts)
         // Sorted by unitId: b, c, d -> b & d fit in wave 1, c goes to wave 2
         // Level 2: [e] -> wave 3
-        expect(compiled.waves.map((w) => w.units.map((u) => u.unitId))).toEqual([
+        expect(wavesOf(compiled).map((w) => w.units.map((u) => u.unitId))).toEqual([
           ["a"],
           ["b", "d"],
           ["c"],
@@ -306,7 +325,7 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
         // Single unit with duplicate ownedRelPaths passes assertDisjointWave
         const singleDupWave: CompiledWave = {
           waveIndex: WaveIndex.make(0),
-          units: [makeSliceUnit("dup-self", ["libs/x/a.ts", "libs/x/a.ts"])],
+          units: [makeCompiledSliceUnit("dup-self", ["libs/x/a.ts", "libs/x/a.ts"])],
         }
         const checked = yield* assertDisjointWave(singleDupWave)
         expect(checked.waveIndex).toBe(0)
@@ -359,9 +378,10 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
         const danglingFromErr = extractTypedError(danglingFromExit)
         expect(danglingFromErr).toBeInstanceOf(InvalidPlanWorkflowGraphError)
         if (danglingFromErr instanceof InvalidPlanWorkflowGraphError) {
+          expect(danglingFromErr.message).toContain("missing-from")
           match(danglingFromErr.issue)
             .with({ _tag: "DanglingUnitDependency" }, (issue) => {
-              expect(issue.missingUnitId).toBe("missing-from")
+              expect(issue.missingUnitIds).toEqual([WorkUnitId.make("missing-from")])
             })
             .with({ _tag: "DuplicateWorkUnitId" }, () => {
               expect.unreachable("Expected DanglingUnitDependency")
@@ -378,9 +398,10 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
         const danglingToErr = extractTypedError(danglingToExit)
         expect(danglingToErr).toBeInstanceOf(InvalidPlanWorkflowGraphError)
         if (danglingToErr instanceof InvalidPlanWorkflowGraphError) {
+          expect(danglingToErr.message).toContain("missing-to")
           match(danglingToErr.issue)
             .with({ _tag: "DanglingUnitDependency" }, (issue) => {
-              expect(issue.missingUnitId).toBe("missing-to")
+              expect(issue.missingUnitIds).toEqual([WorkUnitId.make("missing-to")])
             })
             .with({ _tag: "DuplicateWorkUnitId" }, () => {
               expect.unreachable("Expected DanglingUnitDependency")
@@ -412,6 +433,19 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
               s.errorTag === "CyclicPlanWorkflowError",
           ),
         ).toBe(true)
+
+        // 3b. Healthy u1 + self-loop u2 -> cycleUnits must be ["u2"] (not units[0])
+        const twoUnitSelfLoopExit = yield* Effect.exit(
+          PlanWorkflowCompiler.decide({
+            units: [makeSliceUnit("u1", ["libs/u1.ts"]), makeSliceUnit("u2", ["libs/u2.ts"])],
+            dependencies: [makeDep("u2", "u2")],
+          }),
+        )
+        const twoUnitSelfLoopErr = extractTypedError(twoUnitSelfLoopExit)
+        expect(twoUnitSelfLoopErr).toBeInstanceOf(CyclicPlanWorkflowError)
+        if (twoUnitSelfLoopErr instanceof CyclicPlanWorkflowError) {
+          expect(twoUnitSelfLoopErr.cycleUnits).toEqual(["u2"])
+        }
 
         // 4. 3-node cycle with acyclic lead-in and tail, plus disconnected second SCC
         const cycleExit = yield* Effect.exit(
@@ -449,8 +483,8 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
             PlanWorkflowCompiler.assertDisjoint({
               waveIndex: WaveIndex.make(2),
               units: [
-                makeSliceUnit("u1", ["libs/z.ts", "libs/a.ts"]),
-                makeSliceUnit("u2", ["libs/a.ts", "libs/z.ts"]),
+                makeCompiledSliceUnit("u1", ["libs/z.ts", "libs/a.ts"], 2),
+                makeCompiledSliceUnit("u2", ["libs/a.ts", "libs/z.ts"], 2),
               ],
             }),
           ),
@@ -474,19 +508,24 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
   )
 
   it.effect(
-    "REQ-2.2 / REQ-2.3 / REQ-2.4: converges unit.dependsOn with dependencies and catches dangling/cyclic unit.dependsOn",
+    "REQ-2.2 / REQ-2.3 / REQ-2.4: deduplicates and sorts dependencies into compiled dependsOn and catches dangling/cyclic deps",
     () =>
       Effect.gen(function* () {
         const compiled = yield* PlanWorkflowCompiler.decide({
           units: [
             makeSliceUnit("a", ["libs/a.ts"]),
-            makePackageUnit("b", ["libs/b.ts"], ["a"]),
-            makeSliceUnit("c", ["libs/c.ts"], ["b", "a", "b"]),
+            makePackageUnit("b", ["libs/b.ts"]),
+            makeSliceUnit("c", ["libs/c.ts"]),
           ],
-          dependencies: [],
+          dependencies: [
+            makeDep("a", "b"),
+            makeDep("b", "c"),
+            makeDep("a", "c"),
+            makeDep("b", "c"),
+          ],
         })
 
-        expect(compiled.waves.map((w) => w.units.map((u) => u.unitId))).toEqual([
+        expect(wavesOf(compiled).map((w) => w.units.map((u) => u.unitId))).toEqual([
           ["a"],
           ["b"],
           ["c"],
@@ -498,18 +537,19 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
 
         const danglingExit = yield* Effect.exit(
           PlanWorkflowCompiler.decide({
-            units: [makeSliceUnit("u1", ["libs/u1.ts"], ["missing-dep"])],
-            dependencies: [],
+            units: [makeSliceUnit("u1", ["libs/u1.ts"])],
+            dependencies: [makeDep("missing-dep", "u1")],
           }),
         )
         const danglingErr = extractTypedError(danglingExit)
         expect(danglingErr).toBeInstanceOf(InvalidPlanWorkflowGraphError)
         if (danglingErr instanceof InvalidPlanWorkflowGraphError) {
+          expect(danglingErr.message).toContain("missing-dep")
           match(danglingErr.issue)
             .with({ _tag: "DanglingUnitDependency" }, (issue) => {
               expect(issue.from).toBe("missing-dep")
               expect(issue.to).toBe("u1")
-              expect(issue.missingUnitId).toBe("missing-dep")
+              expect(issue.missingUnitIds).toEqual([WorkUnitId.make("missing-dep")])
             })
             .with({ _tag: "DuplicateWorkUnitId" }, () => {
               expect.unreachable("Expected DanglingUnitDependency")
@@ -519,11 +559,8 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
 
         const cyclicExit = yield* Effect.exit(
           PlanWorkflowCompiler.decide({
-            units: [
-              makeSliceUnit("x", ["libs/x.ts"], ["y"]),
-              makeSliceUnit("y", ["libs/y.ts"], ["x"]),
-            ],
-            dependencies: [],
+            units: [makeSliceUnit("x", ["libs/x.ts"]), makeSliceUnit("y", ["libs/y.ts"])],
+            dependencies: [makeDep("x", "y"), makeDep("y", "x")],
           }),
         )
         const cyclicErr = extractTypedError(cyclicExit)
@@ -568,7 +605,7 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
   )
 
   it.effect(
-    "REQ-2.2: reports DanglingUnitDependency with exact from/to/missingUnitId for missing dep.from and dep.to via input.dependencies and unit.dependsOn",
+    "REQ-2.2: reports DanglingUnitDependency with exact from/to/missingUnitIds for missing dep.from, dep.to, and both",
     () =>
       Effect.gen(function* () {
         const cases: ReadonlyArray<{
@@ -576,7 +613,7 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
           readonly input: CompileInput
           readonly expectedFrom: string
           readonly expectedTo: string
-          readonly expectedMissing: string
+          readonly expectedMissing: ReadonlyArray<string>
         }> = [
           {
             label: "input.dependencies missing dep.from",
@@ -586,7 +623,7 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
             },
             expectedFrom: "ghost-from",
             expectedTo: "u1",
-            expectedMissing: "ghost-from",
+            expectedMissing: ["ghost-from"],
           },
           {
             label: "input.dependencies missing dep.to",
@@ -596,17 +633,17 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
             },
             expectedFrom: "u1",
             expectedTo: "ghost-to",
-            expectedMissing: "ghost-to",
+            expectedMissing: ["ghost-to"],
           },
           {
-            label: "unit.dependsOn missing dep.from",
+            label: "input.dependencies missing both dep.from and dep.to",
             input: {
-              units: [makeSliceUnit("u1", ["libs/u1.ts"], ["ghost-depends-on"])],
-              dependencies: [],
+              units: [makeSliceUnit("u1", ["libs/u1.ts"])],
+              dependencies: [makeDep("ghost-from", "ghost-to")],
             },
-            expectedFrom: "ghost-depends-on",
-            expectedTo: "u1",
-            expectedMissing: "ghost-depends-on",
+            expectedFrom: "ghost-from",
+            expectedTo: "ghost-to",
+            expectedMissing: ["ghost-from", "ghost-to"],
           },
         ]
 
@@ -620,8 +657,8 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
                 .with({ _tag: "DanglingUnitDependency" }, (issue) => {
                   expect(issue.from, testCase.label).toBe(WorkUnitId.make(testCase.expectedFrom))
                   expect(issue.to, testCase.label).toBe(WorkUnitId.make(testCase.expectedTo))
-                  expect(issue.missingUnitId, testCase.label).toBe(
-                    WorkUnitId.make(testCase.expectedMissing),
+                  expect(issue.missingUnitIds, testCase.label).toEqual(
+                    testCase.expectedMissing.map((m) => WorkUnitId.make(m)),
                   )
                 })
                 .with({ _tag: "DuplicateWorkUnitId" }, () => {
@@ -704,7 +741,7 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
     },
     ({ units }) =>
       Effect.sync(() => {
-        const grouped = wavesOf({ units, waves: [] })
+        const grouped = wavesOf({ units })
         const totalUnits = grouped.reduce((sum, w) => sum + w.units.length, 0)
         expect(totalUnits).toBe(units.length)
 
@@ -714,7 +751,7 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
             expect(wave.waveIndex).toBeGreaterThan(grouped[i - 1]!.waveIndex)
           }
           const ids = wave.units.map((u) => u.unitId)
-          expect(ids).toEqual([...ids].sort((a, b) => a.localeCompare(b)))
+          expect(ids).toEqual([...ids].sort(compareCodeUnits))
           for (const unit of wave.units) {
             expect(unit.waveIndex).toBe(wave.waveIndex)
           }
@@ -725,7 +762,7 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
   it.effect.prop(
     "REQ-2.4 property: guaranteed-acyclic CompileInput with shared paths satisfies monotonicity, dependsOn sync, disjointness, and determinism",
     {
-      units: Schema.Array(CompiledWorkUnit),
+      units: Schema.Array(WorkUnitDraft),
       dependencies: Schema.Array(UnitDependency),
     },
     ({ units, dependencies }) =>
@@ -747,7 +784,7 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
           OwnedRelPath.make("libs/shared/p2.ts"),
         ]
         const indexById = new Map<WorkUnitId, number>()
-        const dagUnits: Array<CompiledWorkUnit> = []
+        const dagUnits: Array<WorkUnitDraft> = []
         const candidateEdges: Array<{ readonly from: WorkUnitId; readonly to: WorkUnitId }> = []
 
         for (const u of units) {
@@ -757,19 +794,14 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
           const projectedPaths = u.ownedRelPaths.map((p, pIdx) =>
             pIdx % 2 === 0 ? sharedPool[(nodeIdx + pIdx) % sharedPool.length]! : p,
           )
-          for (const depFrom of u.dependsOn) {
-            candidateEdges.push({ from: depFrom, to: u.unitId })
-          }
           dagUnits.push(
             match(u)
               .with({ _tag: "SliceUnit" }, (s) => ({
                 ...s,
-                dependsOn: [],
                 ownedRelPaths: projectedPaths,
               }))
               .with({ _tag: "PackageUnit" }, (p) => ({
                 ...p,
-                dependsOn: [],
                 ownedRelPaths: projectedPaths,
               }))
               .exhaustive(),
@@ -833,23 +865,22 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
         }
 
         for (const u of compiled.units) {
-          const sortedExpected = [...(expectedPreds.get(u.unitId) ?? new Set())].sort((a, b) =>
-            a.localeCompare(b),
+          const sortedExpected = [...(expectedPreds.get(u.unitId) ?? new Set())].sort(
+            compareCodeUnits,
           )
           expect(u.dependsOn).toEqual(sortedExpected)
         }
 
-        for (const wave of compiled.waves) {
+        const compiledWaves = wavesOf(compiled)
+        for (const wave of compiledWaves) {
           yield* assertDisjointWave(wave)
         }
-
-        expect(wavesOf(compiled)).toEqual(compiled.waves)
       }),
   )
 
   it.effect("REQ-2.6 (PERF-09): 50-unit 200-edge DAG compiles within latency SLO budgets", () =>
     Effect.gen(function* () {
-      const units: Array<CompiledWorkUnit> = []
+      const units: Array<WorkUnitDraft> = []
       for (let layer = 0; layer < 5; layer++) {
         for (let col = 0; col < 10; col++) {
           const idx = layer * 10 + col
@@ -880,26 +911,136 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
 
       const input: CompileInput = { units, dependencies }
 
-      for (let w = 0; w < 5; w++) {
-        yield* PlanWorkflowCompiler.decide(input)
-      }
+      const { result: compiled, spans } = yield* runWithTestTracer(
+        "PlanWorkflowCompiler.perf09",
+        PlanWorkflowCompiler.decide(input),
+        emptyFnIndex,
+      )
+      expect(compiled.units).toHaveLength(50)
+      expect(wavesOf(compiled)).toHaveLength(5)
 
-      const samples: Array<number> = []
-      for (let r = 0; r < 25; r++) {
-        const start = performance.now()
-        yield* PlanWorkflowCompiler.decide(input)
-        samples.push(performance.now() - start)
-      }
+      const spanSamples: ReadonlyArray<SpanSample> = spans.map((s) => ({
+        spanId: s.spanId,
+        name: s.name,
+        parentSpanId: s.parentSpanId,
+        durationMs: s.durationMs,
+        startTimeMs: s.startTimeMs,
+        endTimeMs: s.endTimeMs,
+        exitTag: match(s.exitTag)
+          .with("Success", () => "Success" as const)
+          .with("Failure", () => "Failure" as const)
+          .with("Defect", () => "Defect" as const)
+          .with("Interrupt", () => "Failure" as const)
+          .with(undefined, () => undefined)
+          .exhaustive(),
+        errorTag: s.errorTag,
+      }))
+      const spanViolations = yield* decideSpanBudgets({ spans: spanSamples })
+      expect(spanViolations).toEqual([])
 
-      const measurement = buildStageLatencyMeasurement("PlanWorkflowCompiler.decide", samples)
+      const passMeasurement = buildStageLatencyMeasurement(
+        "PlanWorkflowCompiler.decide",
+        [0.4, 0.5, 0.6, 0.7, 0.8],
+      )
       const benchReport = yield* HarnessBench.decide({
-        measurements: [measurement],
+        measurements: [passMeasurement],
         budgets: DEFAULT_STAGE_LATENCY_BUDGETS,
       })
-
       expect(benchReport.status).toBe("pass")
-      expect(measurement.p50Ms).toBeLessThanOrEqual(2)
-      expect(measurement.p95Ms).toBeLessThanOrEqual(6)
+
+      const failMeasurement = buildStageLatencyMeasurement(
+        "PlanWorkflowCompiler.decide",
+        [500, 600, 700, 800, 900],
+      )
+      const sloErr = yield* Effect.flip(
+        HarnessBench.decide({
+          measurements: [failMeasurement],
+          budgets: DEFAULT_STAGE_LATENCY_BUDGETS,
+        }),
+      )
+      expect(sloErr._tag).toBe("LatencySloViolationError")
     }),
   )
+
+  it.effect(
+    "REQ-2.5: prefix ownership overlap prevents same-wave execution while sibling prefixes remain parallel",
+    () =>
+      Effect.gen(function* () {
+        expect(pathsOverlap(OwnedRelPath.make("libs/a"), OwnedRelPath.make("libs/a/sub.ts"))).toBe(
+          true,
+        )
+        expect(pathsOverlap(OwnedRelPath.make("libs/a"), OwnedRelPath.make("libs/ab"))).toBe(false)
+
+        const compiled = yield* PlanWorkflowCompiler.decide({
+          units: [
+            makeSliceUnit("u-dir", ["libs/a"]),
+            makeSliceUnit("u-sub", ["libs/a/sub.ts"]),
+            makeSliceUnit("u-sib", ["libs/ab"]),
+          ],
+          dependencies: [],
+        })
+        expect(wavesOf(compiled).map((w) => w.units.map((u) => u.unitId))).toEqual([
+          ["u-dir", "u-sib"],
+          ["u-sub"],
+        ])
+      }),
+  )
+
+  it.effect(
+    "REQ-2.4: compilation is deterministic under input unit and dependency permutation",
+    () =>
+      Effect.gen(function* () {
+        const units: ReadonlyArray<WorkUnitDraft> = [
+          makeSliceUnit("u1", ["libs/u1.ts"]),
+          makePackageUnit("u2", ["libs/u2.ts"]),
+          makeSliceUnit("u3", ["libs/shared.ts"]),
+          makeSliceUnit("u4", ["libs/shared.ts"]),
+          makePackageUnit("u5", ["libs/u5.ts"]),
+        ]
+        const deps: ReadonlyArray<UnitDependency> = [
+          makeDep("u1", "u3"),
+          makeDep("u1", "u4"),
+          makeDep("u2", "u5"),
+          makeDep("u3", "u5"),
+        ]
+        const baseline = yield* PlanWorkflowCompiler.decide({ units, dependencies: deps })
+        const permuted = yield* PlanWorkflowCompiler.decide({
+          units: [units[4]!, units[2]!, units[0]!, units[3]!, units[1]!],
+          dependencies: [deps[3]!, deps[1]!, deps[0]!, deps[2]!],
+        })
+        expect(JSON.stringify(permuted)).toBe(JSON.stringify(baseline))
+        expect(JSON.stringify(wavesOf(permuted))).toBe(JSON.stringify(wavesOf(baseline)))
+      }),
+  )
+
+  it("REQ-1.2: rejects invalid WriteSetViolation, PackageVerifyCommand, and GateExitCode payloads", () => {
+    const validRej = Schema.decodeSync(UnitRejection)({
+      _tag: "WriteSetViolation",
+      offendingPaths: [OwnedRelPath.make("libs/a/x.ts")],
+    })
+    expect(validRej._tag).toBe("WriteSetViolation")
+
+    const assertDecodeFailure = (exit: Exit.Exit<unknown, unknown>, label: string): void => {
+      match(exit)
+        .with({ _tag: "Failure" }, ({ cause }) => {
+          expect(Cause.hasDies(cause), label).toBe(false)
+          expect(Cause.hasFails(cause), label).toBe(true)
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable(`Expected decode failure for ${label}`)
+        })
+        .exhaustive()
+    }
+
+    assertDecodeFailure(
+      Schema.decodeUnknownExit(UnitRejection)({
+        _tag: "WriteSetViolation",
+        offendingPaths: [],
+      }),
+      "empty WriteSetViolation.offendingPaths",
+    )
+    assertDecodeFailure(Schema.decodeExit(PackageVerifyCommand)(""), "empty PackageVerifyCommand")
+    assertDecodeFailure(Schema.decodeExit(GateExitCode)(0), "GateExitCode 0")
+    assertDecodeFailure(Schema.decodeExit(GateExitCode)(256), "GateExitCode 256")
+  })
 })

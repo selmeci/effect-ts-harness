@@ -38,14 +38,25 @@ export const handleGc = (
   Effect.gen(function* () {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const strict = argv.includes("--strict")
-    const graph =
-      options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo))
-    const hasPatternsDir = nodeSyncHostIo.existsSync(join(repoRoot, "agent-patterns"))
     const { docs: governanceDocs, findings: docReadFindings } = loadGovernanceDocsChecked(
       repoRoot,
       nodeSyncHostIo,
     )
-    const baseReport = yield* decideGraphEntropy({
+    if (docReadFindings.length > 0) {
+      const failReport: GraphGcReport = {
+        clean: false,
+        findings: docReadFindings,
+      }
+      return {
+        exitCode: strict ? 1 : 0,
+        stdout: JSON.stringify(failReport),
+        stderr: "",
+      }
+    }
+    const graph =
+      options?.implGraph ?? (yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo))
+    const hasPatternsDir = nodeSyncHostIo.existsSync(join(repoRoot, "agent-patterns"))
+    const finalReport = yield* decideGraphEntropy({
       graph,
       expectedPatterns: hasPatternsDir ? IDIOM_BLOCKS : undefined,
       checkUntestedDomainFns: true,
@@ -53,17 +64,6 @@ export const handleGc = (
       governanceDocs,
       ...(strict ? { workspaceRoot: repoRoot, hostIo: nodeSyncHostIo } : {}),
     })
-    const finalReport: GraphGcReport =
-      docReadFindings.length > 0
-        ? {
-            ...baseReport,
-            clean: false,
-            findings: [
-              ...baseReport.findings,
-              ...docReadFindings.map((f) => ({ ...f, kind: "governance-doc-read-error" as const })),
-            ],
-          }
-        : baseReport
     if (
       strict &&
       !options?.skipBackgroundDaemons &&
@@ -169,7 +169,9 @@ export const handleOntology = (
                     return Effect.interrupt
                   }
                   const pretty = Cause.pretty(cause)
-                  process.stderr.write(`[harness:ontology] semantic conflict check failed: ${pretty}\n`)
+                  process.stderr.write(
+                    `[harness:ontology] semantic conflict check failed: ${pretty}\n`,
+                  )
                   return Effect.succeed<OntologyConflictEvaluationReport>({
                     conflicts: [],
                     degraded: true,

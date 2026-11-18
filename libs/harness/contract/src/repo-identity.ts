@@ -10,7 +10,11 @@ const hasNoControlChars = (value: string): boolean => {
   return true
 }
 
-export const AbsoluteRepoRoot = Schema.NonEmptyString.pipe(
+/**
+ * Canonical POSIX absolute path to the repository root (`1..1024` chars, trimmed, no `.`/`..` segments,
+ * no backslashes, no trailing slash, no ASCII control characters). Required by `harness:SPEC-0017 REQ-1.1`.
+ */
+export const AbsoluteRepoRoot = Schema.String.pipe(
   Schema.check(Schema.isMaxLength(1024)),
   Schema.check(Schema.isTrimmed()),
   Schema.check(Schema.isPattern(/^(?:\/(?!\.\.?(?:\/|$))[^\\/]+)+$/)),
@@ -23,6 +27,7 @@ export const AbsoluteRepoRoot = Schema.NonEmptyString.pipe(
 )
 export type AbsoluteRepoRoot = typeof AbsoluteRepoRoot.Type
 
+/** Lowercase 40-hex-character git commit SHA-1 digest. */
 export const GitCommitSha = Schema.String.pipe(
   Schema.check(Schema.isPattern(/^[0-9a-f]{40}$/)),
   Schema.brand("GitCommitSha"),

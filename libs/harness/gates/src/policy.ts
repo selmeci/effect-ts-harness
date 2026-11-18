@@ -323,7 +323,10 @@ const matchesAny = (command: string, rules: ReadonlyArray<GuardPatternRule>): bo
 export const isCommandAllowed = (command: string): boolean => {
   const stripped = command
     .trim()
-    .replace(/^(?:(?:CI|NX_INTERACTIVE|HARNESS_[A-Z0-9_]+)=[^\s;|&]+\s+)+/, "")
+    .replace(
+      /^(?:(?:CI|NX_INTERACTIVE|(?!HARNESS_STATE_DIR=)HARNESS_[A-Z0-9_]+)=[^\s;|&]+\s+)+/,
+      "",
+    )
   const trimmed = stripped.trim()
   if (trimmed === "") return false
   return ALLOWLIST.some((prefix) => {

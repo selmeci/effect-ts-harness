@@ -13,7 +13,15 @@ import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import { Effect } from "effect"
 import { makeMockDecisionModelLayer } from "@harness/decision"
-import { handleBench, handleMutate } from "../src/commands/mutate-and-bench.command.js"
+import { MutantCount, MutateStampPassed, StampRelFilePath, writeMutateStamp } from "@harness/gates"
+import { nodeSyncHostIo } from "@harness/infra"
+import type { SyncHostIo } from "@harness/service/host-io"
+import {
+  collectModifiedMutableFiles,
+  evaluateVerifyMutateStampGate,
+  handleBench,
+  handleMutate,
+} from "../src/commands/mutate-and-bench.command.js"
 import { handlePlanCheck } from "../src/commands/plan-and-repair.command.js"
 import { handleVerify } from "../src/commands/verify-and-done.command.js"
 
@@ -277,7 +285,7 @@ describe("CLI handleMutate, handleVerify (mutate-stamp), handleBench, and handle
       writeFileSync(join(sampleSrc, "index.ts"), "export const x = 1\n", "utf8")
 
       const res = await Effect.runPromise(
-        handleBench(["bench", "--iterations=1"], {
+        handleBench(["bench", "--iterations=1", "--budget-ms=5000"], {
           repoRoot: dir,
           skipBackgroundDaemons: true,
         }),
@@ -344,4 +352,233 @@ describe("CLI handleMutate, handleVerify (mutate-stamp), handleBench, and handle
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it("evaluateVerifyMutateStampGate full decision matrix: skip, skipSubprocessVerify, isolated workspace, diff-failed, uncovered dirty, and unclassified dirty", () => {
+    const dir = initTempGitRepo("cli-gate-matrix-")
+    try {
+      const strongTest = [
+        'import { expect, it } from "vitest"',
+        'import { isAdult } from "../src/engine.js"',
+        'it("strong", () => { expect(isAdult(21)).toBe(true); expect(isAdult(20)).toBe(false) })',
+      ].join("\n")
+      writeDemoGatesPkg(
+        dir,
+        "export const isAdult = (age: number): boolean => age >= 18\n",
+        strongTest,
+      )
+
+      // 1. Isolated external workspace (no cluster.yaml) with policy: undefined -> bypasses
+      expect(evaluateVerifyMutateStampGate(dir, { repoRoot: dir })).toBeUndefined()
+
+      // 2. Isolated external workspace with policy: "enforce" -> enforces and fails without stamp
+      expect(
+        evaluateVerifyMutateStampGate(dir, { repoRoot: dir, mutateStampPolicy: "enforce" }),
+      ).toContain("Missing .harness/mutate-stamp.json")
+
+      // Make it non-isolated by adding cluster.yaml
+      mkdirSync(join(dir, "libs", "harness", "graph"), { recursive: true })
+      writeFileSync(join(dir, "libs", "harness", "graph", "cluster.yaml"), "name: test\n", "utf8")
+
+      // 3. mutateStampPolicy: "skip" -> bypasses even when non-isolated & dirty
+      expect(
+        evaluateVerifyMutateStampGate(dir, { repoRoot: dir, mutateStampPolicy: "skip" }),
+      ).toBeUndefined()
+
+      // 4. skipSubprocessVerify: true with policy: undefined -> bypasses; with "enforce" -> enforces
+      expect(
+        evaluateVerifyMutateStampGate(dir, { repoRoot: dir, skipSubprocessVerify: true }),
+      ).toBeUndefined()
+      expect(
+        evaluateVerifyMutateStampGate(dir, {
+          repoRoot: dir,
+          skipSubprocessVerify: true,
+          mutateStampPolicy: "enforce",
+        }),
+      ).toContain("Missing .harness/mutate-stamp.json")
+
+      // 5. diff-failed -> fails closed
+      const diffFailIo: SyncHostIo = {
+        ...nodeSyncHostIo,
+        execFileSync: (_cmd, args) => {
+          if (args.includes("rev-parse")) {
+            return { _tag: "Exited", exitCode: 128, stdout: "", stderr: "fatal: not a git repo" }
+          }
+          return nodeSyncHostIo.execFileSync(_cmd, args)
+        },
+      }
+      expect(
+        evaluateVerifyMutateStampGate(
+          dir,
+          { repoRoot: dir, mutateStampPolicy: "enforce" },
+          diffFailIo,
+        ),
+      ).toContain("git rev-parse")
+
+      // 6. dirty with uncovered modified mutable file fails even when stamp treeHash matches and totalMutants >= 1
+      writeMutateStamp(dir, nodeSyncHostIo, {
+        enforcementMode: "strict",
+        diffMode: "working-tree",
+        scannedCandidateFiles: MutantCount.make(1),
+        scannedFiles: [StampRelFilePath.make("libs/demo/gates/src/other.ts")],
+        diffMatchedFiles: [StampRelFilePath.make("libs/demo/gates/src/other.ts")],
+        evaluatedFiles: [StampRelFilePath.make("libs/demo/gates/src/other.ts")],
+        totalMutants: MutantCount.make(1),
+        killedCount: MutantCount.make(1),
+        survivedCount: MutantCount.make(0),
+        equivalentCount: MutantCount.make(0),
+        passed: MutateStampPassed.make(true),
+      })
+      expect(
+        evaluateVerifyMutateStampGate(dir, { repoRoot: dir, mutateStampPolicy: "enforce" }),
+      ).toContain("does not cover required diff file(s): libs/demo/gates/src/engine.ts")
+
+      // 7. dirty with unclassified modified lib file fails closed
+      const unclassDir = join(dir, "libs", "demo", "mystery")
+      mkdirSync(join(unclassDir, "src"), { recursive: true })
+      writeFileSync(
+        join(unclassDir, "package.json"),
+        JSON.stringify({ name: "@demo/mystery", nx: { tags: ["type:unknown"] } }),
+        "utf8",
+      )
+      writeFileSync(join(unclassDir, "src", "mystery.ts"), "export const m = 1\n", "utf8")
+      expect(
+        evaluateVerifyMutateStampGate(dir, { repoRoot: dir, mutateStampPolicy: "enforce" }),
+      ).toContain("Unclassified modified lib file(s)")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("handleMutate CLI integration: failing strict deletes stamp; --scope/--file/--base never write stamp; --file= and 0-mutant strict fail closed", async () => {
+    const dir = initTempGitRepo("cli-mut-integration-")
+    try {
+      const engineSource = "export const isAdult = (age: number): boolean => age >= 18\n"
+      const strongTest = [
+        'import { expect, it } from "vitest"',
+        'import { isAdult } from "../src/engine.js"',
+        'it("strong", () => { expect(isAdult(21)).toBe(true); expect(isAdult(20)).toBe(false) })',
+      ].join("\n")
+      writeDemoGatesPkg(dir, engineSource, strongTest)
+      gitCommitAll(dir, "add demo")
+      git(dir, ["checkout", "-b", "feat/cli-int"])
+      writeFileSync(
+        join(dir, "libs", "demo", "gates", "src", "engine.ts"),
+        "export const isAdult = (age: number): boolean => age >= 21\n",
+        "utf8",
+      )
+      gitCommitAll(dir, "update age")
+
+      const stampPath = join(dir, ".harness", "mutate-stamp.json")
+
+      // 1. --scope, --file, and --base NEVER write a stamp even on passing --strict
+      for (const extraFlag of [
+        "--scope=@demo/gates",
+        "--file=libs/demo/gates/src/engine.ts",
+        "--base=main",
+      ]) {
+        if (existsSync(stampPath)) rmSync(stampPath)
+        const res = await Effect.runPromise(
+          handleMutate(["mutate", "--strict", extraFlag], { repoRoot: dir }),
+        )
+        expect(res.exitCode, extraFlag).toBe(0)
+        expect(existsSync(stampPath), extraFlag).toBe(false)
+      }
+
+      // 2. --file= empty, bare --base/--file/--scope, and --base -foo fail closed (exitCode === 1) without minting stamp and remove existing stamp
+      for (const badArgs of [
+        ["mutate", "--strict", "--file="],
+        ["mutate", "--strict", "--file"],
+        ["mutate", "--strict", "--scope"],
+        ["mutate", "--strict", "--base"],
+        ["mutate", "--strict", "--base", "-foo"],
+      ]) {
+        writeMutateStamp(dir, nodeSyncHostIo, {
+          enforcementMode: "strict",
+          diffMode: "working-tree",
+          scannedCandidateFiles: MutantCount.make(1),
+          scannedFiles: [StampRelFilePath.make("libs/demo/gates/src/engine.ts")],
+          diffMatchedFiles: [StampRelFilePath.make("libs/demo/gates/src/engine.ts")],
+          evaluatedFiles: [StampRelFilePath.make("libs/demo/gates/src/engine.ts")],
+          totalMutants: MutantCount.make(1),
+          killedCount: MutantCount.make(1),
+          survivedCount: MutantCount.make(0),
+          equivalentCount: MutantCount.make(0),
+          passed: MutateStampPassed.make(true),
+        })
+        expect(existsSync(stampPath)).toBe(true)
+        const badRes = await Effect.runPromise(handleMutate(badArgs, { repoRoot: dir }))
+        expect(badRes.exitCode, badArgs.join(" ")).toBe(1)
+        expect(existsSync(stampPath), badArgs.join(" ")).toBe(false)
+      }
+
+      // 3. Failing mutate --strict deletes existing valid stamp
+      writeMutateStamp(dir, nodeSyncHostIo, {
+        enforcementMode: "strict",
+        diffMode: "working-tree",
+        scannedCandidateFiles: MutantCount.make(1),
+        scannedFiles: [StampRelFilePath.make("libs/demo/gates/src/engine.ts")],
+        diffMatchedFiles: [StampRelFilePath.make("libs/demo/gates/src/engine.ts")],
+        evaluatedFiles: [StampRelFilePath.make("libs/demo/gates/src/engine.ts")],
+        totalMutants: MutantCount.make(1),
+        killedCount: MutantCount.make(1),
+        survivedCount: MutantCount.make(0),
+        equivalentCount: MutantCount.make(0),
+        passed: MutateStampPassed.make(true),
+      })
+      writeFileSync(
+        join(dir, "libs", "demo", "gates", "test", "engine.test.ts"),
+        'import { expect, it } from "vitest"\nimport { isAdult } from "../src/engine.js"\nit("weak", () => { expect(isAdult(30)).toBe(true) })\n',
+        "utf8",
+      )
+      const failStrictRes = await Effect.runPromise(
+        handleMutate(["mutate", "--strict"], { repoRoot: dir }),
+      )
+      expect(failStrictRes.exitCode).toBe(1)
+      expect(existsSync(stampPath)).toBe(false)
+
+      // 4. 0-mutant strict run fails closed (exitCode === 1)
+      writeFileSync(
+        join(dir, "libs", "demo", "gates", "src", "engine.ts"),
+        "export const VERSION = 1\n",
+        "utf8",
+      )
+      const zeroMutantRes = await Effect.runPromise(
+        handleMutate(["mutate", "--strict"], { repoRoot: dir }),
+      )
+      expect(zeroMutantRes.exitCode).toBe(1)
+      expect(existsSync(stampPath)).toBe(false)
+
+      // 5. --strict --all with 0-mutant contract sibling passes evaluateVerifyMutateStampGate E2E
+      writeFileSync(
+        join(dir, "libs", "demo", "gates", "src", "engine.ts"),
+        "export const isAdult = (age: number): boolean => age >= 21\n",
+        "utf8",
+      )
+      writeFileSync(
+        join(dir, "libs", "demo", "gates", "test", "engine.test.ts"),
+        strongTest,
+        "utf8",
+      )
+      const contractDir = join(dir, "libs", "demo", "contract")
+      mkdirSync(join(contractDir, "src"), { recursive: true })
+      writeFileSync(
+        join(contractDir, "package.json"),
+        JSON.stringify({ name: "@demo/contract", nx: { tags: ["type:contract"] } }),
+        "utf8",
+      )
+      writeFileSync(join(contractDir, "src", "types.ts"), "export const KIND = 'v1'\n", "utf8")
+
+      expect(collectModifiedMutableFiles(dir)._tag).toBe("Dirty")
+      const allRes = await Effect.runPromise(
+        handleMutate(["mutate", "--strict", "--all"], { repoRoot: dir }),
+      )
+      expect(allRes.exitCode).toBe(0)
+      expect(existsSync(stampPath)).toBe(true)
+      expect(
+        evaluateVerifyMutateStampGate(dir, { repoRoot: dir, mutateStampPolicy: "enforce" }),
+      ).toBeUndefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
 })

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 import {
+  checkOntologyPairConflict,
   validateDecisionLimits,
   checkPlanStepCoverage,
   decideGuardCommand,
@@ -18,19 +19,21 @@ import {
 } from "../src/index.js"
 
 describe("Harness decision definitions & fallbacks", () => {
-  it.effect("keeps all decision definitions within Ollama System One limits (<=26 options, <=64 questions)", () =>
-    Effect.gen(function* () {
-      for (const def of [
-        IdiomRouterV1,
-        GuardV1,
-        TriageV1,
-        PlanStepCoverageV1,
-        LearnProposalV1,
-        OntologyConflictV1,
-      ]) {
-        yield* validateDecisionLimits(def)
-      }
-    }),
+  it.effect(
+    "keeps all decision definitions within Ollama System One limits (<=26 options, <=64 questions)",
+    () =>
+      Effect.gen(function* () {
+        for (const def of [
+          IdiomRouterV1,
+          GuardV1,
+          TriageV1,
+          PlanStepCoverageV1,
+          LearnProposalV1,
+          OntologyConflictV1,
+        ]) {
+          yield* validateDecisionLimits(def)
+        }
+      }),
   )
 
   it.effect(
@@ -302,9 +305,9 @@ describe("Harness decision definitions & fallbacks", () => {
         expect(stateLockRes.kind).toBe("mechanical")
         expect(stateLockRes.hint).toContain("state_lock_held")
 
-        const multiBundleRes = yield* triageFailure(
-          "Error: target matches 2 policy bundles",
-        ).pipe(Effect.provide(failingLayer))
+        const multiBundleRes = yield* triageFailure("Error: target matches 2 policy bundles").pipe(
+          Effect.provide(failingLayer),
+        )
         expect(multiBundleRes.kind).toBe("mechanical")
         expect(multiBundleRes.hint).toContain("matches 2 policy bundles")
 
@@ -331,6 +334,58 @@ describe("Harness decision definitions & fallbacks", () => {
         ).pipe(Effect.provide(failingLayer))
         expect(adrProofRes.kind).toBe("mechanical")
         expect(adrProofRes.hint).toContain("verify")
+
+        const processExitRes = yield* triageFailure(
+          "process-exit-outside-app: Direct 'process.exit(...)' call in 'libs/harness/gates/src/foo.ts'",
+        ).pipe(Effect.provide(failingLayer))
+        expect(processExitRes.kind).toBe("mechanical")
+        expect(processExitRes.hint).toContain("type:app")
+
+        const localeSortRes = yield* triageFailure(
+          "locale-dependent-sort: Locale-dependent '.localeCompare(...)' in 'libs/harness/gates/src/plan-workflow-compiler.ts'",
+        ).pipe(Effect.provide(failingLayer))
+        expect(localeSortRes.kind).toBe("mechanical")
+        expect(localeSortRes.hint).toContain("compareCodeUnits")
+
+        const govDocReadRes = yield* triageFailure(
+          "governance-doc-read-error: Invalid or missing 'status' in frontmatter",
+        ).pipe(Effect.provide(failingLayer))
+        expect(govDocReadRes.kind).toBe("mechanical")
+        expect(govDocReadRes.hint).toContain("YAML frontmatter")
+
+        const dstSeedRes = yield* triageFailure(
+          'Invalid DST_SEED value "abc": Expected a non-negative integer',
+        ).pipe(Effect.provide(failingLayer))
+        expect(dstSeedRes.kind).toBe("mechanical")
+        expect(dstSeedRes.hint).toContain("DST_SEED")
+
+        const mutateStampRes = yield* triageFailure(
+          "[mutation-check] Zero mutants evaluated in strict mode (SPEC-0018 REQ-2.2).",
+        ).pipe(Effect.provide(failingLayer))
+        expect(mutateStampRes.kind).toBe("mechanical")
+        expect(mutateStampRes.hint).toContain("pnpm harness mutate --strict")
+      }),
+  )
+
+  it.effect(
+    "checkOntologyPairConflict boundary: probability === 0.7 with non-none conflictKind detects conflict",
+    () =>
+      Effect.gen(function* () {
+        const mockLayer = makeMockDecisionModelLayer({
+          contradictsProb: 0.7,
+          conflictKindLabel: "state-transition-conflict",
+        })
+        const result = yield* checkOntologyPairConflict({
+          sourceId: "sample:SPEC-0001:REQ-1.1",
+          sourceText: "When upload is requested, the system shall approve.",
+          targetId: "sample:SPEC-0001:REQ-1.2",
+          targetText: "When upload is requested, the system shall reject.",
+          sharedSymbol: "Sample.uploadPhoto",
+        }).pipe(Effect.provide(mockLayer))
+
+        expect(result.hasConflict).toBe(true)
+        expect(result.probability).toBe(0.7)
+        expect(result.conflictKind).toBe("state-transition-conflict")
       }),
   )
 })

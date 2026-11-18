@@ -115,6 +115,15 @@ export type PositiveInt = typeof PositiveInt.Type // -> number & Brand<"Positive
 
 Branded types attach the phantom symbol `"~effect/Brand"` at compile time with zero runtime memory overhead and zero change to JSON / OpenAPI `Encoded` wire formats.
 
+### When Closed `Schema.Literals([...])` Unions Stay Unbranded vs Branded Scalars
+
+- **Closed finite literal unions stay unbranded:** `Schema.Literals(["epic", "slice"])` (e.g. `WorkflowLevel`, `ShipStage`, `RunnerId`, `FrictionLogState`, `GateCategory`) already form a closed compile-time finite union and **should NOT** be piped into `Schema.brand(...)`. Keeping them unbranded preserves ergonomic `ts-pattern` `.with("epic", ...).exhaustive()` matching without redundant `.make(...)` wrapping.
+- **Open scalar domains require `Schema.brand(...)`:** Identifiers, paths, hashes, bounded integers, and validated command/branch strings (`WorkflowRunId`, `OwnedRelPath`, `GateExitCode`, `PackageVerifyCommand`) have open underlying types (`string` or `number`) and **must** use `.pipe(Schema.brand("<BrandName>"))` so distinct domains cannot be swapped at compile time.
+
+### Cross-Field Invariants (`Schema.makeFilter`)
+
+When a composite struct or union has invariants spanning multiple fields (e.g., unique IDs across `units`, dependency `waveIndex` monotonicity, or pairwise disjointness across same-wave units), attach `Schema.check(Schema.makeFilter(predicate, { message: "..." }))` to the outer `Schema.Struct` so invalid states fail at decode time as well as compile time.
+
 ## Parsing and Decoding Untrusted Input
 
 Always decode unknown boundaries with `Schema.decodeUnknownEffect` or `Schema.decodeUnknownSync`:
@@ -134,12 +143,25 @@ export const parseInput = Effect.fn("Input.parse")(function* (raw: unknown) {
 Every constrained schema (`Schema.Int`, `Schema.Natural`, `PositiveInt`, `NonEmptyString`, branded types, and schemas with `check`) declared in `type:contract` **must** have both positive decode tests and negative rejection tests:
 
 1. **Positive Decode Tests:** Assert that valid boundary values decode successfully to the expected runtime value and type.
-2. **Negative Rejection Tests:** Assert that invalid values (`-1`, `0` when strictly positive, `1.5` for integers, `""` for non-empty strings, missing fields, `null`, `undefined`, wrong types) are rejected with `Either.Left` / `ParseError`.
+2. **Negative Rejection Tests:** Assert that invalid values (`-1`, `0` when strictly positive, `1.5` for integers, `""` for non-empty strings, missing fields, `null`, `undefined`, wrong types) are rejected with `Exit.Failure` (`Schema.decodeUnknownExit`).
 
 ```ts
+import { Cause, Exit, Schema } from "effect"
+import { match } from "ts-pattern"
 import { describe, expect, it } from "vitest"
-import { Either, Schema } from "effect"
 import { NonEmptyString, PositiveInt, StreamVersion } from "contract/primitives"
+
+const expectDecodeFailure = <A, E>(schema: Schema.Codec<A, E, never, never>, input: unknown) => {
+  const exit = Schema.decodeUnknownExit(schema)(input)
+  match(exit)
+    .with({ _tag: "Failure" }, (f) => {
+      expect(Cause.pretty(f.cause).length).toBeGreaterThan(0)
+    })
+    .with({ _tag: "Success" }, () => {
+      expect.unreachable(`Expected decode to fail for ${String(input)}`)
+    })
+    .exhaustive()
+}
 
 describe("Primitives Contract Schemas", () => {
   describe("PositiveInt", () => {
@@ -149,11 +171,11 @@ describe("Primitives Contract Schemas", () => {
     })
 
     it("rejects zero, negative numbers, decimals, and non-numbers", () => {
-      expect(Either.isLeft(Schema.decodeUnknownEither(PositiveInt)(0))).toBe(true)
-      expect(Either.isLeft(Schema.decodeUnknownEither(PositiveInt)(-5))).toBe(true)
-      expect(Either.isLeft(Schema.decodeUnknownEither(PositiveInt)(3.14))).toBe(true)
-      expect(Either.isLeft(Schema.decodeUnknownEither(PositiveInt)("42"))).toBe(true)
-      expect(Either.isLeft(Schema.decodeUnknownEither(PositiveInt)(null))).toBe(true)
+      expectDecodeFailure(PositiveInt, 0)
+      expectDecodeFailure(PositiveInt, -5)
+      expectDecodeFailure(PositiveInt, 3.14)
+      expectDecodeFailure(PositiveInt, "42")
+      expectDecodeFailure(PositiveInt, null)
     })
   })
 
@@ -164,8 +186,8 @@ describe("Primitives Contract Schemas", () => {
     })
 
     it("rejects negative integers and decimals", () => {
-      expect(Either.isLeft(Schema.decodeUnknownEither(StreamVersion)(-1))).toBe(true)
-      expect(Either.isLeft(Schema.decodeUnknownEither(StreamVersion)(0.5))).toBe(true)
+      expectDecodeFailure(StreamVersion, -1)
+      expectDecodeFailure(StreamVersion, 0.5)
     })
   })
 
@@ -175,8 +197,8 @@ describe("Primitives Contract Schemas", () => {
     })
 
     it("rejects empty strings and non-strings", () => {
-      expect(Either.isLeft(Schema.decodeUnknownEither(NonEmptyString)(""))).toBe(true)
-      expect(Either.isLeft(Schema.decodeUnknownEither(NonEmptyString)(null))).toBe(true)
+      expectDecodeFailure(NonEmptyString, "")
+      expectDecodeFailure(NonEmptyString, null)
     })
   })
 })
@@ -239,10 +261,15 @@ Never model mutually exclusive states using boolean flags (`isPaid`, `isFailed`)
 ```ts
 import { Schema } from "effect"
 
+export const EpochMillis = Schema.Natural.pipe(Schema.brand("EpochMillis"))
+export const ReceiptId = Schema.NonEmptyString.pipe(Schema.brand("ReceiptId"))
+export const FailureReason = Schema.NonEmptyString.pipe(Schema.brand("FailureReason"))
+export const EntityId = Schema.NonEmptyString.pipe(Schema.brand("EntityId"))
+
 export const PaymentStatus = Schema.TaggedUnion({
-  Pending: { initiatedAt: Schema.Int },
-  Paid: { receiptId: Schema.String, paidAt: Schema.Int },
-  Declined: { reason: Schema.String },
+  Pending: { initiatedAt: EpochMillis },
+  Paid: { receiptId: ReceiptId, paidAt: EpochMillis },
+  Declined: { reason: FailureReason },
 })
 export type PaymentStatus = typeof PaymentStatus.Type
 ```
@@ -257,7 +284,7 @@ import { Schema } from "effect"
 export class EntityNotFoundError extends Schema.TaggedError<EntityNotFoundError>()(
   "EntityNotFoundError",
   {
-    entityId: Schema.String,
+    entityId: EntityId,
   },
 ) {}
 ```

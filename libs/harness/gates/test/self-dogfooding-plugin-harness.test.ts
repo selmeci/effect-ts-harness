@@ -1114,7 +1114,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
     "REQ-1.3: AstGateCache.decide reports effect-fn-dummy-void, discriminant-branching, and non-exhaustive-union-match without isHarnessInternal exemption",
     () =>
       Effect.gen(function* () {
-        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v8")
+        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v9")
 
         const testId = "AstGateCache.decide::REQ-1.3"
         const { result: report, spans } = yield* runWithTestTracer(
@@ -2812,4 +2812,115 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
       persistReports.filter((r) => r.message.includes("discarded-persistence-result")),
     ).toHaveLength(2)
   })
+
+  it.effect(
+    "REQ-1.3: flags process-exit-outside-app and locale-dependent-sort (including evasion forms) in SelfDogfooding.decide",
+    () =>
+      Effect.gen(function* () {
+        const err = yield* Effect.flip(
+          SelfDogfooding.decide({
+            files: [
+              {
+                filePath: AstSourceFilePath.make("libs/sample/core/src/bad-exit.ts"),
+                content: AstSourceContent.make("export const bail = () => process.exit(1)\n"),
+              },
+              {
+                filePath: AstSourceFilePath.make("libs/harness/gates/src/bad-exit.ts"),
+                content: AstSourceContent.make("export const bail = () => process.exit(1)\n"),
+              },
+              {
+                filePath: AstSourceFilePath.make("libs/harness/decision/src/bad-exit.ts"),
+                content: AstSourceContent.make("export const bail = () => process.exit(1)\n"),
+              },
+              {
+                filePath: AstSourceFilePath.make("libs/sample/core/src/evade-exit.ts"),
+                content: AstSourceContent.make(
+                  [
+                    'export const e1 = () => process["exit"](1)',
+                    "export const e2 = () => globalThis.process.exit(1)",
+                    "export const e3 = () => { const { exit } = process; return exit(1) }",
+                    "export const e4 = () => { const p = process; return p.exit(1) }",
+                    "export const e5 = () => process.reallyExit(1)",
+                    "export const e6 = () => Reflect.apply(process.exit, process, [1])",
+                  ].join("\n") + "\n",
+                ),
+              },
+              {
+                filePath: AstSourceFilePath.make("apps/sample/src/ok-exit.ts"),
+                content: AstSourceContent.make("export const bail = () => process.exit(1)\n"),
+              },
+              {
+                filePath: AstSourceFilePath.make("libs/sample/core/test/ok-exit.test.ts"),
+                content: AstSourceContent.make("export const bail = () => process.exit(1)\n"),
+              },
+              {
+                filePath: AstSourceFilePath.make("libs/sample/contract/src/bad-sort.ts"),
+                content: AstSourceContent.make(
+                  "export const sortIds = (xs: string[]) => [...xs].sort((a, b) => a.localeCompare(b))\n",
+                ),
+              },
+              {
+                filePath: AstSourceFilePath.make("libs/sample/domain/src/bad-sort.ts"),
+                content: AstSourceContent.make(
+                  "export const cmp = (a: string, b: string) => a.localeCompare(b)\n",
+                ),
+              },
+              {
+                filePath: AstSourceFilePath.make("libs/sample/domain/src/evade-sort.ts"),
+                content: AstSourceContent.make(
+                  [
+                    'export const s1 = (a: string, b: string) => a["localeCompare"](b)',
+                    "export const s2 = (a: string, b: string) => String.prototype.localeCompare.call(a, b)",
+                    "export const s3 = (a: string, b: string) => new Intl.Collator().compare(a, b)",
+                  ].join("\n") + "\n",
+                ),
+              },
+              {
+                filePath: AstSourceFilePath.make(
+                  "libs/harness/gates/src/plan-workflow-compiler.ts",
+                ),
+                content: AstSourceContent.make(
+                  "export const cmp = (a: string, b: string) => a.localeCompare(b)\n",
+                ),
+              },
+              {
+                filePath: AstSourceFilePath.make("libs/sample/domain/src/ok-sort.ts"),
+                content: AstSourceContent.make(
+                  "export const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)\n",
+                ),
+              },
+            ],
+            maxPluginFileLines: MaxPluginFileLines.make(800),
+            failOnViolation: true,
+          }),
+        )
+
+        const exitViolations = err.violations.filter((v) => v.rule === "process-exit-outside-app")
+        expect(
+          exitViolations.map((v) => v.file).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+        ).toEqual([
+          "libs/harness/decision/src/bad-exit.ts",
+          "libs/harness/gates/src/bad-exit.ts",
+          "libs/sample/core/src/bad-exit.ts",
+          "libs/sample/core/src/evade-exit.ts",
+          "libs/sample/core/src/evade-exit.ts",
+          "libs/sample/core/src/evade-exit.ts",
+          "libs/sample/core/src/evade-exit.ts",
+          "libs/sample/core/src/evade-exit.ts",
+          "libs/sample/core/src/evade-exit.ts",
+        ])
+
+        const sortViolations = err.violations.filter((v) => v.rule === "locale-dependent-sort")
+        expect(
+          sortViolations.map((v) => v.file).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+        ).toEqual([
+          "libs/harness/gates/src/plan-workflow-compiler.ts",
+          "libs/sample/contract/src/bad-sort.ts",
+          "libs/sample/domain/src/bad-sort.ts",
+          "libs/sample/domain/src/evade-sort.ts",
+          "libs/sample/domain/src/evade-sort.ts",
+          "libs/sample/domain/src/evade-sort.ts",
+        ])
+      }),
+  )
 })

@@ -21,7 +21,10 @@ import { syncOmnigraphOnDone } from "../src/commands/done-omnigraph-helpers.js"
 import { handleRoute } from "../src/commands/guard-and-route.command.js"
 import { stopStaleOmnigraphClusterBeforeDelete } from "../src/commands/omnigraph-lifecycle.js"
 import { handlePlanCheck } from "../src/commands/plan-and-repair.command.js"
-import { handleDoctorOrSession, handleIngest } from "../src/commands/session-learn-report.command.js"
+import {
+  handleDoctorOrSession,
+  handleIngest,
+} from "../src/commands/session-learn-report.command.js"
 import { handleVerify } from "../src/commands/verify-and-done.command.js"
 import {
   isReadOnlyStopTurn,
@@ -184,7 +187,10 @@ describe("PR #28 adjudicated review fixes (F-6.2, F-8.3c, F-11.1, F-12.1, F-14.1
       const res = await runCli(["ingest"], { repoRoot: dir })
       expect(res.exitCode).toBe(1)
       expect(res.stderr).toContain("[harness:ingest] Omnigraph sync failed:")
-      const parsed = JSON.parse(res.stdout) as { readonly syncedToOmnigraph: boolean; readonly error?: string }
+      const parsed = JSON.parse(res.stdout) as {
+        readonly syncedToOmnigraph: boolean
+        readonly error?: string
+      }
       expect(parsed.syncedToOmnigraph).toBe(false)
       expect(typeof parsed.error).toBe("string")
       expect(existsSync(join(dir, ".harness", "graph-head.json"))).toBe(false)
@@ -208,7 +214,10 @@ describe("PR #28 adjudicated review fixes (F-6.2, F-8.3c, F-11.1, F-12.1, F-14.1
     }) as typeof process.stderr.write
 
     try {
-      await runCli(["verify"], { repoRoot: join(dir, "nonexistent-repo"), skipSubprocessVerify: true })
+      await runCli(["verify"], {
+        repoRoot: join(dir, "nonexistent-repo"),
+        skipSubprocessVerify: true,
+      })
       expect(stderrChunks.join("")).toContain("TsCompilerOverlayService failed")
       expect(stderrChunks.join("")).toContain("Repository root path does not exist")
     } finally {
@@ -235,9 +244,9 @@ describe("PR #28 adjudicated review fixes (F-6.2, F-8.3c, F-11.1, F-12.1, F-14.1
         stderr: "",
       }),
     ).toBe("fail")
-    expect(
-      resolveCommandTelemetryOutcome("done", { exitCode: 0, stdout: "{}", stderr: "" }),
-    ).toBe("ok")
+    expect(resolveCommandTelemetryOutcome("done", { exitCode: 0, stdout: "{}", stderr: "" })).toBe(
+      "ok",
+    )
   })
 
   it("F-20.1a: recordTelemetry writes telemetry when skipBackgroundDaemons is false", () => {
@@ -315,7 +324,9 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
       }
 
       // Disallowed commands / flags / env / substitutions
-      expect(isReadOnlyStopTurn({ transcriptPath: makeTranscript("env rm -rf /tmp/x") })).toBe(false)
+      expect(isReadOnlyStopTurn({ transcriptPath: makeTranscript("env rm -rf /tmp/x") })).toBe(
+        false,
+      )
       expect(isReadOnlyStopTurn({ transcriptPath: makeTranscript("echo $(whoami)") })).toBe(false)
       expect(isReadOnlyStopTurn({ transcriptPath: makeTranscript("echo `whoami`") })).toBe(false)
       expect(isReadOnlyStopTurn({ transcriptPath: makeTranscript("cat <(ls)") })).toBe(false)
@@ -323,10 +334,12 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
       expect(
         isReadOnlyStopTurn({ transcriptPath: makeTranscript("GIT_EXTERNAL_DIFF=/tmp/x git diff") }),
       ).toBe(false)
-      expect(
-        isReadOnlyStopTurn({ transcriptPath: makeTranscript("find . -exec rm {} +") }),
-      ).toBe(false)
-      expect(isReadOnlyStopTurn({ transcriptPath: makeTranscript("git branch -D feat") })).toBe(false)
+      expect(isReadOnlyStopTurn({ transcriptPath: makeTranscript("find . -exec rm {} +") })).toBe(
+        false,
+      )
+      expect(isReadOnlyStopTurn({ transcriptPath: makeTranscript("git branch -D feat") })).toBe(
+        false,
+      )
       expect(
         isReadOnlyStopTurn({ transcriptPath: makeTranscript("git remote add origin https://x") }),
       ).toBe(false)
@@ -365,7 +378,6 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
   })
 
   it("F-19.2: runDeltaAstAndPluginGates fails closed on GitFailed in verify", async () => {
-
     const dir = mkdtempSync(join(tmpdir(), "harness-f41-"))
     try {
       mkdirSync(join(dir, ".git"), { recursive: true })
@@ -396,7 +408,7 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
     }
   })
 
-  it("F-7.1: gc --strict exits 1 and includes governance-doc-read-error on unreadable ADR/Spec", async () => {
+  it("F-7.1: gc --strict exits 1 and includes unreadable-workspace-file on unreadable ADR/Spec, and governance-doc-read-error on malformed frontmatter", async () => {
     if (typeof process.getuid === "function" && process.getuid() === 0) return
     const dir = mkdtempSync(join(tmpdir(), "harness-f71-"))
     const adrDir = join(dir, "docs", "adr")
@@ -411,9 +423,40 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
       expect(res.exitCode).toBe(1)
       const parsed = Schema.decodeUnknownSync(GraphGcReport)(JSON.parse(res.stdout))
       expect(parsed.clean).toBe(false)
-      expect(parsed.findings.some((f) => f.kind === "governance-doc-read-error")).toBe(true)
+      expect(parsed.findings.some((f) => f.kind === "unreadable-workspace-file")).toBe(true)
+
+      chmodSync(adrPath, 0o644)
+      writeFileSync(adrPath, "---\nid: ADR-0001\nstatus: bogus\n---\n", "utf8")
+      const e2eRes = await Effect.runPromise(handleGc(["gc", "--strict"], { repoRoot: dir }))
+      expect(e2eRes.exitCode).toBe(1)
+      const e2eParsed = Schema.decodeUnknownSync(GraphGcReport)(JSON.parse(e2eRes.stdout))
+      expect(e2eParsed.clean).toBe(false)
+      expect(e2eParsed.findings.some((f) => f.kind === "governance-doc-read-error")).toBe(true)
     } finally {
       if (existsSync(adrPath)) chmodSync(adrPath, 0o644)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("handleVerify fails cleanly with verify:dst-seed on invalid DST_SEED", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-dst-seed-err-"))
+    const prevSeed = process.env["DST_SEED"]
+    try {
+      process.env["DST_SEED"] = "not-a-seed"
+      const res = await Effect.runPromise(
+        handleVerify({
+          repoRoot: dir,
+          skipSubprocessVerify: true,
+          skipBackgroundDaemons: true,
+          mutateStampPolicy: "skip",
+          governanceDocs: [],
+        }),
+      )
+      expect(res.exitCode).toBe(1)
+      expect(res.stderr).toContain("[GATE FAILURE] verify:dst-seed")
+    } finally {
+      if (prevSeed === undefined) Reflect.deleteProperty(process.env, "DST_SEED")
+      else process.env["DST_SEED"] = prevSeed
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -428,10 +471,9 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
 
   it("S-3.3: handleRoute emits block=review;source=degraded-fallback telemetryDetail when model degrades", async () => {
     const res = await Effect.runPromise(
-      handleRoute(
-        ["route", "unmatched-obscure-step-xyz"],
-        { decisionLayer: makeFailingDecisionModelLayer("offline") },
-      ),
+      handleRoute(["route", "unmatched-obscure-step-xyz"], {
+        decisionLayer: makeFailingDecisionModelLayer("offline"),
+      }),
     )
     expect(res.exitCode).toBe(0)
     expect(res.stdout).toBe("review")
@@ -503,31 +545,44 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
         isReadOnlyStopTurn({
           transcriptPath: writeTranscript([
             JSON.stringify({ source: "USER_EXPLICIT", content: "work" }),
-            JSON.stringify({ source: "SYSTEM", content: "Stop hook blocked termination: missing stamp" }),
+            JSON.stringify({
+              source: "SYSTEM",
+              content: "Stop hook blocked termination: missing stamp",
+            }),
             JSON.stringify({
               source: "MODEL",
-              tool_calls: [{ name: "write_file", args: { TargetFile: "apps/harness-cli/src/index.ts" } }],
+              tool_calls: [
+                { name: "write_file", args: { TargetFile: "apps/harness-cli/src/index.ts" } },
+              ],
             }),
           ]),
         }),
       ).toBe(false)
 
       // 2. Background & operator
-      expect(isReadOnlyStopTurn({ transcriptPath: cmdTranscript("echo ok & node -e 'console.log(1)'") })).toBe(
-        false,
-      )
+      expect(
+        isReadOnlyStopTurn({ transcriptPath: cmdTranscript("echo ok & node -e 'console.log(1)'") }),
+      ).toBe(false)
 
       // 3. Quoted flags, backslashes, and ${...} expansion
       expect(isReadOnlyStopTurn({ transcriptPath: cmdTranscript('find . "-delete"') })).toBe(false)
-      expect(isReadOnlyStopTurn({ transcriptPath: cmdTranscript("find . \\-exec sh -c id \\;") })).toBe(
+      expect(
+        isReadOnlyStopTurn({ transcriptPath: cmdTranscript("find . \\-exec sh -c id \\;") }),
+      ).toBe(false)
+      expect(isReadOnlyStopTurn({ transcriptPath: cmdTranscript("find . ${X:--delete}") })).toBe(
         false,
       )
-      expect(isReadOnlyStopTurn({ transcriptPath: cmdTranscript("find . ${X:--delete}") })).toBe(false)
 
       // 4. Tightened git branch allowlist
-      expect(isReadOnlyStopTurn({ transcriptPath: cmdTranscript("git branch new-branch") })).toBe(false)
-      expect(isReadOnlyStopTurn({ transcriptPath: cmdTranscript("git branch -df feat") })).toBe(false)
-      expect(isReadOnlyStopTurn({ transcriptPath: cmdTranscript("git branch --show-current") })).toBe(true)
+      expect(isReadOnlyStopTurn({ transcriptPath: cmdTranscript("git branch new-branch") })).toBe(
+        false,
+      )
+      expect(isReadOnlyStopTurn({ transcriptPath: cmdTranscript("git branch -df feat") })).toBe(
+        false,
+      )
+      expect(
+        isReadOnlyStopTurn({ transcriptPath: cmdTranscript("git branch --show-current") }),
+      ).toBe(true)
       expect(isReadOnlyStopTurn({ transcriptPath: cmdTranscript("git branch -a") })).toBe(true)
 
       // 5. Editing docs/rfcs/*.md is NOT exempted
@@ -537,7 +592,9 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
             JSON.stringify({ source: "USER_EXPLICIT", content: "edit rfc" }),
             JSON.stringify({
               source: "MODEL",
-              tool_calls: [{ name: "write_file", args: { TargetFile: "/repo/docs/rfcs/0008-test.md" } }],
+              tool_calls: [
+                { name: "write_file", args: { TargetFile: "/repo/docs/rfcs/0008-test.md" } },
+              ],
             }),
           ]),
         }),
@@ -822,9 +879,7 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
       }
       if (method === "POST" && url.endsWith("/branches")) {
         res.writeHead(200, headers)
-        res.end(
-          JSON.stringify({ outcome: "created", branch: "impl/current", serverRef: "srv-1" }),
-        )
+        res.end(JSON.stringify({ outcome: "created", branch: "impl/current", serverRef: "srv-1" }))
         return
       }
       if (method === "POST" && url.includes("/branches/merge")) {

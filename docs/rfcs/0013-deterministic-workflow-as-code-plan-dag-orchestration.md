@@ -196,8 +196,6 @@ Snippets follow `AGENTS.md`: branded scalars, no inline object types at boundari
 
 ```typescript
 import { Schema } from "effect"
-// Cross-RFC prerequisite (WF-0 confirmed): `./repo-identity.js` (RFC-0011 §5.3.2) is not yet in `@harness/contract`;
-// WF-1 must either sequence behind RFC-0011 or land `GitCommitSha` (40-hex branded scalar) in `@harness/contract` first.
 import { GitCommitSha } from "./repo-identity.js"
 import { ReviewRoutingPlan } from "./review-routing.js"
 
@@ -231,11 +229,30 @@ export const WaveIndex = Schema.Int.pipe(
 )
 export type WaveIndex = typeof WaveIndex.Type
 
-export const NxProjectName = Schema.NonEmptyString.pipe(Schema.brand("NxProjectName"))
+export const NxProjectName = Schema.String.pipe(
+  Schema.check(Schema.isPattern(/^(?:@[a-z0-9-]+\/)?[a-z0-9][a-z0-9._-]*$/)),
+  Schema.brand("NxProjectName"),
+)
 export type NxProjectName = typeof NxProjectName.Type
 
-export const OwnedRelPath = Schema.NonEmptyString.pipe(Schema.brand("OwnedRelPath"))
+export const OwnedRelPath = Schema.String.pipe(
+  Schema.check(Schema.isBetweenLength(1, 512)),
+  Schema.check(Schema.isPattern(SAFE_OWNED_REL_PATH_RE)),
+  Schema.check(
+    Schema.makeFilter((path) => !PROTECTED_OWNED_PATH_RE.test(path), {
+      message:
+        "OwnedRelPath must not target protected .git, .harness, repos/effect, repos/alchemy, or tools/oxlint paths",
+    }),
+  ),
+  Schema.brand("OwnedRelPath"),
+)
 export type OwnedRelPath = typeof OwnedRelPath.Type
+
+export const pathsOverlap = (a: OwnedRelPath, b: OwnedRelPath): boolean => {
+  const normA = a.normalize("NFC").toLowerCase()
+  const normB = b.normalize("NFC").toLowerCase()
+  return normA === normB || normB.startsWith(`${normA}/`) || normA.startsWith(`${normB}/`)
+}
 
 /** Hex SHA-256 produced by `computeWorkspaceTreeHash` (all non-ignored files): the verify-stamp hash only. */
 export const WorkspaceTreeHash = Schema.String.pipe(
@@ -269,10 +286,14 @@ export const SliceBranchName = Schema.NonEmptyString.pipe(
 )
 export type SliceBranchName = typeof SliceBranchName.Type
 
-export const PackageVerifyCommand = Schema.NonEmptyString.pipe(Schema.brand("PackageVerifyCommand"))
+export const PackageVerifyCommand = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(512)),
+  Schema.check(Schema.isPattern(SAFE_PACKAGE_VERIFY_COMMAND_RE)),
+  Schema.brand("PackageVerifyCommand"),
+)
 export type PackageVerifyCommand = typeof PackageVerifyCommand.Type
 
-export const WorkflowLevel = Schema.Literals(["epic", "slice"]).pipe(Schema.brand("WorkflowLevel"))
+export const WorkflowLevel = Schema.Literals(["epic", "slice"])
 export type WorkflowLevel = typeof WorkflowLevel.Type
 
 export const ShipStage = Schema.Literals([
@@ -282,14 +303,15 @@ export const ShipStage = Schema.Literals([
   "mutate-strict",
   "verify",
   "done",
-]).pipe(Schema.brand("ShipStage"))
+])
 export type ShipStage = typeof ShipStage.Type
 
 /** The two supported agent CLIs. Closed set: adding a runner is a contract change. */
-export const RunnerId = Schema.Literals(["claude-code", "antigravity"]).pipe(
-  Schema.brand("RunnerId"),
-)
+export const RunnerId = Schema.Literals(["claude-code", "antigravity"])
 export type RunnerId = typeof RunnerId.Type
+
+export const FrictionLogState = Schema.Literals(["cleared"])
+export type FrictionLogState = typeof FrictionLogState.Type
 
 export const MaxConcurrency = Schema.Int.pipe(
   Schema.check(Schema.isBetween({ minimum: 1, maximum: 8 })),
@@ -304,28 +326,47 @@ export const UnitMode = Schema.TaggedUnion({
 })
 export type UnitMode = typeof UnitMode.Type
 
-/** L1 `SliceUnit`: a Route D slice in its own sibling worktree. L2 `PackageUnit`: one Nx project inside a slice. */
-export const CompiledWorkUnit = Schema.TaggedUnion({
-  SliceUnit: {
-    unitId: WorkUnitId,
-    branch: SliceBranchName,
-    waveIndex: WaveIndex,
-    dependsOn: Schema.Array(WorkUnitId),
-    ownedRelPaths: Schema.Array(OwnedRelPath),
-    earsKeys: Schema.Array(EarsRequirementKey),
-  },
-  PackageUnit: {
-    unitId: WorkUnitId,
-    projectName: NxProjectName,
-    waveIndex: WaveIndex,
-    dependsOn: Schema.Array(WorkUnitId),
-    ownedRelPaths: Schema.Array(OwnedRelPath),
-    stubKeys: Schema.Array(StubSymbolKey),
-    earsKeys: Schema.Array(EarsRequirementKey),
-    packageVerifyCommand: PackageVerifyCommand,
-  },
+export const SliceUnitDraft = Schema.TaggedStruct("SliceUnit", {
+  unitId: WorkUnitId,
+  branch: SliceBranchName,
+  ownedRelPaths: Schema.Array(OwnedRelPath),
+  earsKeys: Schema.Array(EarsRequirementKey),
 })
+export type SliceUnitDraft = typeof SliceUnitDraft.Type
+
+export const PackageUnitDraft = Schema.TaggedStruct("PackageUnit", {
+  unitId: WorkUnitId,
+  projectName: NxProjectName,
+  ownedRelPaths: Schema.Array(OwnedRelPath),
+  stubKeys: Schema.Array(StubSymbolKey),
+  earsKeys: Schema.Array(EarsRequirementKey),
+  packageVerifyCommand: PackageVerifyCommand,
+}) // + Schema.makeFilter enforcing packageVerifyCommand targets projectName or nx affected
+export type PackageUnitDraft = typeof PackageUnitDraft.Type
+
+export const WorkUnitDraft = Schema.Union([SliceUnitDraft, PackageUnitDraft])
+export type WorkUnitDraft = typeof WorkUnitDraft.Type
+
+export const UnitDependency = Schema.Struct({ from: WorkUnitId, to: WorkUnitId })
+export type UnitDependency = typeof UnitDependency.Type
+
+export const CompileInput = Schema.Struct({
+  units: Schema.Array(WorkUnitDraft),
+  dependencies: Schema.Array(UnitDependency),
+})
+export type CompileInput = typeof CompileInput.Type
+
+/** L1 `SliceUnit`: a Route D slice in its own sibling worktree. L2 `PackageUnit`: one Nx project inside a slice. */
+export const CompiledWorkUnit = Schema.Union([CompiledSliceUnit, CompiledPackageUnit])
 export type CompiledWorkUnit = typeof CompiledWorkUnit.Type
+
+export const CompiledWaves = Schema.Struct({
+  units: Schema.Array(CompiledWorkUnit),
+}) // + Schema.makeFilter enforcing unique unitIds, dep waveIndex < unit waveIndex, dense 0..N-1 waves, wave disjointness
+export type CompiledWaves = typeof CompiledWaves.Type
+
+export const wavesOf = (source: CompiledPlan | CompiledWaves): ReadonlyArray<CompiledWave> =>
+  groupWaves(source.units)
 
 /** Everything the deterministic body may read: the payload of `HarnessTaskWorkflow`. */
 export const CompiledPlan = Schema.Struct({
@@ -336,12 +377,17 @@ export const CompiledPlan = Schema.Struct({
   mode: UnitMode,
   units: Schema.Array(CompiledWorkUnit),
   sharedStepPaths: Schema.Array(OwnedRelPath),
-})
+}) // + Schema.makeFilter enforcing isValidCompiledSchedule(units) and sharedStepPaths disjoint from all unit ownedRelPaths
 export type CompiledPlan = typeof CompiledPlan.Type
 
 export const UnitRejection = Schema.TaggedUnion({
-  WriteSetViolation: { offendingPaths: Schema.Array(OwnedRelPath) },
-  PackageVerifyFailed: { exitCode: Schema.Int.pipe(Schema.brand("GateExitCode")) },
+  WriteSetViolation: { offendingPaths: Schema.NonEmptyArray(OwnedRelPath) },
+  PackageVerifyFailed: {
+    exitCode: Schema.Int.pipe(
+      Schema.check(Schema.isBetween({ minimum: 1, maximum: 255 })),
+      Schema.brand("GateExitCode"),
+    ),
+  },
   StampMissing: {},
   AgentFailed: { reason: Schema.NonEmptyString.pipe(Schema.brand("AgentFailureReason")) },
 })
@@ -370,12 +416,13 @@ export type UnitCompletedOutcome = typeof UnitOutcome.cases.Completed.Type
 
 export const LlmPhaseReceipt = Schema.Struct({
   workspaceHash: WorkspaceTreeHash,
-  frictionLogCleared: Schema.Literals(["cleared"]).pipe(Schema.brand("FrictionLogState")),
+  frictionLogCleared: FrictionLogState,
 })
 export type LlmPhaseReceipt = typeof LlmPhaseReceipt.Type
 
 export const TaskRunReceipt = Schema.Struct({
   runId: WorkflowRunId,
+  planSha: PlanSha256,
   review: ReviewRoutingPlan,
   completedUnits: Schema.Array(WorkUnitId),
   llmPhase: LlmPhaseReceipt,
@@ -384,23 +431,41 @@ export type TaskRunReceipt = typeof TaskRunReceipt.Type
 
 export const ShipReceipt = Schema.Struct({
   runId: WorkflowRunId,
+  planSha: Schema.optional(PlanSha256),
   attempt: ShipAttempt,
   verifiedTreeHash: WorkspaceTreeHash,
 })
 export type ShipReceipt = typeof ShipReceipt.Type
 
+export const PlanGraphIssue = Schema.TaggedUnion({
+  DuplicateWorkUnitId: { unitId: WorkUnitId },
+  DanglingUnitDependency: {
+    from: WorkUnitId,
+    to: WorkUnitId,
+    missingUnitIds: Schema.NonEmptyArray(WorkUnitId),
+  },
+})
+export type PlanGraphIssue = typeof PlanGraphIssue.Type
+
 // ---- errors (Schema.TaggedError) ----
+export class InvalidPlanWorkflowGraphError extends Schema.TaggedError<InvalidPlanWorkflowGraphError>()(
+  "InvalidPlanWorkflowGraphError",
+  {
+    issue: PlanGraphIssue,
+  },
+) {} // derives `message` from `this.issue`
+
 export class CyclicPlanWorkflowError extends Schema.TaggedError<CyclicPlanWorkflowError>()(
   "CyclicPlanWorkflowError",
   {
-    cycleUnits: Schema.Array(WorkUnitId),
+    cycleUnits: Schema.NonEmptyArray(WorkUnitId),
     reason: Schema.NonEmptyString.pipe(Schema.brand("WorkflowCompileReason")),
   },
 ) {}
 
 export class DisjointOwnershipViolationError extends Schema.TaggedError<DisjointOwnershipViolationError>()(
   "DisjointOwnershipViolationError",
-  { waveIndex: WaveIndex, overlappingPaths: Schema.Array(OwnedRelPath) },
+  { waveIndex: WaveIndex, overlappingPaths: Schema.NonEmptyArray(OwnedRelPath) },
 ) {}
 
 /** Terminal failure of `HarnessTaskWorkflow` (after escalation was not resolved). */
@@ -443,27 +508,23 @@ export class WorkflowStoreUnavailableError extends Schema.TaggedError<WorkflowSt
 ### 5.2 Pure Core (`@harness/gates` or `@harness/decision`, `R = never`)
 
 ```typescript
-import { Effect, Schema } from "effect"
+import { Effect } from "effect"
 import * as Graph from "effect/Graph"
-import { CompiledWorkUnit, CyclicPlanWorkflowError, WorkUnitId } from "@harness/contract"
-
-export const UnitDependency = Schema.Struct({ from: WorkUnitId, to: WorkUnitId })
-export type UnitDependency = typeof UnitDependency.Type
-
-/** Impure extraction (snapshot + Nx graph / RFC phases) happens before this point, in harness-cli. */
-export const CompileInput = Schema.Struct({
-  units: Schema.Array(CompiledWorkUnit),
-  dependencies: Schema.Array(UnitDependency),
-})
-export type CompileInput = typeof CompileInput.Type
-
-export const CompiledWaves = Schema.Struct({ units: Schema.Array(CompiledWorkUnit) })
-export type CompiledWaves = typeof CompiledWaves.Type
+import {
+  CompileInput,
+  CompiledWaves,
+  CyclicPlanWorkflowError,
+  InvalidPlanWorkflowGraphError,
+  WorkUnitId,
+} from "@harness/contract"
 
 /** Longest-path levels over the unit DAG, then first-fit split into write-disjoint waves. */
 export const compileWorkflowWaves = Effect.fn("PlanWorkflowCompiler.decide")(function* (
   input: CompileInput,
-): Effect.fn.Return<CompiledWaves, CyclicPlanWorkflowError, never> {
+): Effect.fn.Return<CompiledWaves, CyclicPlanWorkflowError | InvalidPlanWorkflowGraphError, never> {
+  // 1. Validate unique unitIds -> InvalidPlanWorkflowGraphError (DuplicateWorkUnitId)
+  // 2. Validate dependencies endpoints -> InvalidPlanWorkflowGraphError (DanglingUnitDependency)
+  // 3. Reject self-loops (dep.from === dep.to) -> CyclicPlanWorkflowError
   const indexById = new Map<WorkUnitId, Graph.NodeIndex>()
   const graph = Graph.directed<WorkUnitId, null>((mutable) => {
     for (const unit of input.units) indexById.set(unit.unitId, Graph.addNode(mutable, unit.unitId))
@@ -474,17 +535,22 @@ export const compileWorkflowWaves = Effect.fn("PlanWorkflowCompiler.decide")(fun
     }
   })
 
-  if (!Graph.isAcyclic(graph)) {
-    const cycleUnits = Graph.stronglyConnectedComponents(graph)
-      .filter((component) => component.length > 1)
-      .flatMap((component) => component.flatMap((index) => unitIdAt(graph, index)))
-    return yield* new CyclicPlanWorkflowError({ cycleUnits, reason: cycleReason(cycleUnits) })
+  if (selfLoops.size > 0 || !Graph.isAcyclic(graph)) {
+    const cycleUnits = collectCycleUnits(graph, selfLoops)
+    return yield* new CyclicPlanWorkflowError({
+      cycleUnits,
+      reason: cycleReason(cycleUnits),
+    })
   }
 
   // Safe: acyclicity was just established, so Graph.topo cannot throw GraphError.
   const order = Array.from(Graph.values(Graph.topo(graph)))
   const levelOf = assignLevels(order, input.dependencies)
-  return { units: splitLevelsIntoDisjointWaves(input.units, levelOf) }
+  const units = splitLevelsIntoDisjointWaves(input.units, levelOf)
+  for (const wave of wavesOf({ units })) {
+    yield* Effect.orDie(assertDisjointWave(wave))
+  }
+  return { units }
 })
 ```
 
@@ -772,18 +838,18 @@ export const ShipWorkflowLayer = ShipWorkflow.toLayer(
     treeHash,
     attempt,
   }): Effect.fn.Return<ShipReceipt, ShipFailure, ShipRuntime> {
-    yield* gate(ShipStage.make("format-check"), treeHash)
-    yield* gate(ShipStage.make("gc-strict"), treeHash)
-    yield* gate(ShipStage.make("ontology-check-strict"), treeHash)
-    yield* gate(ShipStage.make("mutate-strict"), treeHash) // recovers backup first; asserts H unchanged afterwards
-    yield* gate(ShipStage.make("verify"), treeHash)
-    yield* gate(ShipStage.make("done"), treeHash) // asserts H unchanged afterwards (ShipTreeDriftError)
+    yield* gate("format-check", treeHash)
+    yield* gate("gc-strict", treeHash)
+    yield* gate("ontology-check-strict", treeHash)
+    yield* gate("mutate-strict", treeHash) // recovers backup first; asserts H unchanged afterwards
+    yield* gate("verify", treeHash)
+    yield* gate("done", treeHash) // asserts H unchanged afterwards (ShipTreeDriftError)
     return { runId, attempt, verifiedTreeHash: treeHash }
   }),
 )
 ```
 
-(`ShipStage.make` stands for the single canonical constructor of the brand; the literal values are the closed `ShipStage` union.) `runGateAssertingTree` shells out to the existing CLI gate (`pnpm harness <gate>`, `format:check` via the root script) as a child process of the daemon with a validated `repoRoot`. **Critical `done` protocol requirement (found in review of `verify-and-done.command.ts:477-580`):** in non-TTY pipes `handleDone` currently fails on empty stdin (`"done: empty Stop hook stdin payload"`) and returns `exitCode: 0` with `{ decision: "block" }` JSON on stdout; WF-4 adds an explicit `--cli` flag on `done` (or feeds `{}` stdin and treats `decision === "block"` identically to non-zero exit) mapped to `ShipGateFailedError`, wires failures into `LoopCircuitBreaker.decide` accounting (today only `verify`; new work), and for `mutate-strict` first calls `recoverStartupBackup`. `mutate --strict`: `handleMutate` does not parse `--strict` today (only `--scope=`), so WF-4 wires `--strict`.
+(`ShipStage` is an unbranded closed `Schema.Literals` union.) `runGateAssertingTree` shells out to the existing CLI gate (`pnpm harness <gate>`, `format:check` via the root script) as a child process of the daemon with a validated `repoRoot`. **Critical `done` protocol requirement (found in review of `verify-and-done.command.ts:477-580`):** in non-TTY pipes `handleDone` currently fails on empty stdin (`"done: empty Stop hook stdin payload"`) and returns `exitCode: 0` with `{ decision: "block" }` JSON on stdout; WF-4 adds an explicit `--cli` flag on `done` (or feeds `{}` stdin and treats `decision === "block"` identically to non-zero exit) mapped to `ShipGateFailedError`, wires failures into `LoopCircuitBreaker.decide` accounting (today only `verify`; new work), and for `mutate-strict` first calls `recoverStartupBackup`. `mutate --strict`: `handleMutate` does not parse `--strict` today (only `--scope=`), so WF-4 wires `--strict`.
 
 #### 5.4.3 Why these keys are safe (verified semantics, §4.2)
 
@@ -1192,7 +1258,7 @@ The table below combines WF-0 empirical measurements (`wf0-results.json`, `omnig
 4. **RESOLVED in WF-0 (`agy -p` subprocess behavior on `1.5.10`):** Plain `stdio: ["ignore", "pipe", "pipe"]` succeeds reliably (`16–20 s`); PTY wrapping hangs after output until `SIGKILL`. Inheriting parent `ANTIGRAVITY_*` / `AGY_*` env vars triggers intermittent `20 s` hangs, so stripping them is mandatory. **Supp Probe 4** verified `agy --mode plan --output-format json` (`exit 0`, `15.16 s`) returns valid JSON containing `{ conversation_id, status, response, duration_seconds, num_turns, usage }`. Because `agy` lacks `--disallowedTools` / `--strict-mcp-config` and can fail startup (`exit 3`) on third-party MCP Draft-07 regexes, untrusted or read-only steps requiring hard MCP tool isolation MUST route to `claude -p --strict-mcp-config`.
 5. **Open (`agy` global settings & permissions):** `~/.gemini/antigravity-cli/settings.json` applies globally; `workflow doctor` checks and instructs rather than editing it unless a documented per-invocation override flag is added in future `agy` versions.
 6. **RESOLVED (envelope) / Open (billing):** `claude -p` (`2.1.326`) JSON schema + `--disallowedTools` + `--permission-mode dontAsk` verified, and `--strict-mcp-config --mcp-config <file> --setting-sources ""` is **required** to close external MCP write escapes (WebStorm MCP) and cut cost/tokens >98.5% (`$0.00091` warm). **Supp Probe 4** also confirmed `--settings <generated-hooks.json>` (`exit 0`, `3.40 s`, `$0.0010` warm) re-injects **only** `PreToolUse -> guard` hooks (omitting `Stop -> done`). Dedicated credit-pool billing terms for automated runs remain to be verified before rollout.
-7. **RESOLVED in WF-0 (`effect@4.0.0` API surface):** Verified `Workflow.make(name, opts)` (2-arg), synchronous `DurableDeferred.tokenFromExecutionId`, synchronous `Snowflake.Generator.nextUnsafe()`, `MessageStorage.MessageStorage` Context tag, `Graph.values(Graph.topo(dag))`, `Graph.isAcyclic`, and `Graph.stronglyConnectedComponents` against installed `effect@4.0.0`. Track `GitCommitSha` prerequisite on RFC-0011.
+7. **RESOLVED in WF-0 (`effect@4.0.0` API surface):** Verified `Workflow.make(name, opts)` (2-arg), synchronous `DurableDeferred.tokenFromExecutionId`, synchronous `Snowflake.Generator.nextUnsafe()`, `MessageStorage.MessageStorage` Context tag, `Graph.values(Graph.topo(dag))`, `Graph.isAcyclic`, and `Graph.stronglyConnectedComponents` against installed `effect@4.0.0`. `GitCommitSha` landed in `@harness/contract` (`repo-identity.ts`).
 8. **RESOLVED in WF-0 (Daemon socket placement):** Resolved `<git-common-dir>/harness/daemon.sock` (`70 B` vs `97 B` worktree path, `107 B` Linux limit), requiring `isPathInsideRoot` update for external worktrees and decoupled workflow RPC timeout (`> 5 s`).
 9. **Credentials & worker isolation on disk.** `readAuthTokensFromClusterDir` reads Omnigraph tokens from the cluster directory; `libs/harness/gates/src/policy.ts` enforces `HARNESS_UNIT_WORKER=1` rules blocking slice-worker access to `auth-tokens.json`, `daemon.sock`, and recursive `workflow` lifecycle commands, paired with disjoint `workflows.policy.yaml` (`404` for `agent-mcp` on `harness-workflows`) in WF-2.
 10. **Retention policy & automated Lance version cleanup.** WF-0 observed **172.4 MB** on disk for 475 entities before cleanup (`~765×` uncompacted MVCC growth); **Supp Probe 2** confirmed offline `omnigraph optimize` + `omnigraph cleanup --keep 1 --confirm` reclaims `63.9%` (`5.55 MB`), followed by `omnigraph cluster force-unlock` to clear retained `__cluster/lock.json` before restarting `omnigraph-server`. WF-2 must automate this maintenance sequence cleanly.
@@ -1387,7 +1453,7 @@ Symbols: `WorkflowRun` is one execution of `HarnessTaskWorkflow`; `ownedRelPaths
 ### 10.3 Independent Implementation Milestones
 
 0. **WF-0 - Spike — COMPLETE (`CONDITIONAL GO` — P0 remediations integrated, 8/8 primary suites + 4/4 supplemental probes green on 2026-11-17, no production code merged).** Throwaway `OmnigraphMessageStorage` + `ClusterWorkflowEngine.layer` validated in `.harness/wf0-spike/` against real `omnigraph-server 0.14.0`, real OS `SIGKILL` workers, `claude -p 2.1.326`, and `agy -p 1.5.10` ([full evidence](./reviews/2026-11-17-rfc-0013-wf0-spike-evidence.md)). **Verified criteria:** `(a)` **13/13** `MessageStorage.Encoded` methods and **24/24** GQ queries passed live (Suite 2 + Supp Probe 1 including `Chunk`, `AckChunk`, `$expectedReplyId` CAS `clearReplies`, `unprocessedMessagesById`, `resetRequests`, `resetAddresses`, `wf_messages_by_keys`), replay determinism, and server restart persistence; `(b)` 10×8 concurrent workflows completed (80/80 once, `5.00 s` `writeMutex: true` vs `12.25 s` `false`, `unprocessedMessages` P95 `885 ms`) requiring one process-wide `maxConcurrentHttp = 12` semaphore respecting Omnigraph's 16-in-flight actor cap; `(c)` 5/5 `DurableDeferred` `SIGKILL` trials passed (`465–503 ms` recovery including `400 ms` spike worker boot delay) and 5/5 mid-activity `SIGKILL` trials passed (`12–50 ms` recovery, Wave 1 never re-ran); `(d)` 475-entity export/rebuild/`load({ mode: "merge" })` round trip passed (`11.9 ms` export, `24.8 ms` load, `2` reads in 5 s idle window) and **Supp Probe 2** confirmed `omnigraph cleanup --keep 1 --confirm` reclaims `5.55 MB / 63.9%` offline before `omnigraph cluster force-unlock`; `(e)` **Supp Probe 3** proved disjoint `workflows.policy.yaml` returns `404` to `agent-mcp` on `harness-workflows` reads and writes; `(f)` **Suite 7 + Supp Probe 4** verified `claude -p --strict-mcp-config --setting-sources "" --settings` (`$0.00091–$0.0010` warm with `PreToolUse -> guard` only) and `agy --mode plan --output-format json` (`15.16 s`, `ANTIGRAVITY_*`/`AGY_*` stripped, `stdio: ["ignore", "pipe", "pipe"]`).
-1. **WF-1 - Contracts and compiler (`@harness/contract`, `@harness/gates`):** resolve `GitCommitSha` prerequisite (`RFC-0011` or `@harness/contract` canonical export); branded scalars, `CompiledPlan` (`sharedStepPaths`), `UnitOutcome`, errors (`WriterLeaseHeldError`, `DaemonProtocolMismatchError`, `ShipTreeDriftError`, etc.); `PlanWorkflowCompiler.decide` using `Graph.isAcyclic`, `Graph.values(Graph.topo(D))`, and `Graph.stronglyConnectedComponents`; property tests for `REQ-1.1..1.3`; `PERF-09` compile benchmark.
+1. **WF-1 - Contracts and compiler (`@harness/contract`, `@harness/gates`):** `AbsoluteRepoRoot`, `GitCommitSha`, branded scalars, `WorkUnitDraft`, `CompileInput`, `CompiledWaves`, `CompiledPlan` (`sharedStepPaths`), `UnitOutcome`, errors (`InvalidPlanWorkflowGraphError`, `CyclicPlanWorkflowError`, `DisjointOwnershipViolationError`); `PlanWorkflowCompiler.decide` using `Graph.isAcyclic`, `Graph.values(Graph.topo(D))`, and `Graph.stronglyConnectedComponents`; property tests for `REQ-1.1..1.3` and `REQ-2.1..2.6`; `PERF-09` compile benchmark.
 2. **WF-2 - `OmnigraphMessageStorage`, engine in the daemon, graph `harness-workflows`, rebuild export/restore (`@harness/graph`, `@harness/infra`, `harness-mcp`, `harness-cli`):** `workflows.schema.pg` (`seqKey: String`), 24 GQ 2.1 queries (`is null`, `D₂` two-commit `$expectedReplyId` `clearReplies` under continuous `writeMutex`, `wf_dangling_processed_requests`), `cluster.yaml` second graph + disjoint `workflows.policy.yaml` (`404` for `agent-mcp`) and `CONFIG_DIGEST_FILES` entries, `<git-common-dir>/harness/daemon.sock` (`70 B`) + worktree `isPathInsideRoot` fix + decoupled daemon timeout + `workflow.handshake` version check, process-wide `maxConcurrentHttp = 12` semaphore + `429`/`412` retries, `WfWriterLease` (`flock` + PID liveness + `leaseEpoch`), daemon-only `harness-workflows` mutations, offline `optimize` + `cleanup` + `cluster force-unlock` maintenance, orphan `entityType` quarantine, per-row `JSON.parse` defect isolation, and `WorkflowGraphBackup` (`mode: "merge"`) hooked **before** `killOmnigraphServerPidIfAlive` in `apps/harness-cli/src/commands/omnigraph-lifecycle.ts` (`REQ-2.1..2.9`, `REQ-4.6`). `cluster.yaml`/policy edits and the rebuild hook in `apps/harness-cli/src/commands/omnigraph-lifecycle.ts` are **human-reviewed TCB edits** (RFC-0012 §3.4).
 3. **WF-3 - `HarnessTaskWorkflow`, manual mode, CLI/MCP (`@harness/domain`-tier library, `harness-cli`, `harness-mcp`):** workflow body (`Workflow.make(tag, opts)`), `driveUnit`, `driveSharedStep(plan, worktrees)`, `UnitVerifier.completeUnit`, manual `DurableDeferred` path (`tokenFromExecutionId` synchronous), LLM-phase deferred, `removeWorktreeCheckouts` abort compensation (keeping `slice/*` branches), escalations, read model; `apps/harness-cli/src/commands/workflow.command.ts` (`compile | start | status | complete | resume | doctor | abort`); read-only `harness_workflow_plan` (tool count 19 to 20, `tool-registry.test.ts` updated); `libs/harness/gates/src/policy.ts` `HARNESS_UNIT_WORKER=1` guards; `REQ-1.4`, `REQ-3.1..3.2`, `REQ-4.6`. The `explicit repoRoot` validation reuses RFC-0012 TX-2's exported `validateWorktreeRepoRoot` (no second implementation).
 4. **WF-4 - `ShipWorkflow` and skill updates (`harness-cli`, adapters, `AGENTS.md`):** `workflow ship`, gate activities asserting `treeHash` (`ShipTreeMismatchError`, `MutationRestoreError`, `ShipTreeDriftError`), `mutate --strict` parsing, `done --cli` / `{ decision: "block" }` handling, `LoopCircuitBreaker` accounting, `routeReview` activity; update `effect-lfg/SKILL.md`, `references/multi-slice-worktree-execution.md` and `references/review-and-shipping.md` in **both** adapters (`adapters/claude-code/skills/effect-lfg`, `adapters/antigravity/plugins/effect-harness/skills/effect-lfg`) to the new loop and canonical order; rewrite the workflow line of `AGENTS.md` (`... -> review -> LLM phase -> harness workflow ship`, `learn` before the final gates); `REQ-3.3..3.7`. Wiring `mutate --strict` and `done` in `apps/harness-cli/src/commands/verify-and-done.command.ts`, and any change to `adapters/*/hooks.json`, are **human-reviewed TCB edits**; `ShipWorkflow` invokes the existing `done` CLI path without modifying TCB logic beyond approved hooks.

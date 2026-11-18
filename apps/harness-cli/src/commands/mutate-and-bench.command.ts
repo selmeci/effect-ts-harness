@@ -1,37 +1,32 @@
 import { join } from "node:path"
-import { Cause, Effect } from "effect"
+import { Cause, Effect, Result } from "effect"
 import { match } from "ts-pattern"
 import {
   AstSourceContent,
   AstSourceFilePath,
   type CompileInput,
-  type CompiledWorkUnit,
   EarsRequirementKey,
   HARNESS_GATE_RULE_VERSION,
   OwnedRelPath,
   SliceBranchName,
   type UnitDependency,
-  WaveIndex,
   WorkUnitId,
+  type WorkUnitDraft,
 } from "@harness/contract"
 import {
   AstGateCache,
   BenchStageName,
   buildStageLatencyMeasurement,
-  checkMutateStamp,
   compileWorkflowWaves,
   decideHarnessBench,
   DEFAULT_STAGE_LATENCY_BUDGETS,
-  DstSeedsRunCount,
-  extractGitDiffModifiedLinesChecked,
-  findDomainFiles,
-  findUnclassifiedModifiedLibFiles,
   LatencyMillis,
   LatencySloViolationError,
-  MutateDiffMode,
-  MutateEnforcementMode,
+  MutantCount,
+  MutateStampPassed,
   removeMutateStamp,
   runDomainMutationSuite,
+  StampRelFilePath,
   writeMutateStamp,
 } from "@harness/gates"
 import {
@@ -46,14 +41,26 @@ import {
   stepDatalogFileDelta,
 } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
-import {
-  type CliEnv,
-  type CliResult,
-  findWorkspaceRoot,
-  isIsolatedExternalWorkspace,
-} from "./daemon-and-omnigraph.service.js"
+import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
 import { makeDoneBlockResult } from "./hook-format.js"
-import { extractFlag } from "./repo-path.js"
+import {
+  collectModifiedMutableFiles,
+  type CollectModifiedMutableFilesResult,
+  evaluateVerifyMutateStampGate,
+  hasModifiedMutableFiles,
+  isVerifyMutateStampGateEnforced,
+  resolveVerifyStampMutateMeta,
+} from "./mutate-stamp-gate.js"
+import { extractRequiredFlagValue } from "./repo-path.js"
+
+export {
+  collectModifiedMutableFiles,
+  type CollectModifiedMutableFilesResult,
+  evaluateVerifyMutateStampGate,
+  hasModifiedMutableFiles,
+  isVerifyMutateStampGateEnforced,
+  resolveVerifyStampMutateMeta,
+}
 
 export const handleMutate = (
   argv: ReadonlyArray<string>,
@@ -61,11 +68,66 @@ export const handleMutate = (
 ): Effect.Effect<CliResult> =>
   Effect.sync(() => {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-    const scope = extractFlag(argv, "--scope")
     const isStrict = argv.includes("--strict")
     const isAll = argv.includes("--all")
-    const fileCsv = extractFlag(argv, "--file")
-    const baseRef = extractFlag(argv, "--base")
+
+    const cleanupStamp = (): string | undefined =>
+      match(removeMutateStamp(repoRoot, nodeSyncHostIo))
+        .with({ _tag: "Success" }, () => undefined)
+        .with({ _tag: "Failure" }, ({ failure }) => failure)
+        .exhaustive()
+
+    const failClosed = (msg: string): CliResult => {
+      const cleanupErr = cleanupStamp()
+      return {
+        exitCode: 1,
+        stdout: JSON.stringify({
+          passed: false,
+          totalMutants: 0,
+          killedCount: 0,
+          survivedCount: 0,
+          equivalentCount: 0,
+          mutationScore: 0,
+          survivedMutants: [],
+          diagnostic: msg,
+        }),
+        stderr: cleanupErr !== undefined ? `${msg}\n${cleanupErr}` : msg,
+      }
+    }
+
+    const scopeFlag = extractRequiredFlagValue(argv, "--scope")
+    const fileFlag = extractRequiredFlagValue(argv, "--file")
+    const baseFlag = extractRequiredFlagValue(argv, "--base")
+
+    const flagError = match({ scopeFlag, fileFlag, baseFlag })
+      .with(
+        { scopeFlag: { _tag: "MissingValue" } },
+        () => "Flag --scope requires a non-empty value.",
+      )
+      .with({ fileFlag: { _tag: "MissingValue" } }, () => "Flag --file requires a non-empty value.")
+      .with({ baseFlag: { _tag: "MissingValue" } }, () => "Flag --base requires a non-empty value.")
+      .otherwise(() => undefined)
+    if (flagError !== undefined) {
+      return failClosed(flagError)
+    }
+
+    const scope = match(scopeFlag)
+      .with({ _tag: "Value" }, ({ value }) => value)
+      .with({ _tag: "Absent" }, { _tag: "MissingValue" }, () => undefined)
+      .exhaustive()
+    const fileCsv = match(fileFlag)
+      .with({ _tag: "Value" }, ({ value }) => value)
+      .with({ _tag: "Absent" }, { _tag: "MissingValue" }, () => undefined)
+      .exhaustive()
+    const baseRef = match(baseFlag)
+      .with({ _tag: "Value" }, ({ value }) => value)
+      .with({ _tag: "Absent" }, { _tag: "MissingValue" }, () => undefined)
+      .exhaustive()
+
+    if (baseRef !== undefined && baseRef.startsWith("-")) {
+      return failClosed(`Invalid --base ref '${baseRef}': must not start with '-'.`)
+    }
+
     const targetFiles =
       fileCsv !== undefined
         ? fileCsv
@@ -73,6 +135,10 @@ export const handleMutate = (
             .map((s) => s.trim())
             .filter((s) => s.length > 0)
         : undefined
+
+    if (targetFiles !== undefined && targetFiles.length === 0) {
+      return failClosed("Empty --file target list; refusing to run mutation suite.")
+    }
 
     const report = runDomainMutationSuite(repoRoot, nodeSyncHostIo, {
       scope,
@@ -83,71 +149,54 @@ export const handleMutate = (
       explicitBaseRef: baseRef !== undefined,
     })
 
-    if (!report.passed) {
-      removeMutateStamp(repoRoot, nodeSyncHostIo)
+    const cleanupErr = !report.passed ? cleanupStamp() : undefined
+    let stampWriteErr: string | undefined = undefined
+    if (
+      report.passed &&
+      isStrict &&
+      scope === undefined &&
+      targetFiles === undefined &&
+      baseRef === undefined
+    ) {
+      const writeRes = Result.try(() =>
+        writeMutateStamp(repoRoot, nodeSyncHostIo, {
+          enforcementMode: "strict",
+          diffMode: report.diffMode,
+          scannedCandidateFiles: MutantCount.make(report.scannedCandidateFiles),
+          scannedFiles: report.scannedFiles.map((f) => StampRelFilePath.make(f)),
+          diffMatchedFiles: report.diffMatchedFiles.map((f) => StampRelFilePath.make(f)),
+          evaluatedFiles: report.evaluatedFiles.map((f) => StampRelFilePath.make(f)),
+          totalMutants: MutantCount.make(report.totalMutants),
+          killedCount: MutantCount.make(report.killedCount),
+          survivedCount: MutantCount.make(report.survivedCount),
+          equivalentCount: MutantCount.make(report.equivalentCount),
+          passed: MutateStampPassed.make(true),
+        }),
+      )
+      stampWriteErr = match(writeRes)
+        .with({ _tag: "Success" }, () => undefined)
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          const rollbackErr = cleanupStamp()
+          const msg = `Failed to write mutate-stamp.json: ${failure instanceof Error ? failure.message : String(failure)}`
+          return rollbackErr !== undefined ? `${msg}\n${rollbackErr}` : msg
+        })
+        .exhaustive()
     }
-    if (report.passed && isStrict && scope === undefined && targetFiles === undefined) {
-      writeMutateStamp(repoRoot, nodeSyncHostIo, {
-        enforcementMode: MutateEnforcementMode.make("strict"),
-        diffMode: MutateDiffMode.make(report.diffMode ?? "working-tree"),
-        scannedCandidateFiles: DstSeedsRunCount.make(report.scannedCandidateFiles ?? 0),
-        diffMatchedFiles: report.diffMatchedFiles ?? [],
-        evaluatedFiles: report.evaluatedFiles ?? [],
-        totalMutants: DstSeedsRunCount.make(report.totalMutants),
-        killedCount: DstSeedsRunCount.make(report.killedCount),
-      })
-    }
+
+    const stderrParts = [
+      ...(report.diagnostic !== undefined && report.diagnostic.length > 0
+        ? [report.diagnostic]
+        : []),
+      ...(cleanupErr !== undefined ? [cleanupErr] : []),
+      ...(stampWriteErr !== undefined ? [stampWriteErr] : []),
+    ]
 
     return {
-      exitCode: !report.passed ? 1 : 0,
+      exitCode: !report.passed || stampWriteErr !== undefined ? 1 : 0,
       stdout: JSON.stringify(report),
-      stderr: report.diagnostic ?? "",
+      stderr: stderrParts.join("\n"),
     }
   })
-
-export const hasModifiedMutableFiles = (repoRoot: string): boolean => {
-  const domainFiles = findDomainFiles(repoRoot, nodeSyncHostIo)
-  const diffResult = extractGitDiffModifiedLinesChecked(repoRoot, nodeSyncHostIo, {
-    fallbackBaseRef: "main",
-  })
-  return match(diffResult)
-    .with({ kind: "failed" }, () => true)
-    .with({ kind: "not-git" }, () => domainFiles.length > 0)
-    .with(
-      { kind: "ok" },
-      ({ lines }) =>
-        findUnclassifiedModifiedLibFiles(repoRoot, lines, domainFiles, nodeSyncHostIo).length > 0 ||
-        domainFiles.some((f) => lines.has(f.relFile)),
-    )
-    .exhaustive()
-}
-
-export const evaluateVerifyMutateStampGate = (
-  repoRoot: string,
-  options: CliEnv | undefined,
-): string | undefined => {
-  const shouldEnforce =
-    options?.mutateStampPolicy === "enforce" ||
-    (options?.mutateStampPolicy !== "skip" &&
-      !options?.skipSubprocessVerify &&
-      !isIsolatedExternalWorkspace(repoRoot))
-  if (!shouldEnforce || !hasModifiedMutableFiles(repoRoot)) {
-    return undefined
-  }
-  return match(checkMutateStamp(repoRoot, nodeSyncHostIo))
-    .with({ valid: true }, () => undefined)
-    .with({ valid: false }, ({ reason }) => reason)
-    .exhaustive()
-}
-
-export const resolveVerifyStampMutateMeta = (repoRoot: string) =>
-  match(checkMutateStamp(repoRoot, nodeSyncHostIo))
-    .with({ valid: true }, ({ stamp }) => ({
-      mutateEnforcementMode: stamp.enforcementMode,
-      mutantsEvaluated: stamp.totalMutants,
-    }))
-    .with({ valid: false }, () => undefined)
-    .exhaustive()
 
 export const loadSnapshotPair = (
   repoRoot: string,
@@ -238,7 +287,7 @@ export const parseDoneDeadlineMs = (): number => {
 }
 
 const buildBenchmarkCompileInput = (): CompileInput => {
-  const units: Array<CompiledWorkUnit> = []
+  const units: Array<WorkUnitDraft> = []
   const dependencies: Array<UnitDependency> = []
   for (let layer = 0; layer < 5; layer++) {
     for (let idx = 0; idx < 10; idx++) {
@@ -247,8 +296,6 @@ const buildBenchmarkCompileInput = (): CompileInput => {
         _tag: "SliceUnit",
         unitId,
         branch: SliceBranchName.make(`slice/layer${layer}-unit${idx}`),
-        waveIndex: WaveIndex.make(layer),
-        dependsOn: [],
         ownedRelPaths: [OwnedRelPath.make(`libs/bench/layer-${layer}/unit-${idx}.ts`)],
         earsKeys: [EarsRequirementKey.make(`REQ-${layer + 1}.${idx + 1}`)],
       })
