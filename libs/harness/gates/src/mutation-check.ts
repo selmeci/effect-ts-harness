@@ -10,9 +10,9 @@ import {
   MUTATION_CACHE_SCHEMA_VERSION,
   MutantCacheId,
   type MutationCacheEntry,
+  type MutationCacheHmacSecret,
   MutationCacheTimestamp,
   SourceLineNumber,
-  computeContentSha256,
 } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { runVitestTargetList, stripAnsi } from "./mutation-subprocess-helpers.js"
@@ -39,12 +39,15 @@ import {
   recoverStartupBackup,
 } from "./mutation/mutation-backup.js"
 import {
-  computeMutantCacheKey,
-  computeMutationContextDigests,
+  computeMutationContextDigestsChecked,
+  computeMutationEntryMac,
   loadMutationCache,
-  partitionMutationCacheLookup,
   saveMutationCacheAtomic,
 } from "./mutation/mutation-cache.js"
+import {
+  collectOrderedFileOutcomes,
+  hydrateFileMutantCacheHits,
+} from "./mutation/mutation-suite-helpers.js"
 import {
   decideMutationCheck,
   decideMutationReport,
@@ -139,6 +142,7 @@ export interface RunMutationOptions {
   readonly minScore?: number | undefined
   readonly disableMutantCache?: boolean | undefined
   readonly enableMutantCache?: boolean | undefined
+  readonly hmacSecret?: MutationCacheHmacSecret | undefined
   readonly testRunner?:
     | ((
         mutant: CodeMutant,
@@ -150,6 +154,69 @@ export interface RunMutationOptions {
   readonly saturationSpecs?: ReadonlyArray<SpanSaturationSpec> | undefined
   readonly equivalencePriors?: Readonly<Record<string, number>> | undefined
   readonly sourceCodeOverlays?: Readonly<Record<string, string>> | undefined
+}
+
+const runCustomTestRunner = (
+  file: DomainFile,
+  originalContent: string,
+  schemaSource: string,
+  mutants: ReadonlyArray<CodeMutant>,
+  reachingTestFiles: ReadonlyArray<string>,
+  runner: NonNullable<RunMutationOptions["testRunner"]>,
+  outcomes: Array<MutantOutcome>,
+): string | undefined => {
+  const prevGlobal = getActiveMutantId()
+  const prevEnv = process.env["HARNESS_ACTIVE_MUTANT_ID"]
+  const restoreInProcessEnv = () => {
+    setActiveMutantId(prevGlobal)
+    if (prevEnv === undefined) delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
+    else process.env["HARNESS_ACTIVE_MUTANT_ID"] = prevEnv
+  }
+  const baselineMutant: CodeMutant = {
+    id: MutantId.make("__baseline__"),
+    file: AstSourceFilePath.make(file.relFile),
+    line: SourceLineNumber.make(1),
+    category: "boolean-return",
+    original: MutantSourceText.make(""),
+    replacement: MutantSourceText.make(""),
+    mutatedSource: MutantSourceText.make(originalContent),
+  }
+  setActiveMutantId(undefined)
+  delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
+  const baselineRes = Result.try(() => runner(baselineMutant, originalContent, reachingTestFiles))
+  restoreInProcessEnv()
+  const baselineDiag = match(baselineRes)
+    .with({ _tag: "Success" }, ({ success }) =>
+      success === "survived"
+        ? undefined
+        : `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}'`,
+    )
+    .with(
+      { _tag: "Failure" },
+      ({ failure }) =>
+        `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}': ${failure instanceof Error ? failure.message : String(failure)}`,
+    )
+    .exhaustive()
+  if (baselineDiag !== undefined) return baselineDiag
+  for (const mutant of mutants) {
+    setActiveMutantId(mutant.id)
+    process.env["HARNESS_ACTIVE_MUTANT_ID"] = mutant.id
+    const runRes = Result.try(() => runner(mutant, schemaSource, reachingTestFiles))
+    restoreInProcessEnv()
+    const runnerDiag = match(runRes)
+      .with({ _tag: "Success" }, ({ success }) => {
+        outcomes.push({ mutant, status: success === "killed" ? "killed" : "survived" })
+        return undefined
+      })
+      .with(
+        { _tag: "Failure" },
+        ({ failure }) =>
+          `[mutation-check] Custom testRunner threw for mutant '${mutant.id}': ${failure instanceof Error ? failure.message : String(failure)}`,
+      )
+      .exhaustive()
+    if (runnerDiag !== undefined) return runnerDiag
+  }
+  return undefined
 }
 
 export const runDomainMutationSuite = (
@@ -171,9 +238,9 @@ export const runDomainMutationSuite = (
     .with("advisory", undefined, () => false)
     .exhaustive()
 
-  const makeAbortedReport = (
+  const makeReport = (
     outcomesSoFar: ReadonlyArray<MutantOutcome>,
-    diagnostic: string,
+    extra: { readonly passed?: false; readonly diagnostic?: string },
   ): MutationSuiteReport => ({
     ...evaluateMutationOutcomes(
       outcomesSoFar,
@@ -182,8 +249,7 @@ export const runDomainMutationSuite = (
       options?.saturationSpecs,
       options?.spanObservations,
     ),
-    passed: false,
-    diagnostic,
+    ...extra,
     cachedKilledCount,
     diffMode,
     scannedCandidateFiles,
@@ -192,12 +258,14 @@ export const runDomainMutationSuite = (
     evaluatedFiles,
     ...(untestedFiles.length > 0 ? { untestedFiles } : {}),
   })
+  let flushCacheIfDirty: () => void = () => {}
   const abortWith = (
     outcomesSoFar: ReadonlyArray<MutantOutcome>,
     diagnostic: string,
   ): MutationSuiteReport => {
+    flushCacheIfDirty()
     process.stderr.write(`${diagnostic}\n`)
-    return makeAbortedReport(outcomesSoFar, diagnostic)
+    return makeReport(outcomesSoFar, { passed: false, diagnostic })
   }
 
   const rawOverlays = options?.sourceCodeOverlays
@@ -224,22 +292,14 @@ export const runDomainMutationSuite = (
     return abortWith([], "[mutation-check] Explicit targetFiles (--file) was provided but empty.")
   }
 
-  const domainFilesRes = findDomainFilesChecked(
-    repoRoot,
-    hostIo,
-    options?.scope,
-    options?.targetFiles,
+  const domainFiles = match(
+    findDomainFilesChecked(repoRoot, hostIo, options?.scope, options?.targetFiles),
   )
-  const domainFiles = match(domainFilesRes)
     .with({ _tag: "Ok" }, ({ files }) => files)
-    .with({ _tag: "Error" }, () => undefined)
+    .with({ _tag: "Error" }, ({ reason }) => reason)
     .exhaustive()
-  if (domainFiles === undefined) {
-    const errReason = match(domainFilesRes)
-      .with({ _tag: "Error" }, ({ reason }) => reason)
-      .with({ _tag: "Ok" }, () => "")
-      .exhaustive()
-    return abortWith([], `[mutation-check] Target discovery failed: ${errReason}`)
+  if (typeof domainFiles === "string") {
+    return abortWith([], `[mutation-check] Target discovery failed: ${domainFiles}`)
   }
 
   const domainByRel = new Map(domainFiles.map((f) => [f.relFile, f]))
@@ -290,9 +350,8 @@ export const runDomainMutationSuite = (
     )
   }
 
-  const resolvedDiff = hasOverlays
-    ? { _tag: "Ok" as const, diffMode: "explicit-files" as const, diffLinesMap: undefined }
-    : isExplicitTarget
+  const resolvedDiff =
+    hasOverlays || isExplicitTarget
       ? { _tag: "Ok" as const, diffMode: "explicit-files" as const, diffLinesMap: undefined }
       : match(
           extractGitDiffModifiedLinesChecked(repoRoot, hostIo, {
@@ -300,10 +359,10 @@ export const runDomainMutationSuite = (
             explicitBaseRef: options?.explicitBaseRef,
           }),
         )
-          .with({ _tag: "Failed" }, ({ reason }) => ({
-            _tag: "Abort" as const,
-            diagnostic: `[mutation-check] Failed to extract git diff modified lines: ${reason}`,
-          }))
+          .with(
+            { _tag: "Failed" },
+            ({ reason }) => `[mutation-check] Failed to extract git diff modified lines: ${reason}`,
+          )
           .with({ _tag: "Ok" }, ({ lines, diffMode: extractedMode }) => ({
             _tag: "Ok" as const,
             diffMode: options?.includeAllLines === true ? ("all-lines" as const) : extractedMode,
@@ -316,19 +375,9 @@ export const runDomainMutationSuite = (
             diffLinesMap: undefined,
           }))
           .exhaustive()
-
-  const diffAbort = match(resolvedDiff)
-    .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
-    .with({ _tag: "Ok" }, (ok) => {
-      diffMode = ok.diffMode
-      return undefined
-    })
-    .exhaustive()
-  if (diffAbort !== undefined) return abortWith([], diffAbort)
-  const diffLinesMap = match(resolvedDiff)
-    .with({ _tag: "Ok" }, ({ diffLinesMap: m }) => m)
-    .with({ _tag: "Abort" }, () => undefined)
-    .exhaustive()
+  if (typeof resolvedDiff === "string") return abortWith([], resolvedDiff)
+  diffMode = resolvedDiff.diffMode
+  const diffLinesMap = resolvedDiff.diffLinesMap
 
   if (
     isStrictMode &&
@@ -356,20 +405,57 @@ export const runDomainMutationSuite = (
     if (unclassifiedErr !== undefined) return abortWith([], unclassifiedErr)
   }
 
-  const cacheEnabled =
+  const hmacSecret = options?.hmacSecret
+  const cacheRequested =
     options?.disableMutantCache !== true &&
     !hasOverlays &&
     options?.testRunner === undefined &&
     (options?.enableMutantCache ?? true)
-  const contextDigests = cacheEnabled
-    ? match(computeMutationContextDigests(repoRoot, hostIo))
-        .with({ _tag: "Some" }, ({ value }) => value)
-        .with({ _tag: "None" }, () => undefined)
-        .exhaustive()
-    : undefined
-  const loadedCacheStore = cacheEnabled ? loadMutationCache(repoRoot, hostIo) : undefined
+  if (cacheRequested && hmacSecret === undefined) {
+    process.stderr.write(
+      "[mutation-check] Warning: Mutation cache disabled (missing HMAC secret).\n",
+    )
+  }
+  const contextDigests =
+    cacheRequested && hmacSecret !== undefined
+      ? match(computeMutationContextDigestsChecked(repoRoot, hostIo))
+          .with({ _tag: "Ok" }, ({ digests }) => digests)
+          .with({ _tag: "Disabled" }, ({ reason }) => {
+            process.stderr.write(`[mutation-check] Warning: Mutation cache disabled (${reason}).\n`)
+            return undefined
+          })
+          .exhaustive()
+      : undefined
+  const cacheEnabled = cacheRequested && hmacSecret !== undefined && contextDigests !== undefined
+  const loadedCacheStore =
+    cacheEnabled && hmacSecret !== undefined
+      ? loadMutationCache(repoRoot, hostIo, hmacSecret)
+      : undefined
   const cacheEntries: Record<ContentSha256, MutationCacheEntry> = {}
   let cacheDirty = false
+  flushCacheIfDirty = () => {
+    if (!cacheEnabled || !cacheDirty || hmacSecret === undefined) return
+    const freshStore = loadMutationCache(repoRoot, hostIo, hmacSecret)
+    const saveRes = saveMutationCacheAtomic(
+      repoRoot,
+      {
+        version: MUTATION_CACHE_SCHEMA_VERSION,
+        entries: { ...freshStore.entries, ...cacheEntries },
+      },
+      hostIo,
+      hmacSecret,
+    )
+    match(saveRes)
+      .with({ _tag: "Saved" }, () => {
+        cacheDirty = false
+      })
+      .with({ _tag: "Skipped" }, { _tag: "Failed" }, ({ reason }) => {
+        process.stderr.write(
+          `[mutation-check] Warning: Failed to persist mutation cache: ${reason}\n`,
+        )
+      })
+      .exhaustive()
+  }
 
   const outcomes: Array<MutantOutcome> = []
   for (const file of targets) {
@@ -385,25 +471,21 @@ export const runDomainMutationSuite = (
 
     scannedFiles.push(file.relFile)
     const modifiedLines = bypassDiffFilter ? undefined : diffLinesMap?.get(file.relFile)
-    const originalContentRes =
+    const originalContent = match(
       overlaySource !== undefined
         ? Result.succeed(overlaySource)
         : Result.try({
             try: () => hostIo.readTextSync(file.fullPath),
             catch: (err) => (err instanceof Error ? err.message : String(err)),
-          })
-    const originalContent = match(originalContentRes)
+          }),
+    )
       .with({ _tag: "Success" }, ({ success }) => success)
-      .with({ _tag: "Failure" }, () => undefined)
+      .with({ _tag: "Failure" }, ({ failure }) => ({ readErr: failure }))
       .exhaustive()
-    if (originalContent === undefined) {
-      const readErr = match(originalContentRes)
-        .with({ _tag: "Failure" }, ({ failure }) => failure)
-        .with({ _tag: "Success" }, () => "")
-        .exhaustive()
+    if (typeof originalContent !== "string") {
       return abortWith(
         outcomes,
-        `[mutation-check] Failed to read source file '${file.relFile}': ${readErr}`,
+        `[mutation-check] Failed to read source file '${file.relFile}': ${originalContent.readErr}`,
       )
     }
 
@@ -430,17 +512,12 @@ export const runDomainMutationSuite = (
     }
 
     if (options?.testRunner !== undefined) {
-      const reachingRes = findReachingTestFilesChecked(repoRoot, file, hostIo)
-      const reachingTestFiles = match(reachingRes)
+      const reachingTestFiles = match(findReachingTestFilesChecked(repoRoot, file, hostIo))
         .with({ _tag: "Ok" }, ({ files }) => files)
-        .with({ _tag: "Error" }, () => undefined)
+        .with({ _tag: "Error" }, ({ reason }) => reason)
         .exhaustive()
-      if (reachingTestFiles === undefined) {
-        const errReason = match(reachingRes)
-          .with({ _tag: "Error" }, ({ reason }) => reason)
-          .with({ _tag: "Ok" }, () => "")
-          .exhaustive()
-        return abortWith(outcomes, `[mutation-check] ${errReason}`)
+      if (typeof reachingTestFiles === "string") {
+        return abortWith(outcomes, `[mutation-check] ${reachingTestFiles}`)
       }
       if (reachingTestFiles.length === 0) {
         untestedFiles.push({
@@ -449,63 +526,16 @@ export const runDomainMutationSuite = (
         })
         continue
       }
-      const runner = options.testRunner
-      const prevGlobal = getActiveMutantId()
-      const prevEnv = process.env["HARNESS_ACTIVE_MUTANT_ID"]
-      const restoreInProcessEnv = () => {
-        setActiveMutantId(prevGlobal)
-        if (prevEnv === undefined) delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
-        else process.env["HARNESS_ACTIVE_MUTANT_ID"] = prevEnv
-      }
-      const baselineMutant: CodeMutant = {
-        id: MutantId.make("__baseline__"),
-        file: AstSourceFilePath.make(file.relFile),
-        line: SourceLineNumber.make(1),
-        category: "boolean-return",
-        original: MutantSourceText.make(""),
-        replacement: MutantSourceText.make(""),
-        mutatedSource: MutantSourceText.make(originalContent),
-      }
-      setActiveMutantId(undefined)
-      delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
-      const baselineRes = Result.try(() =>
-        runner(baselineMutant, originalContent, reachingTestFiles),
+      const runnerDiag = runCustomTestRunner(
+        file,
+        originalContent,
+        schemaBundle.schemaSource,
+        mutants,
+        reachingTestFiles,
+        options.testRunner,
+        outcomes,
       )
-      restoreInProcessEnv()
-      const baselineDiag = match(baselineRes)
-        .with({ _tag: "Success" }, ({ success }) =>
-          success === "survived"
-            ? undefined
-            : `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}'`,
-        )
-        .with(
-          { _tag: "Failure" },
-          ({ failure }) =>
-            `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}': ${failure instanceof Error ? failure.message : String(failure)}`,
-        )
-        .exhaustive()
-      if (baselineDiag !== undefined) return abortWith(outcomes, baselineDiag)
-
-      for (const mutant of mutants) {
-        setActiveMutantId(mutant.id)
-        process.env["HARNESS_ACTIVE_MUTANT_ID"] = mutant.id
-        const runRes = Result.try(() =>
-          runner(mutant, schemaBundle.schemaSource, reachingTestFiles),
-        )
-        restoreInProcessEnv()
-        const runnerDiag = match(runRes)
-          .with({ _tag: "Success" }, ({ success }) => {
-            outcomes.push({ mutant, status: success === "killed" ? "killed" : "survived" })
-            return undefined
-          })
-          .with(
-            { _tag: "Failure" },
-            ({ failure }) =>
-              `[mutation-check] Custom testRunner threw for mutant '${mutant.id}': ${failure instanceof Error ? failure.message : String(failure)}`,
-          )
-          .exhaustive()
-        if (runnerDiag !== undefined) return abortWith(outcomes, runnerDiag)
-      }
+      if (runnerDiag !== undefined) return abortWith(outcomes, runnerDiag)
       continue
     }
 
@@ -517,18 +547,13 @@ export const runDomainMutationSuite = (
     }
     delete baseSubprocessEnv["HARNESS_ACTIVE_MUTANT_ID"]
 
-    const partitionRes = partitionReachingTestFilesChecked(repoRoot, file, originalContent, hostIo)
-    const partition = match(partitionRes)
+    const partition = match(
+      partitionReachingTestFilesChecked(repoRoot, file, originalContent, hostIo),
+    )
       .with({ _tag: "Ok" }, ({ partition: p }) => p)
-      .with({ _tag: "Error" }, () => undefined)
+      .with({ _tag: "Error" }, ({ reason }) => reason)
       .exhaustive()
-    if (partition === undefined) {
-      const errReason = match(partitionRes)
-        .with({ _tag: "Error" }, ({ reason }) => reason)
-        .with({ _tag: "Ok" }, () => "")
-        .exhaustive()
-      return abortWith(outcomes, `[mutation-check] ${errReason}`)
-    }
+    if (typeof partition === "string") return abortWith(outcomes, `[mutation-check] ${partition}`)
     const { primaryTests, fallbackTests } = partition
     if (primaryTests.length === 0 && fallbackTests.length === 0) {
       untestedFiles.push({
@@ -538,63 +563,24 @@ export const runDomainMutationSuite = (
       continue
     }
 
-    const mutantKeys = new Map<string, ContentSha256>()
-    const cachedHitIds = new Set<string>()
-    if (cacheEnabled && contextDigests !== undefined && loadedCacheStore !== undefined) {
-      const compiledSchemaSha256 = computeContentSha256(schemaBundle.schemaSource)
-      const originalSha256 = computeContentSha256(originalContent)
-      const allReaching = [...primaryTests, ...fallbackTests]
-      const pkgKey = `${file.scope}/${file.pkgDir}`
-      const candidateKeys: Array<ContentSha256> = []
-      const keyToMutantIds = new Map<ContentSha256, Array<string>>()
-      for (const mutant of mutants) {
-        const keyOpt = computeMutantCacheKey(
-          repoRoot,
-          pkgKey,
-          file.relFile,
-          originalSha256,
-          compiledSchemaSha256,
-          mutant,
-          allReaching,
-          contextDigests,
-          hostIo,
-        )
-        match(keyOpt)
-          .with({ _tag: "Some" }, ({ value: key }) => {
-            mutantKeys.set(mutant.id, key)
-            candidateKeys.push(key)
-            const list = keyToMutantIds.get(key)
-            if (list !== undefined) list.push(mutant.id)
-            else keyToMutantIds.set(key, [mutant.id])
-          })
-          .with({ _tag: "None" }, () => {})
-          .exhaustive()
-      }
-      if (candidateKeys.length > 0) {
-        const lookupDecision = partitionMutationCacheLookup({
-          candidateKeys,
-          store: loadedCacheStore,
-        })
-        const touchedAt = MutationCacheTimestamp.make(new Date().toISOString())
-        for (const hitKey of lookupDecision.hitKeys) {
-          const existing = loadedCacheStore.entries[hitKey]
-          if (existing !== undefined) {
-            cacheEntries[hitKey] = { ...existing, recordedAt: touchedAt }
-            cacheDirty = true
-          }
-          for (const mId of keyToMutantIds.get(hitKey) ?? []) {
-            cachedHitIds.add(mId)
-          }
-        }
-      }
-    }
+    const { mutantKeys, cachedHitIds, dirtiedCache } = hydrateFileMutantCacheHits({
+      repoRoot,
+      file,
+      originalContent,
+      schemaSource: schemaBundle.schemaSource,
+      mutants,
+      allReachingTests: [...primaryTests, ...fallbackTests],
+      hostIo,
+      cacheEnabled,
+      hmacSecret,
+      contextDigests,
+      loadedCacheStore,
+      cacheEntries,
+    })
+    if (dirtiedCache) cacheDirty = true
 
     const uncachedMutants = mutants.filter((m) => !cachedHitIds.has(m.id))
     cachedKilledCount += mutants.length - uncachedMutants.length
-    if (uncachedMutants.length === 0) {
-      for (const mutant of mutants) outcomes.push({ mutant, status: "killed" })
-      continue
-    }
 
     const primaryRes = runVitestTargetList(
       repoRoot,
@@ -662,26 +648,46 @@ export const runDomainMutationSuite = (
         })
         .exhaustive()
       if (fallbackAbort !== undefined) {
-        for (const mutant of mutants) {
-          const o = fileOutcomes.get(mutant.id)
-          if (o !== undefined) outcomes.push(o)
-        }
-        return abortWith(outcomes, fallbackAbort)
+        return abortWith(
+          [...outcomes, ...collectOrderedFileOutcomes(mutants, fileOutcomes).present],
+          fallbackAbort,
+        )
       }
     }
+    const ordered = collectOrderedFileOutcomes(mutants, fileOutcomes)
+    if (ordered.missingIds.length > 0) {
+      return abortWith(
+        [...outcomes, ...ordered.present],
+        `[mutation-check] Missing outcome(s) for mutant(s) in '${file.relFile}': ${ordered.missingIds.join(", ")}`,
+      )
+    }
     const recordedAt = MutationCacheTimestamp.make(new Date().toISOString())
+    const fileAstPath = AstSourceFilePath.make(file.relFile)
     for (const mutant of uncachedMutants) {
       const outcome = fileOutcomes.get(mutant.id)
       const key = mutantKeys.get(mutant.id)
       match(outcome?.status)
         .with("killed", () => {
-          if (key !== undefined && !fileNonCacheableIds.has(mutant.id)) {
-            cacheEntries[key] = {
+          if (
+            key !== undefined &&
+            hmacSecret !== undefined &&
+            !fileNonCacheableIds.has(mutant.id)
+          ) {
+            const mutantCacheId = MutantCacheId.make(mutant.id)
+            const mac = computeMutationEntryMac(hmacSecret, {
               key,
-              file: AstSourceFilePath.make(file.relFile),
-              mutantId: MutantCacheId.make(mutant.id),
+              file: fileAstPath,
+              mutantId: mutantCacheId,
               status: "killed",
               recordedAt,
+            })
+            cacheEntries[key] = {
+              key,
+              file: fileAstPath,
+              mutantId: mutantCacheId,
+              status: "killed",
+              recordedAt,
+              mac,
             }
             cacheDirty = true
           }
@@ -689,23 +695,11 @@ export const runDomainMutationSuite = (
         .with("survived", "equivalent", undefined, () => {})
         .exhaustive()
     }
-    for (const mutant of mutants) {
-      const o = fileOutcomes.get(mutant.id)
-      if (o !== undefined) outcomes.push(o)
-    }
+    outcomes.push(...ordered.present)
+    flushCacheIfDirty()
   }
 
-  if (cacheEnabled && cacheDirty) {
-    const freshStore = loadMutationCache(repoRoot, hostIo)
-    saveMutationCacheAtomic(
-      repoRoot,
-      {
-        version: MUTATION_CACHE_SCHEMA_VERSION,
-        entries: { ...freshStore.entries, ...cacheEntries },
-      },
-      hostIo,
-    )
-  }
+  flushCacheIfDirty()
 
   if (isStrictMode && untestedFiles.length > 0) {
     return abortWith(
@@ -720,22 +714,7 @@ export const runDomainMutationSuite = (
     )
   }
 
-  return {
-    ...evaluateMutationOutcomes(
-      outcomes,
-      options?.minScore,
-      options?.equivalencePriors,
-      options?.saturationSpecs,
-      options?.spanObservations,
-    ),
-    cachedKilledCount,
-    diffMode,
-    scannedCandidateFiles,
-    scannedFiles,
-    diffMatchedFiles,
-    evaluatedFiles,
-    ...(untestedFiles.length > 0 ? { untestedFiles } : {}),
-  }
+  return makeReport(outcomes, {})
 }
 
 export const MutationCheck = {

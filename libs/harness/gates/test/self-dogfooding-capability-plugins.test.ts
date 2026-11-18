@@ -1432,6 +1432,40 @@ describe("Self-Dogfooding Capability Plugins & AST Gate Rules (SPEC-0011)", () =
                   "export const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)\n",
                 ),
               },
+              {
+                filePath: AstSourceFilePath.make("apps/harness-cli/src/bad-promise.ts"),
+                content: AstSourceContent.make(
+                  'export const bad = Effect.promise(() => import("./mod.js"))\nexport const badBracket = Effect["promise"](() => import("./mod.js"))\n',
+                ),
+              },
+              {
+                filePath: AstSourceFilePath.make("apps/harness-cli/src/evade-promise.ts"),
+                content: AstSourceContent.make(
+                  [
+                    'import { Effect as Fx } from "effect"',
+                    'import * as Eff from "effect"',
+                    'import { promise as effPromise } from "effect/Effect"',
+                    "const { promise } = Fx",
+                    "export const e1 = Fx.promise(() => Promise.resolve(1))",
+                    "export const e2 = Eff.Effect.promise(() => Promise.resolve(2))",
+                    "export const e3 = effPromise(() => Promise.resolve(3))",
+                    "export const e4 = promise(() => Promise.resolve(4))",
+                    "export const e5 = Reflect.apply(Fx.promise, Fx, [() => Promise.resolve(5)])",
+                  ].join("\n") + "\n",
+                ),
+              },
+              {
+                filePath: AstSourceFilePath.make("apps/harness-cli/src/good-trypromise.ts"),
+                content: AstSourceContent.make(
+                  'export const good = Effect.tryPromise({ try: () => import("./mod.js"), catch: (e) => e })\n',
+                ),
+              },
+              {
+                filePath: AstSourceFilePath.make("apps/harness-cli/test/ok-promise.test.ts"),
+                content: AstSourceContent.make(
+                  "export const okTest = Effect.promise(() => Promise.resolve(1))\n",
+                ),
+              },
             ],
             maxPluginFileLines: MaxPluginFileLines.make(800),
             failOnViolation: true,
@@ -1463,6 +1497,21 @@ describe("Self-Dogfooding Capability Plugins & AST Gate Rules (SPEC-0011)", () =
           "libs/sample/domain/src/evade-sort.ts",
           "libs/sample/domain/src/evade-sort.ts",
           "libs/sample/domain/src/evade-sort.ts",
+        ])
+
+        const promiseViolations = err.violations.filter(
+          (v) => v.rule === "unhandled-effect-promise",
+        )
+        expect(
+          promiseViolations.map((v) => v.file).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+        ).toEqual([
+          "apps/harness-cli/src/bad-promise.ts",
+          "apps/harness-cli/src/bad-promise.ts",
+          "apps/harness-cli/src/evade-promise.ts",
+          "apps/harness-cli/src/evade-promise.ts",
+          "apps/harness-cli/src/evade-promise.ts",
+          "apps/harness-cli/src/evade-promise.ts",
+          "apps/harness-cli/src/evade-promise.ts",
         ])
       }),
   )

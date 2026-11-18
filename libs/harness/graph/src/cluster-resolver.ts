@@ -118,8 +118,7 @@ export const resolveGitHeadState = (
       }
       return {
         gitBranch: envBranch && envBranch.length > 0 ? envBranch : null,
-        headSha:
-          envSha && envSha.length > 0 ? envSha : headContent.length > 0 ? headContent : null,
+        headSha: envSha && envSha.length > 0 ? envSha : headContent.length > 0 ? headContent : null,
       }
     }),
     () => fallback,
@@ -146,13 +145,20 @@ const resolveGraphMetaStateDir = (
   repoRoot: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string => {
-  const validRoot = normalizeNonRootWorkspacePath(
-    resolve(normalizeNonRootWorkspacePath(repoRoot)),
-  )
+  const validRoot = normalizeNonRootWorkspacePath(resolve(normalizeNonRootWorkspacePath(repoRoot)))
   const rawCustomDir = env.HARNESS_STATE_DIR
   if (rawCustomDir !== undefined && rawCustomDir.length > 0) {
     const decodedCustom = Schema.decodeSync(WorkspaceFilePath)(rawCustomDir)
-    return normalizeNonRootWorkspacePath(resolve(validRoot, decodedCustom))
+    const resolved = normalizeNonRootWorkspacePath(resolve(validRoot, decodedCustom))
+    if (resolved === validRoot) {
+      return Result.getOrThrowWith(
+        Result.fail(
+          `HARNESS_STATE_DIR ('${rawCustomDir}') must not resolve to workspaceRoot ('${validRoot}').`,
+        ),
+        (msg) => new Error(msg),
+      )
+    }
+    return resolved
   }
   const rawWorktreeId = env.HARNESS_WORKTREE_ID
   if (rawWorktreeId !== undefined && rawWorktreeId.length > 0) {
@@ -170,34 +176,41 @@ export const readGraphHeadMetaState = (
   repoRoot: string,
   hostIo: SyncHostIo,
   env: NodeJS.ProcessEnv = process.env,
-): GraphHeadMetaReadState => {
-  const stateDir = resolveGraphMetaStateDir(repoRoot, env)
-  const metaPath = join(stateDir, "graph-head.json")
-  if (!hostIo.existsSync(metaPath)) {
-    return { _tag: "Missing" }
-  }
-  const readRes = Result.try(() => hostIo.readTextSync(metaPath))
-  return match(readRes)
+): GraphHeadMetaReadState =>
+  match(Result.try(() => resolveGraphMetaStateDir(repoRoot, env)))
     .with({ _tag: "Failure" }, ({ failure }) => ({
       _tag: "Corrupt" as const,
-      path: metaPath,
+      path: repoRoot,
       reason: toErrorReasonMessage(failure),
     }))
-    .with({ _tag: "Success" }, ({ success: raw }) =>
-      match(decodeGraphHeadMetaOption(raw))
-        .with({ _tag: "Some" }, ({ value }) => ({
-          _tag: "Present" as const,
-          meta: value,
-        }))
-        .with({ _tag: "None" }, () => ({
+    .with({ _tag: "Success" }, ({ success: stateDir }) => {
+      const metaPath = join(stateDir, "graph-head.json")
+      if (!hostIo.existsSync(metaPath)) {
+        return { _tag: "Missing" as const }
+      }
+      const readRes = Result.try(() => hostIo.readTextSync(metaPath))
+      return match(readRes)
+        .with({ _tag: "Failure" }, ({ failure }) => ({
           _tag: "Corrupt" as const,
           path: metaPath,
-          reason: "failed to decode as GraphHeadMeta",
+          reason: toErrorReasonMessage(failure),
         }))
-        .exhaustive(),
-    )
+        .with({ _tag: "Success" }, ({ success: raw }) =>
+          match(decodeGraphHeadMetaOption(raw))
+            .with({ _tag: "Some" }, ({ value }) => ({
+              _tag: "Present" as const,
+              meta: value,
+            }))
+            .with({ _tag: "None" }, () => ({
+              _tag: "Corrupt" as const,
+              path: metaPath,
+              reason: "failed to decode as GraphHeadMeta",
+            }))
+            .exhaustive(),
+        )
+        .exhaustive()
+    })
     .exhaustive()
-}
 
 export const readGraphHeadMeta = (
   repoRoot: string,
@@ -234,10 +247,7 @@ const isLockPayloadStale = (lockPath: string, hostIo: SyncHostIo): boolean => {
     .with({ _tag: "Success" }, ({ success: raw }) =>
       match(decodeLockPayloadOption(raw))
         .with({ _tag: "None" }, () => true)
-        .with(
-          { _tag: "Some" },
-          ({ value }) => Date.now() - value.ts > GRAPH_HEAD_LOCK_STALE_MS,
-        )
+        .with({ _tag: "Some" }, ({ value }) => Date.now() - value.ts > GRAPH_HEAD_LOCK_STALE_MS)
         .exhaustive(),
     )
     .exhaustive()
@@ -252,7 +262,13 @@ export const withGraphHeadLock = <A>(
   if (!hasTryWriteExclusiveTextSync(hostIo)) {
     return fn()
   }
-  const stateDir = resolveGraphMetaStateDir(repoRoot, env)
+  const stateDir = match(Result.try(() => resolveGraphMetaStateDir(repoRoot, env)))
+    .with({ _tag: "Success" }, ({ success }) => success)
+    .with({ _tag: "Failure" }, () => undefined)
+    .exhaustive()
+  if (stateDir === undefined) {
+    return fn()
+  }
   const lockPath = join(stateDir, ".graph-head.json.lock")
   const dirReady = Result.isSuccess(
     Result.try(() => {
@@ -318,32 +334,43 @@ const persistGraphHeadMeta = (
   hostIo: SyncHostIo,
   meta: GraphHeadMeta,
   env: NodeJS.ProcessEnv = process.env,
-): GraphHeadMeta | null => {
-  const stateDir = resolveGraphMetaStateDir(repoRoot, env)
-  const targetPath = join(stateDir, "graph-head.json")
-  const tmpPath = join(stateDir, `.graph-head.json.${process.pid}.${randomBytes(6).toString("hex")}.tmp`)
-  const writeResult = Result.try(() => {
-    if (!hostIo.existsSync(stateDir)) {
-      hostIo.mkdirRecursiveSync(stateDir)
-    }
-    hostIo.writeTextSync(tmpPath, JSON.stringify(meta, null, 2))
-    hostIo.renameSync(tmpPath, targetPath)
-  })
-  return match(writeResult)
+): GraphHeadMeta | null =>
+  match(Result.try(() => resolveGraphMetaStateDir(repoRoot, env)))
     .with({ _tag: "Failure" }, ({ failure }) => {
       process.stderr.write(
-        `[harness/graph] Error: failed to persist ${targetPath}: ${String(failure)}\n`,
+        `[harness/graph] Warning: invalid HARNESS_STATE_DIR (${toErrorReasonMessage(failure)})\n`,
       )
-      Result.try(() => {
-        if (hostIo.existsSync(tmpPath)) {
-          hostIo.unlinkSync(tmpPath)
-        }
-      })
       return null
     })
-    .with({ _tag: "Success" }, () => meta)
+    .with({ _tag: "Success" }, ({ success: stateDir }) => {
+      const targetPath = join(stateDir, "graph-head.json")
+      const tmpPath = join(
+        stateDir,
+        `.graph-head.json.${process.pid}.${randomBytes(6).toString("hex")}.tmp`,
+      )
+      const writeResult = Result.try(() => {
+        if (!hostIo.existsSync(stateDir)) {
+          hostIo.mkdirRecursiveSync(stateDir)
+        }
+        hostIo.writeTextSync(tmpPath, JSON.stringify(meta, null, 2))
+        hostIo.renameSync(tmpPath, targetPath)
+      })
+      return match(writeResult)
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          process.stderr.write(
+            `[harness/graph] Error: failed to persist ${targetPath}: ${String(failure)}\n`,
+          )
+          Result.try(() => {
+            if (hostIo.existsSync(tmpPath)) {
+              hostIo.unlinkSync(tmpPath)
+            }
+          })
+          return null
+        })
+        .with({ _tag: "Success" }, () => meta)
+        .exhaustive()
+    })
     .exhaustive()
-}
 
 export const updateGraphHeadCursor = (
   repoRoot: string,

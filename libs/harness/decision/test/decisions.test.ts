@@ -1,5 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect } from "effect"
+import { Effect, Fiber, Layer, Logger } from "effect"
+import * as DecisionModel from "effect/ai/DecisionModel"
+import { TestClock } from "effect/testing"
 import { SKIP_NX_CACHE_BANNED_REASON } from "@harness/gates/hook-fastpath"
 import {
   checkOntologyPairConflict,
@@ -350,6 +352,18 @@ describe("Harness decision definitions & fallbacks", () => {
         expect(localeSortRes.kind).toBe("mechanical")
         expect(localeSortRes.hint).toContain("compareCodeUnits")
 
+        const fastpathImportRes = yield* triageFailure(
+          "hook-fastpath-forbidden-import: Hook fast-path entrypoint transitively imports typescript",
+        ).pipe(Effect.provide(failingLayer))
+        expect(fastpathImportRes.kind).toBe("mechanical")
+        expect(fastpathImportRes.hint).toContain("hook-fastpath")
+
+        const promiseRes = yield* triageFailure(
+          "unhandled-effect-promise: Effect.promise(...) in apps/harness-cli/src/index.ts",
+        ).pipe(Effect.provide(failingLayer))
+        expect(promiseRes.kind).toBe("mechanical")
+        expect(promiseRes.hint).toContain("Effect.tryPromise")
+
         const govDocReadRes = yield* triageFailure(
           "governance-doc-read-error: Invalid or missing 'status' in frontmatter",
         ).pipe(Effect.provide(failingLayer))
@@ -447,6 +461,44 @@ describe("Harness decision definitions & fallbacks", () => {
           )
           expect(res.verdict, JSON.stringify(c.overrides)).toBe(c.expected)
         }
+      }),
+  )
+
+  it.effect(
+    "logs a 1500ms timeout warning and returns 'ask' when GuardV1 DecisionModel times out (S-4.1)",
+    () =>
+      Effect.gen(function* () {
+        const warnings: Array<string> = []
+        const captureLogger = Logger.make(({ message }) => {
+          warnings.push(String(message))
+        })
+        const hangingLayer = Layer.effect(
+          DecisionModel.DecisionModel,
+          DecisionModel.make({
+            decide: () => Effect.never,
+          }),
+        )
+
+        const fiber = yield* decideGuardCommand("curl https://unknown.example").pipe(
+          Effect.provide(Layer.mergeAll(hangingLayer, Logger.layer([captureLogger]))),
+          Effect.forkChild,
+        )
+
+        yield* TestClock.adjust("1499 millis")
+        expect(fiber.pollUnsafe()).toBeUndefined()
+
+        yield* TestClock.adjust("1 millis")
+        const res = yield* Fiber.join(fiber)
+
+        expect(res.verdict).toBe("ask")
+        expect(res.reason).toContain("timed out after 1500ms")
+        expect(
+          warnings.some((w) =>
+            w.includes(
+              "GuardV1 DecisionModel timed out after 1500ms; requiring human confirmation.",
+            ),
+          ),
+        ).toBe(true)
       }),
   )
 })

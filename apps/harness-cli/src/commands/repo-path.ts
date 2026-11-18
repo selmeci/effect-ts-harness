@@ -142,6 +142,14 @@ const walkUpForPnpmWorkspace = (startDir: string): string | undefined => {
 export const CLI_REPO_ROOT =
   walkUpForPnpmWorkspace(dirname(fileURLToPath(import.meta.url))) ?? process.cwd()
 
+export const shouldSuppressLiveRepoTestSideEffects = (
+  targetRepoRoot: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean =>
+  (env["HARNESS_DISABLE_LIVE_TELEMETRY"] === "1" || env["HARNESS_TEST_ISOLATION"] === "1") &&
+  (env["HARNESS_STATE_DIR"] === undefined || env["HARNESS_STATE_DIR"].trim() === "") &&
+  resolve(targetRepoRoot) === resolve(CLI_REPO_ROOT)
+
 export const findWorkspaceRoot = (startDir: string = process.cwd()): string =>
   walkUpForPnpmWorkspace(startDir) ?? CLI_REPO_ROOT
 

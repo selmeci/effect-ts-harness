@@ -58,6 +58,7 @@ const stripInnerMutationDiagnostics = (stderr: string): string =>
 const stripVitestTestAssertionNoise = (text: string): string =>
   text
     .replace(/^\s*FAIL\s+[^\r\n]*>\s+[^\r\n]*$/gm, "")
+    // Strip Vitest v5 reporter status lines (↓ skipped, ○ pending/todo, · dot pass noise) so assertion/test titles don't trigger infra-failure regexes.
     .replace(/^\s*[×✗✕✓✔❯↓○·]\s+[^\r\n]*$/gm, "")
     .replace(/^\s*(?:AssertionError|ExpectError|Expected|Received):[^\r\n]*$/gm, "")
     .replace(/^\s*[+-]\s[^\r\n]*$/gm, "")
@@ -198,6 +199,9 @@ export const runVitestTargetList = (
     )
     .exhaustive()
   if (baselineDiag !== undefined) return { _tag: "Abort", diagnostic: baselineDiag }
+  if (mutantsToRun.length === 0) {
+    return { _tag: "Ok", outcomes: [], nonCacheableIds: new Set() }
+  }
 
   const originalSha256 = computeContentSha256(originalSource)
   const expectedMutatedSha256 = computeContentSha256(mutatedSchemaSource)
@@ -321,7 +325,21 @@ export const runVitestTargetList = (
               .with({ _tag: "Signaled" }, { _tag: "TimedOut" }, () => {
                 nonCacheableIds.add(mutant.id)
               })
-              .with({ _tag: "Exited" }, { _tag: "SpawnFailed" }, () => {})
+              .with({ _tag: "Exited" }, (r) => {
+                if (r.exitCode === 1) {
+                  const cleanStdout = stripAnsi(r.stdout)
+                  const cleanStderr = stripAnsi(r.stderr)
+                  const combinedOutput = `${cleanStdout}\n${stripInnerMutationDiagnostics(cleanStderr)}`
+                  const hasExplicitFailedCount = /\bTests\s+[1-9]\d*\s+failed\b/.test(cleanStdout)
+                  const hasAssertionOrExpectError = /\b(?:AssertionError|ExpectError)\b/.test(
+                    combinedOutput,
+                  )
+                  if (!hasExplicitFailedCount && !hasAssertionOrExpectError) {
+                    nonCacheableIds.add(mutant.id)
+                  }
+                }
+              })
+              .with({ _tag: "SpawnFailed" }, () => {})
               .exhaustive(),
           )
           .with({ _tag: "Failure" }, () => {})

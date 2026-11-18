@@ -92,9 +92,21 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
   ),
   makeTriageRule(
     "skip-nx-cache-banned",
-    /--skip-nx-cache|Bypassing Nx cache with '--skip-nx-cache'/,
+    /--skip-nx-cache|--skipNxCache|NX_SKIP_NX_CACHE|NX_DISABLE_NX_CACHE|Bypassing Nx cache/,
     "mechanical",
-    "Drop '--skip-nx-cache' and rely on Nx caching (or set HARNESS_ALLOW_SKIP_NX_CACHE=1 only when intentionally benchmarking cold builds).",
+    "Drop '--skip-nx-cache', '--skipNxCache', and 'NX_*_NX_CACHE' env overrides and rely on Nx caching, or ask a human if cold benchmarking is truly needed.",
+  ),
+  makeTriageRule(
+    "hook-fastpath-forbidden-import",
+    /hook-fastpath-forbidden-import/,
+    "mechanical",
+    "Keep hook fast-path modules free of runtime 'typescript' and '@harness/graph' barrel imports — route via lightweight subpaths (@harness/graph/cluster-resolver, @harness/*/hook-fastpath) or 'import type'.",
+  ),
+  makeTriageRule(
+    "unhandled-effect-promise",
+    /unhandled-effect-promise/,
+    "mechanical",
+    "Replace 'Effect.promise(...)' in production src/ with 'Effect.tryPromise({ try, catch })' so rejected promises stay typed in the E channel instead of throwing Defects.",
   ),
   makeTriageRule(
     "governance-doc-read-error",

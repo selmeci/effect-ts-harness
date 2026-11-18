@@ -9,6 +9,7 @@ import {
   dispatchCliCommand,
   HarnessCommandRegistry,
   makeLiveCliCommandRegistryLayer,
+  toLazyImportError,
 } from "./command-registry.js"
 import { COMMANDS, type CliEnv, type CliResult, isCommand } from "./daemon-and-omnigraph.service.js"
 import {
@@ -546,7 +547,17 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
     (requested === "session" && hasAntigravityFormat(argv))
   const infraLayer = useHookFastpath
     ? HookInfraLive
-    : (yield* Effect.promise(() => import("./mutate-and-bench.command.js"))).HarnessInfraLive
+    : yield* Effect.tryPromise({
+        try: () => import("./mutate-and-bench.command.js"),
+        catch: toLazyImportError,
+      }).pipe(
+        Effect.map((m) => m.HarnessInfraLive),
+        Effect.catch((err) =>
+          Effect.sync(
+            () => (process.stderr.write(`[harness:cli] Warning: ${err.message}\n`), HookInfraLive),
+          ),
+        ),
+      )
   const mainLayer = Layer.mergeAll(
     infraLayer,
     decisionLayer,

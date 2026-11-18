@@ -36,7 +36,7 @@ import {
 } from "@harness/contract"
 import { WorkspaceFs } from "@harness/service"
 import type { SyncHostIo } from "@harness/service/host-io"
-import { checkMigrationFiles, checkMigrationSqlSafety } from "../../migration-check.js"
+import { checkMigrationFiles } from "../../migration-check.js"
 import { decideAstGateCache, type AstGateFileInput } from "../../ast-cache.js"
 import { evaluateAllGatePlugins, GatePluginRegistryLive } from "../gate-plugin-registry.js"
 import {
@@ -44,17 +44,15 @@ import {
   collectWorkspaceAllFiles,
   collectWorkspaceSqlFiles,
   collectWorkspaceTsFiles,
-  extractBalancedBraces,
-  extractBalancedParens,
-  extractTopLevelObjectAnalysis,
   type GcFinding,
   type GraphEntropyInput,
   type GraphReachabilityContext,
   readdirOrReport,
   readTextOrReport,
 } from "./gc-helpers.js"
-import { analyzeSqliteMigratorFromRecordAst } from "../sqlite-migrator-ast.js"
 import { checkUnusedContractExports } from "./gc-topology-entropy.plugin.js"
+import { evaluateHookFastpathImportClosure } from "./gc-hook-fastpath.js"
+import { evaluateInfraSqlAndSqliteHygiene } from "./gc-infra-sql-hygiene.js"
 import { decideHarnessTierTopology } from "../harness-tier-topology.js"
 
 const PackageJsonSchema = Schema.Struct({
@@ -71,7 +69,10 @@ const PackageJsonSchema = Schema.Struct({
 })
 const decodePackageJson = Schema.decodeUnknownOption(Schema.fromJsonString(PackageJsonSchema))
 const isBannedDrizzleDep = (d: string): boolean =>
-  d === "drizzle-orm" || d.startsWith("drizzle-orm/") || d === "drizzle-kit" || d.startsWith("drizzle-kit/")
+  d === "drizzle-orm" ||
+  d.startsWith("drizzle-orm/") ||
+  d === "drizzle-kit" ||
+  d.startsWith("drizzle-kit/")
 
 const ProjectJsonSchema = Schema.Struct({
   tags: Schema.optional(Schema.Array(Schema.String)),
@@ -79,7 +80,10 @@ const ProjectJsonSchema = Schema.Struct({
 const decodeProjectJson = Schema.decodeUnknownOption(Schema.fromJsonString(ProjectJsonSchema))
 
 const SKIPPED_PACKAGE_DEPS = new Set([
-  "effect", "@effect/sql-d1", "@effect/sql-sqlite-do", "@effect/ai-typesafe",
+  "effect",
+  "@effect/sql-d1",
+  "@effect/sql-sqlite-do",
+  "@effect/ai-typesafe",
 ])
 
 const listSubdirs = (
@@ -237,8 +241,12 @@ export const evaluatePackageAndMigrationPlugin = (
           const testDir = join(pkgDir, "test")
           const scriptsDir = join(pkgDir, "scripts")
           const extraTierFiles = [
-            ...(hostIo.existsSync(testDir) ? collectWorkspaceTsFiles(testDir, hostIo, findings, repoRoot) : []),
-            ...(hostIo.existsSync(scriptsDir) ? collectWorkspaceTsFiles(scriptsDir, hostIo, findings, repoRoot) : []),
+            ...(hostIo.existsSync(testDir)
+              ? collectWorkspaceTsFiles(testDir, hostIo, findings, repoRoot)
+              : []),
+            ...(hostIo.existsSync(scriptsDir)
+              ? collectWorkspaceTsFiles(scriptsDir, hostIo, findings, repoRoot)
+              : []),
           ]
           const isContractTier = nxTags.includes(NxTierTag.make("type:contract"))
           for (const file of extraTierFiles) {
@@ -246,7 +254,13 @@ export const evaluatePackageAndMigrationPlugin = (
             if (content === undefined) continue
             const relExtraPath = relative(repoRoot, file).replace(/\\/g, "/")
             if (isContractTier && /["'`]@effect\/vitest(?:\/[^"'`]*)?["'`]/.test(content)) {
-              findings.push({ kind: "contract-test-effect-vitest-import", nodeId: `${relExtraPath}:@effect/vitest`, location: relExtraPath, message: `Contract test file "${relExtraPath}" (${pkgName}, type:contract) imports "@effect/vitest" — type:contract tests must import { describe, expect, it } from "vitest".`, action: `Replace "@effect/vitest" with "vitest" in "${relExtraPath}".` })
+              findings.push({
+                kind: "contract-test-effect-vitest-import",
+                nodeId: `${relExtraPath}:@effect/vitest`,
+                location: relExtraPath,
+                message: `Contract test file "${relExtraPath}" (${pkgName}, type:contract) imports "@effect/vitest" — type:contract tests must import { describe, expect, it } from "vitest".`,
+                action: `Replace "@effect/vitest" with "vitest" in "${relExtraPath}".`,
+              })
             }
             workspaceSourceFiles.push({
               filePath: AstSourceFilePath.make(relExtraPath),
@@ -263,10 +277,16 @@ export const evaluatePackageAndMigrationPlugin = (
               .join("\n")
             for (const depName of Object.keys(dependencies)) {
               if (SKIPPED_PACKAGE_DEPS.has(depName)) continue
-              const isReferenced = combinedContent.includes(`"${depName}"`) || combinedContent.includes(`'${depName}'`) || combinedContent.includes(`"${depName}/`) || combinedContent.includes(`'${depName}/`)
+              const isReferenced =
+                combinedContent.includes(`"${depName}"`) ||
+                combinedContent.includes(`'${depName}'`) ||
+                combinedContent.includes(`"${depName}/`) ||
+                combinedContent.includes(`'${depName}/`)
               if (!isReferenced) {
                 findings.push({
-                  kind: "unused-package-dependency", nodeId: `${rawPkgName}:${depName}`, location: relPkgPath,
+                  kind: "unused-package-dependency",
+                  nodeId: `${rawPkgName}:${depName}`,
+                  location: relPkgPath,
                   message: `Package "${rawPkgName}" declares dependency "${depName}" in package.json, but no file in src/ imports it.`,
                   action: `Remove "${depName}" from dependencies in ${relPkgPath} or import it in src/.`,
                 })
@@ -300,268 +320,31 @@ export const evaluatePackageAndMigrationPlugin = (
         const srcDir = join(tierDir, "src")
         if (!hostIo.existsSync(srcDir)) continue
 
-        const srcFiles = collectWorkspaceTsFiles(srcDir, hostIo, findings, repoRoot).filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"))
-        const packageNamedMigrationBodies = new Map<string, string>()
-        const defaultTableMigratorRoots = new Map<string, string>()
-
-        if (tier === "infra" && scope !== "harness") {
-          for (const file of srcFiles) {
-            const content = readTextOrReport(file, hostIo, repoRoot, findings)
-            if (content === undefined) continue
-            const noComments = content.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\r\n]*/g, "")
-            const mvRegex = /(?:const|let)\s+([A-Za-z0-9_$]*[Mm]igrations[A-Za-z0-9_$]*)\s*(?::[^=]+)?=\s*\{/g
-            let mvMatch: RegExpExecArray | null
-            while ((mvMatch = mvRegex.exec(noComments)) !== null) {
-              const balanced = extractBalancedBraces(noComments, mvMatch.index + mvMatch[0].lastIndexOf("{"))
-              if (balanced !== undefined) packageNamedMigrationBodies.set(mvMatch[1]!, balanced.body)
-            }
-          }
-        }
+        const srcFiles = collectWorkspaceTsFiles(srcDir, hostIo, findings, repoRoot).filter(
+          (f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"),
+        )
 
         for (const file of srcFiles) {
           const relFilePath = relative(repoRoot, file).replace(/\\/g, "/")
           const content = readTextOrReport(file, hostIo, repoRoot, findings)
           if (content === undefined) continue
-          const stripped = content.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\r\n]*/g, "").replace(/\s+/g, "")
+          const stripped = content
+            .replace(/\/\*[\s\S]*?\*\//g, "")
+            .replace(/\/\/[^\r\n]*/g, "")
+            .replace(/\s+/g, "")
           if (stripped === "" || stripped === "export{}" || stripped === "export{};") {
             findings.push({
-              kind: "empty-source-module", nodeId: relFilePath, location: relFilePath,
+              kind: "empty-source-module",
+              nodeId: relFilePath,
+              location: relFilePath,
               message: `Source module "${relFilePath}" contains only an empty export ('export {}') — remove dead placeholder modules or export concrete contracts.`,
               action: `Remove "${relFilePath}" or export concrete types/functions.`,
             })
           }
-
-          if (tier === "infra" && scope !== "harness") {
-            const noComments = content.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\r\n]*/g, "")
-            const nodeSqliteRegex = /\b(?:import\s*\(\s*|require\s*\(\s*|(?:import|from)\s+)["'](node:sqlite|sqlite|better-sqlite3)["']/g
-            let sqliteMatch: RegExpExecArray | null
-            while ((sqliteMatch = nodeSqliteRegex.exec(noComments)) !== null) {
-              const mod = sqliteMatch[1]!
-              findings.push({
-                kind: "node-sqlite-in-infra", nodeId: `${relFilePath}:${mod}`, location: relFilePath,
-                message: `Do not import '${mod}' in '${relFilePath}' — Cloudflare Durable Object SQLite and D1 storages in type:infra/type:app must execute against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006).`,
-                action: `Remove '${mod}' import and execute storage against @alchemy.run/cloudflare-runtime.`,
-              })
-            }
-
-            const codeWithoutStrings = noComments.replace(/(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g, '""')
-            const brandMakeRegex = /\b([A-Z][A-Za-z0-9_$]*)\.make\s*\(/g
-            let bmMatch: RegExpExecArray | null
-            const reportedBrandMakeIds = new Set<string>()
-            while ((bmMatch = brandMakeRegex.exec(codeWithoutStrings)) !== null) {
-              const brandName = bmMatch[1]!
-              if (/^(?:ErrorMessage|Layer|Effect|Context|Option|Array|Set|Map|Record|LocalProjection|CrossAggregateProjection|EventBus|SqlSchema|Migrator|SqliteMigrator)$/.test(brandName)) continue
-              const parenBalanced = extractBalancedParens(codeWithoutStrings, bmMatch.index + bmMatch[0].lastIndexOf("("))
-              if (parenBalanced !== undefined) {
-                const colMatch = /\b([A-Za-z_$][\w$]*\.[a-z]+_[a-z0-9_]+|(?:row|record|entry)\.[a-z][A-Za-z0-9_]*)\b(?!\s*\()/.exec(parenBalanced.body)
-                if (colMatch !== null) {
-                  const nodeId = `${relFilePath}:${brandName}.make(${colMatch[1]!})`
-                  if (!reportedBrandMakeIds.has(nodeId)) {
-                    reportedBrandMakeIds.add(nodeId)
-                    findings.push({
-                      kind: "untrusted-row-brand-make", nodeId, location: relFilePath,
-                      message: `Unvalidated "${brandName}.make(...${colMatch[1]!}...)" on SQLite row column in "${relFilePath}" — ".make()" throws an untyped defect on corrupt/fractional SQLite values; decode with "Schema.decodeUnknownOption(${brandName})" and fail with a domain TaggedError.`,
-                      action: `Replace "${brandName}.make(...${colMatch[1]!}...)" with "Schema.decodeUnknownOption(${brandName})" and match({ _tag: "Some" }, { _tag: "None" }).exhaustive().`,
-                    })
-                  }
-                }
-              }
-            }
-
-            const hasMigratorImport = /\bimport\b[\s\S]*?\b(?:SqliteMigrator|Migrator)\b/.test(noComments)
-            const namedMigrationBodies = new Map<string, string>()
-            const allowedDdlSpans: Array<[number, number]> = []
-            const mvRegex = /(?:const|let)\s+([A-Za-z0-9_$]*[Mm]igrations[A-Za-z0-9_$]*)\s*(?::[^=]+)?=\s*\{/g
-            let mvMatch: RegExpExecArray | null
-            while ((mvMatch = mvRegex.exec(noComments)) !== null) {
-              const balanced = extractBalancedBraces(noComments, mvMatch.index + mvMatch[0].lastIndexOf("{"))
-              if (balanced !== undefined) {
-                namedMigrationBodies.set(mvMatch[1]!, balanced.body)
-                if (hasMigratorImport) allowedDdlSpans.push([mvMatch.index + mvMatch[0].lastIndexOf("{"), balanced.endIndex])
-              }
-            }
-
-            const fromRecordBodies: Array<string> = []
-            const frRegex = /\bfromRecord\s*(?:<[^>]+>)?\s*\(\s*(\{|[A-Za-z_$][\w$]*)/g
-            let frMatch: RegExpExecArray | null
-            while ((frMatch = frRegex.exec(noComments)) !== null) {
-              if (frMatch[1] === "{") {
-                const balanced = extractBalancedBraces(noComments, frMatch.index + frMatch[0].lastIndexOf("{"))
-                if (balanced !== undefined) {
-                  fromRecordBodies.push(balanced.body)
-                  if (hasMigratorImport) allowedDdlSpans.push([frMatch.index + frMatch[0].lastIndexOf("{"), balanced.endIndex])
-                }
-              } else fromRecordBodies.push(`...${frMatch[1]!}`)
-            }
-
-            const meRegex = /\b(?:SqliteMigrator|Migrator)\.(?:run|layer)\s*(?:<[^>]+>)?\s*\(\s*\{/g
-            let meMatch: RegExpExecArray | null
-            while ((meMatch = meRegex.exec(noComments)) !== null) {
-              const cfg = extractBalancedBraces(noComments, meMatch.index + meMatch[0].lastIndexOf("{"))
-              if (cfg !== undefined) {
-                const { keys: cfgKeys } = extractTopLevelObjectAnalysis(cfg.body)
-                if (!cfgKeys.includes("table")) {
-                  let rootKey: string | undefined
-                  for (const kv of packageNamedMigrationBodies.keys()) {
-                    if (new RegExp(`\\b${kv}\\b`).test(cfg.body)) { rootKey = kv; break }
-                  }
-                  if (rootKey === undefined) {
-                    const inlineMatch = /["']([1-9]\d*_[a-z0-9_]+)["']\s*:/.exec(cfg.body)
-                    if (inlineMatch !== null) rootKey = inlineMatch[1]!
-                  }
-                  if (rootKey !== undefined && !defaultTableMigratorRoots.has(rootKey)) defaultTableMigratorRoots.set(rootKey, relFilePath)
-                }
-              }
-            }
-
-            const sqlRegex = /\bsql\s*`([\s\S]*?)`/g
-            let sqlMatch: RegExpExecArray | null, reportedUnmanagedDdl = false
-            while ((sqlMatch = sqlRegex.exec(noComments)) !== null) {
-              const sqlBody = sqlMatch[1]!
-              if (/\b(?:CREATE\s+(?:TEMP\s+|TEMPORARY\s+)?(?:TABLE|INDEX|UNIQUE\s+INDEX|VIEW|TRIGGER)|ALTER\s+TABLE|DROP\s+(?:TABLE|INDEX|VIEW|TRIGGER))\b/i.test(sqlBody)) {
-                const inside = hasMigratorImport && allowedDdlSpans.some(([s, e]) => sqlMatch!.index >= s && sqlMatch!.index <= e)
-                if (!inside && !reportedUnmanagedDdl) {
-                  reportedUnmanagedDdl = true
-                  findings.push({
-                    kind: "unmanaged-sql-ddl", nodeId: relFilePath, location: relFilePath,
-                    message: `Infrastructure module "${relFilePath}" executes raw SQL DDL without SqliteMigrator — manage Durable Object SQLite migrations via @effect/sql-sqlite-do/SqliteMigrator (SqliteMigrator.fromRecord) so applied versions are tracked in effect_sql_migrations (harness:ADR-0008, harness:SPEC-0006).`,
-                    action: `Wrap DDL statements in SqliteMigrator.fromRecord({ "1_init_...": ... }) and execute via SqliteMigrator.run or SqliteMigrator.layer.`,
-                  })
-                }
-                const safety = checkMigrationSqlSafety([{ file: relFilePath, sql: sqlBody }])
-                for (const v of safety.violations) {
-                  findings.push({
-                    kind: "unsafe-sql-migration", nodeId: `${relFilePath}:${v.kind}`, location: relFilePath,
-                    message: v.message,
-                    action: `Escalate destructive migration (${v.kind}) to the human or refactor to an additive migration.`,
-                  })
-                }
-              }
-            }
-
-            const resolveRecordKeys = (initialBody: string, namedBodies: Map<string, string>) => {
-              const visited = new Set<string>(), allKeys: Array<string> = []
-              let hasUnresolvedSpread = false
-              const collect = (body: string) => {
-                const { keys, spreads } = extractTopLevelObjectAnalysis(body)
-                for (const sp of spreads) {
-                  if (!visited.has(sp)) {
-                    visited.add(sp)
-                    const nb = namedBodies.get(sp) ?? packageNamedMigrationBodies.get(sp)
-                    if (nb !== undefined) collect(nb); else hasUnresolvedSpread = true
-                  }
-                }
-                for (const k of keys) allKeys.push(k)
-              }
-              collect(initialBody)
-              return { keys: allKeys, hasUnresolvedSpread }
-            }
-
-            const reportedKeyNodeIds = new Set<string>()
-            const astMigrator = analyzeSqliteMigratorFromRecordAst({ filePath: relFilePath, content })
-            for (const issue of astMigrator.keyIssues) {
-              const nodeId = `${relFilePath}:${issue.key}`
-              if (!reportedKeyNodeIds.has(nodeId)) {
-                reportedKeyNodeIds.add(nodeId)
-                findings.push({
-                  kind: "invalid-migrator-record-key", nodeId, location: relFilePath,
-                  message: issue.message,
-                  action: `Rename migration key to "<positive_integer>_<snake_case_name>" (e.g. "1_init_tables") with an unused integer id.`,
-                })
-              }
-            }
-            const reportedUnsafeNodeIds = new Set<string>(
-              findings.map((f) => `${f.kind}:${f.nodeId}`),
-            )
-            for (const issue of astMigrator.unsafeSqlIssues) {
-              const nodeId = `${relFilePath}:${issue.kind}`
-              const dedupeKey = `unsafe-sql-migration:${nodeId}`
-              if (!reportedUnsafeNodeIds.has(dedupeKey)) {
-                reportedUnsafeNodeIds.add(dedupeKey)
-                findings.push({
-                  kind: "unsafe-sql-migration", nodeId, location: relFilePath,
-                  message: issue.message,
-                  action: `Escalate destructive migration (${issue.kind}) to the human or refactor to an additive migration.`,
-                })
-              }
-            }
-
-            for (const objBody of [...fromRecordBodies, ...namedMigrationBodies.values()]) {
-              const { keys, hasUnresolvedSpread } = resolveRecordKeys(objBody, namedMigrationBodies)
-              const seenIds = new Set<number>()
-              let hasFormatError = false
-              for (const keyName of keys) {
-                const m = /^([1-9]\d*)_([a-z0-9_]+)$/.exec(keyName)
-                if (!m) {
-                  hasFormatError = true
-                  const nodeId = `${relFilePath}:${keyName}`
-                  if (!reportedKeyNodeIds.has(nodeId)) {
-                    reportedKeyNodeIds.add(nodeId)
-                    findings.push({
-                      kind: "invalid-migrator-record-key", nodeId, location: relFilePath,
-                      message: `Invalid SqliteMigrator.fromRecord migration key "${keyName}" in "${relFilePath}" — keys must match "<positive_integer>_<snake_case_name>" (e.g. "1_init_tables") because Effect Migrator.fromRecord silently ignores unnumbered keys (harness:ADR-0008, harness:SPEC-0006).`,
-                      action: `Rename migration key to "<positive_integer>_<snake_case_name>" (e.g. "1_init_tables") with an unused integer id.`,
-                    })
-                  }
-                } else {
-                  const idNum = Number(m[1])
-                  if (seenIds.has(idNum)) {
-                    const nodeId = `${relFilePath}:${keyName}`
-                    if (!reportedKeyNodeIds.has(nodeId)) {
-                      reportedKeyNodeIds.add(nodeId)
-                      findings.push({
-                        kind: "invalid-migrator-record-key", nodeId, location: relFilePath,
-                        message: `Duplicate SqliteMigrator.fromRecord migration id "${m[1]}" in key "${keyName}" in "${relFilePath}".`,
-                        action: `Assign a unique positive integer id to migration key "${keyName}" in "${relFilePath}".`,
-                      })
-                    }
-                  } else seenIds.add(idNum)
-                }
-              }
-
-              if (!hasUnresolvedSpread && !hasFormatError && seenIds.size > 0) {
-                const sortedIds = [...seenIds].sort((a, b) => a - b)
-                if (sortedIds[0]! !== 1) {
-                  const nodeId = `${relFilePath}:sequence-start-${String(sortedIds[0])}`
-                  if (!reportedKeyNodeIds.has(nodeId)) {
-                    reportedKeyNodeIds.add(nodeId)
-                    findings.push({
-                      kind: "invalid-migrator-record-key", nodeId, location: relFilePath,
-                      message: `SqliteMigrator.fromRecord migration sequence in "${relFilePath}" starts at id "${String(sortedIds[0])}" instead of "1" — each independent migrator sequence must start at "1_..." on its own migration table because Effect Migrator skips any migration id <= the highest applied id on a shared table (harness:ADR-0008, harness:SPEC-0006).`,
-                      action: `Start migration sequence at "1_<snake_case_name>" and configure a dedicated "table" option on SqliteMigrator.run / SqliteMigrator.layer when multiple migrators share a database.`,
-                    })
-                  }
-                } else {
-                  for (let i = 1; i < sortedIds.length; i++) {
-                    if (sortedIds[i]! !== sortedIds[i - 1]! + 1) {
-                      const nodeId = `${relFilePath}:sequence-gap-${String(sortedIds[i - 1])}-${String(sortedIds[i])}`
-                      if (!reportedKeyNodeIds.has(nodeId)) {
-                        reportedKeyNodeIds.add(nodeId)
-                        findings.push({
-                          kind: "invalid-migrator-record-key", nodeId, location: relFilePath,
-                          message: `Non-contiguous SqliteMigrator.fromRecord migration sequence in "${relFilePath}" jumps from "${String(sortedIds[i - 1])}" to "${String(sortedIds[i])}".`,
-                          action: `Ensure migration keys in "${relFilePath}" form a contiguous 1..N integer sequence.`,
-                        })
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
         }
 
-        if (tier === "infra" && scope !== "harness" && defaultTableMigratorRoots.size > 1) {
-          const entries = [...defaultTableMigratorRoots.entries()]
-          const allRootNames = entries.map(([name]) => name).join(", ")
-          for (let idx = 1; idx < entries.length; idx++) {
-            const [migratorId, relFilePath] = entries[idx]!
-            findings.push({
-              kind: "invalid-migrator-record-key", nodeId: `${relFilePath}:shared-default-migrations-table:${migratorId}`, location: relFilePath,
-              message: `Multiple distinct SqliteMigrator loaders (${allRootNames}) in "${scope}/infra" use the default "effect_sql_migrations" table without a custom "table" option — Effect Migrator skips any migration id <= MAX(migration_id) on a shared table regardless of name (harness:ADR-0008, harness:SPEC-0006).`,
-              action: `Pass a dedicated "table" option (e.g. table: "es_projector_sql_migrations") to SqliteMigrator.run and SqliteMigrator.layer for "${migratorId}".`,
-            })
-          }
+        if (tier === "infra" && scope !== "harness") {
+          evaluateInfraSqlAndSqliteHygiene(repoRoot, scope, srcFiles, hostIo, findings)
         }
 
         if (tier === "infra" && scope !== "harness") {
@@ -572,7 +355,12 @@ export const evaluatePackageAndMigrationPlugin = (
             hostIo.existsSync(infraTestDir) &&
             collectWorkspaceSqlFiles(migrationsDir, hostIo, findings, repoRoot).length > 0
           ) {
-            for (const testFile of collectWorkspaceTsFiles(infraTestDir, hostIo, findings, repoRoot)) {
+            for (const testFile of collectWorkspaceTsFiles(
+              infraTestDir,
+              hostIo,
+              findings,
+              repoRoot,
+            )) {
               const testContent = readTextOrReport(testFile, hostIo, repoRoot, findings)
               if (testContent === undefined) continue
               if (
@@ -602,7 +390,9 @@ export const evaluatePackageAndMigrationPlugin = (
       const appDir = join(appsDir, app)
       const appSrcDir = join(appDir, "src")
       const appSrcFiles = hostIo.existsSync(appSrcDir)
-        ? collectWorkspaceTsFiles(appSrcDir, hostIo, findings, repoRoot).filter((f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"))
+        ? collectWorkspaceTsFiles(appSrcDir, hostIo, findings, repoRoot).filter(
+            (f) => !f.endsWith(".test.ts") && !f.endsWith(".spec.ts"),
+          )
         : []
       collectPackageManifest(appDir, app, appSrcFiles, false)
     }
@@ -615,13 +405,19 @@ export const evaluatePackageAndMigrationPlugin = (
         match(rootOpt)
           .with({ _tag: "Some" }, ({ value: rootPkg }) => {
             const allRootDeps = [
-              ...Object.keys(rootPkg.dependencies ?? {}), ...Object.keys(rootPkg.devDependencies ?? {}),
-              ...Object.keys(rootPkg.peerDependencies ?? {}), ...Object.keys(rootPkg.optionalDependencies ?? {}),
-            ].map((d) => d.trim()).filter((d) => d.length > 0)
+              ...Object.keys(rootPkg.dependencies ?? {}),
+              ...Object.keys(rootPkg.devDependencies ?? {}),
+              ...Object.keys(rootPkg.peerDependencies ?? {}),
+              ...Object.keys(rootPkg.optionalDependencies ?? {}),
+            ]
+              .map((d) => d.trim())
+              .filter((d) => d.length > 0)
             for (const dep of allRootDeps) {
               if (isBannedDrizzleDep(dep)) {
                 findings.push({
-                  kind: "architecture-policy-violation", nodeId: `package.json:forbidden-core-dependency:${dep}`, location: "package.json",
+                  kind: "architecture-policy-violation",
+                  nodeId: `package.json:forbidden-core-dependency:${dep}`,
+                  location: "package.json",
                   message: `Root package "${(rootPkg.name ?? "root").trim()}" declares banned Drizzle dependency "${dep}" in "package.json" — use native Effect v4 SQL (@effect/sql-d1, @effect/sql-sqlite-do, SqlClient, SqliteMigrator).`,
                   action: `Remove "${dep}" from package.json.`,
                 })
@@ -630,7 +426,9 @@ export const evaluatePackageAndMigrationPlugin = (
           })
           .with({ _tag: "None" }, () => {
             findings.push({
-              kind: "architecture-policy-violation", nodeId: "package.json:corrupt-manifest", location: "package.json",
+              kind: "architecture-policy-violation",
+              nodeId: "package.json:corrupt-manifest",
+              location: "package.json",
               message: `Package manifest "package.json" is invalid JSON or failed schema validation.`,
               action: `Fix JSON syntax and schema in "package.json".`,
             })
@@ -656,21 +454,34 @@ export const evaluatePackageAndMigrationPlugin = (
       }
     }
 
-    const sqlFilesToScan: Array<string> = [...collectWorkspaceSqlFiles(join(repoRoot, "migrations"), hostIo, findings, repoRoot)]
+    const sqlFilesToScan: Array<string> = [
+      ...collectWorkspaceSqlFiles(join(repoRoot, "migrations"), hostIo, findings, repoRoot),
+    ]
     for (const scope of scopes) {
       const scopeDir = join(libsDir, scope)
       for (const tier of listSubdirs(scopeDir, hostIo, repoRoot, findings)) {
-        sqlFilesToScan.push(...collectWorkspaceSqlFiles(join(scopeDir, tier, "migrations"), hostIo, findings, repoRoot))
+        sqlFilesToScan.push(
+          ...collectWorkspaceSqlFiles(
+            join(scopeDir, tier, "migrations"),
+            hostIo,
+            findings,
+            repoRoot,
+          ),
+        )
       }
     }
     for (const app of listSubdirs(appsDir, hostIo, repoRoot, findings)) {
-      sqlFilesToScan.push(...collectWorkspaceSqlFiles(join(appsDir, app, "migrations"), hostIo, findings, repoRoot))
+      sqlFilesToScan.push(
+        ...collectWorkspaceSqlFiles(join(appsDir, app, "migrations"), hostIo, findings, repoRoot),
+      )
     }
     if (sqlFilesToScan.length > 0) {
       for (const v of checkMigrationFiles(sqlFilesToScan, hostIo).violations) {
         const relFile = relative(repoRoot, v.file).replace(/\\/g, "/")
         findings.push({
-          kind: "unsafe-sql-migration", nodeId: `${relFile}:${v.kind}`, location: relFile,
+          kind: "unsafe-sql-migration",
+          nodeId: `${relFile}:${v.kind}`,
+          location: relFile,
           message: v.file !== relFile ? v.message.replaceAll(v.file, relFile) : v.message,
           action: `Escalate destructive migration (${v.kind}) to the human or refactor to an additive migration.`,
         })
@@ -692,15 +503,18 @@ export const evaluatePackageAndMigrationPlugin = (
           for (const v of gateReport.violations) {
             const relFile = relative(repoRoot, v.file).replace(/\\/g, "/")
             findings.push({
-              kind: "architecture-policy-violation", nodeId: `${relFile}:${v.rule}:${String(v.line)}`,
-              location: `${relFile}:${String(v.line)}`, message: v.message,
+              kind: "architecture-policy-violation",
+              nodeId: `${relFile}:${v.rule}:${String(v.line)}`,
+              location: `${relFile}:${String(v.line)}`,
+              message: v.message,
               action: `Resolve self-dogfooding violation (${v.rule}) in ${relFile}:${String(v.line)}.`,
             })
           }
         })
         .with({ _tag: "Failure" }, (cause) => {
           findings.push({
-            kind: "architecture-policy-violation", nodeId: "GatePluginRunner.evaluateAll",
+            kind: "architecture-policy-violation",
+            nodeId: "GatePluginRunner.evaluateAll",
             message: `Gate plugin evaluation failed: ${Cause.pretty(cause.cause)}`,
             action: "Investigate workspace file resolution and gate plugin execution failures.",
           })
@@ -720,16 +534,25 @@ export const evaluatePackageAndMigrationPlugin = (
         const astReport = yield* decideAstGateCache({ files: astFiles })
         for (const v of astReport.violations) {
           findings.push({
-            kind: "architecture-policy-violation", nodeId: `${v.file}:${v.rule}:${String(v.line)}`,
-            location: `${v.file}:${String(v.line)}`, message: v.message,
+            kind: "architecture-policy-violation",
+            nodeId: `${v.file}:${v.rule}:${String(v.line)}`,
+            location: `${v.file}:${String(v.line)}`,
+            message: v.message,
             action: `Resolve AST gate violation (${v.rule}) in ${v.file}:${String(v.line)}.`,
           })
         }
         const adj = new Map<string, Array<string>>()
         for (const af of astFiles) {
           const deps: Array<string> = []
-          for (const m of af.content.matchAll(/(?:import|export)\s+(?:type\s+)?(?:[^"']*from\s+)?["'](\.[^"']+)["']/g)) {
-            if (m[1] !== undefined) deps.push(posix.normalize(posix.join(posix.dirname(af.filePath), m[1].replace(/\.js$/, ".ts"))))
+          for (const m of af.content.matchAll(
+            /(?:import|export)\s+(?:type\s+)?(?:[^"']*from\s+)?["'](\.[^"']+)["']/g,
+          )) {
+            if (m[1] !== undefined)
+              deps.push(
+                posix.normalize(
+                  posix.join(posix.dirname(af.filePath), m[1].replace(/\.js$/, ".ts")),
+                ),
+              )
           }
           adj.set(af.filePath, deps)
         }
@@ -742,7 +565,9 @@ export const evaluatePackageAndMigrationPlugin = (
               .with(1, () => {
                 const cyclePath = [...stack.slice(stack.indexOf(next)), next].join(" -> ")
                 findings.push({
-                  kind: "architecture-policy-violation", nodeId: `${next}:circular-import`, location: next,
+                  kind: "architecture-policy-violation",
+                  nodeId: `${next}:circular-import`,
+                  location: next,
                   message: `Circular relative import detected in modular harness files: ${cyclePath}`,
                   action: `Break the circular import cycle (${cyclePath}) by extracting shared types/helpers into a leaf module.`,
                 })
@@ -754,8 +579,11 @@ export const evaluatePackageAndMigrationPlugin = (
           }
           state.set(node, 2)
         }
-        for (const node of adj.keys()) { if ((state.get(node) ?? 0) === 0) visitCycle(node, [node]) }
+        for (const node of adj.keys()) {
+          if ((state.get(node) ?? 0) === 0) visitCycle(node, [node])
+        }
       }
+      evaluateHookFastpathImportClosure(repoRoot, hostIo, findings)
     }
 
     return findings

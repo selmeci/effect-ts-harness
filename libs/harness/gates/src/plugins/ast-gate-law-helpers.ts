@@ -767,3 +767,9 @@ export const isSilentGateFsFallbackCall = (
   }
   return false
 }
+
+export {
+  collectEffectPromiseAliases,
+  type EffectPromiseAliases,
+  isUnhandledEffectPromiseCall,
+} from "./ast-effect-promise-law.js"

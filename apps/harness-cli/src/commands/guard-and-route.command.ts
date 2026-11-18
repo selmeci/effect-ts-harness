@@ -7,6 +7,7 @@ import {
   classifyCommand,
   classifyFileWrite,
   explainCommandDenyReason,
+  isSkipNxCacheOverrideCommand,
 } from "@harness/gates/hook-fastpath"
 import {
   type CliEnv,
@@ -143,10 +144,22 @@ const evaluateCommandDecision = (
       return match<typeof classification, GuardVerdictDecision>(classification)
         .with("deny", () => ({ verdict: "deny", reason: formatCommandDenyReason(command) }))
         .with("allow", () => ({ verdict: "allow" }))
-        .with("ask", () => ({
-          verdict: "ask",
-          reason: `Command requires human confirmation: ${command}`,
-        }))
+        .with("ask", () => {
+          if (isSkipNxCacheOverrideCommand(command)) {
+            recordFriction(options, {
+              kind: "guard_escalation",
+              summary: command,
+              detail: "ruleId=skip-nx-cache-override; verdict=ask",
+            })
+            process.stderr.write(
+              "[harness:guard] Audit: HARNESS_ALLOW_SKIP_NX_CACHE=1 override requested human confirmation.\n",
+            )
+          }
+          return {
+            verdict: "ask",
+            reason: `Command requires human confirmation: ${command}`,
+          }
+        })
         .exhaustive()
     }
 

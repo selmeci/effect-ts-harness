@@ -3,33 +3,49 @@ import { describe, expect, it } from "vitest"
 import {
   AstSourceFilePath,
   ContentSha256,
+  MUTATION_CACHE_FILENAME,
   MUTATION_CACHE_SCHEMA_VERSION,
   MutantCacheId,
   MutationCacheEntry,
+  MutationCacheHmacSecret,
   MutationCacheLookupDecision,
   MutationCacheLookupInput,
+  MutationCacheMac,
   MutationCacheStore,
   MutationCacheTimestamp,
-  NonNegativeCount,
+  MutationEpochMillis,
+  MutationMaxAgeMillis,
+  PackageRelKey,
+  RuntimeVersionTag,
   computeContentSha256,
 } from "../src/index.js"
 
 describe("MutationCache contract schemas", () => {
   const sampleSha = computeContentSha256("sample-mutant-key")
+  const otherSha = computeContentSha256("other-mutant-key")
+  const sampleMac = MutationCacheMac.make(computeContentSha256("sample-hmac-tag"))
+  const sampleSecret = MutationCacheHmacSecret.make("0123456789abcdef0123456789abcdef")
 
-  it("decodes valid MutationCacheEntry, MutationCacheStore, and MutationCacheLookupDecision", () => {
+  it("decodes valid MutationCacheEntry, MutationCacheStore, MutationCacheLookupInput, and MutationCacheLookupDecision", () => {
+    expect(MUTATION_CACHE_SCHEMA_VERSION).toBe("mutation-cache-v2")
+    expect(MUTATION_CACHE_FILENAME).toBe("mutation-cache-v2.json")
+
     const entry = Schema.decodeSync(MutationCacheEntry)({
       key: sampleSha,
       file: "libs/sample/domain/src/logic.ts",
       mutantId: "logic.ts:1:0",
       status: "killed",
       recordedAt: "2026-11-18T16:00:00.000Z",
+      lastAccessedAt: "2026-11-18T16:05:00Z",
+      mac: sampleMac,
     })
     expect(entry.key).toBe(sampleSha)
     expect(entry.file).toBe(AstSourceFilePath.make("libs/sample/domain/src/logic.ts"))
     expect(entry.mutantId).toBe(MutantCacheId.make("logic.ts:1:0"))
     expect(entry.status).toBe("killed")
     expect(entry.recordedAt).toBe(MutationCacheTimestamp.make("2026-11-18T16:00:00.000Z"))
+    expect(entry.lastAccessedAt).toBe(MutationCacheTimestamp.make("2026-11-18T16:05:00Z"))
+    expect(entry.mac).toBe(sampleMac)
 
     const store = Schema.decodeSync(MutationCacheStore)({
       version: MUTATION_CACHE_SCHEMA_VERSION,
@@ -40,18 +56,28 @@ describe("MutationCache contract schemas", () => {
     expect(store.version).toBe(MUTATION_CACHE_SCHEMA_VERSION)
     expect(store.entries[sampleSha]).toEqual(entry)
 
+    const lookupInput = Schema.decodeSync(MutationCacheLookupInput)({
+      candidateKeys: [sampleSha],
+      store,
+      hmacSecret: sampleSecret,
+      nowMs: 1_700_000_000_000,
+      maxAgeMs: 43_200_000,
+    })
+    expect(lookupInput.hmacSecret).toBe(sampleSecret)
+    expect(lookupInput.nowMs).toBe(MutationEpochMillis.make(1_700_000_000_000))
+    expect(lookupInput.maxAgeMs).toBe(MutationMaxAgeMillis.make(43_200_000))
+
     const decision = Schema.decodeSync(MutationCacheLookupDecision)({
       hitKeys: [sampleSha],
       missKeys: [],
-      hitCount: 1,
-      missCount: 0,
     })
     expect(decision.hitKeys).toEqual([ContentSha256.make(sampleSha)])
-    expect(decision.hitCount).toBe(NonNegativeCount.make(1))
-    expect(decision.missCount).toBe(NonNegativeCount.make(0))
+    expect(decision.missKeys).toEqual([])
+    expect(PackageRelKey.make("libs/harness/gates")).toBe("libs/harness/gates")
+    expect(RuntimeVersionTag.make("node:v22|vitest:5.0.3")).toBe("node:v22|vitest:5.0.3")
   })
 
-  it("rejects invalid MutationCacheEntry, MutationCacheStore, MutationCacheLookupInput, and MutationCacheLookupDecision payloads", () => {
+  it("rejects invalid timestamps, macs, secrets, key mismatches, and malformed payloads", () => {
     const expectRejected = <A, E>(exit: Exit.Exit<A, E>): void => {
       expect(Exit.isFailure(exit) && Cause.hasFails(exit.cause)).toBe(true)
     }
@@ -62,29 +88,70 @@ describe("MutationCache contract schemas", () => {
       mutantId: "logic.ts:1:0",
       status: "killed",
       recordedAt: "2026-11-18T16:00:00.000Z",
+      mac: sampleMac,
     }
 
-    // Invalid status & key
+    // Invalid status, key, and mac
     expectRejected(
       Schema.decodeUnknownExit(MutationCacheEntry)({ ...validEntry, status: "survived" }),
     )
     expectRejected(
       Schema.decodeUnknownExit(MutationCacheEntry)({ ...validEntry, key: "not-a-sha256" }),
     )
-    // Empty branded fields
+    expectRejected(
+      Schema.decodeUnknownExit(MutationCacheEntry)({ ...validEntry, mac: "short-mac" }),
+    )
+    expectRejected(
+      Schema.decodeUnknownExit(MutationCacheEntry)({
+        key: sampleSha,
+        file: validEntry.file,
+        mutantId: validEntry.mutantId,
+        status: validEntry.status,
+        recordedAt: validEntry.recordedAt,
+      }),
+    )
+
+    // Invalid or empty branded fields & non-ISO-8601 UTC timestamps
     expectRejected(Schema.decodeUnknownExit(MutationCacheEntry)({ ...validEntry, file: "" }))
     expectRejected(Schema.decodeUnknownExit(MutationCacheEntry)({ ...validEntry, mutantId: "" }))
     expectRejected(Schema.decodeUnknownExit(MutationCacheEntry)({ ...validEntry, recordedAt: "" }))
+    expectRejected(
+      Schema.decodeUnknownExit(MutationCacheEntry)({
+        ...validEntry,
+        recordedAt: "not-a-timestamp",
+      }),
+    )
+    expectRejected(
+      Schema.decodeUnknownExit(MutationCacheEntry)({
+        ...validEntry,
+        recordedAt: "2026-99-99T00:00:00Z",
+      }),
+    )
+    expectRejected(
+      Schema.decodeUnknownExit(MutationCacheEntry)({
+        ...validEntry,
+        recordedAt: "2026-11-18T16:00:00+02:00",
+      }),
+    )
+
     // Non-object / number inputs
     expectRejected(Schema.decodeUnknownExit(MutationCacheEntry)(42))
     expectRejected(Schema.decodeUnknownExit(MutationCacheStore)(null))
     expectRejected(Schema.decodeUnknownExit(MutationCacheStore)(123))
 
-    // Invalid store version & non-64-hex record key (stripped by Schema.Record) & invalid entry value
+    // Invalid store version (including stale v1) & recordKey !== entry.key spoofing
     expectRejected(
       Schema.decodeUnknownExit(MutationCacheStore)({
-        version: "mutation-cache-v99",
+        version: "mutation-cache-v1",
         entries: {},
+      }),
+    )
+    expectRejected(
+      Schema.decodeUnknownExit(MutationCacheStore)({
+        version: MUTATION_CACHE_SCHEMA_VERSION,
+        entries: {
+          [otherSha]: validEntry,
+        },
       }),
     )
     const badKeyStoreExit = Schema.decodeUnknownExit(MutationCacheStore)({
@@ -105,7 +172,15 @@ describe("MutationCache contract schemas", () => {
       }),
     )
 
-    // Invalid MutationCacheLookupInput
+    // Invalid secret, nowMs, maxAgeMs, PackageRelKey, RuntimeVersionTag
+    expectRejected(Schema.decodeExit(MutationCacheHmacSecret)("too-short"))
+    expectRejected(Schema.decodeExit(MutationCacheHmacSecret)("  padded  "))
+    expectRejected(Schema.decodeExit(MutationEpochMillis)(-1))
+    expectRejected(Schema.decodeExit(MutationMaxAgeMillis)(0))
+    expectRejected(Schema.decodeExit(PackageRelKey)(""))
+    expectRejected(Schema.decodeExit(RuntimeVersionTag)(""))
+
+    // Invalid MutationCacheLookupInput & MutationCacheLookupDecision
     expectRejected(
       Schema.decodeExit(MutationCacheLookupInput)({
         candidateKeys: ["short-key"],
@@ -118,14 +193,10 @@ describe("MutationCache contract schemas", () => {
         store: { version: "wrong-version", entries: {} },
       }),
     )
-
-    // Invalid MutationCacheLookupDecision
     expectRejected(
       Schema.decodeExit(MutationCacheLookupDecision)({
-        hitKeys: [],
+        hitKeys: ["bad"],
         missKeys: [],
-        hitCount: -1,
-        missCount: 0,
       }),
     )
   })

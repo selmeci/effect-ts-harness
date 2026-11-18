@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import { Cause, Effect, Result } from "effect"
+import { Cause, Effect, Option, Result } from "effect"
 import { match } from "ts-pattern"
 import {
   AstSourceContent,
@@ -12,6 +12,7 @@ import {
   type UnitDependency,
   WorkUnitId,
   type WorkUnitDraft,
+  WorkspaceFilePath,
 } from "@harness/contract"
 import {
   AstGateCache,
@@ -25,13 +26,10 @@ import {
   LatencySloViolationError,
   MutantCount,
   MutateStampPassed,
-  readFrictionEvents,
-  readTelemetryEvents,
   removeMutateStamp,
   runDomainMutationSuite,
   StampRelFilePath,
   writeMutateStamp,
-  writeSessionReportFiles,
 } from "@harness/gates"
 import {
   createTypeScriptProgramSession,
@@ -44,19 +42,30 @@ import {
   loadGraphSnapshotEffect,
   stepDatalogFileDelta,
 } from "@harness/graph"
-import { HarnessInfraLive, nodeSyncHostIo } from "@harness/infra"
+import {
+  HarnessInfraLive,
+  nodeSyncHostIo,
+  resolveOrCreateMutationCacheHmacSecret,
+} from "@harness/infra"
+import {
+  readFrictionEventsSafe,
+  readTelemetryEventsSafe,
+  writeSessionReportFilesSafe,
+} from "./learn-and-report.command.js"
+import { shouldSuppressLiveRepoTestSideEffects } from "./repo-path.js"
 
 export { HarnessInfraLive }
 
 export const writeDoneSessionReport = (repoRoot: string): void => {
-  const finalEvents = readTelemetryEvents(repoRoot, nodeSyncHostIo)
-  const finalFriction = readFrictionEvents(repoRoot, nodeSyncHostIo)
+  if (shouldSuppressLiveRepoTestSideEffects(repoRoot)) return
+  const finalEvents = readTelemetryEventsSafe(repoRoot, nodeSyncHostIo)
+  const finalFriction = readFrictionEventsSafe(repoRoot, nodeSyncHostIo)
   const finalReport = buildSessionReport({
     events: finalEvents,
     frictionEvents: finalFriction,
     stampValid: true,
   })
-  writeSessionReportFiles(repoRoot, finalReport, nodeSyncHostIo)
+  writeSessionReportFilesSafe(repoRoot, finalReport, nodeSyncHostIo)
 }
 import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
 import { makeDoneBlockResult } from "./hook-format.js"
@@ -158,6 +167,12 @@ export const handleMutate = (
       return failClosed("Empty --file target list; refusing to run mutation suite.")
     }
 
+    const hmacSecret = Option.getOrUndefined(
+      resolveOrCreateMutationCacheHmacSecret(WorkspaceFilePath.make(repoRoot), {
+        hostIo: nodeSyncHostIo,
+      }),
+    )
+
     const report = runDomainMutationSuite(repoRoot, nodeSyncHostIo, {
       scope,
       includeAllLines: isAll,
@@ -166,6 +181,7 @@ export const handleMutate = (
       baseRef,
       explicitBaseRef: baseRef !== undefined,
       disableMutantCache,
+      hmacSecret,
     })
 
     const cleanupErr = !report.passed ? cleanupStamp() : undefined
@@ -337,10 +353,23 @@ export const handleBench = (
 ): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
     if (argv.includes("--compare")) {
-      const { runBenchmarkCompare } = yield* Effect.promise(
-        () => import("./repo-checks.command.js"),
+      return yield* Effect.tryPromise({
+        try: () => import("./repo-checks.command.js"),
+        catch: (err): { readonly _tag: "BenchmarkImportFailure"; readonly message: string } => ({
+          _tag: "BenchmarkImportFailure",
+          message: err instanceof Error ? err.message : String(err),
+        }),
+      }).pipe(
+        Effect.flatMap(({ runBenchmarkCompare }) => runBenchmarkCompare(argv, options)),
+        Effect.catch((err) => {
+          const msg = `Failed to load benchmark compare: ${err.message}`
+          return Effect.succeed({
+            exitCode: 1,
+            stdout: JSON.stringify({ error: msg }),
+            stderr: `${msg}\n`,
+          })
+        }),
       )
-      return yield* runBenchmarkCompare(argv, options)
     }
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const iterationsArg = argv.find((a) => a.startsWith("--iterations="))

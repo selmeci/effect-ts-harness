@@ -1,4 +1,4 @@
-import { join, relative, resolve } from "node:path"
+import { join, relative } from "node:path"
 import { Effect, Layer, Option, Result, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
@@ -30,6 +30,7 @@ import {
   findWorkspaceRoot,
   isIsolatedExternalWorkspace,
   resolveClusterRepoRoot,
+  shouldSuppressLiveRepoTestSideEffects,
 } from "./repo-path.js"
 
 export {
@@ -38,20 +39,27 @@ export {
   findWorkspaceRoot,
   isIsolatedExternalWorkspace,
   resolveClusterRepoRoot,
+  shouldSuppressLiveRepoTestSideEffects,
 }
 
 export const ensureLocalOmnigraphReady = (repoRoot: string): Effect.Effect<boolean> =>
-  Effect.promise(() => import("./omnigraph-lifecycle.js")).pipe(
+  Effect.tryPromise({
+    try: () => import("./omnigraph-lifecycle.js"),
+    catch: (err): { readonly _tag: "OmnigraphImportFailure"; readonly message: string } => ({
+      _tag: "OmnigraphImportFailure",
+      message: err instanceof Error ? err.message : String(err),
+    }),
+  }).pipe(
     Effect.flatMap((m) => m.ensureLocalOmnigraphReady(repoRoot)),
+    Effect.catch((err) =>
+      Effect.sync(() => {
+        process.stderr.write(
+          `[harness:omnigraph] Warning: failed to load lifecycle module: ${err.message}\n`,
+        )
+        return false
+      }),
+    ),
   )
-
-export const shouldSuppressLiveRepoTestSideEffects = (
-  targetRepoRoot: string,
-  env: NodeJS.ProcessEnv = process.env,
-): boolean =>
-  (env["HARNESS_DISABLE_LIVE_TELEMETRY"] === "1" || env["HARNESS_TEST_ISOLATION"] === "1") &&
-  (env["HARNESS_STATE_DIR"] === undefined || env["HARNESS_STATE_DIR"] === "") &&
-  resolve(targetRepoRoot) === resolve(CLI_REPO_ROOT)
 
 export const COMMANDS = [
   "guard",

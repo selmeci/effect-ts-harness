@@ -1,8 +1,11 @@
 import { Schema } from "effect"
-import { AstSourceFilePath, ContentSha256, NonNegativeCount } from "./ast-and-gate-primitives.js"
+import { AstSourceFilePath, ContentSha256 } from "./ast-and-gate-primitives.js"
 
-/** Canonical persistence format version for incremental mutant outcomes. */
-export const MUTATION_CACHE_SCHEMA_VERSION = "mutation-cache-v1" as const
+/** Canonical persistence format version for HMAC-authenticated incremental mutant outcomes. */
+export const MUTATION_CACHE_SCHEMA_VERSION = "mutation-cache-v2" as const
+
+/** Relative filename under the active harness cache directory. */
+export const MUTATION_CACHE_FILENAME = "mutation-cache-v2.json" as const
 
 export const MutationCacheVersion = Schema.Literal(MUTATION_CACHE_SCHEMA_VERSION)
 export type MutationCacheVersion = typeof MutationCacheVersion.Type
@@ -13,36 +16,105 @@ export type MutationCacheStatus = typeof MutationCacheStatus.Type
 export const MutantCacheId = Schema.NonEmptyString.pipe(Schema.brand("MutantCacheId"))
 export type MutantCacheId = typeof MutantCacheId.Type
 
+const ISO_8601_UTC_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/
+
+/**
+ * Validated ISO-8601 UTC timestamp (`YYYY-MM-DDTHH:mm:ss(.sss)Z`) parseable to finite epoch millis.
+ * Rejects empty or non-UTC timestamps that would silently produce `NaN` in TTL checks.
+ */
 export const MutationCacheTimestamp = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isPattern(ISO_8601_UTC_TIMESTAMP_RE)),
+  Schema.check(
+    Schema.makeFilter((ts) => Number.isFinite(Date.parse(ts)), {
+      message: "MutationCacheTimestamp must be a parseable ISO-8601 UTC timestamp",
+    }),
+  ),
   Schema.brand("MutationCacheTimestamp"),
 )
 export type MutationCacheTimestamp = typeof MutationCacheTimestamp.Type
+
+/** Hex-encoded 256-bit HMAC-SHA256 authentication tag binding entry identity to an out-of-workspace key. */
+export const MutationCacheMac = Schema.String.pipe(
+  Schema.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+  Schema.brand("MutationCacheMac"),
+)
+export type MutationCacheMac = typeof MutationCacheMac.Type
+
+/** Out-of-workspace HMAC secret key material (>= 32 printable non-empty characters). */
+export const MutationCacheHmacSecret = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isBetweenLength(32, 4096)),
+  Schema.check(Schema.isPattern(/^[^\0\r\n]+$/)),
+  Schema.brand("MutationCacheHmacSecret"),
+)
+export type MutationCacheHmacSecret = typeof MutationCacheHmacSecret.Type
+
+export const MutationEpochMillis = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+  Schema.brand("MutationEpochMillis"),
+)
+export type MutationEpochMillis = typeof MutationEpochMillis.Type
+
+export const MutationMaxAgeMillis = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThan(0)),
+  Schema.brand("MutationMaxAgeMillis"),
+)
+export type MutationMaxAgeMillis = typeof MutationMaxAgeMillis.Type
+
+export const PackageRelKey = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isPattern(/^[^\0]+$/)),
+  Schema.brand("PackageRelKey"),
+)
+export type PackageRelKey = typeof PackageRelKey.Type
+
+export const RuntimeVersionTag = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isPattern(/^[^\0]+$/)),
+  Schema.brand("RuntimeVersionTag"),
+)
+export type RuntimeVersionTag = typeof RuntimeVersionTag.Type
 
 export const MutationCacheEntry = Schema.Struct({
   key: ContentSha256,
   file: AstSourceFilePath,
   mutantId: MutantCacheId,
   status: MutationCacheStatus,
+  /** Immutable creation/verification timestamp enforced by the cache TTL window. */
   recordedAt: MutationCacheTimestamp,
+  /** Mutable access timestamp updated on cache hit so LRU eviction preserves hot entries without extending TTL. */
+  lastAccessedAt: Schema.optional(MutationCacheTimestamp),
+  mac: MutationCacheMac,
 })
 export type MutationCacheEntry = typeof MutationCacheEntry.Type
 
 export const MutationCacheStore = Schema.Struct({
   version: MutationCacheVersion,
   entries: Schema.Record(ContentSha256, MutationCacheEntry),
-})
+}).pipe(
+  Schema.check(
+    Schema.makeFilter(
+      (store) =>
+        Object.entries(store.entries).every(([recordKey, entry]) => entry.key === recordKey),
+      {
+        message: "MutationCacheStore entries must key every entry by entry.key",
+      },
+    ),
+  ),
+)
 export type MutationCacheStore = typeof MutationCacheStore.Type
 
 export const MutationCacheLookupInput = Schema.Struct({
   candidateKeys: Schema.Array(ContentSha256),
   store: MutationCacheStore,
+  hmacSecret: Schema.optional(MutationCacheHmacSecret),
+  nowMs: Schema.optional(MutationEpochMillis),
+  maxAgeMs: Schema.optional(MutationMaxAgeMillis),
 })
 export type MutationCacheLookupInput = typeof MutationCacheLookupInput.Type
 
 export const MutationCacheLookupDecision = Schema.Struct({
   hitKeys: Schema.Array(ContentSha256),
   missKeys: Schema.Array(ContentSha256),
-  hitCount: NonNegativeCount,
-  missCount: NonNegativeCount,
 })
 export type MutationCacheLookupDecision = typeof MutationCacheLookupDecision.Type

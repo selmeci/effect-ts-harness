@@ -24,6 +24,7 @@ import {
   unwrapAstExpression,
 } from "../ast-cache.js"
 import {
+  collectEffectPromiseAliases,
   collectProcessExitAliases,
   getMutatedStaticObjectName,
   getStaticMemberName,
@@ -33,6 +34,7 @@ import {
   isDoubleWrappedEffectFn,
   isLiteralVitestKey,
   isMemberCall,
+  isUnhandledEffectPromiseCall,
   isProcessEnvDestructuring,
   isProcessEnvExpression,
   isProcessExitCall,
@@ -235,6 +237,10 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
       ? collectProcessExitAliases(sourceFile)
       : { processAliases: new Set<string>(), exitAliases: new Set<string>() }
     const isLocaleSortBanned = isLocaleDependentSortScopedPath(normPath)
+    const isEffectPromiseBanned = /(?:^|\/)src\//.test(normPath)
+    const effectPromiseAliases = isEffectPromiseBanned
+      ? collectEffectPromiseAliases(sourceFile)
+      : undefined
     const staticCollectionNames = new Set<string>()
     const staticObjectNames = new Set<string>()
     const envAliasNames = new Set<string>()
@@ -620,6 +626,18 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
             rule: SelfDogfoodingRuleId.make("locale-dependent-sort"),
             message: SelfDogfoodingMessage.make(
               `Locale-dependent '.localeCompare(...)' in '${file.filePath}' is banned in deterministic contract/domain/compiler code — use 'compareCodeUnits' from '@harness/contract'.`,
+            ),
+            file: file.filePath,
+            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+            enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+          })
+        }
+
+        if (isEffectPromiseBanned && isUnhandledEffectPromiseCall(node, effectPromiseAliases)) {
+          violations.push({
+            rule: SelfDogfoodingRuleId.make("unhandled-effect-promise"),
+            message: SelfDogfoodingMessage.make(
+              `'Effect.promise(...)' in '${file.filePath}' converts rejections into untyped Defects — use 'Effect.tryPromise({ try, catch })' instead.`,
             ),
             file: file.filePath,
             line: getLineNumber(sourceFile, node.getStart(sourceFile)),

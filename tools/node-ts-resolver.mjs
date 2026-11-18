@@ -1,16 +1,120 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
-import { enableCompileCache, register } from "node:module"
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+} from "node:fs"
+import { constants as moduleConstants, enableCompileCache, register } from "node:module"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve as resolvePath } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
-try {
-  enableCompileCache(
-    process.env.NODE_COMPILE_CACHE ?? join(tmpdir(), "effect-harness-v8-compile-cache"),
+export const resolveDefaultCompileCacheDir = (
+  uid = typeof process.getuid === "function" ? process.getuid() : undefined,
+) =>
+  join(
+    tmpdir(),
+    uid !== undefined
+      ? `effect-harness-v8-compile-cache-${uid}`
+      : "effect-harness-v8-compile-cache",
   )
-} catch {
-  // Ignore unsupported compile-cache environments (e.g. read-only tmpdir)
+
+const lstatOrUndefined = (targetPath) => {
+  try {
+    return lstatSync(targetPath)
+  } catch (err) {
+    if (err && typeof err === "object" && err.code === "ENOENT") {
+      return undefined
+    }
+    throw err
+  }
 }
+
+export const initCompileCache = (
+  enableFn = enableCompileCache,
+  cacheDir = process.env.NODE_COMPILE_CACHE ?? resolveDefaultCompileCacheDir(),
+  statusConstants = moduleConstants?.compileCacheStatus,
+  stderr = process.stderr,
+) => {
+  if (typeof enableFn !== "function") return null
+  try {
+    const failedStatus = statusConstants?.FAILED ?? 0
+    const myUid = typeof process.getuid === "function" ? process.getuid() : undefined
+    let st = lstatOrUndefined(cacheDir)
+    if (st !== undefined) {
+      if (st.isSymbolicLink() || !st.isDirectory()) {
+        stderr.write(
+          `[node-ts-resolver] warning: refusing symlink or non-directory V8 compile cache at '${cacheDir}'\n`,
+        )
+        return { status: failedStatus, message: "symlink or non-directory compile cache path" }
+      }
+      if (myUid !== undefined && st.uid !== myUid) {
+        stderr.write(
+          `[node-ts-resolver] warning: refusing V8 compile cache owned by uid ${st.uid} at '${cacheDir}'\n`,
+        )
+        return { status: failedStatus, message: `compile cache owned by uid ${st.uid}` }
+      }
+      if ((st.mode & 0o077) !== 0) {
+        chmodSync(cacheDir, 0o700)
+        st = lstatOrUndefined(cacheDir)
+        if (
+          st === undefined ||
+          st.isSymbolicLink() ||
+          !st.isDirectory() ||
+          (st.mode & 0o077) !== 0
+        ) {
+          stderr.write(
+            `[node-ts-resolver] warning: failed to enforce 0700 permissions on V8 compile cache at '${cacheDir}'\n`,
+          )
+          return { status: failedStatus, message: "unsafe compile cache directory permissions" }
+        }
+      }
+    } else if (enableFn === enableCompileCache) {
+      mkdirSync(cacheDir, { recursive: true, mode: 0o700 })
+      chmodSync(cacheDir, 0o700)
+      st = lstatOrUndefined(cacheDir)
+      if (
+        st === undefined ||
+        st.isSymbolicLink() ||
+        !st.isDirectory() ||
+        (myUid !== undefined && st.uid !== myUid) ||
+        (st.mode & 0o077) !== 0
+      ) {
+        stderr.write(
+          `[node-ts-resolver] warning: created V8 compile cache failed ownership/permission checks at '${cacheDir}'\n`,
+        )
+        return { status: failedStatus, message: "created compile cache failed safety checks" }
+      }
+    }
+
+    const result = enableFn(cacheDir)
+    if (
+      result &&
+      typeof result === "object" &&
+      statusConstants &&
+      result.status === statusConstants.FAILED
+    ) {
+      const detail = result.message ? `: ${result.message}` : ""
+      stderr.write(
+        `[node-ts-resolver] warning: failed to enable V8 compile cache at '${cacheDir}'${detail}\n`,
+      )
+    }
+    return result ?? null
+  } catch (error) {
+    // Safe to continue without V8 compile cache when the host Node runtime or
+    // filesystem rejects enabling it; module resolution still succeeds uncached.
+    const detail = error instanceof Error ? error.message : String(error)
+    stderr.write(
+      `[node-ts-resolver] warning: enableCompileCache threw for '${cacheDir}': ${detail}\n`,
+    )
+    return null
+  }
+}
+
+initCompileCache()
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..")
 const ensureTrailingSlash = (href) => (href.endsWith("/") ? href : `${href}/`)
@@ -34,7 +138,8 @@ const resolveMainRepoRoot = (root) => {
       }
     }
   } catch {
-    // ignore
+    // Safe to fall back to null: .git may be absent, unreadable, or a directory in
+    // non-worktree checkouts, in which case worktree mainRepoRoot fallback is unneeded.
   }
   return null
 }
@@ -109,7 +214,8 @@ const indexPackageManifest = (pkgRelDir) => {
       }
     }
   } catch {
-    // ignore malformed package.json
+    // Safe to skip malformed or unreadable package.json manifests during startup
+    // indexing; standard Node resolution and static fallback mappings still handle valid packages.
   }
 }
 
@@ -133,7 +239,8 @@ try {
     }
   }
 } catch {
-  // ignore workspace export indexing errors
+  // Safe to ignore directory-enumeration errors (e.g. ENOENT/EACCES/ENOTDIR) when
+  // scanning optional workspace roots; hardcoded WORKSPACE_PACKAGE_PATHS remain active.
 }
 
 const resolveDynamicExport = (specifier) => {

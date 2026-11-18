@@ -4,6 +4,15 @@
  * matching Alchemy's own advice to confirm every deploy). */
 
 import * as path from "node:path"
+import {
+  extractCommandSegments,
+  hasUnquotedBackgroundOperator,
+  toCommandView,
+  type CommandView,
+  type UnwrappedSegment,
+} from "./policy-shell-parser.js"
+
+export { toCommandView, type CommandView }
 
 export type GuardVerdict = "allow" | "deny" | "ask" | "escalate"
 
@@ -104,158 +113,15 @@ export interface GuardPatternRule {
   readonly reason: string
 }
 
-/** Two views of a command used by the pattern rules (harness:SPEC-0001 · 4).
- * - `argv`: shell words after quote and backslash removal, joined by single spaces, with
- *   data arguments dropped (commit messages, grep patterns) — REQ-4.1 / REQ-4.2.
- * - `unquoted`: the raw command with quoted text blanked, so `>` inside a quoted string
- *   is not taken for a redirection — REQ-4.3. */
-export interface CommandView {
-  readonly argv: string
-  readonly unquoted: string
-}
-
-const OPERATOR_WORDS: ReadonlySet<string> = new Set(["&&", "||", ";", "|"])
-
-const splitShellWords = (
-  command: string,
-): { readonly words: ReadonlyArray<string>; readonly unquoted: string } => {
-  const words: Array<string> = []
-  let current = ""
-  let inWord = false
-  let quote: "'" | '"' | undefined
-  let unquoted = ""
-  const flush = (): void => {
-    if (inWord) {
-      words.push(current)
-      current = ""
-      inWord = false
-    }
-  }
-  for (let i = 0; i < command.length; i++) {
-    const ch = command[i]!
-    if (quote !== undefined) {
-      unquoted += " "
-      if (ch === quote) {
-        quote = undefined
-        continue
-      }
-      if (quote === '"' && ch === "\\" && i + 1 < command.length) {
-        current += command[++i]!
-        unquoted += " "
-        continue
-      }
-      current += ch
-      continue
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch
-      inWord = true
-      unquoted += " "
-      continue
-    }
-    if (ch === "\\" && i + 1 < command.length) {
-      current += command[++i]!
-      inWord = true
-      unquoted += "  "
-      continue
-    }
-    if (/\s/.test(ch)) {
-      flush()
-      unquoted += ch
-      continue
-    }
-    if (command.startsWith("&&", i) || command.startsWith("||", i)) {
-      flush()
-      const op = command.slice(i, i + 2)
-      words.push(op)
-      unquoted += op
-      i += 1
-      continue
-    }
-    if (
-      ch === "|" ||
-      ch === ";" ||
-      (ch === "&" && !unquoted.endsWith(">") && command[i + 1] !== ">")
-    ) {
-      flush()
-      words.push(ch)
-      unquoted += ch
-      continue
-    }
-    current += ch
-    inWord = true
-    unquoted += ch
-  }
-  if (inWord) words.push(current)
-  return { words, unquoted }
-}
-
-/** REQ-4.2: drop words that are data, not paths or flags — the message of
- * `git commit -m/--message`, the pattern of `git grep` (first non-option word or `-e`),
- * `git log --grep`, and `gh pr create/edit --title/--body`. */
-const dropDataArguments = (words: ReadonlyArray<string>): ReadonlyArray<string> => {
-  const kept: Array<string> = []
-  let segment: Array<string> = []
-  let skipNext = false
-  let grepPatternSeen = false
-  for (const word of words) {
-    if (OPERATOR_WORDS.has(word)) {
-      kept.push(word)
-      segment = []
-      skipNext = false
-      grepPatternSeen = false
-      continue
-    }
-    const program = segment.filter((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w))
-    segment.push(word)
-    if (skipNext) {
-      skipNext = false
-      continue
-    }
-    const sub = program[0] === "git" ? program[1] : undefined
-    const ghSub = program[0] === "gh" ? program[1] : undefined
-    if (sub === "commit" && (word === "-m" || word === "--message")) {
-      skipNext = true
-      continue
-    }
-    if (sub === "commit" && (/^-m./.test(word) || word.startsWith("--message="))) continue
-    if (sub === "log" && word === "--grep") {
-      skipNext = true
-      continue
-    }
-    if (sub === "log" && word.startsWith("--grep=")) continue
-    if (
-      ghSub === "pr" &&
-      (word === "-t" || word === "--title" || word === "-b" || word === "--body")
-    ) {
-      skipNext = true
-      continue
-    }
-    if (sub === "grep" && word === "-e") {
-      skipNext = true
-      grepPatternSeen = true
-      continue
-    }
-    if (sub === "grep" && !grepPatternSeen && word !== "--" && !word.startsWith("-")) {
-      grepPatternSeen = true
-      continue
-    }
-    kept.push(word)
-  }
-  return kept
-}
-
-export const toCommandView = (command: string): CommandView => {
-  const { words, unquoted } = splitShellWords(command)
-  return { argv: dropDataArguments(words).join(" "), unquoted }
-}
-
-/** REQ-3.1: a dotenv file referenced as a path token, including multi-dot names
- * (`.env.development.local`) and globs (`.env*`). It does not match identifiers
- * (`process.env`, `import.meta.env`) or templates (`.env.example`, `.env.template`,
- * `.env.sample`) — REQ-3.2. Evaluated on `CommandView.argv`. */
+/** REQ-3.1: a dotenv file, mutation-hmac key, `.cache/effect-harness` state/key path, or
+ * wildcard `*.key` token referenced as a path token, including multi-dot names
+ * (`.env.development.local`), globs/character classes/braces (`.env*`, `mutation-hmac*.key`,
+ * `mutation-hmac-v[0-9].key`, `mutation-hmac-{v1,v2}.key`, `*.key`). It does not match
+ * identifiers (`process.env`, `import.meta.env`), plugin dirs (`plugins/effect-harness`),
+ * or templates (`.env.example`, `.env.template`, `.env.sample`) — REQ-3.2.
+ * Evaluated on `CommandView.argv`. */
 export const SECRET_FILE_PATTERN: RegExp =
-  /(?:^|[\s=:/<>(])\.env(?:\.(?!(?:example|template|sample)(?:$|[\s/]))[\w*?-]+)*\*?(?=$|[\s/;|&)<>])/
+  /(?:^|[\s=:/<>(])(?:\.env(?:\.(?!(?:example|template|sample)(?:$|[\s/]))[\w*?-]+)*\*?|mutation-hmac[^\s;|&)<>]*(?:\.key|\*|\?|\]|\})|[^\s;|&)<>]*\.cache\/effect-harness(?:\/[^\s;|&)<>]*)?|[^\s=:/<>()]*(?:\*|\?|\[[^\]\s]+\]|\{[^}\s]+\})[^\s;|&)<>]*\.key)(?=$|[\s/;|&)<>])/
 
 /** REQ-2.1: the agent must not use the guard as an oracle to test candidate commands.
  * Hooks invoke the guard directly from the IDE, never through an agent shell command.
@@ -323,13 +189,13 @@ export const DESTRUCTIVE_ARGUMENT_PATTERNS: ReadonlyArray<GuardPatternRule> = [
 export const FILE_REDIRECTION_PATTERN: RegExp =
   /(?:&>>?|(?<![=&>-])\d*>>?(?![&>])|(?<![=&>-])\d*>&(?![\d-]))\s*(?!\/dev\/null(?:\s|$))\S/
 
-/** REQ-3.3: a word split by a single-character bracket class (`[e]nv`, `e[n]v`, `[.]env`)
+/** REQ-3.3: a word or path split by a character-class glob (`[e]nv`, `v[0-9]`, `[.]env`)
  * or by empty quotes (`r''m`, `.''env`) — the forms used to slip past substring rules.
  * Evaluated on the raw command. */
 export const OBFUSCATION_PATTERNS: ReadonlyArray<GuardPatternRule> = [
   {
-    pattern: /\[[^\]\s]\](?=[\w.])|(?<=[\w.])\[[^\]\s]\]/,
-    reason: "single-character bracket class inside a word",
+    pattern: /\[[^\]\s]+\](?=[\w./*-])|(?<=[\w./*-])\[[^\]\s]+\]/,
+    reason: "character-class glob inside a word or path",
   },
   { pattern: /(?<=[\w.])(?:''|"")(?=[\w.])/, reason: "empty quotes inside a word" },
 ]
@@ -344,7 +210,7 @@ export const isCommandAllowed = (command: string): boolean => {
   const stripped = command
     .trim()
     .replace(
-      /^(?:(?:CI|NX_INTERACTIVE|(?!HARNESS_STATE_DIR=|HARNESS_DISABLE_LIVE_TELEMETRY=|HARNESS_TEST_ISOLATION=)HARNESS_[A-Z0-9_]+)=[^\s;|&]+\s+)+/,
+      /^(?:(?:CI|NX_INTERACTIVE|(?!HARNESS_STATE_DIR=|HARNESS_DISABLE_LIVE_TELEMETRY=|HARNESS_TEST_ISOLATION=|HARNESS_ALLOW_SKIP_NX_CACHE=)HARNESS_[A-Z0-9_]+)=[^\s;|&]+\s+)+/,
       "",
     )
   const trimmed = stripped.trim()
@@ -356,144 +222,6 @@ export const isCommandAllowed = (command: string): boolean => {
   })
 }
 
-const WRAPPER_BINARIES: ReadonlySet<string> = new Set("pnpm npm npx pnpx yarn bun bunx".split(" "))
-const WRAPPER_VALUE_FLAGS: ReadonlySet<string> = new Set(
-  "--filter -F --dir -C --prefix --package -p --loglevel --reporter --store-dir --cache-dir --config -c --userconfig".split(
-    " ",
-  ),
-)
-const WRAPPER_SUBCOMMANDS: ReadonlySet<string> = new Set(["exec", "run", "dlx"])
-const ENV_VALUE_FLAGS: ReadonlySet<string> = new Set(
-  "-u -C -S --unset --chdir --split-string".split(" "),
-)
-const ENV_SIMPLE_FLAGS: ReadonlySet<string> = new Set(
-  "-i --ignore-environment -0 --null".split(" "),
-)
-
-const binaryBasename = (word: string): string =>
-  word.includes("/") ? word.slice(word.lastIndexOf("/") + 1) : word
-
-interface UnwrappedSegment {
-  readonly envAssignments: ReadonlyArray<string>
-  readonly commandWords: ReadonlyArray<string>
-  readonly sawPackageRunner: boolean
-}
-
-const unwrapCommandSegment = (words: ReadonlyArray<string>): UnwrappedSegment => {
-  const envAssignments: Array<string> = []
-  let sawPackageRunner = false
-  let i = 0
-  while (i < words.length) {
-    const w = words[i]!
-    const base = binaryBasename(w)
-    if (base === "env") {
-      i++
-      while (i < words.length) {
-        const arg = words[i]!
-        if (arg === "--") {
-          i++
-          break
-        }
-        if (ENV_VALUE_FLAGS.has(arg)) {
-          i += 2
-          continue
-        }
-        if (
-          ENV_SIMPLE_FLAGS.has(arg) ||
-          arg.startsWith("--unset=") ||
-          arg.startsWith("--chdir=") ||
-          arg.startsWith("--split-string=")
-        ) {
-          i++
-          continue
-        }
-        if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(arg)) {
-          envAssignments.push(arg)
-          i++
-          continue
-        }
-        break
-      }
-      continue
-    }
-    if (base === "command") {
-      i++
-      while (i < words.length) {
-        const arg = words[i]!
-        if (arg === "--") {
-          i++
-          break
-        }
-        if (arg === "-p") {
-          i++
-          continue
-        }
-        break
-      }
-      continue
-    }
-    if (base === "cross-env" || base === "builtin") {
-      i++
-      continue
-    }
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
-      envAssignments.push(w)
-      i++
-      continue
-    }
-    if (WRAPPER_BINARIES.has(base)) {
-      sawPackageRunner = true
-      i++
-      while (i < words.length) {
-        const arg = words[i]!
-        if (WRAPPER_VALUE_FLAGS.has(arg)) {
-          i += 2
-          continue
-        }
-        if (arg === "--") {
-          i++
-          break
-        }
-        if (
-          arg.startsWith("-") ||
-          WRAPPER_SUBCOMMANDS.has(arg) ||
-          /^[A-Za-z_][A-Za-z0-9_]*=/.test(arg)
-        ) {
-          if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(arg)) envAssignments.push(arg)
-          i++
-          continue
-        }
-        break
-      }
-      continue
-    }
-    break
-  }
-  return {
-    envAssignments,
-    commandWords: words.slice(i),
-    sawPackageRunner,
-  }
-}
-
-const extractCommandSegments = (command: string): ReadonlyArray<UnwrappedSegment> => {
-  const segments: Array<UnwrappedSegment> = []
-  for (const line of command.split(/\r?\n/)) {
-    const view = toCommandView(line)
-    for (const rawSeg of view.argv.split(/\s*(?:&&|\|\||[;|&])\s*/)) {
-      const cleanedSeg = rawSeg.replace(/^[()\s]+|[()\s]+$/g, "")
-      const words = cleanedSeg
-        .split(/\s+/)
-        .map((w) => w.replace(/^[()]+|[()]+$/g, ""))
-        .filter(Boolean)
-      if (words.length > 0) {
-        segments.push(unwrapCommandSegment(words))
-      }
-    }
-  }
-  return segments
-}
-
 export const isCdCommand = (trimmed: string): boolean =>
   extractCommandSegments(trimmed).some((seg) => seg.commandWords[0] === "cd")
 
@@ -501,54 +229,49 @@ export const INTERACTIVE_NX_BANNED_REASON =
   "Running 'nx show' without 'CI=true' can hang on interactive prompts; prefix with 'CI=true' or use harness MCP tools."
 
 export const SKIP_NX_CACHE_BANNED_REASON =
-  "Bypassing Nx cache with '--skip-nx-cache' is banned by harness policy in routine runs; set 'HARNESS_ALLOW_SKIP_NX_CACHE=1' only when intentionally benchmarking cold builds."
+  "Bypassing Nx cache with '--skip-nx-cache', '--skipNxCache', or 'NX_SKIP_NX_CACHE'/'NX_DISABLE_NX_CACHE' is banned by harness policy; drop the cache-bypass flag/env and rely on Nx caching."
 
-const SKIP_NX_CACHE_ARG_PATTERN = /^--skip-nx-cache(?:=(?!false$).*)?$/
+const SKIP_NX_CACHE_ARG_PATTERN = /^--(?:skip-nx-cache|skipNxCache)(?:=(?!false$).*)?$/
+const SKIP_NX_CACHE_ENV_PATTERN = /^(?:NX_SKIP_NX_CACHE|NX_DISABLE_NX_CACHE)=(?:true|1)$/
+
+const segmentHasSkipNxCache = (seg: UnwrappedSegment): boolean => {
+  if (seg.envAssignments.some((env) => SKIP_NX_CACHE_ENV_PATTERN.test(env))) {
+    return true
+  }
+  const bin = seg.commandWords[0]
+  if (bin === undefined) {
+    return false
+  }
+  const isTarget =
+    bin === "nx" ||
+    bin.endsWith("/nx") ||
+    (seg.sawPackageRunner && (bin === "verify" || bin === "verify:all"))
+  if (!isTarget) {
+    return false
+  }
+  return seg.commandWords.slice(1).some((arg) => SKIP_NX_CACHE_ARG_PATTERN.test(arg))
+}
 
 export const isSkipNxCacheCommand = (command: string): boolean =>
-  extractCommandSegments(command).some((seg) => {
-    const bin = seg.commandWords[0]
-    if (bin === undefined) {
-      return false
-    }
-    const isTarget =
-      bin === "nx" ||
-      bin.endsWith("/nx") ||
-      (seg.sawPackageRunner && (bin === "verify" || bin === "verify:all"))
-    if (!isTarget) {
-      return false
-    }
-    if (seg.envAssignments.includes("HARNESS_ALLOW_SKIP_NX_CACHE=1")) {
-      return false
-    }
-    return seg.commandWords.slice(1).some((arg) => SKIP_NX_CACHE_ARG_PATTERN.test(arg))
-  })
+  extractCommandSegments(command).some(
+    (seg) =>
+      segmentHasSkipNxCache(seg) && !seg.envAssignments.includes("HARNESS_ALLOW_SKIP_NX_CACHE=1"),
+  )
+
+export const isSkipNxCacheOverrideCommand = (command: string): boolean =>
+  extractCommandSegments(command).some(
+    (seg) =>
+      segmentHasSkipNxCache(seg) && seg.envAssignments.includes("HARNESS_ALLOW_SKIP_NX_CACHE=1"),
+  )
 
 export const CLEF_SYSTEMONE_ONLY_BANNED_REASON =
   "clef (clef-flash) is a TypeSafe System One structured decision model, NOT a generative text/chat model — /api/generate, /api/chat, /v1/chat/completions, /v1/completions, and 'ollama run clef*' do not exist for System One models and return HTTP errors. Use DecisionModel.decide (@effect/ai-typesafe TypeSafeDecisionModel) or POST http://localhost:11434/v1/systemone ({ model: 'clef-flash', state, questions }), or run 'pnpm harness doctor' to warm/verify the model."
 
-const IGNORED_CLEF_GUARD_BINARIES: ReadonlySet<string> = new Set([
-  "grep",
-  "rg",
-  "git",
-  "gh",
-  "vitest",
-])
+const IGNORED_CLEF_GUARD_BINARIES: ReadonlySet<string> = new Set("grep rg git gh vitest".split(" "))
 
-const CLEF_HTTP_OR_SCRIPT_BINARIES: ReadonlySet<string> = new Set([
-  "curl",
-  "wget",
-  "http",
-  "https",
-  "xh",
-  "fetch",
-  "python",
-  "python3",
-  "node",
-  "bun",
-  "tsx",
-  "deno",
-])
+const CLEF_HTTP_OR_SCRIPT_BINARIES: ReadonlySet<string> = new Set(
+  "curl wget http https xh fetch python python3 node bun tsx deno".split(" "),
+)
 
 const CLEF_MODEL_NAME_PATTERN = /\bclef(?:-flash)?\b/i
 const CLEF_INVALID_ENDPOINT_PATTERN =
@@ -597,6 +320,76 @@ export const isInteractiveNxCommand = (command: string): boolean =>
     return !hasNonInteractiveEnv
   })
 
+export const CD_COMMAND_BANNED_REASON =
+  "Shell 'cd' commands are banned by harness policy; use the tool Cwd parameter instead."
+
+export type CommandDenyRuleId =
+  | "cd-command-banned"
+  | "interactive-nx-banned"
+  | "skip-nx-cache-banned"
+  | "invalid-clef-endpoint"
+  | "denylist-token"
+  | "git-force-push"
+  | "secret-file-access"
+  | "guard-self-invocation"
+
+export interface CommandDenyExplanation {
+  readonly ruleId: CommandDenyRuleId
+  readonly reason: string
+}
+
+const GIT_FORCE_PUSH_PATTERN = /\bgit\s+(?:\S+\s+)*push\b.*(?:\s|^)(?:--force|-f)(?:\s|$)/
+
+export const explainCommandDenyRule = (command: string): CommandDenyExplanation | undefined => {
+  const trimmed = command.trim()
+  if (trimmed === "") {
+    return undefined
+  }
+  if (isCdCommand(trimmed)) {
+    return { ruleId: "cd-command-banned", reason: CD_COMMAND_BANNED_REASON }
+  }
+  if (isInteractiveNxCommand(trimmed)) {
+    return { ruleId: "interactive-nx-banned", reason: INTERACTIVE_NX_BANNED_REASON }
+  }
+  if (isSkipNxCacheCommand(trimmed)) {
+    return { ruleId: "skip-nx-cache-banned", reason: SKIP_NX_CACHE_BANNED_REASON }
+  }
+  if (isInvalidClefEndpointCommand(trimmed)) {
+    return { ruleId: "invalid-clef-endpoint", reason: CLEF_SYSTEMONE_ONLY_BANNED_REASON }
+  }
+  const view = toCommandView(trimmed)
+  const matchedDeny = DENYLIST.find((entry) => containsToken(view.argv, entry.token))
+  if (matchedDeny !== undefined) {
+    return {
+      ruleId: "denylist-token",
+      reason: `Command contains banned token '${matchedDeny.token}' (${matchedDeny.reason}).`,
+    }
+  }
+  if (GIT_FORCE_PUSH_PATTERN.test(view.argv)) {
+    return {
+      ruleId: "git-force-push",
+      reason: "Force-pushing with '--force' or '-f' is banned by harness policy.",
+    }
+  }
+  if (SECRET_FILE_PATTERN.test(view.argv)) {
+    return {
+      ruleId: "secret-file-access",
+      reason:
+        "Accessing or exposing secret/credential files (.env, mutation-hmac*.key) in shell commands is banned by harness policy.",
+    }
+  }
+  if (GUARD_SELF_INVOCATION_PATTERN.test(view.argv)) {
+    return {
+      ruleId: "guard-self-invocation",
+      reason: "Invoking 'harness guard' from an agent shell command is banned by harness policy.",
+    }
+  }
+  return undefined
+}
+
+export const explainCommandDenyReason = (command: string): string | undefined =>
+  explainCommandDenyRule(command)?.reason
+
 /** Rule order is load-bearing (harness:ADR-0003): deny → ask → escalate → allow.
  * Every rule that removes the automatic `allow` must run before the prefix allowlist. */
 export const classifyCommand = (command: string): GuardVerdict => {
@@ -604,28 +397,15 @@ export const classifyCommand = (command: string): GuardVerdict => {
   if (trimmed === "") {
     return "escalate"
   }
-  if (isCdCommand(trimmed)) {
+  if (explainCommandDenyRule(trimmed) !== undefined) {
     return "deny"
   }
-  if (isInteractiveNxCommand(trimmed)) {
-    return "deny"
-  }
-  if (isSkipNxCacheCommand(trimmed)) {
-    return "deny"
-  }
-  if (isInvalidClefEndpointCommand(trimmed)) {
-    return "deny"
+  if (isSkipNxCacheOverrideCommand(trimmed)) {
+    return "ask"
   }
   const view = toCommandView(command)
-  if (
-    DENYLIST.some((entry) => containsToken(view.argv, entry.token)) ||
-    /\bgit\s+(?:\S+\s+)*push\b.*(?:\s|^)(?:--force|-f)(?:\s|$)/.test(view.argv)
-  ) {
-    return "deny"
-  }
-  if (SECRET_FILE_PATTERN.test(view.argv) || GUARD_SELF_INVOCATION_PATTERN.test(view.argv)) {
-    return "deny"
-  }
+  const hasBgOp = hasUnquotedBackgroundOperator(view.unquoted)
+  const hasUnquotedBraceExpansion = /\{[^}\s,]+,[^}\s]*\}/.test(view.unquoted)
   if (
     ASKLIST.some((token) => containsToken(view.argv, token)) ||
     matchesAny(view.argv, GIT_DISCARD_PATTERNS)
@@ -636,11 +416,12 @@ export const classifyCommand = (command: string): GuardVerdict => {
     matchesAny(view.argv, DESTRUCTIVE_ARGUMENT_PATTERNS) ||
     FILE_REDIRECTION_PATTERN.test(view.unquoted) ||
     matchesAny(command, OBFUSCATION_PATTERNS) ||
+    hasUnquotedBraceExpansion ||
     /\$\(|`/.test(view.argv)
   ) {
     return "escalate"
   }
-  if (SHELL_OPERATORS.some((op) => command.includes(op))) {
+  if (hasBgOp || SHELL_OPERATORS.some((op) => command.includes(op))) {
     const isAllowedFilter = (p: string): boolean =>
       p.startsWith("grep ") ||
       p.startsWith("head ") ||
@@ -662,6 +443,7 @@ export const classifyCommand = (command: string): GuardVerdict => {
     }
 
     if (
+      !hasBgOp &&
       command.includes("|") &&
       !command.includes("||") &&
       !command.includes("&&") &&
@@ -673,6 +455,7 @@ export const classifyCommand = (command: string): GuardVerdict => {
       }
     }
     if (
+      !hasBgOp &&
       command.includes("&&") &&
       !command.includes("||") &&
       !command.includes(";") &&
@@ -694,26 +477,6 @@ export const classifyCommand = (command: string): GuardVerdict => {
     return "escalate"
   }
   return isCommandAllowed(command) ? "allow" : "escalate"
-}
-
-export const CD_COMMAND_BANNED_REASON =
-  "Shell 'cd' commands are banned by harness policy; use the tool Cwd parameter instead."
-
-export const explainCommandDenyReason = (command: string): string | undefined => {
-  const trimmed = command.trim()
-  if (isCdCommand(trimmed)) {
-    return CD_COMMAND_BANNED_REASON
-  }
-  if (isInteractiveNxCommand(trimmed)) {
-    return INTERACTIVE_NX_BANNED_REASON
-  }
-  if (isSkipNxCacheCommand(trimmed)) {
-    return SKIP_NX_CACHE_BANNED_REASON
-  }
-  if (isInvalidClefEndpointCommand(trimmed)) {
-    return CLEF_SYSTEMONE_ONLY_BANNED_REASON
-  }
-  return undefined
 }
 
 export interface FileWriteGuardResult {
@@ -752,7 +515,7 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
 
   if (
     candidates.some((p) =>
-      /(^|\/)\.harness\/(worktrees\/[^/]+\/)?(cache\/mutation-cache-v1\.json|session-preinvocation-cache\.json)$/.test(
+      /(^|\/)\.harness\/(worktrees\/[^/]+\/)?(cache\/mutation-cache-v\d+\.(?:json(?:\.corrupt)?|corrupt)|session-preinvocation-cache\.json)$/.test(
         p,
       ),
     )
@@ -766,8 +529,9 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
   if (
     candidates.some(
       (p) =>
-        /(^|\/)(\.env(\.[a-zA-Z0-9_-]+)*|\.dev\.vars|.*\.(pem|key))$/.test(p) &&
-        !/\.(example|template|sample)$/i.test(p),
+        /(^|\/)(\.env(\.[a-zA-Z0-9_-]+)*|\.dev\.vars|mutation-hmac[^/]*\.key|.*\.(pem|key))$/.test(
+          p,
+        ) && !/\.(example|template|sample)$/i.test(p),
     )
   ) {
     return {

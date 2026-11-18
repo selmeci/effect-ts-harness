@@ -16,8 +16,10 @@ import {
   dispatchCliCommand,
   HarnessCommandRegistry,
   HarnessCommandRegistryLive,
+  lazyImportCliHandler,
   makeHarnessCommandRegistryLayer,
   makeLiveCliCommandRegistryLayer,
+  toLazyImportError,
 } from "./commands/command-registry.js"
 import {
   buildOmnigraphClusterKillArgs,
@@ -52,8 +54,10 @@ export const handleIngest = (
   args: ReadonlyArray<string>,
   options?: CliEnv,
 ): Effect.Effect<CliResult> =>
-  Effect.promise(() => import("./commands/session-learn-report.command.js")).pipe(
-    Effect.flatMap((m) => m.handleIngest(args, options)),
+  lazyImportCliHandler(
+    "ingest",
+    () => import("./commands/session-learn-report.command.js"),
+    (m) => m.handleIngest(args, options),
   )
 
 export {
@@ -181,11 +185,20 @@ export const runCliEffect = (
       (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) &&
       !shouldSuppressLiveRepoTestSideEffects(repoRoot)
     ) {
-      yield* Effect.promise(() => import("./commands/mutate-and-bench.command.js")).pipe(
-        Effect.flatMap(({ writeDoneSessionReport }) =>
-          Effect.try(() => writeDoneSessionReport(repoRoot)),
+      yield* Effect.tryPromise({
+        try: () => import("./commands/mutate-and-bench.command.js"),
+        catch: toLazyImportError,
+      }).pipe(
+        Effect.flatMap((m) =>
+          Effect.try({ try: () => m.writeDoneSessionReport(repoRoot), catch: toLazyImportError }),
         ),
-        Effect.ignore,
+        Effect.catch((err) =>
+          Effect.sync(() => {
+            process.stderr.write(
+              `[harness:done] Warning: failed to write session report: ${err.message}\n`,
+            )
+          }),
+        ),
       )
     }
 

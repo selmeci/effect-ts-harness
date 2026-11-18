@@ -746,4 +746,29 @@ describe("mutation-check: strict fail-closed modes and primary/fallback test par
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it("exempts package-root vitest.config.* from findUnclassifiedModifiedLibFiles while still flagging other non-src lib files", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mut-vitest-cfg-"))
+    try {
+      const pkg = writePkg(dir, "demo", "core", {
+        type: "package.json",
+        name: "@demo/core",
+        tags: ["type:core"],
+      })
+      writeFileSync(join(pkg, "vitest.config.ts"), "export default {}\n", "utf8")
+      writeFileSync(join(pkg, "extra.ts"), "export const extra = 1\n", "utf8")
+      const unclassified = findUnclassifiedModifiedLibFiles(
+        dir,
+        new Map([
+          ["libs/demo/core/vitest.config.ts", new Set([1])],
+          ["libs/demo/core/extra.ts", new Set([1])],
+        ]),
+        [],
+        testHostIo,
+      )
+      expect(unclassified).toEqual(["libs/demo/core/extra.ts"])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

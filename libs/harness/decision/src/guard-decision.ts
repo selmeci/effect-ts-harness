@@ -1,4 +1,4 @@
-import { Cause, Effect, Option, Schema } from "effect"
+import { Cause, Effect, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { isPureInterruptCause } from "@harness/contract"
@@ -52,26 +52,37 @@ export const decideGuardCommand = Effect.fn("Harness.decideGuardCommand")(functi
     )
     .with("escalate", () =>
       Effect.gen(function* () {
-        const outcome = yield* DecisionModel.decide(GuardV1, { input: { command } }).pipe(
-          Effect.timeoutOption("1500 millis"),
+        const timedResult = yield* DecisionModel.decide(GuardV1, { input: { command } }).pipe(
+          Effect.map((value) => ({ _tag: "Success" as const, value })),
           Effect.catchCauseIf(
             (cause) => !isPureInterruptCause(cause),
             (cause) =>
               Effect.logWarning(`Decision model fallback: ${Cause.pretty(cause)}`).pipe(
-                Effect.as(Option.none()),
+                Effect.as({ _tag: "ModelError" as const }),
               ),
           ),
-          Effect.orElseSucceed(() => Option.none()),
+          Effect.orElseSucceed(() => ({ _tag: "ModelError" as const })),
+          Effect.timeoutOption("1500 millis"),
         )
 
-        return yield* match(outcome)
+        return yield* match(timedResult)
           .with({ _tag: "None" }, () =>
+            Effect.logWarning(
+              "GuardV1 DecisionModel timed out after 1500ms; requiring human confirmation.",
+            ).pipe(
+              Effect.as({
+                verdict: "ask" as const,
+                reason: "DecisionModel timed out after 1500ms; requires human confirmation.",
+              }),
+            ),
+          )
+          .with({ _tag: "Some", value: { _tag: "ModelError" } }, () =>
             Effect.succeed({
               verdict: "ask" as const,
               reason: "DecisionModel unavailable or timed out; requires human confirmation.",
             }),
           )
-          .with({ _tag: "Some" }, ({ value }) =>
+          .with({ _tag: "Some", value: { _tag: "Success" } }, ({ value: { value } }) =>
             Effect.gen(function* () {
               const { answers } = value
               yield* Effect.annotateCurrentSpan({

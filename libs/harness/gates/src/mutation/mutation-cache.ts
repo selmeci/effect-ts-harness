@@ -1,63 +1,139 @@
-import { randomBytes } from "node:crypto"
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto"
 import { dirname, isAbsolute, join, relative, resolve } from "node:path"
-import { Effect, Option, Result, Schema } from "effect"
+import { Cause, Effect, Option, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
+  AstSourceFilePath,
   ContentSha256,
+  MUTATION_CACHE_FILENAME,
   MUTATION_CACHE_SCHEMA_VERSION,
-  type MutationCacheEntry,
+  MutantCacheId,
+  MutationCacheEntry,
+  MutationCacheHmacSecret,
   MutationCacheLookupDecision,
   type MutationCacheLookupInput,
+  MutationCacheMac,
+  type MutationCacheStatus,
   MutationCacheStore,
-  NonNegativeCount,
+  MutationCacheTimestamp,
+  MutationEpochMillis,
+  MutationMaxAgeMillis,
+  type PackageRelKey,
   compareCodeUnits,
   computeContentSha256,
 } from "@harness/contract"
-import type { SyncHostDirEntry, SyncHostIo } from "@harness/service/host-io"
-import { isWorkspaceTsSourceFileName } from "../workspace-ts-scan.js"
+import type { SyncHostIo } from "@harness/service/host-io"
 import { resolveHarnessStateDir } from "../worktree.js"
 import type { CodeMutant } from "./mutant-ast-generator.js"
+import {
+  type MutationContextDigests,
+  type MutationContextDigestsResult,
+  checkExists,
+  computeMutationContextDigests,
+  computeMutationContextDigestsChecked,
+  isNonSymlink,
+  readSafeText,
+  unwrapOption,
+  unwrapResult,
+} from "./mutation-context-digest.js"
 
-export const MAX_MUTATION_CACHE_ENTRIES = 5000
-
-const MUTATION_CACHE_FILENAME = "mutation-cache-v1.json"
-
-export interface MutationContextDigests {
-  readonly workspaceSrcDigest: ContentSha256
-  readonly testSupportDigests: ReadonlyMap<string, ContentSha256>
+export {
+  type MutationContextDigests,
+  type MutationContextDigestsResult,
+  computeMutationContextDigests,
+  computeMutationContextDigestsChecked,
 }
+export const MAX_MUTATION_CACHE_ENTRIES = 5000
+export const MAX_MUTATION_CACHE_AGE_MS = 12 * 60 * 60 * 1000
+
+export interface ComputeMutationEntryMacInput {
+  readonly key: ContentSha256
+  readonly file: AstSourceFilePath
+  readonly mutantId: MutantCacheId
+  readonly status: MutationCacheStatus
+  readonly recordedAt: MutationCacheTimestamp
+}
+
+export interface ComputeMutantCacheKeyInput {
+  readonly pkgKey: PackageRelKey
+  readonly relFile: AstSourceFilePath
+  readonly originalContentSha256: ContentSha256
+  readonly compiledSchemaSha256: ContentSha256
+  readonly mutant: CodeMutant
+  readonly reachingTestHashes: ReadonlyMap<AstSourceFilePath, ContentSha256>
+  readonly digests: MutationContextDigests
+}
+
+export type SaveMutationCacheResult =
+  | { readonly _tag: "Saved" }
+  | { readonly _tag: "Skipped"; readonly reason: string }
+  | { readonly _tag: "Failed"; readonly reason: string }
+
+export type LoadMutationCacheResult =
+  | {
+      readonly _tag: "Loaded"
+      readonly store: MutationCacheStore
+      readonly droppedEntryCount: number
+    }
+  | { readonly _tag: "Missing" }
+  | {
+      readonly _tag: "Corrupt"
+      readonly reason: string
+      readonly quarantinedPath?: string | undefined
+    }
+  | { readonly _tag: "Unsafe"; readonly reason: string }
 
 export const emptyMutationCacheStore = (): MutationCacheStore => ({
   version: MUTATION_CACHE_SCHEMA_VERSION,
   entries: {},
 })
 
+export const computeMutationEntryMac = (
+  hmacSecret: MutationCacheHmacSecret,
+  p: ComputeMutationEntryMacInput,
+): MutationCacheMac =>
+  MutationCacheMac.make(
+    createHmac("sha256", hmacSecret)
+      .update(`${p.key}\0${p.file}\0${p.mutantId}\0${p.status}\0${p.recordedAt}`)
+      .digest("hex"),
+  )
+
+export const verifyMutationEntryMac = (
+  hmacSecret: MutationCacheHmacSecret,
+  entry: MutationCacheEntry,
+): boolean => {
+  const expectedBuf = Buffer.from(computeMutationEntryMac(hmacSecret, entry), "utf8")
+  const actualBuf = Buffer.from(entry.mac, "utf8")
+  return expectedBuf.length === actualBuf.length && timingSafeEqual(expectedBuf, actualBuf)
+}
+
 export const partitionMutationCacheLookup = (
   input: MutationCacheLookupInput,
 ): MutationCacheLookupDecision => {
+  const hmacSecret = input.hmacSecret
+  if (hmacSecret === undefined) return { hitKeys: [], missKeys: [...input.candidateKeys] }
+  const nowMs = input.nowMs ?? MutationEpochMillis.make(Date.now())
+  const maxAgeMs = input.maxAgeMs ?? MutationMaxAgeMillis.make(MAX_MUTATION_CACHE_AGE_MS)
   const hitKeys: Array<ContentSha256> = []
   const missKeys: Array<ContentSha256> = []
   for (const candidateKey of input.candidateKeys) {
     const entry = Object.hasOwn(input.store.entries, candidateKey)
       ? input.store.entries[candidateKey]
       : undefined
+    const ageMs = entry !== undefined ? nowMs - Date.parse(entry.recordedAt) : Number.NaN
     const isHit =
       entry !== undefined &&
       match(entry.status)
         .with("killed", () => entry.key === candidateKey)
-        .exhaustive()
-    if (isHit) {
-      hitKeys.push(candidateKey)
-    } else {
-      missKeys.push(candidateKey)
-    }
+        .exhaustive() &&
+      verifyMutationEntryMac(hmacSecret, entry) &&
+      Number.isFinite(ageMs) &&
+      ageMs >= 0 &&
+      ageMs <= maxAgeMs
+    if (isHit) hitKeys.push(candidateKey)
+    else missKeys.push(candidateKey)
   }
-  return {
-    hitKeys,
-    missKeys,
-    hitCount: NonNegativeCount.make(hitKeys.length),
-    missCount: NonNegativeCount.make(missKeys.length),
-  }
+  return { hitKeys, missKeys }
 }
 
 export const decideMutationCacheLookup = Effect.fn("MutationCache.decide")(function* (
@@ -66,284 +142,108 @@ export const decideMutationCacheLookup = Effect.fn("MutationCache.decide")(funct
   return yield* Effect.succeed(partitionMutationCacheLookup(input))
 })
 
-export const MutationCache = {
-  decide: decideMutationCacheLookup,
-} as const
+export const MutationCache = { decide: decideMutationCacheLookup } as const
 
-const unwrapResult = <A>(res: Result.Result<A, unknown>): Option.Option<A> =>
-  match(res)
-    .with({ _tag: "Success" }, ({ success }) => Option.some(success))
-    .with({ _tag: "Failure" }, () => Option.none())
-    .exhaustive()
-
-const unwrapOption = <A>(opt: Option.Option<A>): A | undefined =>
-  match(opt)
-    .with({ _tag: "Some" }, ({ value }) => value)
-    .with({ _tag: "None" }, () => undefined)
-    .exhaustive()
-
-const checkExists = (targetPath: string, hostIo: SyncHostIo): boolean | undefined =>
-  unwrapOption(unwrapResult(Result.try(() => hostIo.existsSync(targetPath))))
-
-const isFileSafe = (targetPath: string, hostIo: SyncHostIo): boolean =>
-  unwrapOption(unwrapResult(Result.try(() => hostIo.isFileSync(targetPath)))) ?? false
-
-const isNonSymlink = (targetPath: string, hostIo: SyncHostIo): boolean =>
-  match(unwrapResult(Result.try(() => hostIo.isSymbolicLinkSync(targetPath))))
-    .with({ _tag: "Some" }, ({ value }) => !value)
-    .with({ _tag: "None" }, () => false)
-    .exhaustive()
-
-const realpathOrUndefined = (targetPath: string, hostIo: SyncHostIo): string | undefined =>
-  unwrapOption(unwrapResult(Result.try(() => hostIo.realpathSync(targetPath))))
-
-const readSafeText = (filePath: string, hostIo: SyncHostIo): Option.Option<string> =>
-  isNonSymlink(filePath, hostIo)
-    ? unwrapResult(Result.try(() => hostIo.readTextSync(filePath)))
-    : Option.none()
-
-const readdirSafe = (
-  dirPath: string,
-  hostIo: SyncHostIo,
-): Option.Option<ReadonlyArray<SyncHostDirEntry>> =>
-  isNonSymlink(dirPath, hostIo)
-    ? unwrapResult(Result.try(() => hostIo.readdirSync(dirPath)))
-    : Option.none()
-
-const collectDirFiles = (
-  baseDir: string,
-  relPrefix: string,
-  excludedDirs: ReadonlySet<string>,
-  includeFile: (name: string) => boolean,
-  hostIo: SyncHostIo,
-  outRelPaths: Array<string>,
-): boolean => {
-  const entries = match(readdirSafe(baseDir, hostIo))
-    .with({ _tag: "Some" }, ({ value }) => value)
-    .with({ _tag: "None" }, () => undefined)
-    .exhaustive()
-  if (entries === undefined) return false
-  const sorted = [...entries].sort((a, b) => compareCodeUnits(a.name, b.name))
-  for (const entry of sorted) {
-    const childFull = join(baseDir, entry.name)
-    const childRel = `${relPrefix}/${entry.name}`
-    if (!isNonSymlink(childFull, hostIo)) return false
-    const ok = match(entry)
-      .with({ isDirectory: true }, () =>
-        excludedDirs.has(entry.name)
-          ? true
-          : collectDirFiles(childFull, childRel, excludedDirs, includeFile, hostIo, outRelPaths),
-      )
-      .with({ isDirectory: false, isFile: true }, () => {
-        if (includeFile(entry.name)) outRelPaths.push(childRel)
-        return true
-      })
-      .with({ isDirectory: false, isFile: false }, () => false)
-      .exhaustive()
-    if (!ok) return false
-  }
-  return true
-}
-
-const isTestFile = (name: string): boolean =>
-  name.endsWith(".test.ts") ||
-  name.endsWith(".spec.ts") ||
-  name.endsWith(".test.tsx") ||
-  name.endsWith(".spec.tsx")
-
-const hashRelFiles = (
+export const hashReachingTestFiles = (
   repoRoot: string,
-  relPaths: ReadonlyArray<string>,
+  reachingTestFiles: ReadonlyArray<string>,
   hostIo: SyncHostIo,
-): Option.Option<ContentSha256> => {
-  const sorted = [...relPaths].sort(compareCodeUnits)
-  const pairs: Array<readonly [string, ContentSha256]> = []
-  for (const relPath of sorted) {
-    const content = match(readSafeText(join(repoRoot, relPath), hostIo))
-      .with({ _tag: "Some" }, ({ value }) => value)
-      .with({ _tag: "None" }, () => undefined)
-      .exhaustive()
-    if (content === undefined) return Option.none()
-    pairs.push([relPath, computeContentSha256(content)])
-  }
-  return Option.some(computeContentSha256(JSON.stringify(pairs)))
-}
-
-const SRC_EXCLUDED_DIRS = new Set(["test", "dist", "node_modules"])
-const TEST_EXCLUDED_DIRS = new Set(["dist", "node_modules"])
-const ROOT_CONTEXT_FILES = [
-  "package.json",
-  "pnpm-lock.yaml",
-  "tsconfig.base.json",
-  "vitest.config.ts",
-  "tools/parallel-vitest-batch.mjs",
-  "tools/node-ts-resolver.mjs",
-] as const
-const PKG_CONFIG_FILES = ["package.json", "tsconfig.json", "tsconfig.lib.json", "vitest.config.ts"]
-
-export const computeMutationContextDigests = (
-  repoRoot: string,
-  hostIo: SyncHostIo,
-): Option.Option<MutationContextDigests> => {
-  const workspaceRelFiles: Array<string> = []
-  const testSupportDigests = new Map<string, ContentSha256>()
-
-  for (const topFile of ROOT_CONTEXT_FILES) {
-    const exists = checkExists(join(repoRoot, topFile), hostIo)
-    if (exists === undefined) return Option.none()
-    if (exists) workspaceRelFiles.push(topFile)
-  }
-
-  const oxlintDir = join(repoRoot, "tools", "oxlint")
-  const hasOxlint = checkExists(oxlintDir, hostIo)
-  if (hasOxlint === undefined) return Option.none()
-  if (
-    hasOxlint &&
-    !collectDirFiles(
-      oxlintDir,
-      "tools/oxlint",
-      TEST_EXCLUDED_DIRS,
-      () => true,
-      hostIo,
-      workspaceRelFiles,
-    )
-  ) {
-    return Option.none()
-  }
-
-  const libsDir = join(repoRoot, "libs")
-  const libsExists = checkExists(libsDir, hostIo)
-  if (libsExists === undefined) return Option.none()
-
-  if (libsExists) {
-    const scopes = match(readdirSafe(libsDir, hostIo))
-      .with({ _tag: "Some" }, ({ value }) => value)
-      .with({ _tag: "None" }, () => undefined)
-      .exhaustive()
-    if (scopes === undefined) return Option.none()
-    for (const scope of [...scopes].sort((a, b) => compareCodeUnits(a.name, b.name))) {
-      if (!scope.isDirectory || scope.name === "node_modules") continue
-      const scopeDir = join(libsDir, scope.name)
-      const pkgs = match(readdirSafe(scopeDir, hostIo))
-        .with({ _tag: "Some" }, ({ value }) => value)
-        .with({ _tag: "None" }, () => undefined)
-        .exhaustive()
-      if (pkgs === undefined) return Option.none()
-      for (const pkg of [...pkgs].sort((a, b) => compareCodeUnits(a.name, b.name))) {
-        if (!pkg.isDirectory || pkg.name === "node_modules") continue
-        const pkgKey = `${scope.name}/${pkg.name}`
-        const pkgDir = join(scopeDir, pkg.name)
-
-        for (const cfgFile of PKG_CONFIG_FILES) {
-          const hasCfg = checkExists(join(pkgDir, cfgFile), hostIo)
-          if (hasCfg === undefined) return Option.none()
-          if (hasCfg) workspaceRelFiles.push(`libs/${pkgKey}/${cfgFile}`)
-        }
-
-        const srcDir = join(pkgDir, "src")
-        const hasSrc = checkExists(srcDir, hostIo)
-        if (hasSrc === undefined) return Option.none()
-        if (
-          hasSrc &&
-          !collectDirFiles(
-            srcDir,
-            `libs/${pkgKey}/src`,
-            SRC_EXCLUDED_DIRS,
-            isWorkspaceTsSourceFileName,
-            hostIo,
-            workspaceRelFiles,
-          )
-        ) {
-          return Option.none()
-        }
-
-        const supportFiles: Array<string> = []
-        const hasVitestConfig = checkExists(join(pkgDir, "vitest.config.ts"), hostIo)
-        if (hasVitestConfig === undefined) return Option.none()
-        if (hasVitestConfig) supportFiles.push(`libs/${pkgKey}/vitest.config.ts`)
-
-        const testDir = join(pkgDir, "test")
-        const hasTestDir = checkExists(testDir, hostIo)
-        if (hasTestDir === undefined) return Option.none()
-        if (
-          hasTestDir &&
-          !collectDirFiles(
-            testDir,
-            `libs/${pkgKey}/test`,
-            TEST_EXCLUDED_DIRS,
-            (name) => !isTestFile(name),
-            hostIo,
-            supportFiles,
-          )
-        ) {
-          return Option.none()
-        }
-        for (const sf of supportFiles) {
-          if (sf !== `libs/${pkgKey}/vitest.config.ts`) workspaceRelFiles.push(sf)
-        }
-        if (hasVitestConfig || hasTestDir) {
-          const supportDigest = match(hashRelFiles(repoRoot, supportFiles, hostIo))
-            .with({ _tag: "Some" }, ({ value }) => value)
-            .with({ _tag: "None" }, () => undefined)
-            .exhaustive()
-          if (supportDigest === undefined) return Option.none()
-          testSupportDigests.set(pkgKey, supportDigest)
-        }
-      }
-    }
-  }
-
-  const wsDigest = match(hashRelFiles(repoRoot, workspaceRelFiles, hostIo))
-    .with({ _tag: "Some" }, ({ value }) => value)
-    .with({ _tag: "None" }, () => undefined)
-    .exhaustive()
-  if (wsDigest === undefined) return Option.none()
-  return Option.some({ workspaceSrcDigest: wsDigest, testSupportDigests })
-}
-
-export const computeMutantCacheKey = (
-  repoRoot: string,
-  pkgKey: string,
-  relFile: string,
-  originalContentSha256: ContentSha256,
-  compiledSchemaSha256: ContentSha256,
-  mutant: CodeMutant,
-  reachingTests: ReadonlyArray<string>,
-  digests: MutationContextDigests,
-  hostIo: SyncHostIo,
-): Option.Option<ContentSha256> => {
-  const sortedTests = [...reachingTests].sort(compareCodeUnits)
-  const hashedReachingTests: Array<readonly [string, ContentSha256]> = []
-  for (const testPath of sortedTests) {
+): Option.Option<ReadonlyMap<AstSourceFilePath, ContentSha256>> => {
+  const hashed = new Map<AstSourceFilePath, ContentSha256>()
+  for (const testPath of [...reachingTestFiles].sort(compareCodeUnits)) {
     const fullPath = isAbsolute(testPath) ? testPath : join(repoRoot, testPath)
-    const relTestPath = relative(repoRoot, fullPath).replace(/\\/g, "/")
-    const content = match(readSafeText(fullPath, hostIo))
-      .with({ _tag: "Some" }, ({ value }) => value)
-      .with({ _tag: "None" }, () => undefined)
-      .exhaustive()
+    const content = unwrapOption(readSafeText(fullPath, hostIo))
     if (content === undefined) return Option.none()
-    hashedReachingTests.push([relTestPath, computeContentSha256(content)])
+    hashed.set(
+      AstSourceFilePath.make(relative(repoRoot, fullPath).replace(/\\/g, "/")),
+      computeContentSha256(content),
+    )
   }
-  const payload = JSON.stringify({
-    v: MUTATION_CACHE_SCHEMA_VERSION,
-    relFile,
-    originalContentSha256,
-    compiledSchemaSha256,
-    id: mutant.id,
-    line: mutant.line,
-    category: mutant.category,
-    original: mutant.original,
-    replacement: mutant.replacement,
-    ws: digests.workspaceSrcDigest,
-    ts: digests.testSupportDigests.get(pkgKey) ?? "",
-    tests: hashedReachingTests,
-  })
-  return Option.some(computeContentSha256(payload))
+  return Option.some(hashed)
 }
 
+export const computeMutantCacheKey = (input: ComputeMutantCacheKeyInput): ContentSha256 =>
+  computeContentSha256(
+    JSON.stringify({
+      v: MUTATION_CACHE_SCHEMA_VERSION,
+      runtimeVersion: input.digests.runtimeVersion,
+      relFile: input.relFile,
+      originalContentSha256: input.originalContentSha256,
+      compiledSchemaSha256: input.compiledSchemaSha256,
+      id: input.mutant.id,
+      line: input.mutant.line,
+      category: input.mutant.category,
+      original: input.mutant.original,
+      replacement: input.mutant.replacement,
+      ws: input.digests.workspaceSrcDigest,
+      ts: input.digests.testSupportDigests.get(input.pkgKey) ?? "",
+      tests: [...input.reachingTestHashes.entries()].sort((a, b) => compareCodeUnits(a[0], b[0])),
+    }),
+  )
+
+const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e))
+const tryOrErr = <A>(
+  fn: () => A,
+  prefix: string,
+): { readonly ok: true; readonly v: A } | { readonly ok: false; readonly err: string } =>
+  match(Result.try(fn))
+    .with({ _tag: "Success" }, ({ success }) => ({ ok: true as const, v: success }))
+    .with({ _tag: "Failure" }, ({ failure }) => ({
+      ok: false as const,
+      err: `${prefix}: ${errMsg(failure)}`,
+    }))
+    .exhaustive()
+const isFileSafe = (p: string, hostIo: SyncHostIo): boolean =>
+  unwrapOption(unwrapResult(Result.try(() => hostIo.isFileSync(p)))) ?? false
+const realpathOrUndefined = (p: string, hostIo: SyncHostIo): string | undefined =>
+  unwrapOption(unwrapResult(Result.try(() => hostIo.realpathSync(p))))
 const isPathContained = (parentReal: string, childReal: string): boolean => {
   const rel = relative(parentReal, childReal)
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
+}
+
+const resolveCachePaths = (repoRoot: string) =>
+  match(Result.try(() => resolveHarnessStateDir(repoRoot)))
+    .with({ _tag: "Success" }, ({ success: stateDir }) => {
+      const cacheDir = join(stateDir, "cache")
+      return {
+        _tag: "Ok" as const,
+        stateDir,
+        cacheDir,
+        cacheFile: join(cacheDir, MUTATION_CACHE_FILENAME),
+      }
+    })
+    .with({ _tag: "Failure" }, ({ failure }) => ({
+      _tag: "Unsafe" as const,
+      reason: `invalid harness state dir: ${errMsg(failure)}`,
+    }))
+    .exhaustive()
+
+type AncestorPathState = "safe-exists" | "absent" | "unsafe"
+
+const inspectAncestorPath = (targetPath: string, hostIo: SyncHostIo): AncestorPathState => {
+  const symRes = Result.try(() => hostIo.isSymbolicLinkSync(targetPath))
+  const symState = match(symRes)
+    .with({ _tag: "Success" }, ({ success: isSymlink }) =>
+      isSymlink ? ("unsafe" as const) : ("not-symlink" as const),
+    )
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      const code =
+        typeof failure === "object" &&
+        failure !== null &&
+        "code" in failure &&
+        typeof failure.code === "string"
+          ? failure.code
+          : undefined
+      return code === "ENOENT" || code === undefined
+        ? ("not-symlink" as const)
+        : ("unsafe" as const)
+    })
+    .exhaustive()
+  if (symState === "unsafe") return "unsafe"
+  const exists = checkExists(targetPath, hostIo)
+  if (exists === undefined) return "unsafe"
+  return exists ? "safe-exists" : "absent"
 }
 
 const checkCacheAncestors = (
@@ -354,79 +254,201 @@ const checkCacheAncestors = (
 ): string | undefined => {
   if (!isNonSymlink(repoRoot, hostIo)) return undefined
   const resolvedRoot = resolve(repoRoot)
-  const stateInRepo = isPathContained(resolvedRoot, resolve(stateDir))
+  const resolvedState = resolve(stateDir)
+  const stateInRepo = isPathContained(resolvedRoot, resolvedState)
   let cur = resolve(cacheDir)
-  let deepestExisting: string | undefined = undefined
+  let deepest: string | undefined = undefined
+  let passedStateDir = false
   while (true) {
-    const exists = checkExists(cur, hostIo)
-    if (exists === undefined) return undefined
-    if (exists) {
-      if (!isNonSymlink(cur, hostIo)) return undefined
-      if (deepestExisting === undefined) deepestExisting = cur
+    const ancestorState = inspectAncestorPath(cur, hostIo)
+    if (ancestorState === "unsafe") return undefined
+    if (ancestorState === "safe-exists") {
+      if (deepest === undefined) deepest = cur
+      if (!stateInRepo && passedStateDir) break
     }
+    if (cur === resolvedState) passedStateDir = true
     if (
       cur === resolvedRoot ||
-      (!stateInRepo && cur === resolve(stateDir)) ||
+      (!stateInRepo && passedStateDir && deepest !== undefined) ||
       cur === dirname(cur)
     ) {
       break
     }
     cur = dirname(cur)
   }
-  if (deepestExisting === undefined) return undefined
+  if (deepest === undefined) return undefined
   if (stateInRepo) {
     const rootReal = realpathOrUndefined(repoRoot, hostIo)
-    const deepReal = realpathOrUndefined(deepestExisting, hostIo)
-    if (rootReal === undefined || deepReal === undefined || !isPathContained(rootReal, deepReal)) {
+    const deepReal = realpathOrUndefined(deepest, hostIo)
+    if (rootReal === undefined || deepReal === undefined || !isPathContained(rootReal, deepReal))
       return undefined
-    }
   }
-  return deepestExisting
+  return deepest
 }
 
-export const loadMutationCache = (repoRoot: string, hostIo: SyncHostIo): MutationCacheStore => {
-  const stateDir = resolveHarnessStateDir(repoRoot)
-  const cacheDir = join(stateDir, "cache")
-  const cacheFile = join(cacheDir, MUTATION_CACHE_FILENAME)
-  if (checkExists(cacheFile, hostIo) !== true) return emptyMutationCacheStore()
-  if (checkCacheAncestors(repoRoot, stateDir, cacheDir, hostIo) === undefined) {
-    return emptyMutationCacheStore()
-  }
+const TopLevelCacheEnvelopeSchema = Schema.fromJsonString(
+  Schema.Struct({ version: Schema.Unknown, entries: Schema.Record(Schema.String, Schema.Unknown) }),
+)
+
+const tryQuarantineCorruptCache = (
+  cacheDir: string,
+  cacheFile: string,
+  reason: string,
+  hostIo: SyncHostIo,
+): LoadMutationCacheResult => {
+  const canQuarantine =
+    isNonSymlink(cacheDir, hostIo) &&
+    isNonSymlink(cacheFile, hostIo) &&
+    isFileSafe(cacheFile, hostIo)
+  const corruptPath = `${cacheFile}.corrupt`
+  const quarantinedPath = canQuarantine
+    ? unwrapOption(
+        unwrapResult(
+          Result.try(() => {
+            hostIo.renameSync(cacheFile, corruptPath)
+            return corruptPath
+          }),
+        ),
+      )
+    : undefined
+  return { _tag: "Corrupt", reason, ...(quarantinedPath !== undefined ? { quarantinedPath } : {}) }
+}
+
+const validateCachePathSafety = (
+  repoRoot: string,
+  stateDir: string,
+  cacheDir: string,
+  cacheFile: string,
+  checkFile: boolean,
+  hostIo: SyncHostIo,
+): string | undefined => {
+  if (checkCacheAncestors(repoRoot, stateDir, cacheDir, hostIo) === undefined)
+    return `unsafe cache ancestor path for '${cacheDir}'`
   if (
     !isNonSymlink(stateDir, hostIo) ||
     !isNonSymlink(cacheDir, hostIo) ||
-    !isNonSymlink(cacheFile, hostIo) ||
-    !isFileSafe(cacheFile, hostIo)
+    (checkFile && (!isNonSymlink(cacheFile, hostIo) || !isFileSafe(cacheFile, hostIo)))
   ) {
-    return emptyMutationCacheStore()
+    return `symlink or non-file detected at '${cacheFile}'`
   }
   const stateReal = realpathOrUndefined(stateDir, hostIo)
-  const fileReal = realpathOrUndefined(cacheFile, hostIo)
-  if (stateReal === undefined || fileReal === undefined || !isPathContained(stateReal, fileReal)) {
-    return emptyMutationCacheStore()
+  const targetReal = realpathOrUndefined(checkFile ? cacheFile : cacheDir, hostIo)
+  if (
+    stateReal === undefined ||
+    targetReal === undefined ||
+    !isPathContained(stateReal, targetReal)
+  ) {
+    return `realpath escape detected for '${cacheFile}'`
   }
-  const raw = match(readSafeText(cacheFile, hostIo))
-    .with({ _tag: "Some" }, ({ value }) => value)
-    .with({ _tag: "None" }, () => undefined)
-    .exhaustive()
-  if (raw === undefined) return emptyMutationCacheStore()
-  return match(Schema.decodeOption(Schema.fromJsonString(MutationCacheStore))(raw))
-    .with({ _tag: "Some" }, ({ value }) => value)
-    .with({ _tag: "None" }, () => emptyMutationCacheStore())
+  return undefined
+}
+
+export const loadMutationCacheWithStatus = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  hmacSecret?: MutationCacheHmacSecret,
+): LoadMutationCacheResult => {
+  if (hmacSecret === undefined) {
+    return { _tag: "Unsafe", reason: "missing HMAC secret" }
+  }
+  return match(resolveCachePaths(repoRoot))
+    .with({ _tag: "Unsafe" }, (u) => u)
+    .with({ _tag: "Ok" }, ({ stateDir, cacheDir, cacheFile }) => {
+      const exists = checkExists(cacheFile, hostIo)
+      if (exists === undefined)
+        return { _tag: "Unsafe" as const, reason: `failed to stat cache file '${cacheFile}'` }
+      if (!exists) return { _tag: "Missing" as const }
+      const unsafeReason = validateCachePathSafety(
+        repoRoot,
+        stateDir,
+        cacheDir,
+        cacheFile,
+        true,
+        hostIo,
+      )
+      if (unsafeReason !== undefined) return { _tag: "Unsafe" as const, reason: unsafeReason }
+      const raw = unwrapOption(readSafeText(cacheFile, hostIo))
+      if (raw === undefined)
+        return { _tag: "Unsafe" as const, reason: `unreadable cache file '${cacheFile}'` }
+      return match(Schema.decodeExit(TopLevelCacheEnvelopeSchema)(raw))
+        .with({ _tag: "Failure" }, ({ cause }) =>
+          tryQuarantineCorruptCache(
+            cacheDir,
+            cacheFile,
+            `invalid cache JSON structure: ${Cause.pretty(cause).slice(0, 160)}`,
+            hostIo,
+          ),
+        )
+        .with({ _tag: "Success" }, ({ value: envelope }) => {
+          if (envelope.version !== MUTATION_CACHE_SCHEMA_VERSION) {
+            return tryQuarantineCorruptCache(
+              cacheDir,
+              cacheFile,
+              `unexpected cache version '${String(envelope.version)}'`,
+              hostIo,
+            )
+          }
+          const validEntries: Record<ContentSha256, MutationCacheEntry> = {}
+          let droppedEntryCount = 0
+          for (const [k, rawEntry] of Object.entries(envelope.entries)) {
+            const validEntry = match(Schema.decodeUnknownExit(MutationCacheEntry)(rawEntry))
+              .with({ _tag: "Failure" }, () => undefined)
+              .with({ _tag: "Success" }, ({ value: entry }) =>
+                entry.key === k && verifyMutationEntryMac(hmacSecret, entry) ? entry : undefined,
+              )
+              .exhaustive()
+            if (validEntry === undefined) droppedEntryCount += 1
+            else validEntries[validEntry.key] = validEntry
+          }
+          return {
+            _tag: "Loaded" as const,
+            store: { version: MUTATION_CACHE_SCHEMA_VERSION, entries: validEntries },
+            droppedEntryCount,
+          }
+        })
+        .exhaustive()
+    })
     .exhaustive()
 }
+
+export const loadMutationCache = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  hmacSecret?: MutationCacheHmacSecret,
+): MutationCacheStore =>
+  match(loadMutationCacheWithStatus(repoRoot, hostIo, hmacSecret))
+    .with({ _tag: "Loaded" }, ({ store, droppedEntryCount }) => {
+      if (droppedEntryCount > 0)
+        process.stderr.write(
+          `[mutation-cache] Warning: Dropped ${droppedEntryCount} invalid/tampered cache entry(ies).\n`,
+        )
+      return store
+    })
+    .with({ _tag: "Missing" }, () => emptyMutationCacheStore())
+    .with({ _tag: "Corrupt" }, ({ reason, quarantinedPath }) => {
+      process.stderr.write(
+        `[mutation-cache] Warning: Corrupt cache (${reason})${quarantinedPath !== undefined ? ` (quarantined to ${quarantinedPath})` : ""}.\n`,
+      )
+      return emptyMutationCacheStore()
+    })
+    .with({ _tag: "Unsafe" }, ({ reason }) => {
+      process.stderr.write(`[mutation-cache] Warning: Unsafe cache path (${reason}).\n`)
+      return emptyMutationCacheStore()
+    })
+    .exhaustive()
 
 const pruneCacheStore = (store: MutationCacheStore): MutationCacheStore => {
   const entriesList = Object.entries(store.entries)
   if (entriesList.length <= MAX_MUTATION_CACHE_ENTRIES) return store
   entriesList.sort((a, b) => {
-    const byTime = compareCodeUnits(b[1].recordedAt, a[1].recordedAt)
+    const byTime = compareCodeUnits(
+      b[1].lastAccessedAt ?? b[1].recordedAt,
+      a[1].lastAccessedAt ?? a[1].recordedAt,
+    )
     return byTime !== 0 ? byTime : compareCodeUnits(a[0], b[0])
   })
   const prunedEntries: Record<ContentSha256, MutationCacheEntry> = {}
-  for (const [, v] of entriesList.slice(0, MAX_MUTATION_CACHE_ENTRIES)) {
-    prunedEntries[v.key] = v
-  }
+  for (const [, v] of entriesList.slice(0, MAX_MUTATION_CACHE_ENTRIES)) prunedEntries[v.key] = v
   return { version: MUTATION_CACHE_SCHEMA_VERSION, entries: prunedEntries }
 }
 
@@ -434,47 +456,63 @@ export const saveMutationCacheAtomic = (
   repoRoot: string,
   store: MutationCacheStore,
   hostIo: SyncHostIo,
-): void => {
-  const res = Result.try(() => {
-    const stateDir = resolveHarnessStateDir(repoRoot)
-    const cacheDir = join(stateDir, "cache")
-    const cacheFile = join(cacheDir, MUTATION_CACHE_FILENAME)
-    if (checkCacheAncestors(repoRoot, stateDir, cacheDir, hostIo) === undefined) return
-    hostIo.mkdirRecursiveSync(cacheDir)
-    if (!isNonSymlink(stateDir, hostIo) || !isNonSymlink(cacheDir, hostIo)) return
-    const cacheFileExists = checkExists(cacheFile, hostIo)
-    if (cacheFileExists === undefined) return
-    if (cacheFileExists && (!isNonSymlink(cacheFile, hostIo) || !isFileSafe(cacheFile, hostIo))) {
-      return
-    }
-    const stateReal = hostIo.realpathSync(stateDir)
-    const cacheDirReal = hostIo.realpathSync(cacheDir)
-    if (!isPathContained(stateReal, cacheDirReal)) return
-    if (isPathContained(resolve(repoRoot), resolve(stateDir))) {
-      if (!isPathContained(hostIo.realpathSync(repoRoot), cacheDirReal)) return
-    }
-
-    const pruned = pruneCacheStore(store)
-    const encoded = Schema.encodeSync(Schema.fromJsonString(MutationCacheStore))(pruned)
-    const tmpPath = join(
-      cacheDir,
-      `.mutation-cache-v1.${process.pid}.${randomBytes(6).toString("hex")}.tmp`,
-    )
-    const writeRes = Result.try(() => {
-      hostIo.writeTextSync(tmpPath, encoded)
-      hostIo.renameSync(tmpPath, cacheFile)
-    })
-    match(writeRes)
-      .with({ _tag: "Success" }, () => {})
-      .with({ _tag: "Failure" }, () => {
+  hmacSecret?: MutationCacheHmacSecret,
+): SaveMutationCacheResult => {
+  if (hmacSecret === undefined) return { _tag: "Skipped", reason: "missing HMAC secret" }
+  return match(resolveCachePaths(repoRoot))
+    .with({ _tag: "Unsafe" }, ({ reason }) => ({ _tag: "Skipped" as const, reason }))
+    .with({ _tag: "Ok" }, ({ stateDir, cacheDir, cacheFile }) => {
+      if (checkCacheAncestors(repoRoot, stateDir, cacheDir, hostIo) === undefined) {
+        return { _tag: "Skipped" as const, reason: `unsafe cache ancestor path for '${cacheDir}'` }
+      }
+      const mkdirRes = tryOrErr(
+        () => hostIo.mkdirRecursiveSync(cacheDir),
+        `mkdir failed for '${cacheDir}'`,
+      )
+      if (!mkdirRes.ok) return { _tag: "Failed" as const, reason: mkdirRes.err }
+      const cacheFileExists = checkExists(cacheFile, hostIo)
+      if (cacheFileExists === undefined)
+        return { _tag: "Skipped" as const, reason: `failed to stat '${cacheFile}'` }
+      const unsafeReason = validateCachePathSafety(
+        repoRoot,
+        stateDir,
+        cacheDir,
+        cacheFile,
+        cacheFileExists,
+        hostIo,
+      )
+      if (unsafeReason !== undefined) return { _tag: "Skipped" as const, reason: unsafeReason }
+      if (isPathContained(resolve(repoRoot), resolve(stateDir))) {
+        const repoReal = realpathOrUndefined(repoRoot, hostIo)
+        const dirReal = realpathOrUndefined(cacheDir, hostIo)
+        if (
+          repoReal === undefined ||
+          dirReal === undefined ||
+          !isPathContained(repoReal, dirReal)
+        ) {
+          return { _tag: "Skipped" as const, reason: `cache dir escapes repoRoot '${repoRoot}'` }
+        }
+      }
+      const encRes = tryOrErr(
+        () => Schema.encodeSync(Schema.fromJsonString(MutationCacheStore))(pruneCacheStore(store)),
+        "encode failed",
+      )
+      if (!encRes.ok) return { _tag: "Failed" as const, reason: encRes.err }
+      const tmpPath = join(
+        cacheDir,
+        `.mutation-cache-v2.${process.pid}.${randomBytes(6).toString("hex")}.tmp`,
+      )
+      const writeRes = tryOrErr(() => {
+        hostIo.writeTextSync(tmpPath, encRes.v)
+        hostIo.renameSync(tmpPath, cacheFile)
+      }, "atomic write failed")
+      if (!writeRes.ok) {
         Result.try(() => {
           if (hostIo.existsSync(tmpPath)) hostIo.unlinkSync(tmpPath)
         })
-      })
-      .exhaustive()
-  })
-  match(res)
-    .with({ _tag: "Success" }, () => {})
-    .with({ _tag: "Failure" }, () => {})
+        return { _tag: "Failed" as const, reason: writeRes.err }
+      }
+      return { _tag: "Saved" as const }
+    })
     .exhaustive()
 }
