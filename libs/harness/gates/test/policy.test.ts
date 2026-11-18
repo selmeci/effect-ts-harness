@@ -4,11 +4,15 @@ import { decideLoopThrashing, type FrictionEvent } from "../src/friction-log.js"
 import {
   CD_COMMAND_BANNED_REASON,
   classifyCommand,
+  classifyFileWrite,
   CLEF_SYSTEMONE_ONLY_BANNED_REASON,
   INTERACTIVE_NX_BANNED_REASON,
+  SKIP_NX_CACHE_BANNED_REASON,
   isCdCommand,
   isInteractiveNxCommand,
   isInvalidClefEndpointCommand,
+  isSkipNxCacheCommand,
+  toCommandView,
 } from "../src/policy.js"
 
 describe("guard policy", () => {
@@ -472,5 +476,60 @@ describe("guard policy", () => {
     expect(classifyCommand("omnigraph status")).toBe("allow")
     expect(classifyCommand("omnigraph cleanup --keep 5")).toBe("allow")
     expect(classifyCommand("omnigraph branches delete feat/old")).toBe("allow")
+  })
+
+  it("denies --skip-nx-cache on nx commands unless HARNESS_ALLOW_SKIP_NX_CACHE=1 or --skip-nx-cache=false, while allowing grep/rg", () => {
+    expect(isSkipNxCacheCommand("nx test @harness/gates --skip-nx-cache")).toBe(true)
+    expect(classifyCommand("nx test @harness/gates --skip-nx-cache")).toBe("deny")
+    expect(classifyCommand("pnpm nx run gates:verify --skip-nx-cache")).toBe("deny")
+    expect(classifyCommand("CI=true npx nx affected --skip-nx-cache")).toBe("deny")
+    expect(classifyCommand("CI=true pnpm nx test --skip-nx-cache=true")).toBe("deny")
+    expect(classifyCommand("nx test --skip-nx-cache | tail -20")).toBe("deny")
+    expect(classifyCommand("echo ok && nx test --skip-nx-cache")).toBe("deny")
+    expect(classifyCommand("./node_modules/.bin/nx test --skip-nx-cache")).toBe("deny")
+
+    expect(isSkipNxCacheCommand("nx test @harness/gates --skip-nx-cache=false")).toBe(false)
+    expect(classifyCommand("nx test @harness/gates --skip-nx-cache=false")).toBe("allow")
+
+    expect(
+      isSkipNxCacheCommand(
+        "HARNESS_ALLOW_SKIP_NX_CACHE=1 pnpm nx run @harness/gates:test --skip-nx-cache",
+      ),
+    ).toBe(false)
+    expect(
+      classifyCommand(
+        "HARNESS_ALLOW_SKIP_NX_CACHE=1 pnpm nx run @harness/gates:test --skip-nx-cache",
+      ),
+    ).toBe("allow")
+
+    expect(isSkipNxCacheCommand("grep skip-nx-cache libs/")).toBe(false)
+    expect(classifyCommand("grep skip-nx-cache libs/")).toBe("allow")
+    expect(isSkipNxCacheCommand("rg --skip-nx-cache libs/")).toBe(false)
+    expect(classifyCommand("rg --skip-nx-cache libs/")).toBe("allow")
+    expect(SKIP_NX_CACHE_BANNED_REASON).toContain("HARNESS_ALLOW_SKIP_NX_CACHE=1")
+
+    // Unquoted operator splitting, /usr/bin/env -i, wrapper value flags, verify scripts, telemetry env isolation, and cache file write guard
+    expect(classifyCommand('"foo"&&nx test --skip-nx-cache')).toBe("deny")
+    expect(classifyCommand("true;pnpm nx test --skip-nx-cache")).toBe("deny")
+    expect(classifyCommand("/usr/bin/env -i pnpm nx test --skip-nx-cache")).toBe("deny")
+    expect(classifyCommand("pnpm --loglevel warn nx run @harness/gates:test --skip-nx-cache")).toBe(
+      "deny",
+    )
+    expect(classifyCommand("pnpm verify -- --skip-nx-cache")).toBe("deny")
+    expect(
+      classifyCommand("HARNESS_DISABLE_LIVE_TELEMETRY=1 pnpm nx run @harness/contract:test"),
+    ).toBe("escalate")
+    expect(classifyFileWrite(".harness/cache/mutation-cache-v1.json").verdict).toBe("deny")
+    expect(classifyFileWrite(".harness/session-preinvocation-cache.json").verdict).toBe("deny")
+
+    // Background '&', redirection '&>', 'env --', empty/env-only segments, and 'verify:all' boundary checks
+    expect(classifyCommand("echo ok&nx test --skip-nx-cache")).toBe("deny")
+    expect(toCommandView("echo foo&>bar").argv).toBe("echo foo&>bar")
+    expect(isSkipNxCacheCommand("env -i FOO=1 nx test --skip-nx-cache")).toBe(true)
+    expect(isSkipNxCacheCommand("env -- nx test --skip-nx-cache")).toBe(true)
+    expect(isSkipNxCacheCommand("")).toBe(false)
+    expect(isSkipNxCacheCommand("FOO=1")).toBe(false)
+    expect(isSkipNxCacheCommand("pnpm verify:all -- --skip-nx-cache")).toBe(true)
+    expect(isSkipNxCacheCommand("pnpm vitest run --skip-nx-cache")).toBe(false)
   })
 })

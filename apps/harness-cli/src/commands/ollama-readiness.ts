@@ -1,6 +1,6 @@
 import { Effect } from "effect"
 import { match } from "ts-pattern"
-import { nodeSyncHostIo } from "@harness/infra"
+import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
 
 export interface OllamaReadinessOptions {
   readonly baseUrl?: string | undefined
@@ -41,7 +41,10 @@ export function checkOllamaServerReadyDetailed(
                   }>
                 }
                 if (!Array.isArray(body.models)) {
-                  return { ready: false, reason: `Ollama ${targetUrl} response missing models array` }
+                  return {
+                    ready: false,
+                    reason: `Ollama ${targetUrl} response missing models array`,
+                  }
                 }
                 const hasClef = body.models.some(
                   (m) =>
@@ -54,7 +57,10 @@ export function checkOllamaServerReadyDetailed(
               }),
             )
             .otherwise((status) =>
-              Promise.resolve({ ready: false, reason: `Ollama ${targetUrl} returned HTTP ${status}` }),
+              Promise.resolve({
+                ready: false,
+                reason: `Ollama ${targetUrl} returned HTTP ${status}`,
+              }),
             ),
         )
         .catch((err: unknown): OllamaProbeResult => ({
@@ -107,9 +113,7 @@ export function ensureLocalOllamaReady(opts?: OllamaReadinessOptions): Effect.Ef
           match(spawnRes)
             .with({ _tag: "Spawned" }, () => undefined)
             .with({ _tag: "SpawnFailed" }, ({ spawnError }) => {
-              process.stderr.write(
-                `[harness:ollama] Failed to spawn ollama serve: ${spawnError}\n`,
-              )
+              process.stderr.write(`[harness:ollama] Failed to spawn ollama serve: ${spawnError}\n`)
             })
             .exhaustive()
         }

@@ -577,6 +577,23 @@ describe("CLI handleMutate, handleVerify (mutate-stamp), handleBench, and handle
       expect(
         evaluateVerifyMutateStampGate(dir, { repoRoot: dir, mutateStampPolicy: "enforce" }),
       ).toBeUndefined()
+
+      // 6. Warm second mutate run hits mutant cache (cachedKilledCount > 0), and --no-cache bypasses it
+      const warmRes = await Effect.runPromise(
+        handleMutate(["mutate", "--strict"], { repoRoot: dir }),
+      )
+      expect(warmRes.exitCode).toBe(0)
+      const warmReport = JSON.parse(warmRes.stdout) as { cachedKilledCount?: number }
+      expect(warmReport.cachedKilledCount).toBeGreaterThan(0)
+
+      rmSync(stampPath, { force: true })
+      const noCacheRes = await Effect.runPromise(
+        handleMutate(["mutate", "--strict", "--no-cache"], { repoRoot: dir }),
+      )
+      expect(noCacheRes.exitCode).toBe(0)
+      const noCacheReport = JSON.parse(noCacheRes.stdout) as { cachedKilledCount?: number }
+      expect(noCacheReport.cachedKilledCount ?? 0).toBe(0)
+      expect(existsSync(stampPath)).toBe(true)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

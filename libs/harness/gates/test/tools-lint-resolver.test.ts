@@ -109,7 +109,9 @@ describe("tools/oxlint/syntax-bans.js & tools/node-ts-resolver.mjs (S-4.1, S-6.1
     cliRule.ImportDeclaration({
       type: "ImportDeclaration",
       source: { value: "effect/Effect" },
-      specifiers: [{ type: "ImportSpecifier", imported: { name: "runSync" }, local: { name: "runSync" } }],
+      specifiers: [
+        { type: "ImportSpecifier", imported: { name: "runSync" }, local: { name: "runSync" } },
+      ],
     })
     expect(cliReports.filter((m) => m.includes("unscoped-effect-run"))).toHaveLength(3)
 
@@ -141,7 +143,7 @@ describe("tools/oxlint/syntax-bans.js & tools/node-ts-resolver.mjs (S-4.1, S-6.1
     expect(mcpBoundaryReports.filter((m) => m.includes("unscoped-effect-run"))).toHaveLength(1)
   })
 
-  it("S-6.1: node-ts-resolver resolves .js -> .ts workspace imports and logs diagnostics when HARNESS_DEBUG_RESOLVER=1", async () => {
+  it("S-6.1: node-ts-resolver fast-paths .js -> .ts, preserves real .js, resolves dynamic exports, honors NODE_COMPILE_CACHE, and logs genuine fallbacks", async () => {
     const resolverMod = (await import(resolverUrl)) as {
       readonly resolve: (
         specifier: string,
@@ -152,9 +154,7 @@ describe("tools/oxlint/syntax-bans.js & tools/node-ts-resolver.mjs (S-4.1, S-6.1
         ) => Promise<{ readonly url: string; readonly shortCircuit?: boolean }>,
       ) => Promise<{ readonly url: string }>
     }
-    const parentURL = pathToFileURL(
-      fileURLToPath(new URL("../src/index.ts", import.meta.url)),
-    ).href
+    const parentURL = pathToFileURL(fileURLToPath(new URL("../src/index.ts", import.meta.url))).href
     const stderrChunks: Array<string> = []
     const origWrite = process.stderr.write.bind(process.stderr)
     const prevDebug = process.env["HARNESS_DEBUG_RESOLVER"]
@@ -165,20 +165,69 @@ describe("tools/oxlint/syntax-bans.js & tools/node-ts-resolver.mjs (S-4.1, S-6.1
     }) as typeof process.stderr.write
 
     try {
+      // 1. Fast-path relative .js -> .ts calls nextResolve ONCE directly with .ts (no ERR_MODULE_NOT_FOUND throw)
+      const directCalls: Array<string> = []
       const resolved = await resolverMod.resolve(
-        "./policy.js",
+        "./policy.js?v=1#top",
         { parentURL, conditions: ["node", "import"] },
         async (specifier: string) => {
-          if (specifier.endsWith(".js")) {
-            const err = new Error(`Cannot find module ${specifier}`) as Error & { code?: string }
-            err.code = "ERR_MODULE_NOT_FOUND"
-            throw err
-          }
+          directCalls.push(specifier)
           return { url: specifier, shortCircuit: true }
         },
       )
-      expect(resolved.url).toContain("policy.ts")
-      expect(stderrChunks.join("")).toContain("[node-ts-resolver] primary fallback for './policy.js'")
+      expect(directCalls).toHaveLength(1)
+      expect(resolved.url).toContain("policy.ts?v=1#top")
+      expect(stderrChunks.join("")).toBe("")
+
+      // 2. Real .js files win over .ts (tools/oxlint/syntax-bans.js exists on disk)
+      const toolsParentUrl = pathToFileURL(
+        fileURLToPath(new URL("../../../../tools/node-ts-resolver.mjs", import.meta.url)),
+      ).href
+      const realJsCalls: Array<string> = []
+      await resolverMod.resolve(
+        "./oxlint/syntax-bans.js",
+        { parentURL: toolsParentUrl, conditions: ["node", "import"] },
+        async (specifier: string) => {
+          realJsCalls.push(specifier)
+          return { url: specifier, shortCircuit: true }
+        },
+      )
+      expect(realJsCalls).toEqual(["./oxlint/syntax-bans.js"])
+
+      // 3. Dynamic package.json "exports" subpath resolution
+      const exportCalls: Array<string> = []
+      const exportResolved = await resolverMod.resolve(
+        "@harness/service/host-io",
+        { parentURL, conditions: ["node", "import"] },
+        async (specifier: string) => {
+          exportCalls.push(specifier)
+          return { url: specifier, shortCircuit: true }
+        },
+      )
+      expect(exportCalls).toHaveLength(1)
+      expect(exportResolved.url).toContain("libs/harness/service/src/host-io.ts")
+
+      // 4. Genuine fallback debug logging when nextResolve rejects
+      await expect(
+        resolverMod.resolve(
+          "@nonexistent/missing-pkg",
+          { parentURL, conditions: ["node", "import"] },
+          async (specifier: string) => {
+            const err = new Error(`Cannot find module ${specifier}`) as Error & { code?: string }
+            err.code = "ERR_MODULE_NOT_FOUND"
+            throw err
+          },
+        ),
+      ).rejects.toThrow()
+      expect(stderrChunks.join("")).toContain(
+        "[node-ts-resolver] primary fallback for '@nonexistent/missing-pkg'",
+      )
+
+      // 5. NODE_COMPILE_CACHE env override is supported in resolver source
+      const resolverSource = await import("node:fs/promises").then((fs) =>
+        fs.readFile(fileURLToPath(resolverUrl), "utf8"),
+      )
+      expect(resolverSource).toContain("process.env.NODE_COMPILE_CACHE")
     } finally {
       process.stderr.write = origWrite
       if (prevDebug === undefined) {

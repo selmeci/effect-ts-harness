@@ -16,6 +16,7 @@ import {
 import {
   AstGateCache,
   BenchStageName,
+  buildSessionReport,
   buildStageLatencyMeasurement,
   compileWorkflowWaves,
   decideHarnessBench,
@@ -24,10 +25,13 @@ import {
   LatencySloViolationError,
   MutantCount,
   MutateStampPassed,
+  readFrictionEvents,
+  readTelemetryEvents,
   removeMutateStamp,
   runDomainMutationSuite,
   StampRelFilePath,
   writeMutateStamp,
+  writeSessionReportFiles,
 } from "@harness/gates"
 import {
   createTypeScriptProgramSession,
@@ -40,7 +44,20 @@ import {
   loadGraphSnapshotEffect,
   stepDatalogFileDelta,
 } from "@harness/graph"
-import { nodeSyncHostIo } from "@harness/infra"
+import { HarnessInfraLive, nodeSyncHostIo } from "@harness/infra"
+
+export { HarnessInfraLive }
+
+export const writeDoneSessionReport = (repoRoot: string): void => {
+  const finalEvents = readTelemetryEvents(repoRoot, nodeSyncHostIo)
+  const finalFriction = readFrictionEvents(repoRoot, nodeSyncHostIo)
+  const finalReport = buildSessionReport({
+    events: finalEvents,
+    frictionEvents: finalFriction,
+    stampValid: true,
+  })
+  writeSessionReportFiles(repoRoot, finalReport, nodeSyncHostIo)
+}
 import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
 import { makeDoneBlockResult } from "./hook-format.js"
 import {
@@ -70,6 +87,7 @@ export const handleMutate = (
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const isStrict = argv.includes("--strict")
     const isAll = argv.includes("--all")
+    const disableMutantCache = argv.includes("--no-cache")
 
     const cleanupStamp = (): string | undefined =>
       match(removeMutateStamp(repoRoot, nodeSyncHostIo))
@@ -147,6 +165,7 @@ export const handleMutate = (
       targetFiles,
       baseRef,
       explicitBaseRef: baseRef !== undefined,
+      disableMutantCache,
     })
 
     const cleanupErr = !report.passed ? cleanupStamp() : undefined

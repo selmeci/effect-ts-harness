@@ -12,12 +12,15 @@ export {
   OBFUSCATION_PATTERNS,
   SECRET_FILE_PATTERN,
   SHELL_OPERATORS,
+  SKIP_NX_CACHE_BANNED_REASON,
   classifyCommand,
   classifyFileWrite,
+  explainCommandDenyReason,
   isCdCommand,
   isCommandAllowed,
   isInteractiveNxCommand,
   isInvalidClefEndpointCommand,
+  isSkipNxCacheCommand,
   toCommandView,
   type CommandView,
   type FileWriteGuardResult,
@@ -482,3 +485,19 @@ export {
   assertDisjointWave,
   compileWorkflowWaves,
 } from "./plan-workflow-compiler.js"
+export {
+  MAX_MUTATION_CACHE_ENTRIES,
+  MutationCache,
+  type MutationContextDigests,
+  computeMutantCacheKey,
+  computeMutationContextDigests,
+  decideMutationCacheLookup,
+  emptyMutationCacheStore,
+  loadMutationCache,
+  saveMutationCacheAtomic,
+} from "./mutation/mutation-cache.js"
+export {
+  isWorkspaceTsSourceFileName,
+  scanWorkspaceTsFilesChecked,
+  type ScanWorkspaceTsFilesResult,
+} from "./workspace-ts-scan.js"

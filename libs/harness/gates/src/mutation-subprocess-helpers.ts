@@ -40,7 +40,11 @@ export type MutantSubprocessOutcome =
   | { readonly kind: "outcome"; readonly status: "killed" | "survived" }
 
 export type MutantBatchRunResult =
-  | { readonly _tag: "Ok"; readonly outcomes: ReadonlyArray<MutantOutcome> }
+  | {
+      readonly _tag: "Ok"
+      readonly outcomes: ReadonlyArray<MutantOutcome>
+      readonly nonCacheableIds: ReadonlySet<string>
+    }
   | { readonly _tag: "Abort"; readonly diagnostic: string }
 
 const isInfraMissingOutput = (combinedOutput: string): boolean =>
@@ -54,7 +58,7 @@ const stripInnerMutationDiagnostics = (stderr: string): string =>
 const stripVitestTestAssertionNoise = (text: string): string =>
   text
     .replace(/^\s*FAIL\s+[^\r\n]*>\s+[^\r\n]*$/gm, "")
-    .replace(/^\s*[×✗✕✓✔❯]\s+[^\r\n]*$/gm, "")
+    .replace(/^\s*[×✗✕✓✔❯↓○·]\s+[^\r\n]*$/gm, "")
     .replace(/^\s*(?:AssertionError|ExpectError|Expected|Received):[^\r\n]*$/gm, "")
     .replace(/^\s*[+-]\s[^\r\n]*$/gm, "")
 
@@ -153,6 +157,9 @@ export const runVitestTargetList = (
   const execArgs = useDirectVitest
     ? [vitestCliPath, "run", "--maxWorkers=2", ...reachingTestFiles]
     : ["vitest", "run", ...reachingTestFiles]
+  const mutantExecArgs = useDirectVitest
+    ? [vitestCliPath, "run", "--bail=1", "--maxWorkers=2", ...reachingTestFiles]
+    : ["vitest", "run", "--bail=1", ...reachingTestFiles]
 
   const baselineExecRes = Result.try(() =>
     hostIo.execFileSync(execCmd, execArgs, {
@@ -300,6 +307,7 @@ export const runVitestTargetList = (
   process.once("SIGTERM", onSigTerm)
 
   const passOutcomes: Array<MutantOutcome> = []
+  const nonCacheableIds = new Set<string>()
   const recordOutcome = (
     mutant: CodeMutant,
     execRes: Result.Result<SyncHostExecResult, unknown>,
@@ -307,6 +315,17 @@ export const runVitestTargetList = (
     match(classifyMutantSubprocessResult(mutant.id, execRes))
       .with({ kind: "abort" }, ({ diagnostic }) => diagnostic)
       .with({ kind: "outcome" }, ({ status }) => {
+        match(execRes)
+          .with({ _tag: "Success" }, ({ success }) =>
+            match(success)
+              .with({ _tag: "Signaled" }, { _tag: "TimedOut" }, () => {
+                nonCacheableIds.add(mutant.id)
+              })
+              .with({ _tag: "Exited" }, { _tag: "SpawnFailed" }, () => {})
+              .exhaustive(),
+          )
+          .with({ _tag: "Failure" }, () => {})
+          .exhaustive()
         passOutcomes.push({ mutant, status })
         return undefined
       })
@@ -407,7 +426,7 @@ export const runVitestTargetList = (
         for (const mutant of mutantsToRun) {
           if (signalState.current !== undefined) break
           const execRes = Result.try(() =>
-            hostIo.execFileSync(execCmd, execArgs, {
+            hostIo.execFileSync(execCmd, mutantExecArgs, {
               cwd: repoRoot,
               timeoutMs: 30_000,
               env: { ...baseSubprocessEnv, HARNESS_ACTIVE_MUTANT_ID: mutant.id },
@@ -459,5 +478,5 @@ export const runVitestTargetList = (
     return { _tag: "Abort", diagnostic: `${loopSummary.runnerAbortDiagnostic}${restoreSuffix}` }
   }
   if (restoreErr !== undefined) return { _tag: "Abort", diagnostic: restoreErr }
-  return { _tag: "Ok", outcomes: passOutcomes }
+  return { _tag: "Ok", outcomes: passOutcomes, nonCacheableIds }
 }

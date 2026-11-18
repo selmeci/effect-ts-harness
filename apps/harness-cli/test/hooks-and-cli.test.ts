@@ -11,9 +11,7 @@ import { match } from "ts-pattern"
 import { afterEach, describe, expect, it } from "vitest"
 import { makeMockDecisionModelLayer } from "@harness/decision"
 import { CLEF_SYSTEMONE_ONLY_BANNED_REASON, DstSeed, writeVerifyStamp } from "@harness/gates"
-import {
-  resolveOmnigraphClusterDir,
-} from "@harness/graph"
+import { resolveOmnigraphClusterDir } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 import {
   ensureLocalOmnigraphReady,
@@ -156,9 +154,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
   describe("F-1.3 & F-1.4: fail-closed stdin handling in guard and done", () => {
     it("handleGuard denies on StdinReadError timeout", async () => {
       const mockStdin = createMockStdin(false)
-      const res = await withMockedStdin(mockStdin, () =>
-        runCli(["guard"], { stdinTimeoutMs: 30 }),
-      )
+      const res = await withMockedStdin(mockStdin, () => runCli(["guard"], { stdinTimeoutMs: 30 }))
       expect(res.exitCode).toBe(2)
       expect(res.stderr).toContain("failed or timed out reading hook stdin payload")
     })
@@ -690,21 +686,15 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
           dstSeed: DstSeed.make(1),
           dstSeedsRun: 1,
         })
-        const slowDecisionLayer = Layer.effect(
-          DecisionModel.DecisionModel,
-          Effect.never,
-        )
+        const slowDecisionLayer = Layer.effect(DecisionModel.DecisionModel, Effect.never)
         const res = await Effect.runPromise(
-          handleDone(
-            ["done"],
-            {
-              repoRoot: tmpRepo,
-              skipBackgroundDaemons: true,
-              stdin: JSON.stringify({ stop_hook_active: false }),
-              planSteps: [{ stepId: "step-1", planStep: "step-1", stepDiff: "diff" }],
-              decisionLayer: slowDecisionLayer,
-            },
-          ),
+          handleDone(["done"], {
+            repoRoot: tmpRepo,
+            skipBackgroundDaemons: true,
+            stdin: JSON.stringify({ stop_hook_active: false }),
+            planSteps: [{ stepId: "step-1", planStep: "step-1", stepDiff: "diff" }],
+            decisionLayer: slowDecisionLayer,
+          }),
         )
         expect(res.exitCode).toBe(2)
         expect(JSON.parse(res.stdout)).toEqual({
@@ -755,10 +745,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         "}, 20);",
         "iv.unref();",
       ].join(" ")
-      const runSignalSub = (
-        args: ReadonlyArray<string>,
-        signal: "SIGINT" | "SIGTERM",
-      ) =>
+      const runSignalSub = (args: ReadonlyArray<string>, signal: "SIGINT" | "SIGTERM") =>
         new Promise<{ code: number | null; stdout: string; stderr: string }>((resolvePromise) => {
           const child = spawn(
             process.execPath,
@@ -844,45 +831,49 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       const addr = hangingServer.address()
       const port = typeof addr === "object" && addr !== null ? addr.port : 0
       try {
-        const agyStdinGuardTerm = await new Promise<{ code: number | null; stdout: string; stderr: string }>(
-          (resolvePromise) => {
-            const child = spawn(
-              process.execPath,
-              ["--import", "./tools/node-ts-resolver.mjs", "apps/harness-cli/src/index.ts", "guard"],
-              {
-                cwd: REPO_ROOT,
-                stdio: ["pipe", "pipe", "pipe"],
-                env: { ...process.env, HARNESS_OLLAMA_URL: `http://127.0.0.1:${port}` },
-              },
-            )
-            let stdout = ""
-            let stderr = ""
-            let signaled = false
-            const sendTerm = () => {
-              if (signaled) return
-              signaled = true
-              child.kill("SIGTERM")
-            }
-            const fallbackTimer = setTimeout(sendTerm, 3000)
-            killChildOnRequest = () => {
-              sendTerm()
-            }
-            child.stdout.on("data", (d) => {
-              stdout += String(d)
-            })
-            child.stderr.on("data", (d) => {
-              stderr += String(d)
-            })
-            child.on("close", (code) => {
-              clearTimeout(fallbackTimer)
-              resolvePromise({ code, stdout, stderr })
-            })
-            child.stdin.write(
-              JSON.stringify({ toolCall: { name: "Bash", args: { CommandLine: "curl https://example.com" } } }),
-            )
-            child.stdin.end()
-          },
-        )
+        const agyStdinGuardTerm = await new Promise<{
+          code: number | null
+          stdout: string
+          stderr: string
+        }>((resolvePromise) => {
+          const child = spawn(
+            process.execPath,
+            ["--import", "./tools/node-ts-resolver.mjs", "apps/harness-cli/src/index.ts", "guard"],
+            {
+              cwd: REPO_ROOT,
+              stdio: ["pipe", "pipe", "pipe"],
+              env: { ...process.env, HARNESS_OLLAMA_URL: `http://127.0.0.1:${port}` },
+            },
+          )
+          let stdout = ""
+          let stderr = ""
+          let signaled = false
+          const sendTerm = () => {
+            if (signaled) return
+            signaled = true
+            child.kill("SIGTERM")
+          }
+          const fallbackTimer = setTimeout(sendTerm, 3000)
+          killChildOnRequest = () => {
+            sendTerm()
+          }
+          child.stdout.on("data", (d) => {
+            stdout += String(d)
+          })
+          child.stderr.on("data", (d) => {
+            stderr += String(d)
+          })
+          child.on("close", (code) => {
+            clearTimeout(fallbackTimer)
+            resolvePromise({ code, stdout, stderr })
+          })
+          child.stdin.write(
+            JSON.stringify({
+              toolCall: { name: "Bash", args: { CommandLine: "curl https://example.com" } },
+            }),
+          )
+          child.stdin.end()
+        })
         expect(agyStdinGuardTerm.code).toBe(2)
         expect(JSON.parse(agyStdinGuardTerm.stdout.trim())).toEqual({
           decision: "deny",
@@ -903,56 +894,63 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
           dstSeed: DstSeed.make(1),
           dstSeedsRun: 1,
         })
-        const agyStdinDoneInt = await new Promise<{ code: number | null; stdout: string; stderr: string }>(
-          (resolvePromise) => {
-            const child = spawn(
-              process.execPath,
-              ["--import", join(REPO_ROOT, "tools/node-ts-resolver.mjs"), join(REPO_ROOT, "apps/harness-cli/src/index.ts"), "done"],
-              {
-                cwd: doneSigRepo,
-                stdio: ["pipe", "pipe", "pipe"],
-                env: {
-                  ...process.env,
-                  HARNESS_OLLAMA_URL: `http://127.0.0.1:${port}`,
-                  OMNIGRAPH_URL: `http://127.0.0.1:${port}`,
-                  HARNESS_WORKTREE_ID: "",
-                  CLAUDE_AGENT_ID: "",
-                  ANTIGRAVITY_SUBAGENT: "",
-                },
+        const agyStdinDoneInt = await new Promise<{
+          code: number | null
+          stdout: string
+          stderr: string
+        }>((resolvePromise) => {
+          const child = spawn(
+            process.execPath,
+            [
+              "--import",
+              join(REPO_ROOT, "tools/node-ts-resolver.mjs"),
+              join(REPO_ROOT, "apps/harness-cli/src/index.ts"),
+              "done",
+            ],
+            {
+              cwd: doneSigRepo,
+              stdio: ["pipe", "pipe", "pipe"],
+              env: {
+                ...process.env,
+                HARNESS_OLLAMA_URL: `http://127.0.0.1:${port}`,
+                OMNIGRAPH_URL: `http://127.0.0.1:${port}`,
+                HARNESS_WORKTREE_ID: "",
+                CLAUDE_AGENT_ID: "",
+                ANTIGRAVITY_SUBAGENT: "",
               },
-            )
-            let stdout = ""
-            let stderr = ""
-            let signaled = false
-            const sendInt = () => {
-              if (signaled) return
-              signaled = true
-              child.kill("SIGINT")
-            }
-            const fallbackTimer = setTimeout(sendInt, 4000)
-            killChildOnRequest = () => {
-              sendInt()
-            }
-            child.stdout.on("data", (d) => {
-              stdout += String(d)
-            })
-            child.stderr.on("data", (d) => {
-              stderr += String(d)
-            })
-            child.on("close", (code) => {
-              clearTimeout(fallbackTimer)
-              resolvePromise({ code, stdout, stderr })
-            })
-            child.stdin.write(
-              JSON.stringify({
-                fullyIdle: true,
-                conversationId: "conv-1",
-                workspacePaths: [doneSigRepo],
-              }),
-            )
-            child.stdin.end()
-          },
-        )
+            },
+          )
+          let stdout = ""
+          let stderr = ""
+          let signaled = false
+          const sendInt = () => {
+            if (signaled) return
+            signaled = true
+            child.kill("SIGINT")
+          }
+          const fallbackTimer = setTimeout(sendInt, 4000)
+          killChildOnRequest = () => {
+            sendInt()
+          }
+          child.stdout.on("data", (d) => {
+            stdout += String(d)
+          })
+          child.stderr.on("data", (d) => {
+            stderr += String(d)
+          })
+          child.on("close", (code) => {
+            clearTimeout(fallbackTimer)
+            resolvePromise({ code, stdout, stderr })
+          })
+          child.stdin.write(
+            JSON.stringify({
+              fullyIdle: true,
+              conversationId: "conv-1",
+              workspacePaths: [doneSigRepo],
+            }),
+          )
+          child.stdin.end()
+        })
         expect(agyStdinDoneInt.code).toBe(2)
         expect(JSON.parse(agyStdinDoneInt.stdout.trim())).toEqual({
           decision: "continue",
@@ -1143,4 +1141,292 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it("denies --skip-nx-cache in guard with explicit reason", async () => {
+    const res = await Effect.runPromise(
+      runDeclarativeCli(["guard", "--format=antigravity"], {
+        skipBackgroundDaemons: true,
+        stdin: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm nx run gates:verify --skip-nx-cache" },
+          },
+        }),
+      }),
+    )
+    expect(res.exitCode).toBe(0)
+    const parsed = JSON.parse(res.stdout) as { decision: string; reason?: string }
+    expect(parsed.decision).toBe("deny")
+    expect(parsed.reason).toContain("--skip-nx-cache")
+  })
+
+  it("caches session --format=antigravity PreInvocation and invalidates on friction-log.jsonl or tracked git file change", async () => {
+    const { execFileSync } = await import("node:child_process")
+    const dir = mkdtempSync(join(tmpdir(), "harness-session-fastpath-"))
+    try {
+      mkdirSync(join(dir, "libs", "demo", "src"), { recursive: true })
+      writeFileSync(
+        join(dir, "tsconfig.base.json"),
+        JSON.stringify({ compilerOptions: { plugins: [{ name: "@effect/language-service" }] } }),
+        "utf8",
+      )
+      mkdirSync(join(dir, "node_modules", "@effect", "tsgo"), { recursive: true })
+      writeFileSync(join(dir, "node_modules", "@effect", "tsgo", "package.json"), "{}", "utf8")
+      const trackedFile = join(dir, "libs", "demo", "src", "mod.ts")
+      writeFileSync(trackedFile, "export const v = 1\n", "utf8")
+      execFileSync("git", ["init"], { cwd: dir })
+      execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir })
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: dir })
+      execFileSync("git", ["add", "."], { cwd: dir })
+      execFileSync("git", ["commit", "-m", "init"], { cwd: dir })
+
+      const first = await Effect.runPromise(
+        runDeclarativeCli(["session", "--format=antigravity"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(first.exitCode).toBe(0)
+      const cachePath = join(dir, ".harness", "session-preinvocation-cache.json")
+      expect(existsSync(cachePath)).toBe(true)
+
+      const second = await Effect.runPromise(
+        runDeclarativeCli(["session", "--format=antigravity"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(second.exitCode).toBe(0)
+      expect(JSON.parse(second.stdout)).toEqual(JSON.parse(first.stdout))
+
+      const { tryReadPreInvocationSessionCache } =
+        await import("../src/commands/session-fastpath.js")
+      expect(
+        tryReadPreInvocationSessionCache(["session", "--format=antigravity"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        })._tag,
+      ).toBe("Some")
+
+      writeFileSync(
+        join(dir, ".harness", "friction-log.jsonl"),
+        `${JSON.stringify({ timestamp: new Date().toISOString(), kind: "route_miss", summary: "s", detail: "d" })}\n`,
+        "utf8",
+      )
+      expect(
+        tryReadPreInvocationSessionCache(["session", "--format=antigravity"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        })._tag,
+      ).toBe("None")
+
+      const third = await Effect.runPromise(
+        runDeclarativeCli(["session", "--format=antigravity"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(third.exitCode).toBe(0)
+      expect(
+        tryReadPreInvocationSessionCache(["session", "--format=antigravity"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        })._tag,
+      ).toBe("Some")
+
+      writeFileSync(trackedFile, "export const v = 2\n", "utf8")
+      expect(
+        tryReadPreInvocationSessionCache(["session", "--format=antigravity"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        })._tag,
+      ).toBe("None")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  it("enforces PreInvocation cache TTL expiry, future timestamp, HARNESS_REQUIRE_OLLAMA=1, corrupt JSON, symlink rejection, and verify-stamp invalidation", async () => {
+    const { execFileSync } = await import("node:child_process")
+    const { symlinkSync } = await import("node:fs")
+    const { PRE_INVOCATION_CACHE_TTL_MS, tryReadPreInvocationSessionCache } =
+      await import("../src/commands/session-fastpath.js")
+    const dir = mkdtempSync(join(tmpdir(), "harness-session-hardening-"))
+    try {
+      mkdirSync(join(dir, "libs", "demo", "src"), { recursive: true })
+      writeFileSync(
+        join(dir, "tsconfig.base.json"),
+        JSON.stringify({ compilerOptions: { plugins: [{ name: "@effect/language-service" }] } }),
+        "utf8",
+      )
+      mkdirSync(join(dir, "node_modules", "@effect", "tsgo"), { recursive: true })
+      writeFileSync(join(dir, "node_modules", "@effect", "tsgo", "package.json"), "{}", "utf8")
+      writeFileSync(join(dir, "libs", "demo", "src", "mod.ts"), "export const v = 1\n", "utf8")
+      execFileSync("git", ["init"], { cwd: dir })
+      execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir })
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: dir })
+      execFileSync("git", ["add", "."], { cwd: dir })
+      execFileSync("git", ["commit", "-m", "init"], { cwd: dir })
+
+      const opts = { repoRoot: dir, skipBackgroundDaemons: true } as const
+      const first = await Effect.runPromise(
+        runDeclarativeCli(["session", "--format=antigravity"], opts),
+      )
+      expect(first.exitCode).toBe(0)
+      const cachePath = join(dir, ".harness", "session-preinvocation-cache.json")
+      const originalRaw = readFileSync(cachePath, "utf8")
+      const original = JSON.parse(originalRaw) as Record<string, unknown>
+
+      // 1. > 15_000ms TTL expiry miss
+      writeFileSync(
+        cachePath,
+        JSON.stringify({
+          ...original,
+          recordedAtMs: Date.now() - PRE_INVOCATION_CACHE_TTL_MS - 10,
+        }),
+        "utf8",
+      )
+      expect(tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag).toBe(
+        "None",
+      )
+
+      // 2. Future recordedAtMs (now + 5_000) rejection
+      writeFileSync(
+        cachePath,
+        JSON.stringify({ ...original, recordedAtMs: Date.now() + 5_000 }),
+        "utf8",
+      )
+      expect(tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag).toBe(
+        "None",
+      )
+
+      // 3. HARNESS_REQUIRE_OLLAMA=1 cache bypass
+      writeFileSync(cachePath, originalRaw, "utf8")
+      const prevRequireOllama = process.env.HARNESS_REQUIRE_OLLAMA
+      process.env.HARNESS_REQUIRE_OLLAMA = "1"
+      try {
+        expect(
+          tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag,
+        ).toBe("None")
+      } finally {
+        if (prevRequireOllama === undefined)
+          Reflect.deleteProperty(process.env, "HARNESS_REQUIRE_OLLAMA")
+        else process.env.HARNESS_REQUIRE_OLLAMA = prevRequireOllama
+      }
+
+      // 4. Corrupt JSON rejection
+      writeFileSync(cachePath, "{not-valid-json", "utf8")
+      expect(tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag).toBe(
+        "None",
+      )
+
+      // 5. Symlinked cache file rejection
+      const outsideTarget = join(dir, "outside.json")
+      writeFileSync(outsideTarget, originalRaw, "utf8")
+      rmSync(cachePath, { force: true })
+      symlinkSync(outsideTarget, cachePath)
+      expect(tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag).toBe(
+        "None",
+      )
+      rmSync(cachePath, { force: true })
+      rmSync(outsideTarget, { force: true })
+
+      // 6. Modifying .harness/verify-stamp.json invalidates PreInvocation cache
+      writeFileSync(cachePath, originalRaw, "utf8")
+      expect(tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag).toBe(
+        "Some",
+      )
+      writeFileSync(join(dir, ".harness", "verify-stamp.json"), '{"valid":true}\n', "utf8")
+      expect(tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag).toBe(
+        "None",
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  it("never loads typescript on route or warm session --format=antigravity", async () => {
+    const { execFileSync, spawnSync } = await import("node:child_process")
+    const repoRoot = resolve(import.meta.dirname, "../../..")
+
+    // Check route cold start
+    const routeRes = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        "./tools/node-ts-resolver.mjs",
+        "apps/harness-cli/src/index.ts",
+        "route",
+        "plan",
+        "domain",
+        "usecase",
+      ],
+      {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          NODE_DEBUG: "module",
+          HARNESS_DISABLE_LIVE_TELEMETRY: "1",
+        },
+        encoding: "utf8",
+        maxBuffer: 32 * 1024 * 1024,
+      },
+    )
+    expect(routeRes.status).toBe(0)
+    expect(routeRes.stderr).not.toContain("node_modules/typescript")
+
+    // Check warm session --format=antigravity
+    const dir = mkdtempSync(join(tmpdir(), "harness-warm-session-cold-"))
+    try {
+      mkdirSync(join(dir, "libs", "demo", "src"), { recursive: true })
+      writeFileSync(
+        join(dir, "tsconfig.base.json"),
+        JSON.stringify({ compilerOptions: { plugins: [{ name: "@effect/language-service" }] } }),
+        "utf8",
+      )
+      mkdirSync(join(dir, "node_modules", "@effect", "tsgo"), { recursive: true })
+      writeFileSync(join(dir, "node_modules", "@effect", "tsgo", "package.json"), "{}", "utf8")
+      writeFileSync(join(dir, "libs", "demo", "src", "mod.ts"), "export const v = 1\n", "utf8")
+      execFileSync("git", ["init"], { cwd: dir })
+      execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir })
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: dir })
+      execFileSync("git", ["add", "."], { cwd: dir })
+      execFileSync("git", ["commit", "-m", "init"], { cwd: dir })
+
+      // Prime cache in-process
+      const prime = await Effect.runPromise(
+        runDeclarativeCli(["session", "--format=antigravity"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(prime.exitCode).toBe(0)
+
+      // Run warm session in a fresh subprocess from dir with NODE_DEBUG=module
+      const warmRes = spawnSync(
+        process.execPath,
+        [
+          "--import",
+          resolve(repoRoot, "tools/node-ts-resolver.mjs"),
+          resolve(repoRoot, "apps/harness-cli/src/index.ts"),
+          "session",
+          "--format=antigravity",
+        ],
+        {
+          cwd: dir,
+          env: {
+            ...process.env,
+            NODE_DEBUG: "module",
+            HARNESS_DISABLE_LIVE_TELEMETRY: "1",
+          },
+          encoding: "utf8",
+          maxBuffer: 32 * 1024 * 1024,
+        },
+      )
+      expect(warmRes.status).toBe(0)
+      expect(warmRes.stderr).not.toContain("node_modules/typescript")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 30_000)
 })

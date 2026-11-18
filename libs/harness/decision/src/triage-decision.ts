@@ -91,6 +91,12 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     "Locale-dependent .localeCompare(...) is banned in deterministic contract/domain/compiler code — use compareCodeUnits from @harness/contract.",
   ),
   makeTriageRule(
+    "skip-nx-cache-banned",
+    /--skip-nx-cache|Bypassing Nx cache with '--skip-nx-cache'/,
+    "mechanical",
+    "Drop '--skip-nx-cache' and rely on Nx caching (or set HARNESS_ALLOW_SKIP_NX_CACHE=1 only when intentionally benchmarking cold builds).",
+  ),
+  makeTriageRule(
     "governance-doc-read-error",
     /governance-doc-read-error/,
     "mechanical",

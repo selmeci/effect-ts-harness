@@ -2,9 +2,16 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { fileURLToPath } from "node:url"
 import { Result } from "effect"
 import { match } from "ts-pattern"
-import { resolveCanonicalRepoRoot } from "@harness/graph"
-import { nodeSyncHostIo } from "@harness/infra"
+import { resolveCanonicalRepoRoot } from "@harness/graph/cluster-resolver"
+import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
 import type { SyncHostIo } from "@harness/service/host-io"
+
+export const buildOmnigraphClusterKillArgs = (
+  clusterRootDir: string,
+): readonly [string, ReadonlyArray<string>] => {
+  const escaped = clusterRootDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  return ["pkill", ["-f", `omnigraph-server.*--cluster file://${escaped}(\\s|$)`]]
+}
 
 export const isInsideRoot = (rootDir: string, candidatePath: string): boolean => {
   const rel = relative(resolve(rootDir), resolve(candidatePath))

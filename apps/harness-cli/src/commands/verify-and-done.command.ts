@@ -38,6 +38,7 @@ import {
   type CliEnv,
   type CliResult,
   ensureLocalOllamaReady,
+  shouldSuppressLiveRepoTestSideEffects,
   findWorkspaceRoot,
   formatSubprocessError,
   isIsolatedExternalWorkspace,
@@ -596,7 +597,10 @@ export const handleDone = (
             )
             if (omnigraphFailure !== undefined) return withTranscriptStderr(omnigraphFailure)
 
-            if (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) {
+            if (
+              (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) &&
+              !shouldSuppressLiveRepoTestSideEffects(repoRoot)
+            ) {
               const report = buildSessionReport({
                 events: readTelemetryEvents(repoRoot, nodeSyncHostIo),
                 frictionEvents: readFrictionEvents(repoRoot, nodeSyncHostIo),

@@ -39,6 +39,11 @@ import {
 } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 import { hasAntigravityFormat } from "./hook-format.js"
+import {
+  resolveHarnessTsgoPkgJsonPath,
+  shouldRequireLiveOllama,
+  tryCachePreInvocationResult,
+} from "./session-fastpath.js"
 import { buildWorkspaceFnIndex } from "@harness/ingest"
 import {
   type CliEnv,
@@ -49,6 +54,7 @@ import {
   isIsolatedExternalWorkspace,
   resolveClusterRepoRoot,
   resolveDecisionModelLayer,
+  shouldSuppressLiveRepoTestSideEffects,
 } from "./daemon-and-omnigraph.service.js"
 
 export const handleDoctorOrSession = (
@@ -74,17 +80,12 @@ export const handleDoctorOrSession = (
     }).pipe(Effect.orElseSucceed(() => false))
 
     const isolatedExternal = isIsolatedExternalWorkspace(repoRoot)
-    let omnigraphInitialized = isolatedExternal
-      ? true
-      : yield* ensureLocalOmnigraphReady(repoRoot)
+    let omnigraphInitialized = isolatedExternal ? true : yield* ensureLocalOmnigraphReady(repoRoot)
     let reconcileError: string | undefined
 
-    const requireLiveOllama =
-      process.env.HARNESS_REQUIRE_OLLAMA === "1" ||
-      (!isolatedExternal &&
-        options?.decisionLayer === undefined &&
-        options?.skipBackgroundDaemons !== true)
+    const requireLiveOllama = shouldRequireLiveOllama(options, nodeSyncHostIo)
     const ollamaReady = requireLiveOllama ? yield* ensureLocalOllamaReady() : true
+    const ollamaProbed = requireLiveOllama
 
     const planPath = join(harnessDir, "plan-graph-snapshot.json")
     const implPath = join(harnessDir, "graph-snapshot.json")
@@ -105,7 +106,9 @@ export const handleDoctorOrSession = (
           saveGraphSnapshot(reconciledGraph, implPath, nodeSyncHostIo)
           const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
           if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {
-            process.stderr.write("[harness:session] Warning: failed to persist .harness/graph-head.json\n")
+            process.stderr.write(
+              "[harness:session] Warning: failed to persist .harness/graph-head.json\n",
+            )
           }
         } else {
           const reconcileSyncRes = yield* syncToOmnigraphAndSnapshot(reconciledGraph, {
@@ -126,8 +129,13 @@ export const handleDoctorOrSession = (
           )
           if (reconcileSyncRes.syncedToOmnigraph) {
             const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
-            if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {
-              process.stderr.write("[harness:session] Warning: failed to persist .harness/graph-head.json\n")
+            if (
+              (headState.headSha !== null || headState.gitBranch !== null) &&
+              savedMeta === null
+            ) {
+              process.stderr.write(
+                "[harness:session] Warning: failed to persist .harness/graph-head.json\n",
+              )
             }
           } else {
             omnigraphInitialized = false
@@ -141,18 +149,12 @@ export const handleDoctorOrSession = (
     const tsconfigBasePath = nodeSyncHostIo.existsSync(join(repoRoot, "tsconfig.base.json"))
       ? join(repoRoot, "tsconfig.base.json")
       : join(workspaceRoot, "tsconfig.base.json")
-    const tsgoPkgPath = nodeSyncHostIo.existsSync(
-      join(repoRoot, "node_modules", "@effect", "tsgo", "package.json"),
-    )
-      ? join(repoRoot, "node_modules", "@effect", "tsgo", "package.json")
-      : join(workspaceRoot, "node_modules", "@effect", "tsgo", "package.json")
+    const tsgoPkgPath = resolveHarnessTsgoPkgJsonPath(repoRoot, nodeSyncHostIo)
     const effectLspOk = yield* Effect.try({
-      try: () => {
-        if (!nodeSyncHostIo.existsSync(tsconfigBasePath) || !nodeSyncHostIo.existsSync(tsgoPkgPath)) {
-          return false
-        }
-        return nodeSyncHostIo.readTextSync(tsconfigBasePath).includes("@effect/language-service")
-      },
+      try: () =>
+        nodeSyncHostIo.existsSync(tsconfigBasePath) &&
+        nodeSyncHostIo.existsSync(tsgoPkgPath) &&
+        nodeSyncHostIo.readTextSync(tsconfigBasePath).includes("@effect/language-service"),
       catch: () => false,
     }).pipe(Effect.orElseSucceed(() => false))
 
@@ -167,7 +169,9 @@ export const handleDoctorOrSession = (
             Effect.catchCause((cause) => {
               if (isPureInterruptCause(cause)) return Effect.interrupt
               return Effect.sync(() => {
-                process.stderr.write(`[harness learn] decision model fallback: ${Cause.pretty(cause)}\n`)
+                process.stderr.write(
+                  `[harness learn] decision model fallback: ${Cause.pretty(cause)}\n`,
+                )
               }).pipe(Effect.as(Option.none()))
             }),
             Effect.provide(decisionLayer),
@@ -222,7 +226,10 @@ export const handleDoctorOrSession = (
     const effectiveStampValid = hasPlanOrStamp ? stampCheck.valid : true
     const stampReason = !stampCheck.valid ? stampCheck.reason : undefined
     const rawFrictionEvents = readFrictionEvents(repoRoot, nodeSyncHostIo)
-    const telemetryEvents = readTelemetryEvents(repoRoot, nodeSyncHostIo)
+    const telemetryEvents =
+      isAntigravity && rawFrictionEvents.length === 0
+        ? []
+        : readTelemetryEvents(repoRoot, nodeSyncHostIo)
     const scoped = scopeSessionReportInput({
       events: telemetryEvents,
       frictionEvents: rawFrictionEvents,
@@ -239,12 +246,6 @@ export const handleDoctorOrSession = (
       loopThrashing,
     })
 
-    const telemetryReport = buildSessionReport({
-      events: telemetryEvents,
-      frictionEvents: rawFrictionEvents,
-      stampValid: effectiveStampValid,
-    })
-
     const ok =
       nodeOk && snapshotDirOk && snapshotOk && effectLspOk && omnigraphInitialized && ollamaReady
 
@@ -257,9 +258,28 @@ export const handleDoctorOrSession = (
       }
       if (!snapshotOk) injected.push(...missingPlannedFns)
       if (reconcileError !== undefined) {
-        injected.push(`[harness:session] Warning: Omnigraph reconcile sync failed: ${reconcileError}`)
+        injected.push(
+          `[harness:session] Warning: Omnigraph reconcile sync failed: ${reconcileError}`,
+        )
       }
       if (handoff.handoffMessage !== null) injected.push(handoff.handoffMessage)
+      if (
+        ok &&
+        reconcileError === undefined &&
+        options?.governanceDocs === undefined &&
+        options?.planGraph === undefined &&
+        options?.implGraph === undefined
+      ) {
+        tryCachePreInvocationResult(
+          repoRoot,
+          harnessDir,
+          ollamaReady,
+          ollamaProbed,
+          injected,
+          options,
+          nodeSyncHostIo,
+        )
+      }
       return {
         exitCode: 0,
         stdout: JSON.stringify({
@@ -272,6 +292,12 @@ export const handleDoctorOrSession = (
             : "",
       }
     }
+
+    const telemetryReport = buildSessionReport({
+      events: telemetryEvents,
+      frictionEvents: rawFrictionEvents,
+      stampValid: effectiveStampValid,
+    })
 
     return {
       exitCode: ok ? 0 : 1,
@@ -334,7 +360,9 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
       saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
       const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
       if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {
-        process.stderr.write("[harness:ingest] Warning: failed to persist .harness/graph-head.json\n")
+        process.stderr.write(
+          "[harness:ingest] Warning: failed to persist .harness/graph-head.json\n",
+        )
       }
       return {
         exitCode: 0,
@@ -387,7 +415,9 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
     if (syncRes.syncedToOmnigraph) {
       const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
       if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {
-        process.stderr.write("[harness:ingest] Warning: failed to persist .harness/graph-head.json\n")
+        process.stderr.write(
+          "[harness:ingest] Warning: failed to persist .harness/graph-head.json\n",
+        )
       }
     }
     const syncError = syncRes.syncedToOmnigraph
@@ -601,19 +631,17 @@ export const handleReport = (
       stampValid: stampCheck.valid,
       cumulative: argv.includes("--all"),
     })
-    if (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) {
+    if (
+      (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) &&
+      !shouldSuppressLiveRepoTestSideEffects(repoRoot)
+    ) {
       writeSessionReportFiles(repoRoot, report, nodeSyncHostIo)
-    }
-    if (argv.includes("--format=markdown")) {
-      return {
-        exitCode: 0,
-        stdout: renderSessionReportMarkdown(report),
-        stderr: "",
-      }
     }
     return {
       exitCode: 0,
-      stdout: JSON.stringify(report),
+      stdout: argv.includes("--format=markdown")
+        ? renderSessionReportMarkdown(report)
+        : JSON.stringify(report),
       stderr: "",
     }
   })

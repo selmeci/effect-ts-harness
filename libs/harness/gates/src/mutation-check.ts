@@ -4,7 +4,16 @@
 import { join, resolve } from "node:path"
 import { Result } from "effect"
 import { match } from "ts-pattern"
-import { AstSourceFilePath, SourceLineNumber } from "@harness/contract"
+import {
+  AstSourceFilePath,
+  type ContentSha256,
+  MUTATION_CACHE_SCHEMA_VERSION,
+  MutantCacheId,
+  type MutationCacheEntry,
+  MutationCacheTimestamp,
+  SourceLineNumber,
+  computeContentSha256,
+} from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { runVitestTargetList, stripAnsi } from "./mutation-subprocess-helpers.js"
 import {
@@ -29,6 +38,13 @@ import {
   extractGitDiffModifiedLinesChecked,
   recoverStartupBackup,
 } from "./mutation/mutation-backup.js"
+import {
+  computeMutantCacheKey,
+  computeMutationContextDigests,
+  loadMutationCache,
+  partitionMutationCacheLookup,
+  saveMutationCacheAtomic,
+} from "./mutation/mutation-cache.js"
 import {
   decideMutationCheck,
   decideMutationReport,
@@ -121,6 +137,8 @@ export interface RunMutationOptions {
   readonly baseRef?: string | undefined
   readonly explicitBaseRef?: boolean | undefined
   readonly minScore?: number | undefined
+  readonly disableMutantCache?: boolean | undefined
+  readonly enableMutantCache?: boolean | undefined
   readonly testRunner?:
     | ((
         mutant: CodeMutant,
@@ -146,6 +164,8 @@ export const runDomainMutationSuite = (
   const evaluatedFiles: Array<string> = []
   const untestedFiles: Array<UntestedMutationFile> = []
 
+  let cachedKilledCount = 0
+
   const isStrictMode = match(options?.enforcementMode)
     .with("strict", () => true)
     .with("advisory", undefined, () => false)
@@ -164,6 +184,7 @@ export const runDomainMutationSuite = (
     ),
     passed: false,
     diagnostic,
+    cachedKilledCount,
     diffMode,
     scannedCandidateFiles,
     scannedFiles,
@@ -335,6 +356,21 @@ export const runDomainMutationSuite = (
     if (unclassifiedErr !== undefined) return abortWith([], unclassifiedErr)
   }
 
+  const cacheEnabled =
+    options?.disableMutantCache !== true &&
+    !hasOverlays &&
+    options?.testRunner === undefined &&
+    (options?.enableMutantCache ?? true)
+  const contextDigests = cacheEnabled
+    ? match(computeMutationContextDigests(repoRoot, hostIo))
+        .with({ _tag: "Some" }, ({ value }) => value)
+        .with({ _tag: "None" }, () => undefined)
+        .exhaustive()
+    : undefined
+  const loadedCacheStore = cacheEnabled ? loadMutationCache(repoRoot, hostIo) : undefined
+  const cacheEntries: Record<ContentSha256, MutationCacheEntry> = {}
+  let cacheDirty = false
+
   const outcomes: Array<MutantOutcome> = []
   for (const file of targets) {
     const overlaySource = normalizedOverlays.get(file.relFile)
@@ -501,6 +537,65 @@ export const runDomainMutationSuite = (
       })
       continue
     }
+
+    const mutantKeys = new Map<string, ContentSha256>()
+    const cachedHitIds = new Set<string>()
+    if (cacheEnabled && contextDigests !== undefined && loadedCacheStore !== undefined) {
+      const compiledSchemaSha256 = computeContentSha256(schemaBundle.schemaSource)
+      const originalSha256 = computeContentSha256(originalContent)
+      const allReaching = [...primaryTests, ...fallbackTests]
+      const pkgKey = `${file.scope}/${file.pkgDir}`
+      const candidateKeys: Array<ContentSha256> = []
+      const keyToMutantIds = new Map<ContentSha256, Array<string>>()
+      for (const mutant of mutants) {
+        const keyOpt = computeMutantCacheKey(
+          repoRoot,
+          pkgKey,
+          file.relFile,
+          originalSha256,
+          compiledSchemaSha256,
+          mutant,
+          allReaching,
+          contextDigests,
+          hostIo,
+        )
+        match(keyOpt)
+          .with({ _tag: "Some" }, ({ value: key }) => {
+            mutantKeys.set(mutant.id, key)
+            candidateKeys.push(key)
+            const list = keyToMutantIds.get(key)
+            if (list !== undefined) list.push(mutant.id)
+            else keyToMutantIds.set(key, [mutant.id])
+          })
+          .with({ _tag: "None" }, () => {})
+          .exhaustive()
+      }
+      if (candidateKeys.length > 0) {
+        const lookupDecision = partitionMutationCacheLookup({
+          candidateKeys,
+          store: loadedCacheStore,
+        })
+        const touchedAt = MutationCacheTimestamp.make(new Date().toISOString())
+        for (const hitKey of lookupDecision.hitKeys) {
+          const existing = loadedCacheStore.entries[hitKey]
+          if (existing !== undefined) {
+            cacheEntries[hitKey] = { ...existing, recordedAt: touchedAt }
+            cacheDirty = true
+          }
+          for (const mId of keyToMutantIds.get(hitKey) ?? []) {
+            cachedHitIds.add(mId)
+          }
+        }
+      }
+    }
+
+    const uncachedMutants = mutants.filter((m) => !cachedHitIds.has(m.id))
+    cachedKilledCount += mutants.length - uncachedMutants.length
+    if (uncachedMutants.length === 0) {
+      for (const mutant of mutants) outcomes.push({ mutant, status: "killed" })
+      continue
+    }
+
     const primaryRes = runVitestTargetList(
       repoRoot,
       file,
@@ -510,17 +605,26 @@ export const runDomainMutationSuite = (
       originalContent,
       schemaBundle.schemaSource,
       backupPath,
-      mutants,
+      uncachedMutants,
     )
+    const fileNonCacheableIds = new Set<string>()
     const primaryOutcomes = match(primaryRes)
       .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
-      .with({ _tag: "Ok" }, ({ outcomes: resOutcomes }) => resOutcomes)
+      .with({ _tag: "Ok" }, ({ outcomes: resOutcomes, nonCacheableIds }) => {
+        for (const id of nonCacheableIds) fileNonCacheableIds.add(id)
+        return resOutcomes
+      })
       .exhaustive()
     if (typeof primaryOutcomes === "string") return abortWith(outcomes, primaryOutcomes)
 
     const fileOutcomes = new Map<string, MutantOutcome>(
       primaryOutcomes.map((o) => [o.mutant.id, o]),
     )
+    for (const mutant of mutants) {
+      if (cachedHitIds.has(mutant.id)) {
+        fileOutcomes.set(mutant.id, { mutant, status: "killed" })
+      }
+    }
     const survivingMutants = primaryOutcomes
       .filter((o) =>
         match(o.status)
@@ -544,7 +648,8 @@ export const runDomainMutationSuite = (
       )
       const fallbackAbort = match(fallbackRes)
         .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
-        .with({ _tag: "Ok" }, ({ outcomes: fbOutcomes }) => {
+        .with({ _tag: "Ok" }, ({ outcomes: fbOutcomes, nonCacheableIds }) => {
+          for (const id of nonCacheableIds) fileNonCacheableIds.add(id)
           for (const fbOutcome of fbOutcomes) {
             match(fbOutcome.status)
               .with("killed", () => {
@@ -557,11 +662,49 @@ export const runDomainMutationSuite = (
         })
         .exhaustive()
       if (fallbackAbort !== undefined) {
-        for (const o of fileOutcomes.values()) outcomes.push(o)
+        for (const mutant of mutants) {
+          const o = fileOutcomes.get(mutant.id)
+          if (o !== undefined) outcomes.push(o)
+        }
         return abortWith(outcomes, fallbackAbort)
       }
     }
-    for (const o of fileOutcomes.values()) outcomes.push(o)
+    const recordedAt = MutationCacheTimestamp.make(new Date().toISOString())
+    for (const mutant of uncachedMutants) {
+      const outcome = fileOutcomes.get(mutant.id)
+      const key = mutantKeys.get(mutant.id)
+      match(outcome?.status)
+        .with("killed", () => {
+          if (key !== undefined && !fileNonCacheableIds.has(mutant.id)) {
+            cacheEntries[key] = {
+              key,
+              file: AstSourceFilePath.make(file.relFile),
+              mutantId: MutantCacheId.make(mutant.id),
+              status: "killed",
+              recordedAt,
+            }
+            cacheDirty = true
+          }
+        })
+        .with("survived", "equivalent", undefined, () => {})
+        .exhaustive()
+    }
+    for (const mutant of mutants) {
+      const o = fileOutcomes.get(mutant.id)
+      if (o !== undefined) outcomes.push(o)
+    }
+  }
+
+  if (cacheEnabled && cacheDirty) {
+    const freshStore = loadMutationCache(repoRoot, hostIo)
+    saveMutationCacheAtomic(
+      repoRoot,
+      {
+        version: MUTATION_CACHE_SCHEMA_VERSION,
+        entries: { ...freshStore.entries, ...cacheEntries },
+      },
+      hostIo,
+    )
   }
 
   if (isStrictMode && untestedFiles.length > 0) {
@@ -585,6 +728,7 @@ export const runDomainMutationSuite = (
       options?.saturationSpecs,
       options?.spanObservations,
     ),
+    cachedKilledCount,
     diffMode,
     scannedCandidateFiles,
     scannedFiles,

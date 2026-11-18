@@ -4,7 +4,6 @@
  * matching Alchemy's own advice to confirm every deploy). */
 
 import * as path from "node:path"
-import { match, P } from "ts-pattern"
 
 export type GuardVerdict = "allow" | "deny" | "ask" | "escalate"
 
@@ -125,6 +124,13 @@ const splitShellWords = (
   let inWord = false
   let quote: "'" | '"' | undefined
   let unquoted = ""
+  const flush = (): void => {
+    if (inWord) {
+      words.push(current)
+      current = ""
+      inWord = false
+    }
+  }
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!
     if (quote !== undefined) {
@@ -154,11 +160,25 @@ const splitShellWords = (
       continue
     }
     if (/\s/.test(ch)) {
-      if (inWord) {
-        words.push(current)
-        current = ""
-        inWord = false
-      }
+      flush()
+      unquoted += ch
+      continue
+    }
+    if (command.startsWith("&&", i) || command.startsWith("||", i)) {
+      flush()
+      const op = command.slice(i, i + 2)
+      words.push(op)
+      unquoted += op
+      i += 1
+      continue
+    }
+    if (
+      ch === "|" ||
+      ch === ";" ||
+      (ch === "&" && !unquoted.endsWith(">") && command[i + 1] !== ">")
+    ) {
+      flush()
+      words.push(ch)
       unquoted += ch
       continue
     }
@@ -324,7 +344,7 @@ export const isCommandAllowed = (command: string): boolean => {
   const stripped = command
     .trim()
     .replace(
-      /^(?:(?:CI|NX_INTERACTIVE|(?!HARNESS_STATE_DIR=)HARNESS_[A-Z0-9_]+)=[^\s;|&]+\s+)+/,
+      /^(?:(?:CI|NX_INTERACTIVE|(?!HARNESS_STATE_DIR=|HARNESS_DISABLE_LIVE_TELEMETRY=|HARNESS_TEST_ISOLATION=)HARNESS_[A-Z0-9_]+)=[^\s;|&]+\s+)+/,
       "",
     )
   const trimmed = stripped.trim()
@@ -336,29 +356,83 @@ export const isCommandAllowed = (command: string): boolean => {
   })
 }
 
-const WRAPPER_BINARIES: ReadonlySet<string> = new Set(["pnpm", "npm", "npx", "yarn", "bunx"])
-const WRAPPER_VALUE_FLAGS: ReadonlySet<string> = new Set([
-  "--filter",
-  "-F",
-  "--dir",
-  "-C",
-  "--prefix",
-  "--package",
-  "-p",
-])
+const WRAPPER_BINARIES: ReadonlySet<string> = new Set("pnpm npm npx pnpx yarn bun bunx".split(" "))
+const WRAPPER_VALUE_FLAGS: ReadonlySet<string> = new Set(
+  "--filter -F --dir -C --prefix --package -p --loglevel --reporter --store-dir --cache-dir --config -c --userconfig".split(
+    " ",
+  ),
+)
 const WRAPPER_SUBCOMMANDS: ReadonlySet<string> = new Set(["exec", "run", "dlx"])
+const ENV_VALUE_FLAGS: ReadonlySet<string> = new Set(
+  "-u -C -S --unset --chdir --split-string".split(" "),
+)
+const ENV_SIMPLE_FLAGS: ReadonlySet<string> = new Set(
+  "-i --ignore-environment -0 --null".split(" "),
+)
+
+const binaryBasename = (word: string): string =>
+  word.includes("/") ? word.slice(word.lastIndexOf("/") + 1) : word
 
 interface UnwrappedSegment {
   readonly envAssignments: ReadonlyArray<string>
   readonly commandWords: ReadonlyArray<string>
+  readonly sawPackageRunner: boolean
 }
 
 const unwrapCommandSegment = (words: ReadonlyArray<string>): UnwrappedSegment => {
   const envAssignments: Array<string> = []
+  let sawPackageRunner = false
   let i = 0
   while (i < words.length) {
     const w = words[i]!
-    if (w === "env" || w === "cross-env" || w === "command" || w === "builtin") {
+    const base = binaryBasename(w)
+    if (base === "env") {
+      i++
+      while (i < words.length) {
+        const arg = words[i]!
+        if (arg === "--") {
+          i++
+          break
+        }
+        if (ENV_VALUE_FLAGS.has(arg)) {
+          i += 2
+          continue
+        }
+        if (
+          ENV_SIMPLE_FLAGS.has(arg) ||
+          arg.startsWith("--unset=") ||
+          arg.startsWith("--chdir=") ||
+          arg.startsWith("--split-string=")
+        ) {
+          i++
+          continue
+        }
+        if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(arg)) {
+          envAssignments.push(arg)
+          i++
+          continue
+        }
+        break
+      }
+      continue
+    }
+    if (base === "command") {
+      i++
+      while (i < words.length) {
+        const arg = words[i]!
+        if (arg === "--") {
+          i++
+          break
+        }
+        if (arg === "-p") {
+          i++
+          continue
+        }
+        break
+      }
+      continue
+    }
+    if (base === "cross-env" || base === "builtin") {
       i++
       continue
     }
@@ -367,46 +441,29 @@ const unwrapCommandSegment = (words: ReadonlyArray<string>): UnwrappedSegment =>
       i++
       continue
     }
-    if (WRAPPER_BINARIES.has(w)) {
+    if (WRAPPER_BINARIES.has(base)) {
+      sawPackageRunner = true
       i++
       while (i < words.length) {
         const arg = words[i]!
-        const shouldBreak = match(arg)
-          .with(
-            P.when((a) => WRAPPER_VALUE_FLAGS.has(a)),
-            () => {
-              i += 2
-              return false
-            },
-          )
-          .with("--", () => {
-            i++
-            return true
-          })
-          .with(
-            P.when((a) => a.startsWith("-")),
-            () => {
-              i++
-              return false
-            },
-          )
-          .with(
-            P.when((a) => WRAPPER_SUBCOMMANDS.has(a)),
-            () => {
-              i++
-              return false
-            },
-          )
-          .with(
-            P.when((a) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(a)),
-            (a) => {
-              envAssignments.push(a)
-              i++
-              return false
-            },
-          )
-          .otherwise(() => true)
-        if (shouldBreak) break
+        if (WRAPPER_VALUE_FLAGS.has(arg)) {
+          i += 2
+          continue
+        }
+        if (arg === "--") {
+          i++
+          break
+        }
+        if (
+          arg.startsWith("-") ||
+          WRAPPER_SUBCOMMANDS.has(arg) ||
+          /^[A-Za-z_][A-Za-z0-9_]*=/.test(arg)
+        ) {
+          if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(arg)) envAssignments.push(arg)
+          i++
+          continue
+        }
+        break
       }
       continue
     }
@@ -415,6 +472,7 @@ const unwrapCommandSegment = (words: ReadonlyArray<string>): UnwrappedSegment =>
   return {
     envAssignments,
     commandWords: words.slice(i),
+    sawPackageRunner,
   }
 }
 
@@ -441,6 +499,30 @@ export const isCdCommand = (trimmed: string): boolean =>
 
 export const INTERACTIVE_NX_BANNED_REASON =
   "Running 'nx show' without 'CI=true' can hang on interactive prompts; prefix with 'CI=true' or use harness MCP tools."
+
+export const SKIP_NX_CACHE_BANNED_REASON =
+  "Bypassing Nx cache with '--skip-nx-cache' is banned by harness policy in routine runs; set 'HARNESS_ALLOW_SKIP_NX_CACHE=1' only when intentionally benchmarking cold builds."
+
+const SKIP_NX_CACHE_ARG_PATTERN = /^--skip-nx-cache(?:=(?!false$).*)?$/
+
+export const isSkipNxCacheCommand = (command: string): boolean =>
+  extractCommandSegments(command).some((seg) => {
+    const bin = seg.commandWords[0]
+    if (bin === undefined) {
+      return false
+    }
+    const isTarget =
+      bin === "nx" ||
+      bin.endsWith("/nx") ||
+      (seg.sawPackageRunner && (bin === "verify" || bin === "verify:all"))
+    if (!isTarget) {
+      return false
+    }
+    if (seg.envAssignments.includes("HARNESS_ALLOW_SKIP_NX_CACHE=1")) {
+      return false
+    }
+    return seg.commandWords.slice(1).some((arg) => SKIP_NX_CACHE_ARG_PATTERN.test(arg))
+  })
 
 export const CLEF_SYSTEMONE_ONLY_BANNED_REASON =
   "clef (clef-flash) is a TypeSafe System One structured decision model, NOT a generative text/chat model — /api/generate, /api/chat, /v1/chat/completions, /v1/completions, and 'ollama run clef*' do not exist for System One models and return HTTP errors. Use DecisionModel.decide (@effect/ai-typesafe TypeSafeDecisionModel) or POST http://localhost:11434/v1/systemone ({ model: 'clef-flash', state, questions }), or run 'pnpm harness doctor' to warm/verify the model."
@@ -526,6 +608,9 @@ export const classifyCommand = (command: string): GuardVerdict => {
     return "deny"
   }
   if (isInteractiveNxCommand(trimmed)) {
+    return "deny"
+  }
+  if (isSkipNxCacheCommand(trimmed)) {
     return "deny"
   }
   if (isInvalidClefEndpointCommand(trimmed)) {
@@ -614,6 +699,23 @@ export const classifyCommand = (command: string): GuardVerdict => {
 export const CD_COMMAND_BANNED_REASON =
   "Shell 'cd' commands are banned by harness policy; use the tool Cwd parameter instead."
 
+export const explainCommandDenyReason = (command: string): string | undefined => {
+  const trimmed = command.trim()
+  if (isCdCommand(trimmed)) {
+    return CD_COMMAND_BANNED_REASON
+  }
+  if (isInteractiveNxCommand(trimmed)) {
+    return INTERACTIVE_NX_BANNED_REASON
+  }
+  if (isSkipNxCacheCommand(trimmed)) {
+    return SKIP_NX_CACHE_BANNED_REASON
+  }
+  if (isInvalidClefEndpointCommand(trimmed)) {
+    return CLEF_SYSTEMONE_ONLY_BANNED_REASON
+  }
+  return undefined
+}
+
 export interface FileWriteGuardResult {
   readonly verdict: "allow" | "deny" | "ask"
   readonly reason?: string | undefined
@@ -645,6 +747,19 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
     return {
       verdict: "deny",
       reason: `Direct modification of mutate-stamp.json is forbidden (stamp forgery protection): ${filePath}`,
+    }
+  }
+
+  if (
+    candidates.some((p) =>
+      /(^|\/)\.harness\/(worktrees\/[^/]+\/)?(cache\/mutation-cache-v1\.json|session-preinvocation-cache\.json)$/.test(
+        p,
+      ),
+    )
+  ) {
+    return {
+      verdict: "deny",
+      reason: `Direct modification of harness cache file is forbidden: ${filePath}`,
     }
   }
 

@@ -17,6 +17,12 @@ import {
   SelfDogfoodingRuleId,
   TierTopologyRuleId,
 } from "@harness/contract"
+import { resolveHarnessStateDir } from "@harness/gates/hook-fastpath"
+import {
+  CLI_REPO_ROOT,
+  recordTelemetry,
+  shouldSuppressLiveRepoTestSideEffects,
+} from "../src/commands/daemon-and-omnigraph.service.js"
 
 describe("Claude Code adapter & Omnigraph Cedar policy", () => {
   const repoRoot = resolve(import.meta.dirname, "../../..")
@@ -132,23 +138,29 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
   })
 
   it("executes harness-cli guard end-to-end under Node with node-ts-resolver.mjs", () => {
-    const stdout = execFileSync(
-      process.execPath,
-      ["--import", "./tools/node-ts-resolver.mjs", "apps/harness-cli/src/index.ts", "guard"],
-      {
-        cwd: repoRoot,
-        input: JSON.stringify({ tool_input: { command: "alchemy deploy" } }),
-        encoding: "utf8",
-      },
-    )
-    const result = JSON.parse(stdout.trim())
-    expect(result).toEqual({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "ask",
-        permissionDecisionReason: "Command requires human confirmation: alchemy deploy",
-      },
-    })
+    const stateDir = mkdtempSync(join(tmpdir(), "harness-adapter-state-"))
+    try {
+      const stdout = execFileSync(
+        process.execPath,
+        ["--import", "./tools/node-ts-resolver.mjs", "apps/harness-cli/src/index.ts", "guard"],
+        {
+          cwd: repoRoot,
+          env: { ...process.env, HARNESS_STATE_DIR: stateDir },
+          input: JSON.stringify({ tool_input: { command: "alchemy deploy" } }),
+          encoding: "utf8",
+        },
+      )
+      const result = JSON.parse(stdout.trim())
+      expect(result).toEqual({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "ask",
+          permissionDecisionReason: "Command requires human confirmation: alchemy deploy",
+        },
+      })
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true })
+    }
   })
 
   it("forbids agent-mcp from mutating Omnigraph branches in policies.cedar and policy YAML files", () => {
@@ -947,7 +959,10 @@ describe("Antigravity adapter & plugin configuration", () => {
       body
         .replaceAll("effect-harness_harness-mcp", "harness-mcp")
         .replaceAll("effect-harness_omnigraph-mcp", "omnigraph-mcp")
-        .replaceAll("`read_file` with targeted `StartLine` and `EndLine`", "`Read` with targeted `offset` and `limit`")
+        .replaceAll(
+          "`read_file` with targeted `StartLine` and `EndLine`",
+          "`Read` with targeted `offset` and `limit`",
+        )
         .replaceAll("`read_file`", "`Read`")
 
     for (const reviewerId of SPECIALIST_REVIEWER_IDS) {
@@ -1006,6 +1021,7 @@ describe("Antigravity adapter & plugin configuration", () => {
     }
 
     const claudeFiles = collectFiles(resolve(repoRoot, "adapters/claude-code"))
+    expect(claudeFiles.length).toBeGreaterThan(0)
     for (const filePath of claudeFiles) {
       const content = readFileSync(filePath, "utf8")
       expect(
@@ -1016,6 +1032,109 @@ describe("Antigravity adapter & plugin configuration", () => {
         content,
         `Banned Antigravity MCP server name "effect-harness_omnigraph-mcp" found in ${filePath}`,
       ).not.toContain("effect-harness_omnigraph-mcp")
+    }
+  })
+
+  it("never loads typescript on guard --format=antigravity cold start", () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "harness-guard-cold-state-"))
+    try {
+      const res = spawnSync(
+        process.execPath,
+        [
+          "--import",
+          "./tools/node-ts-resolver.mjs",
+          "apps/harness-cli/src/index.ts",
+          "guard",
+          "--format=antigravity",
+        ],
+        {
+          cwd: repoRoot,
+          env: {
+            ...process.env,
+            HARNESS_STATE_DIR: stateDir,
+            NODE_DEBUG: "module",
+          },
+          input: JSON.stringify({
+            toolCall: { name: "run_command", args: { CommandLine: "git status" } },
+          }),
+          encoding: "utf8",
+          maxBuffer: 32 * 1024 * 1024,
+        },
+      )
+      expect(res.status).toBe(0)
+      expect(JSON.parse(res.stdout.trim())).toEqual({ decision: "allow" })
+      expect(res.stderr).not.toContain("node_modules/typescript")
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true })
+    }
+  })
+
+  it("shouldSuppressLiveRepoTestSideEffects protects CLI_REPO_ROOT while preserving temp repoRoot telemetry writes", async () => {
+    expect(
+      shouldSuppressLiveRepoTestSideEffects(CLI_REPO_ROOT, { HARNESS_DISABLE_LIVE_TELEMETRY: "1" }),
+    ).toBe(true)
+    expect(
+      shouldSuppressLiveRepoTestSideEffects(CLI_REPO_ROOT, { HARNESS_TEST_ISOLATION: "1" }),
+    ).toBe(true)
+    expect(
+      shouldSuppressLiveRepoTestSideEffects(CLI_REPO_ROOT, {
+        HARNESS_DISABLE_LIVE_TELEMETRY: "1",
+        HARNESS_STATE_DIR: "/tmp/custom-state",
+      }),
+    ).toBe(false)
+
+    const tempRepo = mkdtempSync(join(tmpdir(), "harness-telemetry-isolation-"))
+    try {
+      expect(
+        shouldSuppressLiveRepoTestSideEffects(tempRepo, { HARNESS_DISABLE_LIVE_TELEMETRY: "1" }),
+      ).toBe(false)
+      recordTelemetry(
+        { repoRoot: tempRepo },
+        {
+          surface: "cli",
+          category: "guard",
+          toolName: "guard",
+          outcome: "ok",
+          durationMs: 1,
+        },
+      )
+      const { recordFriction } = await import("../src/commands/daemon-and-omnigraph.service.js")
+      const liveFrictionPath = join(CLI_REPO_ROOT, ".harness", "friction-log.jsonl")
+      const beforeLiveFriction = existsSync(liveFrictionPath)
+        ? readFileSync(liveFrictionPath, "utf8")
+        : undefined
+      const prevDisable = process.env.HARNESS_DISABLE_LIVE_TELEMETRY
+      const prevStateDir = process.env.HARNESS_STATE_DIR
+      process.env.HARNESS_DISABLE_LIVE_TELEMETRY = "1"
+      Reflect.deleteProperty(process.env, "HARNESS_STATE_DIR")
+      try {
+        recordFriction(
+          { repoRoot: CLI_REPO_ROOT },
+          { kind: "route_miss", summary: "suppressed-test", detail: "should-not-write" },
+        )
+        const afterLiveFriction = existsSync(liveFrictionPath)
+          ? readFileSync(liveFrictionPath, "utf8")
+          : undefined
+        expect(afterLiveFriction).toBe(beforeLiveFriction)
+      } finally {
+        if (prevDisable === undefined)
+          Reflect.deleteProperty(process.env, "HARNESS_DISABLE_LIVE_TELEMETRY")
+        else process.env.HARNESS_DISABLE_LIVE_TELEMETRY = prevDisable
+        if (prevStateDir !== undefined) process.env.HARNESS_STATE_DIR = prevStateDir
+      }
+
+      recordFriction(
+        { repoRoot: tempRepo },
+        {
+          kind: "route_miss",
+          summary: "temp-friction",
+          detail: "should-write",
+        },
+      )
+      expect(existsSync(join(resolveHarnessStateDir(tempRepo), "telemetry-log.jsonl"))).toBe(true)
+      expect(existsSync(join(resolveHarnessStateDir(tempRepo), "friction-log.jsonl"))).toBe(true)
+    } finally {
+      rmSync(tempRepo, { recursive: true, force: true })
     }
   })
 })

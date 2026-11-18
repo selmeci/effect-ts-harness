@@ -1,16 +1,9 @@
 import { Context, Effect, Layer, Option } from "effect"
 import { match } from "ts-pattern"
-import {
-  CliCommandInput,
-  CliCommandName,
-  CliCommandNotFoundError,
-} from "@harness/contract"
-import {
-  COMMANDS,
-  type CliEnv,
-  type CliResult,
-} from "./daemon-and-omnigraph.service.js"
+import { CliCommandInput, CliCommandName, CliCommandNotFoundError } from "@harness/contract"
+import { COMMANDS, type CliEnv, type CliResult } from "./daemon-and-omnigraph.service.js"
 import { handleGuard, handleRoute } from "./guard-and-route.command.js"
+import { tryReadPreInvocationSessionCache } from "./session-fastpath.js"
 
 export { CliCommandInput, CliCommandName, CliCommandNotFoundError }
 
@@ -170,9 +163,14 @@ export const makeLiveCliCommandDescriptors = (
     name: CliCommandName.make("session"),
     summary: "Inspect active session handoff state and inject pending stubs.",
     execute: (args) =>
-      Effect.promise(() => import("./session-learn-report.command.js")).pipe(
-        Effect.flatMap((m) => m.handleDoctorOrSession(args, options)),
-      ),
+      match(tryReadPreInvocationSessionCache(args, options))
+        .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+        .with({ _tag: "None" }, () =>
+          Effect.promise(() => import("./session-learn-report.command.js")).pipe(
+            Effect.flatMap((m) => m.handleDoctorOrSession(args, options)),
+          ),
+        )
+        .exhaustive(),
   },
   {
     name: CliCommandName.make("doctor"),

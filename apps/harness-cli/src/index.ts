@@ -5,15 +5,8 @@ import { Cause, Effect, Exit, Layer, Logger } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { isPureInterruptCause } from "@harness/contract"
-import { nodeSyncHostIo } from "@harness/infra"
-import {
-  buildSessionReport,
-  readFrictionEvents,
-  readTelemetryEvents,
-  type TelemetryCategory,
-  type TelemetrySurface,
-  writeSessionReportFiles,
-} from "@harness/gates"
+import { type TelemetryCategory, type TelemetrySurface } from "@harness/gates/hook-fastpath"
+import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
 import {
   CANONICAL_CLI_COMMAND_NAMES,
   CliCommandName,
@@ -43,6 +36,7 @@ import {
   type OllamaReadinessOptions,
   recordTelemetry,
   resolveCommandTelemetryOutcome,
+  shouldSuppressLiveRepoTestSideEffects,
   stripAnsiCodes,
   tryQueryWarmDaemonSocket,
 } from "./commands/daemon-and-omnigraph.service.js"
@@ -54,7 +48,10 @@ import {
   resolveTeardownFailure,
 } from "./commands/hook-format.js"
 
-export const handleIngest = (args: ReadonlyArray<string>, options?: CliEnv): Effect.Effect<CliResult> =>
+export const handleIngest = (
+  args: ReadonlyArray<string>,
+  options?: CliEnv,
+): Effect.Effect<CliResult> =>
   Effect.promise(() => import("./commands/session-learn-report.command.js")).pipe(
     Effect.flatMap((m) => m.handleIngest(args, options)),
   )
@@ -135,7 +132,8 @@ export const runCliEffect = (
 
     if (
       effectiveOptions?.repoRoot === undefined &&
-      effectiveOptions?.skipBackgroundDaemons !== true
+      effectiveOptions?.skipBackgroundDaemons !== true &&
+      !shouldSuppressLiveRepoTestSideEffects(CLI_REPO_ROOT)
     ) {
       yield* Effect.try(() => {
         const harnessDir = join(CLI_REPO_ROOT, ".harness")
@@ -180,18 +178,15 @@ export const runCliEffect = (
       res.telemetryDetail !== "fullyIdle=false" &&
       res.telemetryDetail !== "subagent=true" &&
       res.telemetryDetail !== "readOnly=true" &&
-      (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true)
+      (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) &&
+      !shouldSuppressLiveRepoTestSideEffects(repoRoot)
     ) {
-      yield* Effect.try(() => {
-        const finalEvents = readTelemetryEvents(repoRoot, nodeSyncHostIo)
-        const finalFriction = readFrictionEvents(repoRoot, nodeSyncHostIo)
-        const finalReport = buildSessionReport({
-          events: finalEvents,
-          frictionEvents: finalFriction,
-          stampValid: true,
-        })
-        writeSessionReportFiles(repoRoot, finalReport, nodeSyncHostIo)
-      }).pipe(Effect.ignore)
+      yield* Effect.promise(() => import("./commands/mutate-and-bench.command.js")).pipe(
+        Effect.flatMap(({ writeDoneSessionReport }) =>
+          Effect.try(() => writeDoneSessionReport(repoRoot)),
+        ),
+        Effect.ignore,
+      )
     }
 
     return res

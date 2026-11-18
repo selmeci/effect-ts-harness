@@ -232,3 +232,14 @@ export {
   pathsOverlap,
   wavesOf,
 } from "./workflow.js"
+export {
+  MUTATION_CACHE_SCHEMA_VERSION,
+  MutantCacheId,
+  MutationCacheEntry,
+  MutationCacheLookupDecision,
+  MutationCacheLookupInput,
+  MutationCacheStatus,
+  MutationCacheStore,
+  MutationCacheTimestamp,
+  MutationCacheVersion,
+} from "./mutation-cache.js"
