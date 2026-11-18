@@ -638,6 +638,13 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
     }
   }
 
+  if (candidates.some((p) => /(^|\/)\.harness\/(worktrees\/[^/]+\/)?mutate-stamp\.json$/.test(p))) {
+    return {
+      verdict: "deny",
+      reason: `Direct modification of mutate-stamp.json is forbidden (stamp forgery protection): ${filePath}`,
+    }
+  }
+
   if (
     candidates.some(
       (p) =>
@@ -651,11 +658,7 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
     }
   }
 
-  if (
-    candidates.some((p) =>
-      /(^|\/)(\.oxlintrc\.json|tools\/oxlint\/.*|.*\.cedar)$/.test(p),
-    )
-  ) {
+  if (candidates.some((p) => /(^|\/)(\.oxlintrc\.json|tools\/oxlint\/.*|.*\.cedar)$/.test(p))) {
     return {
       verdict: "ask",
       reason: `Modifying harness governance/linter policy requires human confirmation: ${filePath}`,

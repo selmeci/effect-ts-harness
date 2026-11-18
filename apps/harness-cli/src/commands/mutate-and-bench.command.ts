@@ -4,17 +4,35 @@ import { match } from "ts-pattern"
 import {
   AstSourceContent,
   AstSourceFilePath,
+  type CompileInput,
+  type CompiledWorkUnit,
+  EarsRequirementKey,
   HARNESS_GATE_RULE_VERSION,
+  OwnedRelPath,
+  SliceBranchName,
+  type UnitDependency,
+  WaveIndex,
+  WorkUnitId,
 } from "@harness/contract"
 import {
   AstGateCache,
   BenchStageName,
   buildStageLatencyMeasurement,
+  checkMutateStamp,
+  compileWorkflowWaves,
   decideHarnessBench,
   DEFAULT_STAGE_LATENCY_BUDGETS,
+  DstSeedsRunCount,
+  extractGitDiffModifiedLinesChecked,
+  findDomainFiles,
+  findUnclassifiedModifiedLibFiles,
   LatencyMillis,
   LatencySloViolationError,
+  MutateDiffMode,
+  MutateEnforcementMode,
+  removeMutateStamp,
   runDomainMutationSuite,
+  writeMutateStamp,
 } from "@harness/gates"
 import {
   createTypeScriptProgramSession,
@@ -22,10 +40,20 @@ import {
   DatalogSession,
   decideGraphRewrite,
   extractTypeGraph,
+  type GraphSnapshotError,
+  type HarnessGraph,
+  loadGraphSnapshotEffect,
   stepDatalogFileDelta,
 } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
-import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
+import {
+  type CliEnv,
+  type CliResult,
+  findWorkspaceRoot,
+  isIsolatedExternalWorkspace,
+} from "./daemon-and-omnigraph.service.js"
+import { makeDoneBlockResult } from "./hook-format.js"
+import { extractFlag } from "./repo-path.js"
 
 export const handleMutate = (
   argv: ReadonlyArray<string>,
@@ -33,16 +61,209 @@ export const handleMutate = (
 ): Effect.Effect<CliResult> =>
   Effect.sync(() => {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-    const scopeArg = argv.find((arg) => arg.startsWith("--scope="))
-    const scope = scopeArg ? scopeArg.slice("--scope=".length) : undefined
+    const scope = extractFlag(argv, "--scope")
+    const isStrict = argv.includes("--strict")
+    const isAll = argv.includes("--all")
+    const fileCsv = extractFlag(argv, "--file")
+    const baseRef = extractFlag(argv, "--base")
+    const targetFiles =
+      fileCsv !== undefined
+        ? fileCsv
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0)
+        : undefined
 
-    const report = runDomainMutationSuite(repoRoot, nodeSyncHostIo, { scope })
+    const report = runDomainMutationSuite(repoRoot, nodeSyncHostIo, {
+      scope,
+      includeAllLines: isAll,
+      enforcementMode: isStrict ? "strict" : "advisory",
+      targetFiles,
+      baseRef,
+      explicitBaseRef: baseRef !== undefined,
+    })
+
+    if (!report.passed) {
+      removeMutateStamp(repoRoot, nodeSyncHostIo)
+    }
+    if (report.passed && isStrict && scope === undefined && targetFiles === undefined) {
+      writeMutateStamp(repoRoot, nodeSyncHostIo, {
+        enforcementMode: MutateEnforcementMode.make("strict"),
+        diffMode: MutateDiffMode.make(report.diffMode ?? "working-tree"),
+        scannedCandidateFiles: DstSeedsRunCount.make(report.scannedCandidateFiles ?? 0),
+        diffMatchedFiles: report.diffMatchedFiles ?? [],
+        evaluatedFiles: report.evaluatedFiles ?? [],
+        totalMutants: DstSeedsRunCount.make(report.totalMutants),
+        killedCount: DstSeedsRunCount.make(report.killedCount),
+      })
+    }
+
     return {
       exitCode: !report.passed ? 1 : 0,
       stdout: JSON.stringify(report),
-      stderr: "",
+      stderr: report.diagnostic ?? "",
     }
   })
+
+export const hasModifiedMutableFiles = (repoRoot: string): boolean => {
+  const domainFiles = findDomainFiles(repoRoot, nodeSyncHostIo)
+  const diffResult = extractGitDiffModifiedLinesChecked(repoRoot, nodeSyncHostIo, {
+    fallbackBaseRef: "main",
+  })
+  return match(diffResult)
+    .with({ kind: "failed" }, () => true)
+    .with({ kind: "not-git" }, () => domainFiles.length > 0)
+    .with(
+      { kind: "ok" },
+      ({ lines }) =>
+        findUnclassifiedModifiedLibFiles(repoRoot, lines, domainFiles, nodeSyncHostIo).length > 0 ||
+        domainFiles.some((f) => lines.has(f.relFile)),
+    )
+    .exhaustive()
+}
+
+export const evaluateVerifyMutateStampGate = (
+  repoRoot: string,
+  options: CliEnv | undefined,
+): string | undefined => {
+  const shouldEnforce =
+    options?.mutateStampPolicy === "enforce" ||
+    (options?.mutateStampPolicy !== "skip" &&
+      !options?.skipSubprocessVerify &&
+      !isIsolatedExternalWorkspace(repoRoot))
+  if (!shouldEnforce || !hasModifiedMutableFiles(repoRoot)) {
+    return undefined
+  }
+  return match(checkMutateStamp(repoRoot, nodeSyncHostIo))
+    .with({ valid: true }, () => undefined)
+    .with({ valid: false }, ({ reason }) => reason)
+    .exhaustive()
+}
+
+export const resolveVerifyStampMutateMeta = (repoRoot: string) =>
+  match(checkMutateStamp(repoRoot, nodeSyncHostIo))
+    .with({ valid: true }, ({ stamp }) => ({
+      mutateEnforcementMode: stamp.enforcementMode,
+      mutantsEvaluated: stamp.totalMutants,
+    }))
+    .with({ valid: false }, () => undefined)
+    .exhaustive()
+
+export const loadSnapshotPair = (
+  repoRoot: string,
+  initialPlan: HarnessGraph | undefined,
+  initialImpl: HarnessGraph | undefined,
+  isAntigravity: boolean,
+): Effect.Effect<
+  | { readonly _tag: "Done"; readonly result: CliResult }
+  | {
+      readonly _tag: "Graphs"
+      readonly planGraph?: HarnessGraph | undefined
+      readonly implGraph?: HarnessGraph | undefined
+    }
+> =>
+  Effect.gen(function* () {
+    if (initialPlan !== undefined && initialImpl !== undefined) {
+      return { _tag: "Graphs" as const, planGraph: initialPlan, implGraph: initialImpl }
+    }
+    const planPath = join(repoRoot, ".harness", "plan-graph-snapshot.json")
+    const implPath = join(repoRoot, ".harness", "graph-snapshot.json")
+    if (
+      (initialPlan === undefined && !nodeSyncHostIo.existsSync(planPath)) ||
+      (initialImpl === undefined && !nodeSyncHostIo.existsSync(implPath))
+    ) {
+      return { _tag: "Graphs" as const, planGraph: initialPlan, implGraph: initialImpl }
+    }
+
+    const loadOne = (path: string, label: string) =>
+      loadGraphSnapshotEffect(path, nodeSyncHostIo).pipe(
+        Effect.map((graph) => ({ _tag: "Ok" as const, graph })),
+        Effect.catchTag("GraphSnapshotError", (err: GraphSnapshotError) =>
+          Effect.gen(function* () {
+            yield* Effect.logError(
+              `Failed to load ${label} graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`,
+            )
+            return { _tag: "Err" as const, err }
+          }),
+        ),
+      )
+
+    const planLoad =
+      initialPlan !== undefined
+        ? { _tag: "Ok" as const, graph: initialPlan }
+        : yield* loadOne(planPath, "plan")
+    const implLoad =
+      initialImpl !== undefined
+        ? { _tag: "Ok" as const, graph: initialImpl }
+        : yield* loadOne(implPath, "implementation")
+
+    return match({ planLoad, implLoad })
+      .with({ planLoad: { _tag: "Err" } }, ({ planLoad: { err } }) => {
+        const reason = `Corrupt plan graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`
+        return {
+          _tag: "Done" as const,
+          result: makeDoneBlockResult(
+            isAntigravity,
+            reason,
+            "[GATE FAILURE] done:plan-graph-snapshot\n",
+          ),
+        }
+      })
+      .with({ implLoad: { _tag: "Err" } }, ({ implLoad: { err } }) => {
+        const reason = `Corrupt implementation graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`
+        return {
+          _tag: "Done" as const,
+          result: makeDoneBlockResult(
+            isAntigravity,
+            reason,
+            "[GATE FAILURE] done:impl-graph-snapshot\n",
+          ),
+        }
+      })
+      .with({ planLoad: { _tag: "Ok" }, implLoad: { _tag: "Ok" } }, ({ planLoad, implLoad }) => ({
+        _tag: "Graphs" as const,
+        planGraph: planLoad.graph,
+        implGraph: implLoad.graph,
+      }))
+      .exhaustive()
+  })
+
+export const parseDoneDeadlineMs = (): number => {
+  const raw = process.env.HARNESS_DONE_DEADLINE_MS
+  if (raw === undefined || raw.trim().length === 0) {
+    return 23_000
+  }
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 23_000
+}
+
+const buildBenchmarkCompileInput = (): CompileInput => {
+  const units: Array<CompiledWorkUnit> = []
+  const dependencies: Array<UnitDependency> = []
+  for (let layer = 0; layer < 5; layer++) {
+    for (let idx = 0; idx < 10; idx++) {
+      const unitId = WorkUnitId.make(`u-${layer}-${idx}`)
+      units.push({
+        _tag: "SliceUnit",
+        unitId,
+        branch: SliceBranchName.make(`slice/layer${layer}-unit${idx}`),
+        waveIndex: WaveIndex.make(layer),
+        dependsOn: [],
+        ownedRelPaths: [OwnedRelPath.make(`libs/bench/layer-${layer}/unit-${idx}.ts`)],
+        earsKeys: [EarsRequirementKey.make(`REQ-${layer + 1}.${idx + 1}`)],
+      })
+      if (layer > 0) {
+        for (let d = 0; d < 5; d++) {
+          dependencies.push({
+            from: WorkUnitId.make(`u-${layer - 1}-${(idx + d) % 10}`),
+            to: unitId,
+          })
+        }
+      }
+    }
+  }
+  return { units, dependencies }
+}
 
 export const handleBench = (
   argv: ReadonlyArray<string>,
@@ -180,6 +401,35 @@ export const handleBench = (
       rewriteSamples.push(Math.max(0, performance.now() - t0))
     }
 
+    const benchInput = buildBenchmarkCompileInput()
+    const failBenchStage = (msg: string): CliResult => ({
+      exitCode: 1,
+      stdout: JSON.stringify({ overallStatus: "failed", error: msg }),
+      stderr: msg,
+    })
+    yield* compileWorkflowWaves(benchInput).pipe(
+      Effect.catch((err) =>
+        Effect.sync(() => {
+          stageError = `PlanWorkflowCompiler.decide warmup failed: ${String(err)}`
+        }),
+      ),
+    )
+    if (stageError !== undefined) return failBenchStage(stageError)
+
+    const workflowCompilerSamples: Array<number> = []
+    for (let i = 0; i < iterations; i++) {
+      const t0 = performance.now()
+      yield* compileWorkflowWaves(benchInput).pipe(
+        Effect.catch((err) =>
+          Effect.sync(() => {
+            stageError = `PlanWorkflowCompiler.decide failed: ${String(err)}`
+          }),
+        ),
+      )
+      if (stageError !== undefined) return failBenchStage(stageError)
+      workflowCompilerSamples.push(Math.max(0, performance.now() - t0))
+    }
+
     const measurements = [
       buildStageLatencyMeasurement(
         BenchStageName.make("extractTypeGraph.warm"),
@@ -188,6 +438,10 @@ export const handleBench = (
       buildStageLatencyMeasurement(BenchStageName.make("DatalogSession.stepDelta"), datalogSamples),
       buildStageLatencyMeasurement(BenchStageName.make("AstGateCache.warm"), warmAstSamples),
       buildStageLatencyMeasurement(BenchStageName.make("GraphRewrite.decide"), rewriteSamples),
+      buildStageLatencyMeasurement(
+        BenchStageName.make("PlanWorkflowCompiler.decide"),
+        workflowCompilerSamples,
+      ),
     ]
 
     const effectiveBudgets =

@@ -10,6 +10,7 @@ import {
   CompiledWave,
   CompiledWaves,
   CompiledWorkUnit,
+  CompilerRepoRootPath,
   CyclicPlanWorkflowError,
   DisjointOwnershipViolationError,
   EarsRequirementKey,
@@ -50,6 +51,7 @@ import {
   WorkflowCompileReason,
   WorkflowLevel,
   WorkflowRunId,
+  WorkspaceFilePath,
   WorkspaceTreeHash,
   wavesOf,
 } from "../src/index.js"
@@ -101,13 +103,17 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
   it("validates AbsoluteRepoRoot and GitCommitSha (REQ-1.1)", () => {
     expectCases(
       AbsoluteRepoRoot,
-      ["/repo", "/a/b c", "/.gemini/worktree"],
+      ["/repo", "/a/b c", "/.gemini/worktree", "/" + "a".repeat(1023)],
       [
         "",
         "/",
         "rel/path",
         "C:/win",
         "/bad\0",
+        "/repo\x1fsub",
+        "/repo\x00sub",
+        "/repo\x7fsub",
+        "/" + "a".repeat(1024),
         "/../etc/passwd",
         "/./foo",
         "/repo/..",
@@ -499,5 +505,118 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
     expect(badTreeFromPlan).toBe(planSha)
     expect(badUnitFromRun).toBe(runId)
     expect(badRunFromUnit).toBe(unitId)
+
+    const repoRoot = AbsoluteRepoRoot.make("/repo")
+    const gitSha = GitCommitSha.make(SHA_40)
+    const wsPath = WorkspaceFilePath.make("/repo")
+    const compilerRoot = CompilerRepoRootPath.make("/repo")
+
+    // @ts-expect-error AbsoluteRepoRoot cannot be assigned to WorkspaceFilePath
+    const badWsFromAbs: WorkspaceFilePath = repoRoot
+    // @ts-expect-error WorkspaceFilePath cannot be assigned to AbsoluteRepoRoot
+    const badAbsFromWs: AbsoluteRepoRoot = wsPath
+    // @ts-expect-error AbsoluteRepoRoot cannot be assigned to CompilerRepoRootPath
+    const badCompilerFromAbs: CompilerRepoRootPath = repoRoot
+    // @ts-expect-error CompilerRepoRootPath cannot be assigned to AbsoluteRepoRoot
+    const badAbsFromCompiler: AbsoluteRepoRoot = compilerRoot
+    // @ts-expect-error GitCommitSha cannot be assigned to WorkspaceFilePath
+    const badWsFromSha: WorkspaceFilePath = gitSha
+    // @ts-expect-error GitCommitSha cannot be assigned to CompilerRepoRootPath
+    const badCompilerFromSha: CompilerRepoRootPath = gitSha
+    // @ts-expect-error WorkspaceFilePath cannot be assigned to GitCommitSha
+    const badShaFromWs: GitCommitSha = wsPath
+    // @ts-expect-error CompilerRepoRootPath cannot be assigned to GitCommitSha
+    const badShaFromCompiler: GitCommitSha = compilerRoot
+
+    expect(badWsFromAbs).toBe(repoRoot)
+    expect(badAbsFromWs).toBe(wsPath)
+    expect(badCompilerFromAbs).toBe(repoRoot)
+    expect(badAbsFromCompiler).toBe(compilerRoot)
+    expect(badWsFromSha).toBe(gitSha)
+    expect(badCompilerFromSha).toBe(gitSha)
+    expect(badShaFromWs).toBe(wsPath)
+    expect(badShaFromCompiler).toBe(compilerRoot)
+  })
+
+  it("roundtrips CompiledPlan, CompiledWave, CompiledWaves, UnitOutcome, and ShipReceipt via Schema.encodeUnknownSync / Schema.decodeUnknownSync", () => {
+    const sliceUnit: CompiledWorkUnit = {
+      _tag: "SliceUnit",
+      unitId: WorkUnitId.make("unit-slice-1"),
+      branch: SliceBranchName.make("slice/epic-unit1"),
+      waveIndex: WaveIndex.make(0),
+      dependsOn: [],
+      ownedRelPaths: [OwnedRelPath.make("libs/harness/contract/src/workflow.ts")],
+      earsKeys: [EarsRequirementKey.make("REQ-1.1")],
+    }
+    const pkgUnit: CompiledWorkUnit = {
+      _tag: "PackageUnit",
+      unitId: WorkUnitId.make("unit-pkg-1"),
+      projectName: NxProjectName.make("@harness/contract"),
+      waveIndex: WaveIndex.make(1),
+      dependsOn: [WorkUnitId.make("unit-slice-1")],
+      ownedRelPaths: [OwnedRelPath.make("libs/harness/contract/test/workflow.test.ts")],
+      stubKeys: [StubSymbolKey.make("PlanWorkflowCompiler.decide")],
+      earsKeys: [EarsRequirementKey.make("REQ-1.2")],
+      packageVerifyCommand: PackageVerifyCommand.make("pnpm nx run @harness/contract:verify"),
+    }
+
+    const wave0: CompiledWave = { waveIndex: WaveIndex.make(0), units: [sliceUnit] }
+    const wave1: CompiledWave = { waveIndex: WaveIndex.make(1), units: [pkgUnit] }
+    const compiledWaves: CompiledWaves = { units: [sliceUnit, pkgUnit], waves: [wave0, wave1] }
+    const compiledPlan: CompiledPlan = {
+      runId: WorkflowRunId.make("run-0001"),
+      level: WorkflowLevel.make("epic"),
+      planSha: PlanSha256.make(SHA_64_C),
+      baseSha: GitCommitSha.make(SHA_40),
+      mode: {
+        _tag: "Automatic",
+        runner: RunnerId.make("claude-code"),
+        maxConcurrency: MaxConcurrency.make(2),
+      },
+      units: [sliceUnit, pkgUnit],
+      sharedStepPaths: [OwnedRelPath.make("libs/harness/contract/src/index.ts")],
+    }
+    const shipReceipt: ShipReceipt = {
+      runId: WorkflowRunId.make("run-0001"),
+      attempt: ShipAttempt.make(2),
+      verifiedTreeHash: WorkspaceTreeHash.make(SHA_64_A),
+    }
+
+    const roundtripUnknown = <A, E>(schema: Schema.Codec<A, E, never, never>, value: A): A => {
+      const encoded = Schema.encodeUnknownSync(schema)(value)
+      const decoded = Schema.decodeUnknownSync(schema)(encoded)
+      expect(decoded).toEqual(value)
+      return decoded
+    }
+
+    roundtripUnknown(CompiledWave, wave0)
+    roundtripUnknown(CompiledWave, wave1)
+    roundtripUnknown(CompiledWaves, compiledWaves)
+    roundtripUnknown(CompiledPlan, compiledPlan)
+    roundtripUnknown(ShipReceipt, shipReceipt)
+
+    const outcomes: ReadonlyArray<UnitOutcome> = [
+      {
+        _tag: "Completed",
+        unitId: WorkUnitId.make("unit-slice-1"),
+        attempt: AttemptNumber.make(1),
+        changedPaths: [OwnedRelPath.make("libs/harness/contract/src/workflow.ts")],
+        packageStampHash: PackageStampHash.make(SHA_64_B),
+      },
+      {
+        _tag: "Rejected",
+        unitId: WorkUnitId.make("unit-pkg-1"),
+        attempt: AttemptNumber.make(2),
+        rejection: { _tag: "PackageVerifyFailed", exitCode: GateExitCode.make(1) },
+      },
+      {
+        _tag: "Escalated",
+        unitId: WorkUnitId.make("unit-pkg-1"),
+        escalation: { _tag: "MergeConflict", branch: SliceBranchName.make("slice/epic-unit1") },
+      },
+    ]
+    for (const outcome of outcomes) {
+      roundtripUnknown(UnitOutcome, outcome)
+    }
   })
 })

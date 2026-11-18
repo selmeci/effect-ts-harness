@@ -16,11 +16,7 @@ import {
   type TelemetrySurface,
 } from "@harness/gates"
 import { type HarnessGraph } from "@harness/graph"
-import {
-  LocalDecisionModel,
-  nodeSyncHostIo,
-  queryUnixSocketLineDetailed,
-} from "@harness/infra"
+import { LocalDecisionModel, nodeSyncHostIo, queryUnixSocketLineDetailed } from "@harness/infra"
 import type { CliResult, HookStdinTracker } from "./hook-format.js"
 export type { CliResult } from "./hook-format.js"
 
@@ -89,6 +85,7 @@ export interface CliEnv {
   readonly skipSubprocessVerify?: boolean | undefined
   readonly skipBackgroundDaemons?: boolean | undefined
   readonly skipAutoSessionReport?: boolean | undefined
+  readonly mutateStampPolicy?: "enforce" | "skip" | undefined
   readonly stdinTimeoutMs?: number | undefined
   readonly stdinMaxBytes?: number | undefined
   readonly governanceDocs?: ReadonlyArray<GovernanceDocReference> | undefined
@@ -109,10 +106,7 @@ export const resolveDecisionModelLayer = (
       .exhaustive()
   })
 
-export const resolveCommandTelemetryOutcome = (
-  command: string,
-  res: CliResult,
-): TelemetryOutcome =>
+export const resolveCommandTelemetryOutcome = (command: string, res: CliResult): TelemetryOutcome =>
   match(command)
     .with("guard", () => {
       if (res.exitCode !== 0 || res.stdout.includes('"decision":"deny"')) {
@@ -275,7 +269,10 @@ export const cleanSubprocessError = (raw: string): string => {
     }
     filtered.push(line)
   }
-  const result = filtered.join("\n").replace(/\n{3,}/g, "\n\n").trim()
+  const result = filtered
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
   return result.length > 0 ? result : noAnsi.trim()
 }
 
@@ -483,7 +480,10 @@ export const resolveModifiedFilesSinceStampOrHead = (
           })
           .with({ _tag: "TimedOut" }, () => "git status timed out")
           .with({ _tag: "Signaled" }, ({ signal }) => `git status killed by signal ${signal}`)
-          .with({ _tag: "SpawnFailed" }, ({ spawnError }) => `git status spawn failed: ${spawnError}`)
+          .with(
+            { _tag: "SpawnFailed" },
+            ({ spawnError }) => `git status spawn failed: ${spawnError}`,
+          )
           .exhaustive()
         if (statusFailure !== undefined) {
           return { _tag: "GitFailed", reason: statusFailure }

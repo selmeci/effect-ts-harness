@@ -12,12 +12,45 @@ export const DstSeedsRunCount = Schema.Int.pipe(
 )
 export type DstSeedsRunCount = typeof DstSeedsRunCount.Type
 
+export const MutateEnforcementMode = Schema.Literals(["strict", "advisory"]).pipe(
+  Schema.brand("MutateEnforcementMode"),
+)
+export type MutateEnforcementMode = typeof MutateEnforcementMode.Type
+
+export const MutateDiffMode = Schema.Literals([
+  "all-lines",
+  "explicit-files",
+  "working-tree",
+  "branch-base",
+  "not-git",
+]).pipe(Schema.brand("MutateDiffMode"))
+export type MutateDiffMode = typeof MutateDiffMode.Type
+
+export const MutateStampSchema = Schema.Struct({
+  treeHash: Schema.String,
+  timestamp: Schema.String,
+  enforcementMode: MutateEnforcementMode,
+  diffMode: MutateDiffMode,
+  scannedCandidateFiles: DstSeedsRunCount,
+  diffMatchedFiles: Schema.Array(Schema.String),
+  evaluatedFiles: Schema.Array(Schema.String),
+  totalMutants: DstSeedsRunCount,
+  killedCount: DstSeedsRunCount,
+})
+export type MutateStamp = typeof MutateStampSchema.Type
+
+export type CheckMutateStampResult =
+  | { readonly valid: true; readonly stamp: MutateStamp }
+  | { readonly valid: false; readonly reason: string }
+
 export const VerifyStampSchema = Schema.Struct({
   treeHash: Schema.String,
   timestamp: Schema.String,
   taskBranch: Schema.String,
   dstSeed: Schema.optional(DstSeed),
   dstSeedsRun: Schema.optional(DstSeedsRunCount),
+  mutateEnforcementMode: Schema.optional(MutateEnforcementMode),
+  mutantsEvaluated: Schema.optional(DstSeedsRunCount),
 })
 
 export type VerifyStamp = Schema.Schema.Type<typeof VerifyStampSchema>
@@ -115,7 +148,14 @@ export const writeVerifyStamp = (
   repoRoot: string,
   hostIo: SyncHostIo,
   taskBranch?: string,
-  dstOptions?: { readonly dstSeed?: DstSeed | undefined; readonly dstSeedsRun?: number | undefined },
+  dstOptions?: {
+    readonly dstSeed?: DstSeed | undefined
+    readonly dstSeedsRun?: number | undefined
+  },
+  mutateMeta?: {
+    readonly mutateEnforcementMode?: MutateEnforcementMode | undefined
+    readonly mutantsEvaluated?: DstSeedsRunCount | undefined
+  },
 ): VerifyStamp => {
   const treeHash = computeWorkspaceTreeHash(repoRoot, hostIo)
   const envSeed = parseDstSeedEnv(process.env["DST_SEED"])
@@ -127,6 +167,12 @@ export const writeVerifyStamp = (
     dstSeed: resolvedSeed,
     ...(dstOptions?.dstSeedsRun !== undefined
       ? { dstSeedsRun: DstSeedsRunCount.make(Math.max(0, Math.trunc(dstOptions.dstSeedsRun))) }
+      : {}),
+    ...(mutateMeta?.mutateEnforcementMode !== undefined
+      ? { mutateEnforcementMode: mutateMeta.mutateEnforcementMode }
+      : {}),
+    ...(mutateMeta?.mutantsEvaluated !== undefined
+      ? { mutantsEvaluated: mutateMeta.mutantsEvaluated }
       : {}),
   }
   const harnessDir = resolveHarnessStateDir(repoRoot)
@@ -140,10 +186,7 @@ export const writeVerifyStamp = (
 
 const decodeVerifyStamp = Schema.decodeOption(Schema.fromJsonString(VerifyStampSchema))
 
-export const checkVerifyStamp = (
-  repoRoot: string,
-  hostIo: SyncHostIo,
-): CheckVerifyStampResult => {
+export const checkVerifyStamp = (repoRoot: string, hostIo: SyncHostIo): CheckVerifyStampResult => {
   const harnessDir = resolveHarnessStateDir(repoRoot)
   const stampPath = join(harnessDir, "verify-stamp.json")
   if (!hostIo.existsSync(stampPath)) {
@@ -172,6 +215,77 @@ export const checkVerifyStamp = (
         }
       }
 
+      return {
+        valid: true as const,
+        stamp,
+      }
+    })
+    .exhaustive()
+}
+
+export const writeMutateStamp = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  input: Omit<MutateStamp, "treeHash" | "timestamp">,
+): MutateStamp => {
+  const treeHash = computeWorkspaceTreeHash(repoRoot, hostIo)
+  const stamp: MutateStamp = {
+    treeHash,
+    timestamp: new Date().toISOString(),
+    ...input,
+  }
+  const harnessDir = resolveHarnessStateDir(repoRoot)
+  if (!hostIo.existsSync(harnessDir)) {
+    hostIo.mkdirRecursiveSync(harnessDir)
+  }
+  const stampPath = join(harnessDir, "mutate-stamp.json")
+  hostIo.writeTextSync(stampPath, JSON.stringify(stamp, null, 2) + "\n")
+  return stamp
+}
+
+export const removeMutateStamp = (repoRoot: string, hostIo: SyncHostIo): void => {
+  const stampPath = join(resolveHarnessStateDir(repoRoot), "mutate-stamp.json")
+  if (hostIo.existsSync(stampPath)) {
+    hostIo.unlinkSync(stampPath)
+  }
+}
+
+const decodeMutateStamp = Schema.decodeOption(Schema.fromJsonString(MutateStampSchema))
+
+export const checkMutateStamp = (repoRoot: string, hostIo: SyncHostIo): CheckMutateStampResult => {
+  const stampPath = join(resolveHarnessStateDir(repoRoot), "mutate-stamp.json")
+  if (!hostIo.existsSync(stampPath)) {
+    return {
+      valid: false,
+      reason:
+        "Missing .harness/mutate-stamp.json. Run pnpm harness mutate --strict after your latest edits before verify.",
+    }
+  }
+
+  const content = hostIo.readTextSync(stampPath)
+  const decoded = decodeMutateStamp(content)
+  return match(decoded)
+    .with({ _tag: "None" }, () => ({
+      valid: false as const,
+      reason:
+        "Invalid .harness/mutate-stamp.json. Run pnpm harness mutate --strict after your latest edits before verify.",
+    }))
+    .with({ _tag: "Some" }, ({ value: stamp }) => {
+      if (stamp.enforcementMode !== "strict") {
+        return {
+          valid: false as const,
+          reason:
+            "Advisory .harness/mutate-stamp.json is insufficient for verify. Run pnpm harness mutate --strict after your latest edits before verify.",
+        }
+      }
+      const currentTreeHash = computeWorkspaceTreeHash(repoRoot, hostIo)
+      if (stamp.treeHash !== currentTreeHash) {
+        return {
+          valid: false as const,
+          reason:
+            "Workspace files changed since last mutate --strict. Run pnpm harness mutate --strict after your latest edits before verify.",
+        }
+      }
       return {
         valid: true as const,
         stamp,

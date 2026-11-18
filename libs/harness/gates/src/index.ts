@@ -26,12 +26,20 @@ export {
 } from "./policy.js"
 export {
   DstSeedsRunCount,
+  MutateDiffMode,
+  MutateEnforcementMode,
+  MutateStampSchema,
   VerifyStampSchema,
+  checkMutateStamp,
   checkVerifyStamp,
   computeWorkspaceTreeHash,
   parseDstSeedEnv,
+  removeMutateStamp,
+  type CheckMutateStampResult,
   type CheckVerifyStampResult,
+  type MutateStamp,
   type VerifyStamp,
+  writeMutateStamp,
   writeVerifyStamp,
 } from "./verify-stamp.js"
 export { diffPlanAndImplGraphs, formatEntityKey, type PlanImplDiffResult } from "./branch-diff.js"
@@ -163,12 +171,15 @@ export {
   evaluateMutationOutcomes,
   evaluateSpanSaturationViolations,
   extractGitDiffModifiedLines,
+  findDomainFiles,
   findReachingTestFiles,
+  findUnclassifiedModifiedLibFiles,
   getActiveMutantId,
   getWorkspaceGitDiffModifiedLines,
   isMutantMarkedEquivalent,
   normalizePriorMillis,
   parseGitDiffModifiedLines,
+  partitionReachingTestFiles,
   runDomainMutationSuite,
   setActiveMutantId,
   stripAnsi,
@@ -437,7 +448,15 @@ export {
   readdirOrReport,
 } from "./plugins/gc/gc-helpers.js"
 export { GATE_RULE_SOURCE_FILES } from "./plugins/gc/gc-doc-truth.plugin.js"
-export { MUTATION_PATTERNS, isAssertionFailure } from "./mutation/mutant-ast-generator.js"
+export {
+  MUTATION_PATTERNS,
+  isAssertionFailure,
+  verifyMutantSchemaSyntax,
+} from "./mutation/mutant-ast-generator.js"
+export {
+  extractGitDiffModifiedLinesChecked,
+  type GitDiffExtractionResult,
+} from "./mutation/mutation-backup.js"
 export { readAndVerifyWorkspaceFile, statAndReadWorkspaceFiles } from "./services/workspace-fs.js"
 export { execCheckedSubprocess, validateSubprocessInput } from "./services/subprocess-runner.js"
 export { withActiveMutantEffect } from "./services/active-mutant-context.js"

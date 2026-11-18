@@ -52,7 +52,10 @@ export const IMMUTABLE_TCB_PATHS: ReadonlyArray<string> = [
   "libs/harness/gates/src/ast-cache.ts",
   "libs/harness/gates/src/plugins/ast-gate-visitors.ts",
   "libs/harness/gates/src/mutation-check.ts",
+  "libs/harness/gates/src/mutation-subprocess-helpers.ts",
   "libs/harness/gates/src/mutation/mutant-ast-generator.ts",
+  "libs/harness/gates/src/mutation/mutation-backup.ts",
+  "libs/harness/gates/src/mutation/mutation-target-discovery.ts",
   "libs/harness/gates/src/rule-synthesizer.ts",
   "apps/harness-cli/src/index.ts",
 ]
@@ -443,7 +446,9 @@ export const evaluatePositiveReplay = (
   const badNodeSet = new Set<string>(badNodes)
   const goodNodeSet = new Set<string>(goodNodes)
   const concreteRhsNodes = new Set(rhsNodes.map(instantiate))
-  const removedNodes = new Set(badNodes.filter((n) => !concreteRhsNodes.has(n) && !goodNodeSet.has(n)))
+  const removedNodes = new Set(
+    badNodes.filter((n) => !concreteRhsNodes.has(n) && !goodNodeSet.has(n)),
+  )
   const addedNodes = [...concreteRhsNodes].filter((n) => !badNodeSet.has(n))
 
   const rewrittenNodes = new Set<string>(badNodes.filter((n) => !removedNodes.has(n)))
@@ -726,4 +731,3 @@ export const RuleSynthesizer = {
   evaluatePositiveReplay,
   evaluateZeroFalsePositive,
 } as const
-

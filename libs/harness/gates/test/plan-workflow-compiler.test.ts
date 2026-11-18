@@ -534,6 +534,169 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
       }),
   )
 
+  it.effect(
+    "REQ-2.3: isolates 2-node cycle (a <-> b) and excludes upstream (c -> a) and downstream (b -> d) acyclic nodes",
+    () =>
+      Effect.gen(function* () {
+        const exit = yield* Effect.exit(
+          PlanWorkflowCompiler.decide({
+            units: [
+              makeSliceUnit("c", ["libs/c.ts"]),
+              makeSliceUnit("a", ["libs/a.ts"]),
+              makeSliceUnit("b", ["libs/b.ts"]),
+              makeSliceUnit("d", ["libs/d.ts"]),
+            ],
+            dependencies: [
+              makeDep("c", "a"),
+              makeDep("a", "b"),
+              makeDep("b", "a"),
+              makeDep("b", "d"),
+            ],
+          }),
+        )
+        const err = extractTypedError(exit)
+        expect(err).toBeInstanceOf(CyclicPlanWorkflowError)
+        match(err)
+          .with({ _tag: "CyclicPlanWorkflowError" }, (cycleErr) => {
+            expect(cycleErr.cycleUnits).toEqual([WorkUnitId.make("a"), WorkUnitId.make("b")])
+          })
+          .with({ _tag: "InvalidPlanWorkflowGraphError" }, () => {
+            expect.unreachable("Expected CyclicPlanWorkflowError")
+          })
+          .exhaustive()
+      }),
+  )
+
+  it.effect(
+    "REQ-2.2: reports DanglingUnitDependency with exact from/to/missingUnitId for missing dep.from and dep.to via input.dependencies and unit.dependsOn",
+    () =>
+      Effect.gen(function* () {
+        const cases: ReadonlyArray<{
+          readonly label: string
+          readonly input: CompileInput
+          readonly expectedFrom: string
+          readonly expectedTo: string
+          readonly expectedMissing: string
+        }> = [
+          {
+            label: "input.dependencies missing dep.from",
+            input: {
+              units: [makeSliceUnit("u1", ["libs/u1.ts"])],
+              dependencies: [makeDep("ghost-from", "u1")],
+            },
+            expectedFrom: "ghost-from",
+            expectedTo: "u1",
+            expectedMissing: "ghost-from",
+          },
+          {
+            label: "input.dependencies missing dep.to",
+            input: {
+              units: [makeSliceUnit("u1", ["libs/u1.ts"])],
+              dependencies: [makeDep("u1", "ghost-to")],
+            },
+            expectedFrom: "u1",
+            expectedTo: "ghost-to",
+            expectedMissing: "ghost-to",
+          },
+          {
+            label: "unit.dependsOn missing dep.from",
+            input: {
+              units: [makeSliceUnit("u1", ["libs/u1.ts"], ["ghost-depends-on"])],
+              dependencies: [],
+            },
+            expectedFrom: "ghost-depends-on",
+            expectedTo: "u1",
+            expectedMissing: "ghost-depends-on",
+          },
+        ]
+
+        for (const testCase of cases) {
+          const exit = yield* Effect.exit(PlanWorkflowCompiler.decide(testCase.input))
+          const err = extractTypedError(exit)
+          expect(err, testCase.label).toBeInstanceOf(InvalidPlanWorkflowGraphError)
+          match(err)
+            .with({ _tag: "InvalidPlanWorkflowGraphError" }, (invalidErr) =>
+              match(invalidErr.issue)
+                .with({ _tag: "DanglingUnitDependency" }, (issue) => {
+                  expect(issue.from, testCase.label).toBe(WorkUnitId.make(testCase.expectedFrom))
+                  expect(issue.to, testCase.label).toBe(WorkUnitId.make(testCase.expectedTo))
+                  expect(issue.missingUnitId, testCase.label).toBe(
+                    WorkUnitId.make(testCase.expectedMissing),
+                  )
+                })
+                .with({ _tag: "DuplicateWorkUnitId" }, () => {
+                  expect.unreachable(`Expected DanglingUnitDependency for ${testCase.label}`)
+                })
+                .exhaustive(),
+            )
+            .with({ _tag: "CyclicPlanWorkflowError" }, () => {
+              expect.unreachable(`Expected InvalidPlanWorkflowGraphError for ${testCase.label}`)
+            })
+            .exhaustive()
+        }
+      }),
+  )
+
+  it.effect.prop(
+    "REQ-1.1 property: AbsoluteRepoRoot rejects arbitrary strings with ASCII 0x00..0x1f / 0x7f control chars and accepts valid multi-segment POSIX paths <= 1024 chars",
+    {
+      raw: Schema.String,
+      ctrlIdx: Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 0, maximum: 32 }))),
+      segments: Schema.Array(
+        Schema.NonEmptyString.pipe(
+          Schema.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,15}$/)),
+        ),
+      ).pipe(Schema.check(Schema.isMinLength(1), Schema.isMaxLength(8))),
+    },
+    ({ raw, ctrlIdx, segments }) =>
+      Effect.sync(() => {
+        const ctrlCode = ctrlIdx === 32 ? 0x7f : ctrlIdx
+        const ctrlChar = String.fromCharCode(ctrlCode)
+        const injected = `/repo${ctrlChar}${raw}sub`
+        const rejectedExit = Schema.decodeExit(AbsoluteRepoRoot)(injected)
+        match(rejectedExit)
+          .with({ _tag: "Failure" }, () => undefined)
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable(
+              `Expected AbsoluteRepoRoot to reject control char 0x${ctrlCode.toString(16)}`,
+            )
+          })
+          .exhaustive()
+
+        const validPosix = `/${segments.join("/")}`
+        expect(validPosix.length).toBeLessThanOrEqual(1024)
+        const acceptedExit = Schema.decodeExit(AbsoluteRepoRoot)(validPosix)
+        match(acceptedExit)
+          .with({ _tag: "Success" }, ({ value }) => {
+            expect(value).toBe(validPosix)
+          })
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            expect.unreachable(
+              `Expected valid POSIX path '${validPosix}' to decode: ${Cause.pretty(cause)}`,
+            )
+          })
+          .exhaustive()
+      }),
+  )
+
+  it.effect.prop(
+    "REQ-1.2 property: CompiledWorkUnit and UnitOutcome roundtrip via Schema.encodeSync / Schema.decodeUnknownSync",
+    {
+      unit: CompiledWorkUnit,
+      outcome: UnitOutcome,
+    },
+    ({ unit, outcome }) =>
+      Effect.gen(function* () {
+        const encodedUnit: unknown = yield* Schema.encodeEffect(CompiledWorkUnit)(unit)
+        const decodedUnit = yield* Schema.decodeUnknownEffect(CompiledWorkUnit)(encodedUnit)
+        expect(decodedUnit).toEqual(unit)
+
+        const encodedOutcome: unknown = yield* Schema.encodeEffect(UnitOutcome)(outcome)
+        const decodedOutcome = yield* Schema.decodeUnknownEffect(UnitOutcome)(encodedOutcome)
+        expect(decodedOutcome).toEqual(outcome)
+      }),
+  )
+
   it.effect.prop(
     "REQ-1.3 property: wavesOf groups arbitrary unsorted CompiledWorkUnit[] by ascending waveIndex and lexicographic unitId",
     {

@@ -3,6 +3,7 @@ import { Cause, Exit, Schema } from "effect"
 import { match } from "ts-pattern"
 import { describe, expect, it } from "vitest"
 import {
+  AbsoluteRepoRoot,
   ActiveMutantId,
   AstGateDecisionReport,
   AstGateEvaluationError,
@@ -10,8 +11,12 @@ import {
   AstSourceContent,
   AstSourceFilePath,
   CANONICAL_MCP_TOOL_NAMES,
+  CompiledPlan,
+  CompiledWaves,
+  type CompiledWorkUnit,
   CompilerRepoRootPath,
   ContentSha256,
+  CyclicPlanWorkflowError,
   DaemonServerError,
   DaemonServerErrorKind,
   DaemonSocketPath,
@@ -20,25 +25,31 @@ import {
   DecisionCachePayloadJson,
   DecisionCacheStatsSnapshot,
   DecisionCacheTtlMillis,
+  DisjointOwnershipViolationError,
+  EarsRequirementKey,
   EnclosingSymbolName,
   ErrorReasonMessage,
   EvaluatorId,
   GateRuleId,
   GateViolationMessage,
+  GitCommitSha,
   HARNESS_AST_GATE_CACHE_FILENAME,
   HARNESS_DECISION_CACHE_FILENAME,
   HARNESS_GATE_RULE_VERSION,
   HarnessSubprocessError,
   HarnessTierTopologyInput,
   HarnessTierTopologyReport,
+  InvalidPlanWorkflowGraphError,
   InvalidReviewRouteInputError,
   McpToolName,
   NonNegativeCount,
   NxScopeTag,
   NxTierTag,
+  OwnedRelPath,
   PackageDependencyName,
   PackageManifestName,
   PackageManifestPath,
+  PlanSha256,
   PluginId,
   REVIEW_DEPTH_LEVELS,
   REVIEW_DEPTH_RANK,
@@ -57,6 +68,7 @@ import {
   SelfDogfoodingMessage,
   SelfDogfoodingReport,
   SelfDogfoodingViolationError,
+  SliceBranchName,
   SourceLineNumber,
   StdinReadError,
   SubprocessArg,
@@ -65,6 +77,11 @@ import {
   SubprocessOutput,
   TierTopologyMessage,
   TierTopologyRuleId,
+  WaveIndex,
+  WorkUnitId,
+  WorkflowCompileReason,
+  WorkflowLevel,
+  WorkflowRunId,
   WorkspaceFilePath,
   WorkspaceFsOperation,
   getReviewDepthRank,
@@ -83,6 +100,7 @@ import {
   sanitizeWorktreeIdSegment,
   toErrorReasonMessage,
   validateSubprocessInput,
+  wavesOf,
 } from "../src/index.js"
 
 describe("@harness/contract schemas", () => {
@@ -363,7 +381,9 @@ describe("@harness/contract schemas", () => {
         expect(s.value.failureKind).toBe("signal")
       })
       .with({ _tag: "Failure" }, (f) => {
-        expect.unreachable(`Expected HarnessSubprocessError with signal to succeed: ${Cause.pretty(f.cause)}`)
+        expect.unreachable(
+          `Expected HarnessSubprocessError with signal to succeed: ${Cause.pretty(f.cause)}`,
+        )
       })
       .exhaustive()
 
@@ -457,7 +477,9 @@ describe("@harness/contract schemas", () => {
       message: SelfDogfoodingMessage.make("failed"),
       violations: [],
     }
-    expect(() => Schema.decodeUnknownSync(SelfDogfoodingViolationError)(emptyDogfoodingErr)).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(SelfDogfoodingViolationError)(emptyDogfoodingErr),
+    ).toThrow()
 
     const evalErr = new AstGateEvaluationError({
       filePath: AstSourceFilePath.make("libs/a.ts"),
@@ -514,9 +536,29 @@ describe("@harness/contract schemas", () => {
 
     expect(HARNESS_AST_GATE_CACHE_FILENAME).toBe("ast-gate-cache-v1.json")
     expect(HARNESS_DECISION_CACHE_FILENAME).toBe("decision-cache-v1.json")
-    expect(resolveDefaultAstGateCachePath("/repo/")).toBe("/repo/.harness/cache/ast-gate-cache-v1.json")
-    expect(resolveDefaultDecisionCachePath("/repo")).toBe("/repo/.harness/cache/decision-cache-v1.json")
-    for (const invalidRoot of ["", "   ", "/", "///", "/.", "/..", "/tmp/..", ".", "..", "./.", "a/..", "../..", "C:\\.", "C:\\a\\..", "/repo\0"]) {
+    expect(resolveDefaultAstGateCachePath("/repo/")).toBe(
+      "/repo/.harness/cache/ast-gate-cache-v1.json",
+    )
+    expect(resolveDefaultDecisionCachePath("/repo")).toBe(
+      "/repo/.harness/cache/decision-cache-v1.json",
+    )
+    for (const invalidRoot of [
+      "",
+      "   ",
+      "/",
+      "///",
+      "/.",
+      "/..",
+      "/tmp/..",
+      ".",
+      "..",
+      "./.",
+      "a/..",
+      "../..",
+      "C:\\.",
+      "C:\\a\\..",
+      "/repo\0",
+    ]) {
       expect(() => resolveDefaultAstGateCachePath(invalidRoot)).toThrow()
       expect(() => resolveDefaultDecisionCachePath(invalidRoot)).toThrow()
       expect(() => normalizeNonRootWorkspacePath(invalidRoot)).toThrow()
@@ -707,5 +749,91 @@ describe("@harness/contract schemas", () => {
         touchedScopes: Array.from({ length: 17 }, () => "scope:web"),
       }),
     ).toThrow()
+  })
+
+  it("exports all WF-1 root barrel symbols and exercises wavesOf sorting + GitCommitSha decode", () => {
+    expect(AbsoluteRepoRoot).toBeDefined()
+    expect(GitCommitSha).toBeDefined()
+    expect(WorkflowRunId).toBeDefined()
+    expect(WorkUnitId).toBeDefined()
+    expect(OwnedRelPath).toBeDefined()
+    expect(CompiledPlan).toBeDefined()
+    expect(CompiledWaves).toBeDefined()
+    expect(CyclicPlanWorkflowError).toBeDefined()
+    expect(DisjointOwnershipViolationError).toBeDefined()
+    expect(InvalidPlanWorkflowGraphError).toBeDefined()
+    expect(wavesOf).toBeTypeOf("function")
+
+    const validSha = "0123456789abcdef0123456789abcdef01234567"
+    expect(Schema.decodeSync(GitCommitSha)(validSha)).toBe(validSha)
+    expect(() => Schema.decodeSync(GitCommitSha)("not-a-sha")).toThrow()
+
+    expect(Schema.decodeSync(AbsoluteRepoRoot)("/workspace/repo")).toBe("/workspace/repo")
+    const runId = Schema.decodeSync(WorkflowRunId)("run-barrel-01")
+    const relPathA = Schema.decodeSync(OwnedRelPath)("libs/a.ts")
+    const relPathB = Schema.decodeSync(OwnedRelPath)("libs/b.ts")
+    const unitZ: CompiledWorkUnit = {
+      _tag: "SliceUnit",
+      unitId: WorkUnitId.make("unit-z"),
+      branch: SliceBranchName.make("slice/epic-z"),
+      waveIndex: WaveIndex.make(1),
+      dependsOn: [],
+      ownedRelPaths: [relPathB],
+      earsKeys: [EarsRequirementKey.make("REQ-1.3")],
+    }
+    const unitA: CompiledWorkUnit = {
+      _tag: "SliceUnit",
+      unitId: WorkUnitId.make("unit-a"),
+      branch: SliceBranchName.make("slice/epic-a"),
+      waveIndex: WaveIndex.make(1),
+      dependsOn: [],
+      ownedRelPaths: [relPathA],
+      earsKeys: [EarsRequirementKey.make("REQ-1.3")],
+    }
+    const unitRoot: CompiledWorkUnit = {
+      _tag: "SliceUnit",
+      unitId: WorkUnitId.make("unit-0"),
+      branch: SliceBranchName.make("slice/epic-0"),
+      waveIndex: WaveIndex.make(0),
+      dependsOn: [],
+      ownedRelPaths: [OwnedRelPath.make("libs/root.ts")],
+      earsKeys: [EarsRequirementKey.make("REQ-1.3")],
+    }
+
+    const plan = Schema.decodeSync(CompiledPlan)({
+      runId,
+      level: WorkflowLevel.make("epic"),
+      planSha: PlanSha256.make("a".repeat(64)),
+      baseSha: validSha,
+      mode: { _tag: "Manual" },
+      units: [unitZ, unitA, unitRoot],
+      sharedStepPaths: [],
+    })
+    const sortedWaves = wavesOf(plan)
+    expect(sortedWaves.map((w) => w.waveIndex)).toEqual([0, 1])
+    expect(sortedWaves[0]?.units.map((u) => u.unitId)).toEqual(["unit-0"])
+    expect(sortedWaves[1]?.units.map((u) => u.unitId)).toEqual(["unit-a", "unit-z"])
+
+    const wrappedWaves = Schema.decodeSync(CompiledWaves)({
+      units: [unitZ, unitA, unitRoot],
+      waves: sortedWaves,
+    })
+    expect(wavesOf(wrappedWaves)).toEqual(sortedWaves)
+
+    const cyclicErr = new CyclicPlanWorkflowError({
+      cycleUnits: [WorkUnitId.make("unit-a"), WorkUnitId.make("unit-z")],
+      reason: WorkflowCompileReason.make("cycle"),
+    })
+    const disjointErr = new DisjointOwnershipViolationError({
+      waveIndex: WaveIndex.make(1),
+      overlappingPaths: [relPathA],
+    })
+    const invalidErr = new InvalidPlanWorkflowGraphError({
+      issue: { _tag: "DuplicateWorkUnitId", unitId: WorkUnitId.make("unit-a") },
+      reason: WorkflowCompileReason.make("duplicate"),
+    })
+    expect(cyclicErr._tag).toBe("CyclicPlanWorkflowError")
+    expect(disjointErr._tag).toBe("DisjointOwnershipViolationError")
+    expect(invalidErr._tag).toBe("InvalidPlanWorkflowGraphError")
   })
 })

@@ -1,34 +1,56 @@
 /**
  * @fileoverview Mutation verification gate, mutant discovery, test execution, and span saturation analysis.
  */
-import { join, relative } from "node:path"
-import { Effect, Result, Schema } from "effect"
+import { join, resolve } from "node:path"
+import { Effect, Result } from "effect"
 import { match } from "ts-pattern"
-import { computeContentSha256 } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
-import { classifyMutantSubprocessResult, stripAnsi } from "./mutation-subprocess-helpers.js"
-
-export { stripAnsi }
+import { runVitestTargetList, stripAnsi } from "./mutation-subprocess-helpers.js"
 import {
-  getActiveMutantId, setActiveMutantId, withActiveMutantEffect,
+  getActiveMutantId,
+  setActiveMutantId,
+  withActiveMutantEffect,
 } from "./services/active-mutant-context.js"
 import {
-  CodeMutant, compileMutantSchemaModule, discoverDomainMutants, evaluateMutantSchemaInProcess,
-  MutantCategory, MutantOutcome, type MutantSchemaModule, parseGitDiffModifiedLines,
+  CodeMutant,
+  compileMutantSchemaModule,
+  discoverDomainMutants,
+  evaluateMutantSchemaInProcess,
+  MutantCategory,
+  MutantOutcome,
+  type MutantSchemaModule,
+  parseGitDiffModifiedLines,
+  verifyMutantSchemaSyntax,
 } from "./mutation/mutant-ast-generator.js"
 import {
-  BackupSchema,
   extractGitDiffModifiedLinesChecked,
-  type GitDiffExtractionResult,
   recoverStartupBackup,
-  unlinkBackupChecked,
-  writeMutationBackup,
 } from "./mutation/mutation-backup.js"
+import {
+  type DomainFile,
+  findDomainFiles,
+  findReachingTestFiles,
+  findUnclassifiedModifiedLibFiles,
+  partitionReachingTestFiles,
+} from "./mutation/mutation-target-discovery.js"
 
 export {
-  MutantCategory, CodeMutant, MutantOutcome, type MutantSchemaModule,
-  getActiveMutantId, setActiveMutantId, parseGitDiffModifiedLines,
-  discoverDomainMutants, compileMutantSchemaModule, evaluateMutantSchemaInProcess,
+  stripAnsi,
+  MutantCategory,
+  CodeMutant,
+  MutantOutcome,
+  type MutantSchemaModule,
+  type DomainFile,
+  getActiveMutantId,
+  setActiveMutantId,
+  parseGitDiffModifiedLines,
+  discoverDomainMutants,
+  compileMutantSchemaModule,
+  evaluateMutantSchemaInProcess,
+  findDomainFiles,
+  findReachingTestFiles,
+  findUnclassifiedModifiedLibFiles,
+  partitionReachingTestFiles,
 }
 
 export interface SpanSaturationSpec {
@@ -80,6 +102,16 @@ export interface MutationSuiteReport {
   readonly equivalentMutants?: ReadonlyArray<CodeMutant> | undefined
   readonly saturationViolations?: ReadonlyArray<SaturationViolation> | undefined
   readonly diagnostic?: string | undefined
+  readonly diffMode?:
+    | "all-lines"
+    | "explicit-files"
+    | "working-tree"
+    | "branch-base"
+    | "not-git"
+    | undefined
+  readonly scannedCandidateFiles?: number | undefined
+  readonly diffMatchedFiles?: ReadonlyArray<string> | undefined
+  readonly evaluatedFiles?: ReadonlyArray<string> | undefined
 }
 
 export const evaluateSpanSaturationViolations = (
@@ -87,7 +119,6 @@ export const evaluateSpanSaturationViolations = (
   observations: ReadonlyArray<TraceSpanObservation>,
 ): ReadonlyArray<SaturationViolation> => {
   const byId = new Map<string, TraceSpanObservation>(observations.map((o) => [o.spanId, o]))
-
   const getAncestorSpanNamesAndSelf = (obs: TraceSpanObservation): ReadonlySet<string> => {
     const names = new Set<string>([obs.name])
     const visited = new Set<string>([obs.spanId])
@@ -115,7 +146,11 @@ export const evaluateSpanSaturationViolations = (
 
   for (const obs of observations) {
     for (const spanName of getAncestorSpanNamesAndSelf(obs)) {
-      if (obs.exitTag === "Failure" && typeof obs.errorTag === "string" && obs.errorTag.length > 0) {
+      if (
+        obs.exitTag === "Failure" &&
+        typeof obs.errorTag === "string" &&
+        obs.errorTag.length > 0
+      ) {
         recordTag(errorTagsBySpan, spanName, obs.errorTag)
         recordTag(branchTagsBySpan, spanName, obs.errorTag)
       }
@@ -140,7 +175,6 @@ export const evaluateSpanSaturationViolations = (
         message: `[SAT-01] Unexercised error channel(s) on '${spec.spanName}' (${spec.spanQualname}): [${missingErrors.join(", ")}] were never observed on '${spec.spanName}' or its descendant spans.`,
       })
     }
-
     const declaredBranches = spec.declaredBranchTags ?? []
     if (declaredBranches.length >= 2) {
       const observedBranches = branchTagsBySpan.get(spec.spanName) ?? new Set<string>()
@@ -158,7 +192,6 @@ export const evaluateSpanSaturationViolations = (
       }
     }
   }
-
   return violations
 }
 
@@ -174,8 +207,7 @@ export const isMutantMarkedEquivalent = (
     .with("equivalent", () => true)
     .with("killed", "survived", () => {
       const prior = priors?.[outcome.mutant.id]
-      if (prior === undefined) return false
-      return normalizePriorMillis(prior) >= threshold
+      return prior !== undefined && normalizePriorMillis(prior) >= threshold
     })
     .exhaustive()
 
@@ -214,22 +246,20 @@ export const evaluateMutationOutcomes = (
       .with("survived", "equivalent", () => false)
       .exhaustive(),
   ).length
-  const totalMutants = outcomes.length
-  const actionableMutants = totalMutants - equivalentMutants.length
+  const actionableMutants = outcomes.length - equivalentMutants.length
   const mutationScore = actionableMutants <= 0 ? 1 : killedCount / actionableMutants
-  const effectiveMinScore = minScore ?? 1
-
   const saturationViolations =
     saturationSpecs !== undefined && spanObservations !== undefined
       ? evaluateSpanSaturationViolations(saturationSpecs, spanObservations)
       : undefined
-
-  const saturationPassed = saturationViolations === undefined || saturationViolations.length === 0
-  const passed = survivedCount === 0 && mutationScore >= effectiveMinScore && saturationPassed
+  const passed =
+    survivedCount === 0 &&
+    mutationScore >= (minScore ?? 1) &&
+    (saturationViolations === undefined || saturationViolations.length === 0)
 
   return {
     passed,
-    totalMutants,
+    totalMutants: outcomes.length,
     killedCount,
     survivedCount,
     mutationScore,
@@ -255,132 +285,44 @@ export const decideMutationReport = Effect.fn("MutationCheck.decide")(function* 
   )
 })
 
-/**
- * Decides whether the mutation suite report passes based on killed mutants,
- * minimum score threshold, equivalence priors, and span saturation specifications.
- */
 export const decideMutationCheck = decideMutationReport
-
-interface DomainFile {
-  readonly scope: string
-  readonly tier: "domain" | "core" | "contract"
-  readonly fullPath: string
-  readonly relFile: string
-}
-
-const findDomainFiles = (
-  repoRoot: string,
-  hostIo: SyncHostIo,
-  scope?: string,
-): ReadonlyArray<DomainFile> => {
-  const results: Array<DomainFile> = []
-  const libsDir = join(repoRoot, "libs")
-  if (!hostIo.existsSync(libsDir)) return results
-
-  const cleanScope = scope
-    ? scope.replace(/^@harness\//, "").replace(/-(domain|core|contract)$/, "")
-    : undefined
-  const scopes =
-    cleanScope !== undefined
-      ? [cleanScope]
-      : hostIo.readdirSync(libsDir).map((e) => e.name)
-
-  for (const s of scopes) {
-    const scopePath = join(libsDir, s)
-    const tiersToScan = [
-      { dir: join(scopePath, "domain", "src"), tier: "domain" as const },
-      { dir: join(scopePath, "domain", "test", "fixtures"), tier: "domain" as const },
-      { dir: join(scopePath, "core", "src"), tier: "core" as const },
-      { dir: join(scopePath, "core", "test", "fixtures"), tier: "core" as const },
-      { dir: join(scopePath, "contract", "src"), tier: "contract" as const },
-    ]
-
-    for (const { dir, tier } of tiersToScan) {
-      if (!hostIo.existsSync(dir)) continue
-      const walk = (d: string) => {
-        for (const entry of hostIo.readdirSync(d)) {
-          const full = join(d, entry.name)
-          match({ isDirectory: entry.isDirectory, isFile: entry.isFile })
-            .with({ isDirectory: true }, () => {
-              walk(full)
-            })
-            .with({ isDirectory: false, isFile: true }, () => {
-              if ((entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) && !entry.name.endsWith(".d.ts")) {
-                if (tier === "contract") {
-                  const content = hostIo.readTextSync(full)
-                  if (content.includes("Effect.fn") || content.includes("Effect.gen") || content.includes("match(")) {
-                    results.push({ scope: s, tier, fullPath: full, relFile: relative(repoRoot, full).replace(/\\/g, "/") })
-                  }
-                } else {
-                  results.push({ scope: s, tier, fullPath: full, relFile: relative(repoRoot, full).replace(/\\/g, "/") })
-                }
-              }
-            })
-            .with({ isDirectory: false, isFile: false }, () => {})
-            .exhaustive()
-        }
-      }
-      walk(dir)
-    }
-  }
-
-  return results
-}
 
 export const extractGitDiffModifiedLines = (
   repoRoot: string,
   hostIo: SyncHostIo,
-): ReadonlyMap<string, ReadonlySet<number>> | undefined => {
-  const res = extractGitDiffModifiedLinesChecked(repoRoot, hostIo)
-  return match(res)
+): ReadonlyMap<string, ReadonlySet<number>> | undefined =>
+  match(extractGitDiffModifiedLinesChecked(repoRoot, hostIo))
     .with({ kind: "ok" }, ({ lines }) => lines)
     .with({ kind: "not-git" }, () => undefined)
     .with({ kind: "failed" }, () => undefined)
     .exhaustive()
-}
 
 export const getWorkspaceGitDiffModifiedLines = extractGitDiffModifiedLines
-
-export const findReachingTestFiles = (
-  repoRoot: string,
-  file: DomainFile,
-  hostIo: SyncHostIo,
-): ReadonlyArray<string> => {
-  const testDir = join(repoRoot, "libs", file.scope, file.tier, "test")
-  if (!hostIo.existsSync(testDir)) return []
-  const reaching: Array<string> = []
-  const walk = (dir: string) => {
-    for (const entry of hostIo.readdirSync(dir)) {
-      const full = join(dir, entry.name)
-      match({ isDirectory: entry.isDirectory, isFile: entry.isFile })
-        .with({ isDirectory: true }, () => {
-          walk(full)
-        })
-        .with({ isDirectory: false, isFile: true }, () => {
-          if (entry.name.endsWith(".test.ts") || entry.name.endsWith(".spec.ts")) {
-            reaching.push(full)
-          }
-        })
-        .with({ isDirectory: false, isFile: false }, () => {})
-        .exhaustive()
-    }
-  }
-  walk(testDir)
-  return reaching
-}
 
 export const collectReachingTestAssertions = (
   repoRoot: string,
   file: DomainFile,
   hostIo: SyncHostIo,
 ): string =>
-  findReachingTestFiles(repoRoot, file, hostIo).map((full) => hostIo.readTextSync(full)).join("\n")
+  findReachingTestFiles(repoRoot, file, hostIo)
+    .map((full) => hostIo.readTextSync(full))
+    .join("\n")
 
 export interface RunMutationOptions {
   readonly scope?: string | undefined
   readonly includeAllLines?: boolean | undefined
+  readonly enforcementMode?: "strict" | "advisory" | undefined
+  readonly targetFiles?: ReadonlyArray<string> | undefined
+  readonly baseRef?: string | undefined
+  readonly explicitBaseRef?: boolean | undefined
   readonly minScore?: number | undefined
-  readonly testRunner?: ((mutant: CodeMutant, schemaSource: string, reachingTestFiles: ReadonlyArray<string>) => "killed" | "survived") | undefined
+  readonly testRunner?:
+    | ((
+        mutant: CodeMutant,
+        schemaSource: string,
+        reachingTestFiles: ReadonlyArray<string>,
+      ) => "killed" | "survived")
+    | undefined
   readonly spanObservations?: ReadonlyArray<SpanSaturationObservation> | undefined
   readonly saturationSpecs?: ReadonlyArray<SpanSaturationSpec> | undefined
   readonly equivalencePriors?: Readonly<Record<string, number>> | undefined
@@ -392,65 +334,172 @@ export const runDomainMutationSuite = (
   hostIo: SyncHostIo,
   options?: RunMutationOptions,
 ): MutationSuiteReport => {
+  let diffMode: MutationSuiteReport["diffMode"] = undefined
+  let scannedCandidateFiles: number | undefined = undefined
+  const diffMatchedFiles: Array<string> = []
+  const evaluatedFiles: Array<string> = []
+
   const makeAbortedReport = (
     outcomesSoFar: ReadonlyArray<MutantOutcome>,
     diagnostic: string,
-  ): MutationSuiteReport => {
-    const base = evaluateMutationOutcomes(
+  ): MutationSuiteReport => ({
+    ...evaluateMutationOutcomes(
       outcomesSoFar,
       options?.minScore,
       options?.equivalencePriors,
       options?.saturationSpecs,
       options?.spanObservations,
-    )
-    return {
-      ...base,
-      passed: false,
-      diagnostic,
+    ),
+    passed: false,
+    diagnostic,
+    ...(diffMode !== undefined ? { diffMode } : {}),
+    ...(scannedCandidateFiles !== undefined ? { scannedCandidateFiles } : {}),
+    diffMatchedFiles,
+    evaluatedFiles,
+  })
+  const abortWith = (
+    outcomesSoFar: ReadonlyArray<MutantOutcome>,
+    diagnostic: string,
+  ): MutationSuiteReport => {
+    process.stderr.write(`${diagnostic}\n`)
+    return makeAbortedReport(outcomesSoFar, diagnostic)
+  }
+
+  const rawOverlays = options?.sourceCodeOverlays
+  const hasOverlays = rawOverlays !== undefined
+  const normalizedOverlays = new Map<string, string>()
+  if (rawOverlays !== undefined) {
+    for (const [k, v] of Object.entries(rawOverlays)) {
+      normalizedOverlays.set(k.replace(/\\/g, "/").replace(/^\.\//, ""), v)
     }
   }
 
   const backupPath = join(repoRoot, ".harness", "mutation-backup.json")
-  const startupDiag = recoverStartupBackup(repoRoot, backupPath, hostIo)
-  if (startupDiag !== undefined) {
-    process.stderr.write(`${startupDiag}\n`)
-    return makeAbortedReport([], startupDiag)
+  const resolvedBackupPath = resolve(backupPath)
+  const startupDiag =
+    !hasOverlays && process.env["HARNESS_ACTIVE_BACKUP_PATH"] !== resolvedBackupPath
+      ? recoverStartupBackup(repoRoot, backupPath, hostIo)
+      : undefined
+  if (startupDiag !== undefined) return abortWith([], startupDiag)
+
+  const domainFiles = findDomainFiles(repoRoot, hostIo, options?.scope, options?.targetFiles)
+  const domainByRel = new Map(domainFiles.map((f) => [f.relFile, f]))
+  const targets: ReadonlyArray<DomainFile> = hasOverlays
+    ? Array.from(normalizedOverlays.keys()).map((relFile) => {
+        const existing = domainByRel.get(relFile)
+        if (existing !== undefined) return existing
+        const parts = /^libs\/([^/]+)\/([^/]+)\//.exec(relFile)
+        const scope = parts?.[1] ?? "sample"
+        const pkgDir = parts?.[2] ?? "domain"
+        const tier = match<string, DomainFile["tier"]>(pkgDir)
+          .with("contract", () => "contract")
+          .with("core", "gates", "graph", "decision", "ingest", () => "core")
+          .otherwise(() => "domain")
+        return { scope, pkgDir, tier, fullPath: join(repoRoot, relFile), relFile }
+      })
+    : domainFiles
+  scannedCandidateFiles = targets.length
+
+  const targetFilesOpt = options?.targetFiles
+  const hasTargetFilesOpt = targetFilesOpt !== undefined
+  const isExplicitTarget = (targetFilesOpt?.length ?? 0) > 0
+
+  if (!hasOverlays && hasTargetFilesOpt) {
+    const discoveredSet = new Set(domainFiles.map((f) => f.relFile))
+    for (const rawTarget of targetFilesOpt) {
+      const normTarget = rawTarget.replace(/\\/g, "/").replace(/^\.\//, "")
+      if (!discoveredSet.has(normTarget)) {
+        return abortWith(
+          [],
+          `[mutation-check] Requested target file '${normTarget}' was not found in discovered domain/core/contract files.`,
+        )
+      }
+    }
+  }
+  if (
+    !hasOverlays &&
+    options?.enforcementMode === "strict" &&
+    options?.scope !== undefined &&
+    domainFiles.length === 0
+  ) {
+    return abortWith(
+      [],
+      `[mutation-check] No domain/core/contract files matched scope '${options.scope}' in strict mode.`,
+    )
   }
 
-  const domainFiles = findDomainFiles(repoRoot, hostIo, options?.scope)
-  const diffResult: GitDiffExtractionResult =
-    options?.includeAllLines === true
-      ? { kind: "not-git" }
-      : extractGitDiffModifiedLinesChecked(repoRoot, hostIo)
-  const diffAbortDiag = match(diffResult)
-    .with({ kind: "failed" }, ({ reason }) => `[mutation-check] Failed to extract git diff modified lines: ${reason}`)
-    .with({ kind: "ok" }, () => undefined)
-    .with({ kind: "not-git" }, () => undefined)
+  const resolvedDiff = hasOverlays
+    ? { kind: "ok" as const, diffMode: "explicit-files" as const, diffLinesMap: undefined }
+    : options?.includeAllLines === true
+      ? { kind: "ok" as const, diffMode: "all-lines" as const, diffLinesMap: undefined }
+      : isExplicitTarget
+        ? { kind: "ok" as const, diffMode: "explicit-files" as const, diffLinesMap: undefined }
+        : match(
+            extractGitDiffModifiedLinesChecked(repoRoot, hostIo, {
+              fallbackBaseRef:
+                options?.baseRef ?? (options?.enforcementMode === "strict" ? "main" : undefined),
+              explicitBaseRef: options?.explicitBaseRef,
+            }),
+          )
+            .with({ kind: "failed" }, ({ reason }) => ({
+              kind: "abort" as const,
+              diagnostic: `[mutation-check] Failed to extract git diff modified lines: ${reason}`,
+            }))
+            .with({ kind: "ok" }, ({ lines, diffMode: extractedMode }) => ({
+              kind: "ok" as const,
+              diffMode: extractedMode,
+              diffLinesMap: lines,
+            }))
+            .with({ kind: "not-git" }, () => ({
+              kind: "ok" as const,
+              diffMode: "not-git" as const,
+              diffLinesMap: undefined,
+            }))
+            .exhaustive()
+
+  const diffAbort = match(resolvedDiff)
+    .with({ kind: "abort" }, ({ diagnostic }) => diagnostic)
+    .with({ kind: "ok" }, (ok) => {
+      diffMode = ok.diffMode
+      return undefined
+    })
     .exhaustive()
-  if (diffAbortDiag !== undefined) {
-    process.stderr.write(`${diffAbortDiag}\n`)
-    return makeAbortedReport([], diffAbortDiag)
+  if (diffAbort !== undefined) return abortWith([], diffAbort)
+  const diffLinesMap = match(resolvedDiff)
+    .with({ kind: "ok" }, ({ diffLinesMap: m }) => m)
+    .with({ kind: "abort" }, () => undefined)
+    .exhaustive()
+
+  if (
+    options?.enforcementMode === "strict" &&
+    options?.scope === undefined &&
+    !hasTargetFilesOpt &&
+    diffLinesMap !== undefined
+  ) {
+    const unclassified = findUnclassifiedModifiedLibFiles(
+      repoRoot,
+      diffLinesMap,
+      domainFiles,
+      hostIo,
+    )
+    if (unclassified.length > 0)
+      return abortWith(
+        [],
+        `[mutation-check] Unclassified modified lib file(s) in strict mode: ${unclassified.join(", ")}`,
+      )
   }
-  const diffLinesMap = match(diffResult)
-    .with({ kind: "ok" }, ({ lines }) => lines)
-    .with({ kind: "not-git" }, () => undefined)
-    .with({ kind: "failed" }, () => undefined)
-    .exhaustive()
+
   const outcomes: Array<MutantOutcome> = []
-
-  for (const file of domainFiles) {
-    const overlaySource = options?.sourceCodeOverlays?.[file.relFile]
-    if (overlaySource === undefined && options?.includeAllLines !== true && diffLinesMap !== undefined) {
+  for (const file of targets) {
+    const overlaySource = normalizedOverlays.get(file.relFile)
+    const bypassDiffFilter =
+      overlaySource !== undefined || options?.includeAllLines === true || isExplicitTarget
+    if (!bypassDiffFilter && diffLinesMap !== undefined) {
       if (!diffLinesMap.has(file.relFile)) continue
+      diffMatchedFiles.push(file.relFile)
     }
 
-    const modifiedLines =
-      options?.includeAllLines === true || overlaySource !== undefined
-        ? undefined
-        : diffLinesMap !== undefined
-          ? diffLinesMap.get(file.relFile)
-          : undefined
-
+    const modifiedLines = bypassDiffFilter ? undefined : diffLinesMap?.get(file.relFile)
     const originalContent = overlaySource ?? hostIo.readTextSync(file.fullPath)
     const mutants = discoverDomainMutants(
       file.relFile,
@@ -459,9 +508,22 @@ export const runDomainMutationSuite = (
     )
     if (mutants.length === 0) continue
 
+    evaluatedFiles.push(file.relFile)
     const schemaBundle = compileMutantSchemaModule(file.relFile, originalContent, mutants)
-    const reachingTestFiles = findReachingTestFiles(repoRoot, file, hostIo)
+    const syntaxErrors = verifyMutantSchemaSyntax(file.relFile, schemaBundle.schemaSource)
+    if (syntaxErrors.length > 0) {
+      return abortWith(
+        outcomes,
+        `[mutation-check] Compiled mutant schema for '${file.relFile}' failed syntax verification: ${syntaxErrors.join("; ")}`,
+      )
+    }
 
+    if (overlaySource !== undefined && options?.testRunner === undefined) {
+      for (const mutant of mutants) outcomes.push({ mutant, status: "survived" })
+      continue
+    }
+
+    const reachingTestFiles = findReachingTestFiles(repoRoot, file, hostIo)
     if (reachingTestFiles.length === 0) {
       for (const mutant of mutants) outcomes.push({ mutant, status: "survived" })
       continue
@@ -473,13 +535,9 @@ export const runDomainMutationSuite = (
       const prevEnv = process.env["HARNESS_ACTIVE_MUTANT_ID"]
       const restoreInProcessEnv = () => {
         setActiveMutantId(prevGlobal)
-        if (prevEnv === undefined) {
-          delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
-        } else {
-          process.env["HARNESS_ACTIVE_MUTANT_ID"] = prevEnv
-        }
+        if (prevEnv === undefined) delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
+        else process.env["HARNESS_ACTIVE_MUTANT_ID"] = prevEnv
       }
-
       const baselineMutant: CodeMutant = {
         id: "__baseline__",
         file: file.relFile,
@@ -491,7 +549,9 @@ export const runDomainMutationSuite = (
       }
       setActiveMutantId(undefined)
       delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
-      const baselineRes = Result.try(() => runner(baselineMutant, originalContent, reachingTestFiles))
+      const baselineRes = Result.try(() =>
+        runner(baselineMutant, originalContent, reachingTestFiles),
+      )
       restoreInProcessEnv()
       const baselineDiag = match(baselineRes)
         .with({ _tag: "Success" }, ({ success }) =>
@@ -499,40 +559,33 @@ export const runDomainMutationSuite = (
             ? undefined
             : `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}'`,
         )
-        .with({ _tag: "Failure" }, ({ failure }) =>
-          `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}': ${failure instanceof Error ? failure.message : String(failure)}`,
+        .with(
+          { _tag: "Failure" },
+          ({ failure }) =>
+            `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}': ${failure instanceof Error ? failure.message : String(failure)}`,
         )
         .exhaustive()
-      if (baselineDiag !== undefined) {
-        process.stderr.write(`${baselineDiag}\n`)
-        return makeAbortedReport(outcomes, baselineDiag)
-      }
+      if (baselineDiag !== undefined) return abortWith(outcomes, baselineDiag)
 
       for (const mutant of mutants) {
         setActiveMutantId(mutant.id)
         process.env["HARNESS_ACTIVE_MUTANT_ID"] = mutant.id
-        const runRes = Result.try(() => runner(mutant, schemaBundle.schemaSource, reachingTestFiles))
+        const runRes = Result.try(() =>
+          runner(mutant, schemaBundle.schemaSource, reachingTestFiles),
+        )
         restoreInProcessEnv()
         const runnerDiag = match(runRes)
           .with({ _tag: "Success" }, ({ success }) => {
             outcomes.push({ mutant, status: success === "killed" ? "killed" : "survived" })
             return undefined
           })
-          .with({ _tag: "Failure" }, ({ failure }) =>
-            `[mutation-check] Custom testRunner threw for mutant '${mutant.id}': ${failure instanceof Error ? failure.message : String(failure)}`,
+          .with(
+            { _tag: "Failure" },
+            ({ failure }) =>
+              `[mutation-check] Custom testRunner threw for mutant '${mutant.id}': ${failure instanceof Error ? failure.message : String(failure)}`,
           )
           .exhaustive()
-        if (runnerDiag !== undefined) {
-          process.stderr.write(`${runnerDiag}\n`)
-          return makeAbortedReport(outcomes, runnerDiag)
-        }
-      }
-      continue
-    }
-
-    if (overlaySource !== undefined) {
-      for (const mutant of mutants) {
-        outcomes.push({ mutant, status: "survived" })
+        if (runnerDiag !== undefined) return abortWith(outcomes, runnerDiag)
       }
       continue
     }
@@ -541,240 +594,92 @@ export const runDomainMutationSuite = (
       ...process.env,
       NO_COLOR: "1",
       FORCE_COLOR: "0",
+      HARNESS_ACTIVE_BACKUP_PATH: resolvedBackupPath,
     }
     delete baseSubprocessEnv["HARNESS_ACTIVE_MUTANT_ID"]
 
-    // F-4.1: Unmutated baseline test execution BEFORE writing backup or mutated schema
-    const baselineExecRes = Result.try(() =>
-      hostIo.execFileSync("pnpm", ["vitest", "run", ...reachingTestFiles], {
-        cwd: repoRoot,
-        timeoutMs: 30_000,
-        env: baseSubprocessEnv,
-      }),
-    )
-    const baselineDiag = match(baselineExecRes)
-      .with({ _tag: "Failure" }, ({ failure }) =>
-        `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}': ${failure instanceof Error ? failure.message : String(failure)}`,
-      )
-      .with({ _tag: "Success" }, ({ success }) =>
-        match(success)
-          .with({ _tag: "Exited" }, (r) => {
-            if (r.exitCode === 0) return undefined
-            const cleanErr = stripAnsi(r.stderr).trim()
-            const stderrPart = cleanErr.length > 0 ? `, stderr=${cleanErr}` : ""
-            return `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}' (exitCode=${r.exitCode}${stderrPart})`
-          })
-          .with({ _tag: "TimedOut" }, (r) => {
-            const cleanErr = stripAnsi(r.stderr).trim()
-            const stderrPart = cleanErr.length > 0 ? `, stderr=${cleanErr}` : ""
-            return `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}' (timedOut=true${stderrPart})`
-          })
-          .with({ _tag: "Signaled" }, (r) => {
-            const cleanErr = stripAnsi(r.stderr).trim()
-            const stderrPart = cleanErr.length > 0 ? `, stderr=${cleanErr}` : ""
-            return `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}' (signal=${r.signal}${stderrPart})`
-          })
-          .with({ _tag: "SpawnFailed" }, (r) =>
-            `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}' (spawnError=${r.spawnError})`,
-          )
-          .exhaustive(),
-      )
-      .exhaustive()
-
-    if (baselineDiag !== undefined) {
-      process.stderr.write(`${baselineDiag}\n`)
-      return makeAbortedReport(outcomes, baselineDiag)
-    }
-
-    const originalSource = originalContent
-    const originalSha256 = computeContentSha256(originalSource)
-    const expectedMutatedSha256 = computeContentSha256(schemaBundle.schemaSource)
-    const backupWriteErr = writeMutationBackup(
+    const { primaryTests, fallbackTests } = partitionReachingTestFiles(
       repoRoot,
-      backupPath,
-      file.fullPath,
-      originalSource,
-      schemaBundle.schemaSource,
+      file,
+      originalContent,
       hostIo,
     )
-    if (backupWriteErr !== undefined) {
-      process.stderr.write(`${backupWriteErr}\n`)
-      return makeAbortedReport(outcomes, backupWriteErr)
-    }
-
-    const restoreOriginalFile = (): string | undefined => {
-      const currentDiskRes = Result.try(() => hostIo.readTextSync(file.fullPath))
-      const conflictDiag = match(currentDiskRes)
-        .with({ _tag: "Success" }, ({ success: currentDiskContent }) => {
-          const currentSha256 = computeContentSha256(currentDiskContent)
-          if (currentSha256 !== expectedMutatedSha256 && currentSha256 !== originalSha256) {
-            return `[mutation-check] CRITICAL: Target '${file.relFile}' was modified externally mid-run (sha256=${currentSha256}); refusing to overwrite user edits. Preserving '${backupPath}'.`
-          }
-          return undefined
-        })
-        .with({ _tag: "Failure" }, ({ failure }) =>
-          `[mutation-check] CRITICAL: Failed to read '${file.fullPath}' before restore (${failure instanceof Error ? failure.message : String(failure)}). Preserving '${backupPath}'.`,
-        )
-        .exhaustive()
-
-      if (conflictDiag !== undefined) {
-        process.stderr.write(`${conflictDiag}\n`)
-        return conflictDiag
-      }
-
-      const primaryWrite = Result.try(() => {
-        hostIo.writeTextSync(file.fullPath, originalSource)
-      })
-      const primaryError = match(primaryWrite)
-        .with({ _tag: "Success" }, () => undefined)
-        .with({ _tag: "Failure" }, ({ failure }) =>
-          failure instanceof Error ? failure.message : String(failure),
-        )
-        .exhaustive()
-
-      if (primaryError === undefined) {
-        const unlinkErr = unlinkBackupChecked(backupPath, hostIo)
-        if (unlinkErr !== undefined) {
-          const diag = `[mutation-check] CRITICAL: Restored '${file.fullPath}' but ${unlinkErr}`
-          process.stderr.write(`${diag}\n`)
-          return diag
-        }
-        return undefined
-      }
-
-      // Retry restoring from backupPath before giving up
-      const retryRes = Result.try(() => {
-        const raw = hostIo.readTextSync(backupPath)
-        const decoded = Schema.decodeOption(BackupSchema)(raw)
-        const sourceToWrite = match(decoded)
-          .with({ _tag: "Some" }, ({ value }) => value.content ?? value.originalSource ?? originalSource)
-          .with({ _tag: "None" }, () => originalSource)
-          .exhaustive()
-        hostIo.writeTextSync(file.fullPath, sourceToWrite)
-      })
-
-      return match(retryRes)
-        .with({ _tag: "Success" }, () => {
-          const unlinkErr = unlinkBackupChecked(backupPath, hostIo)
-          if (unlinkErr !== undefined) {
-            const diag = `[mutation-check] CRITICAL: Restored '${file.fullPath}' from backup retry but ${unlinkErr}`
-            process.stderr.write(`${diag}\n`)
-            return diag
-          }
-          return undefined
-        })
-        .with({ _tag: "Failure" }, ({ failure }) => {
-          const retryMsg = failure instanceof Error ? failure.message : String(failure)
-          const diag = `[mutation-check] CRITICAL: Failed to restore '${file.fullPath}' (${primaryError}; backup retry: ${retryMsg}). Preserving '${backupPath}'.`
-          process.stderr.write(`${diag}\n`)
-          return diag
-        })
-        .exhaustive()
-    }
-
-    const onProcessExit = () => {
-      restoreOriginalFile()
-    }
-    const onSigInt = () => {
-      onProcessExit()
-      process.exit(130)
-    }
-    const onSigTerm = () => {
-      onProcessExit()
-      process.exit(143)
-    }
-    process.once("exit", onProcessExit)
-    process.once("SIGINT", onSigInt)
-    process.once("SIGTERM", onSigTerm)
-
-    const cleanupProcessListeners = () => {
-      process.off("exit", onProcessExit)
-      process.off("SIGINT", onSigInt)
-      process.off("SIGTERM", onSigTerm)
-    }
-
-    const runLoopRes = Result.try(() => {
-      let innerWriteSchemaErr: string | undefined = undefined
-      let innerRunnerAbortDiagnostic: string | undefined = undefined
-      let innerRestoreErr: string | undefined = undefined
-      const writeSchemaRes = Result.try(() => {
-        hostIo.writeTextSync(file.fullPath, schemaBundle.schemaSource)
-      })
-      innerWriteSchemaErr = match(writeSchemaRes)
-        .with({ _tag: "Success" }, () => undefined)
-        .with({ _tag: "Failure" }, ({ failure }) =>
-          failure instanceof Error ? failure.message : String(failure),
-        )
-        .exhaustive()
-
-      if (innerWriteSchemaErr !== undefined) {
-        innerRestoreErr = restoreOriginalFile()
-      } else {
-        for (const mutant of mutants) {
-          const execRes = Result.try(() =>
-            hostIo.execFileSync("pnpm", ["vitest", "run", ...reachingTestFiles], {
-              cwd: repoRoot,
-              timeoutMs: 30_000,
-              env: { ...baseSubprocessEnv, HARNESS_ACTIVE_MUTANT_ID: mutant.id },
-            }),
-          )
-          const outcomeOrAbort = classifyMutantSubprocessResult(mutant.id, execRes)
-
-          const abortDiagnostic = match(outcomeOrAbort)
-            .with({ kind: "abort" }, ({ diagnostic }) => diagnostic)
-            .with({ kind: "outcome" }, ({ status }) => {
-              outcomes.push({ mutant, status })
-              return undefined
-            })
-            .exhaustive()
-          if (abortDiagnostic !== undefined) {
-            innerRunnerAbortDiagnostic = abortDiagnostic
-            break
-          }
-        }
-        innerRestoreErr = restoreOriginalFile()
-      }
-      return {
-        writeSchemaErr: innerWriteSchemaErr,
-        runnerAbortDiagnostic: innerRunnerAbortDiagnostic,
-        restoreErr: innerRestoreErr,
-      }
-    })
-    cleanupProcessListeners()
-    const { writeSchemaErr, runnerAbortDiagnostic, restoreErr } = match(runLoopRes)
-      .with({ _tag: "Success" }, ({ success }) => success)
-      .with({ _tag: "Failure" }, ({ failure }) => ({
-        writeSchemaErr: undefined as string | undefined,
-        runnerAbortDiagnostic: `[mutation-check] Unexpected error for '${file.relFile}': ${failure instanceof Error ? failure.message : String(failure)}` as string | undefined,
-        restoreErr: undefined as string | undefined,
-      }))
+    const primaryRes = runVitestTargetList(
+      repoRoot,
+      file,
+      hostIo,
+      baseSubprocessEnv,
+      primaryTests,
+      originalContent,
+      schemaBundle.schemaSource,
+      backupPath,
+      mutants,
+    )
+    const primaryOutcomes = match(primaryRes)
+      .with({ kind: "abort" }, ({ diagnostic }) => diagnostic)
+      .with({ kind: "ok" }, ({ outcomes: resOutcomes }) => resOutcomes)
       .exhaustive()
+    if (typeof primaryOutcomes === "string") return abortWith(outcomes, primaryOutcomes)
 
-    if (writeSchemaErr !== undefined) {
-      const diag =
-        restoreErr !== undefined
-          ? `[mutation-check] Failed to write mutated schema for '${file.relFile}': ${writeSchemaErr} (${restoreErr})`
-          : `[mutation-check] Failed to write mutated schema for '${file.relFile}': ${writeSchemaErr}`
-      process.stderr.write(`${diag}\n`)
-      return makeAbortedReport(outcomes, diag)
-    }
+    const fileOutcomes = new Map<string, MutantOutcome>(
+      primaryOutcomes.map((o) => [o.mutant.id, o]),
+    )
+    const survivingMutants = primaryOutcomes
+      .filter((o) =>
+        match(o.status)
+          .with("survived", () => true)
+          .with("killed", "equivalent", () => false)
+          .exhaustive(),
+      )
+      .map((o) => o.mutant)
 
-    if (runnerAbortDiagnostic !== undefined) {
-      process.stderr.write(`${runnerAbortDiagnostic}\n`)
-      return makeAbortedReport(outcomes, runnerAbortDiagnostic)
+    if (survivingMutants.length > 0 && fallbackTests.length > 0) {
+      const fallbackRes = runVitestTargetList(
+        repoRoot,
+        file,
+        hostIo,
+        baseSubprocessEnv,
+        fallbackTests,
+        originalContent,
+        schemaBundle.schemaSource,
+        backupPath,
+        survivingMutants,
+      )
+      const fallbackAbort = match(fallbackRes)
+        .with({ kind: "abort" }, ({ diagnostic }) => diagnostic)
+        .with({ kind: "ok" }, ({ outcomes: fbOutcomes }) => {
+          for (const fbOutcome of fbOutcomes) {
+            match(fbOutcome.status)
+              .with("killed", () => {
+                fileOutcomes.set(fbOutcome.mutant.id, fbOutcome)
+              })
+              .with("survived", "equivalent", () => {})
+              .exhaustive()
+          }
+          return undefined
+        })
+        .exhaustive()
+      if (fallbackAbort !== undefined) {
+        for (const o of fileOutcomes.values()) outcomes.push(o)
+        return abortWith(outcomes, fallbackAbort)
+      }
     }
-    if (restoreErr !== undefined) {
-      return makeAbortedReport(outcomes, restoreErr)
-    }
+    for (const o of fileOutcomes.values()) outcomes.push(o)
   }
 
-  return evaluateMutationOutcomes(
-    outcomes,
-    options?.minScore,
-    options?.equivalencePriors,
-    options?.saturationSpecs,
-    options?.spanObservations,
-  )
+  return {
+    ...evaluateMutationOutcomes(
+      outcomes,
+      options?.minScore,
+      options?.equivalencePriors,
+      options?.saturationSpecs,
+      options?.spanObservations,
+    ),
+    ...(diffMode !== undefined ? { diffMode } : {}),
+    scannedCandidateFiles,
+    diffMatchedFiles,
+    evaluatedFiles,
+  }
 }
 
 export const MutationCheck = {

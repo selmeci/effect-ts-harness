@@ -2878,7 +2878,10 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         }>
       }
       expect(passJson.overallStatus).toBe("passed")
-      expect(passJson.measurements).toHaveLength(4)
+      expect(passJson.measurements).toHaveLength(5)
+      expect(passJson.measurements.some((m) => m.stage === "PlanWorkflowCompiler.decide")).toBe(
+        true,
+      )
       expect(passJson.measurements.every((m) => m.sampleCount === 1)).toBe(true)
 
       // 4. runCli(["bench", "--iterations=1", "--budget-ms=0.0001"]) fails closed (exit 1) with LatencySloViolationError

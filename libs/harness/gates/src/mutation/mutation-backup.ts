@@ -10,12 +10,36 @@ import { parseGitDiffModifiedLines } from "./mutant-ast-generator.js"
 
 export type GitDiffExtractionResult =
   | { readonly kind: "not-git" }
-  | { readonly kind: "ok"; readonly lines: ReadonlyMap<string, ReadonlySet<number>> }
+  | {
+      readonly kind: "ok"
+      readonly lines: ReadonlyMap<string, ReadonlySet<number>>
+      readonly diffMode: "working-tree" | "branch-base"
+    }
   | { readonly kind: "failed"; readonly reason: string }
+
+export interface GitDiffExtractionOptions {
+  readonly fallbackBaseRef?: string | undefined
+  readonly explicitBaseRef?: boolean | undefined
+}
+
+const mergeLineMaps = (
+  target: Map<string, Set<number>>,
+  source: ReadonlyMap<string, ReadonlySet<number>>,
+): void => {
+  for (const [file, lineSet] of source.entries()) {
+    let dest = target.get(file)
+    if (dest === undefined) {
+      dest = new Set<number>()
+      target.set(file, dest)
+    }
+    for (const line of lineSet) dest.add(line)
+  }
+}
 
 export const extractGitDiffModifiedLinesChecked = (
   repoRoot: string,
   hostIo: SyncHostIo,
+  options?: GitDiffExtractionOptions,
 ): GitDiffExtractionResult => {
   const gitOpts = { cwd: repoRoot, timeoutMs: 15_000 }
   const revParseRes = Result.try(() =>
@@ -32,10 +56,12 @@ export const extractGitDiffModifiedLinesChecked = (
     .with({ _tag: "Success" }, ({ success }) =>
       match(success)
         .with({ _tag: "Exited" }, (res) => {
-          if (res.exitCode === 0 && res.stdout.trim() === "true") {
+          if (res.exitCode === 0 && res.stdout.trim() === "true")
             return { kind: "proceed" as const }
-          }
-          if (res.exitCode === 128 && /not a git repository/i.test(`${res.stdout}\n${res.stderr}`)) {
+          if (
+            res.exitCode === 128 &&
+            /not a git repository/i.test(`${res.stdout}\n${res.stderr}`)
+          ) {
             return { kind: "not-git" as const }
           }
           const stderrPart = res.stderr.trim().length > 0 ? `, stderr=${res.stderr.trim()}` : ""
@@ -67,9 +93,11 @@ export const extractGitDiffModifiedLinesChecked = (
     .exhaustive()
   if (earlyExit !== undefined) return earlyExit
 
-  const runGitDiff = (
+  const runGit = (
     args: ReadonlyArray<string>,
-  ): { readonly ok: true; readonly stdout: string } | { readonly ok: false; readonly reason: string } => {
+  ):
+    | { readonly ok: true; readonly stdout: string }
+    | { readonly ok: false; readonly reason: string } => {
     const res = Result.try(() => hostIo.execFileSync("git", args, gitOpts))
     return match(res)
       .with({ _tag: "Failure" }, ({ failure }) => ({
@@ -81,7 +109,10 @@ export const extractGitDiffModifiedLinesChecked = (
           .with({ _tag: "Exited" }, (r) => {
             if (r.exitCode === 0) return { ok: true as const, stdout: r.stdout }
             const stderrPart = r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""
-            return { ok: false as const, reason: `git ${args.join(" ")} failed (exitCode=${r.exitCode}${stderrPart})` }
+            return {
+              ok: false as const,
+              reason: `git ${args.join(" ")} failed (exitCode=${r.exitCode}${stderrPart})`,
+            }
           })
           .with({ _tag: "TimedOut" }, (r) => ({
             ok: false as const,
@@ -100,14 +131,95 @@ export const extractGitDiffModifiedLinesChecked = (
       .exhaustive()
   }
 
-  const primaryDiff = runGitDiff(["diff", "-U0"])
+  const diffFromMergeBase = (
+    baseRef: string,
+  ):
+    | { readonly status: "ok"; readonly lines: ReadonlyMap<string, ReadonlySet<number>> }
+    | { readonly status: "merge-base-failed"; readonly reason: string }
+    | { readonly status: "diff-failed"; readonly reason: string } => {
+    const mb = runGit(["merge-base", "HEAD", baseRef])
+    if (!mb.ok) return { status: "merge-base-failed", reason: mb.reason }
+    const mergeBase = mb.stdout.trim()
+    if (mergeBase.length === 0) {
+      return {
+        status: "merge-base-failed",
+        reason: `git merge-base HEAD ${baseRef} returned empty output`,
+      }
+    }
+    const baseDiff = runGit(["diff", "-U0", `${mergeBase}...HEAD`, "--", "libs/"])
+    if (!baseDiff.ok) return { status: "diff-failed", reason: baseDiff.reason }
+    return { status: "ok", lines: parseGitDiffModifiedLines(baseDiff.stdout) }
+  }
+
+  if (options?.explicitBaseRef === true) {
+    if (options.fallbackBaseRef === undefined) {
+      return { kind: "failed", reason: "explicitBaseRef requires fallbackBaseRef" }
+    }
+    return match(diffFromMergeBase(options.fallbackBaseRef))
+      .with({ status: "ok" }, ({ lines }) => ({
+        kind: "ok" as const,
+        lines,
+        diffMode: "branch-base" as const,
+      }))
+      .with({ status: "merge-base-failed" }, ({ reason }) => ({ kind: "failed" as const, reason }))
+      .with({ status: "diff-failed" }, ({ reason }) => ({ kind: "failed" as const, reason }))
+      .exhaustive()
+  }
+
+  const primaryDiff = runGit(["diff", "-U0"])
   if (!primaryDiff.ok) return { kind: "failed", reason: primaryDiff.reason }
 
-  const headDiff = runGitDiff(["diff", "-U0", "HEAD"])
+  const headDiff = runGit(["diff", "-U0", "HEAD"])
   if (!headDiff.ok) return { kind: "failed", reason: headDiff.reason }
 
-  const diffOut = headDiff.stdout.length > 0 ? `${primaryDiff.stdout}\n${headDiff.stdout}` : primaryDiff.stdout
-  return { kind: "ok", lines: parseGitDiffModifiedLines(diffOut) }
+  const mergedMap = new Map<string, Set<number>>()
+  mergeLineMaps(mergedMap, parseGitDiffModifiedLines(primaryDiff.stdout))
+  mergeLineMaps(mergedMap, parseGitDiffModifiedLines(headDiff.stdout))
+
+  const untrackedRes = runGit(["ls-files", "--others", "--exclude-standard", "--", "libs/"])
+  if (!untrackedRes.ok) return { kind: "failed", reason: untrackedRes.reason }
+
+  for (const rawLine of untrackedRes.stdout.split(/\r?\n/)) {
+    const relPath = rawLine.trim().replace(/\\/g, "/")
+    if (
+      relPath.length === 0 ||
+      !(relPath.endsWith(".ts") || relPath.endsWith(".tsx")) ||
+      relPath.endsWith(".d.ts")
+    ) {
+      continue
+    }
+    const absPath = join(repoRoot, relPath)
+    if (!hostIo.existsSync(absPath)) continue
+    const readRes = Result.try(() => hostIo.readTextSync(absPath))
+    match(readRes)
+      .with({ _tag: "Success" }, ({ success: content }) => {
+        const lineCount = content.split(/\r?\n/).length
+        let lineSet = mergedMap.get(relPath)
+        if (lineSet === undefined) {
+          lineSet = new Set<number>()
+          mergedMap.set(relPath, lineSet)
+        }
+        for (let ln = 1; ln <= lineCount; ln++) lineSet.add(ln)
+      })
+      .with({ _tag: "Failure" }, () => {})
+      .exhaustive()
+  }
+
+  const hasLibsDiff = Array.from(mergedMap.keys()).some((k) => k.startsWith("libs/"))
+  if (!hasLibsDiff && options?.fallbackBaseRef !== undefined) {
+    const handled = match(diffFromMergeBase(options.fallbackBaseRef))
+      .with({ status: "ok" }, ({ lines }) => ({
+        kind: "ok" as const,
+        lines,
+        diffMode: "branch-base" as const,
+      }))
+      .with({ status: "diff-failed" }, ({ reason }) => ({ kind: "failed" as const, reason }))
+      .with({ status: "merge-base-failed" }, () => undefined)
+      .exhaustive()
+    if (handled !== undefined) return handled
+  }
+
+  return { kind: "ok", lines: mergedMap, diffMode: "working-tree" }
 }
 
 export const BackupSchema = Schema.fromJsonString(
@@ -127,8 +239,10 @@ export const unlinkBackupChecked = (backupPath: string, hostIo: SyncHostIo): str
   })
   return match(unlinkRes)
     .with({ _tag: "Success" }, () => undefined)
-    .with({ _tag: "Failure" }, ({ failure }) =>
-      `Failed to unlink '${backupPath}': ${failure instanceof Error ? failure.message : String(failure)}`,
+    .with(
+      { _tag: "Failure" },
+      ({ failure }) =>
+        `Failed to unlink '${backupPath}': ${failure instanceof Error ? failure.message : String(failure)}`,
     )
     .exhaustive()
 }
@@ -141,14 +255,12 @@ export const recoverStartupBackup = (
   if (!hostIo.existsSync(backupPath)) return undefined
   const backupReadRes = Result.try(() => hostIo.readTextSync(backupPath))
   const restoreFailureReason = match(backupReadRes)
-    .with({ _tag: "Success" }, ({ success: rawBackup }) => {
-      const decodedBackupOpt = Schema.decodeOption(BackupSchema)(rawBackup)
-      return match(decodedBackupOpt)
+    .with({ _tag: "Success" }, ({ success: rawBackup }) =>
+      match(Schema.decodeOption(BackupSchema)(rawBackup))
         .with({ _tag: "Some" }, ({ value: decoded }) => {
           const content = decoded.content ?? decoded.originalSource
-          if (decoded.filePath === undefined || content === undefined) {
+          if (decoded.filePath === undefined || content === undefined)
             return "Backup JSON missing filePath or content"
-          }
           const resolvedTarget = resolve(repoRoot, decoded.filePath)
           const relTarget = relative(resolve(repoRoot), resolvedTarget).replace(/\\/g, "/")
           if (
@@ -158,46 +270,44 @@ export const recoverStartupBackup = (
           ) {
             return `Backup target path '${decoded.filePath}' escapes workspace bounds`
           }
-          const currentReadRes = Result.try(() => hostIo.readTextSync(resolvedTarget))
-          return match(currentReadRes)
-            .with({ _tag: "Failure" }, ({ failure }) =>
-              `Failed to read target '${relTarget}': ${failure instanceof Error ? failure.message : String(failure)}`,
+          return match(Result.try(() => hostIo.readTextSync(resolvedTarget)))
+            .with(
+              { _tag: "Failure" },
+              ({ failure }) =>
+                `Failed to read target '${relTarget}': ${failure instanceof Error ? failure.message : String(failure)}`,
             )
             .with({ _tag: "Success" }, ({ success: currentContent }) => {
               const currentSha256 = computeContentSha256(currentContent)
               const originalSha256 = decoded.originalSha256 ?? computeContentSha256(content)
               if (decoded.mutatedSha256 !== undefined && currentSha256 === decoded.mutatedSha256) {
-                const writeRes = Result.try(() => {
-                  hostIo.writeTextSync(resolvedTarget, content)
-                })
-                const writeErr = match(writeRes)
+                const writeErr = match(
+                  Result.try(() => {
+                    hostIo.writeTextSync(resolvedTarget, content)
+                  }),
+                )
                   .with({ _tag: "Success" }, () => undefined)
                   .with({ _tag: "Failure" }, ({ failure }) =>
                     failure instanceof Error ? failure.message : String(failure),
                   )
                   .exhaustive()
-                if (writeErr !== undefined) return writeErr
-                return unlinkBackupChecked(backupPath, hostIo)
+                return writeErr !== undefined ? writeErr : unlinkBackupChecked(backupPath, hostIo)
               }
-              if (currentSha256 === originalSha256) {
-                return unlinkBackupChecked(backupPath, hostIo)
-              }
+              if (currentSha256 === originalSha256) return unlinkBackupChecked(backupPath, hostIo)
               return `Target '${relTarget}' was modified on disk (sha256=${currentSha256}) and matches neither originalSha256 (${originalSha256}) nor mutatedSha256 (${decoded.mutatedSha256 ?? "none"}); refusing to overwrite user edits. Inspect and remove '${backupPath}' manually.`
             })
             .exhaustive()
         })
         .with({ _tag: "None" }, () => "Backup JSON failed schema decoding")
-        .exhaustive()
-    })
+        .exhaustive(),
+    )
     .with({ _tag: "Failure" }, ({ failure }) =>
       failure instanceof Error ? failure.message : String(failure),
     )
     .exhaustive()
 
-  if (restoreFailureReason !== undefined) {
-    return `[mutation-check] CRITICAL: Failed to restore startup backup '${backupPath}' (${restoreFailureReason}); aborting without deleting backup.`
-  }
-  return undefined
+  return restoreFailureReason !== undefined
+    ? `[mutation-check] CRITICAL: Failed to restore startup backup '${backupPath}' (${restoreFailureReason}); aborting without deleting backup.`
+    : undefined
 }
 
 export const writeMutationBackup = (
@@ -223,8 +333,10 @@ export const writeMutationBackup = (
   })
   return match(res)
     .with({ _tag: "Success" }, () => undefined)
-    .with({ _tag: "Failure" }, ({ failure }) =>
-      `[mutation-check] Failed to write mutation backup '${backupPath}': ${failure instanceof Error ? failure.message : String(failure)}`,
+    .with(
+      { _tag: "Failure" },
+      ({ failure }) =>
+        `[mutation-check] Failed to write mutation backup '${backupPath}': ${failure instanceof Error ? failure.message : String(failure)}`,
     )
     .exhaustive()
 }
