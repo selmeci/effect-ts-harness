@@ -62,6 +62,7 @@ export interface MutationOutcomesSummary {
 
 export interface MutationSuiteReport extends MutationOutcomesSummary {
   readonly diagnostic?: string | undefined
+  readonly cachedKilledCount?: number | undefined
   readonly diffMode: "all-lines" | "explicit-files" | "working-tree" | "branch-base" | "not-git"
   readonly scannedCandidateFiles: number
   readonly scannedFiles: ReadonlyArray<string>

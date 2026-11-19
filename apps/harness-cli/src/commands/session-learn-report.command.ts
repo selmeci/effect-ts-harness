@@ -1,28 +1,17 @@
 import { join } from "node:path"
-import { Cause, Effect, Option, Schema } from "effect"
+import { Cause, Effect, Option } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { isPureInterruptCause } from "@harness/contract"
-import { deterministicLearnFallback, IdiomRouterV1, proposeLearningAction } from "@harness/decision"
+import { IdiomRouterV1 } from "@harness/decision"
 import {
   buildSessionHandoff,
   buildSessionReport,
   checkLoopThrashing,
   checkVerifyStamp,
-  clearFrictionEvents,
-  clearTelemetryEvents,
-  decidePlanSearch,
-  decideRuleSynthesizer,
   diffPlanAndImplGraphs,
-  PlanSearchInput,
-  readFrictionEvents,
-  readTelemetryEvents,
-  renderSessionReportMarkdown,
-  resolveHarnessStateDir,
-  RuleSynthesizerInput,
   scopeSessionReportInput,
   summarizeFrictionEvents,
-  writeSessionReportFiles,
 } from "@harness/gates"
 import {
   decideOmnigraphReconcile,
@@ -39,6 +28,19 @@ import {
 } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 import { hasAntigravityFormat } from "./hook-format.js"
+import {
+  handleLearn,
+  handleReport,
+  readFrictionEventsSafe,
+  readTelemetryEventsSafe,
+} from "./learn-and-report.command.js"
+import {
+  ensureHarnessDirSafe,
+  resolveHarnessStateDirSafe,
+  resolveHarnessTsgoPkgJsonPath,
+  shouldRequireLiveOllama,
+  tryCachePreInvocationResult,
+} from "./session-fastpath.js"
 import { buildWorkspaceFnIndex } from "@harness/ingest"
 import {
   type CliEnv,
@@ -49,7 +51,10 @@ import {
   isIsolatedExternalWorkspace,
   resolveClusterRepoRoot,
   resolveDecisionModelLayer,
+  shouldSuppressLiveRepoTestSideEffects,
 } from "./daemon-and-omnigraph.service.js"
+
+export { handleLearn, handleReport }
 
 export const handleDoctorOrSession = (
   argv: ReadonlyArray<string>,
@@ -62,36 +67,27 @@ export const handleDoctorOrSession = (
     const nodeMajor = parseInt(process.versions.node.split(".")[0] ?? "0", 10)
     const nodeOk = nodeMajor >= 24
 
-    const harnessDir = resolveHarnessStateDir(repoRoot, process.env)
-    const snapshotDirOk = yield* Effect.try({
-      try: () => {
-        if (!nodeSyncHostIo.existsSync(harnessDir)) {
-          nodeSyncHostIo.mkdirRecursiveSync(harnessDir)
-        }
-        return true
-      },
-      catch: () => false,
-    }).pipe(Effect.orElseSucceed(() => false))
+    const suppressLiveWrites = shouldSuppressLiveRepoTestSideEffects(repoRoot)
+    const harnessDirOpt = resolveHarnessStateDirSafe(repoRoot)
+    const harnessDir = Option.getOrElse(harnessDirOpt, () => join(repoRoot, ".harness"))
+    const snapshotDirOk = suppressLiveWrites
+      ? Option.isSome(harnessDirOpt)
+      : ensureHarnessDirSafe(harnessDirOpt, nodeSyncHostIo)
 
     const isolatedExternal = isIsolatedExternalWorkspace(repoRoot)
-    let omnigraphInitialized = isolatedExternal
-      ? true
-      : yield* ensureLocalOmnigraphReady(repoRoot)
+    let omnigraphInitialized = isolatedExternal ? true : yield* ensureLocalOmnigraphReady(repoRoot)
     let reconcileError: string | undefined
 
-    const requireLiveOllama =
-      process.env.HARNESS_REQUIRE_OLLAMA === "1" ||
-      (!isolatedExternal &&
-        options?.decisionLayer === undefined &&
-        options?.skipBackgroundDaemons !== true)
+    const requireLiveOllama = shouldRequireLiveOllama(options, nodeSyncHostIo)
     const ollamaReady = requireLiveOllama ? yield* ensureLocalOllamaReady() : true
+    const ollamaProbed = requireLiveOllama
 
     const planPath = join(harnessDir, "plan-graph-snapshot.json")
     const implPath = join(harnessDir, "graph-snapshot.json")
 
     const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
     const recordedMeta = readGraphHeadMeta(repoRoot, nodeSyncHostIo)
-    if (!isolatedExternal || recordedMeta !== null) {
+    if ((!isolatedExternal || recordedMeta !== null) && !suppressLiveWrites) {
       const reconcileDecision = yield* decideOmnigraphReconcile({
         snapshotExists: nodeSyncHostIo.existsSync(implPath),
         recordedHeadSha: recordedMeta?.headSha ?? null,
@@ -105,7 +101,9 @@ export const handleDoctorOrSession = (
           saveGraphSnapshot(reconciledGraph, implPath, nodeSyncHostIo)
           const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
           if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {
-            process.stderr.write("[harness:session] Warning: failed to persist .harness/graph-head.json\n")
+            process.stderr.write(
+              "[harness:session] Warning: failed to persist .harness/graph-head.json\n",
+            )
           }
         } else {
           const reconcileSyncRes = yield* syncToOmnigraphAndSnapshot(reconciledGraph, {
@@ -126,8 +124,13 @@ export const handleDoctorOrSession = (
           )
           if (reconcileSyncRes.syncedToOmnigraph) {
             const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
-            if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {
-              process.stderr.write("[harness:session] Warning: failed to persist .harness/graph-head.json\n")
+            if (
+              (headState.headSha !== null || headState.gitBranch !== null) &&
+              savedMeta === null
+            ) {
+              process.stderr.write(
+                "[harness:session] Warning: failed to persist .harness/graph-head.json\n",
+              )
             }
           } else {
             omnigraphInitialized = false
@@ -141,18 +144,12 @@ export const handleDoctorOrSession = (
     const tsconfigBasePath = nodeSyncHostIo.existsSync(join(repoRoot, "tsconfig.base.json"))
       ? join(repoRoot, "tsconfig.base.json")
       : join(workspaceRoot, "tsconfig.base.json")
-    const tsgoPkgPath = nodeSyncHostIo.existsSync(
-      join(repoRoot, "node_modules", "@effect", "tsgo", "package.json"),
-    )
-      ? join(repoRoot, "node_modules", "@effect", "tsgo", "package.json")
-      : join(workspaceRoot, "node_modules", "@effect", "tsgo", "package.json")
+    const tsgoPkgPath = resolveHarnessTsgoPkgJsonPath(repoRoot, nodeSyncHostIo)
     const effectLspOk = yield* Effect.try({
-      try: () => {
-        if (!nodeSyncHostIo.existsSync(tsconfigBasePath) || !nodeSyncHostIo.existsSync(tsgoPkgPath)) {
-          return false
-        }
-        return nodeSyncHostIo.readTextSync(tsconfigBasePath).includes("@effect/language-service")
-      },
+      try: () =>
+        nodeSyncHostIo.existsSync(tsconfigBasePath) &&
+        nodeSyncHostIo.existsSync(tsgoPkgPath) &&
+        nodeSyncHostIo.readTextSync(tsconfigBasePath).includes("@effect/language-service"),
       catch: () => false,
     }).pipe(Effect.orElseSucceed(() => false))
 
@@ -167,7 +164,9 @@ export const handleDoctorOrSession = (
             Effect.catchCause((cause) => {
               if (isPureInterruptCause(cause)) return Effect.interrupt
               return Effect.sync(() => {
-                process.stderr.write(`[harness learn] decision model fallback: ${Cause.pretty(cause)}\n`)
+                process.stderr.write(
+                  `[harness learn] decision model fallback: ${Cause.pretty(cause)}\n`,
+                )
               }).pipe(Effect.as(Option.none()))
             }),
             Effect.provide(decisionLayer),
@@ -186,12 +185,9 @@ export const handleDoctorOrSession = (
         loadGraphSnapshotEffect(path, nodeSyncHostIo).pipe(
           Effect.map((graph) => ({ _tag: "Ok" as const, graph })),
           Effect.catchTag("GraphSnapshotError", (err: GraphSnapshotError) =>
-            Effect.gen(function* () {
-              yield* Effect.logError(
-                `Failed to load ${label} graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`,
-              )
-              return { _tag: "Err" as const, err }
-            }),
+            Effect.logError(
+              `Failed to load ${label} graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`,
+            ).pipe(Effect.as({ _tag: "Err" as const, err })),
           ),
         )
       const planLoad = yield* loadSnap(planPath, "plan")
@@ -221,8 +217,11 @@ export const handleDoctorOrSession = (
       nodeSyncHostIo.existsSync(join(harnessDir, "verify-stamp.json"))
     const effectiveStampValid = hasPlanOrStamp ? stampCheck.valid : true
     const stampReason = !stampCheck.valid ? stampCheck.reason : undefined
-    const rawFrictionEvents = readFrictionEvents(repoRoot, nodeSyncHostIo)
-    const telemetryEvents = readTelemetryEvents(repoRoot, nodeSyncHostIo)
+    const rawFrictionEvents = readFrictionEventsSafe(repoRoot, nodeSyncHostIo)
+    const telemetryEvents =
+      isAntigravity && rawFrictionEvents.length === 0
+        ? []
+        : readTelemetryEventsSafe(repoRoot, nodeSyncHostIo)
     const scoped = scopeSessionReportInput({
       events: telemetryEvents,
       frictionEvents: rawFrictionEvents,
@@ -239,12 +238,6 @@ export const handleDoctorOrSession = (
       loopThrashing,
     })
 
-    const telemetryReport = buildSessionReport({
-      events: telemetryEvents,
-      frictionEvents: rawFrictionEvents,
-      stampValid: effectiveStampValid,
-    })
-
     const ok =
       nodeOk && snapshotDirOk && snapshotOk && effectLspOk && omnigraphInitialized && ollamaReady
 
@@ -257,21 +250,50 @@ export const handleDoctorOrSession = (
       }
       if (!snapshotOk) injected.push(...missingPlannedFns)
       if (reconcileError !== undefined) {
-        injected.push(`[harness:session] Warning: Omnigraph reconcile sync failed: ${reconcileError}`)
+        injected.push(
+          `[harness:session] Warning: Omnigraph reconcile sync failed: ${reconcileError}`,
+        )
       }
       if (handoff.handoffMessage !== null) injected.push(handoff.handoffMessage)
+      const antigravityStderr =
+        reconcileError !== undefined
+          ? `[harness:session] Warning: Omnigraph reconcile sync failed: ${reconcileError}`
+          : ""
+      if (
+        !suppressLiveWrites &&
+        ok &&
+        reconcileError === undefined &&
+        options?.governanceDocs === undefined &&
+        options?.planGraph === undefined &&
+        options?.implGraph === undefined
+      ) {
+        tryCachePreInvocationResult(
+          repoRoot,
+          harnessDir,
+          ollamaReady,
+          ollamaProbed,
+          injected,
+          antigravityStderr,
+          options,
+          nodeSyncHostIo,
+        )
+      }
       return {
         exitCode: 0,
         stdout: JSON.stringify({
           injectSteps: injected,
           ...(reconcileError !== undefined ? { reconcileError } : {}),
         }),
-        stderr:
-          reconcileError !== undefined
-            ? `[harness:session] Warning: Omnigraph reconcile sync failed: ${reconcileError}`
-            : "",
+        stderr: antigravityStderr,
+        telemetryDetail: "cache=miss",
       }
     }
+
+    const telemetryReport = buildSessionReport({
+      events: telemetryEvents,
+      frictionEvents: rawFrictionEvents,
+      stampValid: effectiveStampValid,
+    })
 
     return {
       exitCode: ok ? 0 : 1,
@@ -308,7 +330,13 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
   const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
   const isAntigravity = hasAntigravityFormat(argv)
   const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)
-  const harnessDir = resolveHarnessStateDir(repoRoot, process.env)
+  const harnessDir = Option.getOrUndefined(resolveHarnessStateDirSafe(repoRoot))
+  if (harnessDir === undefined)
+    return {
+      exitCode: 1,
+      stdout: JSON.stringify({ error: "Invalid HARNESS_STATE_DIR" }),
+      stderr: "Invalid HARNESS_STATE_DIR\n",
+    }
   const snapshotPath = join(harnessDir, "graph-snapshot.json")
   const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
   const recordedMeta = readGraphHeadMeta(repoRoot, nodeSyncHostIo)
@@ -334,7 +362,9 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
       saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
       const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
       if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {
-        process.stderr.write("[harness:ingest] Warning: failed to persist .harness/graph-head.json\n")
+        process.stderr.write(
+          "[harness:ingest] Warning: failed to persist .harness/graph-head.json\n",
+        )
       }
       return {
         exitCode: 0,
@@ -387,7 +417,9 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
     if (syncRes.syncedToOmnigraph) {
       const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
       if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {
-        process.stderr.write("[harness:ingest] Warning: failed to persist .harness/graph-head.json\n")
+        process.stderr.write(
+          "[harness:ingest] Warning: failed to persist .harness/graph-head.json\n",
+        )
       }
     }
     const syncError = syncRes.syncedToOmnigraph
@@ -425,195 +457,3 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
     stderr: "",
   }
 })
-
-export const handleLearn = (
-  argv: ReadonlyArray<string>,
-  options: CliEnv | undefined,
-): Effect.Effect<CliResult> =>
-  Effect.gen(function* () {
-    const decisionLayer = yield* resolveDecisionModelLayer(options?.decisionLayer)
-    const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-    const shouldClear = argv.includes("--clear")
-    const events = readFrictionEvents(repoRoot, nodeSyncHostIo)
-    const clusters = summarizeFrictionEvents(events)
-    const proposals = []
-    let useFastFallback =
-      (shouldClear && options?.decisionLayer === undefined) || argv.includes("--deterministic")
-
-    for (const cluster of clusters) {
-      const input = {
-        kind: cluster.kind,
-        summary: cluster.summary,
-        detail: cluster.detail,
-        occurrences: cluster.occurrences,
-      }
-      const proposal = useFastFallback
-        ? deterministicLearnFallback(input)
-        : yield* proposeLearningAction(input).pipe(Effect.provide(decisionLayer))
-      if (proposal.source === "deterministic-fallback") {
-        useFastFallback = true
-      }
-      proposals.push({
-        key: cluster.key,
-        kind: cluster.kind,
-        summary: cluster.summary,
-        occurrences: cluster.occurrences,
-        lastSeen: cluster.lastSeen,
-        ...proposal,
-      })
-    }
-
-    const warnings: Array<string> = []
-    const warnLearn = (msg: string): void => {
-      warnings.push(msg)
-      process.stderr.write(`[harness:learn] Warning: ${msg}\n`)
-    }
-    let synthesizedRules: ReadonlyArray<unknown> = []
-    const rejectedRules: Array<{ ruleId: string; stage: string; reason: string }> = []
-    let planSearchResults: unknown = undefined
-    const learnedSlicesPath = join(repoRoot, ".harness", "learned-slices.json")
-    if (nodeSyncHostIo.existsSync(learnedSlicesPath)) {
-      const rawSlices = yield* Effect.try({
-        try: () => nodeSyncHostIo.readTextSync(learnedSlicesPath),
-        catch: (err) => {
-          warnLearn(
-            `failed to read ${learnedSlicesPath}: ${err instanceof Error ? err.message : String(err)}`,
-          )
-          return undefined
-        },
-      }).pipe(Effect.orElseSucceed(() => undefined))
-      if (rawSlices !== undefined) {
-        const decodeJson = Schema.decodeUnknownOption(
-          Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
-        )
-        const parsedOpt = decodeJson(rawSlices)
-        yield* match(parsedOpt)
-          .with({ _tag: "Some" }, ({ value: parsed }) =>
-            Effect.gen(function* () {
-              if (Array.isArray(parsed["slices"])) {
-                const rules: Array<unknown> = []
-                for (let idx = 0; idx < parsed["slices"].length; idx++) {
-                  const s = parsed["slices"][idx]
-                  const decodedSlice = Schema.decodeUnknownOption(RuleSynthesizerInput)(s)
-                  yield* match(decodedSlice)
-                    .with({ _tag: "Some" }, ({ value: slice }) =>
-                      Effect.gen(function* () {
-                        const synthRes = yield* decideRuleSynthesizer(slice).pipe(
-                          Effect.map((report) => ({ _tag: "Ok" as const, report })),
-                          Effect.catchTag("RuleSynthesisError", (err) =>
-                            Effect.succeed({ _tag: "Err" as const, err }),
-                          ),
-                        )
-                        match(synthRes)
-                          .with({ _tag: "Ok" }, ({ report }) => {
-                            rules.push(report)
-                          })
-                          .with({ _tag: "Err" }, ({ err }) => {
-                            rejectedRules.push({
-                              ruleId: String(slice.taskId),
-                              stage: err.stage ?? "unknown",
-                              reason: err.reason ?? err.message,
-                            })
-                          })
-                          .exhaustive()
-                      }),
-                    )
-                    .with({ _tag: "None" }, () =>
-                      Effect.sync(() => {
-                        warnLearn(
-                          `invalid RuleSynthesizerInput at slices[${idx}] in ${learnedSlicesPath}`,
-                        )
-                      }),
-                    )
-                    .exhaustive()
-                }
-                synthesizedRules = rules
-              }
-              if (Array.isArray(parsed["candidates"])) {
-                const rawPlanInput: unknown = {
-                  candidates: parsed["candidates"],
-                  requireZeroViolations: false,
-                }
-                const decodedPlanSearch = Schema.decodeUnknownOption(PlanSearchInput)(rawPlanInput)
-                planSearchResults = yield* match(decodedPlanSearch)
-                  .with({ _tag: "Some" }, ({ value: input }) =>
-                    decidePlanSearch(input).pipe(
-                      Effect.catch((err) =>
-                        Effect.sync(() => {
-                          warnLearn(`decidePlanSearch failed: ${String(err)}`)
-                          return undefined
-                        }),
-                      ),
-                    ),
-                  )
-                  .with({ _tag: "None" }, () =>
-                    Effect.sync(() => {
-                      warnLearn(`invalid PlanSearchInput candidates in ${learnedSlicesPath}`)
-                      return undefined
-                    }),
-                  )
-                  .exhaustive()
-              }
-            }),
-          )
-          .with({ _tag: "None" }, () =>
-            Effect.sync(() => {
-              warnLearn(`failed to decode ${learnedSlicesPath} as JSON object`)
-            }),
-          )
-          .exhaustive()
-      }
-    }
-
-    if (shouldClear) {
-      clearFrictionEvents(repoRoot, nodeSyncHostIo)
-    }
-
-    return {
-      exitCode: 0,
-      stdout: JSON.stringify({
-        totalEvents: events.length,
-        proposals,
-        cleared: shouldClear,
-        ...(synthesizedRules.length > 0 ? { synthesizedRules } : {}),
-        ...(rejectedRules.length > 0 ? { rejectedRules } : {}),
-        ...(planSearchResults !== undefined ? { planSearchResults } : {}),
-      }),
-      stderr: warnings.join("\n"),
-    }
-  })
-
-export const handleReport = (
-  argv: ReadonlyArray<string>,
-  options: CliEnv | undefined,
-): Effect.Effect<CliResult> =>
-  Effect.sync(() => {
-    const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-    if (argv.includes("--reset") || argv.includes("--clear")) {
-      clearTelemetryEvents(repoRoot, nodeSyncHostIo)
-    }
-    const events = readTelemetryEvents(repoRoot, nodeSyncHostIo)
-    const frictionEvents = readFrictionEvents(repoRoot, nodeSyncHostIo)
-    const stampCheck = checkVerifyStamp(repoRoot, nodeSyncHostIo)
-    const report = buildSessionReport({
-      events,
-      frictionEvents,
-      stampValid: stampCheck.valid,
-      cumulative: argv.includes("--all"),
-    })
-    if (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) {
-      writeSessionReportFiles(repoRoot, report, nodeSyncHostIo)
-    }
-    if (argv.includes("--format=markdown")) {
-      return {
-        exitCode: 0,
-        stdout: renderSessionReportMarkdown(report),
-        stderr: "",
-      }
-    }
-    return {
-      exitCode: 0,
-      stdout: JSON.stringify(report),
-      stderr: "",
-    }
-  })

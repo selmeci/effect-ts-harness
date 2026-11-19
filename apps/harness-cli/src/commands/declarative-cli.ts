@@ -4,11 +4,12 @@ import * as DecisionModel from "effect/ai/DecisionModel"
 import { Argument, Command as CliCommand, Flag } from "effect/cli"
 import { match } from "ts-pattern"
 import { isPureInterruptCause } from "@harness/contract"
-import { HarnessInfraLive, LocalDecisionModel } from "@harness/infra"
+import { HookInfraLive, LocalDecisionModel } from "@harness/infra/hook-fastpath"
 import {
   dispatchCliCommand,
   HarnessCommandRegistry,
   makeLiveCliCommandRegistryLayer,
+  toLazyImportError,
 } from "./command-registry.js"
 import { COMMANDS, type CliEnv, type CliResult, isCommand } from "./daemon-and-omnigraph.service.js"
 import {
@@ -213,15 +214,17 @@ export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.E
       scope: Flag.optional(Flag.String("scope")),
       strict: boolFlag("strict"),
       all: boolFlag("all"),
+      noCache: boolFlag("no-cache"),
       file: Flag.optional(Flag.String("file")),
       base: Flag.optional(Flag.String("base")),
       args: variadicArgs,
     },
-    ({ scope, strict, all, file, base, args }) => {
+    ({ scope, strict, all, noCache, file, base, args }) => {
       const raw: Array<string> = [...args]
       appendStringFlag(raw, "scope", scope)
       appendBoolFlag(raw, "strict", strict)
       appendBoolFlag(raw, "all", all)
+      appendBoolFlag(raw, "no-cache", noCache)
       appendStringFlag(raw, "file", file)
       appendStringFlag(raw, "base", base)
       return runSubcommand("mutate", raw)
@@ -536,8 +539,25 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
     warn: pushStderrLine,
   }
   const isHookCommand = requested === "guard" || requested === "done" || hasAntigravityFormat(argv)
+  const useHookFastpath =
+    requested === "guard" ||
+    requested === "route" ||
+    (requested === "session" && hasAntigravityFormat(argv))
+  const infraLayer = useHookFastpath
+    ? HookInfraLive
+    : yield* Effect.tryPromise({
+        try: () => import("./mutate-and-bench.command.js"),
+        catch: toLazyImportError,
+      }).pipe(
+        Effect.map((m) => m.HarnessInfraLive),
+        Effect.catch((err) =>
+          Effect.sync(
+            () => (process.stderr.write(`[harness:cli] Warning: ${err.message}\n`), HookInfraLive),
+          ),
+        ),
+      )
   const mainLayer = Layer.mergeAll(
-    HarnessInfraLive,
+    infraLayer,
     decisionLayer,
     liveCommandLayer,
     NodeServices.layer,

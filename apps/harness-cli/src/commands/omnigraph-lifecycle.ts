@@ -38,6 +38,7 @@ import {
 } from "./omnigraph-auth-and-drift.js"
 
 import {
+  buildOmnigraphClusterKillArgs,
   CLI_REPO_ROOT,
   findWorkspaceRoot,
   resolveClusterRepoRoot,
@@ -47,6 +48,7 @@ const DEFAULT_EMBEDDING_API_KEY = "ollama-local"
 const DEFAULT_EMBEDDINGS_MOCK = "1"
 
 export {
+  buildOmnigraphClusterKillArgs,
   CLI_REPO_ROOT,
   findWorkspaceRoot,
   isLoopbackOmnigraphUrl,
@@ -57,6 +59,35 @@ export {
 }
 
 const LockJsonSchema = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
+
+const matchExecSyncStdout = (
+  label: string,
+  res: ReturnType<SyncHostIo["execFileSync"]>,
+  allowExitCode1 = false,
+): string | undefined =>
+  match(res)
+    .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {
+      if (exitCode !== 0 && !(allowExitCode1 && exitCode === 1)) {
+        process.stderr.write(
+          `[harness:omnigraph] ${label} (exitCode=${exitCode}): ${stderr || stdout || "unknown error"}\n`,
+        )
+        return undefined
+      }
+      return stdout
+    })
+    .with({ _tag: "TimedOut" }, ({ stderr }) => {
+      process.stderr.write(`[harness:omnigraph] ${label} timed out: ${stderr}\n`)
+      return undefined
+    })
+    .with({ _tag: "Signaled" }, ({ signal, stderr }) => {
+      process.stderr.write(`[harness:omnigraph] ${label} killed by ${signal}: ${stderr}\n`)
+      return undefined
+    })
+    .with({ _tag: "SpawnFailed" }, ({ spawnError }) => {
+      process.stderr.write(`[harness:omnigraph] ${label} spawn failed: ${spawnError}\n`)
+      return undefined
+    })
+    .exhaustive()
 
 export interface UnlockClusterResult {
   readonly ok: boolean
@@ -107,9 +138,7 @@ export function unlockOmnigraphClusterIfNeeded(
         return true
       })
       .with({ _tag: "None" }, () => {
-        process.stderr.write(
-          `[harness:omnigraph] Error: failed to decode ${lockPath} as JSON\n`,
-        )
+        process.stderr.write(`[harness:omnigraph] Error: failed to decode ${lockPath} as JSON\n`)
         return false
       })
       .exhaustive()
@@ -132,36 +161,10 @@ export function unlockOmnigraphClusterIfNeeded(
         )
         return false
       })
-      .with({ _tag: "Success" }, ({ success: res }) =>
-        match(res)
-          .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {
-            if (exitCode !== 0) {
-              process.stderr.write(
-                `[harness:omnigraph] force-unlock failed for ${lockId} (exitCode=${exitCode}): ${stderr || stdout}\n`,
-              )
-              return false
-            }
-            return true
-          })
-          .with({ _tag: "TimedOut" }, ({ stderr }) => {
-            process.stderr.write(
-              `[harness:omnigraph] force-unlock timed out for ${lockId}: ${stderr}\n`,
-            )
-            return false
-          })
-          .with({ _tag: "Signaled" }, ({ signal, stderr }) => {
-            process.stderr.write(
-              `[harness:omnigraph] force-unlock killed by ${signal} for ${lockId}: ${stderr}\n`,
-            )
-            return false
-          })
-          .with({ _tag: "SpawnFailed" }, ({ spawnError }) => {
-            process.stderr.write(
-              `[harness:omnigraph] force-unlock spawn failed for ${lockId}: ${spawnError}\n`,
-            )
-            return false
-          })
-          .exhaustive(),
+      .with(
+        { _tag: "Success" },
+        ({ success: res }) =>
+          matchExecSyncStdout(`force-unlock failed for ${lockId}`, res) !== undefined,
       )
       .exhaustive()
     if (!unlockOk) {
@@ -169,13 +172,6 @@ export function unlockOmnigraphClusterIfNeeded(
     }
   }
   return { ok: true }
-}
-
-export const buildOmnigraphClusterKillArgs = (
-  clusterRootDir: string,
-): readonly [string, ReadonlyArray<string>] => {
-  const escaped = clusterRootDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  return ["pkill", ["-f", `omnigraph-server.*--cluster file://${escaped}(\\s|$)`]]
 }
 
 const decodeOmnigraphServerMeta = Schema.decodeOption(
@@ -190,32 +186,12 @@ export const stopStaleOmnigraphClusterBeforeDelete = (
 ): boolean => {
   const [killBin, killArgs] = buildOmnigraphClusterKillArgs(clusterRootDir)
   const killResult = Result.try({
-    try: () => {
-      const killRes = hostIo.execFileSync(killBin, [...killArgs], { timeoutMs: 5_000 })
-      return match(killRes)
-        .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {
-          if (exitCode !== 0 && exitCode !== 1) {
-            process.stderr.write(
-              `[harness:omnigraph] Warning: pkill returned exitCode=${exitCode}: ${stderr || stdout}\n`,
-            )
-            return false
-          }
-          return true
-        })
-        .with({ _tag: "TimedOut" }, ({ stderr }) => {
-          process.stderr.write(`[harness:omnigraph] Warning: pkill timed out: ${stderr}\n`)
-          return false
-        })
-        .with({ _tag: "Signaled" }, ({ signal, stderr }) => {
-          process.stderr.write(`[harness:omnigraph] Warning: pkill killed by ${signal}: ${stderr}\n`)
-          return false
-        })
-        .with({ _tag: "SpawnFailed" }, ({ spawnError }) => {
-          process.stderr.write(`[harness:omnigraph] Warning: pkill spawn failed: ${spawnError}\n`)
-          return false
-        })
-        .exhaustive()
-    },
+    try: () =>
+      matchExecSyncStdout(
+        "Warning: pkill",
+        hostIo.execFileSync(killBin, [...killArgs], { timeoutMs: 5_000 }),
+        true,
+      ) !== undefined,
     catch: (err) => {
       process.stderr.write(
         `[harness:omnigraph] Warning: pkill failed: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -277,13 +253,17 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
       hasPolicies = clusterYamlDeclaresPolicies(yamlRead.content)
     }
 
-    type SetupRes = { readonly ok: true; readonly pid: number; readonly appliedCluster: boolean } | { readonly ok: false }
+    type SetupRes =
+      | { readonly ok: true; readonly pid: number; readonly appliedCluster: boolean }
+      | { readonly ok: false }
     return yield* Effect.acquireUseRelease(
       acquireOmnigraphClusterLockEffect(clusterRootDir),
       (lockHandle) =>
         Effect.gen(function* () {
           if (lockHandle === undefined) {
-            process.stderr.write(`[harness:omnigraph] Failed to acquire cluster startup lock for ${clusterRootDir}\n`)
+            process.stderr.write(
+              `[harness:omnigraph] Failed to acquire cluster startup lock for ${clusterRootDir}\n`,
+            )
             return false
           }
 
@@ -291,7 +271,9 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
           let serverJsonCorruptOrUnreadable = false
           const serverJsonPath = join(clusterRootDir, "server.json")
           if (nodeSyncHostIo.existsSync(serverJsonPath)) {
-            const rawMetaOutcome = match(Result.try(() => nodeSyncHostIo.readTextSync(serverJsonPath)))
+            const rawMetaOutcome = match(
+              Result.try(() => nodeSyncHostIo.readTextSync(serverJsonPath)),
+            )
               .with({ _tag: "Success" }, ({ success }) => ({ ok: true as const, raw: success }))
               .with({ _tag: "Failure" }, ({ failure }) => {
                 process.stderr.write(
@@ -360,7 +342,13 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
                   )
                   return { ok: false as const, applyCluster: false }
                 }
-                if (!(yield* killOmnigraphServerPidIfAlive(serverPid, clusterRootDir, "clean rebuild"))) {
+                if (
+                  !(yield* killOmnigraphServerPidIfAlive(
+                    serverPid,
+                    clusterRootDir,
+                    "clean rebuild",
+                  ))
+                ) {
                   return { ok: false as const, applyCluster: false }
                 }
                 const stoppedBeforeDelete = stopStaleOmnigraphClusterBeforeDelete(
@@ -402,7 +390,11 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
                 const stopped =
                   serverPid === undefined && serverJsonCorruptOrUnreadable
                     ? stopStaleOmnigraphClusterBeforeDelete(clusterRootDir, undefined)
-                    : yield* killOmnigraphServerPidIfAlive(serverPid, clusterRootDir, "live cluster apply")
+                    : yield* killOmnigraphServerPidIfAlive(
+                        serverPid,
+                        clusterRootDir,
+                        "live cluster apply",
+                      )
                 return { ok: stopped, applyCluster: stopped }
               }),
             )
@@ -415,7 +407,8 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
                   }
                 }
                 const belongsToThisRepo =
-                  explicitEnvUrl !== undefined || serverMeta?.canonicalRepoRoot === canonicalRepoRoot
+                  explicitEnvUrl !== undefined ||
+                  serverMeta?.canonicalRepoRoot === canonicalRepoRoot
                 if (belongsToThisRepo) {
                   const probe = yield* probeOmnigraphServerReady(targetBaseUrl)
                   const alreadyReady = match(probe)
@@ -438,7 +431,10 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
             return true
           }
 
-          if (!nodeSyncHostIo.existsSync(omnigraphBin) || !nodeSyncHostIo.existsSync(omnigraphServerBin)) {
+          if (
+            !nodeSyncHostIo.existsSync(omnigraphBin) ||
+            !nodeSyncHostIo.existsSync(omnigraphServerBin)
+          ) {
             process.stderr.write(
               `[harness:omnigraph] Missing omnigraph binaries (${omnigraphBin}, ${omnigraphServerBin}). Install omnigraph v0.14.0 into ~/.local/bin before retrying.\n`,
             )
@@ -475,33 +471,44 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
               if (driftHandled.applyCluster || !nodeSyncHostIo.existsSync(graphOmniDir)) {
                 const outRes = nodeSyncHostIo.execFileSync(
                   omnigraphBin,
-                  ["cluster", "apply", "--target", `file://${clusterRootDir}`, "--config", configDir, "--as", "harness-cli", "--json"],
+                  [
+                    "cluster",
+                    "apply",
+                    "--target",
+                    `file://${clusterRootDir}`,
+                    "--config",
+                    configDir,
+                    "--as",
+                    "harness-cli",
+                    "--json",
+                  ],
                   { cwd: clusterRepoRoot, timeoutMs: 30_000 },
                 )
-                const applyStdout = match(outRes)
-                  .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {
-                    if (exitCode !== 0) {
-                      process.stderr.write(`[harness:omnigraph] Local omnigraph cluster apply failed (exitCode=${exitCode}): ${stderr || stdout || "unknown error"}\n`)
-                      return undefined
-                    }
-                    return stdout
-                  })
-                  .with({ _tag: "TimedOut" }, ({ stderr }) => { process.stderr.write(`[harness:omnigraph] Local omnigraph cluster apply timed out: ${stderr}\n`); return undefined })
-                  .with({ _tag: "Signaled" }, ({ signal, stderr }) => { process.stderr.write(`[harness:omnigraph] Local omnigraph cluster apply killed by ${signal}: ${stderr}\n`); return undefined })
-                  .with({ _tag: "SpawnFailed" }, ({ spawnError }) => { process.stderr.write(`[harness:omnigraph] Local omnigraph cluster apply spawn failed: ${spawnError}\n`); return undefined })
-                  .exhaustive()
+                const applyStdout = matchExecSyncStdout(
+                  "Local omnigraph cluster apply failed",
+                  outRes,
+                )
                 if (applyStdout === undefined) return { ok: false }
-                if (!unlockOmnigraphClusterIfNeeded(omnigraphBin, clusterRootDir, applyStdout).ok) return { ok: false }
+                if (!unlockOmnigraphClusterIfNeeded(omnigraphBin, clusterRootDir, applyStdout).ok)
+                  return { ok: false }
                 appliedCluster = true
               }
-              if (!unlockOmnigraphClusterIfNeeded(omnigraphBin, clusterRootDir).ok) return { ok: false }
-              const bindHostPort = targetBaseUrl.match(/^https?:\/\/([^/]+)/)?.[1] ?? `127.0.0.1:${defaultPort}`
+              if (!unlockOmnigraphClusterIfNeeded(omnigraphBin, clusterRootDir).ok)
+                return { ok: false }
+              const bindHostPort =
+                targetBaseUrl.match(/^https?:\/\/([^/]+)/)?.[1] ?? `127.0.0.1:${defaultPort}`
               if (!hasPolicies) {
                 process.stderr.write(
                   "[harness:omnigraph] Warning: spawning omnigraph-server with --unauthenticated because cluster.yaml declares no policies:\n",
                 )
               }
-              const spawnArgs = ["--cluster", `file://${clusterRootDir}`, "--bind", bindHostPort, ...(hasPolicies ? [] : ["--unauthenticated"])]
+              const spawnArgs = [
+                "--cluster",
+                `file://${clusterRootDir}`,
+                "--bind",
+                bindHostPort,
+                ...(hasPolicies ? [] : ["--unauthenticated"]),
+              ]
               const hasExplicitEmbeddingKey =
                 typeof process.env.OMNIGRAPH_EMBEDDING_API_KEY === "string" &&
                 process.env.OMNIGRAPH_EMBEDDING_API_KEY.length > 0
@@ -512,14 +519,20 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
               }
               const spawnEnv: Record<string, string | undefined> = {
                 ...process.env,
-                OMNIGRAPH_EMBEDDING_API_KEY: process.env.OMNIGRAPH_EMBEDDING_API_KEY ?? DEFAULT_EMBEDDING_API_KEY,
+                OMNIGRAPH_EMBEDDING_API_KEY:
+                  process.env.OMNIGRAPH_EMBEDDING_API_KEY ?? DEFAULT_EMBEDDING_API_KEY,
                 ...(process.env.OMNIGRAPH_EMBEDDINGS_MOCK !== undefined
                   ? { OMNIGRAPH_EMBEDDINGS_MOCK: process.env.OMNIGRAPH_EMBEDDINGS_MOCK }
                   : !hasExplicitEmbeddingKey
                     ? { OMNIGRAPH_EMBEDDINGS_MOCK: DEFAULT_EMBEDDINGS_MOCK }
                     : {}),
                 ...(tokens !== undefined
-                  ? { OMNIGRAPH_SERVER_BEARER_TOKENS_JSON: JSON.stringify({ "harness-cli": tokens.cliToken, "agent-mcp": tokens.mcpToken }) }
+                  ? {
+                      OMNIGRAPH_SERVER_BEARER_TOKENS_JSON: JSON.stringify({
+                        "harness-cli": tokens.cliToken,
+                        "agent-mcp": tokens.mcpToken,
+                      }),
+                    }
                   : {}),
               }
               if (hasExplicitEmbeddingKey && process.env.OMNIGRAPH_EMBEDDINGS_MOCK === undefined) {
@@ -532,14 +545,22 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
               })
               return match(spawnRes)
                 .with({ _tag: "SpawnFailed" }, ({ spawnError }): SetupRes => {
-                  process.stderr.write(`[harness:omnigraph] Failed to spawn omnigraph-server: ${spawnError}\n`)
+                  process.stderr.write(
+                    `[harness:omnigraph] Failed to spawn omnigraph-server: ${spawnError}\n`,
+                  )
                   return { ok: false }
                 })
-                .with({ _tag: "Spawned" }, ({ pid }): SetupRes => ({ ok: true, pid, appliedCluster }))
+                .with({ _tag: "Spawned" }, ({ pid }): SetupRes => ({
+                  ok: true,
+                  pid,
+                  appliedCluster,
+                }))
                 .exhaustive()
             },
             catch: (err): SetupRes => {
-              process.stderr.write(`[harness:omnigraph] Local omnigraph setup/spawn failed: ${err instanceof Error ? err.message : String(err)}\n`)
+              process.stderr.write(
+                `[harness:omnigraph] Local omnigraph setup/spawn failed: ${err instanceof Error ? err.message : String(err)}\n`,
+              )
               return { ok: false }
             },
           }).pipe(Effect.orElseSucceed((): SetupRes => ({ ok: false })))
@@ -573,7 +594,10 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
             const probe = yield* probeOmnigraphServerReady(targetBaseUrl)
             const isReady = match(probe)
               .with({ _tag: "Ready" }, () => true)
-              .with({ _tag: "NotReady" }, ({ reason }) => { lastFailureReason = reason; return false })
+              .with({ _tag: "NotReady" }, ({ reason }) => {
+                lastFailureReason = reason
+                return false
+              })
               .exhaustive()
             if (isReady) {
               if (setupRes.appliedCluster) {
@@ -597,7 +621,11 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
                     process.stderr.write(
                       `[harness:omnigraph] Error: failed to write server.json: ${failure.message}\n`,
                     )
-                    yield* killOmnigraphServerPidIfAlive(setupRes.pid, clusterRootDir, "server.json write failure")
+                    yield* killOmnigraphServerPidIfAlive(
+                      setupRes.pid,
+                      clusterRootDir,
+                      "server.json write failure",
+                    )
                     return false
                   }),
                 )
@@ -607,7 +635,9 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
             yield* Effect.sleep("100 millis")
           }
           yield* killOmnigraphServerPidIfAlive(setupRes.pid, clusterRootDir, "readyz timeout")
-          process.stderr.write(`[harness:omnigraph] Omnigraph server did not become ready at ${targetBaseUrl}/readyz: ${lastFailureReason}\n`)
+          process.stderr.write(
+            `[harness:omnigraph] Omnigraph server did not become ready at ${targetBaseUrl}/readyz: ${lastFailureReason}\n`,
+          )
           return false
         }),
       (lockHandle) => Effect.sync(() => releaseOmnigraphClusterLock(lockHandle)),

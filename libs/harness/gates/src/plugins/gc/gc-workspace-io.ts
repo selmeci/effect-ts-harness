@@ -44,6 +44,7 @@ export const GcFindingKind = Schema.Literals([
   "stale-gate-rule-version",
   "contract-test-effect-vitest-import",
   "chained-equality-ternary",
+  "hook-fastpath-forbidden-import",
 ])
 export type GcFindingKind = typeof GcFindingKind.Type
 

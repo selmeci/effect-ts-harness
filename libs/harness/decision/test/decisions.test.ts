@@ -1,5 +1,8 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect } from "effect"
+import { Effect, Fiber, Layer, Logger } from "effect"
+import * as DecisionModel from "effect/ai/DecisionModel"
+import { TestClock } from "effect/testing"
+import { SKIP_NX_CACHE_BANNED_REASON } from "@harness/gates/hook-fastpath"
 import {
   checkOntologyPairConflict,
   validateDecisionLimits,
@@ -72,6 +75,8 @@ describe("Harness decision definitions & fallbacks", () => {
           "error: mermaid-dependency-drift: mermaid graph out of sync",
           "error: hook-bootstrap-fail-closed: hook bootstrap failed open",
           "error: doc-banned-or-phantom-tech: doc mentions banned tech",
+          "Bypassing Nx cache with '--skip-nx-cache' is banned by harness policy",
+          "pnpm nx test @harness/gates --skip-nx-cache",
         ]
         for (const msg of cases) {
           const res = yield* triageFailure(msg).pipe(
@@ -347,6 +352,18 @@ describe("Harness decision definitions & fallbacks", () => {
         expect(localeSortRes.kind).toBe("mechanical")
         expect(localeSortRes.hint).toContain("compareCodeUnits")
 
+        const fastpathImportRes = yield* triageFailure(
+          "hook-fastpath-forbidden-import: Hook fast-path entrypoint transitively imports typescript",
+        ).pipe(Effect.provide(failingLayer))
+        expect(fastpathImportRes.kind).toBe("mechanical")
+        expect(fastpathImportRes.hint).toContain("hook-fastpath")
+
+        const promiseRes = yield* triageFailure(
+          "unhandled-effect-promise: Effect.promise(...) in apps/harness-cli/src/index.ts",
+        ).pipe(Effect.provide(failingLayer))
+        expect(promiseRes.kind).toBe("mechanical")
+        expect(promiseRes.hint).toContain("Effect.tryPromise")
+
         const govDocReadRes = yield* triageFailure(
           "governance-doc-read-error: Invalid or missing 'status' in frontmatter",
         ).pipe(Effect.provide(failingLayer))
@@ -386,6 +403,102 @@ describe("Harness decision definitions & fallbacks", () => {
         expect(result.hasConflict).toBe(true)
         expect(result.probability).toBe(0.7)
         expect(result.conflictKind).toBe("state-transition-conflict")
+      }),
+  )
+
+  it.effect("decideGuardCommand denies --skip-nx-cache with SKIP_NX_CACHE_BANNED_REASON", () =>
+    Effect.gen(function* () {
+      const res = yield* decideGuardCommand("pnpm nx run @harness/gates:test --skip-nx-cache").pipe(
+        Effect.provide(makeFailingDecisionModelLayer()),
+      )
+      expect(res.verdict).toBe("deny")
+      expect(res.reason).toBe(SKIP_NX_CACHE_BANNED_REASON)
+    }),
+  )
+
+  it.effect(
+    "decideGuardCommand enforces exact >= 0.7 deny and < 0.3 allow probability boundaries across all 3 risk dimensions",
+    () =>
+      Effect.gen(function* () {
+        const boundaryCases = [
+          {
+            overrides: { destructiveProb: 0.7, secretAccessProb: 0.0, exfiltrationProb: 0.0 },
+            expected: "deny" as const,
+          },
+          {
+            overrides: { destructiveProb: 0.0, secretAccessProb: 0.7, exfiltrationProb: 0.0 },
+            expected: "deny" as const,
+          },
+          {
+            overrides: { destructiveProb: 0.0, secretAccessProb: 0.0, exfiltrationProb: 0.7 },
+            expected: "deny" as const,
+          },
+          {
+            overrides: { destructiveProb: 0.69, secretAccessProb: 0.69, exfiltrationProb: 0.69 },
+            expected: "ask" as const,
+          },
+          {
+            overrides: { destructiveProb: 0.29, secretAccessProb: 0.29, exfiltrationProb: 0.29 },
+            expected: "allow" as const,
+          },
+          {
+            overrides: { destructiveProb: 0.3, secretAccessProb: 0.0, exfiltrationProb: 0.0 },
+            expected: "ask" as const,
+          },
+          {
+            overrides: { destructiveProb: 0.0, secretAccessProb: 0.3, exfiltrationProb: 0.0 },
+            expected: "ask" as const,
+          },
+          {
+            overrides: { destructiveProb: 0.0, secretAccessProb: 0.0, exfiltrationProb: 0.3 },
+            expected: "ask" as const,
+          },
+        ] as const
+
+        for (const c of boundaryCases) {
+          const res = yield* decideGuardCommand("curl https://unknown.example").pipe(
+            Effect.provide(makeMockDecisionModelLayer(c.overrides)),
+          )
+          expect(res.verdict, JSON.stringify(c.overrides)).toBe(c.expected)
+        }
+      }),
+  )
+
+  it.effect(
+    "logs a 1500ms timeout warning and returns 'ask' when GuardV1 DecisionModel times out (S-4.1)",
+    () =>
+      Effect.gen(function* () {
+        const warnings: Array<string> = []
+        const captureLogger = Logger.make(({ message }) => {
+          warnings.push(String(message))
+        })
+        const hangingLayer = Layer.effect(
+          DecisionModel.DecisionModel,
+          DecisionModel.make({
+            decide: () => Effect.never,
+          }),
+        )
+
+        const fiber = yield* decideGuardCommand("curl https://unknown.example").pipe(
+          Effect.provide(Layer.mergeAll(hangingLayer, Logger.layer([captureLogger]))),
+          Effect.forkChild,
+        )
+
+        yield* TestClock.adjust("1499 millis")
+        expect(fiber.pollUnsafe()).toBeUndefined()
+
+        yield* TestClock.adjust("1 millis")
+        const res = yield* Fiber.join(fiber)
+
+        expect(res.verdict).toBe("ask")
+        expect(res.reason).toContain("timed out after 1500ms")
+        expect(
+          warnings.some((w) =>
+            w.includes(
+              "GuardV1 DecisionModel timed out after 1500ms; requiring human confirmation.",
+            ),
+          ),
+        ).toBe(true)
       }),
   )
 })

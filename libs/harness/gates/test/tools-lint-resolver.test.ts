@@ -1,3 +1,16 @@
+import { execFileSync } from "node:child_process"
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
+import { constants as moduleConstants } from "node:module"
+import { tmpdir } from "node:os"
+import { dirname, join } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
 
@@ -109,7 +122,9 @@ describe("tools/oxlint/syntax-bans.js & tools/node-ts-resolver.mjs (S-4.1, S-6.1
     cliRule.ImportDeclaration({
       type: "ImportDeclaration",
       source: { value: "effect/Effect" },
-      specifiers: [{ type: "ImportSpecifier", imported: { name: "runSync" }, local: { name: "runSync" } }],
+      specifiers: [
+        { type: "ImportSpecifier", imported: { name: "runSync" }, local: { name: "runSync" } },
+      ],
     })
     expect(cliReports.filter((m) => m.includes("unscoped-effect-run"))).toHaveLength(3)
 
@@ -141,7 +156,7 @@ describe("tools/oxlint/syntax-bans.js & tools/node-ts-resolver.mjs (S-4.1, S-6.1
     expect(mcpBoundaryReports.filter((m) => m.includes("unscoped-effect-run"))).toHaveLength(1)
   })
 
-  it("S-6.1: node-ts-resolver resolves .js -> .ts workspace imports and logs diagnostics when HARNESS_DEBUG_RESOLVER=1", async () => {
+  it("S-6.1: node-ts-resolver fast-paths .js -> .ts, preserves real .js, resolves dynamic exports, honors NODE_COMPILE_CACHE, and logs genuine fallbacks", async () => {
     const resolverMod = (await import(resolverUrl)) as {
       readonly resolve: (
         specifier: string,
@@ -152,9 +167,7 @@ describe("tools/oxlint/syntax-bans.js & tools/node-ts-resolver.mjs (S-4.1, S-6.1
         ) => Promise<{ readonly url: string; readonly shortCircuit?: boolean }>,
       ) => Promise<{ readonly url: string }>
     }
-    const parentURL = pathToFileURL(
-      fileURLToPath(new URL("../src/index.ts", import.meta.url)),
-    ).href
+    const parentURL = pathToFileURL(fileURLToPath(new URL("../src/index.ts", import.meta.url))).href
     const stderrChunks: Array<string> = []
     const origWrite = process.stderr.write.bind(process.stderr)
     const prevDebug = process.env["HARNESS_DEBUG_RESOLVER"]
@@ -165,20 +178,69 @@ describe("tools/oxlint/syntax-bans.js & tools/node-ts-resolver.mjs (S-4.1, S-6.1
     }) as typeof process.stderr.write
 
     try {
+      // 1. Fast-path relative .js -> .ts calls nextResolve ONCE directly with .ts (no ERR_MODULE_NOT_FOUND throw)
+      const directCalls: Array<string> = []
       const resolved = await resolverMod.resolve(
-        "./policy.js",
+        "./policy.js?v=1#top",
         { parentURL, conditions: ["node", "import"] },
         async (specifier: string) => {
-          if (specifier.endsWith(".js")) {
-            const err = new Error(`Cannot find module ${specifier}`) as Error & { code?: string }
-            err.code = "ERR_MODULE_NOT_FOUND"
-            throw err
-          }
+          directCalls.push(specifier)
           return { url: specifier, shortCircuit: true }
         },
       )
-      expect(resolved.url).toContain("policy.ts")
-      expect(stderrChunks.join("")).toContain("[node-ts-resolver] primary fallback for './policy.js'")
+      expect(directCalls).toHaveLength(1)
+      expect(resolved.url).toContain("policy.ts?v=1#top")
+      expect(stderrChunks.join("")).toBe("")
+
+      // 2. Real .js files win over .ts (tools/oxlint/syntax-bans.js exists on disk)
+      const toolsParentUrl = pathToFileURL(
+        fileURLToPath(new URL("../../../../tools/node-ts-resolver.mjs", import.meta.url)),
+      ).href
+      const realJsCalls: Array<string> = []
+      await resolverMod.resolve(
+        "./oxlint/syntax-bans.js",
+        { parentURL: toolsParentUrl, conditions: ["node", "import"] },
+        async (specifier: string) => {
+          realJsCalls.push(specifier)
+          return { url: specifier, shortCircuit: true }
+        },
+      )
+      expect(realJsCalls).toEqual(["./oxlint/syntax-bans.js"])
+
+      // 3. Dynamic package.json "exports" subpath resolution
+      const exportCalls: Array<string> = []
+      const exportResolved = await resolverMod.resolve(
+        "@harness/service/host-io",
+        { parentURL, conditions: ["node", "import"] },
+        async (specifier: string) => {
+          exportCalls.push(specifier)
+          return { url: specifier, shortCircuit: true }
+        },
+      )
+      expect(exportCalls).toHaveLength(1)
+      expect(exportResolved.url).toContain("libs/harness/service/src/host-io.ts")
+
+      // 4. Genuine fallback debug logging when nextResolve rejects
+      await expect(
+        resolverMod.resolve(
+          "@nonexistent/missing-pkg",
+          { parentURL, conditions: ["node", "import"] },
+          async (specifier: string) => {
+            const err = new Error(`Cannot find module ${specifier}`) as Error & { code?: string }
+            err.code = "ERR_MODULE_NOT_FOUND"
+            throw err
+          },
+        ),
+      ).rejects.toThrow()
+      expect(stderrChunks.join("")).toContain(
+        "[node-ts-resolver] primary fallback for '@nonexistent/missing-pkg'",
+      )
+
+      // 5. NODE_COMPILE_CACHE env override is supported in resolver source
+      const resolverSource = await import("node:fs/promises").then((fs) =>
+        fs.readFile(fileURLToPath(resolverUrl), "utf8"),
+      )
+      expect(resolverSource).toContain("process.env.NODE_COMPILE_CACHE")
     } finally {
       process.stderr.write = origWrite
       if (prevDebug === undefined) {
@@ -187,5 +249,207 @@ describe("tools/oxlint/syntax-bans.js & tools/node-ts-resolver.mjs (S-4.1, S-6.1
         process.env["HARNESS_DEBUG_RESOLVER"] = prevDebug
       }
     }
+  })
+
+  it("S-5.2b: initCompileCache warns on FAILED or throw, and stays silent on ENABLED, ALREADY_ENABLED, and DISABLED", async () => {
+    const resolverMod = (await import(resolverUrl)) as {
+      readonly initCompileCache: (
+        enableFn?: (dir: string) => {
+          readonly status: number
+          readonly directory?: string
+          readonly message?: string
+        },
+        cacheDir?: string,
+        statusConstants?: {
+          readonly FAILED: number
+          readonly ENABLED: number
+          readonly ALREADY_ENABLED: number
+          readonly DISABLED: number
+        },
+        stderr?: { readonly write: (chunk: string) => boolean },
+      ) => unknown
+    }
+    const statusConstants = moduleConstants.compileCacheStatus
+    const makeStderr = () => {
+      const chunks: Array<string> = []
+      return {
+        chunks,
+        stream: {
+          write: (chunk: string) => {
+            chunks.push(chunk)
+            return true
+          },
+        },
+      }
+    }
+
+    // FAILED -> emits warning with message
+    const failedStderr = makeStderr()
+    resolverMod.initCompileCache(
+      () => ({ status: statusConstants.FAILED, message: "read-only fs" }),
+      "/tmp/readonly-cache",
+      statusConstants,
+      failedStderr.stream,
+    )
+    expect(failedStderr.chunks.join("")).toContain("failed to enable V8 compile cache")
+    expect(failedStderr.chunks.join("")).toContain("read-only fs")
+
+    // Throwing enableCompileCache -> emits warning
+    const throwStderr = makeStderr()
+    resolverMod.initCompileCache(
+      () => {
+        throw new Error("permission denied")
+      },
+      "/tmp/denied-cache",
+      statusConstants,
+      throwStderr.stream,
+    )
+    expect(throwStderr.chunks.join("")).toContain("enableCompileCache threw")
+    expect(throwStderr.chunks.join("")).toContain("permission denied")
+
+    // ENABLED, ALREADY_ENABLED, DISABLED -> silent
+    for (const status of [
+      statusConstants.ENABLED,
+      statusConstants.ALREADY_ENABLED,
+      statusConstants.DISABLED,
+    ]) {
+      const okStderr = makeStderr()
+      resolverMod.initCompileCache(
+        () => ({ status, directory: "/tmp/ok-cache" }),
+        "/tmp/ok-cache",
+        statusConstants,
+        okStderr.stream,
+      )
+      expect(okStderr.chunks).toHaveLength(0)
+    }
+
+    // UID-scoped default dir + symlink rejection + 0777 permission tightening
+    const fullResolverMod = (await import(resolverUrl)) as {
+      readonly resolveDefaultCompileCacheDir: (uid?: number) => string
+      readonly initCompileCache: (
+        enableFn?: (dir: string) => {
+          readonly status: number
+          readonly directory?: string
+          readonly message?: string
+        },
+        cacheDir?: string,
+        statusConstants?: {
+          readonly FAILED: number
+          readonly ENABLED: number
+          readonly ALREADY_ENABLED: number
+          readonly DISABLED: number
+        },
+        stderr?: { readonly write: (chunk: string) => boolean },
+      ) => { readonly status: number; readonly message?: string } | null
+    }
+    expect(fullResolverMod.resolveDefaultCompileCacheDir(1000)).toContain(
+      "effect-harness-v8-compile-cache-1000",
+    )
+
+    const tmpBase = mkdtempSync(join(tmpdir(), "compile-cache-sec-"))
+    try {
+      const targetDir = join(tmpBase, "real-target")
+      mkdirSync(targetDir, { recursive: true })
+      const symCacheDir = join(tmpBase, "sym-cache")
+      symlinkSync(targetDir, symCacheDir)
+
+      let enableCalls = 0
+      const symStderr = makeStderr()
+      const symRes = fullResolverMod.initCompileCache(
+        () => {
+          enableCalls += 1
+          return { status: statusConstants.ENABLED }
+        },
+        symCacheDir,
+        statusConstants,
+        symStderr.stream,
+      )
+      expect(enableCalls).toBe(0)
+      expect(symRes?.status).toBe(statusConstants.FAILED)
+      expect(symStderr.chunks.join("")).toContain("symlink or non-directory")
+
+      const danglingLink = join(tmpBase, "dangling-cache")
+      symlinkSync(join(tmpBase, "missing-target"), danglingLink)
+      const danglingRes = fullResolverMod.initCompileCache(
+        () => {
+          enableCalls += 1
+          return { status: statusConstants.ENABLED }
+        },
+        danglingLink,
+        statusConstants,
+        makeStderr().stream,
+      )
+      expect(enableCalls).toBe(0)
+      expect(danglingRes?.status).toBe(statusConstants.FAILED)
+
+      const fileCachePath = join(tmpBase, "file-cache")
+      writeFileSync(fileCachePath, "not-a-dir", "utf8")
+      const fileRes = fullResolverMod.initCompileCache(
+        () => {
+          enableCalls += 1
+          return { status: statusConstants.ENABLED }
+        },
+        fileCachePath,
+        statusConstants,
+        makeStderr().stream,
+      )
+      expect(enableCalls).toBe(0)
+      expect(fileRes?.status).toBe(statusConstants.FAILED)
+
+      const looseDir = join(tmpBase, "loose-cache")
+      mkdirSync(looseDir, { recursive: true })
+      chmodSync(looseDir, 0o777)
+      const looseStderr = makeStderr()
+      const looseRes = fullResolverMod.initCompileCache(
+        () => {
+          enableCalls += 1
+          return { status: statusConstants.ENABLED, directory: looseDir }
+        },
+        looseDir,
+        statusConstants,
+        looseStderr.stream,
+      )
+      expect(enableCalls).toBe(1)
+      expect(looseRes?.status).toBe(statusConstants.ENABLED)
+      expect(statSync(looseDir).mode & 0o077).toBe(0)
+      expect(looseStderr.chunks).toHaveLength(0)
+    } finally {
+      rmSync(tmpBase, { recursive: true, force: true })
+    }
+  })
+
+  it("S-1.6: hook-fastpath and cluster-resolver subpaths never load typescript or @harness/graph barrel", () => {
+    const repoRoot = dirname(dirname(fileURLToPath(resolverUrl)))
+    const resolverRelPath = "./tools/node-ts-resolver.mjs"
+    const loaderSrc = `
+      export async function resolve(specifier, context, nextResolve) {
+        const res = await nextResolve(specifier, context);
+        if (
+          specifier === "typescript" ||
+          res.url.includes("/node_modules/typescript/") ||
+          res.url.endsWith("/libs/harness/graph/src/index.ts")
+        ) {
+          throw new Error(
+            "FORBIDDEN_IMPORT: " + specifier + " -> " + res.url + " (from " + (context.parentURL ?? "") + ")"
+          );
+        }
+        return res;
+      }
+    `
+    const script = `
+      import { register } from "node:module";
+      register("data:text/javascript," + encodeURIComponent(${JSON.stringify(loaderSrc)}));
+      await import("@harness/gates/hook-fastpath");
+      await import("@harness/decision/hook-fastpath");
+      await import("@harness/infra/hook-fastpath");
+      await import("@harness/graph/cluster-resolver");
+      process.stdout.write("CLOSURE_OK");
+    `
+    const out = execFileSync(
+      process.execPath,
+      ["--import", join(repoRoot, resolverRelPath), "--input-type=module", "-e", script],
+      { cwd: repoRoot, encoding: "utf8" },
+    )
+    expect(out).toContain("CLOSURE_OK")
   })
 })

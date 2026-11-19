@@ -2,9 +2,16 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { fileURLToPath } from "node:url"
 import { Result } from "effect"
 import { match } from "ts-pattern"
-import { resolveCanonicalRepoRoot } from "@harness/graph"
-import { nodeSyncHostIo } from "@harness/infra"
+import { resolveCanonicalRepoRoot } from "@harness/graph/cluster-resolver"
+import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
 import type { SyncHostIo } from "@harness/service/host-io"
+
+export const buildOmnigraphClusterKillArgs = (
+  clusterRootDir: string,
+): readonly [string, ReadonlyArray<string>] => {
+  const escaped = clusterRootDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  return ["pkill", ["-f", `omnigraph-server.*--cluster file://${escaped}(\\s|$)`]]
+}
 
 export const isInsideRoot = (rootDir: string, candidatePath: string): boolean => {
   const rel = relative(resolve(rootDir), resolve(candidatePath))
@@ -134,6 +141,14 @@ const walkUpForPnpmWorkspace = (startDir: string): string | undefined => {
 
 export const CLI_REPO_ROOT =
   walkUpForPnpmWorkspace(dirname(fileURLToPath(import.meta.url))) ?? process.cwd()
+
+export const shouldSuppressLiveRepoTestSideEffects = (
+  targetRepoRoot: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean =>
+  (env["HARNESS_DISABLE_LIVE_TELEMETRY"] === "1" || env["HARNESS_TEST_ISOLATION"] === "1") &&
+  (env["HARNESS_STATE_DIR"] === undefined || env["HARNESS_STATE_DIR"].trim() === "") &&
+  resolve(targetRepoRoot) === resolve(CLI_REPO_ROOT)
 
 export const findWorkspaceRoot = (startDir: string = process.cwd()): string =>
   walkUpForPnpmWorkspace(startDir) ?? CLI_REPO_ROOT

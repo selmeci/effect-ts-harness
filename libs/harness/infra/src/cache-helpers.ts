@@ -1,5 +1,5 @@
 import { join, resolve } from "node:path"
-import { Schema } from "effect"
+import { Result, Schema } from "effect"
 import {
   HARNESS_AST_GATE_CACHE_FILENAME,
   HARNESS_DECISION_CACHE_FILENAME,
@@ -53,7 +53,16 @@ const resolveHarnessStateDir = (
   const rawCustomDir = env.HARNESS_STATE_DIR
   if (rawCustomDir !== undefined && rawCustomDir.length > 0) {
     const decodedCustom = Schema.decodeSync(WorkspaceFilePath)(rawCustomDir)
-    return normalizeNonRootWorkspacePath(resolve(validRoot, decodedCustom))
+    const resolved = normalizeNonRootWorkspacePath(resolve(validRoot, decodedCustom))
+    if (resolved === validRoot) {
+      return Result.getOrThrowWith(
+        Result.fail(
+          `HARNESS_STATE_DIR ('${rawCustomDir}') must not resolve to workspaceRoot ('${validRoot}').`,
+        ),
+        (msg) => new Error(msg),
+      )
+    }
+    return resolved
   }
   const rawWorktreeId = env.HARNESS_WORKTREE_ID
   if (rawWorktreeId !== undefined && rawWorktreeId.length > 0) {

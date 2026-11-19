@@ -479,6 +479,18 @@ describe("mutation-check infrastructure failure and backup recovery (F-4.3, F-5.
       }),
     )
     expect(assertionNoiseKilled).toEqual({ kind: "outcome", status: "killed" })
+
+    const skippedBailTitleKilled = classifyMutantSubprocessResult(
+      "m-bail-skipped-title",
+      Result.succeed({
+        _tag: "Exited",
+        exitCode: 1,
+        stdout:
+          " × libs/demo.test.ts > M-1\n ↓ M-2.3: SyntaxError, Tests no tests, 0 test files, and ERR_MODULE_NOT_FOUND\nTests  1 failed | 1 skipped (2)\n",
+        stderr: "",
+      }),
+    )
+    expect(skippedBailTitleKilled).toEqual({ kind: "outcome", status: "killed" })
   })
 })
 
@@ -662,6 +674,7 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
         const report = runDomainMutationSuite(repoRoot, hostIo, {
           includeAllLines: true,
           enforcementMode: "strict",
+          disableMutantCache: true,
         })
         expect(report.passed, c.label).toBe(true)
         expect(report.killedCount, c.label).toBe(1)
@@ -723,6 +736,7 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
         const report = runDomainMutationSuite(repoRoot, hostIo, {
           includeAllLines: true,
           enforcementMode: "strict",
+          disableMutantCache: true,
         })
         expect(report.passed, c.label).toBe(false)
         expect(report.killedCount, c.label).toBe(0)
@@ -1095,53 +1109,52 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
     }
   })
 
-  it("ignores Vitest FAIL breadcrumb test titles containing infra keywords while still aborting on real module load failures", () => {
-    const killedBreadcrumb = classifyMutantSubprocessResult(
-      "m-breadcrumb",
-      Result.succeed({
-        _tag: "Exited",
-        exitCode: 1,
-        stdout:
-          " FAIL  libs/demo.test.ts > suite > Tests no tests and ERR_MODULE_NOT_FOUND abort\nTests  1 failed (1)\n",
-        stderr: "",
-      }),
-    )
-    expect(killedBreadcrumb).toEqual({ kind: "outcome", status: "killed" })
-
-    const realModuleAbort = classifyMutantSubprocessResult(
-      "m-real-module-err",
-      Result.succeed({
-        _tag: "Exited",
-        exitCode: 1,
-        stdout:
-          " FAIL  suiteB.test.ts [ suiteB.test.ts ]\nTests  1 failed (1)\nError [ERR_MODULE_NOT_FOUND]: Cannot find module\n",
-        stderr: "",
-      }),
-    )
-    expect(realModuleAbort.kind).toBe("abort")
-
-    const treeFailBreadcrumb = classifyMutantSubprocessResult(
-      "m-tree-breadcrumb",
-      Result.succeed({
-        _tag: "Exited",
-        exitCode: 1,
-        stdout:
-          " × libs/demo.test.ts > suite > Cannot find module or No test files found\nTests  1 failed (1)\n",
-        stderr: "",
-      }),
-    )
-    expect(treeFailBreadcrumb).toEqual({ kind: "outcome", status: "killed" })
-
-    const assertionNoiseKilled = classifyMutantSubprocessResult(
-      "m-assertion-noise",
-      Result.succeed({
-        _tag: "Exited",
-        exitCode: 1,
-        stdout:
-          "Tests  1 failed (1)\nAssertionError: expected \"Cannot find module '@missing/pkg'\" not to be reached\n",
-        stderr: "",
-      }),
-    )
-    expect(assertionNoiseKilled).toEqual({ kind: "outcome", status: "killed" })
+  it("preserves partial primary outcomes in aborted report when fallback test suite fails with infra error", () => {
+    const source = "export const isSame = (a: number, b: number): boolean => a === b\n"
+    const { repoRoot } = setupTempMutationRepo(source)
+    try {
+      writeFileSync(
+        join(repoRoot, "libs", "sample", "domain", "test", "logic.test.ts"),
+        'import { isSame } from "../src/logic.js"\nimport { expect, it } from "vitest"\nit("ok", () => { expect(isSame(1, 1)).toBe(true) })\n',
+        "utf8",
+      )
+      const fallbackTestPath = join(repoRoot, "libs", "sample", "domain", "test", "other.test.ts")
+      writeFileSync(
+        fallbackTestPath,
+        'import { expect, it } from "vitest"\nit("unrelated", () => { expect(1).toBe(1) })\n',
+        "utf8",
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "sample", "domain", "test", "other2.test.ts"),
+        'import { expect, it } from "vitest"\nit("unrelated2", () => { expect(2).toBe(2) })\n',
+        "utf8",
+      )
+      const fallbackAbortHostIo: SyncHostIo = {
+        ...testHostIo,
+        execFileSync: (cmd, args, options) => {
+          if (cmd === "git") return notGitExecResult
+          if (isBaselineInvocation(options?.env)) return greenBaselineResult
+          if (args.some((a) => a.includes("other.test.ts"))) {
+            return { _tag: "SpawnFailed", spawnError: "fallback-boom", stdout: "", stderr: "" }
+          }
+          return {
+            _tag: "Exited",
+            exitCode: 0,
+            stdout: "Tests  1 passed (1)\n",
+            stderr: "",
+          }
+        },
+      }
+      const report = runDomainMutationSuite(repoRoot, fallbackAbortHostIo, {
+        includeAllLines: true,
+        disableMutantCache: true,
+      })
+      expect(report.passed).toBe(false)
+      expect(report.diagnostic).toContain("fallback-boom")
+      expect(report.totalMutants).toBeGreaterThanOrEqual(1)
+      expect(report.survivedCount).toBeGreaterThanOrEqual(1)
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true })
+    }
   })
 })

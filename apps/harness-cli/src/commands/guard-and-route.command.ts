@@ -2,17 +2,13 @@ import { Cause, Effect, Layer, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { isPureInterruptCause } from "@harness/contract"
-import { decideGuardCommand, routeStepWithStatus } from "@harness/decision"
+import { decideGuardCommand, routeStepWithStatus } from "@harness/decision/hook-fastpath"
 import {
-  CD_COMMAND_BANNED_REASON,
   classifyCommand,
   classifyFileWrite,
-  CLEF_SYSTEMONE_ONLY_BANNED_REASON,
-  INTERACTIVE_NX_BANNED_REASON,
-  isCdCommand,
-  isInteractiveNxCommand,
-  isInvalidClefEndpointCommand,
-} from "@harness/gates"
+  explainCommandDenyReason,
+  isSkipNxCacheOverrideCommand,
+} from "@harness/gates/hook-fastpath"
 import {
   type CliEnv,
   type CliResult,
@@ -106,14 +102,12 @@ const formatAskResult = (isAntigravity: boolean, reason: string | undefined): Cl
         stderr: "",
       }
 
-const formatCommandDenyReason = (command: string): string =>
-  isCdCommand(command)
-    ? `Blocked by harness guard: ${command} (${CD_COMMAND_BANNED_REASON})`
-    : isInteractiveNxCommand(command)
-      ? `Blocked by harness guard: ${command} (${INTERACTIVE_NX_BANNED_REASON})`
-      : isInvalidClefEndpointCommand(command)
-        ? `Blocked by harness guard: ${command} (${CLEF_SYSTEMONE_ONLY_BANNED_REASON})`
-        : `Blocked by harness guard: ${command}`
+const formatCommandDenyReason = (command: string): string => {
+  const detail = explainCommandDenyReason(command)
+  return detail !== undefined
+    ? `Blocked by harness guard: ${command} (${detail})`
+    : `Blocked by harness guard: ${command}`
+}
 
 type GuardVerdictDecision =
   | { readonly verdict: "deny"; readonly reason: string }
@@ -150,10 +144,22 @@ const evaluateCommandDecision = (
       return match<typeof classification, GuardVerdictDecision>(classification)
         .with("deny", () => ({ verdict: "deny", reason: formatCommandDenyReason(command) }))
         .with("allow", () => ({ verdict: "allow" }))
-        .with("ask", () => ({
-          verdict: "ask",
-          reason: `Command requires human confirmation: ${command}`,
-        }))
+        .with("ask", () => {
+          if (isSkipNxCacheOverrideCommand(command)) {
+            recordFriction(options, {
+              kind: "guard_escalation",
+              summary: command,
+              detail: "ruleId=skip-nx-cache-override; verdict=ask",
+            })
+            process.stderr.write(
+              "[harness:guard] Audit: HARNESS_ALLOW_SKIP_NX_CACHE=1 override requested human confirmation.\n",
+            )
+          }
+          return {
+            verdict: "ask",
+            reason: `Command requires human confirmation: ${command}`,
+          }
+        })
         .exhaustive()
     }
 
@@ -182,11 +188,7 @@ const evaluateCommandDecision = (
     return match<typeof decision.verdict, GuardVerdictDecision>(decision.verdict)
       .with("deny", () => ({
         verdict: "deny",
-        reason: isInteractiveNxCommand(command)
-          ? `Blocked by harness guard: ${command} (${INTERACTIVE_NX_BANNED_REASON})`
-          : isInvalidClefEndpointCommand(command)
-            ? `Blocked by harness guard: ${command} (${CLEF_SYSTEMONE_ONLY_BANNED_REASON})`
-            : `Blocked by harness guard: ${command}`,
+        reason: formatCommandDenyReason(command),
       }))
       .with("allow", () => ({ verdict: "allow" }))
       .with("ask", () => ({ verdict: "ask", reason: decision.reason }))
@@ -266,7 +268,12 @@ export const handleGuard = (
     let stdinDecodeFailureReason: string | undefined
     let isReadOnlyToolCall = false
 
-    if (rawStdin !== undefined && rawStdin.trim().length > 0 && positionalArgs.length === 0 && !cliFilePath) {
+    if (
+      rawStdin !== undefined &&
+      rawStdin.trim().length > 0 &&
+      positionalArgs.length === 0 &&
+      !cliFilePath
+    ) {
       const stdinText = rawStdin
       isAntigravity = isAntigravity || detectAntigravityHookPayload(stdinText)
       const decoded = decodePreToolUseStdin(stdinText)
@@ -293,10 +300,7 @@ export const handleGuard = (
               value.tool_input?.targetFile ??
               undefined
           }
-          if (
-            !stdinFilePath &&
-            (!stdinCmd || stdinCmd.trim() === "")
-          ) {
+          if (!stdinFilePath && (!stdinCmd || stdinCmd.trim() === "")) {
             if (toolName !== undefined && READ_ONLY_TOOL_NAMES.has(toolName)) {
               isReadOnlyToolCall = true
             } else {
@@ -329,9 +333,10 @@ export const handleGuard = (
 
     if (filePath && hasCommand) {
       const fileGuard = classifyFileWrite(filePath)
-      const fileDecision: GuardVerdictDecision = match<typeof fileGuard.verdict, GuardVerdictDecision>(
-        fileGuard.verdict,
-      )
+      const fileDecision: GuardVerdictDecision = match<
+        typeof fileGuard.verdict,
+        GuardVerdictDecision
+      >(fileGuard.verdict)
         .with("deny", () => ({
           verdict: "deny",
           reason: fileGuard.reason ?? `Blocked file write: ${filePath}`,
@@ -345,9 +350,10 @@ export const handleGuard = (
 
     if (filePath && !hasCommand) {
       const fileGuard = classifyFileWrite(filePath)
-      const fileDecision: GuardVerdictDecision = match<typeof fileGuard.verdict, GuardVerdictDecision>(
-        fileGuard.verdict,
-      )
+      const fileDecision: GuardVerdictDecision = match<
+        typeof fileGuard.verdict,
+        GuardVerdictDecision
+      >(fileGuard.verdict)
         .with("deny", () => ({
           verdict: "deny",
           reason: fileGuard.reason ?? `Blocked file write: ${filePath}`,

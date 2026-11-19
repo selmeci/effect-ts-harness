@@ -577,6 +577,56 @@ describe("CLI handleMutate, handleVerify (mutate-stamp), handleBench, and handle
       expect(
         evaluateVerifyMutateStampGate(dir, { repoRoot: dir, mutateStampPolicy: "enforce" }),
       ).toBeUndefined()
+
+      // 6. Warm second mutate run hits mutant cache (cachedKilledCount > 0), and --no-cache bypasses it
+      const warmRes = await Effect.runPromise(
+        handleMutate(["mutate", "--strict"], { repoRoot: dir }),
+      )
+      expect(warmRes.exitCode).toBe(0)
+      const warmReport = JSON.parse(warmRes.stdout) as { cachedKilledCount?: number }
+      expect(warmReport.cachedKilledCount).toBeGreaterThan(0)
+
+      rmSync(stampPath, { force: true })
+      const noCacheRes = await Effect.runPromise(
+        handleMutate(["mutate", "--strict", "--no-cache"], { repoRoot: dir }),
+      )
+      expect(noCacheRes.exitCode).toBe(0)
+      const noCacheReport = JSON.parse(noCacheRes.stdout) as { cachedKilledCount?: number }
+      expect(noCacheReport.cachedKilledCount ?? 0).toBe(0)
+      expect(existsSync(stampPath)).toBe(true)
+
+      // 7. F-2.1b: handleMutate wires out-of-workspace HMAC secret and isolates cache per secret
+      const prevXdg = process.env.XDG_CACHE_HOME
+      const cacheHomeA = mkdtempSync(join(tmpdir(), "harness-hmac-a-"))
+      const cacheHomeB = mkdtempSync(join(tmpdir(), "harness-hmac-b-"))
+      try {
+        process.env.XDG_CACHE_HOME = cacheHomeA
+        const primeA = await Effect.runPromise(
+          handleMutate(["mutate", "--strict"], { repoRoot: dir }),
+        )
+        expect(primeA.exitCode).toBe(0)
+        const hitA = await Effect.runPromise(
+          handleMutate(["mutate", "--strict"], { repoRoot: dir }),
+        )
+        expect(hitA.exitCode).toBe(0)
+        expect(
+          (JSON.parse(hitA.stdout) as { cachedKilledCount?: number }).cachedKilledCount,
+        ).toBeGreaterThan(0)
+
+        process.env.XDG_CACHE_HOME = cacheHomeB
+        const missB = await Effect.runPromise(
+          handleMutate(["mutate", "--strict"], { repoRoot: dir }),
+        )
+        expect(missB.exitCode).toBe(0)
+        expect(
+          (JSON.parse(missB.stdout) as { cachedKilledCount?: number }).cachedKilledCount ?? 0,
+        ).toBe(0)
+      } finally {
+        if (prevXdg === undefined) Reflect.deleteProperty(process.env, "XDG_CACHE_HOME")
+        else process.env.XDG_CACHE_HOME = prevXdg
+        rmSync(cacheHomeA, { recursive: true, force: true })
+        rmSync(cacheHomeB, { recursive: true, force: true })
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

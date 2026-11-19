@@ -1,16 +1,9 @@
 import { Context, Effect, Layer, Option } from "effect"
 import { match } from "ts-pattern"
-import {
-  CliCommandInput,
-  CliCommandName,
-  CliCommandNotFoundError,
-} from "@harness/contract"
-import {
-  COMMANDS,
-  type CliEnv,
-  type CliResult,
-} from "./daemon-and-omnigraph.service.js"
+import { CliCommandInput, CliCommandName, CliCommandNotFoundError } from "@harness/contract"
+import { COMMANDS, type CliEnv, type CliResult } from "./daemon-and-omnigraph.service.js"
 import { handleGuard, handleRoute } from "./guard-and-route.command.js"
+import { tryReadPreInvocationSessionCache } from "./session-fastpath.js"
 
 export { CliCommandInput, CliCommandName, CliCommandNotFoundError }
 
@@ -65,6 +58,36 @@ export const makeHarnessCommandRegistryLayer = (
 
 export type CliCommandHandler = (args: ReadonlyArray<string>) => Effect.Effect<CliResult>
 
+export interface LazyImportFailure {
+  readonly _tag: "LazyImportFailure"
+  readonly message: string
+}
+
+export const toLazyImportError = (err: unknown): LazyImportFailure => ({
+  _tag: "LazyImportFailure",
+  message: err instanceof Error ? err.message : String(err),
+})
+
+export const lazyImportCliHandler = <M>(
+  commandName: string,
+  load: () => Promise<M>,
+  run: (mod: M) => Effect.Effect<CliResult>,
+): Effect.Effect<CliResult> =>
+  Effect.tryPromise({
+    try: load,
+    catch: toLazyImportError,
+  }).pipe(
+    Effect.flatMap(run),
+    Effect.catch((err) => {
+      const msg = `Failed to load CLI command '${commandName}': ${err.message}`
+      return Effect.succeed({
+        exitCode: 1,
+        stdout: JSON.stringify({ error: msg }),
+        stderr: `${msg}\n`,
+      })
+    }),
+  )
+
 export const makeLiveCliCommandDescriptors = (
   options?: CliEnv,
 ): ReadonlyArray<CliCommandPluginDescriptor> => [
@@ -82,152 +105,195 @@ export const makeLiveCliCommandDescriptors = (
     name: CliCommandName.make("plan-check"),
     summary: "Validate compilable stub<A,E,R>() skeletons and snapshot plan/current.",
     execute: (args) =>
-      Effect.promise(() => import("./plan-and-repair.command.js")).pipe(
-        Effect.flatMap((m) => m.handlePlanCheck(args, options)),
+      lazyImportCliHandler(
+        "plan-check",
+        () => import("./plan-and-repair.command.js"),
+        (m) => m.handlePlanCheck(args, options),
       ),
   },
   {
     name: CliCommandName.make("plan-synth"),
     summary: "Synthesize plan graph patches via Double-Pushout (DPO) rules.",
     execute: (args) =>
-      Effect.promise(() => import("./plan-and-repair.command.js")).pipe(
-        Effect.flatMap((m) => m.handlePlanSynth(args, options)),
+      lazyImportCliHandler(
+        "plan-synth",
+        () => import("./plan-and-repair.command.js"),
+        (m) => m.handlePlanSynth(args, options),
       ),
   },
   {
     name: CliCommandName.make("repair"),
     summary: "Repair architectural and code antipatterns via DPO rules.",
     execute: (args) =>
-      Effect.promise(() => import("./plan-and-repair.command.js")).pipe(
-        Effect.flatMap((m) => m.handleRepair(args, options)),
+      lazyImportCliHandler(
+        "repair",
+        () => import("./plan-and-repair.command.js"),
+        (m) => m.handleRepair(args, options),
       ),
   },
   {
     name: CliCommandName.make("verify"),
     summary: "Execute affected verify targets, check span budgets, and write verify-stamp.json.",
     execute: () =>
-      Effect.promise(() => import("./verify-and-done.command.js")).pipe(
-        Effect.flatMap((m) => m.handleVerify(options)),
+      lazyImportCliHandler(
+        "verify",
+        () => import("./verify-and-done.command.js"),
+        (m) => m.handleVerify(options),
       ),
   },
   {
     name: CliCommandName.make("done"),
     summary: "Verify stamp freshness, diff plan vs impl graph, and merge impl/current to main.",
     execute: (args) =>
-      Effect.promise(() => import("./verify-and-done.command.js")).pipe(
-        Effect.flatMap((m) => m.handleDone(args, options)),
+      lazyImportCliHandler(
+        "done",
+        () => import("./verify-and-done.command.js"),
+        (m) => m.handleDone(args, options),
       ),
   },
   {
     name: CliCommandName.make("learn"),
     summary: "Cluster friction-log.jsonl events and propose deterministic promotions.",
     execute: (args) =>
-      Effect.promise(() => import("./session-learn-report.command.js")).pipe(
-        Effect.flatMap((m) => m.handleLearn(args, options)),
+      lazyImportCliHandler(
+        "learn",
+        () => import("./session-learn-report.command.js"),
+        (m) => m.handleLearn(args, options),
       ),
   },
   {
     name: CliCommandName.make("gc"),
     summary: "Run zero-entropy graph garbage collection and governance lint.",
     execute: (args) =>
-      Effect.promise(() => import("./gc-and-ontology.command.js")).pipe(
-        Effect.flatMap((m) => m.handleGc(args, options)),
+      lazyImportCliHandler(
+        "gc",
+        () => import("./gc-and-ontology.command.js"),
+        (m) => m.handleGc(args, options),
       ),
   },
   {
     name: CliCommandName.make("mutate"),
     summary: "Run in-process Mutant Schemata and saturation verification over domain code.",
     execute: (args) =>
-      Effect.promise(() => import("./mutate-and-bench.command.js")).pipe(
-        Effect.flatMap((m) => m.handleMutate(args, options)),
+      lazyImportCliHandler(
+        "mutate",
+        () => import("./mutate-and-bench.command.js"),
+        (m) => m.handleMutate(args, options),
       ),
   },
   {
     name: CliCommandName.make("bench"),
     summary: "Measure harness stage latencies and enforce p50/p95 SLO budgets.",
     execute: (args) =>
-      Effect.promise(() => import("./mutate-and-bench.command.js")).pipe(
-        Effect.flatMap((m) => m.handleBench(args, options)),
+      lazyImportCliHandler(
+        "bench",
+        () => import("./mutate-and-bench.command.js"),
+        (m) => m.handleBench(args, options),
       ),
   },
   {
     name: CliCommandName.make("benchmark"),
     summary: "Compare canonical harness benchmark runs against acceptance criteria.",
     execute: (args) =>
-      Effect.promise(() => import("./repo-checks.command.js")).pipe(
-        Effect.flatMap((m) => m.runBenchmarkCompare(args, options)),
+      lazyImportCliHandler(
+        "benchmark",
+        () => import("./repo-checks.command.js"),
+        (m) => m.runBenchmarkCompare(args, options),
       ),
   },
   {
     name: CliCommandName.make("ingest"),
     summary: "Ingest runtime trace NDJSON events into Omnigraph.",
     execute: (args) =>
-      Effect.promise(() => import("./session-learn-report.command.js")).pipe(
-        Effect.flatMap((m) => m.handleIngest(args, options)),
+      lazyImportCliHandler(
+        "ingest",
+        () => import("./session-learn-report.command.js"),
+        (m) => m.handleIngest(args, options),
       ),
   },
   {
     name: CliCommandName.make("session"),
     summary: "Inspect active session handoff state and inject pending stubs.",
     execute: (args) =>
-      Effect.promise(() => import("./session-learn-report.command.js")).pipe(
-        Effect.flatMap((m) => m.handleDoctorOrSession(args, options)),
-      ),
+      match(tryReadPreInvocationSessionCache(args, options))
+        .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+        .with({ _tag: "None" }, () =>
+          lazyImportCliHandler(
+            "session",
+            () => import("./session-learn-report.command.js"),
+            (m) => m.handleDoctorOrSession(args, options),
+          ),
+        )
+        .exhaustive(),
   },
   {
     name: CliCommandName.make("doctor"),
     summary: "Run workspace health diagnostics and session recovery checks.",
     execute: (args) =>
-      Effect.promise(() => import("./session-learn-report.command.js")).pipe(
-        Effect.flatMap((m) => m.handleDoctorOrSession(args, options)),
+      lazyImportCliHandler(
+        "doctor",
+        () => import("./session-learn-report.command.js"),
+        (m) => m.handleDoctorOrSession(args, options),
       ),
   },
   {
     name: CliCommandName.make("ontology"),
     summary: "Audit ArchiMate 3.2 cross-layer traceability and semantic conflicts.",
     execute: (args) =>
-      Effect.promise(() => import("./gc-and-ontology.command.js")).pipe(
-        Effect.flatMap((m) => m.handleOntology(args, options)),
+      lazyImportCliHandler(
+        "ontology",
+        () => import("./gc-and-ontology.command.js"),
+        (m) => m.handleOntology(args, options),
       ),
   },
   {
     name: CliCommandName.make("report"),
     summary: "Generate session telemetry and friction report.",
     execute: (args) =>
-      Effect.promise(() => import("./session-learn-report.command.js")).pipe(
-        Effect.flatMap((m) => m.handleReport(args, options)),
+      lazyImportCliHandler(
+        "report",
+        () => import("./session-learn-report.command.js"),
+        (m) => m.handleReport(args, options),
       ),
   },
   {
     name: CliCommandName.make("check-openapi"),
     summary: "Validate OpenAPI contract specifications.",
     execute: (args) =>
-      Effect.promise(() => import("./repo-checks.command.js")).pipe(
-        Effect.flatMap((m) => m.runCheckOpenApi(args, options)),
+      lazyImportCliHandler(
+        "check-openapi",
+        () => import("./repo-checks.command.js"),
+        (m) => m.runCheckOpenApi(args, options),
       ),
   },
   {
     name: CliCommandName.make("check-migrations"),
     summary: "Validate database schema migrations for safety.",
     execute: (args) =>
-      Effect.promise(() => import("./repo-checks.command.js")).pipe(
-        Effect.flatMap((m) => m.runCheckMigrations(args, options)),
+      lazyImportCliHandler(
+        "check-migrations",
+        () => import("./repo-checks.command.js"),
+        (m) => m.runCheckMigrations(args, options),
       ),
   },
   {
     name: CliCommandName.make("check-event-schemas"),
     summary: "Validate event-sourcing schema evolution compatibility.",
     execute: (args) =>
-      Effect.promise(() => import("./repo-checks.command.js")).pipe(
-        Effect.flatMap((m) => m.runCheckEventSchemas(args, options)),
+      lazyImportCliHandler(
+        "check-event-schemas",
+        () => import("./repo-checks.command.js"),
+        (m) => m.runCheckEventSchemas(args, options),
       ),
   },
   {
     name: CliCommandName.make("scenario"),
     summary: "List or execute harness evaluation scenarios.",
     execute: (args) =>
-      Effect.promise(() => import("./scenario.command.js")).pipe(
-        Effect.flatMap((m) => m.runScenarioCommand(args, options)),
+      lazyImportCliHandler(
+        "scenario",
+        () => import("./scenario.command.js"),
+        (m) => m.runScenarioCommand(args, options),
       ),
   },
   {

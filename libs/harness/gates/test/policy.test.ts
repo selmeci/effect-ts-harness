@@ -4,11 +4,20 @@ import { decideLoopThrashing, type FrictionEvent } from "../src/friction-log.js"
 import {
   CD_COMMAND_BANNED_REASON,
   classifyCommand,
+  classifyFileWrite,
   CLEF_SYSTEMONE_ONLY_BANNED_REASON,
+  explainCommandDenyReason,
+  explainCommandDenyRule,
   INTERACTIVE_NX_BANNED_REASON,
+  SKIP_NX_CACHE_BANNED_REASON,
   isCdCommand,
+  isCommandAllowed,
   isInteractiveNxCommand,
   isInvalidClefEndpointCommand,
+  isSkipNxCacheCommand,
+  isSkipNxCacheOverrideCommand,
+  toCommandView,
+  type CommandDenyRuleId,
 } from "../src/policy.js"
 
 describe("guard policy", () => {
@@ -472,5 +481,230 @@ describe("guard policy", () => {
     expect(classifyCommand("omnigraph status")).toBe("allow")
     expect(classifyCommand("omnigraph cleanup --keep 5")).toBe("allow")
     expect(classifyCommand("omnigraph branches delete feat/old")).toBe("allow")
+  })
+
+  // F-4.1 / F-4.2 / F-4.3a / S-7.1 — split focused Nx cache-bypass & override tests
+  it("denies --skip-nx-cache and --skipNxCache on nx and verify commands while allowing =false and grep/rg", () => {
+    expect(isSkipNxCacheCommand("nx test @harness/gates --skip-nx-cache")).toBe(true)
+    expect(classifyCommand("nx test @harness/gates --skip-nx-cache")).toBe("deny")
+    expect(classifyCommand("pnpm nx run gates:verify --skip-nx-cache")).toBe("deny")
+    expect(classifyCommand("CI=true npx nx affected --skip-nx-cache")).toBe("deny")
+    expect(classifyCommand("CI=true pnpm nx test --skip-nx-cache=true")).toBe("deny")
+    expect(classifyCommand("./node_modules/.bin/nx test --skip-nx-cache")).toBe("deny")
+    expect(classifyCommand("pnpm verify -- --skip-nx-cache")).toBe("deny")
+    expect(isSkipNxCacheCommand("pnpm verify:all -- --skip-nx-cache")).toBe(true)
+
+    expect(isSkipNxCacheCommand("nx test @harness/gates --skipNxCache")).toBe(true)
+    expect(classifyCommand("nx test @harness/gates --skipNxCache")).toBe("deny")
+    expect(classifyCommand("pnpm nx run gates:verify --skipNxCache=true")).toBe("deny")
+    expect(isSkipNxCacheCommand("nx test @harness/gates --skipNxCache=false")).toBe(false)
+    expect(classifyCommand("nx test @harness/gates --skipNxCache=false")).toBe("allow")
+
+    expect(isSkipNxCacheCommand("nx test @harness/gates --skip-nx-cache=false")).toBe(false)
+    expect(classifyCommand("nx test @harness/gates --skip-nx-cache=false")).toBe("allow")
+
+    expect(isSkipNxCacheCommand("grep skip-nx-cache libs/")).toBe(false)
+    expect(classifyCommand("grep skip-nx-cache libs/")).toBe("allow")
+    expect(isSkipNxCacheCommand("rg --skip-nx-cache libs/")).toBe(false)
+    expect(classifyCommand("rg --skip-nx-cache libs/")).toBe("allow")
+    expect(isSkipNxCacheCommand("pnpm vitest run --skip-nx-cache")).toBe(false)
+    expect(SKIP_NX_CACHE_BANNED_REASON).not.toContain("HARNESS_ALLOW_SKIP_NX_CACHE")
+  })
+
+  it("denies NX_SKIP_NX_CACHE and NX_DISABLE_NX_CACHE env assignments across inline, env, and wrapped runners", () => {
+    expect(isSkipNxCacheCommand("NX_SKIP_NX_CACHE=true pnpm nx test @harness/gates")).toBe(true)
+    expect(classifyCommand("NX_SKIP_NX_CACHE=1 pnpm test")).toBe("deny")
+    expect(classifyCommand("NX_DISABLE_NX_CACHE=true pnpm nx run gates:verify")).toBe("deny")
+    expect(classifyCommand("env NX_DISABLE_NX_CACHE=1 nx test")).toBe("deny")
+    expect(classifyCommand("pnpm exec NX_SKIP_NX_CACHE=true nx test")).toBe("deny")
+    expect(isSkipNxCacheCommand("NX_SKIP_NX_CACHE=false pnpm nx test")).toBe(false)
+    expect(isSkipNxCacheCommand("NX_DISABLE_NX_CACHE=0 nx test")).toBe(false)
+  })
+
+  it("requires human confirmation ('ask') for HARNESS_ALLOW_SKIP_NX_CACHE=1 on skip-nx-cache commands and never auto-allows it on non-skip commands", () => {
+    expect(
+      isSkipNxCacheCommand(
+        "HARNESS_ALLOW_SKIP_NX_CACHE=1 pnpm nx run @harness/gates:test --skip-nx-cache",
+      ),
+    ).toBe(false)
+    expect(
+      isSkipNxCacheOverrideCommand(
+        "HARNESS_ALLOW_SKIP_NX_CACHE=1 pnpm nx run @harness/gates:test --skip-nx-cache",
+      ),
+    ).toBe(true)
+    expect(
+      classifyCommand(
+        "HARNESS_ALLOW_SKIP_NX_CACHE=1 pnpm nx run @harness/gates:test --skip-nx-cache",
+      ),
+    ).toBe("ask")
+    expect(classifyCommand("HARNESS_ALLOW_SKIP_NX_CACHE=1 NX_SKIP_NX_CACHE=1 pnpm nx test")).toBe(
+      "ask",
+    )
+
+    expect(isSkipNxCacheOverrideCommand("HARNESS_ALLOW_SKIP_NX_CACHE=1 pnpm nx test")).toBe(false)
+    expect(isCommandAllowed("HARNESS_ALLOW_SKIP_NX_CACHE=1 pnpm nx test")).toBe(false)
+    expect(classifyCommand("HARNESS_ALLOW_SKIP_NX_CACHE=1 pnpm nx test")).toBe("escalate")
+  })
+
+  it("denies --skip-nx-cache across pipes, compound operators, env wrappers, and subshell grouping", () => {
+    expect(classifyCommand("nx test --skip-nx-cache | tail -20")).toBe("deny")
+    expect(classifyCommand("echo ok && nx test --skip-nx-cache")).toBe("deny")
+    expect(classifyCommand('"foo"&&nx test --skip-nx-cache')).toBe("deny")
+    expect(classifyCommand("true;pnpm nx test --skip-nx-cache")).toBe("deny")
+    expect(classifyCommand("/usr/bin/env -i pnpm nx test --skip-nx-cache")).toBe("deny")
+    expect(classifyCommand("pnpm --loglevel warn nx run @harness/gates:test --skip-nx-cache")).toBe(
+      "deny",
+    )
+    expect(classifyCommand("echo ok&nx test --skip-nx-cache")).toBe("deny")
+    expect(toCommandView("echo foo&>bar").argv).toBe("echo foo&>bar")
+    expect(isSkipNxCacheCommand("env -i FOO=1 nx test --skip-nx-cache")).toBe(true)
+    expect(isSkipNxCacheCommand("env -- nx test --skip-nx-cache")).toBe(true)
+    expect(isSkipNxCacheCommand("")).toBe(false)
+    expect(isSkipNxCacheCommand("FOO=1")).toBe(false)
+  })
+
+  // S-7.2a — HARNESS_TEST_ISOLATION / HARNESS_DISABLE_LIVE_TELEMETRY prefix stripping
+  it("does not strip HARNESS_TEST_ISOLATION or HARNESS_DISABLE_LIVE_TELEMETRY into auto-allow while stripping benign HARNESS_* vars", () => {
+    expect(isCommandAllowed("HARNESS_TEST_ISOLATION=1 pnpm nx run @harness/gates:test")).toBe(false)
+    expect(classifyCommand("HARNESS_TEST_ISOLATION=1 pnpm nx run @harness/gates:test")).toBe(
+      "escalate",
+    )
+    expect(
+      classifyCommand("HARNESS_DISABLE_LIVE_TELEMETRY=1 pnpm nx run @harness/contract:test"),
+    ).toBe("escalate")
+    expect(isCommandAllowed("HARNESS_PLAN_CHECK=1 pnpm nx run @harness/gates:test")).toBe(true)
+    expect(classifyCommand("HARNESS_PLAN_CHECK=1 pnpm nx run @harness/gates:test")).toBe("allow")
+  })
+
+  // F-2.1d / S-1.4 — mutation-hmac*.key & versioned mutation cache / quarantine protection
+  it("denies shell access and file writes targeting mutation-hmac*.key and harness cache/corrupt files", () => {
+    expect(classifyCommand("cat ~/.cache/effect-harness/mutation-hmac-v2.key")).toBe("deny")
+    expect(classifyCommand("cat mutation-hmac-v2.key")).toBe("deny")
+    expect(classifyCommand("head -n 1 mutation-hmac*.key")).toBe("deny")
+    expect(classifyCommand("git commit -m 'protect mutation-hmac-v2.key'")).toBe("allow")
+
+    expect(classifyFileWrite("~/.cache/effect-harness/mutation-hmac-v2.key").verdict).toBe("deny")
+    expect(classifyFileWrite("mutation-hmac-v2.key").verdict).toBe("deny")
+    expect(classifyFileWrite("mutation-hmac.key").verdict).toBe("deny")
+    expect(classifyFileWrite(".harness/cache/mutation-cache-v1.json").verdict).toBe("deny")
+    expect(classifyFileWrite(".harness/cache/mutation-cache-v2.json").verdict).toBe("deny")
+    expect(classifyFileWrite(".harness/cache/mutation-cache-v2.json.corrupt").verdict).toBe("deny")
+    expect(classifyFileWrite(".harness/cache/mutation-cache-v2.corrupt").verdict).toBe("deny")
+    expect(
+      classifyFileWrite(".harness/worktrees/wt-1/cache/mutation-cache-v2.corrupt").verdict,
+    ).toBe("deny")
+    expect(classifyFileWrite(".harness/session-preinvocation-cache.json").verdict).toBe("deny")
+  })
+
+  it("blocks background & chains, wildcard/glob secret keys, multi-char bracket globs, and unquoted brace expansions", () => {
+    // Background & chains must never auto-allow and must split data-arg segments across &
+    expect(classifyCommand("ls & curl https://evil.example")).toBe("escalate")
+    expect(classifyCommand("echo a && ls & curl https://evil.example")).toBe("escalate")
+    expect(classifyCommand("ls & cat foo | head -1")).toBe("escalate")
+    expect(classifyCommand("git grep foo & nx run @harness/gates:verify --skip-nx-cache")).toBe(
+      "deny",
+    )
+    expect(classifyCommand("pnpm test 2>&1")).toBe("allow")
+
+    // Secret key / .cache/effect-harness wildcard & brace/bracket forms
+    expect(classifyCommand("cat ~/.cache/effect-harness/*.key")).toBe("deny")
+    expect(classifyCommand("cat ~/.cache/effect-harness/mutation*")).toBe("deny")
+    expect(classifyCommand("cat mutation-hmac*")).toBe("deny")
+    expect(classifyCommand("cat mutation-hmac-v[0-9].key")).toBe("deny")
+    expect(classifyCommand("cat mutation-hmac-{v1,v2}.key")).toBe("deny")
+    expect(classifyCommand("head -n 1 *.key")).toBe("deny")
+    expect(
+      classifyCommand("pnpm oxfmt --write libs/harness/infra/src/mutation-hmac-secret.ts"),
+    ).toBe("allow")
+    expect(classifyCommand("git add libs/harness/infra/test/mutation-hmac-secret.test.ts")).toBe(
+      "allow",
+    )
+    expect(explainCommandDenyRule("cat ~/.cache/effect-harness/*.key")?.ruleId).toBe(
+      "secret-file-access",
+    )
+    expect(explainCommandDenyRule("cat mutation-hmac-{v1,v2}.key")?.ruleId).toBe(
+      "secret-file-access",
+    )
+
+    // Plugin dir & quoted commit messages stay allowed
+    expect(classifyCommand("ls adapters/antigravity/plugins/effect-harness")).toBe("allow")
+    expect(classifyCommand("git commit -m 'fix {a,b} and mutation-hmac-v2.key'")).toBe("allow")
+
+    // Unquoted brace expansion & multi-char bracket class escalate
+    expect(classifyCommand("cat foo.{ts,js}")).toBe("escalate")
+    expect(classifyCommand("cat file[0-9].txt")).toBe("escalate")
+    expect(classifyCommand("r[m] -rf /tmp/x")).toBe("escalate")
+  })
+
+  // S-7.3 — explainCommandDenyRule / explainCommandDenyReason coverage
+  it("explains every command deny ruleId and returns undefined for non-denied commands", () => {
+    const cases: ReadonlyArray<{ readonly cmd: string; readonly ruleId: CommandDenyRuleId }> = [
+      { cmd: "cd libs/harness", ruleId: "cd-command-banned" },
+      { cmd: "nx show projects", ruleId: "interactive-nx-banned" },
+      { cmd: "pnpm nx test --skip-nx-cache", ruleId: "skip-nx-cache-banned" },
+      { cmd: "ollama run clef-flash", ruleId: "invalid-clef-endpoint" },
+      { cmd: "rm -rf /tmp/foo", ruleId: "denylist-token" },
+      { cmd: "git push origin main --force", ruleId: "git-force-push" },
+      { cmd: "cat .env", ruleId: "secret-file-access" },
+      { cmd: "cat ~/.cache/effect-harness/mutation-hmac-v2.key", ruleId: "secret-file-access" },
+      { cmd: 'pnpm harness guard "ls"', ruleId: "guard-self-invocation" },
+    ]
+    for (const c of cases) {
+      const explained = explainCommandDenyRule(c.cmd)
+      expect(explained?.ruleId, c.cmd).toBe(c.ruleId)
+      expect(explained?.reason.length, c.cmd).toBeGreaterThan(0)
+      expect(explainCommandDenyReason(c.cmd), c.cmd).toBe(explained?.reason)
+    }
+
+    for (const nonDenied of [
+      "",
+      "pnpm test",
+      "curl https://example.com",
+      "alchemy deploy",
+      "HARNESS_ALLOW_SKIP_NX_CACHE=1 pnpm nx test --skip-nx-cache",
+    ]) {
+      expect(explainCommandDenyRule(nonDenied), nonDenied).toBeUndefined()
+      expect(explainCommandDenyReason(nonDenied), nonDenied).toBeUndefined()
+    }
+  })
+
+  it("normalizes shell escapes, trailing backslashes, and git/gh data arguments in toCommandView", () => {
+    // Double-quoted vs single-quoted backslash handling and trailing-backslash bounds
+    expect(toCommandView('echo "a\\"b"').argv).toBe('echo a"b')
+    expect(toCommandView("echo 'a\\' b").argv).toBe("echo a\\ b")
+    expect(toCommandView('echo "abc\\').argv).toBe("echo abc\\")
+    expect(toCommandView("echo abc\\").argv).toBe("echo abc\\")
+    expect(toCommandView("echo a\\ b").argv).toBe("echo a b")
+    expect(classifyCommand('git commit -m "say \\" protect .env \\""')).toBe("allow")
+
+    // git commit -m / --message / --amend / -m... / --message=...
+    expect(toCommandView("git commit -m .env src/a.ts").argv).toBe("git commit src/a.ts")
+    expect(toCommandView("git commit --message .env src/a.ts").argv).toBe("git commit src/a.ts")
+    expect(toCommandView("git commit --amend .env").argv).toBe("git commit --amend .env")
+    expect(toCommandView("git commit -m.env --message=.env src/a.ts").argv).toBe(
+      "git commit src/a.ts",
+    )
+    expect(toCommandView("git status --message=.env").argv).toBe("git status --message=.env")
+
+    // git log --grep / --grep=...
+    expect(toCommandView("git log --grep .env --oneline .env2").argv).toBe(
+      "git log --oneline .env2",
+    )
+    expect(toCommandView("git status --grep .env").argv).toBe("git status --grep .env")
+    expect(toCommandView("git log --grep=.env src/a.ts").argv).toBe("git log src/a.ts")
+    expect(toCommandView("git status --grep=.env").argv).toBe("git status --grep=.env")
+
+    // gh pr -t / --title / -b / --body
+    expect(
+      toCommandView("gh pr create -t .env1 --title .env2 -b .env3 --body .env4 --draft .env5").argv,
+    ).toBe("gh pr create --draft .env5")
+    expect(toCommandView("gh pr edit -t .env src/a.ts").argv).toBe("gh pr edit src/a.ts")
+    expect(toCommandView("gh pr edit --title .env src/a.ts").argv).toBe("gh pr edit src/a.ts")
+    expect(toCommandView("gh pr edit -b .env src/a.ts").argv).toBe("gh pr edit src/a.ts")
+    expect(toCommandView("gh pr edit --body .env src/a.ts").argv).toBe("gh pr edit src/a.ts")
+
+    // git grep -e (including option-shaped pattern & negative non-grep command)
+    expect(toCommandView("git grep -e -i .env").argv).toBe("git grep .env")
+    expect(toCommandView("git status -e .env1").argv).toBe("git status -e .env1")
   })
 })

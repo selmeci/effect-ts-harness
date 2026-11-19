@@ -3,20 +3,23 @@ import { Effect, Layer, Option, Result, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { ErrorReasonMessage, StdinReadError, type StdinReadErrorKind } from "@harness/contract"
+import type { GovernanceDocReference } from "@harness/gates"
 import {
   appendFrictionEvent,
   appendTelemetryEvent,
-  collectWorkspaceTsFiles,
   type FrictionEventKind,
-  type GcFinding,
-  type GovernanceDocReference,
+  scanWorkspaceTsFilesChecked,
   type TelemetryCategory,
   type TelemetryEngineSource,
   type TelemetryOutcome,
   type TelemetrySurface,
-} from "@harness/gates"
-import { type HarnessGraph } from "@harness/graph"
-import { LocalDecisionModel, nodeSyncHostIo, queryUnixSocketLineDetailed } from "@harness/infra"
+} from "@harness/gates/hook-fastpath"
+import type { HarnessGraph } from "@harness/graph"
+import {
+  LocalDecisionModel,
+  nodeSyncHostIo,
+  queryUnixSocketLineDetailed,
+} from "@harness/infra/hook-fastpath"
 import type { CliResult, HookStdinTracker } from "./hook-format.js"
 export type { CliResult } from "./hook-format.js"
 
@@ -24,19 +27,39 @@ type SyncHostIo = typeof nodeSyncHostIo
 import {
   buildOmnigraphClusterKillArgs,
   CLI_REPO_ROOT,
-  ensureLocalOmnigraphReady,
   findWorkspaceRoot,
+  isIsolatedExternalWorkspace,
   resolveClusterRepoRoot,
-} from "./omnigraph-lifecycle.js"
+  shouldSuppressLiveRepoTestSideEffects,
+} from "./repo-path.js"
 
 export {
   buildOmnigraphClusterKillArgs,
   CLI_REPO_ROOT,
-  ensureLocalOmnigraphReady,
   findWorkspaceRoot,
+  isIsolatedExternalWorkspace,
   resolveClusterRepoRoot,
+  shouldSuppressLiveRepoTestSideEffects,
 }
-export { isIsolatedExternalWorkspace } from "./repo-path.js"
+
+export const ensureLocalOmnigraphReady = (repoRoot: string): Effect.Effect<boolean> =>
+  Effect.tryPromise({
+    try: () => import("./omnigraph-lifecycle.js"),
+    catch: (err): { readonly _tag: "OmnigraphImportFailure"; readonly message: string } => ({
+      _tag: "OmnigraphImportFailure",
+      message: err instanceof Error ? err.message : String(err),
+    }),
+  }).pipe(
+    Effect.flatMap((m) => m.ensureLocalOmnigraphReady(repoRoot)),
+    Effect.catch((err) =>
+      Effect.sync(() => {
+        process.stderr.write(
+          `[harness:omnigraph] Warning: failed to load lifecycle module: ${err.message}\n`,
+        )
+        return false
+      }),
+    ),
+  )
 
 export const COMMANDS = [
   "guard",
@@ -223,7 +246,11 @@ export const recordFriction = (
   if (options?.repoRoot === undefined && options?.skipBackgroundDaemons === true) {
     return
   }
-  appendFrictionEvent(options?.repoRoot ?? findWorkspaceRoot(), event, nodeSyncHostIo)
+  const targetRoot = options?.repoRoot ?? findWorkspaceRoot()
+  if (shouldSuppressLiveRepoTestSideEffects(targetRoot)) {
+    return
+  }
+  appendFrictionEvent(targetRoot, event, nodeSyncHostIo)
 }
 
 export const recordTelemetry = (
@@ -241,7 +268,11 @@ export const recordTelemetry = (
   if (options?.repoRoot === undefined && options?.skipBackgroundDaemons === true) {
     return
   }
-  appendTelemetryEvent(options?.repoRoot ?? findWorkspaceRoot(), event, nodeSyncHostIo)
+  const targetRoot = options?.repoRoot ?? findWorkspaceRoot()
+  if (shouldSuppressLiveRepoTestSideEffects(targetRoot)) {
+    return
+  }
+  appendTelemetryEvent(targetRoot, event, nodeSyncHostIo)
 }
 
 export const ANSI_REGEX = new RegExp(
@@ -335,20 +366,23 @@ const collectAllWorkspaceSourceAndTestFiles = (
   repoRoot: string,
   hostIo: SyncHostIo,
 ): ResolveModifiedFilesResult => {
-  const findings: Array<GcFinding> = []
   const collected: Array<string> = []
   for (const rootDir of ["libs", "apps"] as const) {
     const absDir = join(repoRoot, rootDir)
     if (hostIo.existsSync(absDir)) {
-      for (const absFile of collectWorkspaceTsFiles(absDir, hostIo, findings, repoRoot)) {
-        collected.push(relative(repoRoot, absFile).replace(/\\/g, "/"))
+      const scanRes = scanWorkspaceTsFilesChecked(absDir, hostIo)
+      const err = match(scanRes)
+        .with({ _tag: "Ok" }, ({ files }) => {
+          for (const absFile of files) {
+            collected.push(relative(repoRoot, absFile).replace(/\\/g, "/"))
+          }
+          return undefined
+        })
+        .with({ _tag: "Error" }, ({ reason }) => reason)
+        .exhaustive()
+      if (err !== undefined) {
+        return { _tag: "GitFailed", reason: err }
       }
-    }
-  }
-  if (findings.length > 0) {
-    return {
-      _tag: "GitFailed",
-      reason: findings.map((f) => `[${f.kind}] ${f.location ?? f.nodeId}: ${f.message}`).join("; "),
     }
   }
   return { _tag: "Resolved", files: collected }

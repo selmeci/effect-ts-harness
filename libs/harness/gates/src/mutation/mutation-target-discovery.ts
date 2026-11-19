@@ -464,6 +464,7 @@ const isNonTestLibSourcePath = (norm: string): boolean => {
   if (!(norm.endsWith(".ts") || norm.endsWith(".tsx")) || norm.endsWith(".d.ts")) return false
   if (/(?:^|\/)(?:dist|node_modules)\//.test(norm)) return false
   if (/\.(?:test|spec)\.tsx?$/.test(norm)) return false
+  if (/^libs\/[^/]+\/[^/]+\/vitest\.(?:config|workspace)\.[cm]?tsx?$/.test(norm)) return false
   if (/\/test\//.test(norm) && !/\/test\/fixtures\//.test(norm)) return false
   return true
 }

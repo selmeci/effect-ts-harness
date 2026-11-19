@@ -27,11 +27,15 @@ const runOneMutant = (mutantId) =>
     let stderr = ""
     let timedOut = false
     let settled = false
-    const child = spawn(process.execPath, [vitestCli, "run", "--maxWorkers=2", ...testFiles], {
-      cwd,
-      env: { ...childBaseEnv, HARNESS_ACTIVE_MUTANT_ID: mutantId },
-      stdio: ["ignore", "pipe", "pipe"],
-    })
+    const child = spawn(
+      process.execPath,
+      [vitestCli, "run", "--bail=1", "--maxWorkers=2", ...testFiles],
+      {
+        cwd,
+        env: { ...childBaseEnv, HARNESS_ACTIVE_MUTANT_ID: mutantId },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    )
     const timer = setTimeout(() => {
       timedOut = true
       child.kill("SIGKILL")

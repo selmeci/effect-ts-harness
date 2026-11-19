@@ -10,12 +10,13 @@ export const GATE_RULE_SOURCE_FILES = [
   "libs/harness/gates/src/plugins/sqlite-migrator-ast.ts",
   "tools/oxlint/syntax-bans.js",
   "libs/harness/gates/src/plugins/ast-gate-law-helpers.ts",
+  "libs/harness/gates/src/plugins/ast-effect-promise-law.ts",
   "libs/harness/contract/src/ast-and-gate-primitives.ts",
   "libs/harness/gates/src/plugins/gc/gc-workspace-io.ts",
 ] as const
 
 export const EXPECTED_GATE_RULE_VERSION_DIGEST =
-  "39f941fa89f3a21e4846dda792d9927c8a9821b40f29b7b742dcd1e6816fae99"
+  "b4bb62cf4111ea1db6bbcc1b9e031d7d6fa2bed5b6aa405562517832e912ae21"
 
 export const extractGateRuleIdsFromSources = (
   astVisitorsSource: string,
