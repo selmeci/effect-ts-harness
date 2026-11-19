@@ -2338,4 +2338,140 @@ exit 1
       pkillFailSpy.mockRestore()
     }
   })
+
+  it("runPreMergeOmnigraphBranchVerify allows EffectFn deletions absent from plan-graph-snapshot.json while blocking planned EffectFn deletions", async () => {
+    const repoRoot = makeTempRepo("harness-rfc0009-del-plan-")
+    const clusterDir = resolveOmnigraphClusterDir(repoRoot, nodeSyncHostIo)
+    mkdirSync(clusterDir, { recursive: true })
+    mkdirSync(join(repoRoot, ".harness"), { recursive: true })
+    const canonicalRoot = resolveCanonicalRepoRoot(repoRoot, nodeSyncHostIo)
+    const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
+
+    let deletedEntityId = "libs/sample/domain/src/index.ts#greet"
+    let deletedSpanName = "Sample.greet"
+    let deletedWasStub = false
+    const headers = { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" } as const
+    const server = createServer((req, res) => {
+      const url = req.url ?? ""
+      if (url === "/readyz") {
+        res.writeHead(200, headers)
+        res.end(JSON.stringify({ ready: true, status: "serving", ready_graph_count: 1 }))
+        return
+      }
+      if (url.includes("/branches/diff")) {
+        res.writeHead(200, headers)
+        res.end(
+          JSON.stringify({
+            outcome: "ok",
+            serverRef: "srv-1",
+            from_commit_id: "c1",
+            to_commit_id: "c2",
+            changes: [
+              {
+                id: deletedEntityId,
+                kind: "node",
+                op: "delete",
+                type: { id: "t1", name: "EffectFn" },
+                before: { properties: { isStub: deletedWasStub, spanName: deletedSpanName } },
+                after: null,
+              },
+            ],
+            netNodeCount: -1,
+            netEdgeCount: 0,
+          }),
+        )
+        return
+      }
+      if (url.includes("/branches/merge")) {
+        res.writeHead(200, headers)
+        res.end(
+          JSON.stringify({
+            outcome: "already_up_to_date",
+            source: taskBranches.implBranch,
+            target: taskBranches.mainBranch,
+            dry_run: true,
+            commit: null,
+            serverRef: "srv-1",
+          }),
+        )
+        return
+      }
+      res.writeHead(200, headers)
+      res.end(
+        JSON.stringify({
+          outcome: "ok",
+          branches: [taskBranches.mainBranch, taskBranches.planBranch, taskBranches.implBranch],
+        }),
+      )
+    })
+    await new Promise<void>((resolvePromise, rejectPromise) => {
+      server.once("error", rejectPromise)
+      server.listen(0, "127.0.0.1", () => resolvePromise())
+    })
+    const port = (server.address() as AddressInfo).port
+    writeFileSync(
+      join(clusterDir, "server.json"),
+      JSON.stringify({
+        pid: process.pid,
+        port,
+        baseUrl: `http://127.0.0.1:${port}`,
+        canonicalRepoRoot: canonicalRoot,
+        updatedAt: null,
+      }),
+      "utf8",
+    )
+
+    try {
+      const planSnapshotPath = join(repoRoot, ".harness", "plan-graph-snapshot.json")
+      const planGraph = buildHarnessGraph({
+        fns: [
+          {
+            qualname: "libs/sample/domain/src/index.ts#plannedFn",
+            spanName: "Sample.plannedFn",
+            file: "libs/sample/domain/src/index.ts",
+            line: 20,
+            packageTag: "domain",
+            isStub: true,
+          },
+        ],
+      })
+      saveGraphSnapshot(planGraph, planSnapshotPath, nodeSyncHostIo)
+      const implGraph = buildHarnessGraph({})
+
+      // 1. Intentional deletion of pre-existing function absent from plan-graph-snapshot.json passes
+      const intentionalDeleteRes = await Effect.runPromise(
+        runPreMergeOmnigraphBranchVerify(
+          repoRoot,
+          taskBranches,
+          false,
+          "block",
+          { repoRoot },
+          Date.now(),
+          implGraph,
+        ),
+      )
+      expect(intentionalDeleteRes).toBeUndefined()
+
+      // 2. Dropping an EffectFn that WAS present in plan-graph-snapshot.json still blocks
+      deletedEntityId = "libs/sample/domain/src/index.ts#plannedFn"
+      deletedSpanName = "Sample.plannedFn"
+      deletedWasStub = true
+      const droppedPlannedRes = await Effect.runPromise(
+        runPreMergeOmnigraphBranchVerify(
+          repoRoot,
+          taskBranches,
+          false,
+          "block",
+          { repoRoot },
+          Date.now(),
+          implGraph,
+        ),
+      )
+      expect(droppedPlannedRes?.exitCode).toBe(1)
+      expect(droppedPlannedRes?.stderr).toContain("[planned-effect-fn-dropped]")
+    } finally {
+      server.closeAllConnections()
+      server.close()
+    }
+  })
 })

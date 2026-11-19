@@ -368,6 +368,7 @@ describe("sample-infra", () => {
                 .readdirSync(p, { withFileTypes: true })
                 .map((e) => ({ name: e.name, isFile: e.isFile(), isDirectory: e.isDirectory() })),
             realpathSync: (p) => nodeFs.realpathSync(p),
+            getEnv: () => process.env,
             execFileSync: () => ({ _tag: "Exited", exitCode: 1, stdout: "", stderr: "unused in unit test" }),
           }
 

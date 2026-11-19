@@ -191,7 +191,7 @@ export const runDomainMutationSuite = (
   const backupPath = join(repoRoot, ".harness", "mutation-backup.json")
   const resolvedBackupPath = resolve(backupPath)
   const startupDiag =
-    !hasOverlays && process.env["HARNESS_ACTIVE_BACKUP_PATH"] !== resolvedBackupPath
+    !hasOverlays && hostIo.getEnv()["HARNESS_ACTIVE_BACKUP_PATH"] !== resolvedBackupPath
       ? recoverStartupBackup(repoRoot, backupPath, hostIo)
       : undefined
   if (startupDiag !== undefined) return abortWith([], startupDiag)
@@ -415,11 +415,8 @@ export const runDomainMutationSuite = (
       }
       const runner = options.testRunner
       const prevGlobal = getActiveMutantId()
-      const prevEnv = process.env["HARNESS_ACTIVE_MUTANT_ID"]
       const restoreInProcessEnv = () => {
         setActiveMutantId(prevGlobal)
-        if (prevEnv === undefined) delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
-        else process.env["HARNESS_ACTIVE_MUTANT_ID"] = prevEnv
       }
       const baselineMutant: CodeMutant = {
         id: MutantId.make("__baseline__"),
@@ -431,7 +428,6 @@ export const runDomainMutationSuite = (
         mutatedSource: MutantSourceText.make(originalContent),
       }
       setActiveMutantId(undefined)
-      delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
       const baselineRes = Result.try(() =>
         runner(baselineMutant, originalContent, reachingTestFiles),
       )
@@ -452,7 +448,6 @@ export const runDomainMutationSuite = (
 
       for (const mutant of mutants) {
         setActiveMutantId(mutant.id)
-        process.env["HARNESS_ACTIVE_MUTANT_ID"] = mutant.id
         const runRes = Result.try(() =>
           runner(mutant, schemaBundle.schemaSource, reachingTestFiles),
         )
@@ -474,7 +469,7 @@ export const runDomainMutationSuite = (
     }
 
     const baseSubprocessEnv: Record<string, string | undefined> = {
-      ...process.env,
+      ...hostIo.getEnv(),
       NO_COLOR: "1",
       FORCE_COLOR: "0",
       HARNESS_ACTIVE_BACKUP_PATH: resolvedBackupPath,

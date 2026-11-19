@@ -5,16 +5,10 @@ import {
   AlbumQuotaExceededError,
   type CreatePhotoInput,
   type DecideAlbumQuotaInput,
-  type GreetInput,
-  GreetingMessage,
   MAX_PHOTOS_PER_ALBUM,
   type PhotoId,
 } from "@harness/sample-contract"
 import { AlbumCounterClient, PhotoRepo } from "@harness/sample-service"
-
-export const greet = Effect.fn("Sample.greet")(function* (input: GreetInput) {
-  return yield* Effect.succeed(GreetingMessage.make(`Hello, ${input.name}!`))
-})
 
 export const decideAlbumQuota = Effect.fn("Album.decide")(function* (input: DecideAlbumQuotaInput) {
   return yield* match(input)

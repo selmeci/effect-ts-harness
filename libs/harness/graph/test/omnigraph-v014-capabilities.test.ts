@@ -1244,14 +1244,16 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
     }),
   )
 
-  it("R2-P1: resolveOmnigraphBaseUrl and makeOmnigraphClient default env to process.env while explicit {} isolates", async () => {
+  it("R2-P1: resolveOmnigraphBaseUrl and makeOmnigraphClient read explicit env or hostIo.getEnv() while omitted args and {} isolate", async () => {
     const prevUrl = process.env["OMNIGRAPH_URL"]
     const prevTok = process.env["OMNIGRAPH_TOKEN"]
     try {
       process.env["OMNIGRAPH_URL"] = "http://127.0.0.1:19444"
       process.env["OMNIGRAPH_TOKEN"] = "env-default-token"
 
-      expect(resolveOmnigraphBaseUrl()).toBe("http://127.0.0.1:19444")
+      expect(resolveOmnigraphBaseUrl(undefined, process.env)).toBe("http://127.0.0.1:19444")
+      expect(resolveOmnigraphBaseUrl(undefined, undefined, testHostIo)).toBe("http://127.0.0.1:19444")
+      expect(resolveOmnigraphBaseUrl()).toBe("http://127.0.0.1:8080")
       expect(resolveOmnigraphBaseUrl(undefined, {})).toBe("http://127.0.0.1:8080")
 
       let seenUrl = ""

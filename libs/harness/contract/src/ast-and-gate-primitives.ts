@@ -8,7 +8,7 @@ export type NonNegativeCount = typeof NonNegativeCount.Type
 
 export const GateRuleVersion = Schema.NonEmptyString.pipe(Schema.brand("GateRuleVersion"))
 export type GateRuleVersion = typeof GateRuleVersion.Type
-export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v9")
+export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v10")
 
 /**
  * Pure deterministic UTF-16 code-unit string comparator (`-1 | 0 | 1`).

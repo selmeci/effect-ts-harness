@@ -560,12 +560,11 @@ export const resolveDstSeedsForTier = (
   tier?: DstExecutionTier,
   envSeed?: string,
 ): ReadonlyArray<DstSeed> => {
-  const rawSeed = envSeed ?? process.env.DST_SEED
+  const rawSeed = envSeed
   if (rawSeed !== undefined && /^\d+$/.test(rawSeed.trim())) {
     return [DstSeed.make(Number(rawSeed.trim()))]
   }
-  const effectiveTier =
-    tier ?? DstExecutionTier.make(process.env.CI === "true" ? "ci_full" : "fast_local")
+  const effectiveTier = tier ?? DstExecutionTier.make("fast_local")
   const count = resolveDstSeedCount(effectiveTier)
   return Array.from({ length: count }, (_, idx) => DstSeed.make(idx))
 }
@@ -595,9 +594,7 @@ export const runDstSeedSuite = Effect.fn("DstEngine.runSuite")(function* (
   DstScheduleError,
   never
 > {
-  const tier =
-    options.tier ??
-    DstExecutionTier.make(process.env.CI === "true" ? "ci_full" : "fast_local")
+  const tier = options.tier ?? DstExecutionTier.make("fast_local")
   const count = options.pinnedSeed !== undefined ? 1 : resolveDstSeedCount(tier)
   const initialSeed = options.pinnedSeed ?? DstSeed.make(0)
   const baseConfig: Omit<DstEngineConfig, "seed"> =

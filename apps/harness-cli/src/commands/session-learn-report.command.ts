@@ -62,7 +62,7 @@ export const handleDoctorOrSession = (
     const nodeMajor = parseInt(process.versions.node.split(".")[0] ?? "0", 10)
     const nodeOk = nodeMajor >= 24
 
-    const harnessDir = resolveHarnessStateDir(repoRoot)
+    const harnessDir = resolveHarnessStateDir(repoRoot, process.env)
     const snapshotDirOk = yield* Effect.try({
       try: () => {
         if (!nodeSyncHostIo.existsSync(harnessDir)) {
@@ -308,7 +308,7 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
   const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
   const isAntigravity = hasAntigravityFormat(argv)
   const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)
-  const harnessDir = resolveHarnessStateDir(repoRoot)
+  const harnessDir = resolveHarnessStateDir(repoRoot, process.env)
   const snapshotPath = join(harnessDir, "graph-snapshot.json")
   const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
   const recordedMeta = readGraphHeadMeta(repoRoot, nodeSyncHostIo)
