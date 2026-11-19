@@ -6,22 +6,15 @@ export const NonNegativeCount = Schema.Int.pipe(
 )
 export type NonNegativeCount = typeof NonNegativeCount.Type
 
-export const GateRuleVersion = Schema.NonEmptyString.pipe(Schema.brand("GateRuleVersion"))
+export const GateRuleVersion = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(256)),
+  Schema.check(Schema.isPattern(/^[^\0\r\n]+$/s)),
+  Schema.brand("GateRuleVersion"),
+)
 export type GateRuleVersion = typeof GateRuleVersion.Type
 export const DEFAULT_IN_MEMORY_GATE_RULE_VERSION: GateRuleVersion =
   GateRuleVersion.make("ast-gates-in-memory")
-
-export const GATE_RULE_SOURCE_FILES = [
-  "libs/harness/gates/src/plugins/ast-gate-visitors.ts",
-  "libs/harness/gates/src/plugins/self-dogfooding-plugin.ts",
-  "libs/harness/gates/src/plugins/harness-tier-topology.ts",
-  "libs/harness/gates/src/plugins/sqlite-migrator-ast.ts",
-  "tools/oxlint/syntax-bans.js",
-  "libs/harness/gates/src/plugins/ast-gate-law-helpers.ts",
-  "libs/harness/gates/src/plugins/ast-effect-promise-law.ts",
-  "libs/harness/contract/src/ast-and-gate-primitives.ts",
-  "libs/harness/gates/src/plugins/gc/gc-workspace-io.ts",
-] as const
 
 /**
  * Pure deterministic UTF-16 code-unit string comparator (`-1 | 0 | 1`).
@@ -135,17 +128,6 @@ export const computeContentSha256 = (content: string): ContentSha256 => {
     hex += h[i]!.toString(16).padStart(8, "0")
   }
   return ContentSha256.make(hex)
-}
-
-export const computeGateRuleVersionFromSources = (
-  sources: ReadonlyArray<string>,
-): GateRuleVersion => {
-  if (sources.length === 0) {
-    return DEFAULT_IN_MEMORY_GATE_RULE_VERSION
-  }
-  return GateRuleVersion.make(
-    `ast-gates-${computeContentSha256(sources.map((s) => computeContentSha256(s)).join(","))}`,
-  )
 }
 
 export const AstSourceContent = Schema.String.pipe(Schema.brand("AstSourceContent"))

@@ -15,6 +15,8 @@ import {
   WorkspaceFilePath,
 } from "@harness/contract"
 import {
+  AST_GATE_RULE_SOURCE_FILES,
+  AST_GATE_TYPESCRIPT_VERSION,
   AstGateCache,
   collectModularPluginFiles,
   collectWorkspaceTsFiles,
@@ -38,7 +40,9 @@ import {
 } from "@harness/infra"
 import type { CliResult, ResolveModifiedFilesResult } from "./daemon-and-omnigraph.service.js"
 
-export const buildDstTargetsFromGraph = (graph: HarnessGraph): ReadonlyArray<DstTargetMethodSpec> => {
+export const buildDstTargetsFromGraph = (
+  graph: HarnessGraph,
+): ReadonlyArray<DstTargetMethodSpec> => {
   const dstTargets: Array<DstTargetMethodSpec> = []
   for (const [, node] of Graph.nodes(graph.graph)) {
     match(node)
@@ -89,11 +93,15 @@ const TierPackageJsonSchema = Schema.Struct({
     }),
   ),
 })
-const decodeTierPackageJson = Schema.decodeUnknownOption(Schema.fromJsonString(TierPackageJsonSchema))
+const decodeTierPackageJson = Schema.decodeUnknownOption(
+  Schema.fromJsonString(TierPackageJsonSchema),
+)
 const ProjectJsonTagsSchema = Schema.Struct({
   tags: Schema.optional(Schema.Array(Schema.String)),
 })
-const decodeProjectJsonTags = Schema.decodeUnknownOption(Schema.fromJsonString(ProjectJsonTagsSchema))
+const decodeProjectJsonTags = Schema.decodeUnknownOption(
+  Schema.fromJsonString(ProjectJsonTagsSchema),
+)
 
 const isBannedDrizzleDepName = (dep: string): boolean =>
   dep === "drizzle-orm" ||
@@ -116,11 +124,7 @@ const readTextChecked = (
     })
     .exhaustive()
 
-const readdirChecked = (
-  dirPath: string,
-  relPath: string,
-  errors: Array<string>,
-) =>
+const readdirChecked = (dirPath: string, relPath: string, errors: Array<string>) =>
   match(Result.try(() => nodeSyncHostIo.readdirSync(dirPath)))
     .with({ _tag: "Success" }, ({ success }) => success)
     .with({ _tag: "Failure" }, ({ failure }) => {
@@ -180,7 +184,11 @@ export const collectHarnessTierTopologyViolationMessages = (
       }
     }
 
-    const collectPackageDir = (pkgDir: string, defaultName: string, isServiceTier: boolean): void => {
+    const collectPackageDir = (
+      pkgDir: string,
+      defaultName: string,
+      isServiceTier: boolean,
+    ): void => {
       const pkgJsonPath = join(pkgDir, "package.json")
       const projectJsonPath = join(pkgDir, "project.json")
       let projectJsonTags: ReadonlyArray<string> = []
@@ -303,7 +311,11 @@ export const collectHarnessTierTopologyViolationMessages = (
     ) {
       return []
     }
-    const report = yield* decideHarnessTierTopology({ manifests, serviceFiles, workspaceSourceFiles })
+    const report = yield* decideHarnessTierTopology({
+      manifests,
+      serviceFiles,
+      workspaceSourceFiles,
+    })
     return [
       ...manifestDecodeErrors,
       ...report.violations.map((v) => `[${v.rule}] ${v.location}: ${v.message}`),
@@ -363,6 +375,11 @@ export const runDeltaAstAndPluginGates = (
           }
           const astGateCacheLayer = makeAstGateCacheLayer({
             cacheFilePath: resolveAstGateCachePath(repoRoot),
+            ruleSource: {
+              _tag: "HashedSources",
+              ruleSourceFiles: AST_GATE_RULE_SOURCE_FILES,
+              compilerVersion: AST_GATE_TYPESCRIPT_VERSION,
+            },
           }).pipe(Layer.provide(NodeServices.layer))
           const astExit = yield* AstGateCache.evaluateCached(astGateFiles).pipe(
             Effect.provide(astGateCacheLayer),
@@ -449,51 +466,56 @@ export const runDeltaAstAndPluginGates = (
             })
           }
         }
-    if (modularDeltaFiles.length === 0) return Option.none()
-    const pluginExit = yield* evaluateAllGatePlugins({
-      filePaths: modularDeltaFiles.map((relPath) => WorkspaceFilePath.make(join(repoRoot, relPath))),
-      failOnViolation: true,
-    }).pipe(Effect.provide(Layer.mergeAll(GatePluginRegistryLive, WorkspaceFsLive)), Effect.exit)
+        if (modularDeltaFiles.length === 0) return Option.none()
+        const pluginExit = yield* evaluateAllGatePlugins({
+          filePaths: modularDeltaFiles.map((relPath) =>
+            WorkspaceFilePath.make(join(repoRoot, relPath)),
+          ),
+          failOnViolation: true,
+        }).pipe(
+          Effect.provide(Layer.mergeAll(GatePluginRegistryLive, WorkspaceFsLive)),
+          Effect.exit,
+        )
 
-    return match(pluginExit)
-      .with({ _tag: "Success" }, () => Option.none<CliResult>())
-      .with({ _tag: "Failure" }, ({ cause }) => {
-        const errOpt = Cause.findErrorOption(cause)
-        return match(errOpt)
-          .with({ _tag: "Some" }, ({ value }) =>
-            match(value)
-              .with({ _tag: "SelfDogfoodingViolationError" }, (err) => {
-                const msg = err.violations
-                  .map((v) => `[${v.rule}] ${v.file}:${v.line}: ${v.message}`)
-                  .join("\n")
-                return Option.some({
-                  exitCode: 1,
-                  stdout: "",
-                  stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\n${msg}`,
-                })
-              })
-              .with({ _tag: "WorkspaceFsError" }, (err) =>
+        return match(pluginExit)
+          .with({ _tag: "Success" }, () => Option.none<CliResult>())
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            const errOpt = Cause.findErrorOption(cause)
+            return match(errOpt)
+              .with({ _tag: "Some" }, ({ value }) =>
+                match(value)
+                  .with({ _tag: "SelfDogfoodingViolationError" }, (err) => {
+                    const msg = err.violations
+                      .map((v) => `[${v.rule}] ${v.file}:${v.line}: ${v.message}`)
+                      .join("\n")
+                    return Option.some({
+                      exitCode: 1,
+                      stdout: "",
+                      stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\n${msg}`,
+                    })
+                  })
+                  .with({ _tag: "WorkspaceFsError" }, (err) =>
+                    Option.some({
+                      exitCode: 1,
+                      stdout: "",
+                      stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\nFailed to read ${err.filePath}: ${err.reason}`,
+                    }),
+                  )
+                  .exhaustive(),
+              )
+              .with({ _tag: "None" }, () =>
                 Option.some({
                   exitCode: 1,
                   stdout: "",
-                  stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\nFailed to read ${err.filePath}: ${err.reason}`,
+                  stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\n${Cause.pretty(cause)}`,
                 }),
               )
-              .exhaustive(),
-          )
-          .with({ _tag: "None" }, () =>
-            Option.some({
-              exitCode: 1,
-              stdout: "",
-              stderr: `[GATE FAILURE] verify:self-dogfooding-plugins\n${Cause.pretty(cause)}`,
-            }),
-          )
+              .exhaustive()
+          })
           .exhaustive()
-      })
-      .exhaustive()
-    }),
-  )
-  .exhaustive()
+      }),
+    )
+    .exhaustive()
 }
 
 export class SpanTraceReadError extends Data.TaggedError("SpanTraceReadError")<{

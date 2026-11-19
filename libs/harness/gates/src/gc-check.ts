@@ -72,6 +72,7 @@ export {
   evaluateDocTruthPlugin,
   extractGateRuleIdsFromSources,
 } from "./plugins/gc/gc-doc-truth.plugin.js"
+export { DOC_TRUTH_RULE_ID_SOURCES, checkAstGateRuleClosure } from "./plugins/gc/gc-rule-ids.js"
 
 // ADR-0008 & SPEC-0006 Deterministic Enforcement literals:
 // "node-sqlite-in-infra" "unmanaged-sql-ddl" "invalid-migrator-record-key" "unsafe-sql-migration"

@@ -27,12 +27,14 @@ import {
   AstSourceContent,
   AstSourceFilePath,
   computeContentSha256,
+  CompilerVersionTag,
   ContentSha256,
   DEFAULT_IN_MEMORY_GATE_RULE_VERSION,
   GateCategory,
   GateRuleVersion,
   inferAstGatePackageTagFromPath,
   makeAstGateDecisionReport,
+  WorkspaceFilePath,
   type WorkspaceFsError,
 } from "@harness/contract"
 import { NonNegativeCount, ts } from "@harness/graph"
@@ -78,11 +80,25 @@ export const AstGateCacheEntry = Schema.Struct({
 })
 export type AstGateCacheEntry = typeof AstGateCacheEntry.Type
 
-export const AstGateCacheStoreSchema = Schema.Struct({
-  version: GateRuleVersion,
-  entries: Schema.Record(Schema.String, AstGateCacheEntry),
-})
-export type AstGateCacheStore = typeof AstGateCacheStoreSchema.Type
+/**
+ * Canonical list of workspace source files whose TypeScript AST logic defines
+ * `evaluateSingleAstGateFile` verdicts. Hashed at runtime together with
+ * `AST_GATE_TYPESCRIPT_VERSION` to invalidate `.harness/cache/ast-gate-cache-v1.json`
+ * automatically whenever any gate rule, parser setting, or SQL safety check changes.
+ */
+export const AST_GATE_RULE_SOURCE_FILES: readonly [WorkspaceFilePath, ...Array<WorkspaceFilePath>] =
+  [
+    WorkspaceFilePath.make("libs/harness/gates/src/ast-cache.ts"),
+    WorkspaceFilePath.make("libs/harness/gates/src/migration-check.ts"),
+    WorkspaceFilePath.make("libs/harness/gates/src/plugins/ast-gate-visitors.ts"),
+    WorkspaceFilePath.make("libs/harness/gates/src/plugins/ast-gate-law-helpers.ts"),
+    WorkspaceFilePath.make("libs/harness/gates/src/plugins/ast-effect-promise-law.ts"),
+    WorkspaceFilePath.make("libs/harness/gates/src/plugins/sqlite-migrator-ast.ts"),
+    WorkspaceFilePath.make("libs/harness/contract/src/ast-and-gate-primitives.ts"),
+  ] as const
+
+/** Installed TypeScript compiler version mixed into AST gate cache keys. */
+export const AST_GATE_TYPESCRIPT_VERSION: CompilerVersionTag = CompilerVersionTag.make(ts.version)
 
 export const AstCacheHitCount = NonNegativeCount
 export type AstCacheHitCount = typeof AstCacheHitCount.Type

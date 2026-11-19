@@ -1,15 +1,11 @@
-import { dirname, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
 import { NodeServices } from "@effect/platform-node"
 import {
   Duration,
   Effect,
   FileSystem,
   Layer,
-  Option,
   Path,
   Ref,
-  Schema,
   ScopedCache,
   SynchronizedRef,
 } from "effect"
@@ -19,45 +15,71 @@ import {
   type AstGateEvaluationReport,
   type AstGateFileBatchInput,
   type AstGateFileEvaluator,
+  AstGatePackageTag,
   AstGateViolationContract,
   computeContentSha256,
-  computeGateRuleVersionFromSources,
   type ContentSha256,
+  DEFAULT_IN_MEMORY_GATE_RULE_VERSION,
   ErrorReasonMessage,
-  type EvaluatorId,
-  GATE_RULE_SOURCE_FILES,
+  EvaluatorId,
   GateRuleVersion,
   inferAstGatePackageTagFromPath,
   makeAstGateEvaluationReport,
+  makePersistedAstCacheKey,
   NonNegativeCount,
   PersistedAstCacheEntry,
   PersistedAstCacheKey,
-  PersistedAstCacheStore,
-  selectActivePersistedAstCacheEntries,
   toErrorReasonMessage,
   WorkspaceFilePath,
   WorkspaceFsError,
   WorkspaceFsOperation,
 } from "@harness/contract"
 import { AstGateCachePort, type AstGateCachePortShape } from "@harness/service"
+import {
+  type AstGateCacheRuleSourceConfig,
+  checkNonSymlinkCachePath,
+  decodeStoreForActiveVersion,
+  encodePersistedStoreJson,
+  readActiveEntriesForMerge,
+  type ResolvedGateRuleVersion,
+  resolveDiskGateRuleVersion,
+  resolveDiskGateRuleVersionWithPlatform,
+} from "./ast-gate-cache-helpers.js"
 import { toReadError, toWriteError } from "./cache-helpers.js"
 
+export {
+  resolveDiskGateRuleVersion,
+  type AstGateCacheRuleSourceConfig,
+  type ResolvedGateRuleVersion,
+}
+
 const AST_GATE_SCOPED_CACHE_CAPACITY = 2048
+const DEFAULT_EVALUATOR_ID = EvaluatorId.make("default")
 
-const DEFAULT_GATE_RULE_SOURCE_ROOT = WorkspaceFilePath.make(
-  resolve(dirname(fileURLToPath(import.meta.url)), "../../../.."),
-)
+interface AstGateCacheStateUnloaded {
+  readonly _tag: "Unloaded"
+}
 
-const decodePersistedStore = Schema.decodeOption(Schema.fromJsonString(PersistedAstCacheStore))
+interface AstGateCacheStateUncached {
+  readonly _tag: "Uncached"
+  readonly resolution: Extract<ResolvedGateRuleVersion, { readonly _tag: "Uncached" }>
+}
 
-interface AstGateCacheState {
-  readonly loaded: boolean
+interface AstGateCacheStateLoaded {
+  readonly _tag: "Loaded"
+  readonly ruleVersion: GateRuleVersion
   readonly entries: ReadonlyMap<PersistedAstCacheKey, PersistedAstCacheEntry>
 }
+
+type AstGateCacheState =
+  | AstGateCacheStateUnloaded
+  | AstGateCacheStateUncached
+  | AstGateCacheStateLoaded
 
 interface PendingAstEvaluation {
   readonly file: AstGateFileBatchInput
   readonly contentSha256: ContentSha256
+  readonly ruleVersion: GateRuleVersion
   readonly evaluateFile: AstGateFileEvaluator
   readonly waiters: number
 }
@@ -65,104 +87,99 @@ interface PendingAstEvaluation {
 /**
  * Constructs an `AstGateCachePort` layer requiring `FileSystem` and `Path`.
  *
- * When `options.cacheFilePath` is omitted, the cache operates in-memory only;
- * `HarnessInfraLive` / `makeHarnessInfraLayer` wires it to
- * `.harness/cache/ast-gate-cache-v1.json` under the repository root.
- *
- * The active `ruleVersion` is derived automatically by SHA-256 hashing
- * `GATE_RULE_SOURCE_FILES` (unless `options.ruleVersion` is explicitly provided),
- * so edits to any AST gate rule file invalidate stale cache entries without manual
- * version bumps.
- *
- * Architectural rationale ("why"): `ScopedCache` (capacity 2048) runs outside
- * `SynchronizedRef` so concurrent `evaluateBatch` callers and batch misses share
- * single-flight evaluation keyed by `(filePath, packageTag, contentSha256, ruleVersion)`,
- * while `SynchronizedRef` serializes atomic write-before-commit disk persistence.
+ * Resolves `options.ruleSource` lazily on first port access (`Layer.effect` performs zero I/O).
+ * When `ruleSource` resolves to `{ _tag: "Uncached" }`, evaluations bypass both memory and disk
+ * persistence without clobbering any valid `.harness/cache/ast-gate-cache-v1.json` on disk.
  */
 const makeAstGateCacheLayer = (options?: {
   readonly cacheFilePath?: WorkspaceFilePath
-  readonly ruleVersion?: GateRuleVersion
-  readonly ruleSourceRoot?: WorkspaceFilePath
+  readonly ruleSource?: AstGateCacheRuleSourceConfig
 }): Layer.Layer<AstGateCachePort, never, FileSystem.FileSystem | Path.Path> =>
   Layer.effect(
     AstGateCachePort,
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem
       const path = yield* Path.Path
-      const activeRuleVersion: GateRuleVersion =
-        options?.ruleVersion !== undefined
-          ? options.ruleVersion
-          : yield* Effect.forEach(
-              GATE_RULE_SOURCE_FILES,
-              (relPath) =>
-                fs.readFileString(
-                  path.join(options?.ruleSourceRoot ?? DEFAULT_GATE_RULE_SOURCE_ROOT, relPath),
-                ),
-              { concurrency: "unbounded" },
-            ).pipe(
-              Effect.map(computeGateRuleVersionFromSources),
-              Effect.catchTag("PlatformError", (err) =>
-                Effect.logWarning(
-                  `Failed to hash GATE_RULE_SOURCE_FILES (${toErrorReasonMessage(err)}); falling back to uncached AST gate evaluation`,
-                ).pipe(
-                  Effect.as(
-                    GateRuleVersion.make(`ast-gates-uncached-${globalThis.crypto.randomUUID()}`),
-                  ),
-                ),
-              ),
-            )
-      const stateRef = yield* SynchronizedRef.make<AstGateCacheState>({
-        loaded: options?.cacheFilePath === undefined,
-        entries: new Map<PersistedAstCacheKey, PersistedAstCacheEntry>(),
-      })
+      const stateRef = yield* SynchronizedRef.make<AstGateCacheState>({ _tag: "Unloaded" })
       const pendingEvalRef = yield* Ref.make<ReadonlyMap<string, PendingAstEvaluation>>(new Map())
 
       const ensureLoaded = (
         state: AstGateCacheState,
       ): Effect.Effect<AstGateCacheState, WorkspaceFsError> =>
-        Effect.gen(function* () {
-          if (state.loaded) {
-            return state
-          }
-          if (options?.cacheFilePath === undefined) {
-            return { ...state, loaded: true }
-          }
-          const filePath = options.cacheFilePath
-          const rawOpt = yield* fs.readFileString(filePath).pipe(
-            Effect.asSome,
-            Effect.catchTag("PlatformError", (err) =>
-              match(err.reason)
-                .with({ _tag: "NotFound" }, () => Effect.succeed(Option.none<string>()))
-                .with({ _tag: P.not("NotFound") }, () => Effect.fail(toReadError(filePath, err)))
-                .exhaustive(),
-            ),
-          )
-          return yield* match(rawOpt)
-            .with({ _tag: "None" }, () => Effect.succeed({ ...state, loaded: true }))
-            .with({ _tag: "Some" }, ({ value: raw }) =>
-              match(decodePersistedStore(raw))
-                .with({ _tag: "None" }, () =>
-                  Effect.logWarning(
-                    `Corrupt AST gate cache at '${filePath}'; resetting to empty store`,
-                  ).pipe(
-                    Effect.as({
-                      loaded: true,
-                      entries: new Map<PersistedAstCacheKey, PersistedAstCacheEntry>(),
-                    }),
-                  ),
+        match(state)
+          .with({ _tag: "Loaded" }, { _tag: "Uncached" }, (ready) => Effect.succeed(ready))
+          .with({ _tag: "Unloaded" }, () =>
+            Effect.gen(function* () {
+              const ruleSourceConfig: AstGateCacheRuleSourceConfig = options?.ruleSource ?? {
+                _tag: "ExplicitVersion",
+                ruleVersion: DEFAULT_IN_MEMORY_GATE_RULE_VERSION,
+              }
+              const resolution = yield* resolveDiskGateRuleVersionWithPlatform(
+                fs,
+                path,
+                ruleSourceConfig,
+              )
+              return yield* match(resolution)
+                .with({ _tag: "Uncached" }, (uncached) =>
+                  Effect.succeed<AstGateCacheState>({ _tag: "Uncached", resolution: uncached }),
                 )
-                .with({ _tag: "Some" }, ({ value: store }) =>
-                  Effect.succeed({
-                    loaded: true,
-                    entries: selectActivePersistedAstCacheEntries(store, activeRuleVersion),
+                .with({ _tag: "Resolved" }, ({ ruleVersion: activeRuleVersion }) =>
+                  Effect.gen(function* () {
+                    if (options?.cacheFilePath === undefined) {
+                      return {
+                        _tag: "Loaded" as const,
+                        ruleVersion: activeRuleVersion,
+                        entries: new Map<PersistedAstCacheKey, PersistedAstCacheEntry>(),
+                      }
+                    }
+                    const filePath = options.cacheFilePath
+                    const existsNonSymlink = yield* checkNonSymlinkCachePath(
+                      fs,
+                      filePath,
+                      toReadError,
+                    )
+                    if (!existsNonSymlink) {
+                      return {
+                        _tag: "Loaded" as const,
+                        ruleVersion: activeRuleVersion,
+                        entries: new Map<PersistedAstCacheKey, PersistedAstCacheEntry>(),
+                      }
+                    }
+                    const rawOpt = yield* fs.readFileString(filePath).pipe(
+                      Effect.asSome,
+                      Effect.catchTag("PlatformError", (err) =>
+                        match(err.reason)
+                          .with({ _tag: "NotFound" }, () => Effect.succeedNone)
+                          .with({ _tag: P.not("NotFound") }, () =>
+                            Effect.fail(toReadError(filePath, err)),
+                          )
+                          .exhaustive(),
+                      ),
+                    )
+                    const loadedEntries = yield* match(rawOpt)
+                      .with({ _tag: "None" }, () =>
+                        Effect.succeed<ReadonlyMap<PersistedAstCacheKey, PersistedAstCacheEntry>>(
+                          new Map(),
+                        ),
+                      )
+                      .with({ _tag: "Some" }, ({ value: raw }) =>
+                        decodeStoreForActiveVersion(raw, activeRuleVersion, filePath),
+                      )
+                      .exhaustive()
+                    return {
+                      _tag: "Loaded" as const,
+                      ruleVersion: activeRuleVersion,
+                      entries: loadedEntries,
+                    }
                   }),
                 )
-                .exhaustive(),
-            )
-            .exhaustive()
-        })
+                .exhaustive()
+            }),
+          )
+          .exhaustive()
 
       const persistEntries = (
+        activeRuleVersion: GateRuleVersion,
         entries: ReadonlyMap<PersistedAstCacheKey, PersistedAstCacheEntry>,
       ): Effect.Effect<void, WorkspaceFsError> =>
         Effect.gen(function* () {
@@ -170,11 +187,22 @@ const makeAstGateCacheLayer = (options?: {
             return
           }
           const filePath = options.cacheFilePath
-          const serializedEntries: Record<string, PersistedAstCacheEntry> = {}
-          for (const [key, entry] of entries.entries()) {
+          const existsNonSymlink = yield* checkNonSymlinkCachePath(fs, filePath, toWriteError)
+          const merged = new Map<PersistedAstCacheKey, PersistedAstCacheEntry>()
+          if (existsNonSymlink) {
+            const diskActive = yield* readActiveEntriesForMerge(fs, filePath, activeRuleVersion)
+            for (const [k, v] of diskActive.entries()) {
+              merged.set(k, v)
+            }
+          }
+          for (const [k, v] of entries.entries()) {
+            merged.set(k, v)
+          }
+          const serializedEntries: Record<string, PersistedAstCacheEntry> = Object.create(null)
+          for (const [key, entry] of merged.entries()) {
             serializedEntries[key] = entry
           }
-          const json = JSON.stringify({
+          const json = encodePersistedStoreJson({
             version: activeRuleVersion,
             entries: serializedEntries,
           })
@@ -203,8 +231,14 @@ const makeAstGateCacheLayer = (options?: {
             const pendingMap = yield* Ref.get(pendingEvalRef)
             const pending = pendingMap.get(lookupKey)
             if (pending === undefined) {
+              const safePathSegment = lookupKey.split("\0")[0]
+              const fallbackPath = WorkspaceFilePath.make(
+                safePathSegment !== undefined && safePathSegment.trim().length > 0
+                  ? safePathSegment.trim()
+                  : "in-memory",
+              )
               return yield* new WorkspaceFsError({
-                filePath: options?.cacheFilePath ?? WorkspaceFilePath.make(lookupKey),
+                filePath: options?.cacheFilePath ?? fallbackPath,
                 operation: WorkspaceFsOperation.make("read"),
                 reason: ErrorReasonMessage.make(
                   `Missing pending AST evaluation for '${lookupKey}'`,
@@ -221,11 +255,32 @@ const makeAstGateCacheLayer = (options?: {
             })
             return {
               contentSha256: pending.contentSha256,
-              ruleVersion: activeRuleVersion,
+              ruleVersion: pending.ruleVersion,
               violations: contractViolations,
             }
           }),
       })
+
+      const dedupeBatchFiles = (
+        files: ReadonlyArray<AstGateFileBatchInput>,
+      ): ReadonlyArray<{
+        readonly file: AstGateFileBatchInput
+        readonly pkgTag: AstGatePackageTag
+      }> => {
+        const result: Array<{
+          readonly file: AstGateFileBatchInput
+          readonly pkgTag: AstGatePackageTag
+        }> = []
+        const seen = new Set<string>()
+        for (const file of files) {
+          const pkgTag = file.packageTag ?? inferAstGatePackageTagFromPath(file.filePath)
+          const dedupeKey = `${file.filePath}\0${pkgTag}`
+          if (seen.has(dedupeKey)) continue
+          seen.add(dedupeKey)
+          result.push({ file, pkgTag })
+        }
+        return result
+      }
 
       const evaluateBatch = Effect.fn("AstGateCachePort.evaluateBatch")(function* (
         files: ReadonlyArray<AstGateFileBatchInput>,
@@ -235,149 +290,200 @@ const makeAstGateCacheLayer = (options?: {
         const snapshot = yield* SynchronizedRef.modifyEffect(stateRef, (state) =>
           ensureLoaded(state).pipe(Effect.map((loaded) => [loaded, loaded] as const)),
         )
+        const dedupedFiles = dedupeBatchFiles(files)
 
-        interface PreparedMiss {
-          readonly cacheKey: PersistedAstCacheKey
-          readonly scopedKey: string
-          readonly file: AstGateFileBatchInput
-          readonly contentSha256: ContentSha256
-        }
-
-        const resolvedEvaluatorId =
-          evaluatorId !== undefined && evaluatorId.trim().length > 0
-            ? evaluatorId.trim()
-            : "default"
-        const hitMap = new Map<PersistedAstCacheKey, PersistedAstCacheEntry>()
-        const misses: Array<PreparedMiss> = []
-        const orderedKeys: Array<PersistedAstCacheKey> = []
-        const seenBatchEntries = new Set<string>()
-        let cacheHitCount = 0
-
-        for (const file of files) {
-          const pkgTag = file.packageTag ?? inferAstGatePackageTagFromPath(file.filePath)
-          const dedupeKey = `${file.filePath}\0${pkgTag}`
-          if (seenBatchEntries.has(dedupeKey)) {
-            continue
-          }
-          seenBatchEntries.add(dedupeKey)
-
-          const cacheKey = PersistedAstCacheKey.make(
-            `${dedupeKey}\0${activeRuleVersion}\0${resolvedEvaluatorId}`,
-          )
-          orderedKeys.push(cacheKey)
-          const contentSha256 = computeContentSha256(file.content)
-          const existing = snapshot.entries.get(cacheKey)
-
-          if (
-            existing !== undefined &&
-            existing.contentSha256 === contentSha256 &&
-            existing.ruleVersion === activeRuleVersion
-          ) {
-            cacheHitCount += 1
-            hitMap.set(cacheKey, existing)
-          } else {
-            const scopedKey = `${cacheKey}\0${contentSha256}`
-            misses.push({ cacheKey, scopedKey, file, contentSha256 })
-          }
-        }
-
-        const computedMap = new Map<PersistedAstCacheKey, PersistedAstCacheEntry>()
-        if (misses.length > 0) {
-          const computedPairs = yield* Effect.forEach(
-            misses,
-            (miss) =>
-              Effect.acquireUseRelease(
-                Ref.update(pendingEvalRef, (pending) => {
-                  const next = new Map(pending)
-                  const prev = next.get(miss.scopedKey)
-                  next.set(miss.scopedKey, {
-                    file: miss.file,
-                    contentSha256: miss.contentSha256,
-                    evaluateFile,
-                    waiters: (prev?.waiters ?? 0) + 1,
-                  })
-                  return next
-                }),
-                () =>
-                  ScopedCache.get(scopedCache, miss.scopedKey).pipe(
-                    Effect.mapError((err) => {
-                      if (
-                        err instanceof WorkspaceFsError ||
-                        err instanceof AstGateEvaluationError
-                      ) {
-                        return err
-                      }
-                      return toWriteError(miss.file.filePath, err)
+        return yield* match(snapshot)
+          .with({ _tag: "Uncached" }, () =>
+            Effect.forEach(
+              dedupedFiles,
+              ({ file }) =>
+                Effect.try({
+                  try: () => evaluateFile(file),
+                  catch: (err) =>
+                    new AstGateEvaluationError({
+                      filePath: file.filePath,
+                      reason: toErrorReasonMessage(err, "AST gate evaluator failed"),
                     }),
-                    Effect.map((entry) => [miss.cacheKey, entry] as const),
-                  ),
-                () =>
-                  Ref.update(pendingEvalRef, (pending) => {
-                    const next = new Map(pending)
-                    const prev = next.get(miss.scopedKey)
-                    if (prev === undefined || prev.waiters <= 1) {
-                      next.delete(miss.scopedKey)
-                    } else {
-                      next.set(miss.scopedKey, { ...prev, waiters: prev.waiters - 1 })
-                    }
-                    return next
-                  }),
+                }),
+              { concurrency: "unbounded" },
+            ).pipe(
+              Effect.map((batches) =>
+                makeAstGateEvaluationReport({
+                  violations: batches.flat(),
+                  inspectedFileCount: NonNegativeCount.make(dedupedFiles.length),
+                  cacheHitCount: NonNegativeCount.make(0),
+                }),
               ),
-            { concurrency: "unbounded" },
+            ),
           )
-
-          for (const [cacheKey, entry] of computedPairs) {
-            computedMap.set(cacheKey, entry)
-          }
-
-          yield* SynchronizedRef.modifyEffect(stateRef, (state) =>
-            Effect.gen(function* () {
-              const loaded = yield* ensureLoaded(state)
-              const nextEntries = new Map(loaded.entries)
-              let dirty = false
-              for (const [cacheKey, entry] of computedMap.entries()) {
-                const prev = nextEntries.get(cacheKey)
-                if (
-                  prev === undefined ||
-                  prev.contentSha256 !== entry.contentSha256 ||
-                  prev.ruleVersion !== entry.ruleVersion
-                ) {
-                  nextEntries.set(cacheKey, entry)
-                  dirty = true
+          .with(
+            { _tag: "Loaded" },
+            ({ ruleVersion: activeRuleVersion, entries: snapshotEntries }) =>
+              Effect.gen(function* () {
+                interface PreparedMiss {
+                  readonly cacheKey: PersistedAstCacheKey
+                  readonly scopedKey: string
+                  readonly file: AstGateFileBatchInput
+                  readonly contentSha256: ContentSha256
                 }
-              }
-              if (dirty) {
-                yield* persistEntries(nextEntries).pipe(
-                  Effect.catchTag("WorkspaceFsError", (err) =>
-                    Effect.logWarning(
-                      `Failed to persist AST gate cache at '${err.filePath}': ${err.reason}`,
-                    ),
-                  ),
-                )
-              }
-              return [undefined, { loaded: true, entries: nextEntries }] as const
-            }),
+
+                const resolvedEvaluatorId =
+                  evaluatorId !== undefined && evaluatorId.trim().length > 0
+                    ? EvaluatorId.make(evaluatorId.trim())
+                    : DEFAULT_EVALUATOR_ID
+                const hitMap = new Map<PersistedAstCacheKey, PersistedAstCacheEntry>()
+                const misses: Array<PreparedMiss> = []
+                const orderedKeys: Array<PersistedAstCacheKey> = []
+                let cacheHitCount = 0
+
+                for (const { file, pkgTag } of dedupedFiles) {
+                  const cacheKey = makePersistedAstCacheKey(
+                    file.filePath,
+                    pkgTag,
+                    activeRuleVersion,
+                    resolvedEvaluatorId,
+                  )
+                  orderedKeys.push(cacheKey)
+                  const contentSha256 = computeContentSha256(file.content)
+                  const existing = snapshotEntries.get(cacheKey)
+
+                  if (
+                    existing !== undefined &&
+                    existing.contentSha256 === contentSha256 &&
+                    existing.ruleVersion === activeRuleVersion
+                  ) {
+                    cacheHitCount += 1
+                    hitMap.set(cacheKey, existing)
+                  } else {
+                    const scopedKey = `${cacheKey}\0${contentSha256}`
+                    misses.push({ cacheKey, scopedKey, file, contentSha256 })
+                  }
+                }
+
+                const computedMap = new Map<PersistedAstCacheKey, PersistedAstCacheEntry>()
+                if (misses.length > 0) {
+                  const computedPairs = yield* Effect.forEach(
+                    misses,
+                    (miss) =>
+                      Effect.acquireUseRelease(
+                        Ref.update(pendingEvalRef, (pending) => {
+                          const next = new Map(pending)
+                          const prev = next.get(miss.scopedKey)
+                          next.set(miss.scopedKey, {
+                            file: miss.file,
+                            contentSha256: miss.contentSha256,
+                            ruleVersion: activeRuleVersion,
+                            evaluateFile,
+                            waiters: (prev?.waiters ?? 0) + 1,
+                          })
+                          return next
+                        }),
+                        () =>
+                          ScopedCache.get(scopedCache, miss.scopedKey).pipe(
+                            Effect.mapError((err) => {
+                              if (
+                                err instanceof WorkspaceFsError ||
+                                err instanceof AstGateEvaluationError
+                              ) {
+                                return err
+                              }
+                              return toWriteError(miss.file.filePath, err)
+                            }),
+                            Effect.map((entry) => [miss.cacheKey, entry] as const),
+                          ),
+                        () =>
+                          Ref.update(pendingEvalRef, (pending) => {
+                            const next = new Map(pending)
+                            const prev = next.get(miss.scopedKey)
+                            if (prev === undefined || prev.waiters <= 1) {
+                              next.delete(miss.scopedKey)
+                            } else {
+                              next.set(miss.scopedKey, { ...prev, waiters: prev.waiters - 1 })
+                            }
+                            return next
+                          }),
+                      ),
+                    { concurrency: "unbounded" },
+                  )
+
+                  for (const [cacheKey, entry] of computedPairs) {
+                    computedMap.set(cacheKey, entry)
+                  }
+
+                  yield* SynchronizedRef.modifyEffect(stateRef, (state) =>
+                    Effect.gen(function* () {
+                      const loaded = yield* ensureLoaded(state)
+                      return yield* match(loaded)
+                        .with({ _tag: "Uncached" }, { _tag: "Unloaded" }, (other) =>
+                          Effect.succeed([undefined, other] as const),
+                        )
+                        .with(
+                          { _tag: "Loaded" },
+                          ({ ruleVersion: currentVer, entries: currentEntries }) =>
+                            Effect.gen(function* () {
+                              const nextEntries = new Map(currentEntries)
+                              let dirty = false
+                              for (const [cacheKey, entry] of computedMap.entries()) {
+                                const prev = nextEntries.get(cacheKey)
+                                if (
+                                  prev === undefined ||
+                                  prev.contentSha256 !== entry.contentSha256 ||
+                                  prev.ruleVersion !== entry.ruleVersion
+                                ) {
+                                  nextEntries.set(cacheKey, entry)
+                                  dirty = true
+                                }
+                              }
+                              if (dirty) {
+                                yield* persistEntries(currentVer, nextEntries).pipe(
+                                  Effect.catchTag("WorkspaceFsError", (err) =>
+                                    Effect.logWarning(
+                                      `Failed to persist AST gate cache at '${err.filePath}': ${err.reason}`,
+                                    ),
+                                  ),
+                                )
+                              }
+                              return [
+                                undefined,
+                                {
+                                  _tag: "Loaded" as const,
+                                  ruleVersion: currentVer,
+                                  entries: nextEntries,
+                                },
+                              ] as const
+                            }),
+                        )
+                        .exhaustive()
+                    }),
+                  )
+                }
+
+                const violations: Array<AstGateViolationContract> = []
+                for (const cacheKey of orderedKeys) {
+                  const entry = hitMap.get(cacheKey) ?? computedMap.get(cacheKey)
+                  if (entry !== undefined) {
+                    violations.push(...entry.violations)
+                  }
+                }
+
+                return makeAstGateEvaluationReport({
+                  violations,
+                  inspectedFileCount: NonNegativeCount.make(orderedKeys.length),
+                  cacheHitCount: NonNegativeCount.make(cacheHitCount),
+                })
+              }),
           )
-        }
-
-        const violations: Array<AstGateViolationContract> = []
-        for (const cacheKey of orderedKeys) {
-          const entry = hitMap.get(cacheKey) ?? computedMap.get(cacheKey)
-          if (entry !== undefined) {
-            violations.push(...entry.violations)
-          }
-        }
-
-        return makeAstGateEvaluationReport({
-          violations,
-          inspectedFileCount: NonNegativeCount.make(orderedKeys.length),
-          cacheHitCount: NonNegativeCount.make(cacheHitCount),
-        })
+          .with({ _tag: "Unloaded" }, () =>
+            Effect.die(
+              "Invariant violation: AstGateCacheState remained Unloaded after ensureLoaded",
+            ),
+          )
+          .exhaustive()
       })
 
       const clearCache: Effect.Effect<void, WorkspaceFsError> = SynchronizedRef.updateEffect(
         stateRef,
-        () =>
+        (state) =>
           Effect.gen(function* () {
             yield* ScopedCache.invalidateAll(scopedCache)
             if (options?.cacheFilePath !== undefined) {
@@ -386,17 +492,28 @@ const makeAstGateCacheLayer = (options?: {
                 .remove(filePath, { force: true })
                 .pipe(Effect.mapError((err) => toWriteError(filePath, err)))
             }
-            return {
-              loaded: true,
-              entries: new Map<PersistedAstCacheKey, PersistedAstCacheEntry>(),
-            }
+            return match(state)
+              .with({ _tag: "Uncached" }, (uncached) => uncached)
+              .with({ _tag: "Unloaded" }, () => ({ _tag: "Unloaded" as const }))
+              .with({ _tag: "Loaded" }, ({ ruleVersion }) => ({
+                _tag: "Loaded" as const,
+                ruleVersion,
+                entries: new Map<PersistedAstCacheKey, PersistedAstCacheEntry>(),
+              }))
+              .exhaustive()
           }),
       )
 
       const cacheSize: Effect.Effect<NonNegativeCount, WorkspaceFsError> =
         SynchronizedRef.modifyEffect(stateRef, (state) =>
           ensureLoaded(state).pipe(
-            Effect.map((loaded) => [NonNegativeCount.make(loaded.entries.size), loaded] as const),
+            Effect.map((loaded) => {
+              const size = match(loaded)
+                .with({ _tag: "Loaded" }, ({ entries }) => entries.size)
+                .with({ _tag: "Uncached" }, { _tag: "Unloaded" }, () => 0)
+                .exhaustive()
+              return [NonNegativeCount.make(size), loaded] as const
+            }),
           ),
         )
 

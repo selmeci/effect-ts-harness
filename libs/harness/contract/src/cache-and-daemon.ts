@@ -1,8 +1,10 @@
-import { Schema } from "effect"
+import { Result, Schema } from "effect"
 import {
   AstGatePackageTag,
   AstSourceContent,
   AstSourceFilePath,
+  compareCodeUnits,
+  computeContentSha256,
   ContentSha256,
   EnclosingSymbolName,
   GateCategory,
@@ -219,13 +221,105 @@ export class DaemonServerError extends Schema.TaggedError<DaemonServerError>()(
   },
 ) {}
 
-export const PersistedAstCacheKey = Schema.NonEmptyString.pipe(Schema.brand("PersistedAstCacheKey"))
+export const CompilerVersionTag = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(128)),
+  Schema.check(Schema.isPattern(/^[^\0\r\n]+$/s)),
+  Schema.brand("CompilerVersionTag"),
+)
+export type CompilerVersionTag = typeof CompilerVersionTag.Type
+
+const ExplicitGateRuleSourceConfig = Schema.TaggedStruct("ExplicitVersion", {
+  ruleVersion: GateRuleVersion,
+})
+
+const HashedGateRuleSourceConfig = Schema.TaggedStruct("HashedSources", {
+  ruleSourceFiles: Schema.NonEmptyArray(WorkspaceFilePath),
+  ruleSourceRoot: Schema.optional(WorkspaceFilePath),
+  compilerVersion: Schema.optional(CompilerVersionTag),
+})
+
+export const AstGateCacheRuleSourceConfig = Schema.Union([
+  ExplicitGateRuleSourceConfig,
+  HashedGateRuleSourceConfig,
+])
+export type AstGateCacheRuleSourceConfig = typeof AstGateCacheRuleSourceConfig.Type
+
+const ResolvedGateRuleVersionSuccess = Schema.TaggedStruct("Resolved", {
+  ruleVersion: GateRuleVersion,
+})
+
+const UncachedGateRuleVersionFallback = Schema.TaggedStruct("Uncached", {
+  reason: ErrorReasonMessage,
+  rootDir: WorkspaceFilePath,
+  failedFile: Schema.optional(WorkspaceFilePath),
+})
+
+export const ResolvedGateRuleVersion = Schema.Union([
+  ResolvedGateRuleVersionSuccess,
+  UncachedGateRuleVersionFallback,
+])
+export type ResolvedGateRuleVersion = typeof ResolvedGateRuleVersion.Type
+
+export const GateRuleSourceSnapshot = Schema.Struct({
+  filePath: WorkspaceFilePath,
+  content: AstSourceContent,
+})
+export type GateRuleSourceSnapshot = typeof GateRuleSourceSnapshot.Type
+
+/**
+ * Derives a deterministic SHA-256 `GateRuleVersion` from canonical path-bound
+ * rule source snapshots (plus optional compiler version tag).
+ * Fails closed when given an empty snapshot list so callers never fall back
+ * to a static version key that could collide across rule changes.
+ */
+export const computeGateRuleVersionFromSources = (
+  sources: ReadonlyArray<GateRuleSourceSnapshot>,
+  compilerVersion?: CompilerVersionTag,
+): Result.Result<GateRuleVersion, ErrorReasonMessage> => {
+  if (sources.length === 0) {
+    return Result.fail(
+      ErrorReasonMessage.make(
+        "Cannot derive AST gate rule version from an empty rule source snapshot list.",
+      ),
+    )
+  }
+  const canonicalPairs = [...sources]
+    .sort((a, b) => compareCodeUnits(a.filePath, b.filePath))
+    .map((s) => [s.filePath, computeContentSha256(s.content)] as const)
+  const digest = computeContentSha256(
+    JSON.stringify({
+      domain: "ast-gate-rules-v1",
+      ...(compilerVersion !== undefined ? { compilerVersion } : {}),
+      files: canonicalPairs,
+    }),
+  )
+  return Result.succeed(GateRuleVersion.make(`ast-gates-${digest}`))
+}
+
+const PERSISTED_AST_CACHE_KEY_RE =
+  /^[^\0]+\0(?:contract|domain|service|infra|app|test)\0[^\0]+\0[^\0]+$/s
+
+export const PersistedAstCacheKey = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isMaxLength(4096)),
+  Schema.check(Schema.isPattern(PERSISTED_AST_CACHE_KEY_RE)),
+  Schema.brand("PersistedAstCacheKey"),
+)
 export type PersistedAstCacheKey = typeof PersistedAstCacheKey.Type
+
+/** Constructs a canonical 4-segment persisted AST cache key delimited by NUL bytes. */
+export const makePersistedAstCacheKey = (
+  filePath: AstSourceFilePath,
+  packageTag: AstGatePackageTag,
+  ruleVersion: GateRuleVersion,
+  evaluatorId: EvaluatorId,
+): PersistedAstCacheKey =>
+  PersistedAstCacheKey.make(`${filePath}\0${packageTag}\0${ruleVersion}\0${evaluatorId}`)
 
 export const PersistedAstCacheEntry = Schema.Struct({
   contentSha256: ContentSha256,
   ruleVersion: GateRuleVersion,
-  violations: Schema.Array(AstGateViolationContract),
+  violations: Schema.Array(AstGateViolationContract).pipe(Schema.check(Schema.isMaxLength(10_000))),
 })
 export type PersistedAstCacheEntry = typeof PersistedAstCacheEntry.Type
 
@@ -235,6 +329,11 @@ export const PersistedAstCacheStore = Schema.Struct({
 })
 export type PersistedAstCacheStore = typeof PersistedAstCacheStore.Type
 
+/**
+ * Filters persisted AST gate cache entries down to the active `GateRuleVersion`,
+ * evicting any store-version mismatch, stale entry `ruleVersion`, or key whose
+ * embedded rule-version segment does not match `activeRuleVersion`.
+ */
 export const selectActivePersistedAstCacheEntries = (
   store: PersistedAstCacheStore,
   activeRuleVersion: GateRuleVersion,
@@ -244,7 +343,12 @@ export const selectActivePersistedAstCacheEntries = (
     return activeEntries
   }
   for (const [key, entry] of Object.entries(store.entries)) {
-    if (entry.ruleVersion === activeRuleVersion) {
+    const parts = key.split("\0")
+    if (
+      parts.length === 4 &&
+      parts[2] === activeRuleVersion &&
+      entry.ruleVersion === activeRuleVersion
+    ) {
       activeEntries.set(PersistedAstCacheKey.make(key), entry)
     }
   }

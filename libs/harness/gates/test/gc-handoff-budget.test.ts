@@ -19,7 +19,7 @@ import {
   extractTopLevelObjectAnalysis,
   loadGovernanceDocsChecked,
 } from "../src/plugins/gc/gc-helpers.js"
-import { extractGateRuleIdsFromSources } from "../src/plugins/gc/gc-rule-digest.js"
+import { extractGateRuleIdsFromSources } from "../src/plugins/gc/gc-rule-ids.js"
 import {
   decideGraphEntropy,
   diffPlanAndImplGraphs,
@@ -1211,7 +1211,7 @@ status: accepted
       rmSync(tempDir, { recursive: true, force: true })
     }
 
-    // gc-rule-digest: extractGateRuleIdsFromSources extracts GateRuleId.make and [rule-id] from syntaxBansSource
+    // gc-rule-ids: extractGateRuleIdsFromSources extracts GateRuleId.make and [rule-id] from syntaxBansSource
     const ruleIds = extractGateRuleIdsFromSources(
       'GateRuleId.make("sample-gate-rule")',
       "",
