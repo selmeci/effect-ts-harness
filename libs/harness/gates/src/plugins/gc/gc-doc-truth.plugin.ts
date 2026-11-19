@@ -11,21 +11,9 @@ import {
   readdirOrReport,
   readTextOrReport,
 } from "./gc-helpers.js"
-import {
-  EXPECTED_GATE_RULE_VERSION_DIGEST,
-  GATE_RULE_SOURCE_FILES,
-  computeGateRuleVersionDigest,
-  evaluateGateRuleDigestCheck,
-  extractGateRuleIdsFromSources,
-} from "./gc-rule-digest.js"
+import { GATE_RULE_SOURCE_FILES, extractGateRuleIdsFromSources } from "./gc-rule-digest.js"
 
-export {
-  EXPECTED_GATE_RULE_VERSION_DIGEST,
-  GATE_RULE_SOURCE_FILES,
-  computeGateRuleVersionDigest,
-  evaluateGateRuleDigestCheck,
-  extractGateRuleIdsFromSources,
-}
+export { GATE_RULE_SOURCE_FILES, extractGateRuleIdsFromSources }
 
 const PkgManifestDepsSchema = Schema.Struct({
   name: Schema.optional(Schema.String),
@@ -187,7 +175,7 @@ const collectKnownGateRuleIds = (
     readOptional(GATE_RULE_SOURCE_FILES[1]),
     readOptional(GATE_RULE_SOURCE_FILES[2]),
     readOptional(GATE_RULE_SOURCE_FILES[4]),
-    readOptional(GATE_RULE_SOURCE_FILES[7]),
+    readOptional(GATE_RULE_SOURCE_FILES[8]),
   )
   for (const id of extracted) known.add(id)
   return known
@@ -714,8 +702,6 @@ export const evaluateDocTruthPlugin = (input: GraphEntropyInput): ReadonlyArray<
   checkSkillTierTables(repoRoot, hostIo, findings)
   checkMermaidDependencyDrift(repoRoot, hostIo, depsByPkg, pkgByRelDir, findings)
   checkDocBannedOrPhantomTech(repoRoot, hostIo, findings)
-
-  evaluateGateRuleDigestCheck(repoRoot, hostIo, findings)
 
   return findings
 }

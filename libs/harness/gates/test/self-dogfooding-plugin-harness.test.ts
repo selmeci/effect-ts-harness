@@ -11,7 +11,6 @@ import {
   AstSourceFilePath,
   EnclosingSymbolName,
   GateRuleVersion,
-  HARNESS_GATE_RULE_VERSION,
   makeSelfDogfoodingReport,
   MaxPluginFileLines,
   PluginFileLineCount,
@@ -1074,8 +1073,6 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
     "REQ-1.3: AstGateCache.decide reports effect-fn-dummy-void, discriminant-branching, and non-exhaustive-union-match without isHarnessInternal exemption",
     () =>
       Effect.gen(function* () {
-        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v12")
-
         const testId = "AstGateCache.decide::REQ-1.3"
         const { result: report, spans } = yield* runWithTestTracer(
           testId,

@@ -1,14 +1,11 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 import { buildHarnessGraph } from "@harness/graph"
-import {
-  evaluateDocTruthPlugin,
-  GATE_RULE_SOURCE_FILES,
-} from "../src/plugins/gc/gc-doc-truth.plugin.js"
+import { evaluateDocTruthPlugin } from "../src/plugins/gc/gc-doc-truth.plugin.js"
 import { evaluatePackageAndMigrationPlugin } from "../src/plugins/gc/gc-package-and-migration.plugin.js"
 import { checkChainedEqualityTernaries } from "../src/plugins/gc/gc-topology-entropy.plugin.js"
 import { testHostIo } from "./helpers/test-host-io.js"
@@ -22,31 +19,6 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
       hostIo: testHostIo,
     })
     expect(findings).toEqual([])
-  })
-
-  it("[Ears-P1.4] emits stale-gate-rule-version when any of the 5 gate rule files changes without updating EXPECTED_GATE_RULE_VERSION_DIGEST", () => {
-    const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..")
-    const tempDir = mkdtempSync(join(tmpdir(), "harness-doc-truth-digest-"))
-    try {
-      for (const rel of GATE_RULE_SOURCE_FILES) {
-        const dest = join(tempDir, rel)
-        mkdirSync(dirname(dest), { recursive: true })
-        const content = readFileSync(join(repoRoot, rel), "utf8")
-        const updated =
-          rel === "tools/oxlint/syntax-bans.js"
-            ? `${content}\n// synthetic visitor edit\n`
-            : content
-        writeFileSync(dest, updated)
-      }
-      const findings = evaluateDocTruthPlugin({
-        graph: buildHarnessGraph({}),
-        workspaceRoot: tempDir,
-        hostIo: testHostIo,
-      })
-      expect(findings.some((f) => f.kind === "stale-gate-rule-version")).toBe(true)
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true })
-    }
   })
 
   it("[Ears-P1.4] emits hook-timeout-parity when Stop is missing or lacks a positive timeout in antigravity or claude-code hooks.json", () => {

@@ -25,19 +25,21 @@ import {
   DecisionCachePayloadJson,
   DecisionCacheStatsSnapshot,
   DecisionCacheTtlMillis,
+  DEFAULT_IN_MEMORY_GATE_RULE_VERSION,
   DisjointOwnershipViolationError,
   EarsRequirementKey,
   EnclosingSymbolName,
   ErrorReasonMessage,
   EvaluatorId,
+  GATE_RULE_SOURCE_FILES,
   GateRuleId,
+  GateRuleVersion,
   GateViolationMessage,
   GitCommitSha,
   GitDiffErrorReason,
   GitDiffExecutionError,
   HARNESS_AST_GATE_CACHE_FILENAME,
   HARNESS_DECISION_CACHE_FILENAME,
-  HARNESS_GATE_RULE_VERSION,
   HarnessSubprocessError,
   HarnessTierTopologyInput,
   HarnessTierTopologyReport,
@@ -52,6 +54,9 @@ import {
   PackageManifestName,
   PackageManifestPath,
   PackageUnitDraft,
+  PersistedAstCacheEntry,
+  PersistedAstCacheKey,
+  PersistedAstCacheStore,
   PlanSha256,
   PluginId,
   REVIEW_DEPTH_LEVELS,
@@ -92,6 +97,7 @@ import {
   WorkspaceFsOperation,
   compareCodeUnits,
   computeContentSha256,
+  computeGateRuleVersionFromSources,
   getReviewDepthRank,
   inferAstGatePackageTagFromPath,
   isPureInterruptCause,
@@ -106,6 +112,7 @@ import {
   resolveDefaultAstGateCachePath,
   resolveDefaultDecisionCachePath,
   sanitizeWorktreeIdSegment,
+  selectActivePersistedAstCacheEntries,
   toErrorReasonMessage,
   validateSubprocessInput,
   wavesOf,
@@ -458,7 +465,19 @@ describe("@harness/contract schemas", () => {
   })
 
   it("computes SHA-256 identically to node:crypto across empty, ASCII, multi-block, and multi-byte UTF-8 inputs", () => {
-    expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v12")
+    expect(DEFAULT_IN_MEMORY_GATE_RULE_VERSION).toBe("ast-gates-in-memory")
+    expect(GATE_RULE_SOURCE_FILES).toHaveLength(9)
+    expect(GATE_RULE_SOURCE_FILES).toContain("tools/oxlint/syntax-bans.js")
+    expect(GATE_RULE_SOURCE_FILES).toContain("libs/harness/gates/src/plugins/ast-gate-visitors.ts")
+    const v1 = computeGateRuleVersionFromSources(["a", "b"])
+    const v2 = computeGateRuleVersionFromSources(["a", "b"])
+    const vChanged = computeGateRuleVersionFromSources(["a", "c"])
+    const vReordered = computeGateRuleVersionFromSources(["b", "a"])
+    expect(computeGateRuleVersionFromSources([])).toBe(DEFAULT_IN_MEMORY_GATE_RULE_VERSION)
+    expect(v1).toMatch(/^ast-gates-[0-9a-f]{64}$/)
+    expect(v1).toBe(v2)
+    expect(v1).not.toBe(vChanged)
+    expect(v1).not.toBe(vReordered)
     expect(compareCodeUnits("a", "b")).toBe(-1)
     expect(compareCodeUnits("b", "a")).toBe(1)
     expect(compareCodeUnits("a", "a")).toBe(0)
@@ -485,6 +504,53 @@ describe("@harness/contract schemas", () => {
       const expected = createHash("sha256").update(sample, "utf8").digest("hex")
       expect(computeContentSha256(sample)).toBe(expected)
     }
+  })
+
+  it("selects only active persisted AST cache entries matching store and entry ruleVersion", () => {
+    const activeRuleVersion = GateRuleVersion.make("ast-gates-active")
+    const staleRuleVersion = GateRuleVersion.make("ast-gates-stale")
+    const activeKey = PersistedAstCacheKey.make("libs/a.ts\0domain\0ast-gates-active\0default")
+    const staleEntryKey = PersistedAstCacheKey.make("libs/b.ts\0domain\0ast-gates-stale\0default")
+    const shaA = ContentSha256.make("a".repeat(64))
+    const shaB = ContentSha256.make("b".repeat(64))
+
+    const activeEntry: PersistedAstCacheEntry = {
+      contentSha256: shaA,
+      ruleVersion: activeRuleVersion,
+      violations: [],
+    }
+    const staleEntry: PersistedAstCacheEntry = {
+      contentSha256: shaB,
+      ruleVersion: staleRuleVersion,
+      violations: [],
+    }
+
+    const matchingStore = Schema.decodeSync(PersistedAstCacheStore)({
+      version: activeRuleVersion,
+      entries: {
+        [activeKey]: activeEntry,
+        [staleEntryKey]: staleEntry,
+      },
+    })
+    const selectedFromMatching = selectActivePersistedAstCacheEntries(
+      matchingStore,
+      activeRuleVersion,
+    )
+    expect(selectedFromMatching.size).toBe(1)
+    expect(selectedFromMatching.get(activeKey)).toEqual(activeEntry)
+    expect(selectedFromMatching.has(staleEntryKey)).toBe(false)
+
+    const mismatchedStore = Schema.decodeSync(PersistedAstCacheStore)({
+      version: staleRuleVersion,
+      entries: {
+        [activeKey]: activeEntry,
+      },
+    })
+    const selectedFromMismatched = selectActivePersistedAstCacheEntries(
+      mismatchedStore,
+      activeRuleVersion,
+    )
+    expect(selectedFromMismatched.size).toBe(0)
   })
 
   it("enforces non-negative SubprocessExitCode, optional exitCode, non-empty SelfDogfoodingViolationError, AstGateDecisionReport, and DaemonServerErrorKind", () => {

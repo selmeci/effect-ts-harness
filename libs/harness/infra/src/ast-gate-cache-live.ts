@@ -1,3 +1,5 @@
+import { dirname, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import { NodeServices } from "@effect/platform-node"
 import {
   Duration,
@@ -19,13 +21,19 @@ import {
   type AstGateFileEvaluator,
   AstGateViolationContract,
   computeContentSha256,
+  computeGateRuleVersionFromSources,
   type ContentSha256,
   ErrorReasonMessage,
   type EvaluatorId,
-  HARNESS_GATE_RULE_VERSION,
+  GATE_RULE_SOURCE_FILES,
+  GateRuleVersion,
   inferAstGatePackageTagFromPath,
   makeAstGateEvaluationReport,
   NonNegativeCount,
+  PersistedAstCacheEntry,
+  PersistedAstCacheKey,
+  PersistedAstCacheStore,
+  selectActivePersistedAstCacheEntries,
   toErrorReasonMessage,
   WorkspaceFilePath,
   WorkspaceFsError,
@@ -36,25 +44,15 @@ import { toReadError, toWriteError } from "./cache-helpers.js"
 
 const AST_GATE_SCOPED_CACHE_CAPACITY = 2048
 
-const PersistedAstCacheEntrySchema = Schema.Struct({
-  contentSha256: Schema.String,
-  ruleVersion: Schema.String,
-  violations: Schema.Array(AstGateViolationContract),
-})
-type PersistedAstCacheEntry = typeof PersistedAstCacheEntrySchema.Type
-
-const PersistedAstCacheStoreSchema = Schema.Struct({
-  version: Schema.String,
-  entries: Schema.Record(Schema.String, PersistedAstCacheEntrySchema),
-})
-
-const decodePersistedStore = Schema.decodeOption(
-  Schema.fromJsonString(PersistedAstCacheStoreSchema),
+const DEFAULT_GATE_RULE_SOURCE_ROOT = WorkspaceFilePath.make(
+  resolve(dirname(fileURLToPath(import.meta.url)), "../../../.."),
 )
+
+const decodePersistedStore = Schema.decodeOption(Schema.fromJsonString(PersistedAstCacheStore))
 
 interface AstGateCacheState {
   readonly loaded: boolean
-  readonly entries: ReadonlyMap<string, PersistedAstCacheEntry>
+  readonly entries: ReadonlyMap<PersistedAstCacheKey, PersistedAstCacheEntry>
 }
 
 interface PendingAstEvaluation {
@@ -69,7 +67,12 @@ interface PendingAstEvaluation {
  *
  * When `options.cacheFilePath` is omitted, the cache operates in-memory only;
  * `HarnessInfraLive` / `makeHarnessInfraLayer` wires it to
- * `.harness/cache/ast-gates-v1.json` under the repository root.
+ * `.harness/cache/ast-gate-cache-v1.json` under the repository root.
+ *
+ * The active `ruleVersion` is derived automatically by SHA-256 hashing
+ * `GATE_RULE_SOURCE_FILES` (unless `options.ruleVersion` is explicitly provided),
+ * so edits to any AST gate rule file invalidate stale cache entries without manual
+ * version bumps.
  *
  * Architectural rationale ("why"): `ScopedCache` (capacity 2048) runs outside
  * `SynchronizedRef` so concurrent `evaluateBatch` callers and batch misses share
@@ -78,15 +81,39 @@ interface PendingAstEvaluation {
  */
 const makeAstGateCacheLayer = (options?: {
   readonly cacheFilePath?: WorkspaceFilePath
+  readonly ruleVersion?: GateRuleVersion
+  readonly ruleSourceRoot?: WorkspaceFilePath
 }): Layer.Layer<AstGateCachePort, never, FileSystem.FileSystem | Path.Path> =>
   Layer.effect(
     AstGateCachePort,
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem
       const path = yield* Path.Path
+      const activeRuleVersion: GateRuleVersion =
+        options?.ruleVersion !== undefined
+          ? options.ruleVersion
+          : yield* Effect.forEach(
+              GATE_RULE_SOURCE_FILES,
+              (relPath) =>
+                fs.readFileString(
+                  path.join(options?.ruleSourceRoot ?? DEFAULT_GATE_RULE_SOURCE_ROOT, relPath),
+                ),
+              { concurrency: "unbounded" },
+            ).pipe(
+              Effect.map(computeGateRuleVersionFromSources),
+              Effect.catchTag("PlatformError", (err) =>
+                Effect.logWarning(
+                  `Failed to hash GATE_RULE_SOURCE_FILES (${toErrorReasonMessage(err)}); falling back to uncached AST gate evaluation`,
+                ).pipe(
+                  Effect.as(
+                    GateRuleVersion.make(`ast-gates-uncached-${globalThis.crypto.randomUUID()}`),
+                  ),
+                ),
+              ),
+            )
       const stateRef = yield* SynchronizedRef.make<AstGateCacheState>({
         loaded: options?.cacheFilePath === undefined,
-        entries: new Map<string, PersistedAstCacheEntry>(),
+        entries: new Map<PersistedAstCacheKey, PersistedAstCacheEntry>(),
       })
       const pendingEvalRef = yield* Ref.make<ReadonlyMap<string, PendingAstEvaluation>>(new Map())
 
@@ -120,27 +147,23 @@ const makeAstGateCacheLayer = (options?: {
                   ).pipe(
                     Effect.as({
                       loaded: true,
-                      entries: new Map<string, PersistedAstCacheEntry>(),
+                      entries: new Map<PersistedAstCacheKey, PersistedAstCacheEntry>(),
                     }),
                   ),
                 )
-                .with({ _tag: "Some" }, ({ value: store }) => {
-                  const nextEntries = new Map<string, PersistedAstCacheEntry>()
-                  for (const [key, entry] of Object.entries(store.entries)) {
-                    nextEntries.set(key, entry)
-                  }
-                  return Effect.succeed({
+                .with({ _tag: "Some" }, ({ value: store }) =>
+                  Effect.succeed({
                     loaded: true,
-                    entries: nextEntries,
-                  })
-                })
+                    entries: selectActivePersistedAstCacheEntries(store, activeRuleVersion),
+                  }),
+                )
                 .exhaustive(),
             )
             .exhaustive()
         })
 
       const persistEntries = (
-        entries: ReadonlyMap<string, PersistedAstCacheEntry>,
+        entries: ReadonlyMap<PersistedAstCacheKey, PersistedAstCacheEntry>,
       ): Effect.Effect<void, WorkspaceFsError> =>
         Effect.gen(function* () {
           if (options?.cacheFilePath === undefined) {
@@ -152,7 +175,7 @@ const makeAstGateCacheLayer = (options?: {
             serializedEntries[key] = entry
           }
           const json = JSON.stringify({
-            version: HARNESS_GATE_RULE_VERSION,
+            version: activeRuleVersion,
             entries: serializedEntries,
           })
           const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${globalThis.crypto.randomUUID()}.tmp`
@@ -198,7 +221,7 @@ const makeAstGateCacheLayer = (options?: {
             })
             return {
               contentSha256: pending.contentSha256,
-              ruleVersion: HARNESS_GATE_RULE_VERSION,
+              ruleVersion: activeRuleVersion,
               violations: contractViolations,
             }
           }),
@@ -214,7 +237,7 @@ const makeAstGateCacheLayer = (options?: {
         )
 
         interface PreparedMiss {
-          readonly cacheKey: string
+          readonly cacheKey: PersistedAstCacheKey
           readonly scopedKey: string
           readonly file: AstGateFileBatchInput
           readonly contentSha256: ContentSha256
@@ -224,9 +247,9 @@ const makeAstGateCacheLayer = (options?: {
           evaluatorId !== undefined && evaluatorId.trim().length > 0
             ? evaluatorId.trim()
             : "default"
-        const hitMap = new Map<string, PersistedAstCacheEntry>()
+        const hitMap = new Map<PersistedAstCacheKey, PersistedAstCacheEntry>()
         const misses: Array<PreparedMiss> = []
-        const orderedKeys: Array<string> = []
+        const orderedKeys: Array<PersistedAstCacheKey> = []
         const seenBatchEntries = new Set<string>()
         let cacheHitCount = 0
 
@@ -238,7 +261,9 @@ const makeAstGateCacheLayer = (options?: {
           }
           seenBatchEntries.add(dedupeKey)
 
-          const cacheKey = `${dedupeKey}\0${HARNESS_GATE_RULE_VERSION}\0${resolvedEvaluatorId}`
+          const cacheKey = PersistedAstCacheKey.make(
+            `${dedupeKey}\0${activeRuleVersion}\0${resolvedEvaluatorId}`,
+          )
           orderedKeys.push(cacheKey)
           const contentSha256 = computeContentSha256(file.content)
           const existing = snapshot.entries.get(cacheKey)
@@ -246,7 +271,7 @@ const makeAstGateCacheLayer = (options?: {
           if (
             existing !== undefined &&
             existing.contentSha256 === contentSha256 &&
-            existing.ruleVersion === HARNESS_GATE_RULE_VERSION
+            existing.ruleVersion === activeRuleVersion
           ) {
             cacheHitCount += 1
             hitMap.set(cacheKey, existing)
@@ -256,7 +281,7 @@ const makeAstGateCacheLayer = (options?: {
           }
         }
 
-        const computedMap = new Map<string, PersistedAstCacheEntry>()
+        const computedMap = new Map<PersistedAstCacheKey, PersistedAstCacheEntry>()
         if (misses.length > 0) {
           const computedPairs = yield* Effect.forEach(
             misses,
@@ -276,7 +301,10 @@ const makeAstGateCacheLayer = (options?: {
                 () =>
                   ScopedCache.get(scopedCache, miss.scopedKey).pipe(
                     Effect.mapError((err) => {
-                      if (err instanceof WorkspaceFsError || err instanceof AstGateEvaluationError) {
+                      if (
+                        err instanceof WorkspaceFsError ||
+                        err instanceof AstGateEvaluationError
+                      ) {
                         return err
                       }
                       return toWriteError(miss.file.filePath, err)
@@ -360,7 +388,7 @@ const makeAstGateCacheLayer = (options?: {
             }
             return {
               loaded: true,
-              entries: new Map<string, PersistedAstCacheEntry>(),
+              entries: new Map<PersistedAstCacheKey, PersistedAstCacheEntry>(),
             }
           }),
       )

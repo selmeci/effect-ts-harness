@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { NodeServices } from "@effect/platform-node"
 import { describe, expect, it } from "@effect/vitest"
 import { Cause, Deferred, Effect, Fiber, Layer, Option, Schema } from "effect"
@@ -22,6 +22,7 @@ import {
   ActiveMutantId,
   AstSourceContent,
   AstSourceFilePath,
+  computeGateRuleVersionFromSources,
   computeWorkspaceFileLineCount,
   DaemonSocketPath,
   DecisionCacheKey,
@@ -29,9 +30,9 @@ import {
   DecisionCacheTtlMillis,
   EnclosingSymbolName,
   EvaluatorId,
+  GATE_RULE_SOURCE_FILES,
   GateRuleId,
   GateViolationMessage,
-  HARNESS_GATE_RULE_VERSION,
   SourceLineNumber,
   SubprocessArg,
   SubprocessCommand,
@@ -200,6 +201,114 @@ describe("@harness/infra live adapters", () => {
 
           expect(persistedReport.verdict).toBe("clean")
           expect(persistedReport.cacheHitCount).toBe(1)
+        }),
+      ),
+  )
+
+  it.effect(
+    "AstGateCacheLive automatically invalidates and evicts stale entries when GATE_RULE_SOURCE_FILES change and fails safe when rule files are missing",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const ruleSourceRoot = WorkspaceFilePath.make(join(dir, "rule-root"))
+          const cacheFilePath = WorkspaceFilePath.make(join(dir, "cache", "ast-gate-cache.json"))
+          const initialSources = GATE_RULE_SOURCE_FILES.map((rel) => {
+            const abs = join(ruleSourceRoot, rel)
+            mkdirSync(dirname(abs), { recursive: true })
+            const content = `// initial ${rel}\n`
+            writeFileSync(abs, content, "utf8")
+            return content
+          })
+          const expectedV1 = computeGateRuleVersionFromSources(initialSources)
+          const batch = [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/domain/src/clean.ts"),
+              content: AstSourceContent.make("export const answer = 42\n"),
+            },
+          ]
+
+          const layer1 = makeAstGateCacheLayer({ cacheFilePath, ruleSourceRoot }).pipe(
+            Layer.provide(NodeServices.layer),
+          )
+          const r1 = yield* Effect.gen(function* () {
+            const cache = yield* AstGateCachePort
+            return yield* cache.evaluateBatch(batch, () => [])
+          }).pipe(Effect.provide(layer1))
+          expect(r1.cacheHitCount).toBe(0)
+
+          const layer2 = makeAstGateCacheLayer({ cacheFilePath, ruleSourceRoot }).pipe(
+            Layer.provide(NodeServices.layer),
+          )
+          const r2 = yield* Effect.gen(function* () {
+            const cache = yield* AstGateCachePort
+            return yield* cache.evaluateBatch(batch, () => [])
+          }).pipe(Effect.provide(layer2))
+          expect(r2.cacheHitCount).toBe(1)
+
+          const parsedV1 = JSON.parse(readFileSync(cacheFilePath, "utf8")) as {
+            version: string
+            entries: Record<string, unknown>
+          }
+          expect(parsedV1.version).toBe(expectedV1)
+          expect(Object.keys(parsedV1.entries)).toHaveLength(1)
+
+          // Modify one rule file -> cache invalidates automatically and evicts prior version entries
+          const editedSources = initialSources.map((src, idx) =>
+            GATE_RULE_SOURCE_FILES[idx] === "tools/oxlint/syntax-bans.js"
+              ? `${src}// tightened rule\n`
+              : src,
+          )
+          writeFileSync(
+            join(ruleSourceRoot, "tools/oxlint/syntax-bans.js"),
+            editedSources[GATE_RULE_SOURCE_FILES.indexOf("tools/oxlint/syntax-bans.js")]!,
+            "utf8",
+          )
+          const expectedV2 = computeGateRuleVersionFromSources(editedSources)
+          expect(expectedV2).not.toBe(expectedV1)
+
+          const layer3 = makeAstGateCacheLayer({ cacheFilePath, ruleSourceRoot }).pipe(
+            Layer.provide(NodeServices.layer),
+          )
+          const r3 = yield* Effect.gen(function* () {
+            const cache = yield* AstGateCachePort
+            return yield* cache.evaluateBatch(batch, () => [])
+          }).pipe(Effect.provide(layer3))
+          expect(r3.cacheHitCount).toBe(0)
+
+          const parsedV2 = JSON.parse(readFileSync(cacheFilePath, "utf8")) as {
+            version: string
+            entries: Record<string, unknown>
+          }
+          expect(parsedV2.version).toBe(expectedV2)
+          expect(Object.keys(parsedV2.entries)).toHaveLength(1)
+
+          // Missing rule source files -> falls back to uncached per-instance version (never false-hits)
+          const emptyRuleRoot = WorkspaceFilePath.make(join(dir, "missing-rule-root"))
+          mkdirSync(emptyRuleRoot, { recursive: true })
+          const uncachedLayer1 = makeAstGateCacheLayer({
+            cacheFilePath,
+            ruleSourceRoot: emptyRuleRoot,
+          }).pipe(Layer.provide(NodeServices.layer))
+          const ur1 = yield* Effect.gen(function* () {
+            const cache = yield* AstGateCachePort
+            return yield* cache.evaluateBatch(batch, () => [])
+          }).pipe(Effect.provide(uncachedLayer1))
+          expect(ur1.cacheHitCount).toBe(0)
+
+          const uncachedLayer2 = makeAstGateCacheLayer({
+            cacheFilePath,
+            ruleSourceRoot: emptyRuleRoot,
+          }).pipe(Layer.provide(NodeServices.layer))
+          const ur2 = yield* Effect.gen(function* () {
+            const cache = yield* AstGateCachePort
+            return yield* cache.evaluateBatch(batch, () => [])
+          }).pipe(Effect.provide(uncachedLayer2))
+          expect(ur2.cacheHitCount).toBe(0)
+
+          const parsedUncached = JSON.parse(readFileSync(cacheFilePath, "utf8")) as {
+            version: string
+          }
+          expect(parsedUncached.version.startsWith("ast-gates-uncached-")).toBe(true)
         }),
       ),
   )
@@ -594,7 +703,7 @@ describe("@harness/infra live adapters", () => {
             >
           }
           for (const entry of Object.values(parsed.entries)) {
-            entry.ruleVersion = `${HARNESS_GATE_RULE_VERSION}-stale`
+            entry.ruleVersion = `${entry.ruleVersion}-stale`
           }
           writeFileSync(staleAstPath, JSON.stringify(parsed), "utf8")
 

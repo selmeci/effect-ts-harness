@@ -2,7 +2,7 @@ import { dirname, join, relative } from "node:path"
 import { pathToFileURL } from "node:url"
 import { Cause, Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
-import { AstSourceContent, AstSourceFilePath, HARNESS_GATE_RULE_VERSION } from "@harness/contract"
+import { AstSourceContent, AstSourceFilePath } from "@harness/contract"
 import {
   EventSchemaEvolutionInput,
   type EventVersionSnapshotEntry as EventVersionSnapshotEntryType,
@@ -30,14 +30,18 @@ const failResult = (stderr: string, exitCode = 1): CliResult => ({ exitCode, std
 const decodeJsonResult = (
   raw: string,
   errorLabel: string,
-): { readonly ok: true; readonly value: unknown } | { readonly ok: false; readonly result: CliResult } =>
+):
+  | { readonly ok: true; readonly value: unknown }
+  | { readonly ok: false; readonly result: CliResult } =>
   match(decodeUnknownJson(raw))
-    .with({ _tag: "None" }, () => ({ ok: false as const, result: failResult(`ERROR: ${errorLabel}\n`) }))
+    .with({ _tag: "None" }, () => ({
+      ok: false as const,
+      result: failResult(`ERROR: ${errorLabel}\n`),
+    }))
     .with({ _tag: "Some" }, ({ value }) => ({ ok: true as const, value }))
     .exhaustive()
 
-const resolveRepoRoot = (options?: CliEnv): string =>
-  options?.repoRoot ?? findWorkspaceRoot()
+const resolveRepoRoot = (options?: CliEnv): string => options?.repoRoot ?? findWorkspaceRoot()
 
 interface OpenApiModuleShape {
   readonly buildOpenApiSpec: () => unknown
@@ -51,12 +55,9 @@ interface EventModuleShape {
   readonly registeredUpcasters: ReadonlyArray<EventUpcasterLink>
 }
 
-class RepoCheckCliError extends Schema.TaggedError<RepoCheckCliError>()(
-  "RepoCheckCliError",
-  {
-    message: Schema.String,
-  },
-) {}
+class RepoCheckCliError extends Schema.TaggedError<RepoCheckCliError>()("RepoCheckCliError", {
+  message: Schema.String,
+}) {}
 
 const isSnapshotsEffect = (
   value: unknown,
@@ -81,7 +82,10 @@ const importModuleRecord = Effect.fn("HarnessCli.importModuleRecord")(function* 
   repoRoot: string,
   moduleFlag: string | undefined,
   defaultSpecifier: string,
-): Effect.fn.Return<{ readonly specifier: string; readonly mod: Record<string, unknown> }, RepoCheckCliError> {
+): Effect.fn.Return<
+  { readonly specifier: string; readonly mod: Record<string, unknown> },
+  RepoCheckCliError
+> {
   const specifier = yield* resolveModuleSpecifier(repoRoot, moduleFlag, defaultSpecifier)
   const mod = yield* Effect.tryPromise({
     try: () => import(specifier) as Promise<Record<string, unknown>>,
@@ -97,7 +101,11 @@ const loadOpenApiModule = Effect.fn("HarnessCli.loadOpenApiModule")(function* (
   repoRoot: string,
   moduleFlag: string | undefined,
 ): Effect.fn.Return<OpenApiModuleShape, RepoCheckCliError> {
-  const { specifier, mod } = yield* importModuleRecord(repoRoot, moduleFlag, "@harness/sample-contract")
+  const { specifier, mod } = yield* importModuleRecord(
+    repoRoot,
+    moduleFlag,
+    "@harness/sample-contract",
+  )
   const buildOpenApiSpec = mod["buildOpenApiSpec"]
   if (typeof buildOpenApiSpec !== "function") {
     return yield* new RepoCheckCliError({
@@ -113,10 +121,17 @@ const loadEventModule = Effect.fn("HarnessCli.loadEventModule")(function* (
   repoRoot: string,
   moduleFlag: string | undefined,
 ): Effect.fn.Return<EventModuleShape, RepoCheckCliError> {
-  const { specifier, mod } = yield* importModuleRecord(repoRoot, moduleFlag, "@harness/es-core/fixtures/cart")
+  const { specifier, mod } = yield* importModuleRecord(
+    repoRoot,
+    moduleFlag,
+    "@harness/es-core/fixtures/cart",
+  )
   const computeSnapshots = mod["computeEventSnapshots"] ?? mod["computeCartEventSnapshots"]
   const registeredUpcasters = mod["registeredUpcasters"] ?? mod["cartRegisteredUpcasters"]
-  if ((!isSnapshotsEffect(computeSnapshots) && typeof computeSnapshots !== "function") || !Array.isArray(registeredUpcasters)) {
+  if (
+    (!isSnapshotsEffect(computeSnapshots) && typeof computeSnapshots !== "function") ||
+    !Array.isArray(registeredUpcasters)
+  ) {
     return yield* new RepoCheckCliError({
       message: `Module '${specifier}' must export computeEventSnapshots/computeCartEventSnapshots and registeredUpcasters/cartRegisteredUpcasters`,
     })
@@ -124,12 +139,22 @@ const loadEventModule = Effect.fn("HarnessCli.loadEventModule")(function* (
   const snapshotsEffect = isSnapshotsEffect(computeSnapshots)
     ? computeSnapshots
     : Effect.tryPromise({
-        try: () => Promise.resolve((computeSnapshots as () => ReadonlyArray<EventVersionSnapshotEntryType>)()),
-        catch: (error) => new RepoCheckCliError({ message: error instanceof Error ? error.message : String(error) }),
+        try: () =>
+          Promise.resolve(
+            (computeSnapshots as () => ReadonlyArray<EventVersionSnapshotEntryType>)(),
+          ),
+        catch: (error) =>
+          new RepoCheckCliError({
+            message: error instanceof Error ? error.message : String(error),
+          }),
       })
   return {
     computeSnapshots: snapshotsEffect.pipe(
-      Effect.mapError((error) => (error instanceof RepoCheckCliError ? error : new RepoCheckCliError({ message: String(error) }))),
+      Effect.mapError((error) =>
+        error instanceof RepoCheckCliError
+          ? error
+          : new RepoCheckCliError({ message: String(error) }),
+      ),
     ),
     registeredUpcasters: registeredUpcasters as ReadonlyArray<EventUpcasterLink>,
   }
@@ -286,7 +311,10 @@ export const runCheckMigrations = Effect.fn("HarnessCli.checkMigrations")(functi
     }
     srcDir = srcRes.resolvedPath
   }
-  const srcFiles: Array<{ readonly filePath: AstSourceFilePath; readonly content: AstSourceContent }> = []
+  const srcFiles: Array<{
+    readonly filePath: AstSourceFilePath
+    readonly content: AstSourceContent
+  }> = []
   if (srcDir !== undefined && nodeSyncHostIo.isDirectorySync(srcDir)) {
     const tsFiles = collectPackageFiles(
       srcDir,
@@ -309,7 +337,9 @@ export const runCheckMigrations = Effect.fn("HarnessCli.checkMigrations")(functi
         return failResult(readContent.error)
       }
       srcFiles.push({
-        filePath: AstSourceFilePath.make(relative(repoRoot, safeRes.resolvedPath).replace(/\\/g, "/")),
+        filePath: AstSourceFilePath.make(
+          relative(repoRoot, safeRes.resolvedPath).replace(/\\/g, "/"),
+        ),
         content: AstSourceContent.make(readContent.content),
       })
     }
@@ -385,7 +415,6 @@ export const runCheckMigrations = Effect.fn("HarnessCli.checkMigrations")(functi
   if (srcFiles.length > 0) {
     const astReport = yield* AstGateCache.decide({
       files: srcFiles,
-      ruleVersion: HARNESS_GATE_RULE_VERSION,
     })
     const migrationViolations = astReport.violations.filter(
       (v) =>
@@ -461,10 +490,18 @@ export const runCheckEventSchemas = Effect.fn("HarnessCli.checkEventSchemas")(fu
       const serialized = `${JSON.stringify(validatedSnapshots, null, 2)}\n`
       nodeSyncHostIo.mkdirRecursiveSync(dirname(snapshotFilePath))
       nodeSyncHostIo.writeTextSync(snapshotFilePath, serialized)
-      return { exitCode: 0, stdout: `[check-event-schemas] Updated ${snapshotFilePath} with ${validatedSnapshots.length} verified append-only event snapshots.\n`, stderr: "" } satisfies CliResult
+      return {
+        exitCode: 0,
+        stdout: `[check-event-schemas] Updated ${snapshotFilePath} with ${validatedSnapshots.length} verified append-only event snapshots.\n`,
+        stderr: "",
+      } satisfies CliResult
     }
     const valid = yield* verifyCommittedSnapshotParity(input)
-    return { exitCode: 0, stdout: `[check-event-schemas] Event schema evolution verified: ${valid.checkedEventCount} snapshots valid.\n`, stderr: "" } satisfies CliResult
+    return {
+      exitCode: 0,
+      stdout: `[check-event-schemas] Event schema evolution verified: ${valid.checkedEventCount} snapshots valid.\n`,
+      stderr: "",
+    } satisfies CliResult
   })
 
   const exit = yield* Effect.exit(inner)

@@ -94,7 +94,6 @@ export {
   type LoopThrashingStatus,
 } from "./friction-log.js"
 export {
-  EXPECTED_GATE_RULE_VERSION_DIGEST,
   GC_ENFORCEMENT_RULES,
   GcFinding,
   GcFindingKind,
@@ -111,7 +110,6 @@ export {
   collectWorkspaceAllFiles,
   collectWorkspaceSqlFiles,
   collectWorkspaceTsFiles,
-  computeGateRuleVersionDigest,
   decideGraphEntropy,
   evaluateBranchingSqliteViolations,
   evaluateDocTruthPlugin,
@@ -469,7 +467,7 @@ export {
   readTextOrReport,
   readdirOrReport,
 } from "./plugins/gc/gc-helpers.js"
-export { GATE_RULE_SOURCE_FILES, evaluateGateRuleDigestCheck } from "./plugins/gc/gc-rule-digest.js"
+export { GATE_RULE_SOURCE_FILES } from "./plugins/gc/gc-rule-digest.js"
 export {
   MUTATION_PATTERNS,
   isAssertionFailure,

@@ -3,9 +3,11 @@ import {
   AstGatePackageTag,
   AstSourceContent,
   AstSourceFilePath,
+  ContentSha256,
   EnclosingSymbolName,
   GateCategory,
   GateRuleId,
+  GateRuleVersion,
   GateViolationMessage,
   makeVerdictReport,
   makeVerdictReportSchema,
@@ -108,9 +110,7 @@ export const DecisionCacheKey = Schema.NonEmptyString.pipe(
 )
 export type DecisionCacheKey = typeof DecisionCacheKey.Type
 
-export const DecisionCachePayloadJson = Schema.String.pipe(
-  Schema.brand("DecisionCachePayloadJson"),
-)
+export const DecisionCachePayloadJson = Schema.String.pipe(Schema.brand("DecisionCachePayloadJson"))
 export type DecisionCachePayloadJson = typeof DecisionCachePayloadJson.Type
 
 export const DecisionCacheTtlMillis = Schema.Int.pipe(
@@ -218,3 +218,35 @@ export class DaemonServerError extends Schema.TaggedError<DaemonServerError>()(
     reason: ErrorReasonMessage,
   },
 ) {}
+
+export const PersistedAstCacheKey = Schema.NonEmptyString.pipe(Schema.brand("PersistedAstCacheKey"))
+export type PersistedAstCacheKey = typeof PersistedAstCacheKey.Type
+
+export const PersistedAstCacheEntry = Schema.Struct({
+  contentSha256: ContentSha256,
+  ruleVersion: GateRuleVersion,
+  violations: Schema.Array(AstGateViolationContract),
+})
+export type PersistedAstCacheEntry = typeof PersistedAstCacheEntry.Type
+
+export const PersistedAstCacheStore = Schema.Struct({
+  version: GateRuleVersion,
+  entries: Schema.Record(PersistedAstCacheKey, PersistedAstCacheEntry),
+})
+export type PersistedAstCacheStore = typeof PersistedAstCacheStore.Type
+
+export const selectActivePersistedAstCacheEntries = (
+  store: PersistedAstCacheStore,
+  activeRuleVersion: GateRuleVersion,
+): ReadonlyMap<PersistedAstCacheKey, PersistedAstCacheEntry> => {
+  const activeEntries = new Map<PersistedAstCacheKey, PersistedAstCacheEntry>()
+  if (store.version !== activeRuleVersion) {
+    return activeEntries
+  }
+  for (const [key, entry] of Object.entries(store.entries)) {
+    if (entry.ruleVersion === activeRuleVersion) {
+      activeEntries.set(PersistedAstCacheKey.make(key), entry)
+    }
+  }
+  return activeEntries
+}

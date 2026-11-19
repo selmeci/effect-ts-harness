@@ -1,22 +1,6 @@
-import { join } from "node:path"
-import { computeContentSha256, HARNESS_GATE_RULE_VERSION } from "@harness/contract"
-import type { SyncHostIo } from "@harness/service/host-io"
-import { type GcFinding, readTextOrReport } from "./gc-helpers.js"
+import { compareCodeUnits, GATE_RULE_SOURCE_FILES } from "@harness/contract"
 
-export const GATE_RULE_SOURCE_FILES = [
-  "libs/harness/gates/src/plugins/ast-gate-visitors.ts",
-  "libs/harness/gates/src/plugins/self-dogfooding-plugin.ts",
-  "libs/harness/gates/src/plugins/harness-tier-topology.ts",
-  "libs/harness/gates/src/plugins/sqlite-migrator-ast.ts",
-  "tools/oxlint/syntax-bans.js",
-  "libs/harness/gates/src/plugins/ast-gate-law-helpers.ts",
-  "libs/harness/gates/src/plugins/ast-effect-promise-law.ts",
-  "libs/harness/contract/src/ast-and-gate-primitives.ts",
-  "libs/harness/gates/src/plugins/gc/gc-workspace-io.ts",
-] as const
-
-export const EXPECTED_GATE_RULE_VERSION_DIGEST =
-  "0ab675d47b79f91f44c8516ac4d8ead4430bbb1184176fd8386f8136331dc805"
+export { GATE_RULE_SOURCE_FILES }
 
 export const extractGateRuleIdsFromSources = (
   astVisitorsSource: string,
@@ -51,64 +35,5 @@ export const extractGateRuleIdsFromSources = (
       if (m[1] !== undefined) ids.add(m[1])
     }
   }
-  return [...ids].sort((a, b) => a.localeCompare(b))
-}
-
-export const computeGateRuleVersionDigest = (sources: ReadonlyArray<string>): string => {
-  const sortedRuleIds = extractGateRuleIdsFromSources(
-    sources[0] ?? "",
-    sources[1] ?? "",
-    sources[2] ?? "",
-    sources[4] ?? "",
-    sources[7] ?? "",
-  )
-  const sourceHashes = sources.map((s) => computeContentSha256(s)).join(",")
-  return computeContentSha256(
-    `${HARNESS_GATE_RULE_VERSION}:${sortedRuleIds.join(",")}:${sourceHashes}`,
-  )
-}
-
-export const evaluateGateRuleDigestCheck = (
-  repoRoot: string,
-  hostIo: SyncHostIo,
-  findings: Array<GcFinding>,
-): void => {
-  const gateRuleAbsPaths = GATE_RULE_SOURCE_FILES.map((rel) => join(repoRoot, rel))
-  const someExist = gateRuleAbsPaths.some((p) => hostIo.existsSync(p))
-  const allExist = gateRuleAbsPaths.every((p) => hostIo.existsSync(p))
-  if (someExist && !allExist) {
-    const missing = GATE_RULE_SOURCE_FILES.filter((rel) => !hostIo.existsSync(join(repoRoot, rel)))
-    findings.push({
-      kind: "stale-gate-rule-version",
-      nodeId: "HARNESS_GATE_RULE_VERSION",
-      location: "libs/harness/gates/src/plugins/gc/gc-rule-digest.ts",
-      message: `Missing gate rule source file(s) required for digest verification: ${missing.join(", ")}.`,
-      action: `Restore missing gate rule source file(s) (${missing.join(", ")}) or update GATE_RULE_SOURCE_FILES.`,
-    })
-    return
-  }
-  if (!allExist) return
-
-  const gateRuleSources: Array<string> = []
-  let allReadable = true
-  for (const absPath of gateRuleAbsPaths) {
-    const src = readTextOrReport(absPath, hostIo, repoRoot, findings)
-    if (src === undefined) {
-      allReadable = false
-      break
-    }
-    gateRuleSources.push(src)
-  }
-  if (allReadable) {
-    const actualDigest = computeGateRuleVersionDigest(gateRuleSources)
-    if (actualDigest !== EXPECTED_GATE_RULE_VERSION_DIGEST) {
-      findings.push({
-        kind: "stale-gate-rule-version",
-        nodeId: "HARNESS_GATE_RULE_VERSION",
-        location: "libs/harness/gates/src/plugins/gc/gc-rule-digest.ts",
-        message: `Gate rule IDs or gate source files changed without bumping HARNESS_GATE_RULE_VERSION / EXPECTED_GATE_RULE_VERSION_DIGEST (expected ${EXPECTED_GATE_RULE_VERSION_DIGEST}, got ${actualDigest}).`,
-        action: `Bump HARNESS_GATE_RULE_VERSION in @harness/contract and update EXPECTED_GATE_RULE_VERSION_DIGEST to "${actualDigest}".`,
-      })
-    }
-  }
+  return [...ids].sort(compareCodeUnits)
 }

@@ -3,7 +3,7 @@
  * Content-addressable AST cache and category deciders for Effect-TS Engineering Harness.
  *
  * Implements an in-memory and disk-persisted cache keyed by file path, package tag,
- * and SHA-256 content digest under `HARNESS_GATE_RULE_VERSION` (`ast-gates-v12`).
+ * and SHA-256 content digest.
  * Avoids redundant AST parses and visits across repetitive gate runs.
  *
  * Exposes Effect.fn deciders for each gate category:
@@ -28,9 +28,9 @@ import {
   AstSourceFilePath,
   computeContentSha256,
   ContentSha256,
+  DEFAULT_IN_MEMORY_GATE_RULE_VERSION,
   GateCategory,
   GateRuleVersion,
-  HARNESS_GATE_RULE_VERSION,
   inferAstGatePackageTagFromPath,
   makeAstGateDecisionReport,
   type WorkspaceFsError,
@@ -93,7 +93,7 @@ export type AstCacheDurationMs = typeof AstCacheDurationMs.Type
 export const makeAstGateCacheKey = (
   filePath: string,
   packageTag: string,
-  ruleVersion: GateRuleVersion = HARNESS_GATE_RULE_VERSION,
+  ruleVersion: GateRuleVersion = DEFAULT_IN_MEMORY_GATE_RULE_VERSION,
 ): string => `${filePath}\0${packageTag}\0${ruleVersion}`
 
 export const MAX_SOURCE_FILE_CACHE_SIZE = 500
@@ -141,7 +141,7 @@ export const evaluateAstGateFiles = (
   categoryFilter?: GateCategory,
   cacheStore?: Map<string, AstGateCacheEntry>,
 ): AstGateDecisionReport => {
-  const ruleVersion = input.ruleVersion ?? HARNESS_GATE_RULE_VERSION
+  const ruleVersion = input.ruleVersion ?? DEFAULT_IN_MEMORY_GATE_RULE_VERSION
   const gateCache = cacheStore ?? new Map<string, AstGateCacheEntry>()
   const sourceFileCache: AstSourceFileCache = new Map()
 

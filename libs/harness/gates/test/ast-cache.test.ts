@@ -1,6 +1,11 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
-import { AstSourceContent, AstSourceFilePath, GateRuleVersion } from "@harness/contract"
+import {
+  AstSourceContent,
+  AstSourceFilePath,
+  DEFAULT_IN_MEMORY_GATE_RULE_VERSION,
+  GateRuleVersion,
+} from "@harness/contract"
 import { decideAstGateCache, evaluateAstGateFiles, makeAstGateCacheKey } from "../src/ast-cache.js"
 import { analyzeSqliteMigratorFromRecordAst } from "../src/plugins/sqlite-migrator-ast.js"
 
@@ -120,41 +125,39 @@ describe("AstGateCache Drizzle interpolated template specifier ban", () => {
       }),
   )
 
-  it.effect(
-    "keys AST cache by HARNESS_GATE_RULE_VERSION and separates different ruleVersion evaluations",
-    () =>
-      Effect.sync(() => {
-        expect(makeAstGateCacheKey("a.ts", "infra")).toContain("ast-gates-v12")
-        const store = new Map()
-        const r1 = evaluateAstGateFiles(
-          {
-            files: [
-              {
-                filePath: AstSourceFilePath.make("libs/sample/domain/src/x.ts"),
-                content: AstSourceContent.make("export const x = 1\n"),
-              },
-            ],
-            ruleVersion: GateRuleVersion.make("ast-gates-v4"),
-          },
-          undefined,
-          store,
-        )
-        const r2 = evaluateAstGateFiles(
-          {
-            files: [
-              {
-                filePath: AstSourceFilePath.make("libs/sample/domain/src/x.ts"),
-                content: AstSourceContent.make("export const x = 1\n"),
-              },
-            ],
-            ruleVersion: GateRuleVersion.make("ast-gates-v7"),
-          },
-          undefined,
-          store,
-        )
-        expect(r1.parsedFileCount).toBe(1)
-        expect(r2.parsedFileCount).toBe(1)
-        expect(r2.cacheHitCount).toBe(0)
-      }),
+  it.effect("keys AST cache by ruleVersion and separates different ruleVersion evaluations", () =>
+    Effect.sync(() => {
+      expect(makeAstGateCacheKey("a.ts", "infra")).toContain(DEFAULT_IN_MEMORY_GATE_RULE_VERSION)
+      const store = new Map()
+      const r1 = evaluateAstGateFiles(
+        {
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/domain/src/x.ts"),
+              content: AstSourceContent.make("export const x = 1\n"),
+            },
+          ],
+          ruleVersion: GateRuleVersion.make("ast-gates-v4"),
+        },
+        undefined,
+        store,
+      )
+      const r2 = evaluateAstGateFiles(
+        {
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/domain/src/x.ts"),
+              content: AstSourceContent.make("export const x = 1\n"),
+            },
+          ],
+          ruleVersion: GateRuleVersion.make("ast-gates-v7"),
+        },
+        undefined,
+        store,
+      )
+      expect(r1.parsedFileCount).toBe(1)
+      expect(r2.parsedFileCount).toBe(1)
+      expect(r2.cacheHitCount).toBe(0)
+    }),
   )
 })

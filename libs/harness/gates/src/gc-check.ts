@@ -69,9 +69,7 @@ export { evaluateTestAndDeciderPlugin } from "./plugins/gc/gc-test-and-decider.p
 export { evaluateGovernanceDocsPlugin } from "./plugins/gc/gc-governance-docs.plugin.js"
 export { evaluatePackageAndMigrationPlugin } from "./plugins/gc/gc-package-and-migration.plugin.js"
 export {
-  computeGateRuleVersionDigest,
   evaluateDocTruthPlugin,
-  EXPECTED_GATE_RULE_VERSION_DIGEST,
   extractGateRuleIdsFromSources,
 } from "./plugins/gc/gc-doc-truth.plugin.js"
 

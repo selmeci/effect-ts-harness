@@ -453,12 +453,6 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     "Documentation or adapter truth drift — fix unknown @harness/* package names, invalid oxlint rule IDs, missing file paths, duplicate AGENTS.md sections, adapter rules drift, or missing hook timeouts.",
   ),
   makeTriageRule(
-    "stale-gate-rule-version",
-    /stale-gate-rule-version|EXPECTED_GATE_RULE_VERSION_DIGEST/,
-    "mechanical",
-    "Gate rule IDs changed without bumping HARNESS_GATE_RULE_VERSION and EXPECTED_GATE_RULE_VERSION_DIGEST — bump HARNESS_GATE_RULE_VERSION in @harness/contract and update EXPECTED_GATE_RULE_VERSION_DIGEST in gc-doc-truth.plugin.ts.",
-  ),
-  makeTriageRule(
     "silent-gate-fs-fallback",
     /silent-gate-fs-fallback|unreadable-workspace-file/,
     "mechanical",
