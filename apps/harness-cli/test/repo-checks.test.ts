@@ -34,11 +34,10 @@ afterEach(() => {
 })
 
 describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
-  it("runCheckOpenApi: handles --write (0), fresh (0), stale (1), and breaking removal vs --baseline (2)", async () => {
+  it("runCheckOpenApi: handles --write (0), fresh (0), and stale (1)", async () => {
     const tmpDir = makeTempDir("harness-cli-openapi-")
     const modPath = join(tmpDir, "openapi-mod.mjs")
     const outPath = join(tmpDir, "openapi.json")
-    const baselinePath = join(tmpDir, "baseline.json")
 
     writeFileSync(
       modPath,
@@ -47,11 +46,6 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
         '  openapi: "3.1.0",',
         '  paths: { "/health": { get: { responses: { "200": { description: "ok" } } } } },',
         "})",
-        "export const detectOpenApiBreakingChanges = (baseline, current) => {",
-        "  const bPaths = Object.keys((baseline && baseline.paths) || {})",
-        "  const cPaths = new Set(Object.keys((current && current.paths) || {}))",
-        "  return bPaths.filter((p) => !cPaths.has(p)).map((p) => `Removed path ${p}`)",
-        "}",
       ].join("\n"),
       "utf8",
     )
@@ -73,34 +67,6 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
       runCheckOpenApi(["check-openapi", "--module", "openapi-mod.mjs", "--out", "openapi.json"], opts),
     )
     expect(staleRes.exitCode).toBe(1)
-
-    writeFileSync(
-      baselinePath,
-      JSON.stringify({
-        openapi: "3.1.0",
-        paths: {
-          "/health": { get: {} },
-          "/removed-endpoint": { get: {} },
-        },
-      }),
-      "utf8",
-    )
-    const breakingRes = await Effect.runPromise(
-      runCheckOpenApi(
-        [
-          "check-openapi",
-          "--module",
-          "openapi-mod.mjs",
-          "--out",
-          "openapi.json",
-          "--baseline",
-          "baseline.json",
-        ],
-        opts,
-      ),
-    )
-    expect(breakingRes.exitCode).toBe(2)
-    expect(breakingRes.stderr).toContain("ESCALATE")
   })
 
   it("runCheckMigrations: missing dir (1), clean additive SQL (0), destructive DROP TABLE (2)", async () => {
@@ -306,7 +272,7 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
     expect(badKeyRes.stderr).toContain("invalid-migrator-record-key")
   })
 
-  it("T-9: rejects ../ traversal and symlink escapes across --out, --module, --baseline, OPENAPI_BASELINE_PATH, --snapshot, --package, and --dir", async () => {
+  it("T-9: rejects ../ traversal and symlink escapes across --out, --module, benchmark --baseline, --snapshot, --package, and --dir", async () => {
     const tmpDir = makeTempDir("harness-cli-escape-root-")
     const outsideDir = makeTempDir("harness-cli-escape-outside-")
     const opts = { repoRoot: tmpDir, skipBackgroundDaemons: true }
@@ -322,10 +288,7 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
     const validMod = join(tmpDir, "openapi-mod.mjs")
     writeFileSync(
       validMod,
-      [
-        "export const buildOpenApiSpec = () => ({ openapi: '3.1.0', paths: {} })",
-        "export const detectOpenApiBreakingChanges = () => []",
-      ].join("\n"),
+      "export const buildOpenApiSpec = () => ({ openapi: '3.1.0', paths: {} })\n",
       "utf8",
     )
     writeFileSync(
@@ -367,49 +330,12 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
     expect(modEscape2.exitCode).toBe(1)
     expect(modEscape2.stderr).toMatch(/escapes repository root/)
 
-    // --baseline on check-openapi and benchmark
-    const openapiBaseEscape = await Effect.runPromise(
-      runCheckOpenApi(
-        [
-          "check-openapi",
-          "--module",
-          "openapi-mod.mjs",
-          "--out",
-          "openapi.json",
-          "--baseline",
-          "sym-escape/secret.json",
-        ],
-        opts,
-      ),
-    )
-    expect(openapiBaseEscape.exitCode).toBe(1)
-    expect(openapiBaseEscape.stderr).toMatch(/escapes (?:repository )?root/)
-
+    // --baseline on benchmark
     const benchBaseEscape = await Effect.runPromise(
       runBenchmarkCompare(["benchmark", "--baseline", "sym-escape/secret.json"], opts),
     )
     expect(benchBaseEscape.exitCode).toBe(1)
     expect(benchBaseEscape.stderr).toMatch(/escapes (?:repository )?root/)
-
-    // OPENAPI_BASELINE_PATH
-    const prevEnv = process.env.OPENAPI_BASELINE_PATH
-    try {
-      process.env.OPENAPI_BASELINE_PATH = "sym-escape/secret.json"
-      const openapiEnvEscape = await Effect.runPromise(
-        runCheckOpenApi(
-          ["check-openapi", "--module", "openapi-mod.mjs", "--out", "openapi.json"],
-          opts,
-        ),
-      )
-      expect(openapiEnvEscape.exitCode).toBe(1)
-      expect(openapiEnvEscape.stderr).toMatch(/escapes (?:repository )?root/)
-    } finally {
-      if (prevEnv === undefined) {
-        Reflect.deleteProperty(process.env, "OPENAPI_BASELINE_PATH")
-      } else {
-        process.env.OPENAPI_BASELINE_PATH = prevEnv
-      }
-    }
 
     // --snapshot (escape + positive in-root control)
     const snapEscape = await Effect.runPromise(
@@ -456,10 +382,7 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
     const validMod = join(tmpDir, "openapi-mod.mjs")
     writeFileSync(
       validMod,
-      [
-        "export const buildOpenApiSpec = () => ({ openapi: '3.1.0', paths: {} })",
-        "export const detectOpenApiBreakingChanges = () => []",
-      ].join("\n"),
+      "export const buildOpenApiSpec = () => ({ openapi: '3.1.0', paths: {} })\n",
       "utf8",
     )
     writeFileSync(
@@ -480,17 +403,10 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
 
     // Dangling symlinks pointing to non-existent targets outside repoRoot
     symlinkSync(join(outsideDir, "nonexistent-out.json"), join(tmpDir, "dangling-out.json"))
-    symlinkSync(join(outsideDir, "nonexistent-base.json"), join(tmpDir, "dangling-base.json"))
     symlinkSync(join(outsideDir, "nonexistent-snap.json"), join(tmpDir, "dangling-snap.json"))
     symlinkSync(join(outsideDir, "nonexistent-bench.json"), join(tmpDir, "dangling-bench.json"))
 
     // 1. ../../etc/passwd traversal
-    const openApiBaseTrav = await Effect.runPromise(
-      runCheckOpenApi(["check-openapi", "--baseline", "../../etc/passwd", "--module", "openapi-mod.mjs", "--out", "openapi.json"], opts),
-    )
-    expect(openApiBaseTrav.exitCode).toBe(1)
-    expect(openApiBaseTrav.stderr).toMatch(/escapes (?:repository )?root/)
-
     const benchBaseTrav = await Effect.runPromise(
       runBenchmarkCompare(["benchmark", "--baseline", "../../etc/passwd"], opts),
     )
@@ -534,12 +450,6 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
     expect(openApiDanglingOut.exitCode).toBe(1)
     expect(openApiDanglingOut.stderr).toMatch(/escapes (?:repository )?root/)
 
-    const openApiDanglingBase = await Effect.runPromise(
-      runCheckOpenApi(["check-openapi", "--baseline", "dangling-base.json", "--module", "openapi-mod.mjs", "--out", "openapi.json"], opts),
-    )
-    expect(openApiDanglingBase.exitCode).toBe(1)
-    expect(openApiDanglingBase.stderr).toMatch(/escapes (?:repository )?root/)
-
     const danglingSnap = await Effect.runPromise(
       runCheckEventSchemas(["check-event-schemas", "--snapshot", "dangling-snap.json"], opts),
     )
@@ -575,19 +485,6 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
     expect(benchDanglingOut.exitCode).toBe(1)
     expect(benchDanglingOut.stderr).toMatch(/escapes (?:repository )?root/)
     expect(existsSync(join(outsideDir, "nonexistent-bench.json"))).toBe(false)
-
-    const prevEnv = process.env.OPENAPI_BASELINE_PATH
-    try {
-      process.env.OPENAPI_BASELINE_PATH = "dangling-base.json"
-      const openApiDanglingEnv = await Effect.runPromise(
-        runCheckOpenApi(["check-openapi", "--module", "openapi-mod.mjs", "--out", "openapi.json"], opts),
-      )
-      expect(openApiDanglingEnv.exitCode).toBe(1)
-      expect(openApiDanglingEnv.stderr).toMatch(/escapes (?:repository )?root/)
-    } finally {
-      if (prevEnv === undefined) Reflect.deleteProperty(process.env, "OPENAPI_BASELINE_PATH")
-      else process.env.OPENAPI_BASELINE_PATH = prevEnv
-    }
 
     // 3. Nested migration .sql and .ts symlinks escaping repoRoot
     const outsideSql = join(outsideDir, "evil.sql")

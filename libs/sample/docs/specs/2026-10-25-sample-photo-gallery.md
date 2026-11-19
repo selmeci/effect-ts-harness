@@ -13,7 +13,6 @@ spans:
   - Sample.uploadPhoto
   - Sample.getPhotoById
   - Sample.listPhotos
-  - Sample.greet
 services:
   - PhotoRepo
   - AlbumCounterClient
@@ -29,7 +28,7 @@ errors:
 Existing Graph Context & Boundaries:
 
 - **Reused Contracts / Schemas:**
-  - `PhotoId`, `PhotoName`, `AlbumId`, `CreatedAtMillis`, `AlbumPhotoCount`, `PersonName`, `GreetingMessage` (`libs/sample/contract/src/index.ts`): Nominal branded domain scalars (`Schema.brand`).
+  - `PhotoId`, `PhotoName`, `AlbumId`, `CreatedAtMillis`, `AlbumPhotoCount`, `GreetingMessage` (`libs/sample/contract/src/index.ts`): Nominal branded domain scalars (`Schema.brand`).
   - `Photo` (`libs/sample/contract/src/index.ts`): `{ id: PhotoId, name: PhotoName, albumId: AlbumId, createdAt: CreatedAtMillis }`
   - `CreatePhotoInput` (`libs/sample/contract/src/index.ts`): `{ name: PhotoName, albumId: AlbumId }`
 - **Reused Services:**
@@ -60,7 +59,6 @@ Requirements are specified using EARS (Easy Approach to Requirements Syntax). Ev
 | REQ-1.2 | Event-driven       | **When** a user requests a photo by ID via Sample.getPhotoById, The Sample.getPhotoById use-case **shall** query PhotoRepo.findById and return the matching Photo record.                                                          | Sample.getPhotoById | test         |
 | REQ-1.3 | Event-driven       | **When** a user requests all photos via Sample.listPhotos, The Sample.listPhotos use-case **shall** query PhotoRepo.listAll and return a list of all Photo records.                                                                | Sample.listPhotos   | test         |
 | REQ-1.4 | Unwanted behaviour | **If** a user requests a photo by ID via Sample.getPhotoById and no matching record exists in PhotoRepo, **then** The Sample.getPhotoById use-case **shall** fail with typed error PhotoNotFoundError containing the requested ID. | PhotoNotFoundError  | test         |
-| REQ-1.5 | Event-driven       | **When** a user requests a greeting via Sample.greet, The Sample.greet use-case **shall** format and return a greeting string.                                                                                                     | Sample.greet        | test         |
 
 ### 2 · Album Quota Decider & Durable Object Counter
 

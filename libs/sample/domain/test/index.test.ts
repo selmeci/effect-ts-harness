@@ -16,7 +16,6 @@ import {
   AlbumQuotaExceededError,
   CreatedAtMillis,
   type CreatePhotoInput,
-  PersonName,
   type Photo,
   PhotoId,
   PhotoName,
@@ -26,7 +25,7 @@ import {
   StorageOperationName,
 } from "@harness/sample-contract"
 import { AlbumCounterClient, PhotoRepo } from "@harness/sample-service"
-import { decideAlbumQuota, getPhotoById, greet, listPhotos, uploadPhoto } from "../src/index.js"
+import { decideAlbumQuota, getPhotoById, listPhotos, uploadPhoto } from "../src/index.js"
 
 const resolveRepoRoot = (startDir: string): string => {
   let curr = path.resolve(startDir)
@@ -56,19 +55,23 @@ const testHostIo: SyncHostIo = {
   execFileSync: () => ({ _tag: "Exited", exitCode: 1, stdout: "", stderr: "unused in unit test" }),
 }
 
-describe("greet", () => {
-  it.effect("greets by name", () =>
+describe("Album.decide tracing", () => {
+  it.effect("traces decideAlbumQuota and links test to Album.decide", () =>
     Effect.gen(function* () {
-      const testId = "libs/sample/domain/test/index.test.ts::greets by name"
+      const testId =
+        "libs/sample/domain/test/index.test.ts::traces decideAlbumQuota and links test to Album.decide"
       const repoRoot = resolveRepoRoot(process.cwd())
       const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, testHostIo)
 
       const { result, edges } = yield* runWithTestTracer(
         testId,
-        greet({ name: PersonName.make("Roman") }),
+        decideAlbumQuota({
+          albumId: AlbumId.make("vacation"),
+          currentCount: AlbumPhotoCount.make(0),
+        }),
         fnIndex.bySpanName,
       )
-      expect(result).toBe("Hello, Roman!")
+      expect(result).toBe(AlbumPhotoCount.make(1))
 
       const fns = Array.from(fnIndex.bySpanName.values()).map((fn) => ({
         qualname: fn.qualname,
@@ -76,7 +79,7 @@ describe("greet", () => {
         file: fn.file,
         line: fn.line,
         packageTag: fn.packageTag,
-        successType: "GreetingMessage",
+        successType: "AlbumPhotoCount",
         isStub: fn.isStub,
       }))
 
@@ -84,7 +87,7 @@ describe("greet", () => {
         {
           testId,
           testFile: "libs/sample/domain/test/index.test.ts",
-          testName: "greets by name",
+          testName: "traces decideAlbumQuota and links test to Album.decide",
           lastTreeHash: "current",
         },
       ]
@@ -104,11 +107,11 @@ describe("greet", () => {
         const snapshotPath = path.join(repoRoot, ".harness", "graph-snapshot.json")
         saveGraphSnapshot(graph, snapshotPath, testHostIo)
         const loadedGraph = yield* loadGraphSnapshotEffect(snapshotPath, testHostIo)
-        const reachingFromLoaded = findTestsReaching(loadedGraph, "Sample.greet")
+        const reachingFromLoaded = findTestsReaching(loadedGraph, "Album.decide")
         expect(reachingFromLoaded.map((t) => t.testId)).toContain(testId)
       }
 
-      const reaching = findTestsReaching(graph, "Sample.greet")
+      const reaching = findTestsReaching(graph, "Album.decide")
       expect(reaching.map((t) => t.testId)).toContain(testId)
     }),
   )
