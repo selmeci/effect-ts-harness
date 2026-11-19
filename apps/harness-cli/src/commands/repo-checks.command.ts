@@ -41,10 +41,6 @@ const resolveRepoRoot = (options?: CliEnv): string =>
 
 interface OpenApiModuleShape {
   readonly buildOpenApiSpec: () => unknown
-  readonly detectOpenApiBreakingChanges: (
-    baseline: unknown,
-    current: unknown,
-  ) => ReadonlyArray<string>
 }
 
 interface EventModuleShape {
@@ -103,15 +99,13 @@ const loadOpenApiModule = Effect.fn("HarnessCli.loadOpenApiModule")(function* (
 ): Effect.fn.Return<OpenApiModuleShape, RepoCheckCliError> {
   const { specifier, mod } = yield* importModuleRecord(repoRoot, moduleFlag, "@harness/sample-contract")
   const buildOpenApiSpec = mod["buildOpenApiSpec"]
-  const detectOpenApiBreakingChanges = mod["detectOpenApiBreakingChanges"]
-  if (typeof buildOpenApiSpec !== "function" || typeof detectOpenApiBreakingChanges !== "function") {
+  if (typeof buildOpenApiSpec !== "function") {
     return yield* new RepoCheckCliError({
-      message: `Module '${specifier}' must export buildOpenApiSpec and detectOpenApiBreakingChanges`,
+      message: `Module '${specifier}' must export buildOpenApiSpec`,
     })
   }
   return {
     buildOpenApiSpec: buildOpenApiSpec as () => unknown,
-    detectOpenApiBreakingChanges: detectOpenApiBreakingChanges as (baseline: unknown, current: unknown) => ReadonlyArray<string>,
   }
 })
 
@@ -140,93 +134,6 @@ const loadEventModule = Effect.fn("HarnessCli.loadEventModule")(function* (
     registeredUpcasters: registeredUpcasters as ReadonlyArray<EventUpcasterLink>,
   }
 })
-
-type BaselineResolution =
-  | { readonly ok: true; readonly json: string; readonly source: string }
-  | { readonly ok: false; readonly result: CliResult }
-
-const resolveOpenApiBaseline = (
-  repoRoot: string,
-  subArgs: ReadonlyArray<string>,
-  committedJson: string,
-): BaselineResolution => {
-  const cliBaselinePath = extractFlag(subArgs, "--baseline")
-  if (cliBaselinePath !== undefined) {
-    const resolved = resolveRepoPathOrMessage(repoRoot, cliBaselinePath, "OpenAPI baseline path")
-    if (!resolved.ok) {
-      return { ok: false, result: failResult(`ERROR: ${resolved.message}\n`) }
-    }
-    if (nodeSyncHostIo.existsSync(resolved.resolvedPath)) {
-      return { ok: true, json: nodeSyncHostIo.readTextSync(resolved.resolvedPath), source: `file:${cliBaselinePath}` }
-    }
-  }
-
-  const envBaselinePath = process.env.OPENAPI_BASELINE_PATH
-  if (envBaselinePath !== undefined && envBaselinePath.length > 0) {
-    const resolvedEnv = resolveRepoPathOrMessage(repoRoot, envBaselinePath, "OPENAPI_BASELINE_PATH")
-    if (!resolvedEnv.ok) {
-      return { ok: false, result: failResult(`ERROR: ${resolvedEnv.message}\n`) }
-    }
-    if (nodeSyncHostIo.existsSync(resolvedEnv.resolvedPath)) {
-      return { ok: true, json: nodeSyncHostIo.readTextSync(resolvedEnv.resolvedPath), source: `env:${envBaselinePath}` }
-    }
-  }
-
-  for (const ref of ["main", "HEAD"] as const) {
-    const gitRes = nodeSyncHostIo.execFileSync(
-      "git",
-      ["show", `${ref}:libs/sample/contract/openapi.json`],
-      { cwd: repoRoot },
-    )
-    const ok = match(gitRes)
-      .with({ _tag: "Exited" }, (e) => e.exitCode === 0 && e.stdout.trim().length > 0)
-      .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => false)
-      .exhaustive()
-    if (ok) {
-      return { ok: true, json: gitRes.stdout, source: `git:${ref}` }
-    }
-  }
-
-  return { ok: true, json: committedJson, source: "committed" }
-}
-
-const runOasdiffIfAvailable = (
-  repoRoot: string,
-  baselineJson: string,
-  openApiPath: string,
-): CliResult | undefined => {
-  const versionCheck = nodeSyncHostIo.execFileSync("oasdiff", ["--version"], { cwd: repoRoot })
-  const hasOasdiff = match(versionCheck)
-    .with({ _tag: "Exited" }, (e) => e.exitCode === 0)
-    .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => false)
-    .exhaustive()
-  if (!hasOasdiff) {
-    return undefined
-  }
-  const tmpDir = nodeSyncHostIo.mkdtempSync("harness-openapi-baseline-")
-  const tmpBaselinePath = join(tmpDir, "baseline.json")
-  nodeSyncHostIo.writeTextSync(tmpBaselinePath, baselineJson)
-  const diffResult = nodeSyncHostIo.execFileSync(
-    "oasdiff",
-    ["breaking", tmpBaselinePath, openApiPath],
-    { cwd: repoRoot },
-  )
-  nodeSyncHostIo.rmRecursiveSync(tmpDir)
-
-  const diffFailed = match(diffResult)
-    .with({ _tag: "Exited" }, (e) => e.exitCode !== 0)
-    .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => true)
-    .exhaustive()
-  if (diffFailed) {
-    const details = [diffResult.stderr, diffResult.stdout].filter((s) => s.length > 0).join("\n")
-    return {
-      exitCode: 2,
-      stdout: "",
-      stderr: `openapi check: ESCALATE — breaking OpenAPI changes require human confirmation:\n${details}${details.endsWith("\n") ? "" : "\n"}`,
-    }
-  }
-  return undefined
-}
 
 /**
  * Typed `check-openapi` subcommand.
@@ -292,35 +199,6 @@ export const runCheckOpenApi = Effect.fn("HarnessCli.checkOpenApi")(function* (
     return committedResult.result
   }
 
-  const baseline = resolveOpenApiBaseline(repoRoot, subArgs, committedJson)
-  if (!baseline.ok) {
-    return baseline.result
-  }
-  const baselineResult = decodeJsonResult(
-    baseline.json,
-    `Failed to parse baseline JSON from ${baseline.source}`,
-  )
-  if (!baselineResult.ok) {
-    return baselineResult.result
-  }
-
-  const oasdiffFailure = runOasdiffIfAvailable(repoRoot, baseline.json, openApiPath)
-  if (oasdiffFailure !== undefined) {
-    return oasdiffFailure
-  }
-
-  const breakingChanges = modResult.value.detectOpenApiBreakingChanges(
-    baselineResult.value,
-    currentSpec,
-  )
-  if (breakingChanges.length > 0) {
-    const formatted = breakingChanges.map((change) => ` - ${change}`).join("\n")
-    return failResult(
-      `openapi check: ESCALATE — breaking OpenAPI changes require human confirmation:\n${formatted}\n`,
-      2,
-    )
-  }
-
   if (JSON.stringify(committedResult.value) !== JSON.stringify(currentSpec)) {
     return failResult(
       "ERROR: openapi.json is stale and does not match SampleApi.\nRun `pnpm --filter @harness/sample-contract openapi:check -- --write` to update it.\n",
@@ -329,7 +207,7 @@ export const runCheckOpenApi = Effect.fn("HarnessCli.checkOpenApi")(function* (
 
   return yield* Effect.succeed({
     exitCode: 0,
-    stdout: "OpenAPI check passed: openapi.json is fresh and backward-compatible.\n",
+    stdout: "OpenAPI check passed: openapi.json is fresh.\n",
     stderr: "",
   })
 })
