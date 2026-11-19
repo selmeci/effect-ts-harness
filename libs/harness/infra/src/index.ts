@@ -7,7 +7,13 @@ import {
   type TsCompilerOverlayService,
 } from "@harness/graph"
 import { ActiveMutantContextLive } from "./active-mutant-context-live.js"
-import { AstGateCacheLive, makeAstGateCacheLayer } from "./ast-gate-cache-live.js"
+import {
+  AstGateCacheLive,
+  type AstGateCacheRuleSourceConfig,
+  makeAstGateCacheLayer,
+  type ResolvedGateRuleVersion,
+  resolveDiskGateRuleVersion,
+} from "./ast-gate-cache-live.js"
 import {
   resolveAstGateCachePath,
   resolveDecisionCachePath,
@@ -48,7 +54,13 @@ export {
   makeHarnessSubprocessRunnerHostIoLayer,
   makeHarnessSubprocessRunnerLayer,
 }
-export { AstGateCacheLive, makeAstGateCacheLayer }
+export {
+  AstGateCacheLive,
+  makeAstGateCacheLayer,
+  resolveDiskGateRuleVersion,
+  type AstGateCacheRuleSourceConfig,
+  type ResolvedGateRuleVersion,
+}
 export { resolveAstGateCachePath, resolveDecisionCachePath, resolveHarnessStateDir }
 export { DecisionCacheLive, makeDecisionCacheLayer }
 export { LocalDecisionModel, makeLocalDecisionModelLayer }
@@ -74,13 +86,19 @@ export const TsCompilerOverlayServiceLive: Layer.Layer<TsCompilerOverlayService>
   makeTsCompilerOverlayLayer(nodeSyncHostIo)
 export const OmnigraphSyncLive = makeOmnigraphSyncLayer(nodeSyncHostIo)
 
-const makeHarnessInfraLayer = (options?: { readonly repoRoot?: WorkspaceFilePath }) => {
+const makeHarnessInfraLayer = (options?: {
+  readonly repoRoot?: WorkspaceFilePath
+  readonly astGateCacheRuleSource?: AstGateCacheRuleSourceConfig
+}) => {
   const repoRoot = options?.repoRoot ?? WorkspaceFilePath.make(process.cwd())
   return Layer.mergeAll(
     makeWorkspaceFsLayer(),
     makeHarnessSubprocessRunnerLayer(),
     makeAstGateCacheLayer({
       cacheFilePath: resolveAstGateCachePath(repoRoot),
+      ...(options?.astGateCacheRuleSource !== undefined
+        ? { ruleSource: options.astGateCacheRuleSource }
+        : {}),
     }),
     makeDecisionCacheLayer({
       cacheFilePath: resolveDecisionCachePath(repoRoot),

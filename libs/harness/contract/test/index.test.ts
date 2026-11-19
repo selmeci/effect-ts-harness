@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { Cause, Exit, Schema } from "effect"
+import { Cause, Exit, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import { describe, expect, it } from "vitest"
 import {
@@ -8,6 +8,8 @@ import {
   AstGateDecisionReport,
   AstGateEvaluationError,
   AstGateEvaluationReport,
+  AstGatePackageTag,
+  AstGateViolationContract,
   AstSourceContent,
   AstSourceFilePath,
   CANONICAL_MCP_TOOL_NAMES,
@@ -15,6 +17,7 @@ import {
   CompiledWaves,
   type CompiledWorkUnit,
   CompilerRepoRootPath,
+  CompilerVersionTag,
   ContentSha256,
   CyclicPlanWorkflowError,
   DaemonServerError,
@@ -25,19 +28,22 @@ import {
   DecisionCachePayloadJson,
   DecisionCacheStatsSnapshot,
   DecisionCacheTtlMillis,
+  DEFAULT_IN_MEMORY_GATE_RULE_VERSION,
   DisjointOwnershipViolationError,
   EarsRequirementKey,
   EnclosingSymbolName,
   ErrorReasonMessage,
   EvaluatorId,
+  GateCategory,
   GateRuleId,
+  GateRuleSourceSnapshot,
+  GateRuleVersion,
   GateViolationMessage,
   GitCommitSha,
   GitDiffErrorReason,
   GitDiffExecutionError,
   HARNESS_AST_GATE_CACHE_FILENAME,
   HARNESS_DECISION_CACHE_FILENAME,
-  HARNESS_GATE_RULE_VERSION,
   HarnessSubprocessError,
   HarnessTierTopologyInput,
   HarnessTierTopologyReport,
@@ -52,6 +58,9 @@ import {
   PackageManifestName,
   PackageManifestPath,
   PackageUnitDraft,
+  PersistedAstCacheEntry,
+  PersistedAstCacheKey,
+  PersistedAstCacheStore,
   PlanSha256,
   PluginId,
   REVIEW_DEPTH_LEVELS,
@@ -92,12 +101,14 @@ import {
   WorkspaceFsOperation,
   compareCodeUnits,
   computeContentSha256,
+  computeGateRuleVersionFromSources,
   getReviewDepthRank,
   inferAstGatePackageTagFromPath,
   isPureInterruptCause,
   makeAstGateDecisionReport,
   makeAstGateEvaluationReport,
   makeHarnessTierTopologyReport,
+  makePersistedAstCacheKey,
   makeSelfDogfoodingReport,
   makeVerdictReport,
   normalizeNonRootWorkspacePath,
@@ -106,6 +117,7 @@ import {
   resolveDefaultAstGateCachePath,
   resolveDefaultDecisionCachePath,
   sanitizeWorktreeIdSegment,
+  selectActivePersistedAstCacheEntries,
   toErrorReasonMessage,
   validateSubprocessInput,
   wavesOf,
@@ -458,7 +470,69 @@ describe("@harness/contract schemas", () => {
   })
 
   it("computes SHA-256 identically to node:crypto across empty, ASCII, multi-block, and multi-byte UTF-8 inputs", () => {
-    expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v12")
+    expect(DEFAULT_IN_MEMORY_GATE_RULE_VERSION).toBe("ast-gates-in-memory")
+
+    const unwrapVersion = (
+      res: Result.Result<GateRuleVersion, ErrorReasonMessage>,
+    ): GateRuleVersion =>
+      match(res)
+        .with({ _tag: "Success" }, ({ success }) => success)
+        .with({ _tag: "Failure" }, ({ failure }) => expect.unreachable(failure))
+        .exhaustive()
+    const snap = (filePath: string, content: string): GateRuleSourceSnapshot =>
+      Schema.decodeSync(GateRuleSourceSnapshot)({ filePath, content })
+
+    match(computeGateRuleVersionFromSources([]))
+      .with({ _tag: "Success" }, () => expect.unreachable("Expected empty rule snapshots to fail"))
+      .with({ _tag: "Failure" }, ({ failure }) => {
+        expect(failure).toContain("empty")
+      })
+      .exhaustive()
+
+    const vSingleEmpty = unwrapVersion(computeGateRuleVersionFromSources([snap("a.ts", "")]))
+    expect(vSingleEmpty).toMatch(/^ast-gates-[0-9a-f]{64}$/)
+    expect(vSingleEmpty).not.toBe(DEFAULT_IN_MEMORY_GATE_RULE_VERSION)
+
+    const v1 = unwrapVersion(
+      computeGateRuleVersionFromSources([snap("a.ts", "a"), snap("b.ts", "b")]),
+    )
+    const vReordered = unwrapVersion(
+      computeGateRuleVersionFromSources([snap("b.ts", "b"), snap("a.ts", "a")]),
+    )
+    const vChanged = unwrapVersion(
+      computeGateRuleVersionFromSources([snap("a.ts", "a"), snap("b.ts", "c")]),
+    )
+    const vPathSwapped = unwrapVersion(
+      computeGateRuleVersionFromSources([snap("a.ts", "b"), snap("b.ts", "a")]),
+    )
+    const vDelimiterCollision = unwrapVersion(
+      computeGateRuleVersionFromSources([snap("a.ts", "a,b")]),
+    )
+    const expectedV1 = `ast-gates-${computeContentSha256(
+      JSON.stringify({
+        domain: "ast-gate-rules-v1",
+        files: [
+          ["a.ts", computeContentSha256("a")],
+          ["b.ts", computeContentSha256("b")],
+        ],
+      }),
+    )}`
+    expect(v1).toBe(expectedV1)
+    expect(vReordered).toBe(v1)
+    expect(v1).not.toBe(vChanged)
+    expect(v1).not.toBe(vPathSwapped)
+    expect(v1).not.toBe(vDelimiterCollision)
+
+    const vWithTs1 = unwrapVersion(
+      computeGateRuleVersionFromSources([snap("a.ts", "a")], CompilerVersionTag.make("7.0.2")),
+    )
+    const vWithTs2 = unwrapVersion(
+      computeGateRuleVersionFromSources([snap("a.ts", "a")], CompilerVersionTag.make("7.0.3")),
+    )
+    const vWithoutTs = unwrapVersion(computeGateRuleVersionFromSources([snap("a.ts", "a")]))
+    expect(vWithTs1).not.toBe(vWithTs2)
+    expect(vWithTs1).not.toBe(vWithoutTs)
+
     expect(compareCodeUnits("a", "b")).toBe(-1)
     expect(compareCodeUnits("b", "a")).toBe(1)
     expect(compareCodeUnits("a", "a")).toBe(0)
@@ -485,6 +559,162 @@ describe("@harness/contract schemas", () => {
       const expected = createHash("sha256").update(sample, "utf8").digest("hex")
       expect(computeContentSha256(sample)).toBe(expected)
     }
+  })
+
+  it("enforces GateRuleVersion / PersistedAstCache* negative matrices and evicts stale/mismatched entries", () => {
+    for (const badVersion of [
+      "",
+      "  leading",
+      "trailing ",
+      "bad\0nul",
+      "bad\nline",
+      "x".repeat(257),
+      null,
+      undefined,
+      123,
+      Number.NaN,
+    ]) {
+      expect(() => Schema.decodeUnknownSync(GateRuleVersion)(badVersion)).toThrow()
+      expect(() => Schema.decodeUnknownSync(CompilerVersionTag)(badVersion)).toThrow()
+    }
+    for (const badKey of [
+      "",
+      null,
+      undefined,
+      123,
+      Number.NaN,
+      "__proto__",
+      "only-two\0parts",
+      "a.ts\0invalid-tier\0v1\0default",
+      "a.ts\0domain\0v1\0",
+      `${"a".repeat(4090)}\0domain\0v1\0default`,
+    ]) {
+      expect(() => Schema.decodeUnknownSync(PersistedAstCacheKey)(badKey)).toThrow()
+    }
+    for (const badEntry of [
+      "",
+      null,
+      undefined,
+      Number.NaN,
+      { contentSha256: "not-64-hex", ruleVersion: "v1", violations: [] },
+      { contentSha256: "A".repeat(64), ruleVersion: "v1", violations: [] },
+      { contentSha256: "a".repeat(64), ruleVersion: "", violations: [] },
+      { contentSha256: "a".repeat(64), ruleVersion: "v1", violations: [{ bad: true }] },
+    ]) {
+      expect(() => Schema.decodeUnknownSync(PersistedAstCacheEntry)(badEntry)).toThrow()
+    }
+    for (const badStore of [
+      "",
+      null,
+      undefined,
+      Number.NaN,
+      { version: "bad\0ver", entries: {} },
+      { version: "v1", entries: "not-an-object" },
+      {
+        version: "v1",
+        entries: {
+          "a.ts\0domain\0v1\0default": {
+            contentSha256: "not-hex",
+            ruleVersion: "v1",
+            violations: [],
+          },
+        },
+      },
+    ]) {
+      expect(() => Schema.decodeUnknownSync(PersistedAstCacheStore)(badStore)).toThrow()
+    }
+    // Effect Schema.Record filters own keys by PersistedAstCacheKey, excluding invalid "" keys
+    const filteredStore = Schema.decodeSync(PersistedAstCacheStore)({
+      version: "v1",
+      entries: { "": { contentSha256: "a".repeat(64), ruleVersion: "v1", violations: [] } },
+    })
+    expect(filteredStore.entries).toEqual({})
+
+    const activeRuleVersion = GateRuleVersion.make("ast-gates-active")
+    const staleRuleVersion = GateRuleVersion.make("ast-gates-stale")
+    const evalId = EvaluatorId.make("default")
+    const activeKey = makePersistedAstCacheKey(
+      AstSourceFilePath.make("libs/a.ts"),
+      AstGatePackageTag.make("domain"),
+      activeRuleVersion,
+      evalId,
+    )
+    const staleEntryKey = makePersistedAstCacheKey(
+      AstSourceFilePath.make("libs/b.ts"),
+      AstGatePackageTag.make("domain"),
+      staleRuleVersion,
+      evalId,
+    )
+    const keyMismatchKey = makePersistedAstCacheKey(
+      AstSourceFilePath.make("libs/c.ts"),
+      AstGatePackageTag.make("domain"),
+      staleRuleVersion,
+      evalId,
+    )
+    const sampleViolation = Schema.decodeSync(AstGateViolationContract)({
+      category: GateCategory.make("syntax-bans"),
+      rule: GateRuleId.make("unsafe-type-cast"),
+      message: GateViolationMessage.make("Avoid unsafe type assertion"),
+      file: AstSourceFilePath.make("libs/a.ts"),
+      line: SourceLineNumber.make(12),
+      enclosingSymbol: EnclosingSymbolName.make("evaluate"),
+    })
+    const activeEntry: PersistedAstCacheEntry = {
+      contentSha256: ContentSha256.make("a".repeat(64)),
+      ruleVersion: activeRuleVersion,
+      violations: [sampleViolation],
+    }
+    const staleEntry: PersistedAstCacheEntry = {
+      contentSha256: ContentSha256.make("b".repeat(64)),
+      ruleVersion: staleRuleVersion,
+      violations: [],
+    }
+    const mismatchedKeyEntry: PersistedAstCacheEntry = {
+      contentSha256: ContentSha256.make("c".repeat(64)),
+      ruleVersion: activeRuleVersion,
+      violations: [],
+    }
+
+    const emptyStore = Schema.decodeSync(PersistedAstCacheStore)({
+      version: activeRuleVersion,
+      entries: {},
+    })
+    expect(selectActivePersistedAstCacheEntries(emptyStore, activeRuleVersion).size).toBe(0)
+
+    const matchingStore = Schema.decodeSync(PersistedAstCacheStore)({
+      version: activeRuleVersion,
+      entries: {
+        [activeKey]: activeEntry,
+        [staleEntryKey]: staleEntry,
+        [keyMismatchKey]: mismatchedKeyEntry,
+      },
+    })
+    const selectedFromMatching = selectActivePersistedAstCacheEntries(
+      matchingStore,
+      activeRuleVersion,
+    )
+    expect(selectedFromMatching.size).toBe(1)
+    expect(selectedFromMatching.get(activeKey)).toEqual(activeEntry)
+    expect(selectedFromMatching.get(activeKey)?.violations).toEqual([sampleViolation])
+    expect(selectedFromMatching.has(staleEntryKey)).toBe(false)
+    expect(selectedFromMatching.has(keyMismatchKey)).toBe(false)
+
+    const allStaleStore = Schema.decodeSync(PersistedAstCacheStore)({
+      version: activeRuleVersion,
+      entries: {
+        [staleEntryKey]: staleEntry,
+        [keyMismatchKey]: mismatchedKeyEntry,
+      },
+    })
+    expect(selectActivePersistedAstCacheEntries(allStaleStore, activeRuleVersion).size).toBe(0)
+
+    const mismatchedStore = Schema.decodeSync(PersistedAstCacheStore)({
+      version: staleRuleVersion,
+      entries: {
+        [activeKey]: activeEntry,
+      },
+    })
+    expect(selectActivePersistedAstCacheEntries(mismatchedStore, activeRuleVersion).size).toBe(0)
   })
 
   it("enforces non-negative SubprocessExitCode, optional exitCode, non-empty SelfDogfoodingViolationError, AstGateDecisionReport, and DaemonServerErrorKind", () => {

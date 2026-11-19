@@ -286,12 +286,6 @@ describe("Harness decision definitions & fallbacks", () => {
         expect(docTruthRes.kind).toBe("mechanical")
         expect(docTruthRes.hint).toContain("Documentation or adapter truth drift")
 
-        const staleVersionRes = yield* triageFailure(
-          "stale-gate-rule-version: EXPECTED_GATE_RULE_VERSION_DIGEST mismatch",
-        ).pipe(Effect.provide(failingLayer))
-        expect(staleVersionRes.kind).toBe("mechanical")
-        expect(staleVersionRes.hint).toContain("HARNESS_GATE_RULE_VERSION")
-
         const silentFsRes = yield* triageFailure(
           "silent-gate-fs-fallback: safeFs() in libs/harness/gates/src/plugins/gc/gc-helpers.ts",
         ).pipe(Effect.provide(failingLayer))

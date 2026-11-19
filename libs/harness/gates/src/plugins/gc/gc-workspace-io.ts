@@ -41,7 +41,6 @@ export const GcFindingKind = Schema.Literals([
   "skill-tier-table-drift",
   "mermaid-dependency-drift",
   "doc-banned-or-phantom-tech",
-  "stale-gate-rule-version",
   "contract-test-effect-vitest-import",
   "chained-equality-ternary",
   "hook-fastpath-forbidden-import",

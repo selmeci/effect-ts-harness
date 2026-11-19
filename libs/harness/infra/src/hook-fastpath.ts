@@ -4,13 +4,11 @@ import { Effect, Layer, Result } from "effect"
 import { match } from "ts-pattern"
 import {
   normalizeNonRootWorkspacePath,
-  resolveDefaultAstGateCachePath,
   resolveDefaultDecisionCachePath,
   WorkspaceFilePath,
 } from "@harness/contract"
 import { ActiveMutantContextLive } from "./active-mutant-context-live.js"
-import { makeAstGateCacheLayer } from "./ast-gate-cache-live.js"
-import { resolveAstGateCachePath, resolveDecisionCachePath } from "./cache-helpers.js"
+import { resolveDecisionCachePath } from "./cache-helpers.js"
 import { makeDecisionCacheLayer } from "./decision-cache-live.js"
 import { LocalDecisionModel, makeLocalDecisionModelLayer } from "./local-decision-model-live.js"
 import { nodeSyncHostIo } from "./node-host-io.js"
@@ -53,12 +51,6 @@ const makeHookInfraLayer = (options?: { readonly repoRoot?: WorkspaceFilePath })
   return Layer.mergeAll(
     makeWorkspaceFsLayer(),
     makeHarnessSubprocessRunnerLayer(),
-    makeAstGateCacheLayer({
-      cacheFilePath: resolveCachePathSafe(
-        () => resolveAstGateCachePath(repoRoot),
-        () => resolveDefaultAstGateCachePath(defaultRoot),
-      ),
-    }),
     makeDecisionCacheLayer({
       cacheFilePath: resolveCachePathSafe(
         () => resolveDecisionCachePath(repoRoot),

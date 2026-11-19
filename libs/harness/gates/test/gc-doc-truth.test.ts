@@ -1,16 +1,19 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 import { buildHarnessGraph } from "@harness/graph"
-import {
-  evaluateDocTruthPlugin,
-  GATE_RULE_SOURCE_FILES,
-} from "../src/plugins/gc/gc-doc-truth.plugin.js"
+import { AST_GATE_RULE_SOURCE_FILES } from "../src/ast-cache.js"
+import { evaluateDocTruthPlugin } from "../src/plugins/gc/gc-doc-truth.plugin.js"
 import { evaluatePackageAndMigrationPlugin } from "../src/plugins/gc/gc-package-and-migration.plugin.js"
+import {
+  checkAstGateRuleClosure,
+  extractGateRuleIdsFromSources,
+} from "../src/plugins/gc/gc-rule-ids.js"
 import { checkChainedEqualityTernaries } from "../src/plugins/gc/gc-topology-entropy.plugin.js"
+import { type GcFinding } from "../src/plugins/gc/gc-workspace-io.js"
 import { testHostIo } from "./helpers/test-host-io.js"
 
 describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
@@ -22,31 +25,6 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
       hostIo: testHostIo,
     })
     expect(findings).toEqual([])
-  })
-
-  it("[Ears-P1.4] emits stale-gate-rule-version when any of the 5 gate rule files changes without updating EXPECTED_GATE_RULE_VERSION_DIGEST", () => {
-    const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..")
-    const tempDir = mkdtempSync(join(tmpdir(), "harness-doc-truth-digest-"))
-    try {
-      for (const rel of GATE_RULE_SOURCE_FILES) {
-        const dest = join(tempDir, rel)
-        mkdirSync(dirname(dest), { recursive: true })
-        const content = readFileSync(join(repoRoot, rel), "utf8")
-        const updated =
-          rel === "tools/oxlint/syntax-bans.js"
-            ? `${content}\n// synthetic visitor edit\n`
-            : content
-        writeFileSync(dest, updated)
-      }
-      const findings = evaluateDocTruthPlugin({
-        graph: buildHarnessGraph({}),
-        workspaceRoot: tempDir,
-        hostIo: testHostIo,
-      })
-      expect(findings.some((f) => f.kind === "stale-gate-rule-version")).toBe(true)
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true })
-    }
   })
 
   it("[Ears-P1.4] emits hook-timeout-parity when Stop is missing or lacks a positive timeout in antigravity or claude-code hooks.json", () => {
@@ -538,6 +516,127 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
         "libs/sample/domain/src/cases.ts:6",
         "libs/sample/domain/src/cases.ts:7",
       ])
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it("extractGateRuleIdsFromSources extracts GcFindingKind literals from gcWorkspaceIoSource and sorts via compareCodeUnits without unknown-rule false positives", () => {
+    const gcWorkspaceIoSample = [
+      "export const GcFindingKind = Schema.Literals([",
+      '  "z-gc-finding",',
+      '  "a-gc-finding",',
+      '  "unused-service",',
+      "])",
+    ].join("\n")
+
+    const ids = extractGateRuleIdsFromSources(
+      'pushViolation(acc, "zeta-ast-rule")\nGateRuleId.make("alpha-ast-rule")',
+      'SelfDogfoodingRuleId.make("beta-dogfood-rule")',
+      'TierTopologyRuleId.make("gamma-tier-rule")',
+      '"[delta-oxlint-rule] msg"',
+      gcWorkspaceIoSample,
+    )
+
+    expect(ids).toEqual([
+      "a-gc-finding",
+      "alpha-ast-rule",
+      "beta-dogfood-rule",
+      "delta-oxlint-rule",
+      "gamma-tier-rule",
+      "unused-service",
+      "z-gc-finding",
+      "zeta-ast-rule",
+    ])
+
+    const tempDir = mkdtempSync(join(tmpdir(), "harness-doc-truth-gc-finding-id-"))
+    try {
+      const astVisitorsDir = join(tempDir, "libs/harness/gates/src/plugins/gc")
+      mkdirSync(astVisitorsDir, { recursive: true })
+      writeFileSync(
+        join(astVisitorsDir, "gc-workspace-io.ts"),
+        'export const GcFindingKind = Schema.Literals(["custom-gc-finding"])\n',
+      )
+      writeFileSync(
+        join(tempDir, "README.md"),
+        [
+          "# GC Rules",
+          "",
+          "| Rule ID | Meaning |",
+          "| :--- | :--- |",
+          "| `custom-gc-finding` | Recognized from GcFindingKind |",
+          "",
+        ].join("\n"),
+      )
+      const findings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: tempDir,
+        hostIo: testHostIo,
+      })
+      expect(findings.some((f) => f.kind === "doc-unknown-rule-id")).toBe(false)
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it("checkAstGateRuleClosure verifies every AST_GATE_RULE_SOURCE_FILES entry exists and catches missing or unlisted runtime imports", () => {
+    const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..")
+    expect(
+      AST_GATE_RULE_SOURCE_FILES.every((rel) => testHostIo.existsSync(join(repoRoot, rel))),
+    ).toBe(true)
+
+    const realFindings: Array<GcFinding> = []
+    checkAstGateRuleClosure(repoRoot, testHostIo, realFindings)
+    expect(realFindings).toEqual([])
+
+    const secondRel = AST_GATE_RULE_SOURCE_FILES[1]
+    if (secondRel === undefined) {
+      throw new Error("Expected at least 2 AST_GATE_RULE_SOURCE_FILES entries")
+    }
+
+    const tempDir = mkdtempSync(join(tmpdir(), "harness-ast-closure-"))
+    try {
+      for (const rel of AST_GATE_RULE_SOURCE_FILES) {
+        if (rel === secondRel) continue
+        const abs = join(tempDir, rel)
+        mkdirSync(dirname(abs), { recursive: true })
+        writeFileSync(abs, "export const ok = true\n", "utf8")
+      }
+      const missingFindings: Array<GcFinding> = []
+      checkAstGateRuleClosure(tempDir, testHostIo, missingFindings)
+      expect(
+        missingFindings.some(
+          (f) => f.kind === "architecture-policy-violation" && f.location === secondRel,
+        ),
+      ).toBe(true)
+
+      const secondAbs = join(tempDir, secondRel)
+      mkdirSync(dirname(secondAbs), { recursive: true })
+      writeFileSync(secondAbs, "export const ok = true\n", "utf8")
+
+      const typeOnlyAbs = join(tempDir, "libs/harness/gates/src/type-only-helper.ts")
+      writeFileSync(typeOnlyAbs, "export type HelperType = string\n", "utf8")
+      const unlistedRuntimeAbs = join(tempDir, "libs/harness/gates/src/unlisted-runtime-helper.ts")
+      writeFileSync(unlistedRuntimeAbs, "export const helperFn = () => 1\n", "utf8")
+
+      const astCacheAbs = join(tempDir, "libs/harness/gates/src/ast-cache.ts")
+      writeFileSync(
+        astCacheAbs,
+        [
+          'import type { HelperType } from "./type-only-helper.js"',
+          'import { helperFn } from "./unlisted-runtime-helper.js"',
+          "export const runHelper = (): HelperType => String(helperFn())",
+          "",
+        ].join("\n"),
+        "utf8",
+      )
+
+      const closureFindings: Array<GcFinding> = []
+      checkAstGateRuleClosure(tempDir, testHostIo, closureFindings)
+      expect(closureFindings.map((f) => f.location)).toEqual([
+        "libs/harness/gates/src/unlisted-runtime-helper.ts",
+      ])
+      expect(closureFindings[0]?.kind).toBe("architecture-policy-violation")
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
     }

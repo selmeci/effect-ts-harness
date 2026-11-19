@@ -69,11 +69,10 @@ export { evaluateTestAndDeciderPlugin } from "./plugins/gc/gc-test-and-decider.p
 export { evaluateGovernanceDocsPlugin } from "./plugins/gc/gc-governance-docs.plugin.js"
 export { evaluatePackageAndMigrationPlugin } from "./plugins/gc/gc-package-and-migration.plugin.js"
 export {
-  computeGateRuleVersionDigest,
   evaluateDocTruthPlugin,
-  EXPECTED_GATE_RULE_VERSION_DIGEST,
   extractGateRuleIdsFromSources,
 } from "./plugins/gc/gc-doc-truth.plugin.js"
+export { DOC_TRUTH_RULE_ID_SOURCES, checkAstGateRuleClosure } from "./plugins/gc/gc-rule-ids.js"
 
 // ADR-0008 & SPEC-0006 Deterministic Enforcement literals:
 // "node-sqlite-in-infra" "unmanaged-sql-ddl" "invalid-migrator-record-key" "unsafe-sql-migration"

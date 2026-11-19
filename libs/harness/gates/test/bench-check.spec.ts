@@ -12,7 +12,6 @@ import {
   GateRuleId,
   GateRuleVersion,
   GateVerdict,
-  HARNESS_GATE_RULE_VERSION,
   makeAstGateEvaluationReport,
   NonNegativeCount,
 } from "@harness/contract"
@@ -503,7 +502,6 @@ describe("AstGateCache & Unified Single-Pass AST Gate Deciders (PERF-02, RFC-000
         const fullReport = yield* AstGateCache.decide(
           {
             files,
-            ruleVersion: HARNESS_GATE_RULE_VERSION,
           },
           cacheStore,
         )
@@ -515,22 +513,22 @@ describe("AstGateCache & Unified Single-Pass AST Gate Deciders (PERF-02, RFC-000
 
         // Subsequent category-specific gate calls reuse the cached violations with 0 new parses
         const syntaxReport = evaluateAstGateFiles(
-          { files, ruleVersion: HARNESS_GATE_RULE_VERSION },
+          { files },
           GateCategory.make("syntax-bans"),
           cacheStore,
         )
         const testReport = evaluateAstGateFiles(
-          { files, ruleVersion: HARNESS_GATE_RULE_VERSION },
+          { files },
           GateCategory.make("test-integrity"),
           cacheStore,
         )
         const purityReport = evaluateAstGateFiles(
-          { files, ruleVersion: HARNESS_GATE_RULE_VERSION },
+          { files },
           GateCategory.make("domain-purity"),
           cacheStore,
         )
         const effectLawsReport = evaluateAstGateFiles(
-          { files, ruleVersion: HARNESS_GATE_RULE_VERSION },
+          { files },
           GateCategory.make("effect-laws"),
           cacheStore,
         )

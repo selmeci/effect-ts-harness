@@ -6,7 +6,6 @@ import {
   AstSourceFilePath,
   type CompileInput,
   EarsRequirementKey,
-  HARNESS_GATE_RULE_VERSION,
   type MutationCacheAuth,
   MutationEpochMillis,
   OwnedRelPath,
@@ -473,7 +472,6 @@ export const handleBench = (
           content: AstSourceContent.make(sampleContent),
         },
       ],
-      ruleVersion: HARNESS_GATE_RULE_VERSION,
     })
 
     const warmAstSamples: Array<number> = []
@@ -486,7 +484,6 @@ export const handleBench = (
             content: AstSourceContent.make(sampleContent),
           },
         ],
-        ruleVersion: HARNESS_GATE_RULE_VERSION,
       })
       warmAstSamples.push(Math.max(0, performance.now() - t0))
     }

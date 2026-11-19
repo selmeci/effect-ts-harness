@@ -20,7 +20,7 @@ import { decideHarnessTierTopology } from "../src/plugins/harness-tier-topology.
 import { loadGovernanceDocsChecked } from "../src/plugins/gc/gc-helpers.js"
 import { evaluateHookFastpathImportClosure } from "../src/plugins/gc/gc-hook-fastpath.js"
 import { evaluateInfraSqlAndSqliteHygiene } from "../src/plugins/gc/gc-infra-sql-hygiene.js"
-import { extractGateRuleIdsFromSources } from "../src/plugins/gc/gc-rule-digest.js"
+import { extractGateRuleIdsFromSources } from "../src/plugins/gc/gc-rule-ids.js"
 import { type GcFinding } from "../src/plugins/gc/gc-workspace-io.js"
 import {
   decideOntologyInvariants,

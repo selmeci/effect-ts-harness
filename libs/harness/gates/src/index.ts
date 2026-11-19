@@ -94,7 +94,6 @@ export {
   type LoopThrashingStatus,
 } from "./friction-log.js"
 export {
-  EXPECTED_GATE_RULE_VERSION_DIGEST,
   GC_ENFORCEMENT_RULES,
   GcFinding,
   GcFindingKind,
@@ -111,7 +110,6 @@ export {
   collectWorkspaceAllFiles,
   collectWorkspaceSqlFiles,
   collectWorkspaceTsFiles,
-  computeGateRuleVersionDigest,
   decideGraphEntropy,
   evaluateBranchingSqliteViolations,
   evaluateDocTruthPlugin,
@@ -119,6 +117,8 @@ export {
   evaluatePackageAndMigrationPlugin,
   evaluateTestAndDeciderPlugin,
   evaluateTopologyEntropyPlugin,
+  DOC_TRUTH_RULE_ID_SOURCES,
+  checkAstGateRuleClosure,
   extractBalancedBraces,
   extractBalancedParens,
   extractGateRuleIdsFromSources,
@@ -371,11 +371,12 @@ export {
   writeSessionReportFiles,
 } from "./telemetry.js"
 export {
+  AST_GATE_RULE_SOURCE_FILES,
+  AST_GATE_TYPESCRIPT_VERSION,
   AstCacheDurationMs,
   AstCacheHitCount,
   AstGateCache,
   AstGateCacheEntry,
-  AstGateCacheStoreSchema,
   AstGateDecisionReport,
   AstGateEvaluationInput,
   AstGateFileInput,
@@ -410,7 +411,6 @@ export {
   makeAstGateCacheKey,
   makeAstGateDecisionReport,
   resolveEnclosingSymbol,
-  type AstGateCacheStore,
   type AstSourceFileCache,
   unwrapAstExpression,
   visitSourceFileSinglePass,
@@ -469,7 +469,6 @@ export {
   readTextOrReport,
   readdirOrReport,
 } from "./plugins/gc/gc-helpers.js"
-export { GATE_RULE_SOURCE_FILES, evaluateGateRuleDigestCheck } from "./plugins/gc/gc-rule-digest.js"
 export {
   MUTATION_PATTERNS,
   isAssertionFailure,

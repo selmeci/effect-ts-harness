@@ -10,13 +10,17 @@ informed_by:
   - harness:ADR-0009
   - harness:ADR-0011
 enforced_by:
+  - libs/harness/contract/src/cache-and-daemon.ts
   - libs/harness/graph/src/type-extractor.ts
   - libs/harness/graph/src/extractor/compiler-session.ts
   - libs/harness/graph/src/extractor/test-and-governance-extractor.ts
   - libs/harness/graph/src/structural-search.ts
   - libs/harness/gates/src/ast-cache.ts
+  - libs/harness/gates/src/plugins/gc/gc-rule-ids.ts
   - libs/harness/gates/src/migration-check.ts
   - libs/harness/gates/src/bench-check.ts
+  - libs/harness/infra/src/ast-gate-cache-live.ts
+  - libs/harness/infra/src/ast-gate-cache-helpers.ts
   - libs/harness/decision/src/cached-decision-model.ts
   - apps/harness-mcp/src/server.ts
 spans:
@@ -42,7 +46,7 @@ errors:
 This specification defines the behavioral requirements for Milestone 3 (`RFC-0006`: Sub-Second Incremental Harness, Content-Addressable AST/Decision Caching `PERF-01` through `PERF-06`, and `HarnessBench.decide`), governed by `harness:ADR-0009` and `harness:ADR-0011`. It eliminates cold full-workspace recompilation, quadratic test-reachability scanning, redundant multi-gate AST parsing, and duplicate `DecisionModel` evaluations across the CLI and MCP surfaces:
 
 1. **`PERF-01` (`libs/harness/graph/src/type-extractor.ts`, `libs/harness/graph/src/extractor/compiler-session.ts`, `libs/harness/graph/src/extractor/test-and-governance-extractor.ts`):** Persistent warm `TypeScriptProgramSession` reusing `ts.Program` and `ts.SourceFile` ASTs keyed by `(filePath, contentSha256)`, exported declaration fingerprint `declHash(f) = SHA256(emitDeclarationOnly(f))` early cut-off on `overlays`, per-file `FileGraphFragment` disk caching (`.harness/cache/file-graph-v1.json`), and $O(|T| + |F|)$ single-pass identifier/callee token indexing for `ExercisesSpan` edges.
-2. **`PERF-02` (`libs/harness/gates/src/ast-cache.ts`):** Unified single-pass AST gate visitor and content-addressable disk cache (`AstGateCache`) keyed by `(filePath, sha256(content), HARNESS_GATE_RULE_VERSION)` persisted in `.harness/cache/ast-gates-v1.json`, backing `AstGateCache.decide`, `SyntaxBans.decide`, `TestIntegrity.decide`, `MigrationSafety.decide`, `DomainPurity.decide`, and `EffectLaws.decide`.
+2. **`PERF-02` (`libs/harness/gates/src/ast-cache.ts`):** Unified single-pass AST gate visitor and content-addressable disk cache (`AstGateCache`) keyed by `(filePath, packageTag, contentSha256, ruleVersion)` where `ruleVersion` is derived automatically from SHA-256 digests of `AST_GATE_RULE_SOURCE_FILES` and `AST_GATE_TYPESCRIPT_VERSION` via `computeGateRuleVersionFromSources`, persisted in `.harness/cache/ast-gate-cache-v1.json`, backing `AstGateCache.decide`, `SyntaxBans.decide`, `TestIntegrity.decide`, `MigrationSafety.decide`, `DomainPurity.decide`, and `EffectLaws.decide`.
 3. **`PERF-03` (`libs/harness/decision/src/cached-decision-model.ts`):** Content-addressable `CachedDecisionModel` wrapper around `DecisionModel` computing `cacheKey = SHA256(taskId + "\0" + promptVersion + "\0" + canonicalJson(input))`, backed by `.harness/cache/decisions-v1.json` and concurrent request coalescing.
 4. **`PERF-04` & `PERF-05` (`apps/harness-cli/src/index.ts` & `apps/harness-mcp/src/server.ts`):** Incremental affected-only `verify` fast-path over $\Delta F$ since the last valid `.harness/verify-stamp.json` (or `HEAD`), and optional Unix domain socket daemon delegation (`.harness/daemon.sock`) with seamless in-process fallback.
 5. **`PERF-06` (`libs/harness/gates/src/bench-check.ts` & `apps/harness-cli/src/index.ts`):** Branded schemas and pure `HarnessBench.decide` (`R = never`) latency SLO gate evaluating `StageLatencyMeasurement` against `StageLatencyBudget` (`p50BudgetMs`, `p95BudgetMs`), returning `HarnessBenchReport` or failing with `LatencySloViolationError`, wired to `pnpm harness bench`.
@@ -72,7 +76,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ### 2 · Unified Single-Pass `AstGateCache` & Gate Deciders (`PERF-02`)
 
-**Source (`harness:ADR-0011`, `RFC-0006 §4.5`):** All AST-level static gates (`SyntaxBans.decide`, `TestIntegrity.decide`, `MigrationSafety.decide`, `DomainPurity.decide`, `EffectLaws.decide`) must share a unified single-pass AST visitor and bounded path-keyed cache (`AstGateCache.decide`) persisted atomically in `.harness/cache/ast-gates-v1.json`.
+**Source (`harness:ADR-0011`, `RFC-0006 §4.5`):** All AST-level static gates (`SyntaxBans.decide`, `TestIntegrity.decide`, `MigrationSafety.decide`, `DomainPurity.decide`, `EffectLaws.decide`) must share a unified single-pass AST visitor and bounded path-keyed cache (`AstGateCache.decide`) persisted atomically in `.harness/cache/ast-gate-cache-v1.json` and automatically invalidated by `AST_GATE_RULE_SOURCE_FILES` + `AST_GATE_TYPESCRIPT_VERSION` hashing.
 
 | ID      | Pattern      | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Effect Symbol            | Verification   |
 | :------ | :----------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------- | :------------- |
@@ -119,7 +123,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ## Known residual risks
 
-- First cold run in an empty `.harness/cache/` directory still pays the initial `ts.createProgram` parse cost before populating `.harness/cache/file-graph-v1.json` and `.harness/cache/ast-gates-v1.json`.
+- First cold run in an empty `.harness/cache/` directory still pays the initial `ts.createProgram` parse cost before populating `.harness/cache/file-graph-v1.json` and `.harness/cache/ast-gate-cache-v1.json`.
 
 ## Acceptance criteria
 
@@ -135,7 +139,7 @@ flowchart TD
         StructuralSearchDecide["StructuralSearch.decide (R = never)"]
     end
 
-    subgraph UnifiedAstGates["PERF-02: Unified Single-Pass AstGateCache (.harness/cache/ast-gates-v1.json)"]
+    subgraph UnifiedAstGates["PERF-02: Unified Single-Pass AstGateCache (.harness/cache/ast-gate-cache-v1.json)"]
         AstCacheDecide["AstGateCache.decide (R = never)"]
         SyntaxBansDecide["SyntaxBans.decide (R = never)"]
         TestIntegrityDecide["TestIntegrity.decide (R = never)"]

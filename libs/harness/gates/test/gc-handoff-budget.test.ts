@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { join } from "node:path"
 import { Effect, Graph } from "effect"
 import { match } from "ts-pattern"
 import {
@@ -19,11 +19,7 @@ import {
   extractTopLevelObjectAnalysis,
   loadGovernanceDocsChecked,
 } from "../src/plugins/gc/gc-helpers.js"
-import {
-  evaluateGateRuleDigestCheck,
-  extractGateRuleIdsFromSources,
-  GATE_RULE_SOURCE_FILES,
-} from "../src/plugins/gc/gc-rule-digest.js"
+import { extractGateRuleIdsFromSources } from "../src/plugins/gc/gc-rule-ids.js"
 import {
   decideGraphEntropy,
   diffPlanAndImplGraphs,
@@ -32,7 +28,6 @@ import {
   loadGovernanceDocsFromDisk,
   parseGovernanceDocFrontmatter,
   parseGovernanceDocFrontmatterChecked,
-  type GcFinding,
   type GovernanceDocReference,
 } from "../src/index.js"
 import { testHostIo } from "./helpers/test-host-io.js"
@@ -1216,21 +1211,7 @@ status: accepted
       rmSync(tempDir, { recursive: true, force: true })
     }
 
-    // gc-rule-digest: missing file in GATE_RULE_SOURCE_FILES fails closed
-    const digestDir = mkdtempSync(join(tmpdir(), "gc-rule-digest-"))
-    try {
-      const firstRel = GATE_RULE_SOURCE_FILES[0]!
-      mkdirSync(dirname(join(digestDir, firstRel)), { recursive: true })
-      writeFileSync(join(digestDir, firstRel), "// partial\n", "utf8")
-      const digestFindings: Array<GcFinding> = []
-      evaluateGateRuleDigestCheck(digestDir, testHostIo, digestFindings)
-      expect(digestFindings.length).toBeGreaterThan(0)
-      expect(digestFindings.some((f) => f.kind === "stale-gate-rule-version")).toBe(true)
-    } finally {
-      rmSync(digestDir, { recursive: true, force: true })
-    }
-
-    // gc-rule-digest: extractGateRuleIdsFromSources extracts GateRuleId.make and [rule-id] from syntaxBansSource
+    // gc-rule-ids: extractGateRuleIdsFromSources extracts GateRuleId.make and [rule-id] from syntaxBansSource
     const ruleIds = extractGateRuleIdsFromSources(
       'GateRuleId.make("sample-gate-rule")',
       "",

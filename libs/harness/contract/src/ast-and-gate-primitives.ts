@@ -6,9 +6,15 @@ export const NonNegativeCount = Schema.Int.pipe(
 )
 export type NonNegativeCount = typeof NonNegativeCount.Type
 
-export const GateRuleVersion = Schema.NonEmptyString.pipe(Schema.brand("GateRuleVersion"))
+export const GateRuleVersion = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(256)),
+  Schema.check(Schema.isPattern(/^[^\0\r\n]+$/s)),
+  Schema.brand("GateRuleVersion"),
+)
 export type GateRuleVersion = typeof GateRuleVersion.Type
-export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v12")
+export const DEFAULT_IN_MEMORY_GATE_RULE_VERSION: GateRuleVersion =
+  GateRuleVersion.make("ast-gates-in-memory")
 
 /**
  * Pure deterministic UTF-16 code-unit string comparator (`-1 | 0 | 1`).

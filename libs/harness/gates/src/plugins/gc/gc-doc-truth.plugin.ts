@@ -12,20 +12,12 @@ import {
   readTextOrReport,
 } from "./gc-helpers.js"
 import {
-  EXPECTED_GATE_RULE_VERSION_DIGEST,
-  GATE_RULE_SOURCE_FILES,
-  computeGateRuleVersionDigest,
-  evaluateGateRuleDigestCheck,
+  DOC_TRUTH_RULE_ID_SOURCES,
+  checkAstGateRuleClosure,
   extractGateRuleIdsFromSources,
-} from "./gc-rule-digest.js"
+} from "./gc-rule-ids.js"
 
-export {
-  EXPECTED_GATE_RULE_VERSION_DIGEST,
-  GATE_RULE_SOURCE_FILES,
-  computeGateRuleVersionDigest,
-  evaluateGateRuleDigestCheck,
-  extractGateRuleIdsFromSources,
-}
+export { extractGateRuleIdsFromSources }
 
 const PkgManifestDepsSchema = Schema.Struct({
   name: Schema.optional(Schema.String),
@@ -183,11 +175,11 @@ const collectKnownGateRuleIds = (
     return readTextOrReport(absPath, hostIo, repoRoot, findings) ?? ""
   }
   const extracted = extractGateRuleIdsFromSources(
-    readOptional(GATE_RULE_SOURCE_FILES[0]),
-    readOptional(GATE_RULE_SOURCE_FILES[1]),
-    readOptional(GATE_RULE_SOURCE_FILES[2]),
-    readOptional(GATE_RULE_SOURCE_FILES[4]),
-    readOptional(GATE_RULE_SOURCE_FILES[7]),
+    readOptional(DOC_TRUTH_RULE_ID_SOURCES.astVisitors),
+    readOptional(DOC_TRUTH_RULE_ID_SOURCES.selfDogfooding),
+    readOptional(DOC_TRUTH_RULE_ID_SOURCES.tierTopology),
+    readOptional(DOC_TRUTH_RULE_ID_SOURCES.syntaxBans),
+    readOptional(DOC_TRUTH_RULE_ID_SOURCES.gcWorkspaceIo),
   )
   for (const id of extracted) known.add(id)
   return known
@@ -714,8 +706,7 @@ export const evaluateDocTruthPlugin = (input: GraphEntropyInput): ReadonlyArray<
   checkSkillTierTables(repoRoot, hostIo, findings)
   checkMermaidDependencyDrift(repoRoot, hostIo, depsByPkg, pkgByRelDir, findings)
   checkDocBannedOrPhantomTech(repoRoot, hostIo, findings)
-
-  evaluateGateRuleDigestCheck(repoRoot, hostIo, findings)
+  checkAstGateRuleClosure(repoRoot, hostIo, findings)
 
   return findings
 }

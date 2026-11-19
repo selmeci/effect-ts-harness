@@ -1,29 +1,15 @@
 import * as path from "node:path"
-import { NodeServices } from "@effect/platform-node"
-import {
-  Cause,
-  Context,
-  Effect,
-  Exit,
-  Layer,
-  ManagedRuntime,
-  Result,
-  Schema,
-  Scope,
-  SynchronizedRef,
-} from "effect"
+import { Cause, Effect, Exit, ManagedRuntime, Schema, Scope, SynchronizedRef } from "effect"
 import * as Graph from "effect/Graph"
 import * as Semaphore from "effect/Semaphore"
 import { match } from "ts-pattern"
 import {
-  AstSourceContent,
-  AstSourceFilePath,
   OmnigraphBranchName,
   OmnigraphChangeCursor,
   toErrorReasonMessage,
   WorkspaceFilePath,
 } from "@harness/contract"
-import { AstGateCache } from "@harness/gates"
+import { AST_GATE_RULE_SOURCE_FILES, AST_GATE_TYPESCRIPT_VERSION } from "@harness/gates"
 import {
   DatalogFilePath,
   DatalogSession,
@@ -35,16 +21,16 @@ import {
   updateGraphHeadCursor,
 } from "@harness/graph"
 import {
-  makeAstGateCacheLayer,
+  type AstGateCacheRuleSourceConfig,
   nodeSyncHostIo,
-  resolveAstGateCachePath,
+  resolveDiskGateRuleVersion,
+  type ResolvedGateRuleVersion,
   resolveHarnessDaemonSocketPath,
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
-  WorkspaceFsLive,
 } from "@harness/infra"
-import { AstGateCachePort, type AstGateCachePortShape } from "@harness/service"
 import { isPathInsideRoot } from "../tools/mcp-helpers.js"
+import { type CachedDaemonAstPort, handleDaemonAstGatesRequest } from "./ast-gate-daemon-helper.js"
 
 export interface HarnessDaemonServerHandle {
   readonly socketPath: string
@@ -112,9 +98,11 @@ const createDaemonLineHandler =
   (
     repoRoot: string,
     daemonScope: Scope.Scope,
-    cachePortsRef: SynchronizedRef.SynchronizedRef<ReadonlyMap<string, AstGateCachePortShape>>,
+    cachePortsRef: SynchronizedRef.SynchronizedRef<ReadonlyMap<string, CachedDaemonAstPort>>,
     datalogSessionsRef: SynchronizedRef.SynchronizedRef<ReadonlyMap<string, DatalogSessionShape>>,
     pollSemaphoresRef: SynchronizedRef.SynchronizedRef<ReadonlyMap<string, Semaphore.Semaphore>>,
+    startupRuleVersion: ResolvedGateRuleVersion,
+    ruleSourceConfig: AstGateCacheRuleSourceConfig,
   ) =>
   (line: string): Effect.Effect<string> => {
     const reqOpt = decodeDaemonRequest(line.trim())
@@ -139,9 +127,7 @@ const createDaemonLineHandler =
             }),
           )
         }
-        return match<typeof req.command, Effect.Effect<Record<string, unknown>>>(
-          req.command,
-        )
+        return match<typeof req.command, Effect.Effect<Record<string, unknown>>>(req.command)
           .with("ping", () => Effect.succeed({ id: req.id, ok: true, status: "warm" }))
           .with("extract-graph", () =>
             Effect.gen(function* () {
@@ -156,81 +142,14 @@ const createDaemonLineHandler =
             }),
           )
           .with("ast-gates", () =>
-            Effect.gen(function* () {
-              const cachePath = resolveAstGateCachePath(resolvedRoot)
-              const requestedRelPaths = req.files ?? []
-              for (const rel of requestedRelPaths) {
-                const resolvedAbs = path.resolve(resolvedRoot, rel)
-                if (!isPathInsideRoot(resolvedRoot, resolvedAbs)) {
-                  return {
-                    id: req.id,
-                    ok: false,
-                    error: `Path traversal outside workspace root is forbidden: ${rel}`,
-                  }
-                }
-              }
-              const loadedFiles: Array<{
-                readonly filePath: AstSourceFilePath
-                readonly content: AstSourceContent
-              }> = []
-              for (const rel of requestedRelPaths) {
-                const abs = path.resolve(resolvedRoot, rel)
-                if (!nodeSyncHostIo.existsSync(abs)) {
-                  return {
-                    id: req.id,
-                    ok: false,
-                    error: `AST gate target file unavailable: ${rel} (file does not exist)`,
-                  }
-                }
-                const readRes = Result.try(() => nodeSyncHostIo.readTextSync(abs))
-                const textOrError = match(readRes)
-                  .with({ _tag: "Success" }, ({ success }) => ({ ok: true as const, text: success }))
-                  .with({ _tag: "Failure" }, ({ failure }) => ({
-                    ok: false as const,
-                    error: `AST gate target file unavailable: ${rel} (${failure instanceof Error ? failure.message : String(failure)})`,
-                  }))
-                  .exhaustive()
-                if (!textOrError.ok) {
-                  return {
-                    id: req.id,
-                    ok: false,
-                    error: textOrError.error,
-                  }
-                }
-                loadedFiles.push({
-                  filePath: AstSourceFilePath.make(rel),
-                  content: AstSourceContent.make(textOrError.text),
-                })
-              }
-              const cachePort = yield* SynchronizedRef.modifyEffect(cachePortsRef, (ports) => {
-                const existing = ports.get(cachePath)
-                if (existing !== undefined) {
-                  return Effect.succeed([existing, ports] as const)
-                }
-                const astGateCacheLayer = makeAstGateCacheLayer({
-                  cacheFilePath: WorkspaceFilePath.make(cachePath),
-                }).pipe(Layer.provide(Layer.mergeAll(WorkspaceFsLive, NodeServices.layer)))
-                return Layer.buildWithScope(astGateCacheLayer, daemonScope).pipe(
-                  Effect.map((ctx) => {
-                    const built = Context.get(ctx, AstGateCachePort)
-                    const next = new Map(ports)
-                    next.set(cachePath, built)
-                    return [built, next] as const
-                  }),
-                )
-              })
-              const report = yield* AstGateCache.evaluateCached(loadedFiles).pipe(
-                Effect.provideService(AstGateCachePort, cachePort),
-                Effect.catch((err) =>
-                  Effect.succeed({
-                    error: `AST gate cache error: ${err instanceof Error ? err.message : String(err)}`,
-                  }),
-                ),
-              )
-              if ("error" in report) {
-                return { id: req.id, ok: false, error: report.error }
-              }
-              return { id: req.id, ok: true, report }
+            handleDaemonAstGatesRequest({
+              requestId: req.id,
+              resolvedRoot,
+              requestedRelPaths: req.files ?? [],
+              daemonScope,
+              cachePortsRef,
+              startupRuleVersion,
+              ruleSourceConfig,
             }),
           )
           .with("plan-check", "gc", "verify", "bench", () =>
@@ -506,15 +425,25 @@ const createDaemonLineHandler =
 
 export const startHarnessDaemonServer = (
   repoRoot: string = process.cwd(),
+  options?: { readonly ruleSourceRoot?: WorkspaceFilePath },
 ): Promise<HarnessDaemonServerHandle> => {
   const daemonRuntime = ManagedRuntime.make(UnixSocketDaemonLive)
   return daemonRuntime
     .runPromiseExit(
       Effect.gen(function* () {
         const scope = yield* Scope.make()
-        const cachePortsRef = yield* SynchronizedRef.make<
-          ReadonlyMap<string, AstGateCachePortShape>
-        >(new Map())
+        const ruleSourceConfig: AstGateCacheRuleSourceConfig = {
+          _tag: "HashedSources",
+          ruleSourceFiles: AST_GATE_RULE_SOURCE_FILES,
+          compilerVersion: AST_GATE_TYPESCRIPT_VERSION,
+          ...(options?.ruleSourceRoot !== undefined
+            ? { ruleSourceRoot: options.ruleSourceRoot }
+            : {}),
+        }
+        const startupRuleVersion = yield* resolveDiskGateRuleVersion(ruleSourceConfig)
+        const cachePortsRef = yield* SynchronizedRef.make<ReadonlyMap<string, CachedDaemonAstPort>>(
+          new Map(),
+        )
         const datalogSessionsRef = yield* SynchronizedRef.make<
           ReadonlyMap<string, DatalogSessionShape>
         >(new Map())
@@ -528,30 +457,30 @@ export const startHarnessDaemonServer = (
             cachePortsRef,
             datalogSessionsRef,
             pollSemaphoresRef,
+            startupRuleVersion,
+            ruleSourceConfig,
           ),
         }).pipe(
           Scope.provide(scope),
-          Effect.map(
-            (info): HarnessDaemonServerHandle => ({
-              socketPath: info.socketPath,
-              close: () =>
-                daemonRuntime
-                  .runPromiseExit(Scope.close(scope, Exit.void))
-                  .then((closeExit) =>
-                    Exit.match(closeExit, {
-                      onFailure: (cause) => Promise.reject(Cause.squash(cause)),
-                      onSuccess: () => undefined,
-                    }),
-                  )
-                  .finally(() =>
-                    daemonRuntime.dispose().catch((disposeErr: unknown) => {
-                      process.stderr.write(
-                        `[harness-mcp] Daemon runtime dispose error: ${disposeErr instanceof Error ? disposeErr.message : String(disposeErr)}\n`,
-                      )
-                    }),
-                  ),
-            }),
-          ),
+          Effect.map((info): HarnessDaemonServerHandle => ({
+            socketPath: info.socketPath,
+            close: () =>
+              daemonRuntime
+                .runPromiseExit(Scope.close(scope, Exit.void))
+                .then((closeExit) =>
+                  Exit.match(closeExit, {
+                    onFailure: (cause) => Promise.reject(Cause.squash(cause)),
+                    onSuccess: () => undefined,
+                  }),
+                )
+                .finally(() =>
+                  daemonRuntime.dispose().catch((disposeErr: unknown) => {
+                    process.stderr.write(
+                      `[harness-mcp] Daemon runtime dispose error: ${disposeErr instanceof Error ? disposeErr.message : String(disposeErr)}\n`,
+                    )
+                  }),
+                ),
+          })),
           Effect.catchTag("DaemonServerError", (err) =>
             match(err.reasonKind)
               .with("already-alive", () =>
