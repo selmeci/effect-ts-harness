@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import { Cause, Effect, Option, Result } from "effect"
+import { Cause, Effect, Result } from "effect"
 import { match } from "ts-pattern"
 import {
   AstSourceContent,
@@ -7,6 +7,8 @@ import {
   type CompileInput,
   EarsRequirementKey,
   HARNESS_GATE_RULE_VERSION,
+  type MutationCacheAuth,
+  MutationEpochMillis,
   OwnedRelPath,
   SliceBranchName,
   type UnitDependency,
@@ -52,21 +54,6 @@ import {
   readTelemetryEventsSafe,
   writeSessionReportFilesSafe,
 } from "./learn-and-report.command.js"
-import { shouldSuppressLiveRepoTestSideEffects } from "./repo-path.js"
-
-export { HarnessInfraLive }
-
-export const writeDoneSessionReport = (repoRoot: string): void => {
-  if (shouldSuppressLiveRepoTestSideEffects(repoRoot)) return
-  const finalEvents = readTelemetryEventsSafe(repoRoot, nodeSyncHostIo)
-  const finalFriction = readFrictionEventsSafe(repoRoot, nodeSyncHostIo)
-  const finalReport = buildSessionReport({
-    events: finalEvents,
-    frictionEvents: finalFriction,
-    stampValid: true,
-  })
-  writeSessionReportFilesSafe(repoRoot, finalReport, nodeSyncHostIo)
-}
 import { type CliEnv, type CliResult, findWorkspaceRoot } from "./daemon-and-omnigraph.service.js"
 import { makeDoneBlockResult } from "./hook-format.js"
 import {
@@ -77,15 +64,30 @@ import {
   isVerifyMutateStampGateEnforced,
   resolveVerifyStampMutateMeta,
 } from "./mutate-stamp-gate.js"
-import { extractRequiredFlagValue } from "./repo-path.js"
+import { extractRequiredFlagValue, shouldSuppressLiveRepoTestSideEffects } from "./repo-path.js"
+import { writeLastDoneMarker } from "./session-fastpath.js"
 
 export {
   collectModifiedMutableFiles,
   type CollectModifiedMutableFilesResult,
   evaluateVerifyMutateStampGate,
+  HarnessInfraLive,
   hasModifiedMutableFiles,
   isVerifyMutateStampGateEnforced,
   resolveVerifyStampMutateMeta,
+}
+
+export const writeDoneSessionReport = (repoRoot: string): void => {
+  if (shouldSuppressLiveRepoTestSideEffects(repoRoot)) return
+  writeLastDoneMarker(repoRoot, nodeSyncHostIo)
+  const finalEvents = readTelemetryEventsSafe(repoRoot, nodeSyncHostIo)
+  const finalFriction = readFrictionEventsSafe(repoRoot, nodeSyncHostIo)
+  const finalReport = buildSessionReport({
+    events: finalEvents,
+    frictionEvents: finalFriction,
+    stampValid: true,
+  })
+  writeSessionReportFilesSafe(repoRoot, finalReport, nodeSyncHostIo)
 }
 
 export const handleMutate = (
@@ -96,6 +98,7 @@ export const handleMutate = (
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const isStrict = argv.includes("--strict")
     const isAll = argv.includes("--all")
+    const isDiff = argv.includes("--diff")
     const disableMutantCache = argv.includes("--no-cache")
 
     const cleanupStamp = (): string | undefined =>
@@ -167,11 +170,20 @@ export const handleMutate = (
       return failClosed("Empty --file target list; refusing to run mutation suite.")
     }
 
-    const hmacSecret = Option.getOrUndefined(
+    const cacheAuth: MutationCacheAuth = match(
       resolveOrCreateMutationCacheHmacSecret(WorkspaceFilePath.make(repoRoot), {
         hostIo: nodeSyncHostIo,
       }),
     )
+      .with({ _tag: "Resolved" }, ({ secret }) => ({
+        _tag: "Enabled" as const,
+        hmacSecret: secret,
+      }))
+      .with({ _tag: "Unavailable" }, ({ reason }) => ({
+        _tag: "Disabled" as const,
+        reason,
+      }))
+      .exhaustive()
 
     const report = runDomainMutationSuite(repoRoot, nodeSyncHostIo, {
       scope,
@@ -180,8 +192,10 @@ export const handleMutate = (
       targetFiles,
       baseRef,
       explicitBaseRef: baseRef !== undefined,
+      diffOnly: isDiff,
       disableMutantCache,
-      hmacSecret,
+      cacheAuth,
+      nowMs: MutationEpochMillis.make(Date.now()),
     })
 
     const cleanupErr = !report.passed ? cleanupStamp() : undefined
@@ -191,7 +205,8 @@ export const handleMutate = (
       isStrict &&
       scope === undefined &&
       targetFiles === undefined &&
-      baseRef === undefined
+      baseRef === undefined &&
+      !isDiff
     ) {
       const writeRes = Result.try(() =>
         writeMutateStamp(repoRoot, nodeSyncHostIo, {

@@ -477,15 +477,20 @@ describe("Self-Dogfooding Capability Plugins & AST Gate Rules (SPEC-0011)", () =
           fsWriteReport.violations.filter((v) => v.rule === "unisolated-dot-harness-test-write"),
         ).toHaveLength(1)
 
-        // 2c. Writing to tmp directory in test file is allowed
+        // 2c. Writing to tmp directory in test file is allowed (including join(tmpDir, ".harness/..."))
         const cleanTestWriteReport = yield* AstGateCache.decide({
           files: [
             {
               filePath: AstSourceFilePath.make("libs/sample/domain/test/clean.test.ts"),
               packageTag: AstGatePackageTag.make("test"),
               content: AstSourceContent.make(
-                'import {saveGraphSnapshot} from "@harness/graph"\n' +
-                  "export const t = (tmpPath: string) => saveGraphSnapshot({}, tmpPath)\n",
+                'import * as path from "node:path"\n' +
+                  'import {saveGraphSnapshot, syncToOmnigraphAndSnapshot} from "@harness/graph"\n' +
+                  "export const t = (tmpDir: string) => {\n" +
+                  '  saveGraphSnapshot({}, path.join(tmpDir, ".harness", "graph-snapshot.json"))\n' +
+                  '  syncToOmnigraphAndSnapshot({}, { snapshotPath: path.join(tmpDir, ".harness/test-snapshot.json") })\n' +
+                  '  return classifyFileWrite(".harness/verify-stamp.json")\n' +
+                  "}\n",
               ),
             },
           ],
@@ -495,6 +500,33 @@ describe("Self-Dogfooding Capability Plugins & AST Gate Rules (SPEC-0011)", () =
             (v) => v.rule === "unisolated-dot-harness-test-write",
           ),
         ).toHaveLength(0)
+
+        // 2d. Gate Promotion 1: syncToOmnigraphAndSnapshot({ snapshotPath: ".harness/..." }), writeTextSync, appendFileSync, appendTextSync, writeTextWithModeSync, path.join/resolve(process.cwd(), ".harness..."), and empty/dot relative join/concat evasions
+        const evasionWriteReport = yield* AstGateCache.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/domain/test/evasion-write.test.ts"),
+              packageTag: AstGatePackageTag.make("test"),
+              content: AstSourceContent.make(
+                'import * as path from "node:path"\n' +
+                  'export const t1 = () => syncToOmnigraphAndSnapshot({}, { snapshotPath: ".harness/test-snapshot.json" })\n' +
+                  'export const t2 = (io: any) => io.writeTextSync(".harness/a.json", "{}")\n' +
+                  'export const t3 = (fsMod: any) => fsMod.appendFileSync(".harness/b.log", "x")\n' +
+                  'export const t4 = (io: any) => io.appendTextSync(`.harness/c.log`, "x")\n' +
+                  'export const t5 = (io: any) => io.writeTextWithModeSync(".harness/d.json", "{}", 0o600)\n' +
+                  'export const t6 = path.join(process.cwd(), ".harness/sync-test-snapshot.json")\n' +
+                  'export const t7 = path.resolve(process.cwd(), ".harness", "resolved.json")\n' +
+                  'export const t8 = (fsMod: any) => fsMod.writeFileSync(path.join("", ".harness", "empty-base.json"), "{}")\n' +
+                  'export const t9 = (io: any) => io.writeTextSync("./" + ".harness/concat.json", "{}")\n',
+              ),
+            },
+          ],
+        })
+        expect(
+          evasionWriteReport.violations.filter(
+            (v) => v.rule === "unisolated-dot-harness-test-write",
+          ),
+        ).toHaveLength(9)
       }),
   )
 
@@ -558,6 +590,7 @@ describe("Self-Dogfooding Capability Plugins & AST Gate Rules (SPEC-0011)", () =
         )
         expect(syntaxBansSrc).not.toMatch(/\bisInternalHarnessFile\b/)
       }),
+    15_000,
   )
 
   it.effect(

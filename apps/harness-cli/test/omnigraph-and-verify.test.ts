@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } 
 import * as http from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { Effect, Layer, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
@@ -831,9 +831,117 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
         }),
       )
       expect(res.exitCode).toBe(0)
-      const parsed = JSON.parse(res.stdout) as { readonly injectSteps?: unknown }
+      const parsed = JSON.parse(res.stdout) as { readonly injectSteps?: ReadonlyArray<string> }
       expect(Array.isArray(parsed.injectSteps)).toBe(true)
+      expect(parsed.injectSteps?.some((s) => s.includes("Corrupt plan graph snapshot"))).toBe(true)
+      expect(res.stderr).toContain("Corrupt plan graph snapshot")
+      expect(existsSync(join(dir, ".harness", "session-preinvocation-cache.json"))).toBe(false)
     } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("F-13.b: session --format=antigravity validates corrupt graph-snapshot.json alone without writing cache", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-session-corrupt-impl-"))
+    try {
+      mkdirSync(join(dir, ".harness"), { recursive: true })
+      writeFileSync(join(dir, ".harness", "graph-snapshot.json"), "{corrupt-json", "utf8")
+      const res = await Effect.runPromise(
+        runDeclarativeCli(["session", "--format=antigravity"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(res.exitCode).toBe(0)
+      const parsed = JSON.parse(res.stdout) as { readonly injectSteps?: ReadonlyArray<string> }
+      expect(Array.isArray(parsed.injectSteps)).toBe(true)
+      expect(
+        parsed.injectSteps?.some((s) => s.includes("Corrupt implementation graph snapshot")),
+      ).toBe(true)
+      expect(res.stderr).toContain("Corrupt implementation graph snapshot")
+      expect(existsSync(join(dir, ".harness", "session-preinvocation-cache.json"))).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("F-11.b / F-13.a: Antigravity session fails closed on invalid HARNESS_STATE_DIR and surfaces !nodeOk / !effectLspOk / !omnigraphInitialized", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-session-f13a-"))
+    const prevStateDir = process.env.HARNESS_STATE_DIR
+    const prevOmnigraphUrl = process.env.OMNIGRAPH_URL
+    try {
+      writeFileSync(
+        join(dir, "tsconfig.base.json"),
+        JSON.stringify({ compilerOptions: {} }),
+        "utf8",
+      )
+      process.env.HARNESS_STATE_DIR = "."
+
+      const invalidStateRes = await Effect.runPromise(
+        handleDoctorOrSession(["session", "--format=antigravity"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(invalidStateRes.exitCode).toBe(0)
+      expect(existsSync(join(dir, ".harness"))).toBe(false)
+      const statePayload = JSON.parse(invalidStateRes.stdout) as {
+        readonly injectSteps: ReadonlyArray<string>
+      }
+      expect(
+        statePayload.injectSteps.some((s) =>
+          s.includes("Harness state/snapshot directory is unavailable or invalid"),
+        ),
+      ).toBe(true)
+      expect(statePayload.injectSteps.some((s) => s.includes("Effect language service"))).toBe(true)
+      expect(invalidStateRes.stderr).toContain("Harness state/snapshot directory")
+      expect(invalidStateRes.stderr).toContain("Effect language service")
+
+      Reflect.deleteProperty(process.env, "HARNESS_STATE_DIR")
+      const nodeSpy = vi.spyOn(process.versions, "node", "get").mockReturnValue("20.0.0")
+      try {
+        const oldNodeRes = await Effect.runPromise(
+          handleDoctorOrSession(["session", "--format=antigravity"], {
+            repoRoot: dir,
+            skipBackgroundDaemons: true,
+          }),
+        )
+        expect(oldNodeRes.exitCode).toBe(0)
+        const oldNodePayload = JSON.parse(oldNodeRes.stdout) as {
+          readonly injectSteps: ReadonlyArray<string>
+        }
+        expect(oldNodePayload.injectSteps.some((s) => s.includes("Node.js >= 24"))).toBe(true)
+        expect(oldNodeRes.stderr).toContain("Node.js >= 24")
+      } finally {
+        nodeSpy.mockRestore()
+      }
+
+      const nonIsolatedDir = setupNonIsolatedWorkspaceDir("harness-f13a-og-")
+      try {
+        process.env.OMNIGRAPH_URL = "http://127.0.0.1:1"
+        const ogFailRes = await Effect.runPromise(
+          handleDoctorOrSession(["session", "--format=antigravity"], {
+            repoRoot: nonIsolatedDir,
+            skipBackgroundDaemons: true,
+          }),
+        )
+        expect(ogFailRes.exitCode).toBe(0)
+        const ogPayload = JSON.parse(ogFailRes.stdout) as {
+          readonly injectSteps: ReadonlyArray<string>
+        }
+        expect(ogPayload.injectSteps.some((s) => s.includes("Omnigraph"))).toBe(true)
+        expect(ogFailRes.stderr).toContain("Omnigraph")
+        expect(
+          existsSync(join(nonIsolatedDir, ".harness", "session-preinvocation-cache.json")),
+        ).toBe(false)
+      } finally {
+        rmSync(nonIsolatedDir, { recursive: true, force: true })
+      }
+    } finally {
+      if (prevStateDir === undefined) Reflect.deleteProperty(process.env, "HARNESS_STATE_DIR")
+      else process.env.HARNESS_STATE_DIR = prevStateDir
+      if (prevOmnigraphUrl === undefined) Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
+      else process.env.OMNIGRAPH_URL = prevOmnigraphUrl
       rmSync(dir, { recursive: true, force: true })
     }
   })

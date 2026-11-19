@@ -89,18 +89,14 @@ const sendDaemonRawPayload = (
       })
       client.on("close", () => {
         settle(
-          Effect.fail(
-            new DaemonClientError({ message: "Daemon socket closed before response" }),
-          ),
+          Effect.fail(new DaemonClientError({ message: "Daemon socket closed before response" })),
         )
       })
     }),
   )
 
-const sendDaemonPayload = (
-  socketPath: string,
-  payload: string,
-): Promise<Record<string, unknown>> => sendDaemonRawPayload(socketPath, payload + "\n")
+const sendDaemonPayload = (socketPath: string, payload: string): Promise<Record<string, unknown>> =>
+  sendDaemonRawPayload(socketPath, payload + "\n")
 
 describe("harness-mcp tools", () => {
   const graph = buildHarnessGraph({
@@ -1245,7 +1241,7 @@ describe("harness-mcp tools", () => {
     await client.connect(clientTransport)
     try {
       const listed = await client.listTools()
-      expect(listed.tools).toHaveLength(16)
+      expect(listed.tools).toHaveLength(17)
       for (const tool of listed.tools) {
         expect(tool.description?.length).toBeGreaterThan(0)
         expect(tool.inputSchema.type).toBe("object")
@@ -1261,6 +1257,13 @@ describe("harness-mcp tools", () => {
         minConfidenceMillis: {},
         priors: {},
         repoRoot: {},
+      })
+      expect(byName.get("harness_git_diff")?.properties).toMatchObject({
+        repoRoot: {},
+        baseRef: {},
+        paths: {},
+        statOnly: {},
+        maxPatchChars: {},
       })
 
       const okRes = await client.callTool({
@@ -1308,7 +1311,10 @@ describe("harness-mcp tools", () => {
         { name: "harness_ontology_impact", arguments: { symbolOrSpan: "x".repeat(513) } },
         { name: "harness_ontology_check", arguments: { scope: "x".repeat(129) } },
         { name: "harness_gq_query", arguments: { queryName: "bogus" } },
-        { name: "harness_gq_query", arguments: { queryName: "resolve_effect_fn", branch: " main" } },
+        {
+          name: "harness_gq_query",
+          arguments: { queryName: "resolve_effect_fn", branch: " main" },
+        },
         {
           name: "harness_gq_query",
           arguments: { queryName: "resolve_effect_fn", params: { " badKey": "v" } },
@@ -1822,9 +1828,7 @@ describe("harness-mcp tools", () => {
     const decodeGq = Schema.decodeUnknownSync(GqQueryInputSchema)
 
     expect(decodeWhy({ symbolOrSpan: "Sample.greet" })).toEqual({ symbolOrSpan: "Sample.greet" })
-    expect(
-      decodeWhy({ symbolOrSpan: "a".repeat(512), repoRoot: "b".repeat(1024) }),
-    ).toEqual({
+    expect(decodeWhy({ symbolOrSpan: "a".repeat(512), repoRoot: "b".repeat(1024) })).toEqual({
       symbolOrSpan: "a".repeat(512),
       repoRoot: "b".repeat(1024),
     })

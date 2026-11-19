@@ -345,15 +345,13 @@ export const loadGovernanceDocsFromDisk = (
         })
         .exhaustive()
       if (isSym) {
-        if (findings !== undefined) {
-          findings.push({
-            kind: "governance-doc-read-error",
-            nodeId: relDocPath,
-            location: relDocPath,
-            message: `Refusing symlink governance doc '${relDocPath}'.`,
-            action: `Replace symlink '${relDocPath}' with a regular markdown file.`,
-          })
-        }
+        sink.push({
+          kind: "governance-doc-read-error",
+          nodeId: relDocPath,
+          location: relDocPath,
+          message: `Refusing symlink governance doc '${relDocPath}'.`,
+          action: `Replace symlink '${relDocPath}' with a regular markdown file.`,
+        })
         continue
       }
       const content = readTextOrReport(absDocPath, hostIo, repoRoot, sink)
@@ -364,15 +362,13 @@ export const loadGovernanceDocsFromDisk = (
       const parsed = match(parsedRes)
         .with({ _tag: "Ok" }, ({ doc }) => doc)
         .with({ _tag: "Err" }, ({ reason }) => {
-          if (findings !== undefined) {
-            findings.push({
-              kind: "governance-doc-read-error",
-              nodeId: relDocPath,
-              location: relDocPath,
-              message: reason,
-              action: `Fix the YAML frontmatter in '${relDocPath}' (requires non-empty id and valid status: accepted | proposed | superseded | deprecated).`,
-            })
-          }
+          sink.push({
+            kind: "governance-doc-read-error",
+            nodeId: relDocPath,
+            location: relDocPath,
+            message: reason,
+            action: `Fix the YAML frontmatter in '${relDocPath}' (requires non-empty id and valid status: accepted | proposed | superseded | deprecated).`,
+          })
           return undefined
         })
         .exhaustive()
@@ -399,18 +395,35 @@ export const loadGovernanceDocsFromDisk = (
       })
     }
   }
+  if (findings === undefined && sink.length > 0) {
+    const summary = sink
+      .map((f) => `[${f.kind}] ${f.location ?? f.nodeId}: ${f.message}`)
+      .join("\n")
+    process.stderr.write(`loadGovernanceDocsFromDisk warnings (${sink.length}):\n${summary}\n`)
+  }
   return results
 }
 
 export const loadGovernanceDocsChecked = (
   repoRoot: string,
-  hostIo?: SyncHostIo,
+  hostIo: SyncHostIo,
 ): {
   readonly docs: ReadonlyArray<GovernanceDocReference>
   readonly findings: ReadonlyArray<GcFinding>
 } => {
-  if (hostIo === undefined) {
-    return { docs: [], findings: [] }
+  if ((hostIo as SyncHostIo | undefined) === undefined) {
+    return {
+      docs: [],
+      findings: [
+        {
+          kind: "governance-doc-read-error",
+          nodeId: "loadGovernanceDocsChecked",
+          location: repoRoot,
+          message: "loadGovernanceDocsChecked called without SyncHostIo",
+          action: "Pass SyncHostIo (e.g. nodeSyncHostIo).",
+        },
+      ],
+    }
   }
   const findings: Array<GcFinding> = []
   const docs = loadGovernanceDocsFromDisk(repoRoot, hostIo, findings)
@@ -435,9 +448,9 @@ const collectWorkspaceFiles = (
   findings?: Array<GcFinding>,
   repoRoot?: string,
 ): ReadonlyArray<string> => {
-  if (!hostIo.existsSync(dir)) return []
   const sink = findings ?? []
   const root = repoRoot ?? dir
+  if (!existsGuardedOrReport(dir, hostIo, root, sink)) return []
   const entries = readdirOrReport(dir, hostIo, root, sink)
   if (entries === undefined) return []
   const result: Array<string> = []
@@ -498,7 +511,7 @@ export const collectMarkdownFilesRecursive = (
   repoRoot: string,
   findings: Array<GcFinding>,
 ): ReadonlyArray<string> => {
-  if (!hostIo.existsSync(dir)) return []
+  if (!existsGuardedOrReport(dir, hostIo, repoRoot, findings)) return []
   const entries = readdirOrReport(dir, hostIo, repoRoot, findings)
   if (entries === undefined) return []
   const out: Array<string> = []
@@ -519,21 +532,23 @@ export const collectModularPluginFiles = (
   repoRoot: string,
   hostIo: SyncHostIo,
   findings?: Array<GcFinding>,
-): ReadonlyArray<string> =>
-  [
+): ReadonlyArray<string> => {
+  const sink = findings ?? []
+  return [
     ...new Set(
       ["libs", "apps"]
         .map((d) => join(repoRoot, d))
-        .filter((d) => hostIo.existsSync(d))
+        .filter((d) => existsGuardedOrReport(d, hostIo, repoRoot, sink))
         .flatMap((d) =>
           collectWorkspaceFiles(
             d,
             hostIo,
             (n) => (n.endsWith(".ts") || n.endsWith(".tsx")) && !n.endsWith(".d.ts"),
             EXCLUDED_MODULAR_SCAN_DIRS,
-            findings,
+            sink,
             repoRoot,
           ).filter((f) => isModularPluginPath(relative(repoRoot, f).replace(/\\/g, "/"))),
         ),
     ),
   ].sort((a, b) => a.localeCompare(b))
+}

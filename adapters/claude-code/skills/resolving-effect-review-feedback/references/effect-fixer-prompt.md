@@ -80,9 +80,9 @@ Retrieved from `harness_tests_reaching`:
 4. **State-Stack & Lifecycle Completeness:** Whenever fixing a state collection, transaction stack (`txStack`), event listener, timer, or spawned child worker (`child_process`, socket), trace EVERY mutation/cleanup site (`push`, `pop`, `shift`, `splice`, `clear`, `Ref.update`, `on`, `once`, `off`, `removeListener`, `removeAllListeners`, `kill`, `terminate`, `close`, `onExit`, `acquireUseRelease`) **across the ENTIRE owning module, class, service, and all caller/callee functions** so fixes never introduce double-pops, unhandled `'error'` events, or leaks on happy, inner-error, outer-error, or interrupt paths.
 5. **Pure Deciders:** In event sourcing and gate deciders, ensure `evolve: (state, event) => State` and `*.decide` are pure mathematical functions (`R = never`).
 6. **Local Diagnostics:** Run `harness_lsp_diagnostics` on every modified file until diagnostics are clean (0 errors).
-7. **Scoped Verification:** Verify changes using `CI=true pnpm nx run <project>:test`.
+7. **Scoped Verification:** Verify changes using `CI=true pnpm nx run <project>:verify` (or targeted `CI=true pnpm vitest run <test-file>`).
 8. **STRICT BANS:**
-   - NEVER run any harness CLI lifecycle or gate command — whether via `pnpm harness <cmd>` OR `node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts <cmd>` (`verify`, `done`, `gc`, `mutate`, `plan-check`, `ontology check`, `learn`). Whole-monorepo gates are reserved exclusively for the orchestrator.
+   - NEVER run any whole-repo harness CLI lifecycle or gate command concurrently in a shared checkout — whether via `pnpm harness <cmd>` OR `node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts <cmd>` (`verify`, `done`, `gc`, `mutate --strict`, `plan-check`, `ontology check`, `learn`). Whole-monorepo gates and sequential `pnpm harness mutate --file <changed-lib-src-csv> --diff` are reserved exclusively for the orchestrator.
    - NEVER call `@modernrelay/omnigraph-mcp` write tools (`mutate`, `branches_merge`, `branches_delete`).
    - NEVER run `git commit` or `git push`.
    - NEVER add `@ts-ignore`, `@ts-expect-error`, `oxlint-disable`, `it.skip`, or dummy unused variable reads (e.g. `const _v = evt.version`).

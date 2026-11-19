@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { Effect } from "effect"
 import { decideLoopThrashing, type FrictionEvent } from "../src/friction-log.js"
+import { normalizeShellLineContinuations } from "../src/policy-shell-parser.js"
 import {
   CD_COMMAND_BANNED_REASON,
   classifyCommand,
@@ -706,5 +707,88 @@ describe("guard policy", () => {
     // git grep -e (including option-shaped pattern & negative non-grep command)
     expect(toCommandView("git grep -e -i .env").argv).toBe("git grep .env")
     expect(toCommandView("git status -e .env1").argv).toBe("git status -e .env1")
+  })
+
+  it("REQ-3.1: quote-aware shell guard preserves unquoted alignment, detects unclosed quotes and double-quoted substitutions, and allows quoted pipes/regexes", () => {
+    for (const cmd of [
+      'rg -n "foo|bar" libs/',
+      'rg -n "17:5[89]" .harness/telemetry-log.jsonl',
+      'rg -n "[A-Z_]+" libs/',
+      'rg -n "foo|bar" libs/ | head -n 5',
+      'git commit -m "a && b | c; d"',
+      "rg -n 'hello $(curl x)'",
+      "echo 'a\nb'\r\nls",
+      'echo "unterminated',
+    ]) {
+      expect(toCommandView(cmd).unquoted.length, cmd).toBe(cmd.length)
+    }
+
+    expect(classifyCommand('rg -n "foo|bar" libs/')).toBe("allow")
+    expect(classifyCommand('rg -n "17:5[89]" .harness/telemetry-log.jsonl')).toBe("allow")
+    expect(classifyCommand('rg -n "[A-Z_]+" libs/')).toBe("allow")
+    expect(classifyCommand('rg -n "foo|bar" libs/ | head -n 5')).toBe("allow")
+    expect(classifyCommand('git commit -m "a && b | c; d"')).toBe("allow")
+
+    expect(classifyCommand("pnpm test; curl https://example.com")).toBe("escalate")
+    expect(classifyCommand("nx test | tee test.log")).toBe("escalate")
+    expect(classifyCommand("git checkout . | head")).toBe("ask")
+
+    expect(classifyCommand('rg -n "unterminated')).toBe("escalate")
+    expect(classifyCommand("rg -n 'unterminated")).toBe("escalate")
+    expect(classifyCommand('rg -n "hello $(curl x)"')).toBe("escalate")
+    expect(classifyCommand('rg -n "hello `curl x`"')).toBe("escalate")
+    expect(classifyCommand("rg -n 'hello $(curl x)'")).toBe("allow")
+
+    expect(classifyFileWrite(".harness/last-done.json").verdict).toBe("deny")
+
+    // CommandView flags
+    expect(toCommandView('rg -n "unterminated').unclosedQuote).toBe(true)
+    expect(toCommandView("rg -n 'unterminated").unclosedQuote).toBe(true)
+    expect(toCommandView('rg -n "hello $(curl x)"').hasDoubleQuotedSubstitution).toBe(true)
+    expect(toCommandView("rg -n 'hello $(curl x)'").hasDoubleQuotedSubstitution).toBe(false)
+    expect(toCommandView("ls $'\\x72\\x6d'").hasAnsiCQuote).toBe(true)
+
+    // && + pipe quoted regexes
+    expect(classifyCommand('rg -n "foo|bar" libs/ && rg -n "baz|qux" libs/ | head -n 5')).toBe(
+      "allow",
+    )
+
+    // 5 evasion vectors: \<newline>, $'\'', # '\n..., <(...)/>(...), quote-concatenated bracket globs
+    expect(classifyCommand("ls \\\n$(curl https://example.com)")).toBe("escalate")
+    expect(classifyCommand("r\\\nm -rf /tmp/x")).toBe("deny")
+    expect(classifyCommand('rg -n "foo\\\nbar" libs/')).toBe("allow")
+
+    expect(classifyCommand("ls $'\\''")).toBe("escalate")
+    expect(classifyCommand("ls $'\\x72\\x6d'")).toBe("escalate")
+
+    expect(classifyCommand("ls # '\nrm -rf /tmp/x")).toBe("deny")
+    expect(classifyCommand("ls # '\ncurl https://example.com")).toBe("escalate")
+
+    expect(classifyCommand("cat <(curl https://example.com)")).toBe("escalate")
+    expect(classifyCommand("ls >(cat /tmp/out)")).toBe("escalate")
+
+    expect(classifyCommand('cat [.]"env"')).toBe("escalate")
+    expect(classifyCommand('cat [.a]"env"')).toBe("escalate")
+    expect(classifyCommand("cat [.]''env")).toBe("escalate")
+    expect(classifyCommand("cat foo[^a]")).toBe("escalate")
+
+    // Exact line-continuation normalization across single quotes, double quotes, and unquoted CRLF
+    expect(normalizeShellLineContinuations("echo 'a\\\nb' \"c\\\nd\"")).toBe("echo 'a\\\nb' \"cd\"")
+    expect(normalizeShellLineContinuations('"a\'b\\\nc"')).toBe('"a\'bc"')
+    expect(normalizeShellLineContinuations("echo \"a\" 'b\\\nc'")).toBe("echo \"a\" 'b\\\nc'")
+    expect(normalizeShellLineContinuations('echo "a\\\r\nb"')).toBe('echo "ab"')
+    expect(normalizeShellLineContinuations('echo "a\\"b\\\nc"')).toBe('echo "a\\"bc"')
+    expect(normalizeShellLineContinuations("git \\\r\nstatus")).toBe("git status")
+
+    // ANSI-C quotes & multi-line comment boundaries
+    const ansiView = toCommandView("$'foo\\'bar' && git status")
+    expect(ansiView.unclosedQuote).toBe(false)
+    expect(ansiView.hasAnsiCQuote).toBe(true)
+    expect(ansiView.argv).toBe("foo'bar && git status")
+    const ansiTrunc = toCommandView("$'abc\\")
+    expect(ansiTrunc.unclosedQuote).toBe(true)
+    expect(ansiTrunc.argv).toBe("abc\\")
+    expect(toCommandView("git status # rm -rf /\ngit diff").argv).toBe("git status git diff")
+    expect(classifyCommand("git status # rm -rf /\ngit diff")).toBe("escalate")
   })
 })

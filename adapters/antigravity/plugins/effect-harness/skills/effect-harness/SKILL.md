@@ -62,7 +62,7 @@ Always prefer in-process MCP tools over spawning shell subcommands to eliminate 
 - **Ontology & Architecture:** `harness_ontology_check`, `harness_ontology_why`, `harness_ontology_impact` (trace and audit EARS specs and ADR invariants).
 - **Test Impact Analysis:** `harness_tests_reaching` (determines affected test files for touched symbols).
 - **Session Telemetry:** `harness_telemetry_report` (reviews session metrics and friction logs).
-- **Graph Queries:** `harness_gq_query`, `harness_structural_search`.
+- **Graph Queries & Diffs:** `harness_gq_query`, `harness_structural_search`, `harness_git_diff`.
 - **Task Lifecycle Gates (CLI only):** Use `pnpm harness <cmd>` (`plan-check`, `gc --strict`, `mutate --strict`, `verify`, `done`) strictly for task state transitions and cryptographic verify-stamp generation.
 - **Long-Running CLI Gate Execution (`WaitMsBeforeAsync`):** When running CLI lifecycle gates (`pnpm harness plan-check`, `pnpm harness gc --strict`, `pnpm harness mutate --strict`, `pnpm harness verify`, `pnpm harness done`), always pass `WaitMsBeforeAsync: 10000` to `run_command`. If a command goes to the background, rely on Antigravity's reactive wakeup — never poll in a loop with `manage_task status` or `schedule` timers.
 - **Advisory `clef-flash` (TypeSafe System One API):** `clef-flash` is a structured System One model (`POST http://localhost:11434/v1/systemone` via `DecisionModel.decide` + `@effect/ai-typesafe`), never a generative/chat LLM. Use `pnpm harness doctor` for warm-up/health checks; `/api/generate`, `/api/chat`, `/v1/chat/completions`, `/v1/completions`, and `ollama run clef-flash` are unsupported and blocked.
@@ -87,6 +87,7 @@ The plugin provides three complementary MCP servers in `mcp_config.json` (`harne
 - **`harness_gq_query`** (`queryName?: string`, `querySource?: string`, `params?: Record<string, unknown>`, `branch?: string`): Executes canonical Omnigraph `.gq` queries from `libs/harness/graph/queries/harness.gq`.
 - **`harness_graph_infer`** / **`harness_graph_complete`** / **`harness_graph_rewrite`**: Runs incremental Datalog (`@electric-sql/d2ts`) inference, computes missing traceability edges, and evaluates double-pushout (DPO) graph rewrite rules.
 - **`harness_telemetry_report`** (`format?: "json" | "markdown"`, `cumulative?: boolean`, `repoRoot?: string`): Generates the session observability scorecard and tool-usage health report.
+- **`harness_git_diff`** (`repoRoot?: string`, `baseRef?: string`, `paths?: string[]`, `statOnly?: boolean`, `maxPatchChars?: number`): Returns bounded read-only unified diff, stats, and untracked-file previews via `git --no-optional-locks` without acquiring repository lock files.
 
 ### `@modernrelay/omnigraph-mcp` (Property Graph & Branching)
 

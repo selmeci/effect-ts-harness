@@ -33,6 +33,8 @@ import {
   GateRuleId,
   GateViolationMessage,
   GitCommitSha,
+  GitDiffErrorReason,
+  GitDiffExecutionError,
   HARNESS_AST_GATE_CACHE_FILENAME,
   HARNESS_DECISION_CACHE_FILENAME,
   HARNESS_GATE_RULE_VERSION,
@@ -456,7 +458,7 @@ describe("@harness/contract schemas", () => {
   })
 
   it("computes SHA-256 identically to node:crypto across empty, ASCII, multi-block, and multi-byte UTF-8 inputs", () => {
-    expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v11")
+    expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v12")
     expect(compareCodeUnits("a", "b")).toBe(-1)
     expect(compareCodeUnits("b", "a")).toBe(1)
     expect(compareCodeUnits("a", "a")).toBe(0)
@@ -596,9 +598,15 @@ describe("@harness/contract schemas", () => {
     expect(() => Schema.decodeUnknownSync(NxTierTag)("type:unknown")).toThrow()
   })
 
-  it("validates review routing contracts, branded literals, and 16 canonical MCP tool names", () => {
-    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(16)
+  it("validates review routing contracts, branded literals, and 17 canonical MCP tool names", () => {
+    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(17)
     expect(CANONICAL_MCP_TOOL_NAMES).toContain(McpToolName.make("harness_review_route"))
+    expect(CANONICAL_MCP_TOOL_NAMES).toContain(McpToolName.make("harness_git_diff"))
+    const gitDiffErr = new GitDiffExecutionError({
+      reason: GitDiffErrorReason.make("Invalid base ref"),
+    })
+    expect(gitDiffErr._tag).toBe("GitDiffExecutionError")
+    expect(gitDiffErr.reason).toBe(GitDiffErrorReason.make("Invalid base ref"))
 
     expect(SPECIALIST_REVIEWER_IDS).toHaveLength(7)
     for (const id of SPECIALIST_REVIEWER_IDS) {

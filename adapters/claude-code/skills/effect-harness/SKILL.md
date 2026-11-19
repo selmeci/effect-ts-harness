@@ -60,7 +60,7 @@ Always prefer in-process MCP tools over spawning shell subcommands to eliminate 
 - **Ontology & Architecture:** `harness_ontology_check`, `harness_ontology_why`, `harness_ontology_impact` (trace and audit EARS specs and ADR invariants).
 - **Test Impact Analysis:** `harness_tests_reaching` (determines affected test files for touched symbols).
 - **Session Telemetry:** `harness_telemetry_report` (reviews session metrics and friction logs).
-- **Graph Queries:** `harness_gq_query`, `harness_structural_search`.
+- **Graph Queries & Diffs:** `harness_gq_query`, `harness_structural_search`, `harness_git_diff`.
 - **Task Lifecycle Gates (CLI only):** Use `pnpm harness <cmd>` (`plan-check`, `gc --strict`, `mutate --strict`, `verify`, `done`) strictly for task state transitions and cryptographic verify-stamp generation.
 - **Advisory `clef-flash` (TypeSafe System One API):** `clef-flash` is a structured System One model (`POST http://localhost:11434/v1/systemone` via `DecisionModel.decide` + `@effect/ai-typesafe`), never a generative/chat LLM. Use `pnpm harness doctor` for warm-up/health checks; `/api/generate`, `/api/chat`, `/v1/chat/completions`, `/v1/completions`, and `ollama run clef-flash` are unsupported and blocked.
 
@@ -84,6 +84,7 @@ The harness provides three complementary MCP servers in `.mcp.json` (`harness-mc
 - **`harness_gq_query`** (`queryName?: string`, `querySource?: string`, `params?: Record<string, unknown>`, `branch?: string`): Executes canonical Omnigraph `.gq` queries from `libs/harness/graph/queries/harness.gq`.
 - **`harness_graph_infer`** / **`harness_graph_complete`** / **`harness_graph_rewrite`**: Runs incremental Datalog (`@electric-sql/d2ts`) inference, computes missing traceability edges, and evaluates double-pushout (DPO) graph rewrite rules.
 - **`harness_telemetry_report`** (`format?: "json" | "markdown"`, `cumulative?: boolean`, `repoRoot?: string`): Generates the session observability scorecard and tool-usage health report.
+- **`harness_git_diff`** (`repoRoot?: string`, `baseRef?: string`, `paths?: string[]`, `statOnly?: boolean`, `maxPatchChars?: number`): Returns bounded read-only unified diff, stats, and untracked-file previews via `git --no-optional-locks` without acquiring repository lock files.
 
 ### `@modernrelay/omnigraph-mcp` (Property Graph & Branching)
 

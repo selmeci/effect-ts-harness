@@ -37,7 +37,7 @@ flowchart TD
 
   subgraph Apps["type:app — Entrypoints & Sample Stack"]
     CLI["harness-cli\napps/harness-cli (effect/cli + NodeRuntime)"]
-    MCP["harness-mcp\napps/harness-mcp (ManagedRuntime, 16 tools)"]
+    MCP["harness-mcp\napps/harness-mcp (ManagedRuntime, 17 tools)"]
     SAMPLE["sample-app\napps/sample (Alchemy + Workers + DO)"]
     SAMPLE_WEB["sample-web\napps/sample-web (Vite + React + AtomHttpApi)"]
   end
@@ -263,7 +263,7 @@ Invoke via `node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/inde
 
 ### `harness-mcp` Server (`apps/harness-mcp`)
 
-Exposes 16 structural, ontology, Datalog/DPO, diagnostics, and telemetry MCP tools over stdio:
+Exposes 17 structural, diff, ontology, Datalog/DPO, diagnostics, and telemetry MCP tools over stdio:
 
 | MCP Tool                    | Arguments                                                             | Description                                                                                                                                                                                                                                                                       |
 | :-------------------------- | :-------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -283,6 +283,7 @@ Exposes 16 structural, ontology, Datalog/DPO, diagnostics, and telemetry MCP too
 | `harness_graph_rewrite`     | `{ ... }`                                                             | Evaluates double-pushout (DPO) graph rewrite rules over the workspace graph.                                                                                                                                                                                                      |
 | `harness_lsp_diagnostics`   | `{ file?, filePath?, project?, tsconfigPath?, overlays?, repoRoot? }` | Runs `@effect/tsgo` (`tsgo -b --noEmit`) and returns structured diagnostics (including `@effect/language-service` errors) with file, line, column, and code.                                                                                                                      |
 | `harness_telemetry_report`  | `{ format?, cumulative?, repoRoot? }`                                 | Computes the current session health report (`SessionReport.decide`) from `.harness/telemetry-log.jsonl`.                                                                                                                                                                          |
+| `harness_git_diff`          | `{ repoRoot?, baseRef?, paths?, statOnly?, maxPatchChars? }`          | Returns bounded read-only unified diff, stats, and untracked-file previews via `git --no-optional-locks` (default `120000` chars, max `400000`).                                                                                                                                  |
 
 ---
 

@@ -1,10 +1,12 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
-import { Result } from "effect"
+import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
-import { AstSourceFilePath, SourceLineNumber } from "@harness/contract"
+import { AstSourceFilePath, BatchMutantResultsSchema, SourceLineNumber } from "@harness/contract"
 import { ts } from "@harness/graph"
 import type { SyncHostExecResult, SyncHostIo } from "@harness/service/host-io"
 import {
@@ -22,6 +24,7 @@ import {
   writeVerifyStamp,
 } from "../src/index.js"
 import { parseDstSeedEnv } from "../src/verify-stamp.js"
+import { runDomainMutationSuite } from "../src/mutation-check.js"
 import {
   classifyMutantSubprocessResult,
   runVitestTargetList,
@@ -154,6 +157,19 @@ describe("mutation-subprocess-helpers: classifyMutantSubprocessResult", () => {
     expect(res.kind).toBe("abort")
   })
 
+  it("classifies exitCode 1 with FAIL header in stderr (Vitest v5 --bail=1) as killed", () => {
+    const res = classifyMutantSubprocessResult(
+      "m-stderr-fail",
+      Result.succeed({
+        _tag: "Exited",
+        exitCode: 1,
+        stdout: "",
+        stderr: " FAIL  libs/demo/test/a.test.ts > fails\n",
+      }),
+    )
+    expect(res).toEqual({ kind: "outcome", status: "killed" })
+  })
+
   it("aborts when stdout is empty and stderr contains infra errors on exitCode 1 or 0", () => {
     const res1 = classifyMutantSubprocessResult(
       "m-3",
@@ -176,6 +192,24 @@ describe("mutation-subprocess-helpers: classifyMutantSubprocessResult", () => {
       }),
     )
     expect(res0.kind).toBe("abort")
+
+    const missingPassSummary = classifyMutantSubprocessResult(
+      "m-5",
+      Result.succeed({
+        _tag: "Exited",
+        exitCode: 0,
+        stdout: "runner exited without vitest test summary\n",
+        stderr: "",
+      }),
+    )
+    match(missingPassSummary)
+      .with({ kind: "abort" }, ({ diagnostic }) => {
+        expect(diagnostic).toContain("missingVitestPassSummary=true")
+      })
+      .with({ kind: "outcome" }, () => {
+        expect.unreachable("Expected abort when Vitest pass summary is missing")
+      })
+      .exhaustive()
   })
 })
 
@@ -397,7 +431,10 @@ describe("mutation-subprocess-helpers & mutant-ast-generator: Wave 2B #63 satura
               id: "m-1",
               result: { _tag: "Exited", exitCode: 1, stdout: "Tests  1 failed (1)\n", stderr: "" },
             },
-            { id: "m-2", result: { _tag: "Signaled", signal: "SIGKILL", stdout: "", stderr: "" } },
+            {
+              id: "m-2",
+              result: { _tag: "Exited", exitCode: 0, stdout: "Tests  1 passed (1)\n", stderr: "" },
+            },
           ]),
           stderr: "",
         }),
@@ -410,10 +447,42 @@ describe("mutation-subprocess-helpers & mutant-ast-generator: Wave 2B #63 satura
       )
       match(batchOk)
         .with({ _tag: "Ok" }, ({ outcomes }) => {
-          expect(outcomes.map((o) => o.status)).toEqual(["killed", "killed"])
+          expect(outcomes.map((o) => o.status)).toEqual(["killed", "survived"])
         })
         .with({ _tag: "Abort" }, ({ diagnostic }) => {
           expect.unreachable(`Expected batchOk, got: ${diagnostic}`)
+        })
+        .exhaustive()
+
+      // F-2.a & F-2.b: batch Signaled preserves signal name (SIGTERM) and fails closed (abort)
+      const batchSignaled = runVitestTargetList(
+        dir,
+        domainFile,
+        makeBatchIo({
+          _tag: "Exited",
+          exitCode: 0,
+          stdout: JSON.stringify([
+            {
+              id: "m-1",
+              result: { _tag: "Exited", exitCode: 1, stdout: "Tests  1 failed (1)\n", stderr: "" },
+            },
+            { id: "m-2", result: { _tag: "Signaled", signal: "SIGTERM", stdout: "", stderr: "" } },
+          ]),
+          stderr: "",
+        }),
+        { NO_COLOR: "1" },
+        [testPath],
+        originalSource,
+        mutatedSchemaSource,
+        backupPath,
+        [m1, m2],
+      )
+      match(batchSignaled)
+        .with({ _tag: "Abort" }, ({ diagnostic }) => {
+          expect(diagnostic).toContain("terminated by signal SIGTERM")
+        })
+        .with({ _tag: "Ok" }, () => {
+          expect.unreachable("Expected batchSignaled to abort")
         })
         .exhaustive()
 
@@ -987,6 +1056,404 @@ describe("mutation-subprocess-helpers & mutant-ast-generator: Wave 2B #63 satura
       expect(() => parseDstSeedEnv("-5")).toThrow('Invalid DST_SEED value "-5"')
       expect(parseDstSeedEnv("42")).toBe(42)
       expect(parseDstSeedEnv(undefined)).toBeUndefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("REQ-1.2: batched per-package baseline runs 1 baseline call across multiple files and falls back to per-file baseline on package failure", () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "pkg-baseline-test-"))
+    try {
+      const srcDir = join(repoRoot, "libs", "demo", "domain", "src")
+      const testDir = join(repoRoot, "libs", "demo", "domain", "test")
+      mkdirSync(srcDir, { recursive: true })
+      mkdirSync(testDir, { recursive: true })
+      writeFileSync(join(repoRoot, "package.json"), '{"name":"tmp"}\n')
+      writeFileSync(join(srcDir, "a.ts"), "export const eqA = (x: number, y: number) => x === y\n")
+      writeFileSync(join(srcDir, "b.ts"), "export const eqB = (x: number, y: number) => x === y\n")
+      writeFileSync(join(testDir, "a.test.ts"), 'import { eqA } from "../src/a.js"\n')
+      writeFileSync(join(testDir, "b.test.ts"), 'import { eqB } from "../src/b.js"\n')
+
+      let baselineCalls = 0
+      const notGit: SyncHostExecResult = {
+        _tag: "Exited",
+        exitCode: 128,
+        stdout: "",
+        stderr: "not a git repository",
+      }
+      const okIo: SyncHostIo = {
+        ...testHostIo,
+        execFileSync: (cmd, _args, opts) => {
+          if (cmd === "git") return notGit
+          if (opts?.env?.["HARNESS_ACTIVE_MUTANT_ID"] === undefined) {
+            baselineCalls += 1
+            return { _tag: "Exited", exitCode: 0, stdout: "Tests  2 passed (2)\n", stderr: "" }
+          }
+          return {
+            _tag: "Exited",
+            exitCode: 1,
+            stdout: "FAIL  libs/demo/domain/test/a.test.ts\nTests  1 failed (1)\n",
+            stderr: "",
+          }
+        },
+      }
+      const okReport = runDomainMutationSuite(repoRoot, okIo, {
+        includeAllLines: true,
+        disableMutantCache: true,
+      })
+      expect(okReport.passed).toBe(true)
+      expect(okReport.evaluatedFiles).toEqual([
+        "libs/demo/domain/src/a.ts",
+        "libs/demo/domain/src/b.ts",
+      ])
+      expect(baselineCalls).toBe(1)
+
+      // When package baseline fails and a.test.ts passes while b.test.ts fails,
+      // fall back to per-file baseline and emit exact failing file 'libs/demo/domain/src/b.ts'
+      const failIo: SyncHostIo = {
+        ...testHostIo,
+        execFileSync: (cmd, args, opts) => {
+          if (cmd === "git") return notGit
+          if (opts?.env?.["HARNESS_ACTIVE_MUTANT_ID"] === undefined) {
+            if (args.some((a) => a.includes("b.test.ts"))) {
+              return { _tag: "Exited", exitCode: 1, stdout: "", stderr: "b-broken" }
+            }
+            return { _tag: "Exited", exitCode: 0, stdout: "Tests  1 passed (1)\n", stderr: "" }
+          }
+          return {
+            _tag: "Exited",
+            exitCode: 1,
+            stdout: "FAIL  libs/demo/domain/test/a.test.ts\nTests  1 failed (1)\n",
+            stderr: "",
+          }
+        },
+      }
+      // Make a.test.ts import only a.ts (already true), and use targetFiles: [a.ts] first to verify single-file < 2 guard
+      let singleBaselineCalls = 0
+      const singleReport = runDomainMutationSuite(
+        repoRoot,
+        {
+          ...okIo,
+          execFileSync: (cmd, args, opts) => {
+            if (cmd !== "git" && opts?.env?.["HARNESS_ACTIVE_MUTANT_ID"] === undefined) {
+              singleBaselineCalls += 1
+            }
+            return okIo.execFileSync(cmd, args, opts)
+          },
+        },
+        {
+          targetFiles: ["libs/demo/domain/src/a.ts"],
+          includeAllLines: true,
+          disableMutantCache: true,
+        },
+      )
+      expect(singleReport.passed).toBe(true)
+      expect(singleBaselineCalls).toBe(1)
+
+      // In failIo: a.test.ts only reaches a.ts? Wait: findReachingTestFilesChecked returns all tests in test/ unless filtered,
+      // so mock a.test.ts-only pass when only a.test.ts is in args; if both a.test.ts and b.test.ts are in args,
+      // package baseline fails and a.ts passes if a.ts only imports a.test.ts — let's ensure a.test.ts has a vitest import so
+      // partitionReachingTestFilesChecked puts a.test.ts in primaryTests for a.ts and b.test.ts in primaryTests for b.ts.
+      const failReport = runDomainMutationSuite(repoRoot, failIo, {
+        includeAllLines: true,
+        disableMutantCache: true,
+      })
+      expect(failReport.passed).toBe(false)
+      expect(failReport.diagnostic).toContain(
+        "[mutation-check] Baseline test suite failed on unmutated file 'libs/demo/domain/src/",
+      )
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("F-Adv.9: runVitestTargetList scales baseline, batch, and sequential timeouts with reachingTestFiles.length", () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "scaled-timeout-"))
+    try {
+      const srcDir = join(repoRoot, "libs", "demo", "domain", "src")
+      mkdirSync(srcDir, { recursive: true })
+      const modPath = join(srcDir, "mod.ts")
+      const src = "export const eq = (a: number, b: number) => a === b\n"
+      writeFileSync(modPath, src)
+      const mutants = discoverDomainMutants("libs/demo/domain/src/mod.ts", src)
+      const bundle = compileMutantSchemaModule("libs/demo/domain/src/mod.ts", src, mutants)
+      const seenTimeouts: Array<number | undefined> = []
+      const io: SyncHostIo = {
+        ...testHostIo,
+        execFileSync: (_cmd, _args, opts) => {
+          seenTimeouts.push(opts?.timeoutMs)
+          return opts?.env?.["HARNESS_ACTIVE_MUTANT_ID"] === undefined
+            ? { _tag: "Exited", exitCode: 0, stdout: "Tests  5 passed (5)\n", stderr: "" }
+            : { _tag: "Exited", exitCode: 1, stdout: "Tests  1 failed (1)\n", stderr: "" }
+        },
+      }
+      const fiveTests = ["t1.test.ts", "t2.test.ts", "t3.test.ts", "t4.test.ts", "t5.test.ts"]
+      const res = runVitestTargetList(
+        repoRoot,
+        {
+          scope: "demo",
+          pkgDir: "domain",
+          tier: "domain",
+          fullPath: modPath,
+          relFile: "libs/demo/domain/src/mod.ts",
+        },
+        io,
+        {},
+        fiveTests,
+        src,
+        bundle.schemaSource,
+        join(repoRoot, ".harness", "mutation-backup.json"),
+        mutants.slice(0, 1),
+      )
+      expect(res._tag).toBe("Ok")
+      expect(seenTimeouts).toEqual([50_000, 50_000])
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("REQ-1.3: diffOnly filters explicit targetFiles to git diff modified lines and skips unchanged files", () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "diff-only-target-"))
+    try {
+      const srcDir = join(repoRoot, "libs", "demo", "domain", "src")
+      const testDir = join(repoRoot, "libs", "demo", "domain", "test")
+      mkdirSync(srcDir, { recursive: true })
+      mkdirSync(testDir, { recursive: true })
+      writeFileSync(join(repoRoot, "package.json"), '{"name":"tmp"}\n')
+      writeFileSync(
+        join(srcDir, "a.ts"),
+        "export const f1 = (x: number) => x === 1\nexport const f2 = (x: number) => x === 2\n",
+      )
+      writeFileSync(join(srcDir, "b.ts"), "export const g1 = (x: number) => x === 1\n")
+      writeFileSync(
+        join(testDir, "a.test.ts"),
+        'import { f1, f2 } from "../src/a.js"\nimport { g1 } from "../src/b.js"\n',
+      )
+
+      const unifiedDiff = [
+        "diff --git a/libs/demo/domain/src/a.ts b/libs/demo/domain/src/a.ts",
+        "--- a/libs/demo/domain/src/a.ts",
+        "+++ b/libs/demo/domain/src/a.ts",
+        "@@ -2,0 +2,1 @@",
+        "+export const f2 = (x: number) => x === 2",
+      ].join("\n")
+
+      const mutatedLinesSeen: Array<number> = []
+      const diffIo: SyncHostIo = {
+        ...testHostIo,
+        execFileSync: (cmd, args, opts) => {
+          if (cmd === "git") {
+            if (args.includes("rev-parse")) {
+              return { _tag: "Exited", exitCode: 0, stdout: "true\n", stderr: "" }
+            }
+            if (args.includes("diff")) {
+              return { _tag: "Exited", exitCode: 0, stdout: unifiedDiff, stderr: "" }
+            }
+            return { _tag: "Exited", exitCode: 0, stdout: "", stderr: "" }
+          }
+          const activeId = opts?.env?.["HARNESS_ACTIVE_MUTANT_ID"]
+          if (activeId === undefined) {
+            return { _tag: "Exited", exitCode: 0, stdout: "Tests  1 passed (1)\n", stderr: "" }
+          }
+          const lineMatch = /:(\d+)(?:@|:)/.exec(activeId)
+          if (lineMatch !== null) mutatedLinesSeen.push(Number(lineMatch[1]))
+          return {
+            _tag: "Exited",
+            exitCode: 1,
+            stdout: "FAIL  libs/demo/domain/test/a.test.ts\nTests  1 failed (1)\n",
+            stderr: "",
+          }
+        },
+      }
+
+      const report = runDomainMutationSuite(repoRoot, diffIo, {
+        targetFiles: ["libs/demo/domain/src/a.ts", "libs/demo/domain/src/b.ts"],
+        diffOnly: true,
+        disableMutantCache: true,
+      })
+      expect(report.passed).toBe(true)
+      expect(report.diffMode).toBe("working-tree")
+      expect(report.diffMatchedFiles).toEqual(["libs/demo/domain/src/a.ts"])
+      expect(report.evaluatedFiles).toEqual(["libs/demo/domain/src/a.ts"])
+      expect(report.totalMutants).toBeGreaterThan(0)
+      expect(mutatedLinesSeen.length).toBeGreaterThan(0)
+      expect(mutatedLinesSeen.every((line) => line === 2)).toBe(true)
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("F-1.a & F-2.b: batch solo recheck recovers flaky batch timeout/unconfirmed exit and parallel-vitest-batch isolates HARNESS_STATE_DIR", () => {
+    const {
+      dir,
+      testPath,
+      backupPath,
+      batchRunnerPath,
+      originalSource,
+      mutatedSchemaSource,
+      domainFile,
+      m1,
+      m2,
+    } = makeSubprocessFixture()
+    try {
+      const soloRecheckedIds: Array<string> = []
+      const recheckRecoverIo: SyncHostIo = {
+        ...testHostIo,
+        execFileSync: (_cmd, args, opts) => {
+          if (args[0] === batchRunnerPath) {
+            return {
+              _tag: "Exited",
+              exitCode: 0,
+              stdout: JSON.stringify([
+                { id: "m-1", result: { _tag: "TimedOut", stdout: "", stderr: "" } },
+                {
+                  id: "m-2",
+                  result: {
+                    _tag: "Exited",
+                    exitCode: 1,
+                    stdout: "FAIL  libs/demo/core/test/mod.test.ts\n",
+                    stderr: "",
+                  },
+                },
+              ]),
+              stderr: "",
+            }
+          }
+          const activeId = opts?.env?.["HARNESS_ACTIVE_MUTANT_ID"]
+          if (activeId === undefined) {
+            return { _tag: "Exited", exitCode: 0, stdout: "Tests  1 passed (1)\n", stderr: "" }
+          }
+          soloRecheckedIds.push(activeId)
+          if (activeId === "m-1") {
+            return { _tag: "Exited", exitCode: 0, stdout: "Tests  1 passed (1)\n", stderr: "" }
+          }
+          return { _tag: "Exited", exitCode: 1, stdout: "Tests  1 failed (1)\n", stderr: "" }
+        },
+      }
+      const recovered = runVitestTargetList(
+        dir,
+        domainFile,
+        recheckRecoverIo,
+        { NO_COLOR: "1" },
+        [testPath],
+        originalSource,
+        mutatedSchemaSource,
+        backupPath,
+        [m1, m2],
+      )
+      expect(soloRecheckedIds).toEqual(["m-1", "m-2"])
+      match(recovered)
+        .with({ _tag: "Ok" }, ({ outcomes, nonCacheableIds }) => {
+          expect(outcomes.map((o) => [o.mutant.id, o.status])).toEqual([
+            ["m-1", "survived"],
+            ["m-2", "killed"],
+          ])
+          expect(nonCacheableIds.has("m-2")).toBe(false)
+        })
+        .with({ _tag: "Abort" }, ({ diagnostic }) => {
+          expect.unreachable(`Expected recovered Ok, got: ${diagnostic}`)
+        })
+        .exhaustive()
+
+      // Persistent solo TimedOut aborts fail-closed
+      const persistentTimeoutIo: SyncHostIo = {
+        ...testHostIo,
+        execFileSync: (_cmd, args, opts) => {
+          if (args[0] === batchRunnerPath) {
+            return {
+              _tag: "Exited",
+              exitCode: 0,
+              stdout: JSON.stringify([
+                { id: "m-1", result: { _tag: "TimedOut", stdout: "", stderr: "" } },
+                {
+                  id: "m-2",
+                  result: {
+                    _tag: "Exited",
+                    exitCode: 1,
+                    stdout: "Tests  1 failed (1)\n",
+                    stderr: "",
+                  },
+                },
+              ]),
+              stderr: "",
+            }
+          }
+          if (opts?.env?.["HARNESS_ACTIVE_MUTANT_ID"] === undefined) {
+            return { _tag: "Exited", exitCode: 0, stdout: "Tests  1 passed (1)\n", stderr: "" }
+          }
+          return { _tag: "TimedOut", stdout: "", stderr: "" }
+        },
+      }
+      const persistentAbort = runVitestTargetList(
+        dir,
+        domainFile,
+        persistentTimeoutIo,
+        { NO_COLOR: "1" },
+        [testPath],
+        originalSource,
+        mutatedSchemaSource,
+        backupPath,
+        [m1, m2],
+      )
+      expect(persistentAbort._tag).toBe("Abort")
+
+      // Real tools/parallel-vitest-batch.mjs: worker HARNESS_STATE_DIR isolation + cleanup + TimedOut + SIGTERM
+      const batchScript = fileURLToPath(
+        new URL("../../../../tools/parallel-vitest-batch.mjs", import.meta.url),
+      )
+      const fakeVitest = join(dir, "fake-batch-vitest.mjs")
+      const stateDirLog = join(dir, "state-dirs.jsonl")
+      writeFileSync(
+        fakeVitest,
+        `import { appendFileSync } from "node:fs";
+const id = process.env.HARNESS_ACTIVE_MUTANT_ID;
+appendFileSync(${JSON.stringify(stateDirLog)}, JSON.stringify({ id, stateDir: process.env.HARNESS_STATE_DIR ?? null }) + "\\n");
+if (id === "m-sigterm") {
+  process.kill(process.pid, "SIGTERM");
+} else if (id === "m-timeout") {
+  setTimeout(() => {}, 10_000);
+} else {
+  process.stdout.write("Tests  1 failed (1)\\n");
+  process.exit(1);
+}
+`,
+        "utf8",
+      )
+      const sharedParentStateDir = join(dir, "shared-parent-state")
+      const proc = spawnSync(process.execPath, [batchScript], {
+        cwd: dir,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HARNESS_STATE_DIR: sharedParentStateDir,
+          HARNESS_BATCH_VITEST_CLI: fakeVitest,
+          HARNESS_BATCH_CWD: dir,
+          HARNESS_BATCH_TIMEOUT_MS: "250",
+          HARNESS_BATCH_TESTS_JSON: JSON.stringify(["a.test.ts"]),
+          HARNESS_BATCH_MUTANTS_JSON: JSON.stringify(["m-ok", "m-sigterm", "m-timeout"]),
+        },
+      })
+      expect(proc.status).toBe(0)
+      const parsed = Schema.decodeSync(BatchMutantResultsSchema)(proc.stdout)
+      const byId = new Map<string, (typeof parsed)[number]["result"]>(
+        parsed.map((e) => [e.id, e.result]),
+      )
+      expect(byId.get("m-ok")?._tag).toBe("Exited")
+      expect(byId.get("m-sigterm")).toMatchObject({ _tag: "Signaled", signal: "SIGTERM" })
+      expect(byId.get("m-timeout")?._tag).toBe("TimedOut")
+
+      const recorded = readFileSync(stateDirLog, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { id: string; stateDir: string | null })
+      expect(recorded).toHaveLength(3)
+      const stateDirs = recorded.map((r) => r.stateDir)
+      expect(stateDirs.every((s) => typeof s === "string" && s.length > 0)).toBe(true)
+      expect(stateDirs.every((s) => s !== sharedParentStateDir)).toBe(true)
+      expect(new Set(stateDirs).size).toBe(3)
+      for (const s of stateDirs) {
+        if (s !== null) expect(existsSync(s)).toBe(false)
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

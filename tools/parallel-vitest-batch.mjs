@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process"
-import { availableParallelism } from "node:os"
+import { mkdtempSync, rmSync } from "node:fs"
+import { availableParallelism, tmpdir } from "node:os"
+import { join, resolve } from "node:path"
 
 const vitestCli = process.env["HARNESS_BATCH_VITEST_CLI"] ?? ""
 const cwd = process.env["HARNESS_BATCH_CWD"] ?? process.cwd()
@@ -21,59 +23,126 @@ delete childBaseEnv["HARNESS_BATCH_TESTS_JSON"]
 delete childBaseEnv["HARNESS_BATCH_MUTANTS_JSON"]
 delete childBaseEnv["HARNESS_ACTIVE_MUTANT_ID"]
 
-const runOneMutant = (mutantId) =>
-  new Promise((resolve) => {
-    let stdout = ""
-    let stderr = ""
-    let timedOut = false
-    let settled = false
-    const child = spawn(
-      process.execPath,
-      [vitestCli, "run", "--bail=1", "--maxWorkers=2", ...testFiles],
-      {
-        cwd,
-        env: { ...childBaseEnv, HARNESS_ACTIVE_MUTANT_ID: mutantId },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    )
-    const timer = setTimeout(() => {
-      timedOut = true
+const activeChildren = new Set()
+const activeStateDirs = new Set()
+
+const cleanupActiveWorkers = () => {
+  for (const child of activeChildren) {
+    try {
       child.kill("SIGKILL")
-    }, timeoutMs)
-    const finish = (result) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      resolve({ id: mutantId, result })
+    } catch {
+      // Best-effort termination of active batch worker
     }
-    child.stdout?.on("data", (chunk) => {
-      stdout += String(chunk)
-    })
-    child.stderr?.on("data", (chunk) => {
-      stderr += String(chunk)
-    })
-    child.on("error", (err) => {
-      finish({
-        _tag: "SpawnFailed",
-        spawnError: err instanceof Error ? err.message : String(err),
-        stdout: truncateOutput(stdout),
-        stderr: truncateOutput(stderr),
+  }
+  activeChildren.clear()
+  for (const dir of activeStateDirs) {
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      // Best-effort cleanup of per-worker temporary state directory
+    }
+  }
+  activeStateDirs.clear()
+}
+
+for (const [sig, code] of [
+  ["SIGINT", 2],
+  ["SIGTERM", 15],
+]) {
+  process.once(sig, () => {
+    cleanupActiveWorkers()
+    process.exit(128 + code)
+  })
+}
+
+const runOneMutant = async (mutantId) => {
+  const workerStateDir = resolve(mkdtempSync(join(tmpdir(), "harness-batch-state-")))
+  activeStateDirs.add(workerStateDir)
+  const childEnv = {
+    ...childBaseEnv,
+    HARNESS_STATE_DIR: workerStateDir,
+    HARNESS_ACTIVE_MUTANT_ID: mutantId,
+  }
+  try {
+    return await new Promise((resolvePromise) => {
+      let stdout = ""
+      let stderr = ""
+      let timedOut = false
+      let settled = false
+      let child
+      try {
+        child = spawn(
+          process.execPath,
+          [vitestCli, "run", "--bail=1", "--maxWorkers=1", ...testFiles],
+          {
+            cwd,
+            env: childEnv,
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        )
+      } catch (err) {
+        const rawErr = (err instanceof Error ? err.message : String(err)).trim()
+        resolvePromise({
+          id: mutantId,
+          result: {
+            _tag: "SpawnFailed",
+            spawnError: rawErr.length > 0 ? rawErr : "Spawn failed",
+            stdout: "",
+            stderr: "",
+          },
+        })
+        return
+      }
+      activeChildren.add(child)
+      const timer = setTimeout(() => {
+        timedOut = true
+        child.kill("SIGKILL")
+      }, timeoutMs)
+      const finish = (result) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        activeChildren.delete(child)
+        resolvePromise({ id: mutantId, result })
+      }
+      child.stdout?.on("data", (chunk) => {
+        stdout += String(chunk)
+      })
+      child.stderr?.on("data", (chunk) => {
+        stderr += String(chunk)
+      })
+      child.on("error", (err) => {
+        const rawErr = (err instanceof Error ? err.message : String(err)).trim()
+        finish({
+          _tag: "SpawnFailed",
+          spawnError: rawErr.length > 0 ? rawErr : "Spawn failed",
+          stdout: truncateOutput(stdout),
+          stderr: truncateOutput(stderr),
+        })
+      })
+      child.on("close", (code, signal) => {
+        const out = truncateOutput(stdout)
+        const errOut = truncateOutput(stderr)
+        if (timedOut) {
+          finish({ _tag: "TimedOut", stdout: out, stderr: errOut })
+          return
+        }
+        if (signal !== null) {
+          finish({ _tag: "Signaled", signal, stdout: out, stderr: errOut })
+          return
+        }
+        finish({ _tag: "Exited", exitCode: code ?? -1, stdout: out, stderr: errOut })
       })
     })
-    child.on("close", (code, signal) => {
-      const out = truncateOutput(stdout)
-      const errOut = truncateOutput(stderr)
-      if (timedOut) {
-        finish({ _tag: "TimedOut", stdout: out, stderr: errOut })
-        return
-      }
-      if (signal !== null) {
-        finish({ _tag: "Signaled", signal, stdout: out, stderr: errOut })
-        return
-      }
-      finish({ _tag: "Exited", exitCode: code ?? -1, stdout: out, stderr: errOut })
-    })
-  })
+  } finally {
+    activeStateDirs.delete(workerStateDir)
+    try {
+      rmSync(workerStateDir, { recursive: true, force: true })
+    } catch {
+      // Best-effort cleanup of per-worker temporary state directory
+    }
+  }
+}
 
 const results = Array.from({ length: mutantIds.length })
 if (mutantIds.length > 0) {
@@ -86,7 +155,11 @@ if (mutantIds.length > 0) {
       results[idx] = await runOneMutant(mutantIds[idx])
     }
   })
-  await Promise.all(workers)
+  try {
+    await Promise.all(workers)
+  } finally {
+    cleanupActiveWorkers()
+  }
 }
 
 const payload = JSON.stringify(results)

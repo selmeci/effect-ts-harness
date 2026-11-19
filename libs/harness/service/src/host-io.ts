@@ -146,17 +146,14 @@ export type ExclusiveWriteResult =
   | ExclusiveWriteFailed
 
 export interface ExtendedHostIo extends SyncHostIo {
+  readonly readBytesPrefixSync: (filePath: string, maxBytes: number) => Uint8Array
   readonly rmRecursiveSync: (targetPath: string) => void
   readonly cpRecursiveSync: (srcPath: string, destPath: string) => void
   readonly mkdtempSync: (prefix: string) => string
   readonly statMtimeMsSync: (filePath: string) => number | undefined
   readonly statModeSync: (filePath: string) => number | undefined
   readonly chmodSync: (filePath: string, mode: number) => void
-  readonly writeTextWithModeSync: (
-    filePath: string,
-    content: string,
-    mode: number,
-  ) => void
+  readonly writeTextWithModeSync: (filePath: string, content: string, mode: number) => void
   readonly tryWriteExclusiveTextSync: (
     filePath: string,
     content: string,

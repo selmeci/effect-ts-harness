@@ -152,8 +152,21 @@ export const evaluateSpanSaturationViolations = (
   return violations
 }
 
-export const normalizePriorMillis = (raw: number): number =>
-  raw > 0 && raw < 1 ? Math.round(raw * 1000) : Math.round(raw)
+/**
+ * Normalizes an equivalence prior expressed on the canonical `0..1000` millis scale
+ * (`SPEC-0009 REQ-3.1`, `ConfidenceMillis`).
+ *
+ * Unit-interval `[0, 1]` floats are intentionally not rescaled because `1 === 1.0` in JS:
+ * rescaling `<= 1` fails open by inflating `1` millis (`0.1%`) to `1000` millis (`100%`),
+ * while rescaling `< 1` created a `0.999 -> 999` vs `1.0 -> 1` cliff. Non-finite and
+ * negative inputs clamp fail-closed to `0`; values above `1000` clamp to `1000`.
+ */
+export const normalizePriorMillis = (raw: number): number => {
+  if (!Number.isFinite(raw)) {
+    return 0
+  }
+  return Math.min(1000, Math.max(0, Math.round(raw)))
+}
 
 export const isMutantMarkedEquivalent = (
   outcome: MutantOutcome,

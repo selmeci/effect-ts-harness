@@ -12,14 +12,16 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
-import { Option } from "effect"
+import { Option, Redacted } from "effect"
 import { match } from "ts-pattern"
 import {
   AstSourceFilePath,
   ContentSha256,
+  ErrorReasonMessage,
   MUTATION_CACHE_FILENAME,
   MUTATION_CACHE_SCHEMA_VERSION,
   MutantCacheId,
+  type MutationCacheAuth,
   type MutationCacheEntry,
   MutationCacheHmacSecret,
   MutationCacheStore,
@@ -44,6 +46,7 @@ import {
 import {
   MAX_MUTATION_CACHE_AGE_MS,
   MAX_MUTATION_CACHE_ENTRIES,
+  computeFileMutationClosureDigest,
   computeMutantCacheKey,
   computeMutationContextDigestsChecked,
   computeMutationEntryMac,
@@ -54,11 +57,24 @@ import {
   saveMutationCacheAtomic,
   verifyMutationEntryMac,
 } from "../src/mutation/mutation-cache.js"
+import {
+  flushMutationCache,
+  preparePackageBaselines,
+  recordKilledMutantsToCache,
+} from "../src/mutation/mutation-suite-helpers.js"
 import { resolveHarnessStateDir } from "../src/worktree.js"
 import { testHostIo } from "./helpers/test-host-io.js"
 
-const TEST_HMAC_SECRET = MutationCacheHmacSecret.make("hardening-hmac-secret-0123456789abcdef")
-const ALT_HMAC_SECRET = MutationCacheHmacSecret.make("different-hmac-secret-0123456789abcdef")
+const TEST_HMAC_SECRET = Redacted.make(
+  MutationCacheHmacSecret.make("hardening-hmac-secret-0123456789abcdef"),
+)
+const ALT_HMAC_SECRET = Redacted.make(
+  MutationCacheHmacSecret.make("different-hmac-secret-0123456789abcdef"),
+)
+const TEST_CACHE_AUTH: MutationCacheAuth = {
+  _tag: "Enabled",
+  hmacSecret: TEST_HMAC_SECRET,
+}
 
 const notGit: SyncHostExecResult = {
   _tag: "Exited",
@@ -155,13 +171,35 @@ describe("MutationCache hardening & regressions", () => {
     const tampered = { ...entry1, mutantId: MutantCacheId.make("m-evil") }
     expect(verifyMutationEntryMac(TEST_HMAC_SECRET, tampered)).toBe(false)
 
+    // Length-prefixed MAC prevents delimiter collision when a field contains ':'
+    const macA = computeMutationEntryMac(TEST_HMAC_SECRET, {
+      key: computeContentSha256("collision"),
+      file: AstSourceFilePath.make("a/b"),
+      mutantId: MutantCacheId.make("1:c"),
+      status: "killed",
+      recordedAt: MutationCacheTimestamp.make(recordedAt),
+    })
+    const macB = computeMutationEntryMac(TEST_HMAC_SECRET, {
+      key: computeContentSha256("collision"),
+      file: AstSourceFilePath.make("a/b:1"),
+      mutantId: MutantCacheId.make("c"),
+      status: "killed",
+      recordedAt: MutationCacheTimestamp.make(recordedAt),
+    })
+    expect(macA).not.toBe(macB)
+
     const store: MutationCacheStore = {
       version: MUTATION_CACHE_SCHEMA_VERSION,
       entries: { [k1]: entry1WithAccess, [k2]: makeSignedEntry(k2, "m2", recordedAt) },
     }
 
-    // Missing hmacSecret fails closed
-    const noSecret = partitionMutationCacheLookup({ candidateKeys: [k1, k2], store })
+    // Disabled auth fails closed
+    const noSecret = partitionMutationCacheLookup({
+      candidateKeys: [k1, k2],
+      store,
+      auth: { _tag: "Disabled", reason: ErrorReasonMessage.make("no secret") },
+      nowMs: MutationEpochMillis.make(Date.parse(recordedAt)),
+    })
     expect(noSecret.hitKeys).toEqual([])
     expect(noSecret.missKeys).toEqual([k1, k2])
 
@@ -169,7 +207,7 @@ describe("MutationCache hardening & regressions", () => {
     const exactZeroAge = partitionMutationCacheLookup({
       candidateKeys: [k1, k2],
       store,
-      hmacSecret: TEST_HMAC_SECRET,
+      auth: TEST_CACHE_AUTH,
       nowMs: MutationEpochMillis.make(Date.parse(recordedAt)),
       maxAgeMs: MutationMaxAgeMillis.make(MAX_MUTATION_CACHE_AGE_MS),
     })
@@ -178,7 +216,7 @@ describe("MutationCache hardening & regressions", () => {
     const exactTtlBoundary = partitionMutationCacheLookup({
       candidateKeys: [k1, k2],
       store,
-      hmacSecret: TEST_HMAC_SECRET,
+      auth: TEST_CACHE_AUTH,
       nowMs: MutationEpochMillis.make(Date.parse(recordedAt) + MAX_MUTATION_CACHE_AGE_MS),
       maxAgeMs: MutationMaxAgeMillis.make(MAX_MUTATION_CACHE_AGE_MS),
     })
@@ -188,7 +226,7 @@ describe("MutationCache hardening & regressions", () => {
     const expired = partitionMutationCacheLookup({
       candidateKeys: [k1, k2],
       store,
-      hmacSecret: TEST_HMAC_SECRET,
+      auth: TEST_CACHE_AUTH,
       nowMs: MutationEpochMillis.make(Date.parse(recordedAt) + MAX_MUTATION_CACHE_AGE_MS + 1),
     })
     expect(expired.hitKeys).toEqual([])
@@ -197,7 +235,7 @@ describe("MutationCache hardening & regressions", () => {
     const futureRecorded = partitionMutationCacheLookup({
       candidateKeys: [k1],
       store,
-      hmacSecret: TEST_HMAC_SECRET,
+      auth: TEST_CACHE_AUTH,
       nowMs: MutationEpochMillis.make(Date.parse("2026-11-18T09:00:00.000Z")),
     })
     expect(futureRecorded.hitKeys).toEqual([])
@@ -223,16 +261,16 @@ describe("MutationCache hardening & regressions", () => {
         repoRoot,
         { version: MUTATION_CACHE_SCHEMA_VERSION, entries },
         testHostIo,
-        TEST_HMAC_SECRET,
+        TEST_CACHE_AUTH,
       )
-      const loaded = loadMutationCache(repoRoot, testHostIo, TEST_HMAC_SECRET)
+      const loaded = loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)
       expect(loaded.entries[hotKey]).toBeDefined()
     } finally {
       rmSync(repoRoot, { recursive: true, force: true })
     }
   })
 
-  it("F-2.1c & F-8.1: runDomainMutationSuite warns on stderr and disables cache when hmacSecret is missing or context has symlink", () => {
+  it("F-2.1c & F-8.1: runDomainMutationSuite warns on stderr and disables cache when auth is unavailable or symlinked", () => {
     const src = "export const isSame = (a: number, b: number): boolean => a === b\n"
     const { repoRoot } = setupTempRepo(src)
     const stderrChunks: Array<string> = []
@@ -266,6 +304,17 @@ describe("MutationCache hardening & regressions", () => {
         existsSync(join(resolveHarnessStateDir(repoRoot), "cache", MUTATION_CACHE_FILENAME)),
       ).toBe(false)
 
+      // Disabled cacheAuth logs exact failure reason
+      stderrChunks.length = 0
+      const disabledReport = runDomainMutationSuite(repoRoot, mockIo, {
+        includeAllLines: true,
+        cacheAuth: { _tag: "Disabled", reason: ErrorReasonMessage.make("secret file corrupt") },
+      })
+      expect(disabledReport.passed).toBe(true)
+      expect(stderrChunks.join("")).toContain(
+        "[mutation-check] Warning: Mutation cache disabled (secret file corrupt).",
+      )
+
       // Symlink in tools/ triggers Disabled with exact path
       stderrChunks.length = 0
       mkdirSync(join(repoRoot, "tools"), { recursive: true })
@@ -285,7 +334,7 @@ describe("MutationCache hardening & regressions", () => {
 
       runDomainMutationSuite(repoRoot, mockIo, {
         includeAllLines: true,
-        hmacSecret: TEST_HMAC_SECRET,
+        cacheAuth: TEST_CACHE_AUTH,
       })
       expect(stderrChunks.join("")).toContain("[mutation-check] Warning: Mutation cache disabled (")
       expect(stderrChunks.join("")).toContain(linkPath)
@@ -307,7 +356,7 @@ describe("MutationCache hardening & regressions", () => {
         )._tag,
       ).toBe("Skipped")
 
-      expect(loadMutationCacheWithStatus(repoRoot, testHostIo, TEST_HMAC_SECRET)._tag).toBe(
+      expect(loadMutationCacheWithStatus(repoRoot, testHostIo, TEST_CACHE_AUTH)._tag).toBe(
         "Missing",
       )
 
@@ -334,7 +383,7 @@ describe("MutationCache hardening & regressions", () => {
         }),
         "utf8",
       )
-      const loaded = loadMutationCacheWithStatus(repoRoot, testHostIo, TEST_HMAC_SECRET)
+      const loaded = loadMutationCacheWithStatus(repoRoot, testHostIo, TEST_CACHE_AUTH)
       match(loaded)
         .with({ _tag: "Loaded" }, ({ droppedEntryCount, store }) => {
           expect(droppedEntryCount).toBe(2)
@@ -347,7 +396,7 @@ describe("MutationCache hardening & regressions", () => {
 
       // Corrupt top-level JSON is quarantined to .corrupt
       writeFileSync(cacheFile, "{broken", "utf8")
-      const corruptRes = loadMutationCacheWithStatus(repoRoot, testHostIo, TEST_HMAC_SECRET)
+      const corruptRes = loadMutationCacheWithStatus(repoRoot, testHostIo, TEST_CACHE_AUTH)
       match(corruptRes)
         .with({ _tag: "Corrupt" }, ({ quarantinedPath }) => {
           expect(quarantinedPath).toBe(`${cacheFile}.corrupt`)
@@ -360,15 +409,13 @@ describe("MutationCache hardening & regressions", () => {
 
       // Invalid HARNESS_STATE_DIR resolving to repoRoot returns Unsafe / Skipped without throwing
       process.env["HARNESS_STATE_DIR"] = "."
-      expect(loadMutationCacheWithStatus(repoRoot, testHostIo, TEST_HMAC_SECRET)._tag).toBe(
-        "Unsafe",
-      )
+      expect(loadMutationCacheWithStatus(repoRoot, testHostIo, TEST_CACHE_AUTH)._tag).toBe("Unsafe")
       expect(
         saveMutationCacheAtomic(
           repoRoot,
           { version: MUTATION_CACHE_SCHEMA_VERSION, entries: {} },
           testHostIo,
-          TEST_HMAC_SECRET,
+          TEST_CACHE_AUTH,
         )._tag,
       ).toBe("Skipped")
 
@@ -380,10 +427,10 @@ describe("MutationCache hardening & regressions", () => {
           version: MUTATION_CACHE_SCHEMA_VERSION,
           entries: { [kGood]: goodEntry },
         }
-        expect(saveMutationCacheAtomic(repoRoot, extStore, testHostIo, TEST_HMAC_SECRET)).toEqual({
+        expect(saveMutationCacheAtomic(repoRoot, extStore, testHostIo, TEST_CACHE_AUTH)).toEqual({
           _tag: "Saved",
         })
-        expect(loadMutationCache(repoRoot, testHostIo, TEST_HMAC_SECRET)).toEqual(extStore)
+        expect(loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)).toEqual(extStore)
       } finally {
         rmSync(outsideParent, { recursive: true, force: true })
       }
@@ -494,10 +541,10 @@ describe("MutationCache hardening & regressions", () => {
       }
       const r1 = runDomainMutationSuite(repoRoot, mixedIo, {
         includeAllLines: true,
-        hmacSecret: TEST_HMAC_SECRET,
+        cacheAuth: TEST_CACHE_AUTH,
       })
       expect(r1.survivedCount).toBe(1)
-      const cachedAfter1 = loadMutationCache(repoRoot, testHostIo, TEST_HMAC_SECRET)
+      const cachedAfter1 = loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)
       const cachedMutantIds1 = Object.values(cachedAfter1.entries).map((e) => e.mutantId)
       expect(cachedMutantIds1).not.toContain(survivedId)
       expect(cachedMutantIds1).toContain(fallbackKilledId)
@@ -506,7 +553,7 @@ describe("MutationCache hardening & regressions", () => {
       executedMutantIds.length = 0
       const r2 = runDomainMutationSuite(repoRoot, mixedIo, {
         includeAllLines: true,
-        hmacSecret: TEST_HMAC_SECRET,
+        cacheAuth: TEST_CACHE_AUTH,
       })
       expect(r2.cachedKilledCount).toBe(mutants.length - 1)
       expect(executedMutantIds).toEqual([survivedId])
@@ -516,21 +563,21 @@ describe("MutationCache hardening & regressions", () => {
       rmSync(stateDir, { recursive: true, force: true })
       runDomainMutationSuite(repoRoot, mixedIo, {
         includeAllLines: true,
-        hmacSecret: TEST_HMAC_SECRET,
+        cacheAuth: TEST_CACHE_AUTH,
         disableMutantCache: true,
       })
       expect(existsSync(join(stateDir, "cache", MUTATION_CACHE_FILENAME))).toBe(false)
 
       runDomainMutationSuite(repoRoot, testHostIo, {
         includeAllLines: true,
-        hmacSecret: TEST_HMAC_SECRET,
+        cacheAuth: TEST_CACHE_AUTH,
         testRunner: () => "killed",
       })
       expect(existsSync(join(stateDir, "cache", MUTATION_CACHE_FILENAME))).toBe(false)
 
       runDomainMutationSuite(repoRoot, testHostIo, {
         includeAllLines: true,
-        hmacSecret: TEST_HMAC_SECRET,
+        cacheAuth: TEST_CACHE_AUTH,
         sourceCodeOverlays: { "libs/sample/domain/src/logic.ts": src },
       })
       expect(existsSync(join(stateDir, "cache", MUTATION_CACHE_FILENAME))).toBe(false)
@@ -540,7 +587,12 @@ describe("MutationCache hardening & regressions", () => {
   })
 
   it("F-16.4 & F-1.1 & S-1.7: key invalidates on root/pkg configs, non-ts lib files, docs, agent-patterns, tools, and runtimeVersion", () => {
-    const src = "export const isSame = (a: number, b: number) => a === b\n"
+    const src = [
+      'import { otherFn } from "@other/infra"',
+      'const refs = ["docs/specs/s1.md", "agent-patterns/guide.md", "tools/helper.ts"]',
+      "export const isSame = (a: number, b: number) => a === b && otherFn() > 0 && refs.length > 0",
+      "",
+    ].join("\n")
     const { repoRoot, testFile } = setupTempRepo(src)
     try {
       mkdirSync(join(repoRoot, "agent-patterns"), { recursive: true })
@@ -568,6 +620,16 @@ describe("MutationCache hardening & regressions", () => {
         "utf8",
       )
       writeFileSync(
+        join(repoRoot, "libs", "other", "infra", "package.json"),
+        '{"name":"@other/infra"}\n',
+        "utf8",
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "other", "infra", "src", "index.ts"),
+        "export const otherFn = () => 1\n",
+        "utf8",
+      )
+      writeFileSync(
         join(repoRoot, "libs", "other", "infra", "src", "schema.pg"),
         "CREATE TABLE t(id int);\n",
         "utf8",
@@ -590,8 +652,22 @@ describe("MutationCache hardening & regressions", () => {
       const origSha = computeContentSha256(src)
       const schemaSha = computeContentSha256("schema")
       const reachingTestHashes = unwrapOpt(hashReachingTestFiles(repoRoot, [testFile], testHostIo))
-      const keyFor = (digests: typeof d0) =>
-        computeMutantCacheKey({
+      const keyFor = (digests: typeof d0) => {
+        const closure = match(
+          computeFileMutationClosureDigest({
+            repoRoot,
+            relFile: "libs/sample/domain/src/logic.ts",
+            allReachingTests: ["libs/sample/domain/test/logic.test.ts"],
+            digests,
+            hostIo: testHostIo,
+          }),
+        )
+          .with({ _tag: "Ok" }, (ok) => ok)
+          .with({ _tag: "Disabled" }, ({ reason }) => {
+            throw new Error(`Expected Ok closure: ${reason}`)
+          })
+          .exhaustive()
+        return computeMutantCacheKey({
           pkgKey: PackageRelKey.make("sample/domain"),
           relFile: AstSourceFilePath.make("libs/sample/domain/src/logic.ts"),
           originalContentSha256: origSha,
@@ -599,7 +675,9 @@ describe("MutationCache hardening & regressions", () => {
           mutant,
           reachingTestHashes,
           digests,
+          closureDigest: closure.closureDigest,
         })
+      }
 
       const k0 = keyFor(d0)
       const mutators: ReadonlyArray<readonly [string, () => void]> = [
@@ -721,10 +799,10 @@ describe("MutationCache hardening & regressions", () => {
       }
       const aborted = runDomainMutationSuite(repoRoot, mockIo, {
         includeAllLines: true,
-        hmacSecret: TEST_HMAC_SECRET,
+        cacheAuth: TEST_CACHE_AUTH,
       })
       expect(aborted.passed).toBe(false)
-      const savedAfterAbort = loadMutationCache(repoRoot, testHostIo, TEST_HMAC_SECRET)
+      const savedAfterAbort = loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)
       expect(Object.keys(savedAfterAbort.entries).length).toBeGreaterThan(0)
 
       // F-16.5: concurrent/interleaved run writes disjoint entry without clobbering existing
@@ -746,7 +824,7 @@ describe("MutationCache hardening & regressions", () => {
         },
       }
       // Inject extraKey on disk, then run logic2.ts only; both entries must survive
-      const current = loadMutationCache(repoRoot, testHostIo, TEST_HMAC_SECRET)
+      const current = loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)
       saveMutationCacheAtomic(
         repoRoot,
         {
@@ -754,13 +832,13 @@ describe("MutationCache hardening & regressions", () => {
           entries: { ...current.entries, [extraKey]: extraEntry },
         },
         testHostIo,
-        TEST_HMAC_SECRET,
+        TEST_CACHE_AUTH,
       )
       runDomainMutationSuite(repoRoot, mergedIo, {
         targetFiles: ["libs/zzz/domain/src/logic2.ts"],
-        hmacSecret: TEST_HMAC_SECRET,
+        cacheAuth: TEST_CACHE_AUTH,
       })
-      const afterConcurrent = loadMutationCache(repoRoot, testHostIo, TEST_HMAC_SECRET)
+      const afterConcurrent = loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)
       expect(afterConcurrent.entries[extraKey]).toBeDefined()
       expect(Object.keys(afterConcurrent.entries).length).toBeGreaterThanOrEqual(2)
     } finally {
@@ -811,7 +889,7 @@ describe("MutationCache hardening & regressions", () => {
       }
       const report = runDomainMutationSuite(repoRoot, missingBatchIo, {
         includeAllLines: true,
-        hmacSecret: TEST_HMAC_SECRET,
+        cacheAuth: TEST_CACHE_AUTH,
       })
       expect(report.passed).toBe(false)
       expect(report.diagnostic).toBeDefined()
@@ -850,7 +928,7 @@ describe("MutationCache hardening & regressions", () => {
           return testHostIo.isSymbolicLinkSync(p)
         },
       }
-      expect(saveMutationCacheAtomic(repoRoot, store, enoentSymIo, TEST_HMAC_SECRET)._tag).toBe(
+      expect(saveMutationCacheAtomic(repoRoot, store, enoentSymIo, TEST_CACHE_AUTH)._tag).toBe(
         "Saved",
       )
 
@@ -861,7 +939,7 @@ describe("MutationCache hardening & regressions", () => {
           return testHostIo.isSymbolicLinkSync(p)
         },
       }
-      match(saveMutationCacheAtomic(repoRoot, store, eaccesSymIo, TEST_HMAC_SECRET))
+      match(saveMutationCacheAtomic(repoRoot, store, eaccesSymIo, TEST_CACHE_AUTH))
         .with({ _tag: "Skipped" }, ({ reason }) => {
           expect(reason).toContain("unsafe cache ancestor path")
         })
@@ -880,7 +958,7 @@ describe("MutationCache hardening & regressions", () => {
         },
       }
       rmSync(cacheDir, { recursive: true, force: true })
-      expect(saveMutationCacheAtomic(repoRoot, store, nonStrCodeIo, TEST_HMAC_SECRET)._tag).toBe(
+      expect(saveMutationCacheAtomic(repoRoot, store, nonStrCodeIo, TEST_CACHE_AUTH)._tag).toBe(
         "Saved",
       )
 
@@ -893,14 +971,14 @@ describe("MutationCache hardening & regressions", () => {
         },
       }
       rmSync(cacheDir, { recursive: true, force: true })
-      expect(saveMutationCacheAtomic(repoRoot, store, nullThrowIo, TEST_HMAC_SECRET)._tag).toBe(
+      expect(saveMutationCacheAtomic(repoRoot, store, nullThrowIo, TEST_CACHE_AUTH)._tag).toBe(
         "Saved",
       )
 
       mkdirSync(join(externalReal, "cache"), { recursive: true })
       symlinkSync(externalReal, externalSym)
       process.env["HARNESS_STATE_DIR"] = externalSym
-      const symStateSave = saveMutationCacheAtomic(repoRoot, store, testHostIo, TEST_HMAC_SECRET)
+      const symStateSave = saveMutationCacheAtomic(repoRoot, store, testHostIo, TEST_CACHE_AUTH)
       match(symStateSave)
         .with({ _tag: "Skipped" }, ({ reason }) => {
           expect(reason).toContain("unsafe cache ancestor path")
@@ -920,14 +998,44 @@ describe("MutationCache hardening & regressions", () => {
     const { repoRoot: root2 } = setupTempRepo(src)
     try {
       mkdirSync(join(root2, "apps", "demo", "test"), { recursive: true })
+      // F-7.a: semver range in devDependencies is ignored; exact installed vitest version resolves
       writeFileSync(
         join(root2, "package.json"),
-        JSON.stringify({ name: "app-fallback", devDependencies: { vitest: "9.8.7" } }),
+        JSON.stringify({ name: "app-exact", devDependencies: { vitest: "^99.0.0" } }),
         "utf8",
       )
       writeFileSync(
         join(root2, "apps", "demo", "test", "helper.ts"),
         "export const h = 1\n",
+        "utf8",
+      )
+      const lockDigests = match(computeMutationContextDigestsChecked(root2, testHostIo))
+        .with({ _tag: "Ok" }, ({ digests }) => digests)
+        .with({ _tag: "Disabled" }, ({ reason }) => {
+          throw new Error(`Expected Ok: ${reason}`)
+        })
+        .exhaustive()
+      expect(lockDigests.runtimeVersion).not.toContain("^99.0.0")
+
+      // pnpm-lock.yaml exact vitest version resolution
+      writeFileSync(
+        join(root2, "pnpm-lock.yaml"),
+        "importers:\n  .:\n    devDependencies:\n      vitest:\n        specifier: ^4.3.2\n        version: 4.3.2(@types/node@26.0.0)\n",
+        "utf8",
+      )
+      const fromLock = match(computeMutationContextDigestsChecked(root2, testHostIo))
+        .with({ _tag: "Ok" }, ({ digests }) => digests)
+        .with({ _tag: "Disabled" }, ({ reason }) => {
+          throw new Error(`Expected Ok from lockfile: ${reason}`)
+        })
+        .exhaustive()
+      expect(fromLock.runtimeVersion).toContain("vitest:4.3.2")
+
+      // node_modules/vitest/package.json exact version overrides lockfile, whereas range is rejected
+      mkdirSync(join(root2, "node_modules", "vitest"), { recursive: true })
+      writeFileSync(
+        join(root2, "node_modules", "vitest", "package.json"),
+        JSON.stringify({ name: "vitest", version: "9.8.7" }),
         "utf8",
       )
       const okDigests = match(computeMutationContextDigestsChecked(root2, testHostIo))
@@ -937,6 +1045,18 @@ describe("MutationCache hardening & regressions", () => {
         })
         .exhaustive()
       expect(okDigests.runtimeVersion).toContain("vitest:9.8.7")
+
+      // Missing vitest across repoRoot and ancestors fails closed as Disabled
+      rmSync(join(root2, "pnpm-lock.yaml"))
+      rmSync(join(root2, "node_modules"), { recursive: true, force: true })
+      const noVitestIo: SyncHostIo = {
+        ...testHostIo,
+        existsSync: (p) => (p.endsWith("vitest/package.json") ? false : testHostIo.existsSync(p)),
+      }
+      expect(computeMutationContextDigestsChecked(root2, noVitestIo)).toEqual({
+        _tag: "Disabled",
+        reason: "unable to resolve exact installed vitest version",
+      })
 
       symlinkSync(
         join(root2, "apps", "demo", "test", "helper.ts"),
@@ -982,6 +1102,367 @@ it("second should not run", () => {
       expect(executed).toEqual(["first"])
     } finally {
       rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("REQ-1.1 hardening: computeFileMutationClosureDigest fails closed on symlinked or unreadable transitive imports", () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "mutation-closure-hard-"))
+    try {
+      const srcDir = join(repoRoot, "libs", "sample", "domain", "src")
+      const testDir = join(repoRoot, "libs", "sample", "domain", "test")
+      mkdirSync(srcDir, { recursive: true })
+      mkdirSync(testDir, { recursive: true })
+      writeFileSync(join(repoRoot, "package.json"), '{"name":"tmp"}\n')
+      writeFileSync(
+        join(srcDir, "logic.ts"),
+        'import { d } from "./dep.js"\nexport const f = () => d\n',
+      )
+      writeFileSync(join(srcDir, "dep.ts"), "export const d = 1\n")
+      writeFileSync(join(testDir, "logic.test.ts"), 'import { f } from "../src/logic.js"\n')
+
+      const digests = match(computeMutationContextDigestsChecked(repoRoot, testHostIo))
+        .with({ _tag: "Ok" }, ({ digests: d }) => d)
+        .with({ _tag: "Disabled" }, ({ reason }) => {
+          throw new Error(`Expected Ok: ${reason}`)
+        })
+        .exhaustive()
+
+      const depPath = join(srcDir, "dep.ts")
+      const unreadableIo: SyncHostIo = {
+        ...testHostIo,
+        readTextSync: (p) => {
+          if (p === depPath) throw new Error("EACCES: dep")
+          return testHostIo.readTextSync(p)
+        },
+      }
+      expect(
+        computeFileMutationClosureDigest({
+          repoRoot,
+          relFile: "libs/sample/domain/src/logic.ts",
+          allReachingTests: ["libs/sample/domain/test/logic.test.ts"],
+          digests,
+          hostIo: unreadableIo,
+        })._tag,
+      ).toBe("Disabled")
+
+      const symlinkIo: SyncHostIo = {
+        ...testHostIo,
+        isSymbolicLinkSync: (p) => (p === depPath ? true : testHostIo.isSymbolicLinkSync(p)),
+      }
+      expect(
+        computeFileMutationClosureDigest({
+          repoRoot,
+          relFile: "libs/sample/domain/src/logic.ts",
+          allReachingTests: ["libs/sample/domain/test/logic.test.ts"],
+          digests,
+          hostIo: symlinkIo,
+        })._tag,
+      ).toBe("Disabled")
+
+      // Realpath escape / symlinked ancestor inside closure fails closed
+      const escapeIo: SyncHostIo = {
+        ...testHostIo,
+        realpathSync: (p) => (p === depPath ? "/etc/passwd" : testHostIo.realpathSync(p)),
+      }
+      expect(
+        computeFileMutationClosureDigest({
+          repoRoot,
+          relFile: "libs/sample/domain/src/logic.ts",
+          allReachingTests: ["libs/sample/domain/test/logic.test.ts"],
+          digests,
+          hostIo: escapeIo,
+        })._tag,
+      ).toBe("Disabled")
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("REQ-1.2 & cache helpers: preparePackageBaselines, recordKilledMutantsToCache, and flushMutationCache", () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "suite-helpers-hard-"))
+    try {
+      const srcDir = join(repoRoot, "libs", "demo", "domain", "src")
+      const testDir = join(repoRoot, "libs", "demo", "domain", "test")
+      mkdirSync(srcDir, { recursive: true })
+      mkdirSync(testDir, { recursive: true })
+      writeFileSync(join(repoRoot, "package.json"), '{"name":"tmp"}\n')
+      const fileA = {
+        scope: "demo",
+        pkgDir: "domain",
+        tier: "domain" as const,
+        fullPath: join(srcDir, "a.ts"),
+        relFile: "libs/demo/domain/src/a.ts",
+      }
+      const fileB = {
+        scope: "demo",
+        pkgDir: "domain",
+        tier: "domain" as const,
+        fullPath: join(srcDir, "b.ts"),
+        relFile: "libs/demo/domain/src/b.ts",
+      }
+      writeFileSync(fileA.fullPath, "export const eqA = (x: number, y: number) => x === y\n")
+      writeFileSync(fileB.fullPath, "export const eqB = (x: number, y: number) => x === y\n")
+      writeFileSync(join(testDir, "a.test.ts"), 'import { eqA } from "../src/a.js"\n')
+      writeFileSync(join(testDir, "b.test.ts"), 'import { eqB } from "../src/b.js"\n')
+
+      const baselineTestsSeen: Array<string> = []
+      const prepIo: SyncHostIo = {
+        ...testHostIo,
+        execFileSync: (_cmd, args) => {
+          baselineTestsSeen.push(...args)
+          return { _tag: "Exited", exitCode: 0, stdout: "Tests  1 passed (1)\n", stderr: "" }
+        },
+      }
+      const diffLinesMap = new Map<string, ReadonlySet<number>>([[fileA.relFile, new Set([1])]])
+      const prepRes = preparePackageBaselines({
+        repoRoot,
+        targets: [fileA, fileB],
+        hostIo: prepIo,
+        baseSubprocessEnv: {},
+        diffLinesMap,
+        bypassDiffFilter: false,
+      })
+      const prepOk = match(prepRes)
+        .with({ _tag: "Ok" }, (ok) => ok)
+        .with({ _tag: "ReadError" }, ({ relFile, reason }) => {
+          throw new Error(`Expected Ok for ${relFile}: ${reason}`)
+        })
+        .exhaustive()
+      expect(prepOk.partitionCache.has(fileA.relFile)).toBe(true)
+      expect(prepOk.partitionCache.has(fileB.relFile)).toBe(false)
+      expect(baselineTestsSeen.some((a) => a.includes("b.test.ts"))).toBe(false)
+
+      // recordKilledMutantsToCache
+      const mutant = makeSampleMutant()
+      const key = computeContentSha256("k1")
+      const mutantKeys = new Map([[mutant.id, key]])
+      const fileOutcomes = new Map([[mutant.id, { mutant, status: "killed" as const }]])
+      const cacheEntries: Record<ContentSha256, MutationCacheEntry> = {}
+      const nowMs = MutationEpochMillis.make(Date.parse("2026-11-18T16:00:00.000Z"))
+      expect(
+        recordKilledMutantsToCache({
+          relFile: fileA.relFile,
+          uncachedMutants: [mutant],
+          fileOutcomes,
+          mutantKeys,
+          fileNonCacheableIds: new Set(),
+          cacheAuth: undefined,
+          nowMs,
+          cacheEntries,
+        }),
+      ).toBe(false)
+      expect(
+        recordKilledMutantsToCache({
+          relFile: fileA.relFile,
+          uncachedMutants: [mutant],
+          fileOutcomes,
+          mutantKeys,
+          fileNonCacheableIds: new Set(),
+          cacheAuth: TEST_CACHE_AUTH,
+          nowMs,
+          cacheEntries,
+        }),
+      ).toBe(true)
+      expect(cacheEntries[key]?.status).toBe("killed")
+
+      // flushMutationCache: Saved -> true, Failed -> false, Skipped (symlink) -> false
+      expect(flushMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH, cacheEntries)).toBe(true)
+      const failMkdirIo: SyncHostIo = {
+        ...testHostIo,
+        mkdirRecursiveSync: () => {
+          throw new Error("EACCES: mkdir")
+        },
+      }
+      expect(flushMutationCache(repoRoot, failMkdirIo, TEST_CACHE_AUTH, cacheEntries)).toBe(false)
+      const symlinkStateIo: SyncHostIo = {
+        ...testHostIo,
+        isSymbolicLinkSync: (p) =>
+          p.endsWith(".harness") ? true : testHostIo.isSymbolicLinkSync(p),
+      }
+      expect(flushMutationCache(repoRoot, symlinkStateIo, TEST_CACHE_AUTH, cacheEntries)).toBe(
+        false,
+      )
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("REQ-1.1 edge cases: ancestor symlinks, tsconfig paths, and unresolved imports/exports fallback", () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "closure-edges-"))
+    try {
+      mkdirSync(join(repoRoot, "libs", "acme", "core", "src"), { recursive: true })
+      mkdirSync(join(repoRoot, "libs", "app", "domain", "src", "nested"), { recursive: true })
+      mkdirSync(join(repoRoot, "docs", "specs"), { recursive: true })
+      writeFileSync(
+        join(repoRoot, "package.json"),
+        '{"name":"tmp","devDependencies":{"vitest":"1.0.0"}}\n',
+      )
+      writeFileSync(
+        join(repoRoot, "tsconfig.base.json"),
+        JSON.stringify({
+          compilerOptions: {
+            paths: {
+              "@acme/core": ["./libs/acme/core/src/index.ts"],
+              "@acme/core/*": ["./libs/acme/core/src/*"],
+              "@alias-only/core": ["./tools/noop.ts", "./libs/acme/core/src/index.ts"],
+            },
+          },
+        }),
+      )
+      writeFileSync(join(repoRoot, "docs", "specs", "guide.md"), "# Guide v1\n")
+      writeFileSync(join(repoRoot, "index.ts"), "export const rootVal = 1\n")
+      writeFileSync(
+        join(repoRoot, "entry.ts"),
+        'import { rootVal } from "."\nexport const out = rootVal\n',
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "acme", "core", "package.json"),
+        '{"name":"@acme/core"}\n',
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "acme", "core", "src", "index.ts"),
+        "export const c = 1\n",
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "app", "domain", "src", "docs-helper.ts"),
+        "export const d = 1\n",
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "app", "domain", "src", "nested", "dep.ts"),
+        "export const n = 1\n",
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "app", "domain", "src", "clean.ts"),
+        'import { d } from "./docs-helper.js"\nexport { d as dd } from "./docs-helper.js"\nexport const x = d\n',
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "app", "domain", "src", "uses-docs.ts"),
+        'export const pathHint = "docs/specs/guide.md"\n',
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "app", "domain", "src", "uses-acme-missing.ts"),
+        'import { x } from "@acme/core/missing"\nexport const y = x\n',
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "app", "domain", "src", "uses-nested.ts"),
+        'import { n } from "./nested/dep.js"\nexport const z = n\n',
+      )
+
+      const digests1 = match(computeMutationContextDigestsChecked(repoRoot, testHostIo))
+        .with({ _tag: "Ok" }, ({ digests }) => digests)
+        .with({ _tag: "Disabled" }, ({ reason }) => {
+          throw new Error(`Expected Ok digests1: ${reason}`)
+        })
+        .exhaustive()
+
+      expect(digests1.workspacePackages.get("@acme/core")).toBe("libs/acme/core")
+      expect(digests1.workspacePackages.get("@alias-only/core")).toBe("libs/acme/core")
+
+      const unwrapOk = (
+        relFile: string,
+        digests: typeof digests1,
+        hostIo: SyncHostIo = testHostIo,
+      ) =>
+        match(
+          computeFileMutationClosureDigest({
+            repoRoot,
+            relFile,
+            allReachingTests: [],
+            digests,
+            hostIo,
+          }),
+        )
+          .with({ _tag: "Ok" }, (ok) => ok)
+          .with({ _tag: "Disabled" }, ({ reason }) => {
+            throw new Error(`Expected Ok closure for ${relFile}: ${reason}`)
+          })
+          .exhaustive()
+
+      const clean1 = unwrapOk("libs/app/domain/src/clean.ts", digests1)
+      const docs1 = unwrapOk("libs/app/domain/src/uses-docs.ts", digests1)
+      const rootEntry1 = unwrapOk("entry.ts", digests1)
+      const acmeMissing = unwrapOk("libs/app/domain/src/uses-acme-missing.ts", digests1)
+      expect(acmeMissing.usedFallbackAllLibs).toBe(true)
+
+      // Mutating docs/specs/guide.md & index.ts isolates clean.ts while invalidating uses-docs.ts & entry.ts
+      writeFileSync(join(repoRoot, "docs", "specs", "guide.md"), "# Guide v2\n")
+      writeFileSync(join(repoRoot, "index.ts"), "export const rootVal = 2\n")
+      const digests2 = match(computeMutationContextDigestsChecked(repoRoot, testHostIo))
+        .with({ _tag: "Ok" }, ({ digests }) => digests)
+        .with({ _tag: "Disabled" }, ({ reason }) => {
+          throw new Error(`Expected Ok digests2: ${reason}`)
+        })
+        .exhaustive()
+
+      const clean2 = unwrapOk("libs/app/domain/src/clean.ts", digests2)
+      const docs2 = unwrapOk("libs/app/domain/src/uses-docs.ts", digests2)
+      const rootEntry2 = unwrapOk("entry.ts", digests2)
+
+      expect(clean2.closureDigest).toBe(clean1.closureDigest)
+      expect(docs2.closureDigest).not.toBe(docs1.closureDigest)
+      expect(rootEntry2.closureDigest).not.toBe(rootEntry1.closureDigest)
+
+      // Ancestor symlink check catches symlinked parent directory even when leaf is inside repoReal
+      const nestedDir = join(repoRoot, "libs", "app", "domain", "src", "nested")
+      const symParentIo: SyncHostIo = {
+        ...testHostIo,
+        isSymbolicLinkSync: (p) => (p === nestedDir ? true : testHostIo.isSymbolicLinkSync(p)),
+      }
+      const symAncestorRes = computeFileMutationClosureDigest({
+        repoRoot,
+        relFile: "libs/app/domain/src/uses-nested.ts",
+        allReachingTests: [],
+        digests: digests2,
+        hostIo: symParentIo,
+      })
+      match(symAncestorRes)
+        .with({ _tag: "Disabled" }, ({ reason }) => {
+          expect(reason).toContain("symlink")
+        })
+        .with({ _tag: "Ok" }, () => {
+          expect.unreachable("Expected Disabled on symlinked ancestor directory")
+        })
+        .exhaustive()
+
+      // F-8.a: missing relative import triggers usedFallbackAllLibs = true and distinguishes unresolved specifier
+      writeFileSync(
+        join(repoRoot, "libs", "app", "domain", "src", "missing-rel-a.ts"),
+        'import { m } from "./does-not-exist-a.js"\nexport const v = m\n',
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "app", "domain", "src", "missing-rel-b.ts"),
+        'import { m } from "./does-not-exist-b.js"\nexport const v = m\n',
+      )
+      const missingRelA = unwrapOk("libs/app/domain/src/missing-rel-a.ts", digests2)
+      const missingRelB = unwrapOk("libs/app/domain/src/missing-rel-b.ts", digests2)
+      expect(missingRelA.usedFallbackAllLibs).toBe(true)
+      expect(missingRelB.usedFallbackAllLibs).toBe(true)
+
+      // F-8.b: package with explicit exports pointing to missing target fails closed to UnresolvedWorkspace (not src/index.ts)
+      mkdirSync(join(repoRoot, "libs", "acme", "broken-exp", "src"), { recursive: true })
+      writeFileSync(
+        join(repoRoot, "libs", "acme", "broken-exp", "package.json"),
+        JSON.stringify({ name: "@harness/broken-exp", exports: { ".": "./src/missing-entry.ts" } }),
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "acme", "broken-exp", "src", "index.ts"),
+        "export const fallbackShouldNotResolve = 1\n",
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "app", "domain", "src", "uses-broken-exp.ts"),
+        'import { fallbackShouldNotResolve } from "@harness/broken-exp"\nexport const v = fallbackShouldNotResolve\n',
+      )
+      const digests3 = match(computeMutationContextDigestsChecked(repoRoot, testHostIo))
+        .with({ _tag: "Ok" }, ({ digests }) => digests)
+        .with({ _tag: "Disabled" }, ({ reason }) => {
+          throw new Error(`Expected Ok digests3: ${reason}`)
+        })
+        .exhaustive()
+      const brokenExpClosure = unwrapOk("libs/app/domain/src/uses-broken-exp.ts", digests3)
+      expect(brokenExpClosure.usedFallbackAllLibs).toBe(true)
+      expect(brokenExpClosure.resolvedFiles).not.toContain("libs/acme/broken-exp/src/index.ts")
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true })
     }
   })
 })

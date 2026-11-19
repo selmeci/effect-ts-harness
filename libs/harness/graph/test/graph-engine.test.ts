@@ -385,7 +385,8 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
   })
 
   it("writes snapshot and handles offline server gracefully via OmnigraphSync", async () => {
-    const testSnapshotPath = path.join(process.cwd(), ".harness/sync-test-snapshot.json")
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "graph-engine-sync-"))
+    const testSnapshotPath = path.join(tmpDir, ".harness", "sync-test-snapshot.json")
     try {
       const program = Effect.gen(function* () {
         const syncService = yield* OmnigraphSync
@@ -400,9 +401,7 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
       expect(result.syncedToOmnigraph).toBe(false)
       expect(fs.existsSync(testSnapshotPath)).toBe(true)
     } finally {
-      if (fs.existsSync(testSnapshotPath)) {
-        fs.unlinkSync(testSnapshotPath)
-      }
+      fs.rmSync(tmpDir, { recursive: true, force: true })
     }
   })
 

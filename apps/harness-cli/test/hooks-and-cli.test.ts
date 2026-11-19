@@ -8,11 +8,12 @@ import { join, resolve } from "node:path"
 import { Cause, Effect, Exit, Layer } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { DETERMINISTIC_TRIAGE_RULES, makeMockDecisionModelLayer } from "@harness/decision"
 import { CLEF_SYSTEMONE_ONLY_BANNED_REASON, DstSeed, writeVerifyStamp } from "@harness/gates"
 import { resolveOmnigraphClusterDir } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
+import { runWithTestTracer } from "@harness/ingest"
 import {
   ensureLocalOmnigraphReady,
   isLoopbackOmnigraphUrl,
@@ -22,6 +23,7 @@ import {
 import { makeReadStdinEffect } from "../src/commands/daemon-and-omnigraph.service.js"
 import { handleGuard, handleRoute } from "../src/commands/guard-and-route.command.js"
 import { handleDone } from "../src/commands/verify-and-done.command.js"
+import { resolveCliInfraLayer } from "../src/commands/declarative-cli.js"
 import { runCliEffect, runDeclarativeCli, teardownCliMain } from "../src/index.js"
 import { runCli } from "./run-cli-helper.js"
 
@@ -1278,7 +1280,8 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       const originalRaw = readFileSync(cachePath, "utf8")
       const original = JSON.parse(originalRaw) as Record<string, unknown>
 
-      // 1. > 15_000ms TTL expiry miss
+      // 1. > 300_000ms TTL expiry miss
+      expect(PRE_INVOCATION_CACHE_TTL_MS).toBe(300_000)
       writeFileSync(
         cachePath,
         JSON.stringify({
@@ -1332,12 +1335,36 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       rmSync(cachePath, { force: true })
       rmSync(outsideTarget, { force: true })
 
+      // 5b. Dangling symlink at cachePath is rejected even though existsSync is false
+      symlinkSync("/nonexistent/dangling-target", cachePath)
+      expect(tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag).toBe(
+        "None",
+      )
+      rmSync(cachePath, { force: true })
+
       // 6. Modifying .harness/verify-stamp.json invalidates PreInvocation cache
       writeFileSync(cachePath, originalRaw, "utf8")
       expect(tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag).toBe(
         "Some",
       )
       writeFileSync(join(dir, ".harness", "verify-stamp.json"), '{"valid":true}\n', "utf8")
+      expect(tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag).toBe(
+        "None",
+      )
+
+      // 7. Non-root gitignored file (.env.local) invalidates PreInvocation cache
+      rmSync(join(dir, ".harness", "verify-stamp.json"), { force: true })
+      writeFileSync(join(dir, ".gitignore"), "*.local\n", "utf8")
+      execFileSync("git", ["add", ".gitignore"], { cwd: dir })
+      execFileSync("git", ["commit", "-m", "gitignore"], { cwd: dir })
+      const rewarm = await Effect.runPromise(
+        runDeclarativeCli(["session", "--format=antigravity"], opts),
+      )
+      expect(rewarm.exitCode).toBe(0)
+      expect(tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag).toBe(
+        "Some",
+      )
+      writeFileSync(join(dir, "libs", "demo", ".env.local"), "SECRET=1\n", "utf8")
       expect(tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag).toBe(
         "None",
       )
@@ -1516,6 +1543,16 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       )
       expect(first.exitCode).toBe(0)
 
+      // REQ-3.2: non-empty friction-log.jsonl must not self-invalidate on telemetry-log.jsonl appends
+      writeFileSync(join(dir, ".harness", "friction-log.jsonl"), '{"kind":"note"}\n', "utf8")
+      const warmedWithFriction = await Effect.runPromise(
+        runCliEffect(["session", "--format=antigravity"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(warmedWithFriction.exitCode).toBe(0)
+
       const second = await Effect.runPromise(
         runCliEffect(["session", "--format=antigravity"], {
           repoRoot: dir,
@@ -1524,6 +1561,33 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       )
       expect(second.exitCode).toBe(0)
       expect(second.telemetryDetail).toBe("cache=hit")
+
+      // REQ-3.2: `done` writes last-done.json and invalidates SessionHandoff.decide cache (cache=miss)
+      writeVerifyStamp(dir, nodeSyncHostIo, "impl/test", {
+        dstSeed: DstSeed.make(1),
+        dstSeedsRun: 1,
+      })
+      const doneRes = await Effect.runPromise(
+        runCliEffect(["done"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+          stdin: JSON.stringify({ stop_hook_active: false }),
+        }),
+      )
+      expect(doneRes.exitCode).toBe(0)
+      expect(existsSync(join(dir, ".harness", "last-done.json"))).toBe(true)
+      const { result: afterDone } = await Effect.runPromise(
+        runWithTestTracer(
+          "session-after-done",
+          runCliEffect(["session", "--format=antigravity"], {
+            repoRoot: dir,
+            skipBackgroundDaemons: true,
+          }),
+          new Map(),
+        ),
+      )
+      expect(afterDone.exitCode).toBe(0)
+      expect(afterDone.telemetryDetail).toBe("cache=miss")
 
       const telemetryLines = readFileSync(join(dir, ".harness", "telemetry-log.jsonl"), "utf8")
         .trim()
@@ -1614,7 +1678,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
     expect(routeStats.p95).toBeLessThan(50)
   })
 
-  it("F-16.6, F-7.2, F-9.1, F-11.1, S-2.1, S-5.1, S-5.2a: fingerprint invalidation, symlink/NUL/timeout handling, and safe cache dir warnings", async () => {
+  it("F-16.6: pre-invocation fingerprint invalidation and safe cache dir handling", async () => {
     const { execFileSync } = await import("node:child_process")
     const { renameSync, symlinkSync } = await import("node:fs")
     const {
@@ -1777,4 +1841,77 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       rmSync(outer, { recursive: true, force: true })
     }
   }, 30_000)
+
+  it("F-9.a / F-9.b: fastpath returns None on null git head state and guards throwing existsSync", async () => {
+    const { computePreInvocationFingerprint, resolveHarnessTsgoPkgJsonPath } =
+      await import("../src/commands/session-fastpath.js")
+    const dir = mkdtempSync(join(tmpdir(), "harness-fastpath-f9-"))
+    try {
+      mkdirSync(join(dir, ".git"), { recursive: true })
+      const nullHeadIo = {
+        ...nodeSyncHostIo,
+        execFileSync: () => ({ _tag: "Exited" as const, exitCode: 0, stdout: "", stderr: "" }),
+      }
+      expect(computePreInvocationFingerprint(dir, join(dir, ".harness"), nullHeadIo)._tag).toBe(
+        "None",
+      )
+
+      const throwingExistsIo = {
+        ...nodeSyncHostIo,
+        existsSync: () => {
+          throw new Error("EIO: existsSync failed")
+        },
+      }
+      expect(() => resolveHarnessTsgoPkgJsonPath(dir, throwingExistsIo)).not.toThrow()
+      expect(
+        computePreInvocationFingerprint(dir, join(dir, ".harness"), throwingExistsIo)._tag,
+      ).toBe("None")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("F-11.a: resolveCliInfraLayer fails closed when HarnessInfraLive import fails", async () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+    try {
+      const rejectImport = () => Promise.reject(new Error("module load failed"))
+
+      const doneAgy = await Effect.runPromise(
+        resolveCliInfraLayer("done", ["done", "--format=antigravity"], false, {
+          importInfraModule: rejectImport,
+        }),
+      )
+      expect(doneAgy._tag).toBe("FailClosed")
+      match(doneAgy)
+        .with({ _tag: "FailClosed" }, ({ result }) => {
+          expect(result.exitCode).toBe(0)
+          expect(JSON.parse(result.stdout)).toMatchObject({
+            decision: "continue",
+            reason: expect.stringContaining("Failed to load HarnessInfraLive"),
+          })
+        })
+        .with({ _tag: "Ok" }, () => {
+          expect.unreachable()
+        })
+        .exhaustive()
+
+      const verifyRes = await Effect.runPromise(
+        resolveCliInfraLayer("verify", ["verify"], false, {
+          importInfraModule: rejectImport,
+        }),
+      )
+      expect(verifyRes._tag).toBe("FailClosed")
+      match(verifyRes)
+        .with({ _tag: "FailClosed" }, ({ result }) => {
+          expect(result.exitCode).toBe(1)
+          expect(result.stderr).toContain("Failed to load HarnessInfraLive")
+        })
+        .with({ _tag: "Ok" }, () => {
+          expect.unreachable()
+        })
+        .exhaustive()
+    } finally {
+      stderrSpy.mockRestore()
+    }
+  })
 })

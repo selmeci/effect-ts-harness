@@ -110,6 +110,15 @@ export const SubprocessExitCode = Schema.Int.pipe(
 )
 export type SubprocessExitCode = typeof SubprocessExitCode.Type
 
+export const BatchExitCode = Schema.Int.pipe(Schema.brand("BatchExitCode"))
+export type BatchExitCode = typeof BatchExitCode.Type
+
+export const SubprocessSignalName = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isPattern(/^[A-Z][A-Z0-9_+-]{1,31}$/)),
+  Schema.brand("SubprocessSignalName"),
+)
+export type SubprocessSignalName = typeof SubprocessSignalName.Type
+
 export const SubprocessOutput = Schema.String.pipe(Schema.brand("SubprocessOutput"))
 export type SubprocessOutput = typeof SubprocessOutput.Type
 
@@ -246,6 +255,7 @@ export const CANONICAL_MCP_TOOL_NAMES: ReadonlyArray<McpToolName> = [
   McpToolName.make("harness_graph_infer"),
   McpToolName.make("harness_graph_complete"),
   McpToolName.make("harness_graph_rewrite"),
+  McpToolName.make("harness_git_diff"),
 ]
 
 export const McpToolInputName = Schema.String.pipe(Schema.brand("McpToolInputName"))
@@ -254,3 +264,16 @@ export type McpToolInputName = typeof McpToolInputName.Type
 export class UnknownToolError extends Schema.TaggedError<UnknownToolError>()("UnknownToolError", {
   toolName: McpToolInputName,
 }) {}
+
+export const GitDiffErrorReason = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.brand("GitDiffErrorReason"),
+)
+export type GitDiffErrorReason = typeof GitDiffErrorReason.Type
+
+export class GitDiffExecutionError extends Schema.TaggedError<GitDiffExecutionError>()(
+  "GitDiffExecutionError",
+  {
+    reason: GitDiffErrorReason,
+  },
+) {}

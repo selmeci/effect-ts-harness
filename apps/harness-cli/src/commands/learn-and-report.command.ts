@@ -183,11 +183,16 @@ export const handleLearn = (
                             rules.push(report)
                           })
                           .with({ _tag: "Err" }, ({ err }) => {
+                            const stage = err.stage ?? "unknown"
+                            const reason = err.reason ?? err.message
                             rejectedRules.push({
                               ruleId: String(slice.taskId),
-                              stage: err.stage ?? "unknown",
-                              reason: err.reason ?? err.message,
+                              stage,
+                              reason,
                             })
+                            warnLearn(
+                              `rule synthesis rejected for '${slice.taskId}' [${stage}]: ${reason}`,
+                            )
                           })
                           .exhaustive()
                       }),
@@ -239,16 +244,18 @@ export const handleLearn = (
       }
     }
 
-    if (shouldClear) {
+    const hasErrors = rejectedRules.length > 0 || warnings.length > 0
+    const cleared = shouldClear && !hasErrors
+    if (cleared) {
       clearFrictionEventsSafe(repoRoot, nodeSyncHostIo)
     }
 
     return {
-      exitCode: 0,
+      exitCode: hasErrors ? 1 : 0,
       stdout: JSON.stringify({
         totalEvents: events.length,
         proposals,
-        cleared: shouldClear,
+        cleared,
         ...(synthesizedRules.length > 0 ? { synthesizedRules } : {}),
         ...(rejectedRules.length > 0 ? { rejectedRules } : {}),
         ...(planSearchResults !== undefined ? { planSearchResults } : {}),

@@ -25,6 +25,7 @@ import {
   ConflictError,
   type FetchLike,
   GoneError,
+  type Ingest,
   NetworkError,
   NotFoundError,
   Omnigraph,
@@ -45,12 +46,10 @@ export interface OmnigraphConnectionOptions {
   readonly actor?: "harness-cli" | "agent-mcp" | undefined
   readonly fetch?: FetchLike | undefined
   readonly hostIo?: SyncHostIo | undefined
-  readonly env?: NodeJS.ProcessEnv | undefined
+  readonly env?: Readonly<Record<string, string | undefined>> | undefined
 }
 
-const decodeAuthTokensOption = Schema.decodeOption(
-  Schema.fromJsonString(OmnigraphAuthTokensSchema),
-)
+const decodeAuthTokensOption = Schema.decodeOption(Schema.fromJsonString(OmnigraphAuthTokensSchema))
 
 export const isLoopbackOmnigraphUrl = (rawUrl: string): boolean =>
   Result.getOrElse(
@@ -282,12 +281,14 @@ export const mapOmnigraphPreconditionError = (
     const actualCommitRes = decodeStrictOptionalCommitId(cause.preconditionFailure?.actual)
     return match(actualCommitRes)
       .with({ _tag: "Failure" }, ({ failure }) => failure)
-      .with({ _tag: "Success" }, ({ success: actualCommit }) =>
-        new OmnigraphPreconditionError({
-          branch,
-          expectedCommit,
-          actualCommit,
-        }),
+      .with(
+        { _tag: "Success" },
+        ({ success: actualCommit }) =>
+          new OmnigraphPreconditionError({
+            branch,
+            expectedCommit,
+            actualCommit,
+          }),
       )
       .exhaustive()
   }
@@ -588,3 +589,84 @@ export const executeStatBlob = (
       ),
     ),
   )
+
+export interface OmnigraphLoadWithReforkInput {
+  readonly branch: string
+  readonly from?: string | undefined
+  readonly mode: "overwrite" | "append" | "merge"
+  readonly data: string
+}
+
+export const executeLoadWithStaleRefork = (
+  og: Omnigraph,
+  input: OmnigraphLoadWithReforkInput,
+): Effect.Effect<Ingest, OmnigraphLoadError> =>
+  Effect.gen(function* () {
+    const runLoad = (): Effect.Effect<Ingest, OmnigraphLoadError> =>
+      Effect.tryPromise({
+        try: () =>
+          og.load({
+            branch: input.branch,
+            ...(input.from !== undefined ? { from: input.from } : {}),
+            mode: input.mode,
+            data: input.data,
+          }),
+        catch: (cause) => new OmnigraphLoadError({ cause }),
+      })
+
+    const initialRes = yield* runLoad()
+    const isOverwrite = match(input.mode)
+      .with("overwrite", () => true)
+      .with("append", "merge", () => false)
+      .exhaustive()
+
+    if (
+      initialRes.branchCreated !== false ||
+      !isOverwrite ||
+      input.branch === "main" ||
+      input.from === undefined ||
+      input.from === input.branch
+    ) {
+      return initialRes
+    }
+
+    const fromBranch = input.from
+    const mergeBaseRes = yield* Effect.tryPromise({
+      try: () => og.branches.mergeBase({ source: input.branch, target: fromBranch }),
+      catch: (cause) => new OmnigraphLoadError({ cause }),
+    })
+    if (mergeBaseRes.mergeBase.graphCommitId === mergeBaseRes.targetCommitId) {
+      return initialRes
+    }
+
+    const hasConflict = yield* Effect.tryPromise({
+      try: () =>
+        og.branches.merge({
+          source: input.branch,
+          target: fromBranch,
+          dryRun: true,
+        }),
+      catch: (cause) => new OmnigraphLoadError({ cause }),
+    }).pipe(
+      Effect.as(false),
+      Effect.catchIf(
+        (err) => err.cause instanceof ConflictError,
+        () => Effect.succeed(true),
+      ),
+    )
+    if (!hasConflict) {
+      return initialRes
+    }
+
+    yield* Effect.tryPromise({
+      try: () => og.branches.delete(input.branch),
+      catch: (cause) => new OmnigraphLoadError({ cause }),
+    }).pipe(
+      Effect.catchIf(
+        (err) => err.cause instanceof NotFoundError,
+        () => Effect.void,
+      ),
+    )
+
+    return yield* runLoad()
+  })

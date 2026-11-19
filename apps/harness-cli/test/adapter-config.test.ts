@@ -563,7 +563,7 @@ describe("Antigravity adapter & plugin configuration", () => {
         true,
       )
     }
-    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(16)
+    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(17)
 
     const skillExpectations: ReadonlyArray<{
       readonly relPath: string
@@ -849,7 +849,7 @@ describe("Antigravity adapter & plugin configuration", () => {
     expect(rootReadme).not.toContain("{ writeReport? }")
 
     for (const readme of [agyReadme, claudeReadme]) {
-      expect(readme).toContain("exposing 16 tools")
+      expect(readme).toContain("exposing 17 tools")
       for (const toolName of CANONICAL_MCP_TOOL_NAMES) {
         expect(readme).toContain(toolName)
       }
@@ -1033,6 +1033,18 @@ describe("Antigravity adapter & plugin configuration", () => {
         content,
         `Banned Antigravity MCP server name "effect-harness_omnigraph-mcp" found in ${filePath}`,
       ).not.toContain("effect-harness_omnigraph-mcp")
+      expect(
+        content,
+        `Banned Antigravity worktree directive 'Workspace: "share"' found in ${filePath}`,
+      ).not.toContain('Workspace: "share"')
+      expect(
+        content,
+        `Banned Antigravity model directive 'model: "flash"' found in ${filePath}`,
+      ).not.toContain('model: "flash"')
+      expect(
+        content,
+        `Banned Antigravity subagent model '\`flash\`' found in ${filePath}`,
+      ).not.toContain("`flash`")
     }
   })
 
@@ -1185,6 +1197,7 @@ describe("Antigravity adapter & plugin configuration", () => {
       join(liveHarnessDir, "session-report.json"),
       join(liveHarnessDir, "session-report.md"),
       join(liveHarnessDir, "session-preinvocation-cache.json"),
+      join(liveHarnessDir, "last-done.json"),
     ]
     const beforeContents = watchedFiles.map((p) =>
       existsSync(p) ? readFileSync(p, "utf8") : undefined,

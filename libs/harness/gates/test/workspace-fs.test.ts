@@ -11,6 +11,7 @@ import {
   isWorkspaceTsSourceFileName,
   scanWorkspaceTsFilesChecked,
 } from "../src/workspace-ts-scan.js"
+import { isWorkspaceRelPathIncludedInStamp, shouldIgnoreStampEntry } from "../src/worktree.js"
 import { testHostIo } from "./helpers/test-host-io.js"
 import { makeWorkspaceFsMemoryLayer } from "./helpers/test-layers.js"
 
@@ -134,5 +135,21 @@ describe("scanWorkspaceTsFilesChecked", () => {
     } finally {
       rmSync(tmp, { recursive: true, force: true })
     }
+  })
+})
+
+describe("isWorkspaceRelPathIncludedInStamp & shouldIgnoreStampEntry", () => {
+  it("matches verify-stamp inclusion across root-only ignores, build artifacts, nested src/test exceptions, and empty paths", () => {
+    expect(isWorkspaceRelPathIncludedInStamp("")).toBe(false)
+    expect(isWorkspaceRelPathIncludedInStamp("./")).toBe(false)
+    expect(isWorkspaceRelPathIncludedInStamp(".git/HEAD")).toBe(false)
+    expect(isWorkspaceRelPathIncludedInStamp(".harness/last-done.json")).toBe(false)
+    expect(isWorkspaceRelPathIncludedInStamp("temp-scratch/foo.ts")).toBe(false)
+    expect(isWorkspaceRelPathIncludedInStamp("libs/foo/.git/HEAD")).toBe(true)
+    expect(isWorkspaceRelPathIncludedInStamp("libs/foo/dist/index.js")).toBe(false)
+    expect(isWorkspaceRelPathIncludedInStamp("libs/foo/src/dist/helper.ts")).toBe(true)
+    expect(isWorkspaceRelPathIncludedInStamp("libs/foo/src/index.ts")).toBe(true)
+    expect(shouldIgnoreStampEntry(true, "", "repos")).toBe(true)
+    expect(shouldIgnoreStampEntry(false, "libs/foo", "repos")).toBe(false)
   })
 })

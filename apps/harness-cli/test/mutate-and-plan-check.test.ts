@@ -24,6 +24,7 @@ import {
 } from "../src/commands/mutate-and-bench.command.js"
 import { handlePlanCheck } from "../src/commands/plan-and-repair.command.js"
 import { handleVerify } from "../src/commands/verify-and-done.command.js"
+import { runDeclarativeCli } from "../src/index.js"
 
 const REAL_REPO_ROOT = resolve(import.meta.dirname, "../../..")
 
@@ -627,6 +628,57 @@ describe("CLI handleMutate, handleVerify (mutate-stamp), handleBench, and handle
         rmSync(cacheHomeA, { recursive: true, force: true })
         rmSync(cacheHomeB, { recursive: true, force: true })
       }
+      // 8. REQ-1.3: --diff filters to branch-base changed lines on explicit --file and never writes mutate-stamp.json
+      rmSync(stampPath, { force: true })
+      writeFileSync(
+        join(dir, "libs", "demo", "gates", "src", "engine.ts"),
+        "export const isAdult = (age: number): boolean => age >= 21\n",
+        "utf8",
+      )
+      execFileSync("git", ["add", "."], { cwd: dir })
+      execFileSync("git", ["commit", "-m", "base-engine"], { cwd: dir })
+      execFileSync("git", ["update-ref", "refs/heads/main", "HEAD"], { cwd: dir })
+      writeFileSync(
+        join(dir, "libs", "demo", "gates", "src", "engine.ts"),
+        "export const isAdult = (age: number): boolean => age >= 21\nexport const isSenior = (age: number): boolean => age >= 65\n",
+        "utf8",
+      )
+      writeFileSync(
+        join(dir, "libs", "demo", "gates", "test", "engine.test.ts"),
+        'import { expect, it } from "vitest"\nimport { isAdult, isSenior } from "../src/engine.js"\nit("adult", () => { expect(isAdult(21)).toBe(true); expect(isAdult(20)).toBe(false) })\nit("senior", () => { expect(isSenior(65)).toBe(true); expect(isSenior(64)).toBe(false) })\n',
+        "utf8",
+      )
+      const cliDiffRes = await Effect.runPromise(
+        runDeclarativeCli(
+          ["mutate", "--file", "libs/demo/gates/src/engine.ts", "--diff", "--strict"],
+          { repoRoot: dir, skipBackgroundDaemons: true },
+        ),
+      )
+      expect(cliDiffRes.exitCode).toBe(0)
+      const cliDiffReport = JSON.parse(cliDiffRes.stdout) as {
+        diffMode: string
+        totalMutants: number
+      }
+      expect(cliDiffReport.diffMode).toBe("branch-base")
+      expect(cliDiffReport.totalMutants).toBe(1)
+      expect(existsSync(stampPath)).toBe(false)
+
+      const diffAllRes = await Effect.runPromise(
+        runDeclarativeCli(
+          ["mutate", "--file", "libs/demo/gates/src/engine.ts", "--diff", "--all", "--strict"],
+          { repoRoot: dir, skipBackgroundDaemons: true },
+        ),
+      )
+      expect(diffAllRes.exitCode).toBe(0)
+      const diffAllReport = JSON.parse(diffAllRes.stdout) as { totalMutants: number }
+      expect(diffAllReport.totalMutants).toBe(2)
+      expect(existsSync(stampPath)).toBe(false)
+
+      const unscopedDiffRes = await Effect.runPromise(
+        handleMutate(["mutate", "--diff", "--strict"], { repoRoot: dir }),
+      )
+      expect(unscopedDiffRes.exitCode).toBe(0)
+      expect(existsSync(stampPath)).toBe(false)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

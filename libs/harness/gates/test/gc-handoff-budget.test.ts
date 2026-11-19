@@ -1183,6 +1183,35 @@ status: accepted
       )
       expect(errSym).toBeDefined()
       expect(errSym?.message).toContain("symlink")
+
+      // F-6.a: omitting findings still logs symlink/frontmatter errors to stderr (never silent)
+      const stderrChunks: Array<string> = []
+      const origWrite = process.stderr.write.bind(process.stderr)
+      process.stderr.write = ((chunk: string | Uint8Array) => {
+        stderrChunks.push(String(chunk))
+        return true
+      }) as typeof process.stderr.write
+      try {
+        const docsWithoutSink = loadGovernanceDocsFromDisk(tempDir, symHostIo)
+        expect(docsWithoutSink).toEqual([])
+      } finally {
+        process.stderr.write = origWrite
+      }
+      const stderrOut = stderrChunks.join("")
+      expect(stderrOut).toContain("SPEC-0001.md")
+      expect(stderrOut).toContain("SPEC-0002.md")
+
+      // F-6.b: runtime defense if loadGovernanceDocsChecked is called without SyncHostIo
+      const missingIoLoaded = (
+        loadGovernanceDocsChecked as (
+          repoRoot: string,
+          hostIo?: typeof symHostIo,
+        ) => ReturnType<typeof loadGovernanceDocsChecked>
+      )(tempDir)
+      expect(missingIoLoaded.docs).toEqual([])
+      expect(missingIoLoaded.findings).toHaveLength(1)
+      expect(missingIoLoaded.findings[0]?.kind).toBe("governance-doc-read-error")
+      expect(missingIoLoaded.findings[0]?.message).toContain("SyncHostIo")
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
     }

@@ -64,6 +64,7 @@ export const initCompileCache = (
           st === undefined ||
           st.isSymbolicLink() ||
           !st.isDirectory() ||
+          (myUid !== undefined && st.uid !== myUid) ||
           (st.mode & 0o077) !== 0
         ) {
           stderr.write(
@@ -74,19 +75,33 @@ export const initCompileCache = (
       }
     } else if (enableFn === enableCompileCache) {
       mkdirSync(cacheDir, { recursive: true, mode: 0o700 })
-      chmodSync(cacheDir, 0o700)
       st = lstatOrUndefined(cacheDir)
       if (
         st === undefined ||
         st.isSymbolicLink() ||
         !st.isDirectory() ||
-        (myUid !== undefined && st.uid !== myUid) ||
-        (st.mode & 0o077) !== 0
+        (myUid !== undefined && st.uid !== myUid)
       ) {
         stderr.write(
-          `[node-ts-resolver] warning: created V8 compile cache failed ownership/permission checks at '${cacheDir}'\n`,
+          `[node-ts-resolver] warning: created V8 compile cache failed ownership/symlink checks at '${cacheDir}'\n`,
         )
         return { status: failedStatus, message: "created compile cache failed safety checks" }
+      }
+      if ((st.mode & 0o077) !== 0) {
+        chmodSync(cacheDir, 0o700)
+        st = lstatOrUndefined(cacheDir)
+        if (
+          st === undefined ||
+          st.isSymbolicLink() ||
+          !st.isDirectory() ||
+          (myUid !== undefined && st.uid !== myUid) ||
+          (st.mode & 0o077) !== 0
+        ) {
+          stderr.write(
+            `[node-ts-resolver] warning: created V8 compile cache failed permission checks at '${cacheDir}'\n`,
+          )
+          return { status: failedStatus, message: "created compile cache failed safety checks" }
+        }
       }
     }
 
@@ -213,9 +228,15 @@ const indexPackageManifest = (pkgRelDir) => {
         WORKSPACE_PACKAGE_PATHS[fullSpec] = sourceRel
       }
     }
-  } catch {
-    // Safe to skip malformed or unreadable package.json manifests during startup
-    // indexing; standard Node resolution and static fallback mappings still handle valid packages.
+  } catch (error) {
+    const code =
+      error && typeof error === "object" && "code" in error ? String(error.code) : undefined
+    if (code !== "ENOENT") {
+      const detail = error instanceof Error ? error.message : String(error)
+      process.stderr.write(
+        `[node-ts-resolver] warning: failed to index '${pkgJsonPath}': ${detail}\n`,
+      )
+    }
   }
 }
 
@@ -238,9 +259,15 @@ try {
       indexPackageManifest(`apps/${app.name}`)
     }
   }
-} catch {
-  // Safe to ignore directory-enumeration errors (e.g. ENOENT/EACCES/ENOTDIR) when
-  // scanning optional workspace roots; hardcoded WORKSPACE_PACKAGE_PATHS remain active.
+} catch (error) {
+  const code =
+    error && typeof error === "object" && "code" in error ? String(error.code) : undefined
+  if (code !== "ENOENT") {
+    const detail = error instanceof Error ? error.message : String(error)
+    process.stderr.write(
+      `[node-ts-resolver] warning: failed to enumerate workspace packages under '${repoRoot}': ${detail}\n`,
+    )
+  }
 }
 
 const resolveDynamicExport = (specifier) => {
