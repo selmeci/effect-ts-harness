@@ -504,7 +504,7 @@ export const appendTelemetryEvent = (
     ...(input.engineSource !== undefined ? { engineSource: input.engineSource } : {}),
     ...(input.detail !== undefined ? { detail: input.detail } : {}),
   }
-  const harnessDir = resolveHarnessStateDir(repoRoot)
+  const harnessDir = resolveHarnessStateDir(repoRoot, hostIo.getEnv())
   const filePath = join(harnessDir, "telemetry-log.jsonl")
   Result.getOrElse(
     Result.try(() => {
@@ -522,7 +522,7 @@ export const readTelemetryEvents = (
   repoRoot: string,
   hostIo: SyncHostIo,
 ): ReadonlyArray<TelemetryEvent> => {
-  const harnessDir = resolveHarnessStateDir(repoRoot)
+  const harnessDir = resolveHarnessStateDir(repoRoot, hostIo.getEnv())
   const filePath = join(harnessDir, "telemetry-log.jsonl")
   if (!hostIo.existsSync(filePath)) {
     return []
@@ -551,7 +551,7 @@ export const readTelemetryEvents = (
 }
 
 export const clearTelemetryEvents = (repoRoot: string, hostIo: SyncHostIo): void => {
-  const harnessDir = resolveHarnessStateDir(repoRoot)
+  const harnessDir = resolveHarnessStateDir(repoRoot, hostIo.getEnv())
   const filePath = join(harnessDir, "telemetry-log.jsonl")
   Result.getOrElse(
     Result.try(() => {
@@ -569,7 +569,7 @@ export const writeSessionReportFiles = (
   report: SessionReport,
   hostIo: SyncHostIo,
 ): { readonly jsonPath: string; readonly markdownPath: string } => {
-  const harnessDir = resolveHarnessStateDir(repoRoot)
+  const harnessDir = resolveHarnessStateDir(repoRoot, hostIo.getEnv())
   const jsonPath = join(harnessDir, "session-report.json")
   const markdownPath = join(harnessDir, "session-report.md")
   Result.getOrElse(

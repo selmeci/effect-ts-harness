@@ -470,14 +470,8 @@ export const runDomainMutationSuite = (
     if (options?.testRunner !== undefined) {
       const runner = options.testRunner
       const prevGlobal = getActiveMutantId()
-      const prevEnv = process.env["HARNESS_ACTIVE_MUTANT_ID"]
       const restoreInProcessEnv = () => {
         setActiveMutantId(prevGlobal)
-        if (prevEnv === undefined) {
-          delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
-        } else {
-          process.env["HARNESS_ACTIVE_MUTANT_ID"] = prevEnv
-        }
       }
 
       const baselineMutant: CodeMutant = {
@@ -490,7 +484,6 @@ export const runDomainMutationSuite = (
         mutatedSource: originalContent,
       }
       setActiveMutantId(undefined)
-      delete process.env["HARNESS_ACTIVE_MUTANT_ID"]
       const baselineRes = Result.try(() => runner(baselineMutant, originalContent, reachingTestFiles))
       restoreInProcessEnv()
       const baselineDiag = match(baselineRes)
@@ -510,7 +503,6 @@ export const runDomainMutationSuite = (
 
       for (const mutant of mutants) {
         setActiveMutantId(mutant.id)
-        process.env["HARNESS_ACTIVE_MUTANT_ID"] = mutant.id
         const runRes = Result.try(() => runner(mutant, schemaBundle.schemaSource, reachingTestFiles))
         restoreInProcessEnv()
         const runnerDiag = match(runRes)
@@ -538,7 +530,7 @@ export const runDomainMutationSuite = (
     }
 
     const baseSubprocessEnv: Record<string, string | undefined> = {
-      ...process.env,
+      ...hostIo.getEnv(),
       NO_COLOR: "1",
       FORCE_COLOR: "0",
     }

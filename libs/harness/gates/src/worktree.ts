@@ -8,7 +8,7 @@ import {
 
 export const resolveHarnessStateDir = (
   workspaceRoot: string,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Readonly<Record<string, string | undefined>> = {},
 ): string => {
   const validRoot = normalizeNonRootWorkspacePath(
     resolve(normalizeNonRootWorkspacePath(workspaceRoot)),

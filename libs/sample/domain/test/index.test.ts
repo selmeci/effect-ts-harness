@@ -40,6 +40,7 @@ const resolveRepoRoot = (startDir: string): string => {
 }
 
 const testHostIo: SyncHostIo = {
+  getEnv: () => process.env,
   existsSync: (p) => fs.existsSync(p),
   isFileSync: (p) => Result.getOrElse(Result.try(() => fs.statSync(p).isFile()), () => false),
   isDirectorySync: (p) => Result.getOrElse(Result.try(() => fs.statSync(p).isDirectory()), () => false),

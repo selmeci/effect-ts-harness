@@ -197,6 +197,7 @@ const resolveExecutableSync = (
  * omitted.
  */
 export const nodeSyncHostIo: ExtendedHostIo = {
+  getEnv: (): Readonly<Record<string, string | undefined>> => process.env,
   existsSync: (filePath: string): boolean => existsSync(filePath),
   isFileSync: (filePath: string): boolean => {
     const st = statSync(filePath, { throwIfNoEntry: false })

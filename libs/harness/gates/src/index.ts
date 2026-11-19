@@ -374,7 +374,6 @@ export {
   getLineNumber,
   getOrCreateCachedSourceFile,
   inferAstGatePackageTagFromPath,
-  inferPackageTagFromPath,
   isCatchCauseInterruptsOnlyCall,
   isDummyEffectVoidYield,
   isIgnoredChmodPermissionCall,

@@ -468,7 +468,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
             new Response(
               JSON.stringify({
                 outcome: "ok",
-                graphCommitId: "cmt-100",
+                commit: { graph_commit_id: "cmt-100" },
                 serverRef: "9d92f397",
               }),
               {
@@ -771,7 +771,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
                 new Response(
                   JSON.stringify({
                     outcome: "ok",
-                    graphCommitId: "cmt-load-1",
+                    commit: { graph_commit_id: "cmt-load-1" },
                     serverRef: "9d92f397",
                   }),
                   {

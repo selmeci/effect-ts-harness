@@ -76,6 +76,7 @@ export interface SyncHostExecOptions {
 }
 
 export interface SyncHostReader {
+  readonly getEnv: () => Readonly<Record<string, string | undefined>>
   readonly existsSync: (filePath: string) => boolean
   readonly isFileSync: (filePath: string) => boolean
   readonly isDirectorySync: (filePath: string) => boolean

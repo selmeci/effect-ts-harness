@@ -8,7 +8,7 @@ export type NonNegativeCount = typeof NonNegativeCount.Type
 
 export const GateRuleVersion = Schema.NonEmptyString.pipe(Schema.brand("GateRuleVersion"))
 export type GateRuleVersion = typeof GateRuleVersion.Type
-export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v8")
+export const HARNESS_GATE_RULE_VERSION: GateRuleVersion = GateRuleVersion.make("ast-gates-v9")
 
 export const WorkspaceFilePath = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),

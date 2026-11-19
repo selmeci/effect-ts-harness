@@ -76,7 +76,7 @@ const collectFiles = (
 
 export const computeWorkspaceTreeHash = (repoRoot: string, hostIo: SyncHostIo): string => {
   const files: Array<string> = []
-  const harnessStateDir = resolveHarnessStateDir(repoRoot)
+  const harnessStateDir = resolveHarnessStateDir(repoRoot, hostIo.getEnv())
   collectFiles(repoRoot, repoRoot, files, harnessStateDir, hostIo)
   files.sort()
   const hasher = createHash("sha256")
@@ -118,7 +118,8 @@ export const writeVerifyStamp = (
   dstOptions?: { readonly dstSeed?: DstSeed | undefined; readonly dstSeedsRun?: number | undefined },
 ): VerifyStamp => {
   const treeHash = computeWorkspaceTreeHash(repoRoot, hostIo)
-  const envSeed = parseDstSeedEnv(process.env["DST_SEED"])
+  const env = hostIo.getEnv()
+  const envSeed = parseDstSeedEnv(env["DST_SEED"])
   const resolvedSeed = dstOptions?.dstSeed ?? envSeed ?? DstSeed.make(0)
   const stamp: VerifyStamp = {
     treeHash,
@@ -129,7 +130,7 @@ export const writeVerifyStamp = (
       ? { dstSeedsRun: DstSeedsRunCount.make(Math.max(0, Math.trunc(dstOptions.dstSeedsRun))) }
       : {}),
   }
-  const harnessDir = resolveHarnessStateDir(repoRoot)
+  const harnessDir = resolveHarnessStateDir(repoRoot, env)
   if (!hostIo.existsSync(harnessDir)) {
     hostIo.mkdirRecursiveSync(harnessDir)
   }
@@ -144,7 +145,7 @@ export const checkVerifyStamp = (
   repoRoot: string,
   hostIo: SyncHostIo,
 ): CheckVerifyStampResult => {
-  const harnessDir = resolveHarnessStateDir(repoRoot)
+  const harnessDir = resolveHarnessStateDir(repoRoot, hostIo.getEnv())
   const stampPath = join(harnessDir, "verify-stamp.json")
   if (!hostIo.existsSync(stampPath)) {
     return {

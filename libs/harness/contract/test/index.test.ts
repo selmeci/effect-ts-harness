@@ -430,7 +430,7 @@ describe("@harness/contract schemas", () => {
   })
 
   it("computes SHA-256 identically to node:crypto across empty, ASCII, multi-block, and multi-byte UTF-8 inputs", () => {
-    expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v8")
+    expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v9")
     const samples = [
       "",
       "abc",
