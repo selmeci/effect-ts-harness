@@ -87,12 +87,26 @@ export const decideFrictionClusters = Effect.fn("Friction.decide")(function* (
 ) {
   return yield* Effect.succeed(summarizeFrictionEvents(events))
 })
-export * from "./plan-search.js"
-import {
-  type PlanSearchCandidate,
+export {
+  PlanCandidateDescription,
+  PlanCandidateId,
+  PlanCandidateSkeleton,
+  PlanSearch,
+  PlanSearchCandidate,
+  PlanSearchCandidateId,
+  PlanSearchCount,
+  PlanSearchError,
+  PlanSearchFailureReason,
+  PlanSearchFlag,
+  PlanSearchInput,
+  PlanSearchReport,
+  PlanSearchScoreMillis,
+  PlanSearchSummary,
+  PlanSearchWorktreeId,
   comparePlanSearchCandidates,
+  decidePlanSearch,
 } from "./plan-search.js"
-
+import { type PlanSearchCandidate, comparePlanSearchCandidates } from "./plan-search.js"
 
 export interface LoopThrashingStatus {
   readonly stuck: boolean
@@ -248,4 +262,3 @@ export const clearFrictionEvents = (repoRoot: string, hostIo: SyncHostIo): void 
     () => undefined,
   )
 }
-

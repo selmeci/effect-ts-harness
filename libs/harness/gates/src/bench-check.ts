@@ -110,6 +110,11 @@ export const DEFAULT_STAGE_LATENCY_BUDGETS: ReadonlyArray<StageLatencyBudget> = 
     p50BudgetMs: LatencyMillis.make(120),
     p95BudgetMs: LatencyMillis.make(250),
   },
+  {
+    stage: BenchStageName.make("PlanWorkflowCompiler.decide"),
+    p50BudgetMs: LatencyMillis.make(2),
+    p95BudgetMs: LatencyMillis.make(6),
+  },
 ]
 
 export const computePercentileMillis = (

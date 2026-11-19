@@ -3,6 +3,7 @@ import {
   computeWorkspaceFileLineCount,
   DEFAULT_MAX_PLUGIN_FILE_LINES,
   EnclosingSymbolName,
+  inferAstGatePackageTagFromPath,
   makeSelfDogfoodingReport,
   SelfDogfoodingMessage,
   type SelfDogfoodingReport,
@@ -23,8 +24,9 @@ import {
   unwrapAstExpression,
 } from "../ast-cache.js"
 import {
+  collectProcessExitAliases,
   getMutatedStaticObjectName,
-  hasResultTryFsReadText,
+  getStaticMemberName,
   isBannedNodeBuiltinSpecifier,
   isBannedParentConstructor,
   isBareCauseHasInterruptsNode,
@@ -33,8 +35,10 @@ import {
   isMemberCall,
   isProcessEnvDestructuring,
   isProcessEnvExpression,
+  isProcessExitCall,
   isPureTierProcessEnvBannedPath,
   isSilentFsFallbackCheckedPath,
+  isSilentGateFsFallbackCall,
 } from "./ast-gate-law-helpers.js"
 import { type SelfDogfoodingInput } from "./self-dogfooding-contract.js"
 
@@ -113,6 +117,40 @@ export const resolvePathSpecificMaxLines = (
 
 const COLLECTION_MUTATORS = new Set(["set", "add", "delete", "clear"])
 
+const isLocaleCompareCall = (node: ts.CallExpression): boolean => {
+  const callee = unwrapAstExpression(node.expression)
+  const memberName = getStaticMemberName(callee)
+  if (memberName === "localeCompare") return true
+  if (
+    (memberName === "call" || memberName === "apply") &&
+    (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee))
+  ) {
+    if (getStaticMemberName(unwrapAstExpression(callee.expression)) === "localeCompare") return true
+  }
+  if (
+    memberName === "compare" &&
+    (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee))
+  ) {
+    const receiver = unwrapAstExpression(callee.expression)
+    if (ts.isNewExpression(receiver) || ts.isCallExpression(receiver)) {
+      const ctor = unwrapAstExpression(receiver.expression)
+      if (
+        (ts.isPropertyAccessExpression(ctor) || ts.isElementAccessExpression(ctor)) &&
+        getStaticMemberName(ctor) === "Collator"
+      ) {
+        const ns = unwrapAstExpression(ctor.expression)
+        return ts.isIdentifier(ns) && ns.text === "Intl"
+      }
+    }
+  }
+  return false
+}
+
+const isLocaleDependentSortScopedPath = (normPath: string): boolean =>
+  /(?:^|\/)(?:libs\/[^/]+\/(?:contract|domain)\/src\/|libs\/harness\/gates\/src\/plan-workflow-compiler\.ts$)/.test(
+    normPath,
+  )
+
 const extractSpecifierText = (node: ts.Expression): string | undefined => {
   const unwrapped = unwrapAstExpression(node)
   if (ts.isStringLiteral(unwrapped) || ts.isNoSubstitutionTemplateLiteral(unwrapped)) {
@@ -145,127 +183,6 @@ const extractCtorIdentifierName = (expr: ts.LeftHandSideExpression): string | un
 const hasConstAssertion = (expr: ts.Expression): boolean => {
   if (ts.isAsExpression(expr) || ts.isTypeAssertionExpression(expr)) {
     return ts.isTypeReferenceNode(expr.type) && expr.type.typeName.getText() === "const"
-  }
-  return false
-}
-
-const isSilentEmptyFallbackFn = (
-  expr: ts.Expression,
-  sourceFile: ts.SourceFile,
-  allowExtendedEmptyLiterals: boolean,
-): boolean => {
-  const fn = unwrapAstExpression(expr)
-  if (!ts.isArrowFunction(fn) && !ts.isFunctionExpression(fn)) return false
-  let bodyText = fn.body.getText(sourceFile).trim()
-  if (ts.isBlock(fn.body)) {
-    if (fn.body.statements.length !== 1) return false
-    const only = fn.body.statements[0]
-    if (only === undefined || !ts.isReturnStatement(only) || only.expression === undefined) {
-      return false
-    }
-    bodyText = only.expression.getText(sourceFile).trim()
-  }
-  if (bodyText === '""' || bodyText === "''" || bodyText === "[]") return true
-  if (!allowExtendedEmptyLiterals) return false
-  return bodyText === "{}" || bodyText === "undefined" || bodyText === "false"
-}
-
-const hasFailureTagPattern = (expr: ts.Expression): boolean => {
-  const obj = unwrapAstExpression(expr)
-  if (!ts.isObjectLiteralExpression(obj)) return false
-  for (const prop of obj.properties) {
-    if (!ts.isPropertyAssignment(prop)) continue
-    const propName =
-      ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) ? prop.name.text : undefined
-    if (propName !== "_tag") continue
-    const val = unwrapAstExpression(prop.initializer)
-    if (
-      (ts.isStringLiteral(val) || ts.isNoSubstitutionTemplateLiteral(val)) &&
-      val.text === "Failure"
-    ) {
-      return true
-    }
-  }
-  return false
-}
-
-const findRootMatchArgText = (
-  callExpr: ts.CallExpression,
-  sourceFile: ts.SourceFile,
-): string | undefined => {
-  let curr: ts.Expression = unwrapAstExpression(callExpr.expression)
-  while (ts.isPropertyAccessExpression(curr) && ts.isCallExpression(curr.expression)) {
-    const innerCall = curr.expression
-    const innerCallee = unwrapAstExpression(innerCall.expression)
-    if (ts.isIdentifier(innerCallee) && innerCallee.text === "match") {
-      return innerCall.arguments[0]?.getText(sourceFile)
-    }
-    curr = innerCallee
-  }
-  return undefined
-}
-
-const isSilentGateFsFallbackCall = (node: ts.CallExpression, sourceFile: ts.SourceFile): boolean => {
-  const unwrappedCallee = unwrapAstExpression(node.expression)
-  if (ts.isIdentifier(unwrappedCallee) && unwrappedCallee.text === "safeFs") {
-    return true
-  }
-  const calleeText = unwrappedCallee.getText(sourceFile)
-  if (
-    calleeText === "Result.getOrElse" &&
-    node.arguments.length >= 2 &&
-    node.arguments[0] !== undefined &&
-    node.arguments[1] !== undefined &&
-    hasResultTryFsReadText(node.arguments[0].getText(sourceFile)) &&
-    isSilentEmptyFallbackFn(node.arguments[1], sourceFile, false)
-  ) {
-    return true
-  }
-  if (
-    ts.isPropertyAccessExpression(unwrappedCallee) &&
-    unwrappedCallee.name.text === "pipe" &&
-    hasResultTryFsReadText(unwrappedCallee.expression.getText(sourceFile)) &&
-    node.arguments.some(
-      (arg) =>
-        ts.isCallExpression(arg) &&
-        unwrapAstExpression(arg.expression).getText(sourceFile) === "Result.getOrElse" &&
-        arg.arguments.length === 1 &&
-        arg.arguments[0] !== undefined &&
-        isSilentEmptyFallbackFn(arg.arguments[0], sourceFile, true),
-    )
-  ) {
-    return true
-  }
-  if (
-    ts.isIdentifier(unwrappedCallee) &&
-    unwrappedCallee.text === "pipe" &&
-    node.arguments.length >= 2 &&
-    node.arguments[0] !== undefined &&
-    hasResultTryFsReadText(node.arguments[0].getText(sourceFile)) &&
-    node.arguments.slice(1).some(
-      (arg) =>
-        ts.isCallExpression(arg) &&
-        unwrapAstExpression(arg.expression).getText(sourceFile) === "Result.getOrElse" &&
-        arg.arguments.length === 1 &&
-        arg.arguments[0] !== undefined &&
-        isSilentEmptyFallbackFn(arg.arguments[0], sourceFile, true),
-    )
-  ) {
-    return true
-  }
-  if (
-    ts.isPropertyAccessExpression(unwrappedCallee) &&
-    unwrappedCallee.name.text === "with" &&
-    node.arguments.length >= 2 &&
-    node.arguments[0] !== undefined &&
-    node.arguments[1] !== undefined &&
-    hasFailureTagPattern(node.arguments[0]) &&
-    isSilentEmptyFallbackFn(node.arguments[1], sourceFile, true)
-  ) {
-    const matchArgText = findRootMatchArgText(node, sourceFile)
-    if (matchArgText !== undefined && hasResultTryFsReadText(matchArgText)) {
-      return true
-    }
   }
   return false
 }
@@ -311,6 +228,13 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
     const normPath = file.filePath.replace(/\\/g, "/")
     const isInfraSrc = /\/infra\/src\//.test(normPath)
     const isPureProcessEnvBanned = isPureTierProcessEnvBannedPath(normPath)
+    const pkgTag = inferAstGatePackageTagFromPath(normPath)
+    const isProcessExitBanned =
+      /(?:^|\/)src\//.test(normPath) && (/(?:^|\/)libs\//.test(normPath) || pkgTag !== "app")
+    const { processAliases, exitAliases } = isProcessExitBanned
+      ? collectProcessExitAliases(sourceFile)
+      : { processAliases: new Set<string>(), exitAliases: new Set<string>() }
+    const isLocaleSortBanned = isLocaleDependentSortScopedPath(normPath)
     const staticCollectionNames = new Set<string>()
     const staticObjectNames = new Set<string>()
     const envAliasNames = new Set<string>()
@@ -412,7 +336,10 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
       }
     }
 
-    if (isGraphOrchestratorFacadePath(file.filePath) || /(?:^|\/)(?:libs|apps)\/.*\/src\/index\.ts$/.test(normPath)) {
+    if (
+      isGraphOrchestratorFacadePath(file.filePath) ||
+      /(?:^|\/)(?:libs|apps)\/.*\/src\/index\.ts$/.test(normPath)
+    ) {
       for (const stmt of sourceFile.statements) {
         if (ts.isExportDeclaration(stmt) && stmt.exportClause === undefined) {
           violations.push({
@@ -450,7 +377,8 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
           const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword
           const isRequireCall =
             (ts.isIdentifier(node.expression) && node.expression.text === "require") ||
-            (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "require")
+            (ts.isPropertyAccessExpression(node.expression) &&
+              node.expression.name.text === "require")
           if (isDynamicImport || isRequireCall) {
             const spec = extractSpecifierText(node.arguments[0])
             if (
@@ -486,7 +414,8 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
           ts.isPropertyAccessExpression(unwrappedNodeExpr) &&
           ts.isIdentifier(unwrappedNodeExpr.expression) &&
           unwrappedNodeExpr.expression.text === "Effect" &&
-          (unwrappedNodeExpr.name.text === "runSync" || unwrappedNodeExpr.name.text === "runPromise")
+          (unwrappedNodeExpr.name.text === "runSync" ||
+            unwrappedNodeExpr.name.text === "runPromise")
         ) {
           const calleeText = `Effect.${unwrappedNodeExpr.name.text}`
           let curr: ts.Node | undefined = node.parent
@@ -605,7 +534,10 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
           node.arguments[0] !== undefined
         ) {
           let targetExpr = unwrapAstExpression(node.arguments[0])
-          while (ts.isPropertyAccessExpression(targetExpr) || ts.isElementAccessExpression(targetExpr)) {
+          while (
+            ts.isPropertyAccessExpression(targetExpr) ||
+            ts.isElementAccessExpression(targetExpr)
+          ) {
             targetExpr = unwrapAstExpression(targetExpr.expression)
           }
           if (ts.isIdentifier(targetExpr) && staticObjectNames.has(targetExpr.text)) {
@@ -670,6 +602,30 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
             enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
           })
         }
+
+        if (isProcessExitBanned && isProcessExitCall(node, processAliases, exitAliases)) {
+          violations.push({
+            rule: SelfDogfoodingRuleId.make("process-exit-outside-app"),
+            message: SelfDogfoodingMessage.make(
+              `Direct 'process.exit(...)' call in '${file.filePath}' is banned outside type:app — return a typed Error / Result / ExitCode to the CLI/app entrypoint instead.`,
+            ),
+            file: file.filePath,
+            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+            enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+          })
+        }
+
+        if (isLocaleSortBanned && isLocaleCompareCall(node)) {
+          violations.push({
+            rule: SelfDogfoodingRuleId.make("locale-dependent-sort"),
+            message: SelfDogfoodingMessage.make(
+              `Locale-dependent '.localeCompare(...)' in '${file.filePath}' is banned in deterministic contract/domain/compiler code — use 'compareCodeUnits' from '@harness/contract'.`,
+            ),
+            file: file.filePath,
+            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+            enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+          })
+        }
       }
 
       if (
@@ -685,8 +641,12 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
         return isProcessEnvExpression(u) || (ts.isIdentifier(u) && envAliasNames.has(u.text))
       }
       const isVitestEnvAccess =
-        (ts.isPropertyAccessExpression(node) && node.name.text === "VITEST" && isEnvTarget(node.expression)) ||
-        (ts.isElementAccessExpression(node) && isLiteralVitestKey(node.argumentExpression) && isEnvTarget(node.expression)) ||
+        (ts.isPropertyAccessExpression(node) &&
+          node.name.text === "VITEST" &&
+          isEnvTarget(node.expression)) ||
+        (ts.isElementAccessExpression(node) &&
+          isLiteralVitestKey(node.argumentExpression) &&
+          isEnvTarget(node.expression)) ||
         (ts.isBinaryExpression(node) &&
           node.operatorToken.kind === ts.SyntaxKind.InKeyword &&
           isLiteralVitestKey(node.left) &&
@@ -698,7 +658,8 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
           node.name.elements.some((el) => {
             const propName = el.propertyName ?? el.name
             return (
-              ((ts.isIdentifier(propName) || ts.isStringLiteral(propName)) && propName.text === "VITEST") ||
+              ((ts.isIdentifier(propName) || ts.isStringLiteral(propName)) &&
+                propName.text === "VITEST") ||
               (ts.isComputedPropertyName(propName) && isLiteralVitestKey(propName.expression))
             )
           }))

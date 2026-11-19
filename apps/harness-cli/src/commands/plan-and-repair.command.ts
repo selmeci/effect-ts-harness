@@ -3,7 +3,7 @@ import { Cause, Effect, Option } from "effect"
 import * as Graph from "effect/Graph"
 import { match, P } from "ts-pattern"
 import { isPureInterruptCause } from "@harness/contract"
-import { loadGovernanceDocsChecked } from "@harness/gates"
+import { IGNORED_ERRORS, loadGovernanceDocsChecked } from "@harness/gates"
 import {
   BisectionProbeCount,
   checkEffectGraph,
@@ -222,7 +222,7 @@ export const handlePlanCheck = (
           .exhaustive()
         if (isActive) {
           for (const errName of doc.referencedErrors ?? []) {
-            if (!failsWithErrorTags.has(errName)) {
+            if (!failsWithErrorTags.has(errName) && !IGNORED_ERRORS.has(errName)) {
               violations.push(
                 `[dead-tagged-error] Governance doc '${doc.id}' declares TaggedError '${errName}', which has 0 FailsWith edges in the plan graph`,
               )
@@ -420,7 +420,9 @@ export const handleRepair = (
           advance: 0,
         }))
         .with("--rule", () =>
-          nextArg !== undefined ? { filter: nextArg, advance: 1 } : { filter: undefined, advance: 0 },
+          nextArg !== undefined
+            ? { filter: nextArg, advance: 1 }
+            : { filter: undefined, advance: 0 },
         )
         .otherwise(() => ({ filter: undefined, advance: 0 }))
       if (parsed.filter !== undefined) {

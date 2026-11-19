@@ -1,19 +1,31 @@
 import { join, relative } from "node:path"
 import { Schema } from "effect"
 import { match } from "ts-pattern"
-import {
-  computeContentSha256,
-  HARNESS_GATE_RULE_VERSION,
-  SelfDogfoodingRuleId,
-} from "@harness/contract"
+import { SelfDogfoodingRuleId } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
 import {
   type GcFinding,
   GcFindingKind,
   type GraphEntropyInput,
+  collectMarkdownFilesRecursive,
   readdirOrReport,
   readTextOrReport,
 } from "./gc-helpers.js"
+import {
+  EXPECTED_GATE_RULE_VERSION_DIGEST,
+  GATE_RULE_SOURCE_FILES,
+  computeGateRuleVersionDigest,
+  evaluateGateRuleDigestCheck,
+  extractGateRuleIdsFromSources,
+} from "./gc-rule-digest.js"
+
+export {
+  EXPECTED_GATE_RULE_VERSION_DIGEST,
+  GATE_RULE_SOURCE_FILES,
+  computeGateRuleVersionDigest,
+  evaluateGateRuleDigestCheck,
+  extractGateRuleIdsFromSources,
+}
 
 const PkgManifestDepsSchema = Schema.Struct({
   name: Schema.optional(Schema.String),
@@ -21,7 +33,9 @@ const PkgManifestDepsSchema = Schema.Struct({
   peerDependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   optionalDependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
 })
-const decodePkgManifestDeps = Schema.decodeUnknownOption(Schema.fromJsonString(PkgManifestDepsSchema))
+const decodePkgManifestDeps = Schema.decodeUnknownOption(
+  Schema.fromJsonString(PkgManifestDepsSchema),
+)
 
 const HookLeafSchema = Schema.Struct({
   type: Schema.optional(Schema.String),
@@ -44,42 +58,8 @@ const HooksFileSchema = Schema.Struct({
 })
 const decodeHooksFile = Schema.decodeUnknownOption(Schema.fromJsonString(HooksFileSchema))
 
-export const GATE_RULE_SOURCE_FILES = [
-  "libs/harness/gates/src/plugins/ast-gate-visitors.ts",
-  "libs/harness/gates/src/plugins/self-dogfooding-plugin.ts",
-  "libs/harness/gates/src/plugins/harness-tier-topology.ts",
-  "libs/harness/gates/src/plugins/sqlite-migrator-ast.ts",
-  "tools/oxlint/syntax-bans.js",
-] as const
-
-export const EXPECTED_GATE_RULE_VERSION_DIGEST =
-  "461673620864fb41393d1aab221e8e0ea93a9ad561bd04f280fd69aff16344cb"
-
 const VALID_HARNESS_OXLINT_RULES = new Set(["syntax-bans", "test-integrity"])
 const NON_PACKAGE_HANDLES = new Set(["@harness/architecture"])
-
-const collectMarkdownFilesRecursive = (
-  dir: string,
-  hostIo: SyncHostIo,
-  repoRoot: string,
-  findings: Array<GcFinding>,
-): ReadonlyArray<string> => {
-  if (!hostIo.existsSync(dir)) return []
-  const entries = readdirOrReport(dir, hostIo, repoRoot, findings)
-  if (entries === undefined) return []
-  const out: Array<string> = []
-  for (const e of entries) {
-    const full = join(dir, e.name)
-    if (e.isDirectory) {
-      out.push(...collectMarkdownFilesRecursive(full, hostIo, repoRoot, findings))
-      continue
-    }
-    if (e.isFile && e.name.endsWith(".md")) {
-      out.push(full)
-    }
-  }
-  return out.sort((a, b) => a.localeCompare(b))
-}
 
 const collectWorkspacePackageDeps = (
   repoRoot: string,
@@ -168,54 +148,23 @@ const collectDocTargetFiles = (
       }
     }
   }
-  files.push(...collectMarkdownFilesRecursive(join(repoRoot, "libs/harness/docs"), hostIo, repoRoot, findings))
-  files.push(...collectMarkdownFilesRecursive(join(repoRoot, "libs/sample/docs"), hostIo, repoRoot, findings))
-  return [...new Set(files)].sort((a, b) => a.localeCompare(b))
-}
-
-export const extractGateRuleIdsFromSources = (
-  astVisitorsSource: string,
-  selfDogfoodingSource: string,
-  tierTopologySource: string,
-  syntaxBansSource = "",
-  gcHelpersSource = "",
-): ReadonlyArray<string> => {
-  const ids = new Set<string>()
-  for (const m of astVisitorsSource.matchAll(/pushViolation\s*\(\s*[^,]+,\s*"([a-z0-9-]+)"/g)) {
-    if (m[1] !== undefined) ids.add(m[1])
-  }
-  for (const m of astVisitorsSource.matchAll(/GateRuleId\.make\(\s*"([a-z0-9-]+)"\s*\)/g)) {
-    if (m[1] !== undefined) ids.add(m[1])
-  }
-  for (const m of selfDogfoodingSource.matchAll(/SelfDogfoodingRuleId\.make\(\s*"([a-z0-9-]+)"\s*\)/g)) {
-    if (m[1] !== undefined) ids.add(m[1])
-  }
-  for (const m of tierTopologySource.matchAll(/TierTopologyRuleId\.make\(\s*"([a-z0-9-]+)"\s*\)/g)) {
-    if (m[1] !== undefined) ids.add(m[1])
-  }
-  for (const m of syntaxBansSource.matchAll(/["'`]\[([a-z][a-z0-9-]*(?:-[a-z0-9]+)+)\]/g)) {
-    if (m[1] !== undefined) ids.add(m[1])
-  }
-  const gcKindBlock = /GcFindingKind\s*=\s*Schema\.Literals\(\[([\s\S]*?)\]\)/.exec(gcHelpersSource)
-  if (gcKindBlock !== null) {
-    for (const m of gcKindBlock[1]!.matchAll(/"([a-z][a-z0-9-]*(?:-[a-z0-9]+)+)"/g)) {
-      if (m[1] !== undefined) ids.add(m[1])
-    }
-  }
-  return [...ids].sort((a, b) => a.localeCompare(b))
-}
-
-export const computeGateRuleVersionDigest = (
-  sources: ReadonlyArray<string>,
-): string => {
-  const sortedRuleIds = extractGateRuleIdsFromSources(
-    sources[0] ?? "",
-    sources[1] ?? "",
-    sources[2] ?? "",
-    sources[4] ?? "",
+  files.push(
+    ...collectMarkdownFilesRecursive(
+      join(repoRoot, "libs/harness/docs"),
+      hostIo,
+      repoRoot,
+      findings,
+    ),
   )
-  const sourceHashes = sources.map((s) => computeContentSha256(s)).join(",")
-  return computeContentSha256(`${HARNESS_GATE_RULE_VERSION}:${sortedRuleIds.join(",")}:${sourceHashes}`)
+  files.push(
+    ...collectMarkdownFilesRecursive(
+      join(repoRoot, "libs/sample/docs"),
+      hostIo,
+      repoRoot,
+      findings,
+    ),
+  )
+  return [...new Set(files)].sort((a, b) => a.localeCompare(b))
 }
 
 const collectKnownGateRuleIds = (
@@ -238,7 +187,7 @@ const collectKnownGateRuleIds = (
     readOptional(GATE_RULE_SOURCE_FILES[1]),
     readOptional(GATE_RULE_SOURCE_FILES[2]),
     readOptional(GATE_RULE_SOURCE_FILES[4]),
-    readOptional("libs/harness/gates/src/plugins/gc/gc-helpers.ts"),
+    readOptional(GATE_RULE_SOURCE_FILES[7]),
   )
   for (const id of extracted) known.add(id)
   return known
@@ -360,12 +309,17 @@ const checkSkillTierTables = (
         allowedColIdx = 1
         continue
       }
-      const cells = trimmed.split("|").slice(1, -1).map((c) => c.trim())
+      const cells = trimmed
+        .split("|")
+        .slice(1, -1)
+        .map((c) => c.trim())
       if (cells.length < 2) continue
       if (cells.every((c) => /^:?-+:?$/.test(c))) continue
       if (!tableHeaderParsed) {
         tableHeaderParsed = true
-        const foundAllowed = cells.findIndex((c) => /\b(?:allowed\s*imports|may\s*import)\b/i.test(c))
+        const foundAllowed = cells.findIndex((c) =>
+          /\b(?:allowed\s*imports|may\s*import)\b/i.test(c),
+        )
         const foundTag = cells.findIndex((c) => /\b(?:tag|tier)\b/i.test(c))
         if (foundTag >= 0) tagColIdx = foundTag
         if (foundAllowed >= 0) allowedColIdx = foundAllowed
@@ -417,7 +371,9 @@ const checkMermaidDependencyDrift = (
       const block = blockMatch[1] ?? ""
       if (!/\b(?:flowchart|graph)\s+(?:TD|TB|LR|RL|BT)\b/.test(block)) continue
       const nodeToPkg = new Map<string, string>()
-      for (const nodeMatch of block.matchAll(/\b([A-Za-z0-9_]+)\s*(?:\["([^"]*)"\]|\(([^)]*)\)|\[([^\]]*)\])/g)) {
+      for (const nodeMatch of block.matchAll(
+        /\b([A-Za-z0-9_]+)\s*(?:\["([^"]*)"\]|\(([^)]*)\)|\[([^\]]*)\])/g,
+      )) {
         const nodeId = nodeMatch[1]!
         const label = nodeMatch[2] ?? nodeMatch[3] ?? nodeMatch[4] ?? ""
         const pkgMatch = /@harness\/[a-z0-9-]+/.exec(label)
@@ -497,16 +453,25 @@ const checkDocBannedOrPhantomTech = (
       if (e.isFile && e.name.endsWith(".md")) phantomTargets.push(join(patternsDir, e.name))
     }
   }
-  for (const absPath of collectMarkdownFilesRecursive(join(repoRoot, "adapters"), hostIo, repoRoot, findings)) {
+  for (const absPath of collectMarkdownFilesRecursive(
+    join(repoRoot, "adapters"),
+    hostIo,
+    repoRoot,
+    findings,
+  )) {
     phantomTargets.push(absPath)
   }
-  const negationRe = /\b(?:not|never|no|banned|removed|merged|without|instead\s+of|non-goal|replaced|superseded|do\s+not|does\s+not|avoid)\b/i
+  const negationRe =
+    /\b(?:not|never|no|banned|removed|merged|without|instead\s+of|non-goal|replaced|superseded|do\s+not|does\s+not|avoid)\b/i
   for (const absPath of phantomTargets) {
     const relPath = relative(repoRoot, absPath).replace(/\\/g, "/")
     const content = readTextOrReport(absPath, hostIo, repoRoot, findings)
     if (content === undefined) continue
     for (const line of content.split(/\r?\n/)) {
-      const m = /\b(oxc-parser|sqlite-vec|FTS5|Layer\.scoped|Schema\.TaggedErrorClass|Cause\.failureOption)\b/.exec(line)
+      const m =
+        /\b(oxc-parser|sqlite-vec|FTS5|Layer\.scoped|Schema\.TaggedErrorClass|Cause\.failureOption)\b/.exec(
+          line,
+        )
       if (m !== null && !negationRe.test(line)) {
         findings.push({
           kind: "doc-banned-or-phantom-tech",
@@ -517,8 +482,18 @@ const checkDocBannedOrPhantomTech = (
         })
         break
       }
-      if (relPath.startsWith("adapters/claude-code/skills/resolving-effect-review-feedback/") && /\bmodel:\s*"flash"/.test(line) && !negationRe.test(line)) {
-        findings.push({ kind: "doc-banned-or-phantom-tech", nodeId: `${relPath}:claude-agent-model-flash`, location: relPath, message: `Claude Code skill "${relPath}" specifies invalid Agent model "flash" — use "haiku" or "sonnet" for Claude Code Agent tool dispatches.`, action: `Replace model: "flash" with model: "haiku" or "sonnet" in "${relPath}".` })
+      if (
+        relPath.startsWith("adapters/claude-code/skills/resolving-effect-review-feedback/") &&
+        /\bmodel:\s*"flash"/.test(line) &&
+        !negationRe.test(line)
+      ) {
+        findings.push({
+          kind: "doc-banned-or-phantom-tech",
+          nodeId: `${relPath}:claude-agent-model-flash`,
+          location: relPath,
+          message: `Claude Code skill "${relPath}" specifies invalid Agent model "flash" — use "haiku" or "sonnet" for Claude Code Agent tool dispatches.`,
+          action: `Replace model: "flash" with model: "haiku" or "sonnet" in "${relPath}".`,
+        })
         break
       }
     }
@@ -531,7 +506,9 @@ const checkDocBannedOrPhantomTech = (
     const content = readTextOrReport(absPath, hostIo, repoRoot, findings)
     if (content === undefined) continue
     if (/\b(?:drizzle-orm|drizzle-kit)\b/.test(content)) {
-      const hasBanOrSupersession = /\b(?:banned|supersession|superseded|ADR-0008)\b|zakázan/i.test(content)
+      const hasBanOrSupersession = /\b(?:banned|supersession|superseded|ADR-0008)\b|zakázan/i.test(
+        content,
+      )
       if (!hasBanOrSupersession) {
         findings.push({
           kind: "doc-banned-or-phantom-tech",
@@ -545,15 +522,17 @@ const checkDocBannedOrPhantomTech = (
   }
 }
 
-export const evaluateDocTruthPlugin = (
-  input: GraphEntropyInput,
-): ReadonlyArray<GcFinding> => {
+export const evaluateDocTruthPlugin = (input: GraphEntropyInput): ReadonlyArray<GcFinding> => {
   if (input.workspaceRoot === undefined || input.hostIo === undefined) return []
   const repoRoot = input.workspaceRoot
   const hostIo = input.hostIo
   const findings: Array<GcFinding> = []
 
-  const { names: workspacePkgNames, depsByPkg, pkgByRelDir } = collectWorkspacePackageDeps(repoRoot, hostIo, findings)
+  const {
+    names: workspacePkgNames,
+    depsByPkg,
+    pkgByRelDir,
+  } = collectWorkspacePackageDeps(repoRoot, hostIo, findings)
   const docFilesWithPatterns = collectDocTargetFiles(repoRoot, hostIo, findings, true)
   const docFilesForPaths = new Set(docFilesWithPatterns)
   const knownGateRuleIds = collectKnownGateRuleIds(repoRoot, hostIo, findings)
@@ -658,9 +637,16 @@ export const evaluateDocTruthPlugin = (
     if (docFilesForPaths.has(absDoc)) {
       const seenPaths = new Set<string>()
       for (const m of content.matchAll(/`([^`\n]+)`/g)) {
-        const raw = m[1]!.trim().replace(/#L\d+(?:-L?\d+)?$/, "").replace(/:\d+(?::\d+)?$/, "")
-        if (raw.includes("*") || raw.includes("<") || raw.includes("{") || raw.includes("...")) continue
-        if (!/^(?:libs|apps|tools|adapters)\/[A-Za-z0-9_./-]+\.(?:ts|tsx|js|json|sql|md)$/.test(raw)) continue
+        const raw = m[1]!
+          .trim()
+          .replace(/#L\d+(?:-L?\d+)?$/, "")
+          .replace(/:\d+(?::\d+)?$/, "")
+        if (raw.includes("*") || raw.includes("<") || raw.includes("{") || raw.includes("..."))
+          continue
+        if (
+          !/^(?:libs|apps|tools|adapters)\/[A-Za-z0-9_./-]+\.(?:ts|tsx|js|json|sql|md)$/.test(raw)
+        )
+          continue
         if (!seenPaths.has(raw) && !hostIo.existsSync(join(repoRoot, raw))) {
           seenPaths.add(raw)
           findings.push({
@@ -729,31 +715,7 @@ export const evaluateDocTruthPlugin = (
   checkMermaidDependencyDrift(repoRoot, hostIo, depsByPkg, pkgByRelDir, findings)
   checkDocBannedOrPhantomTech(repoRoot, hostIo, findings)
 
-  const gateRuleAbsPaths = GATE_RULE_SOURCE_FILES.map((rel) => join(repoRoot, rel))
-  if (gateRuleAbsPaths.every((p) => hostIo.existsSync(p))) {
-    const gateRuleSources: Array<string> = []
-    let allReadable = true
-    for (const absPath of gateRuleAbsPaths) {
-      const src = readTextOrReport(absPath, hostIo, repoRoot, findings)
-      if (src === undefined) {
-        allReadable = false
-        break
-      }
-      gateRuleSources.push(src)
-    }
-    if (allReadable) {
-      const actualDigest = computeGateRuleVersionDigest(gateRuleSources)
-      if (actualDigest !== EXPECTED_GATE_RULE_VERSION_DIGEST) {
-        findings.push({
-          kind: "stale-gate-rule-version",
-          nodeId: "HARNESS_GATE_RULE_VERSION",
-          location: "libs/harness/gates/src/plugins/gc/gc-doc-truth.plugin.ts",
-          message: `Gate rule IDs or gate source files changed without bumping HARNESS_GATE_RULE_VERSION / EXPECTED_GATE_RULE_VERSION_DIGEST (expected ${EXPECTED_GATE_RULE_VERSION_DIGEST}, got ${actualDigest}).`,
-          action: `Bump HARNESS_GATE_RULE_VERSION in @harness/contract and update EXPECTED_GATE_RULE_VERSION_DIGEST to "${actualDigest}".`,
-        })
-      }
-    }
-  }
+  evaluateGateRuleDigestCheck(repoRoot, hostIo, findings)
 
   return findings
 }

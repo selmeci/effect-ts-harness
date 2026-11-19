@@ -323,7 +323,10 @@ const matchesAny = (command: string, rules: ReadonlyArray<GuardPatternRule>): bo
 export const isCommandAllowed = (command: string): boolean => {
   const stripped = command
     .trim()
-    .replace(/^(?:(?:CI|NX_INTERACTIVE|HARNESS_[A-Z0-9_]+)=[^\s;|&]+\s+)+/, "")
+    .replace(
+      /^(?:(?:CI|NX_INTERACTIVE|(?!HARNESS_STATE_DIR=)HARNESS_[A-Z0-9_]+)=[^\s;|&]+\s+)+/,
+      "",
+    )
   const trimmed = stripped.trim()
   if (trimmed === "") return false
   return ALLOWLIST.some((prefix) => {
@@ -638,6 +641,13 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
     }
   }
 
+  if (candidates.some((p) => /(^|\/)\.harness\/(worktrees\/[^/]+\/)?mutate-stamp\.json$/.test(p))) {
+    return {
+      verdict: "deny",
+      reason: `Direct modification of mutate-stamp.json is forbidden (stamp forgery protection): ${filePath}`,
+    }
+  }
+
   if (
     candidates.some(
       (p) =>
@@ -651,11 +661,7 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
     }
   }
 
-  if (
-    candidates.some((p) =>
-      /(^|\/)(\.oxlintrc\.json|tools\/oxlint\/.*|.*\.cedar)$/.test(p),
-    )
-  ) {
+  if (candidates.some((p) => /(^|\/)(\.oxlintrc\.json|tools\/oxlint\/.*|.*\.cedar)$/.test(p))) {
     return {
       verdict: "ask",
       reason: `Modifying harness governance/linter policy requires human confirmation: ${filePath}`,

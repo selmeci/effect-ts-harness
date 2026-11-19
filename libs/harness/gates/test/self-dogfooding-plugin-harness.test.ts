@@ -1,4 +1,12 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -66,6 +74,7 @@ import {
   discoverDomainMutants,
   evaluateMutantSchemaInProcess,
   getActiveMutantId,
+  setActiveMutantId,
 } from "../src/mutation-check.js"
 import { MUTATION_PATTERNS } from "../src/mutation/mutant-ast-generator.js"
 import {
@@ -270,7 +279,9 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(report9.violations).toHaveLength(0)
 
         // limit (10 lines) -> clean
-        const content10 = Array.from({ length: 10 }, (_, i) => `export const v${i} = ${i}`).join("\n")
+        const content10 = Array.from({ length: 10 }, (_, i) => `export const v${i} = ${i}`).join(
+          "\n",
+        )
         const report10 = yield* SelfDogfooding.decide({
           files: [
             {
@@ -285,7 +296,9 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(report10.violations).toHaveLength(0)
 
         // limit + 1 (11 lines) -> violated
-        const content11 = Array.from({ length: 11 }, (_, i) => `export const v${i} = ${i}`).join("\n")
+        const content11 = Array.from({ length: 11 }, (_, i) => `export const v${i} = ${i}`).join(
+          "\n",
+        )
         const report11 = yield* SelfDogfooding.decide({
           files: [
             {
@@ -302,35 +315,39 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
       }),
   )
 
-  it.effect(
-    "REQ-1.2: non-failing mode returns violated verdict without raising error",
-    () =>
-      Effect.gen(function* () {
-        const input: SelfDogfoodingInput = {
-          files: [
-            {
-              filePath: AstSourceFilePath.make("libs/harness/gates/src/plugins/sample.ts"),
-              content: AstSourceContent.make(
-                "export const fn = Effect.fn('fn')(function* () { yield* Effect.void })\n",
-              ),
-            },
-          ],
-          failOnViolation: false,
-        }
+  it.effect("REQ-1.2: non-failing mode returns violated verdict without raising error", () =>
+    Effect.gen(function* () {
+      const input: SelfDogfoodingInput = {
+        files: [
+          {
+            filePath: AstSourceFilePath.make("libs/harness/gates/src/plugins/sample.ts"),
+            content: AstSourceContent.make(
+              "export const fn = Effect.fn('fn')(function* () { yield* Effect.void })\n",
+            ),
+          },
+        ],
+        failOnViolation: false,
+      }
 
-        const report = yield* decideSelfDogfooding(input)
-        expect(report.verdict).toBe("violated")
-        expect(report.violations.length).toBeGreaterThan(0)
-        expect(report.violations[0]?.rule).toBe("effect-fn-dummy-void")
-      }),
+      const report = yield* decideSelfDogfooding(input)
+      expect(report.verdict).toBe("violated")
+      expect(report.violations.length).toBeGreaterThan(0)
+      expect(report.violations[0]?.rule).toBe("effect-fn-dummy-void")
+    }),
   )
 
   it.effect(
     "REQ-1.2: enforces decomposed line budget across libs/harness/graph/src/**/*.ts modules",
     () =>
       Effect.gen(function* () {
-        const atLimitContent = Array.from({ length: 750 }, (_, i) => `export const g${i} = ${i}`).join("\n")
-        const overLimitContent = Array.from({ length: 801 }, (_, i) => `export const g${i} = ${i}`).join("\n")
+        const atLimitContent = Array.from(
+          { length: 750 },
+          (_, i) => `export const g${i} = ${i}`,
+        ).join("\n")
+        const overLimitContent = Array.from(
+          { length: 801 },
+          (_, i) => `export const g${i} = ${i}`,
+        ).join("\n")
         const report = yield* SelfDogfooding.decide({
           files: [
             {
@@ -356,9 +373,18 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
     "REQ-1.2: passing isModularPluginFile: false for isModularPluginPath targets across libs/ and apps/ still emits file-line-budget-exceeded",
     () =>
       Effect.gen(function* () {
-        const over250Content = Array.from({ length: 251 }, (_, i) => `export const e${i} = ${i}`).join("\n")
-        const over650Content = Array.from({ length: 651 }, (_, i) => `export const p${i} = ${i}`).join("\n")
-        const over800Content = Array.from({ length: 801 }, (_, i) => `export const g${i} = ${i}`).join("\n")
+        const over250Content = Array.from(
+          { length: 251 },
+          (_, i) => `export const e${i} = ${i}`,
+        ).join("\n")
+        const over650Content = Array.from(
+          { length: 651 },
+          (_, i) => `export const p${i} = ${i}`,
+        ).join("\n")
+        const over800Content = Array.from(
+          { length: 801 },
+          (_, i) => `export const g${i} = ${i}`,
+        ).join("\n")
         const report = yield* SelfDogfooding.decide({
           files: [
             {
@@ -367,7 +393,9 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
               isModularPluginFile: false,
             },
             {
-              filePath: AstSourceFilePath.make("libs/harness/graph/src/extractor/compiler-session.ts"),
+              filePath: AstSourceFilePath.make(
+                "libs/harness/graph/src/extractor/compiler-session.ts",
+              ),
               content: AstSourceContent.make(over800Content),
               isModularPluginFile: false,
             },
@@ -611,7 +639,10 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           })
           .exhaustive()
         expect(
-          yield* decideSpanBudgets({ spans: toSpanSamples(spansNonZero), maxRepeatedChildCalls: 3 }),
+          yield* decideSpanBudgets({
+            spans: toSpanSamples(spansNonZero),
+            maxRepeatedChildCalls: 3,
+          }),
         ).toHaveLength(0)
 
         // SubprocessCommand Schema rejection for empty, whitespace-only, and null bytes
@@ -698,108 +729,131 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
       }).pipe(Effect.provide(makeHarnessSubprocessRunnerHostIoLayer(testHostIo))),
   )
 
+  const withIsolatedActiveMutantEnv = <A, E, R>(
+    eff: Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E, R> =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const prevEnv = process.env["HARNESS_ACTIVE_MUTANT_ID"]
+        const prevGlobal = getActiveMutantId()
+        Reflect.deleteProperty(process.env, "HARNESS_ACTIVE_MUTANT_ID")
+        setActiveMutantId(undefined)
+        return { prevEnv, prevGlobal }
+      }),
+      () => eff,
+      ({ prevEnv, prevGlobal }) =>
+        Effect.sync(() => {
+          if (prevEnv === undefined) Reflect.deleteProperty(process.env, "HARNESS_ACTIVE_MUTANT_ID")
+          else process.env["HARNESS_ACTIVE_MUTANT_ID"] = prevEnv
+          setActiveMutantId(prevGlobal)
+        }),
+    )
+
   it.effect(
     "REQ-2.5: MutationCheck.withActiveMutant activates mutant and guarantees restoration",
     () =>
-      Effect.gen(function* () {
-        const testId = "MutationCheck.withActiveMutant::scoped-activation"
-        const mutantId = ActiveMutantId.make("mutant-core-decider-01")
+      withIsolatedActiveMutantEnv(
+        Effect.gen(function* () {
+          const testId = "MutationCheck.withActiveMutant::scoped-activation"
+          const mutantId = ActiveMutantId.make("mutant-core-decider-01")
 
-        expect(getActiveMutantId()).toBeUndefined()
+          expect(getActiveMutantId()).toBeUndefined()
 
-        let observedInside: string | null = null
-        const { result, spans } = yield* runWithTestTracer(
-          testId,
-          withActiveMutantEffect(
-            mutantId,
-            Effect.sync(() => {
-              observedInside = getActiveMutantId() ?? null
-              return true
-            }),
-          ).pipe(Effect.provide(ActiveMutantContextLive)),
-          emptyFnIndex,
-        )
-
-        expect(result).toBe(true)
-        expect(observedInside).toBe("mutant-core-decider-01")
-        expect(getActiveMutantId()).toBeUndefined()
-
-        const budgetViolations = yield* decideSpanBudgets({
-          spans: toSpanSamples(spans),
-          maxRepeatedChildCalls: 3,
-        })
-        expect(budgetViolations).toHaveLength(0)
-
-        let observedInsideFailure: string | null = null
-        const { result: failExit, spans: failSpans } = yield* runWithTestTracer(
-          "MutationCheck.withActiveMutant::callback-defect",
-          Effect.exit(
+          let observedInside: string | null = null
+          const { result, spans } = yield* runWithTestTracer(
+            testId,
             withActiveMutantEffect(
-              ActiveMutantId.make("mutant-fail-99"),
+              mutantId,
               Effect.sync(() => {
-                observedInsideFailure = getActiveMutantId() ?? null
-                throw new Error("boom")
+                observedInside = getActiveMutantId() ?? null
+                return true
               }),
             ).pipe(Effect.provide(ActiveMutantContextLive)),
-          ),
-          emptyFnIndex,
-        )
-        expect(observedInsideFailure).toBe("mutant-fail-99")
-        match(failExit)
-          .with({ _tag: "Failure" }, ({ cause }) => {
-            expect(Cause.squash(cause)).toBeInstanceOf(Error)
-            expect(Cause.pretty(cause)).toContain("boom")
-          })
-          .with({ _tag: "Success" }, () => {
-            expect.unreachable("Expected failure exit")
-          })
-          .exhaustive()
-        expect(getActiveMutantId()).toBeUndefined()
+            emptyFnIndex,
+          )
 
-        const failBudgetViolations = yield* decideSpanBudgets({
-          spans: toSpanSamples(failSpans),
-          maxRepeatedChildCalls: 3,
-        })
-        expect(failBudgetViolations).toHaveLength(0)
-      }),
+          expect(result).toBe(true)
+          expect(observedInside).toBe("mutant-core-decider-01")
+          expect(getActiveMutantId()).toBeUndefined()
+
+          const budgetViolations = yield* decideSpanBudgets({
+            spans: toSpanSamples(spans),
+            maxRepeatedChildCalls: 3,
+          })
+          expect(budgetViolations).toHaveLength(0)
+
+          let observedInsideFailure: string | null = null
+          const { result: failExit, spans: failSpans } = yield* runWithTestTracer(
+            "MutationCheck.withActiveMutant::callback-defect",
+            Effect.exit(
+              withActiveMutantEffect(
+                ActiveMutantId.make("mutant-fail-99"),
+                Effect.sync(() => {
+                  observedInsideFailure = getActiveMutantId() ?? null
+                  throw new Error("boom")
+                }),
+              ).pipe(Effect.provide(ActiveMutantContextLive)),
+            ),
+            emptyFnIndex,
+          )
+          expect(observedInsideFailure).toBe("mutant-fail-99")
+          match(failExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(Cause.squash(cause)).toBeInstanceOf(Error)
+              expect(Cause.pretty(cause)).toContain("boom")
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected failure exit")
+            })
+            .exhaustive()
+          expect(getActiveMutantId()).toBeUndefined()
+
+          const failBudgetViolations = yield* decideSpanBudgets({
+            spans: toSpanSamples(failSpans),
+            maxRepeatedChildCalls: 3,
+          })
+          expect(failBudgetViolations).toHaveLength(0)
+        }),
+      ),
   )
 
   it.effect(
     "ActiveMutantContext: nested runWithMutant calls do not deadlock and restore outer mutant ID",
     () =>
-      Effect.gen(function* () {
-        const ctx = yield* ActiveMutantContext
-        const outerId = ActiveMutantId.make("mutant-outer")
-        const innerId = ActiveMutantId.make("mutant-inner")
+      withIsolatedActiveMutantEnv(
+        Effect.gen(function* () {
+          const ctx = yield* ActiveMutantContext
+          const outerId = ActiveMutantId.make("mutant-outer")
+          const innerId = ActiveMutantId.make("mutant-inner")
 
-        let observedOuterBefore: string | null = null
-        let observedInner: string | null = null
-        let observedOuterAfter: string | null = null
+          let observedOuterBefore: string | null = null
+          let observedInner: string | null = null
+          let observedOuterAfter: string | null = null
 
-        yield* ctx.runWithMutant(
-          outerId,
-          Effect.gen(function* () {
-            observedOuterBefore = getActiveMutantId() ?? null
-            yield* ctx.runWithMutant(
-              innerId,
-              Effect.sync(() => {
-                observedInner = getActiveMutantId() ?? null
-              }),
-            )
-            observedOuterAfter = getActiveMutantId() ?? null
-          }),
-        )
+          yield* ctx.runWithMutant(
+            outerId,
+            Effect.gen(function* () {
+              observedOuterBefore = getActiveMutantId() ?? null
+              yield* ctx.runWithMutant(
+                innerId,
+                Effect.sync(() => {
+                  observedInner = getActiveMutantId() ?? null
+                }),
+              )
+              observedOuterAfter = getActiveMutantId() ?? null
+            }),
+          )
 
-        expect(observedOuterBefore).toBe("mutant-outer")
-        expect(observedInner).toBe("mutant-inner")
-        expect(observedOuterAfter).toBe("mutant-outer")
-        expect(getActiveMutantId()).toBeUndefined()
-      }).pipe(Effect.provide(ActiveMutantContextLive)),
+          expect(observedOuterBefore).toBe("mutant-outer")
+          expect(observedInner).toBe("mutant-inner")
+          expect(observedOuterAfter).toBe("mutant-outer")
+          expect(getActiveMutantId()).toBeUndefined()
+        }).pipe(Effect.provide(ActiveMutantContextLive)),
+      ),
   )
 
-  it.effect(
-    "ActiveMutantContext: fiber interruption restores state and global active mutant",
-    () =>
+  it.effect("ActiveMutantContext: fiber interruption restores state and global active mutant", () =>
+    withIsolatedActiveMutantEnv(
       Effect.gen(function* () {
         const ctx = yield* ActiveMutantContext
         const mutantId = ActiveMutantId.make("mutant-interrupted")
@@ -820,56 +874,59 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(current).toEqual(Option.none())
         expect(getActiveMutantId()).toBeUndefined()
       }).pipe(Effect.provide(ActiveMutantContextLive)),
+    ),
   )
 
   it.effect(
     "REQ-2.5 concurrency: Effect.all concurrent runWithMutant calls serialize without interleaving",
     () =>
-      Effect.gen(function* () {
-        const ctx = yield* ActiveMutantContext
-        const m1 = ActiveMutantId.make("mutant-concurrent-1")
-        const m2 = ActiveMutantId.make("mutant-concurrent-2")
+      withIsolatedActiveMutantEnv(
+        Effect.gen(function* () {
+          const ctx = yield* ActiveMutantContext
+          const m1 = ActiveMutantId.make("mutant-concurrent-1")
+          const m2 = ActiveMutantId.make("mutant-concurrent-2")
 
-        const executionLog: Array<string> = []
+          const executionLog: Array<string> = []
 
-        const task1 = ctx.runWithMutant(
-          m1,
-          Effect.gen(function* () {
-            executionLog.push("start-1")
-            yield* Effect.yieldNow
-            yield* Effect.yieldNow
-            expect(getActiveMutantId()).toBe("mutant-concurrent-1")
-            executionLog.push("end-1")
-          }),
-        )
+          const task1 = ctx.runWithMutant(
+            m1,
+            Effect.gen(function* () {
+              executionLog.push("start-1")
+              yield* Effect.yieldNow
+              yield* Effect.yieldNow
+              expect(getActiveMutantId()).toBe("mutant-concurrent-1")
+              executionLog.push("end-1")
+            }),
+          )
 
-        const task2 = ctx.runWithMutant(
-          m2,
-          Effect.gen(function* () {
-            executionLog.push("start-2")
-            yield* Effect.yieldNow
-            yield* Effect.yieldNow
-            expect(getActiveMutantId()).toBe("mutant-concurrent-2")
-            executionLog.push("end-2")
-          }),
-        )
+          const task2 = ctx.runWithMutant(
+            m2,
+            Effect.gen(function* () {
+              executionLog.push("start-2")
+              yield* Effect.yieldNow
+              yield* Effect.yieldNow
+              expect(getActiveMutantId()).toBe("mutant-concurrent-2")
+              executionLog.push("end-2")
+            }),
+          )
 
-        yield* Effect.all([task1, task2], { concurrency: 2 })
+          yield* Effect.all([task1, task2], { concurrency: 2 })
 
-        const isOneThenTwo =
-          executionLog[0] === "start-1" &&
-          executionLog[1] === "end-1" &&
-          executionLog[2] === "start-2" &&
-          executionLog[3] === "end-2"
-        const isTwoThenOne =
-          executionLog[0] === "start-2" &&
-          executionLog[1] === "end-2" &&
-          executionLog[2] === "start-1" &&
-          executionLog[3] === "end-1"
+          const isOneThenTwo =
+            executionLog[0] === "start-1" &&
+            executionLog[1] === "end-1" &&
+            executionLog[2] === "start-2" &&
+            executionLog[3] === "end-2"
+          const isTwoThenOne =
+            executionLog[0] === "start-2" &&
+            executionLog[1] === "end-2" &&
+            executionLog[2] === "start-1" &&
+            executionLog[3] === "end-1"
 
-        expect(isOneThenTwo || isTwoThenOne).toBe(true)
-        expect(getActiveMutantId()).toBeUndefined()
-      }).pipe(Effect.provide(ActiveMutantContextLive)),
+          expect(isOneThenTwo || isTwoThenOne).toBe(true)
+          expect(getActiveMutantId()).toBeUndefined()
+        }).pipe(Effect.provide(ActiveMutantContextLive)),
+      ),
   )
 
   it.effect(
@@ -939,33 +996,33 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
       }),
   )
 
-  it.effect("GatePluginRegistry: duplicate plugin ID rejection in makeGatePluginRegistryLayer", () =>
-    Effect.gen(function* () {
-      const dupPlugin1: GatePluginDescriptor = {
-        pluginId: PluginId.make("dup-id"),
-        description: "Plugin 1",
-        evaluate: () =>
-          Effect.succeed(makeSelfDogfoodingReport([], NonNegativeCount.make(0))),
-      }
-      const dupPlugin2: GatePluginDescriptor = {
-        pluginId: PluginId.make("dup-id"),
-        description: "Plugin 2",
-        evaluate: () =>
-          Effect.succeed(makeSelfDogfoodingReport([], NonNegativeCount.make(0))),
-      }
+  it.effect(
+    "GatePluginRegistry: duplicate plugin ID rejection in makeGatePluginRegistryLayer",
+    () =>
+      Effect.gen(function* () {
+        const dupPlugin1: GatePluginDescriptor = {
+          pluginId: PluginId.make("dup-id"),
+          description: "Plugin 1",
+          evaluate: () => Effect.succeed(makeSelfDogfoodingReport([], NonNegativeCount.make(0))),
+        }
+        const dupPlugin2: GatePluginDescriptor = {
+          pluginId: PluginId.make("dup-id"),
+          description: "Plugin 2",
+          evaluate: () => Effect.succeed(makeSelfDogfoodingReport([], NonNegativeCount.make(0))),
+        }
 
-      const exit = yield* Effect.exit(
-        Effect.scoped(Layer.build(makeGatePluginRegistryLayer([dupPlugin1, dupPlugin2]))),
-      )
-      match(exit)
-        .with({ _tag: "Failure" }, ({ cause }) => {
-          expect(Cause.pretty(cause)).toContain("dup-id")
-        })
-        .with({ _tag: "Success" }, () => {
-          expect.unreachable("Expected failure exit")
-        })
-        .exhaustive()
-    }),
+        const exit = yield* Effect.exit(
+          Effect.scoped(Layer.build(makeGatePluginRegistryLayer([dupPlugin1, dupPlugin2]))),
+        )
+        match(exit)
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            expect(Cause.pretty(cause)).toContain("dup-id")
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected failure exit")
+          })
+          .exhaustive()
+      }),
   )
 
   it.effect(
@@ -1057,7 +1114,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
     "REQ-1.3: AstGateCache.decide reports effect-fn-dummy-void, discriminant-branching, and non-exhaustive-union-match without isHarnessInternal exemption",
     () =>
       Effect.gen(function* () {
-        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v9")
+        expect(HARNESS_GATE_RULE_VERSION).toBe("ast-gates-v10")
 
         const testId = "AstGateCache.decide::REQ-1.3"
         const { result: report, spans } = yield* runWithTestTracer(
@@ -1383,7 +1440,9 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           } else if (relPath === "libs/harness/graph/src/extractor/compiler-session.ts") {
             expect(lineCount).toBeLessThanOrEqual(700)
           } else if (relPath.startsWith("libs/harness/graph/src/engine/")) {
-            expect(lineCount, `${relPath} engine module exceeded 700 lines`).toBeLessThanOrEqual(700)
+            expect(lineCount, `${relPath} engine module exceeded 700 lines`).toBeLessThanOrEqual(
+              700,
+            )
           } else if (relPath.startsWith("libs/harness/graph/src/extractor/")) {
             expect(lineCount, `${relPath} sub-extractor must be < 500 lines`).toBeLessThan(500)
           }
@@ -1629,7 +1688,9 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           ),
         )
         expect(wsReport.clean).toBe(false)
-        const archFindings = wsReport.findings.filter((f) => f.kind === "architecture-policy-violation")
+        const archFindings = wsReport.findings.filter(
+          (f) => f.kind === "architecture-policy-violation",
+        )
         expect(archFindings.some((f) => f.nodeId.includes("effect-fn-dummy-void"))).toBe(true)
         expect(archFindings.some((f) => f.nodeId.includes("circular-import"))).toBe(true)
       }),
@@ -1684,7 +1745,9 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(resolvePathSpecificMaxLines("apps/harness-cli/src/index.ts", 800)).toBe(250)
         expect(resolvePathSpecificMaxLines("apps/harness-mcp/src/server.ts", 800)).toBe(250)
 
-        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/extractor/effect-fn-extractor.ts")).toBe(499)
+        expect(
+          resolvePathSpecificMaxLines("libs/harness/graph/src/extractor/effect-fn-extractor.ts"),
+        ).toBe(499)
 
         expect(resolvePathSpecificMaxLines("apps/harness-cli/src/commands/verify.ts")).toBe(650)
         expect(resolvePathSpecificMaxLines("apps/harness-mcp/src/tools/graph.ts")).toBe(650)
@@ -1692,9 +1755,15 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(resolvePathSpecificMaxLines("libs/es/infra/src/projector.ts")).toBe(650)
         expect(resolvePathSpecificMaxLines("libs/es/infra/src/memory.ts", 800)).toBe(650)
 
-        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/extractor/compiler-session.ts")).toBe(700)
-        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/engine/snapshot-codec.ts")).toBe(700)
-        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/datalog/datalog-session.ts")).toBe(750)
+        expect(
+          resolvePathSpecificMaxLines("libs/harness/graph/src/extractor/compiler-session.ts"),
+        ).toBe(700)
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/engine/snapshot-codec.ts")).toBe(
+          700,
+        )
+        expect(
+          resolvePathSpecificMaxLines("libs/harness/graph/src/datalog/datalog-session.ts"),
+        ).toBe(750)
 
         expect(resolvePathSpecificMaxLines("libs/harness/gates/src/plugins/sample.ts")).toBe(800)
         expect(resolvePathSpecificMaxLines("libs/sample/domain/src/index.ts")).toBe(800)
@@ -1702,7 +1771,9 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(resolvePathSpecificMaxLines("apps/sample-web/src/client.ts")).toBe(800)
 
         // Stricter explicit maxPluginFileLines still tightens tiered budgets
-        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/type-extractor.ts", 100)).toBe(100)
+        expect(resolvePathSpecificMaxLines("libs/harness/graph/src/type-extractor.ts", 100)).toBe(
+          100,
+        )
         expect(resolvePathSpecificMaxLines("apps/harness-cli/src/index.ts", 100)).toBe(100)
 
         // isModularPluginPath matches all production .ts/.tsx files under libs/ and apps/ and excludes test/d.ts/config/build dirs
@@ -1717,7 +1788,9 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(isModularPluginPath("apps/sample-web/src/client.tsx")).toBe(true)
 
         expect(isModularPluginPath("libs/sample/domain/test/index.test.ts")).toBe(false)
-        expect(isModularPluginPath("libs/harness/decision/src/cached-decision-model.spec.ts")).toBe(false)
+        expect(isModularPluginPath("libs/harness/decision/src/cached-decision-model.spec.ts")).toBe(
+          false,
+        )
         expect(isModularPluginPath("libs/sample/infra/src/global.d.ts")).toBe(false)
         expect(isModularPluginPath("libs/sample/infra/drizzle.config.ts")).toBe(false)
         expect(isModularPluginPath("apps/harness-cli/vitest.config.ts")).toBe(false)
@@ -1754,7 +1827,9 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
             },
           ],
         })
-        expect(violatingIndexReport.violations.filter((v) => v.rule === "facade-star-reexport")).toHaveLength(1)
+        expect(
+          violatingIndexReport.violations.filter((v) => v.rule === "facade-star-reexport"),
+        ).toHaveLength(1)
 
         // 3. Allowed: explicit named export in orchestrator facade and src/index.ts
         const allowedNamedReport = yield* decideSelfDogfooding({
@@ -1771,7 +1846,9 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
             },
           ],
         })
-        expect(allowedNamedReport.violations.filter((v) => v.rule === "facade-star-reexport")).toHaveLength(0)
+        expect(
+          allowedNamedReport.violations.filter((v) => v.rule === "facade-star-reexport"),
+        ).toHaveLength(0)
       }),
   )
 
@@ -1871,7 +1948,9 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           ],
         })
         expect(
-          cleanTestWriteReport.violations.filter((v) => v.rule === "unisolated-dot-harness-test-write"),
+          cleanTestWriteReport.violations.filter(
+            (v) => v.rule === "unisolated-dot-harness-test-write",
+          ),
         ).toHaveLength(0)
       }),
   )
@@ -1930,7 +2009,10 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         expect(mcpPkg.dependencies?.zod).toBeUndefined()
         expect(mcpPkg.devDependencies?.zod).toBeUndefined()
 
-        const syntaxBansSrc = readFileSync(join(repoRoot, "tools", "oxlint", "syntax-bans.js"), "utf8")
+        const syntaxBansSrc = readFileSync(
+          join(repoRoot, "tools", "oxlint", "syntax-bans.js"),
+          "utf8",
+        )
         expect(syntaxBansSrc).not.toMatch(/\bisInternalHarnessFile\b/)
       }),
   )
@@ -1939,7 +2021,8 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
     "RFC-0007 Step 4 edge cases: enforces tiered limits across .tsx & nested subdirs and fails on facade-star-reexport when failOnViolation is true",
     () =>
       Effect.gen(function* () {
-        const makeLines = (n: number) => Array.from({ length: n }, (_, i) => `export const x${i} = ${i}`).join("\n")
+        const makeLines = (n: number) =>
+          Array.from({ length: n }, (_, i) => `export const x${i} = ${i}`).join("\n")
         const tieredReport = yield* SelfDogfooding.decide({
           files: [
             {
@@ -2060,7 +2143,9 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           AstSourceFilePath.make(esMemoryPath),
           infraTag,
         )
-        expect(esMemoryDisallowedViolations.some((v) => v.rule === "unscoped-effect-run")).toBe(true)
+        expect(esMemoryDisallowedViolations.some((v) => v.rule === "unscoped-effect-run")).toBe(
+          true,
+        )
 
         const esMemoryDieOnly = [
           'import { Effect } from "effect"',
@@ -2106,7 +2191,8 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         ).toBe(true)
 
         const nodeSqlitePath = "libs/harness/infra/src/bad-sqlite.ts"
-        const nodeSqliteSrc = 'import { DatabaseSync } from "node:sqlite"\nexport const d = DatabaseSync\n'
+        const nodeSqliteSrc =
+          'import { DatabaseSync } from "node:sqlite"\nexport const d = DatabaseSync\n'
         const nodeSqliteViolations = visitSourceFileSinglePass(
           ts.createSourceFile(nodeSqlitePath, nodeSqliteSrc, ts.ScriptTarget.Latest, true),
           AstSourceFilePath.make(nodeSqlitePath),
@@ -2125,8 +2211,8 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         const silentDefectSrc = AstSourceContent.make(
           'import { Effect } from "effect"\n' +
             "export const bad = Effect.succeed(1).pipe(Effect.catchDefect(() => Effect.void))\n" +
-            'export const okStderr = Effect.succeed(1).pipe(Effect.catchDefect((d) => { process.stderr.write(String(d)); return Effect.void }))\n' +
-            'export const okLog = Effect.succeed(1).pipe(Effect.catchDefect((d) => Effect.logWarning(String(d))))\n' +
+            "export const okStderr = Effect.succeed(1).pipe(Effect.catchDefect((d) => { process.stderr.write(String(d)); return Effect.void }))\n" +
+            "export const okLog = Effect.succeed(1).pipe(Effect.catchDefect((d) => Effect.logWarning(String(d))))\n" +
             "export const okReport = Effect.succeed(1).pipe(Effect.catchDefect((d) => Effect.succeed(makeLspExceptionReport(d))))\n",
         )
         const silentAstReport = yield* AstGateCache.decide({
@@ -2151,7 +2237,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           'import { chmodSync, fchmodSync } from "node:fs"\n' +
             'import { Effect } from "effect"\n' +
             'export const badIgnore = Effect.sync(() => chmodSync("/tmp/x", 0o600)).pipe(Effect.ignore)\n' +
-            'export const badOrElse = Effect.sync(() => fchmodSync(3, 0o600)).pipe(Effect.orElseSucceed(() => undefined))\n' +
+            "export const badOrElse = Effect.sync(() => fchmodSync(3, 0o600)).pipe(Effect.orElseSucceed(() => undefined))\n" +
             'export const okFailClosed = Effect.try({ try: () => chmodSync("/tmp/x", 0o600), catch: (e) => e })\n',
         )
         const chmodAstReport = yield* AstGateCache.decide({
@@ -2272,49 +2358,45 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
       }),
   )
 
-  it.effect(
-    "REQ-5.3: SelfDogfooding.decide enforces no-layer-build-in-layer-effect",
-    () =>
-      Effect.gen(function* () {
-        const filePath = AstSourceFilePath.make("libs/harness/gates/src/layer-build.ts")
-        const content = AstSourceContent.make(
-          'import { Context, Effect, Layer } from "effect"\n' +
-            'const Tag = Context.Service<{ value: number }>("Tag")\n' +
-            "export const badLayer = Layer.effect(Tag, Effect.gen(function* () {\n" +
-            "  const scope = yield* Effect.scope\n" +
-            "  return yield* Layer.build(Layer.empty)\n" +
-            "}))\n" +
-            "export const okProgram = Effect.scoped(Layer.build(Layer.empty))\n",
-        )
-        const report = yield* decideSelfDogfooding({
-          files: [{ filePath, content }],
-        })
-        expect(
-          report.violations.filter((v) => v.rule === "no-layer-build-in-layer-effect"),
-        ).toHaveLength(1)
-      }),
+  it.effect("REQ-5.3: SelfDogfooding.decide enforces no-layer-build-in-layer-effect", () =>
+    Effect.gen(function* () {
+      const filePath = AstSourceFilePath.make("libs/harness/gates/src/layer-build.ts")
+      const content = AstSourceContent.make(
+        'import { Context, Effect, Layer } from "effect"\n' +
+          'const Tag = Context.Service<{ value: number }>("Tag")\n' +
+          "export const badLayer = Layer.effect(Tag, Effect.gen(function* () {\n" +
+          "  const scope = yield* Effect.scope\n" +
+          "  return yield* Layer.build(Layer.empty)\n" +
+          "}))\n" +
+          "export const okProgram = Effect.scoped(Layer.build(Layer.empty))\n",
+      )
+      const report = yield* decideSelfDogfooding({
+        files: [{ filePath, content }],
+      })
+      expect(
+        report.violations.filter((v) => v.rule === "no-layer-build-in-layer-effect"),
+      ).toHaveLength(1)
+    }),
   )
 
-  it.effect(
-    "REQ-5.4: SelfDogfooding.decide enforces no-double-wrapped-effect-fn",
-    () =>
-      Effect.gen(function* () {
-        const filePath = AstSourceFilePath.make("libs/harness/gates/src/double-wrap.ts")
-        const content = AstSourceContent.make(
-          'import { Effect } from "effect"\n' +
-            'export const badArrow = Effect.fn("badArrow")(() => Effect.gen(function* () { return 1 }))\n' +
-            'export const badBlock = Effect.fn("badBlock")((x: number) => { return Effect.gen(function* () { return x }) })\n' +
-            "export const badUntraced = Effect.fnUntraced(() => Effect.gen(function* () { return 2 }))\n" +
-            'export const okFn = Effect.fn("okFn")(function* () { return 3 })\n' +
-            "export const okUntraced = Effect.fnUntraced(function* () { return 4 })\n",
-        )
-        const report = yield* decideSelfDogfooding({
-          files: [{ filePath, content }],
-        })
-        expect(
-          report.violations.filter((v) => v.rule === "no-double-wrapped-effect-fn"),
-        ).toHaveLength(3)
-      }),
+  it.effect("REQ-5.4: SelfDogfooding.decide enforces no-double-wrapped-effect-fn", () =>
+    Effect.gen(function* () {
+      const filePath = AstSourceFilePath.make("libs/harness/gates/src/double-wrap.ts")
+      const content = AstSourceContent.make(
+        'import { Effect } from "effect"\n' +
+          'export const badArrow = Effect.fn("badArrow")(() => Effect.gen(function* () { return 1 }))\n' +
+          'export const badBlock = Effect.fn("badBlock")((x: number) => { return Effect.gen(function* () { return x }) })\n' +
+          "export const badUntraced = Effect.fnUntraced(() => Effect.gen(function* () { return 2 }))\n" +
+          'export const okFn = Effect.fn("okFn")(function* () { return 3 })\n' +
+          "export const okUntraced = Effect.fnUntraced(function* () { return 4 })\n",
+      )
+      const report = yield* decideSelfDogfooding({
+        files: [{ filePath, content }],
+      })
+      expect(
+        report.violations.filter((v) => v.rule === "no-double-wrapped-effect-fn"),
+      ).toHaveLength(3)
+    }),
   )
 
   it.effect(
@@ -2336,12 +2418,8 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         const report = yield* AstGateCache.decide({
           files: [{ filePath, content, packageTag: AstGatePackageTag.make("domain") }],
         })
-        expect(
-          report.violations.filter((v) => v.rule === "discriminant-branching"),
-        ).toHaveLength(1)
-        expect(
-          report.violations.filter((v) => v.rule === "unscoped-effect-run"),
-        ).toHaveLength(1)
+        expect(report.violations.filter((v) => v.rule === "discriminant-branching")).toHaveLength(1)
+        expect(report.violations.filter((v) => v.rule === "unscoped-effect-run")).toHaveLength(1)
       }),
   )
 
@@ -2389,7 +2467,9 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
           failOnViolation: false,
         })
         expect(report.verdict).toBe("violated")
-        expect(report.violations.filter((v) => v.rule === "silent-gate-fs-fallback")).toHaveLength(2)
+        expect(report.violations.filter((v) => v.rule === "silent-gate-fs-fallback")).toHaveLength(
+          2,
+        )
       }),
   )
 
@@ -2413,7 +2493,9 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
               ),
             },
             {
-              filePath: AstSourceFilePath.make("libs/harness/contract/src/workspace-and-process.ts"),
+              filePath: AstSourceFilePath.make(
+                "libs/harness/contract/src/workspace-and-process.ts",
+              ),
               content: AstSourceContent.make(
                 'import { Cause } from "effect"\nexport const isPureInterruptCause = (c: Cause.Cause<unknown>) => Cause.hasInterrupts(c)\n',
               ),
@@ -2427,9 +2509,15 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         })
 
         expect(report.verdict).toBe("violated")
-        expect(report.violations.filter((v) => v.rule === "bare-cause-has-interrupts")).toHaveLength(1)
-        expect(report.violations.filter((v) => v.rule === "process-env-outside-infra-or-app")).toHaveLength(1)
-        expect(report.violations.filter((v) => v.rule === "no-global-mutable-cache")).toHaveLength(1)
+        expect(
+          report.violations.filter((v) => v.rule === "bare-cause-has-interrupts"),
+        ).toHaveLength(1)
+        expect(
+          report.violations.filter((v) => v.rule === "process-env-outside-infra-or-app"),
+        ).toHaveLength(1)
+        expect(report.violations.filter((v) => v.rule === "no-global-mutable-cache")).toHaveLength(
+          1,
+        )
       }),
   )
 
@@ -2465,10 +2553,16 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         })
 
         expect(report.verdict).toBe("violated")
-        expect(report.violations.filter((v) => v.rule === "no-global-mutable-cache")).toHaveLength(3)
-        expect(report.violations.filter((v) => v.rule === "process-env-outside-infra-or-app")).toHaveLength(2)
+        expect(report.violations.filter((v) => v.rule === "no-global-mutable-cache")).toHaveLength(
+          3,
+        )
+        expect(
+          report.violations.filter((v) => v.rule === "process-env-outside-infra-or-app"),
+        ).toHaveLength(2)
         expect(report.violations.filter((v) => v.rule === "dynamic-harness-import")).toHaveLength(2)
-        expect(report.violations.filter((v) => v.rule === "bare-cause-has-interrupts")).toHaveLength(2)
+        expect(
+          report.violations.filter((v) => v.rule === "bare-cause-has-interrupts"),
+        ).toHaveLength(2)
       }),
   )
 
@@ -2495,7 +2589,9 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
               ),
             },
             {
-              filePath: AstSourceFilePath.make("libs/harness/contract/src/workspace-and-process.ts"),
+              filePath: AstSourceFilePath.make(
+                "libs/harness/contract/src/workspace-and-process.ts",
+              ),
               content: AstSourceContent.make(
                 'import { Cause } from "effect"\nexport const isPureInterruptCause = (c: Cause.Cause<unknown>) => Cause.hasInterruptsOnly(c)\n',
               ),
@@ -2505,10 +2601,16 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         })
 
         expect(report.verdict).toBe("violated")
-        const interruptViolations = report.violations.filter((v) => v.rule === "bare-cause-has-interrupts")
+        const interruptViolations = report.violations.filter(
+          (v) => v.rule === "bare-cause-has-interrupts",
+        )
         expect(interruptViolations).toHaveLength(3)
-        expect(interruptViolations.every((v) => v.file === "libs/harness/infra/src/interrupt-checks.ts")).toBe(true)
-        expect(interruptViolations.every((v) => v.message.includes("isPureInterruptCause"))).toBe(true)
+        expect(
+          interruptViolations.every((v) => v.file === "libs/harness/infra/src/interrupt-checks.ts"),
+        ).toBe(true)
+        expect(interruptViolations.every((v) => v.message.includes("isPureInterruptCause"))).toBe(
+          true,
+        )
       }),
   )
 
@@ -2597,7 +2699,9 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
       default: {
         rules: {
           "syntax-bans": {
-            create: (ctx: unknown) => Record<string, ((node: Record<string, unknown>) => void) | undefined>
+            create: (
+              ctx: unknown,
+            ) => Record<string, ((node: Record<string, unknown>) => void) | undefined>
           }
         }
       }
@@ -2647,7 +2751,14 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
                               object: { type: "Identifier", name: "Schema" },
                               property: { type: "Identifier", name: "optional" },
                             },
-                            arguments: [{ type: "MemberExpression", computed: false, object: { type: "Identifier", name: "Schema" }, property: { type: "Identifier", name: "Int" } }],
+                            arguments: [
+                              {
+                                type: "MemberExpression",
+                                computed: false,
+                                object: { type: "Identifier", name: "Schema" },
+                                property: { type: "Identifier", name: "Int" },
+                              },
+                            ],
                           },
                         },
                       ],
@@ -2697,6 +2808,119 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         ],
       },
     })
-    expect(persistReports.filter((r) => r.message.includes("discarded-persistence-result"))).toHaveLength(2)
+    expect(
+      persistReports.filter((r) => r.message.includes("discarded-persistence-result")),
+    ).toHaveLength(2)
   })
+
+  it.effect(
+    "REQ-1.3: flags process-exit-outside-app and locale-dependent-sort (including evasion forms) in SelfDogfooding.decide",
+    () =>
+      Effect.gen(function* () {
+        const err = yield* Effect.flip(
+          SelfDogfooding.decide({
+            files: [
+              {
+                filePath: AstSourceFilePath.make("libs/sample/core/src/bad-exit.ts"),
+                content: AstSourceContent.make("export const bail = () => process.exit(1)\n"),
+              },
+              {
+                filePath: AstSourceFilePath.make("libs/harness/gates/src/bad-exit.ts"),
+                content: AstSourceContent.make("export const bail = () => process.exit(1)\n"),
+              },
+              {
+                filePath: AstSourceFilePath.make("libs/harness/decision/src/bad-exit.ts"),
+                content: AstSourceContent.make("export const bail = () => process.exit(1)\n"),
+              },
+              {
+                filePath: AstSourceFilePath.make("libs/sample/core/src/evade-exit.ts"),
+                content: AstSourceContent.make(
+                  [
+                    'export const e1 = () => process["exit"](1)',
+                    "export const e2 = () => globalThis.process.exit(1)",
+                    "export const e3 = () => { const { exit } = process; return exit(1) }",
+                    "export const e4 = () => { const p = process; return p.exit(1) }",
+                    "export const e5 = () => process.reallyExit(1)",
+                    "export const e6 = () => Reflect.apply(process.exit, process, [1])",
+                  ].join("\n") + "\n",
+                ),
+              },
+              {
+                filePath: AstSourceFilePath.make("apps/sample/src/ok-exit.ts"),
+                content: AstSourceContent.make("export const bail = () => process.exit(1)\n"),
+              },
+              {
+                filePath: AstSourceFilePath.make("libs/sample/core/test/ok-exit.test.ts"),
+                content: AstSourceContent.make("export const bail = () => process.exit(1)\n"),
+              },
+              {
+                filePath: AstSourceFilePath.make("libs/sample/contract/src/bad-sort.ts"),
+                content: AstSourceContent.make(
+                  "export const sortIds = (xs: string[]) => [...xs].sort((a, b) => a.localeCompare(b))\n",
+                ),
+              },
+              {
+                filePath: AstSourceFilePath.make("libs/sample/domain/src/bad-sort.ts"),
+                content: AstSourceContent.make(
+                  "export const cmp = (a: string, b: string) => a.localeCompare(b)\n",
+                ),
+              },
+              {
+                filePath: AstSourceFilePath.make("libs/sample/domain/src/evade-sort.ts"),
+                content: AstSourceContent.make(
+                  [
+                    'export const s1 = (a: string, b: string) => a["localeCompare"](b)',
+                    "export const s2 = (a: string, b: string) => String.prototype.localeCompare.call(a, b)",
+                    "export const s3 = (a: string, b: string) => new Intl.Collator().compare(a, b)",
+                  ].join("\n") + "\n",
+                ),
+              },
+              {
+                filePath: AstSourceFilePath.make(
+                  "libs/harness/gates/src/plan-workflow-compiler.ts",
+                ),
+                content: AstSourceContent.make(
+                  "export const cmp = (a: string, b: string) => a.localeCompare(b)\n",
+                ),
+              },
+              {
+                filePath: AstSourceFilePath.make("libs/sample/domain/src/ok-sort.ts"),
+                content: AstSourceContent.make(
+                  "export const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)\n",
+                ),
+              },
+            ],
+            maxPluginFileLines: MaxPluginFileLines.make(800),
+            failOnViolation: true,
+          }),
+        )
+
+        const exitViolations = err.violations.filter((v) => v.rule === "process-exit-outside-app")
+        expect(
+          exitViolations.map((v) => v.file).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+        ).toEqual([
+          "libs/harness/decision/src/bad-exit.ts",
+          "libs/harness/gates/src/bad-exit.ts",
+          "libs/sample/core/src/bad-exit.ts",
+          "libs/sample/core/src/evade-exit.ts",
+          "libs/sample/core/src/evade-exit.ts",
+          "libs/sample/core/src/evade-exit.ts",
+          "libs/sample/core/src/evade-exit.ts",
+          "libs/sample/core/src/evade-exit.ts",
+          "libs/sample/core/src/evade-exit.ts",
+        ])
+
+        const sortViolations = err.violations.filter((v) => v.rule === "locale-dependent-sort")
+        expect(
+          sortViolations.map((v) => v.file).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+        ).toEqual([
+          "libs/harness/gates/src/plan-workflow-compiler.ts",
+          "libs/sample/contract/src/bad-sort.ts",
+          "libs/sample/domain/src/bad-sort.ts",
+          "libs/sample/domain/src/evade-sort.ts",
+          "libs/sample/domain/src/evade-sort.ts",
+          "libs/sample/domain/src/evade-sort.ts",
+        ])
+      }),
+  )
 })

@@ -14,15 +14,64 @@ const unwrapExpr = (expr: ts.Expression): ts.Expression => {
   return curr
 }
 
-export const ALLOWED_PURE_NODE_SUBPATHS = new Set(["path", "path/posix", "path/win32", "crypto", "url"])
+export const ALLOWED_PURE_NODE_SUBPATHS = new Set([
+  "path",
+  "path/posix",
+  "path/win32",
+  "crypto",
+  "url",
+])
 
 export const BANNED_BARE_NODE_BUILTINS = new Set([
-  "fs", "fs/promises", "child_process", "net", "os", "http", "https", "http2", "tls", "dgram",
-  "dns", "dns/promises", "cluster", "worker_threads", "sqlite", "module", "vm", "readline",
-  "readline/promises", "inspector", "inspector/promises", "v8", "perf_hooks", "process", "repl",
-  "tty", "wasi", "zlib", "stream", "stream/promises", "stream/web", "stream/consumers", "timers",
-  "timers/promises", "async_hooks", "diagnostics_channel", "events", "buffer", "util", "util/types",
-  "assert", "assert/strict", "querystring", "string_decoder", "punycode", "trace_events", "domain", "constants", "sys",
+  "fs",
+  "fs/promises",
+  "child_process",
+  "net",
+  "os",
+  "http",
+  "https",
+  "http2",
+  "tls",
+  "dgram",
+  "dns",
+  "dns/promises",
+  "cluster",
+  "worker_threads",
+  "sqlite",
+  "module",
+  "vm",
+  "readline",
+  "readline/promises",
+  "inspector",
+  "inspector/promises",
+  "v8",
+  "perf_hooks",
+  "process",
+  "repl",
+  "tty",
+  "wasi",
+  "zlib",
+  "stream",
+  "stream/promises",
+  "stream/web",
+  "stream/consumers",
+  "timers",
+  "timers/promises",
+  "async_hooks",
+  "diagnostics_channel",
+  "events",
+  "buffer",
+  "util",
+  "util/types",
+  "assert",
+  "assert/strict",
+  "querystring",
+  "string_decoder",
+  "punycode",
+  "trace_events",
+  "domain",
+  "constants",
+  "sys",
 ])
 
 export const isBannedNodeBuiltinSpecifier = (specifier: string): boolean => {
@@ -37,7 +86,9 @@ export const isSilentFsFallbackCheckedPath = (normPath: string): boolean => {
   if (/(?:^|\/)libs\/harness\/graph\/src\/extractor\/compiler-session\.ts$/.test(normPath)) {
     return false
   }
-  return /(?:^|\/)(?:libs\/harness\/(?:gates|graph)\/src|apps\/harness-(?:cli|mcp)\/src)\//.test(normPath)
+  return /(?:^|\/)(?:libs\/harness\/(?:gates|graph)\/src|apps\/harness-(?:cli|mcp)\/src)\//.test(
+    normPath,
+  )
 }
 
 const FS_READ_SYNC_NAMES = new Set(["readTextSync", "readdirSync", "readBytesSync"])
@@ -50,7 +101,10 @@ const isProcExemptFsArg = (arg: ts.Expression | undefined): boolean => {
     return u.text.includes("/proc/")
   }
   if (ts.isTemplateExpression(u)) {
-    return u.head.text.includes("/proc/") || u.templateSpans.some((s) => s.literal.text.includes("/proc/"))
+    return (
+      u.head.text.includes("/proc/") ||
+      u.templateSpans.some((s) => s.literal.text.includes("/proc/"))
+    )
   }
   return false
 }
@@ -107,7 +161,10 @@ const isCauseMemberCallWithArg = (
 
 const collectAndTerms = (expr: ts.Expression, out: Array<ts.Expression>): void => {
   const unwrapped = unwrapExpr(expr)
-  if (ts.isBinaryExpression(unwrapped) && unwrapped.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+  if (
+    ts.isBinaryExpression(unwrapped) &&
+    unwrapped.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+  ) {
     collectAndTerms(unwrapped.left, out)
     collectAndTerms(unwrapped.right, out)
     return
@@ -174,7 +231,10 @@ export const isBareCauseHasInterruptsNode = (
       curr = curr.parent
       continue
     }
-    if (ts.isBinaryExpression(curr) && curr.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+    if (
+      ts.isBinaryExpression(curr) &&
+      curr.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+    ) {
       root = curr
       curr = curr.parent
       continue
@@ -273,7 +333,11 @@ export const isLiteralVitestKey = (expr: ts.Expression): boolean => {
   )
 }
 
-export const isMemberCall = (callExpr: ts.CallExpression, objName: string, methodName: string): boolean => {
+export const isMemberCall = (
+  callExpr: ts.CallExpression,
+  objName: string,
+  methodName: string,
+): boolean => {
   const callee = unwrapExpr(callExpr.expression)
   return (
     ts.isPropertyAccessExpression(callee) &&
@@ -287,7 +351,11 @@ const isEffectGenBody = (body: ts.ConciseBody): boolean => {
   if (ts.isBlock(body)) {
     if (body.statements.length !== 1) return false
     const onlyStmt = body.statements[0]
-    if (onlyStmt === undefined || !ts.isReturnStatement(onlyStmt) || onlyStmt.expression === undefined) {
+    if (
+      onlyStmt === undefined ||
+      !ts.isReturnStatement(onlyStmt) ||
+      onlyStmt.expression === undefined
+    ) {
       return false
     }
     const returnedExpr = unwrapExpr(onlyStmt.expression)
@@ -310,7 +378,16 @@ export const isDoubleWrappedEffectFn = (callExpr: ts.CallExpression): boolean =>
   return isEffectGenBody(unwrappedArg.body)
 }
 
-const EFFECT_CONSTRUCTORS = new Set(["fn", "fnUntraced", "gen", "sync", "suspend", "try", "tryPromise", "promise"])
+const EFFECT_CONSTRUCTORS = new Set([
+  "fn",
+  "fnUntraced",
+  "gen",
+  "sync",
+  "suspend",
+  "try",
+  "tryPromise",
+  "promise",
+])
 const LAYER_CONSTRUCTORS = new Set(["effect", "succeed", "sync"])
 
 export const isBannedParentConstructor = (callExpr: ts.CallExpression): boolean => {
@@ -378,7 +455,8 @@ export const isAllOptionalSchemaStructCall = (node: ts.Node): boolean => {
 export const isConditionalPortBindBailout = (node: ts.Node): boolean => {
   if (!ts.isIfStatement(node) || node.elseStatement !== undefined) return false
   const test = unwrapExpr(node.expression)
-  if (!ts.isPrefixUnaryExpression(test) || test.operator !== ts.SyntaxKind.ExclamationToken) return false
+  if (!ts.isPrefixUnaryExpression(test) || test.operator !== ts.SyntaxKind.ExclamationToken)
+    return false
   const operand = unwrapExpr(test.operand)
   if (!ts.isIdentifier(operand) || !/bound/i.test(operand.text)) return false
   if (ts.isReturnStatement(node.thenStatement)) return true
@@ -393,12 +471,17 @@ export const isConditionalPortBindBailout = (node: ts.Node): boolean => {
 export const isVacuousLengthNonNegativeAssertion = (node: ts.Node): boolean => {
   if (!ts.isCallExpression(node)) return false
   const callee = unwrapExpr(node.expression)
-  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== "toBeGreaterThanOrEqual") return false
+  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== "toBeGreaterThanOrEqual")
+    return false
   if (node.arguments.length !== 1 || node.arguments[0] === undefined) return false
   const arg0 = unwrapExpr(node.arguments[0])
   if (!ts.isNumericLiteral(arg0) || arg0.text !== "0") return false
   const expectCall = unwrapExpr(callee.expression)
-  if (!ts.isCallExpression(expectCall) || expectCall.arguments.length !== 1 || expectCall.arguments[0] === undefined) {
+  if (
+    !ts.isCallExpression(expectCall) ||
+    expectCall.arguments.length !== 1 ||
+    expectCall.arguments[0] === undefined
+  ) {
     return false
   }
   const expectCallee = unwrapExpr(expectCall.expression)
@@ -423,8 +506,7 @@ const isPersistenceResultCallExpr = (expr: ts.Expression): boolean => {
     unwrapped.operatorToken.kind === ts.SyntaxKind.CommaToken
   ) {
     return (
-      isPersistenceResultCallExpr(unwrapped.left) ||
-      isPersistenceResultCallExpr(unwrapped.right)
+      isPersistenceResultCallExpr(unwrapped.left) || isPersistenceResultCallExpr(unwrapped.right)
     )
   }
   if (!ts.isCallExpression(unwrapped)) return false
@@ -439,3 +521,237 @@ const isPersistenceResultCallExpr = (expr: ts.Expression): boolean => {
 
 export const isDiscardedPersistenceCallStatement = (node: ts.Node): boolean =>
   ts.isExpressionStatement(node) && isPersistenceResultCallExpr(node.expression)
+
+const isProcessRootExpr = (expr: ts.Expression, processAliases?: ReadonlySet<string>): boolean => {
+  const u = unwrapExpr(expr)
+  if (ts.isIdentifier(u)) {
+    return u.text === "process" || (processAliases?.has(u.text) ?? false)
+  }
+  if (ts.isPropertyAccessExpression(u) && u.name.text === "process") {
+    const base = unwrapExpr(u.expression)
+    return ts.isIdentifier(base) && base.text === "globalThis"
+  }
+  if (ts.isElementAccessExpression(u)) {
+    const arg = unwrapExpr(u.argumentExpression)
+    const base = unwrapExpr(u.expression)
+    return (
+      (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) &&
+      arg.text === "process" &&
+      ts.isIdentifier(base) &&
+      base.text === "globalThis"
+    )
+  }
+  return false
+}
+
+export const getStaticMemberName = (node: ts.Expression): string | undefined => {
+  if (ts.isPropertyAccessExpression(node)) return node.name.text
+  if (ts.isElementAccessExpression(node)) {
+    const arg = unwrapExpr(node.argumentExpression)
+    if (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) return arg.text
+  }
+  return undefined
+}
+
+const isProcessExitReference = (
+  expr: ts.Expression,
+  processAliases?: ReadonlySet<string>,
+  exitAliases?: ReadonlySet<string>,
+): boolean => {
+  const u = unwrapExpr(expr)
+  if (ts.isIdentifier(u) && (exitAliases?.has(u.text) ?? false)) return true
+  if (ts.isPropertyAccessExpression(u) || ts.isElementAccessExpression(u)) {
+    const memberName = getStaticMemberName(u)
+    return (
+      (memberName === "exit" || memberName === "reallyExit") &&
+      isProcessRootExpr(u.expression, processAliases)
+    )
+  }
+  return false
+}
+
+export const collectProcessExitAliases = (
+  sourceFile: ts.SourceFile,
+): { readonly processAliases: Set<string>; readonly exitAliases: Set<string> } => {
+  const processAliases = new Set<string>()
+  const exitAliases = new Set<string>()
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && node.initializer !== undefined) {
+      if (isProcessRootExpr(node.initializer, processAliases)) {
+        if (ts.isIdentifier(node.name)) {
+          processAliases.add(node.name.text)
+        }
+        if (ts.isObjectBindingPattern(node.name)) {
+          for (const el of node.name.elements) {
+            const prop = el.propertyName ?? el.name
+            const propName =
+              ts.isIdentifier(prop) || ts.isStringLiteral(prop) ? prop.text : undefined
+            if ((propName === "exit" || propName === "reallyExit") && ts.isIdentifier(el.name)) {
+              exitAliases.add(el.name.text)
+            }
+          }
+        }
+      }
+      if (
+        !isProcessRootExpr(node.initializer, processAliases) &&
+        ts.isIdentifier(node.name) &&
+        isProcessExitReference(node.initializer, processAliases, exitAliases)
+      ) {
+        exitAliases.add(node.name.text)
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sourceFile)
+  return { processAliases, exitAliases }
+}
+
+export const isProcessExitCall = (
+  node: ts.CallExpression,
+  processAliases?: ReadonlySet<string>,
+  exitAliases?: ReadonlySet<string>,
+): boolean => {
+  if (isProcessExitReference(node.expression, processAliases, exitAliases)) return true
+  const callee = unwrapExpr(node.expression)
+  if (
+    (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) &&
+    getStaticMemberName(callee) === "apply"
+  ) {
+    const baseCallee = unwrapExpr(callee.expression)
+    if (
+      ts.isIdentifier(baseCallee) &&
+      baseCallee.text === "Reflect" &&
+      node.arguments[0] !== undefined &&
+      isProcessExitReference(node.arguments[0], processAliases, exitAliases)
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+const isSilentEmptyFallbackFn = (
+  expr: ts.Expression,
+  sourceFile: ts.SourceFile,
+  allowExtendedEmptyLiterals: boolean,
+): boolean => {
+  const fn = unwrapExpr(expr)
+  if (!ts.isArrowFunction(fn) && !ts.isFunctionExpression(fn)) return false
+  let bodyText = fn.body.getText(sourceFile).trim()
+  if (ts.isBlock(fn.body)) {
+    if (fn.body.statements.length !== 1) return false
+    const only = fn.body.statements[0]
+    if (only === undefined || !ts.isReturnStatement(only) || only.expression === undefined) {
+      return false
+    }
+    bodyText = only.expression.getText(sourceFile).trim()
+  }
+  if (bodyText === '""' || bodyText === "''" || bodyText === "[]") return true
+  if (!allowExtendedEmptyLiterals) return false
+  return bodyText === "{}" || bodyText === "undefined" || bodyText === "false"
+}
+
+const hasFailureTagPattern = (expr: ts.Expression): boolean => {
+  const obj = unwrapExpr(expr)
+  if (!ts.isObjectLiteralExpression(obj)) return false
+  for (const prop of obj.properties) {
+    if (!ts.isPropertyAssignment(prop)) continue
+    const propName =
+      ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) ? prop.name.text : undefined
+    if (propName !== "_tag") continue
+    const val = unwrapExpr(prop.initializer)
+    if (
+      (ts.isStringLiteral(val) || ts.isNoSubstitutionTemplateLiteral(val)) &&
+      val.text === "Failure"
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+const findRootMatchArgText = (
+  callExpr: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+): string | undefined => {
+  let curr: ts.Expression = unwrapExpr(callExpr.expression)
+  while (ts.isPropertyAccessExpression(curr) && ts.isCallExpression(curr.expression)) {
+    const innerCall = curr.expression
+    const innerCallee = unwrapExpr(innerCall.expression)
+    if (ts.isIdentifier(innerCallee) && innerCallee.text === "match") {
+      return innerCall.arguments[0]?.getText(sourceFile)
+    }
+    curr = innerCallee
+  }
+  return undefined
+}
+
+export const isSilentGateFsFallbackCall = (
+  node: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+): boolean => {
+  const unwrappedCallee = unwrapExpr(node.expression)
+  if (ts.isIdentifier(unwrappedCallee) && unwrappedCallee.text === "safeFs") {
+    return true
+  }
+  const calleeText = unwrappedCallee.getText(sourceFile)
+  if (
+    calleeText === "Result.getOrElse" &&
+    node.arguments.length >= 2 &&
+    node.arguments[0] !== undefined &&
+    node.arguments[1] !== undefined &&
+    hasResultTryFsReadText(node.arguments[0].getText(sourceFile)) &&
+    isSilentEmptyFallbackFn(node.arguments[1], sourceFile, false)
+  ) {
+    return true
+  }
+  if (
+    ts.isPropertyAccessExpression(unwrappedCallee) &&
+    unwrappedCallee.name.text === "pipe" &&
+    hasResultTryFsReadText(unwrappedCallee.expression.getText(sourceFile)) &&
+    node.arguments.some(
+      (arg) =>
+        ts.isCallExpression(arg) &&
+        unwrapExpr(arg.expression).getText(sourceFile) === "Result.getOrElse" &&
+        arg.arguments.length === 1 &&
+        arg.arguments[0] !== undefined &&
+        isSilentEmptyFallbackFn(arg.arguments[0], sourceFile, true),
+    )
+  ) {
+    return true
+  }
+  if (
+    ts.isIdentifier(unwrappedCallee) &&
+    unwrappedCallee.text === "pipe" &&
+    node.arguments.length >= 2 &&
+    node.arguments[0] !== undefined &&
+    hasResultTryFsReadText(node.arguments[0].getText(sourceFile)) &&
+    node.arguments
+      .slice(1)
+      .some(
+        (arg) =>
+          ts.isCallExpression(arg) &&
+          unwrapExpr(arg.expression).getText(sourceFile) === "Result.getOrElse" &&
+          arg.arguments.length === 1 &&
+          arg.arguments[0] !== undefined &&
+          isSilentEmptyFallbackFn(arg.arguments[0], sourceFile, true),
+      )
+  ) {
+    return true
+  }
+  if (
+    ts.isPropertyAccessExpression(unwrappedCallee) &&
+    unwrappedCallee.name.text === "with" &&
+    node.arguments.length >= 2 &&
+    node.arguments[0] !== undefined &&
+    node.arguments[1] !== undefined &&
+    hasFailureTagPattern(node.arguments[0]) &&
+    isSilentEmptyFallbackFn(node.arguments[1], sourceFile, true)
+  ) {
+    const matchArgText = findRootMatchArgText(node, sourceFile)
+    if (matchArgText !== undefined && hasResultTryFsReadText(matchArgText)) {
+      return true
+    }
+  }
+  return false
+}

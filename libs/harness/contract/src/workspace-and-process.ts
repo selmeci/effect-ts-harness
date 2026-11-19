@@ -28,7 +28,7 @@ const extractRawErrorMessage = (raw: unknown): string => {
     return raw.message
   }
   if (typeof raw === "object" && raw !== null && "message" in raw) {
-    const candidate = (raw as { readonly message: unknown }).message
+    const candidate: unknown = Reflect.get(raw, "message")
     if (typeof candidate === "string") {
       return candidate
     }
@@ -71,11 +71,7 @@ export class WorkspaceFsError extends Schema.TaggedError<WorkspaceFsError>()("Wo
   reason: ErrorReasonMessage,
 }) {}
 
-export const StdinReadErrorKind = Schema.Literals([
-  "Timeout",
-  "MaxBytesExceeded",
-  "ReadFailed",
-])
+export const StdinReadErrorKind = Schema.Literals(["Timeout", "MaxBytesExceeded", "ReadFailed"])
 export type StdinReadErrorKind = typeof StdinReadErrorKind.Type
 
 export class StdinReadError extends Schema.TaggedError<StdinReadError>()("StdinReadError", {
@@ -197,9 +193,7 @@ export const ActiveMutantId = Schema.NonEmptyString.pipe(
 )
 export type ActiveMutantId = typeof ActiveMutantId.Type
 
-export const CompilerRepoRootPath = WorkspaceFilePath.pipe(
-  Schema.brand("CompilerRepoRootPath"),
-)
+export const CompilerRepoRootPath = WorkspaceFilePath.pipe(Schema.brand("CompilerRepoRootPath"))
 export type CompilerRepoRootPath = typeof CompilerRepoRootPath.Type
 
 export const CompilerRepoRootInput = Schema.String.pipe(Schema.brand("CompilerRepoRootInput"))

@@ -10,12 +10,7 @@ import {
   HarnessCommandRegistry,
   makeLiveCliCommandRegistryLayer,
 } from "./command-registry.js"
-import {
-  COMMANDS,
-  type CliEnv,
-  type CliResult,
-  isCommand,
-} from "./daemon-and-omnigraph.service.js"
+import { COMMANDS, type CliEnv, type CliResult, isCommand } from "./daemon-and-omnigraph.service.js"
 import {
   createHookStdinTracker,
   detectAntigravityHookPayload,
@@ -60,9 +55,7 @@ const appendBoolFlag = (out: Array<string>, flagName: string, enabled: boolean):
   }
 }
 
-export const makeHarnessRootCommand = (
-  onResult: (result: CliResult) => Effect.Effect<void>,
-) => {
+export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.Effect<void>) => {
   const runSubcommand = (
     name: string,
     args: ReadonlyArray<string>,
@@ -219,12 +212,18 @@ export const makeHarnessRootCommand = (
     {
       scope: Flag.optional(Flag.String("scope")),
       strict: boolFlag("strict"),
+      all: boolFlag("all"),
+      file: Flag.optional(Flag.String("file")),
+      base: Flag.optional(Flag.String("base")),
       args: variadicArgs,
     },
-    ({ scope, strict, args }) => {
+    ({ scope, strict, all, file, base, args }) => {
       const raw: Array<string> = [...args]
       appendStringFlag(raw, "scope", scope)
       appendBoolFlag(raw, "strict", strict)
+      appendBoolFlag(raw, "all", all)
+      appendStringFlag(raw, "file", file)
+      appendStringFlag(raw, "base", base)
       return runSubcommand("mutate", raw)
     },
   )
@@ -466,7 +465,10 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
       stderr: "",
     }
   }
-  if ((requested === "guard" || requested === "done") && (argv.includes("--help") || argv.includes("-h"))) {
+  if (
+    (requested === "guard" || requested === "done") &&
+    (argv.includes("--help") || argv.includes("-h"))
+  ) {
     return makeFailClosedHookResult(
       requested,
       argv,

@@ -130,10 +130,12 @@ export const proposeLearningAction = Effect.fn("Harness.proposeLearningAction")(
         const { answers } = value
         const prob = answers.actionable.probability
         const fallback = deterministicLearnFallback(input)
-        const rawTarget = answers.target.label
-        const target: LearnTarget = (LEARN_TARGETS as ReadonlyArray<string>).includes(rawTarget)
-          ? (rawTarget as LearnTarget)
-          : fallback.target
+        const decodeLearnTarget = Schema.decodeUnknownOption(Schema.Literals(LEARN_TARGETS))
+
+        const target: LearnTarget = match(decodeLearnTarget(answers.target.label))
+          .with({ _tag: "Some" }, ({ value: parsedTarget }) => parsedTarget)
+          .with({ _tag: "None" }, () => fallback.target)
+          .exhaustive()
 
         yield* Effect.annotateCurrentSpan({
           "decision.definition": "LearnProposalV1",

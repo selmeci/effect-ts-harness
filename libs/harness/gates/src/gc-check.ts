@@ -48,6 +48,8 @@ export {
   extractBalancedParens,
   extractTopLevelObjectAnalysis,
   parseGovernanceDocFrontmatter,
+  parseGovernanceDocFrontmatterChecked,
+  type ParseGovernanceDocFrontmatterResult,
   loadGovernanceDocsFromDisk,
   collectWorkspaceTsFiles,
   collectWorkspaceSqlFiles,
@@ -65,9 +67,7 @@ export {
 } from "./plugins/gc/gc-topology-entropy.plugin.js"
 export { evaluateTestAndDeciderPlugin } from "./plugins/gc/gc-test-and-decider.plugin.js"
 export { evaluateGovernanceDocsPlugin } from "./plugins/gc/gc-governance-docs.plugin.js"
-export {
-  evaluatePackageAndMigrationPlugin,
-} from "./plugins/gc/gc-package-and-migration.plugin.js"
+export { evaluatePackageAndMigrationPlugin } from "./plugins/gc/gc-package-and-migration.plugin.js"
 export {
   computeGateRuleVersionDigest,
   evaluateDocTruthPlugin,
@@ -84,9 +84,7 @@ export const GC_ENFORCEMENT_RULES = [
   "unsafe-sql-migration",
 ] as const satisfies ReadonlyArray<GcFindingKind>
 
-export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (
-  input: GraphEntropyInput,
-) {
+export const decideGraphEntropy = Effect.fn("GraphGc.decide")(function* (input: GraphEntropyInput) {
   const ctx = buildGraphReachabilityContext(input.graph)
   const findings: Array<GcFinding> = []
 

@@ -370,6 +370,83 @@ describe("HarnessBench.decide — Latency SLO Gate (PERF-06, RFC-0006)", () => {
         expect(r1).toEqual(r2)
       }),
   )
+
+  it.effect(
+    "enforces PlanWorkflowCompiler.decide default budget (p50=2ms, p95=6ms) at exact boundary and 0.001ms overages",
+    () =>
+      Effect.gen(function* () {
+        const compilerBudget = DEFAULT_STAGE_LATENCY_BUDGETS.find(
+          (b) => b.stage === BenchStageName.make("PlanWorkflowCompiler.decide"),
+        )
+        expect(compilerBudget).toBeDefined()
+        expect(compilerBudget?.p50BudgetMs).toBe(LatencyMillis.make(2))
+        expect(compilerBudget?.p95BudgetMs).toBe(LatencyMillis.make(6))
+
+        const stage = BenchStageName.make("PlanWorkflowCompiler.decide")
+        const sampleCount = BenchSampleCount.make(25)
+
+        const boundaryPass = yield* HarnessBench.decide({
+          measurements: [
+            {
+              stage,
+              sampleCount,
+              p50Ms: LatencyMillis.make(2),
+              p95Ms: LatencyMillis.make(6),
+            },
+          ],
+          budgets: DEFAULT_STAGE_LATENCY_BUDGETS,
+        })
+        expect(boundaryPass.status).toBe(StageLatencyStatus.make("pass"))
+
+        const violationCases: ReadonlyArray<{
+          readonly p50: number
+          readonly p95: number
+          readonly expected: "p50" | "p95" | "both"
+        }> = [
+          { p50: 2.001, p95: 6, expected: "p50" },
+          { p50: 2, p95: 6.001, expected: "p95" },
+          { p50: 2.001, p95: 6.001, expected: "both" },
+        ]
+
+        for (const testCase of violationCases) {
+          const exit = yield* Effect.exit(
+            HarnessBench.decide({
+              measurements: [
+                {
+                  stage,
+                  sampleCount,
+                  p50Ms: LatencyMillis.make(testCase.p50),
+                  p95Ms: LatencyMillis.make(testCase.p95),
+                },
+              ],
+              budgets: DEFAULT_STAGE_LATENCY_BUDGETS,
+            }),
+          )
+
+          match(exit)
+            .with({ _tag: "Success" }, () => {
+              expect.fail(
+                `Expected LatencySloViolationError (${testCase.expected}) for ${testCase.p50}/${testCase.p95}`,
+              )
+            })
+            .with({ _tag: "Failure" }, ({ cause }) =>
+              match(Cause.findErrorOption(cause))
+                .with({ _tag: "None" }, () => {
+                  expect.fail("Expected typed LatencySloViolationError in Cause")
+                })
+                .with({ _tag: "Some" }, ({ value }) => {
+                  expect(value).toBeInstanceOf(LatencySloViolationError)
+                  expect(value.violations).toHaveLength(1)
+                  expect(value.violations[0]?.exceededDimension).toBe(
+                    LatencyExceededDimension.make(testCase.expected),
+                  )
+                })
+                .exhaustive(),
+            )
+            .exhaustive()
+        }
+      }),
+  )
 })
 
 describe("AstGateCache & Unified Single-Pass AST Gate Deciders (PERF-02, RFC-0006)", () => {

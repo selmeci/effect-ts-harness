@@ -79,6 +79,36 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     "Replace empirical 'tests ... prove' claims in ADR prose with 'tests ... verify' or 'tests ... exercise', reserving 'prove' for type-level or formal proofs.",
   ),
   makeTriageRule(
+    "process-exit-outside-app",
+    /process-exit-outside-app/,
+    "mechanical",
+    "Direct process.exit(...) calls are banned outside type:app — return a typed Error, Result, or ExitCode to the CLI/app entrypoint instead.",
+  ),
+  makeTriageRule(
+    "locale-dependent-sort",
+    /locale-dependent-sort/,
+    "mechanical",
+    "Locale-dependent .localeCompare(...) is banned in deterministic contract/domain/compiler code — use compareCodeUnits from @harness/contract.",
+  ),
+  makeTriageRule(
+    "governance-doc-read-error",
+    /governance-doc-read-error/,
+    "mechanical",
+    "Malformed or missing YAML frontmatter in a governance doc — ensure a valid 'id' and 'status' (accepted | proposed | superseded | deprecated).",
+  ),
+  makeTriageRule(
+    "invalid-dst-seed",
+    /Invalid DST_SEED value/,
+    "mechanical",
+    "Invalid DST_SEED environment variable — provide a non-negative safe integer (e.g. DST_SEED=42) or unset DST_SEED.",
+  ),
+  makeTriageRule(
+    "mutate-stamp-coverage",
+    /Mutate stamp does not cover required diff file|Zero mutants evaluated in strict mode|Mutate stamp did not record a clean passing strict run/,
+    "mechanical",
+    "Run `pnpm harness mutate --strict` after all edits so every modified domain/core/contract file is covered by passing mutants.",
+  ),
+  makeTriageRule(
     "schema-decode-sync-unknown-input",
     /decodeSync[\s\S]{0,160}Argument of type .* is not assignable to parameter of type|Argument of type .* is not assignable to parameter of type[\s\S]{0,160}decodeSync/i,
     "compile",
