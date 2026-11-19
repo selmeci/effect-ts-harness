@@ -68,7 +68,7 @@ Inputs and stored historical records will hit edge conditions:
 - **Corrupt Persisted Payloads & SQLite Fractional Affinity:** Evaluate how the system handles corrupted JSON, fractional numbers in SQLite `INTEGER` columns (`1.5`), or negative values in the database. Flag any `<Brand>.make(row.*)` or `Math.max(0, row.*)` on SQL row columns in `type:infra` that throws an untyped defect instead of failing in `E` via `Schema.decodeUnknownOption`.
 - **Contract Cross-Field Invariants & Non-Empty Arrays:** Flag contract `Schema.Class` or `Schema.Union` definitions where non-empty collections use `Schema.Array` instead of `Schema.NonEmptyArray`, or where cross-field invariants (e.g., envelope `streamVersion > 0` and matching nested `metadata.aggregateId` / `metadata.streamVersion`) are not enforced with `Schema.check(Schema.makeFilter(...))`.
 - **`SqliteMigrator` Ordering & Shared Table Collisions:** If multiple migrators run against the same SQLite database, verify they do not share the default `effect_sql_migrations` table (where running migration `2` first permanently skips migration `1`).
-- **`Upcaster` Chain Gaps:** When domain schemas evolve from version 1 to version 3, verify that explicit upcaster migration paths (`1 -> 2 -> 3`) exist without missing steps or untyped crashes.
+- **`Upcaster` Chain Gaps (Explicitly Versioned Upcasters Only):** ONLY when versioned event schemas and upcasters are explicitly declared (e.g. `@harness/es-core` upcaster chains `1 -> 2 -> 3`), verify that every declared version transition exists without missing steps or untyped crashes. Do NOT demand upcasters or backwards-compatibility shims for experimental or unreleased schemas per `AGENTS.md`.
 
 ### 5. Skeleton `E`-Channel Completeness
 

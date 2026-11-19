@@ -189,7 +189,7 @@ describe("SampleApiClient and AtomHttpApi", () => {
     try {
       fs.writeFileSync(
         tempFile,
-        'import { greet } from "@harness/sample-domain"\nexport const bad = greet\n',
+        'import { decideAlbumQuota } from "@harness/sample-domain"\nexport const bad = decideAlbumQuota\n',
       )
       let failed = false
       let output = ""

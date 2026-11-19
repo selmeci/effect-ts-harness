@@ -161,6 +161,7 @@ describe("@harness/service ports", () => {
       expect(err.operation).toBe("stat")
 
       const reader: SyncHostReader = {
+        getEnv: () => process.env,
         existsSync: () => true,
         isFileSync: () => true,
         isDirectorySync: () => false,

@@ -4,6 +4,7 @@ import { Result } from "effect"
 import type { SyncHostIo } from "../src/host-io.js"
 
 const makeBaseTestHostIo = (): SyncHostIo => ({
+  getEnv: () => process.env,
   existsSync: (filePath) => fs.existsSync(filePath),
   isFileSync: (filePath) =>
     Result.getOrElse(

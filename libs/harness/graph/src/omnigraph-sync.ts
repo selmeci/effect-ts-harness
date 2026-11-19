@@ -75,14 +75,14 @@ export {
 
 export const resolveOmnigraphBaseUrl = (
   options?: OmnigraphConnectionOptions,
-  env: NodeJS.ProcessEnv = process.env,
+  env?: Readonly<Record<string, string | undefined>>,
   hostIo?: SyncHostIo,
 ): string => resolveOmnigraphBaseUrlFromOps(options, env, hostIo)
 
 export const makeOmnigraphClient = (
   options?: OmnigraphConnectionOptions,
   hostIo?: SyncHostIo,
-  env: NodeJS.ProcessEnv = process.env,
+  env?: Readonly<Record<string, string | undefined>>,
 ) => makeOmnigraphClientFromOps(options, hostIo, env)
 
 export interface OmnigraphSyncResult {
@@ -211,7 +211,7 @@ export class OmnigraphSync extends Context.Service<OmnigraphSync, OmnigraphSyncS
 
 export const makeOmnigraphSyncLayer = (
   hostIo: SyncHostIo,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Readonly<Record<string, string | undefined>> = hostIo.getEnv(),
 ): Layer.Layer<OmnigraphSync> =>
   Layer.succeed(
     OmnigraphSync,
@@ -268,15 +268,7 @@ export const makeOmnigraphSyncLayer = (
             catch: (cause) => new OmnigraphLoadError({ cause }),
           }).pipe(
             Effect.flatMap((loadRes) => {
-              const legacyCommitId =
-                "graphCommitId" in loadRes
-                  ? (loadRes as { readonly graphCommitId?: unknown }).graphCommitId
-                  : undefined
-              const rawCommitId =
-                loadRes.commit?.graphCommitId !== undefined && loadRes.commit?.graphCommitId !== null
-                  ? loadRes.commit.graphCommitId
-                  : legacyCommitId
-              return match(decodeStrictOptionalCommitId(rawCommitId))
+              return match(decodeStrictOptionalCommitId(loadRes.commit?.graphCommitId))
                 .with({ _tag: "Failure" }, ({ failure }) => Effect.fail(failure))
                 .with({ _tag: "Success" }, ({ success: decodedCommitId }) => {
                   const commitId = decodedCommitId ?? undefined

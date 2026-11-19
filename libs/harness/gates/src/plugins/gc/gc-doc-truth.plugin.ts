@@ -53,7 +53,7 @@ export const GATE_RULE_SOURCE_FILES = [
 ] as const
 
 export const EXPECTED_GATE_RULE_VERSION_DIGEST =
-  "0784961acb0356904458f530f919649937d17f969f717ee61cc128c787d89560"
+  "461673620864fb41393d1aab221e8e0ea93a9ad561bd04f280fd69aff16344cb"
 
 const VALID_HARNESS_OXLINT_RULES = new Set(["syntax-bans", "test-integrity"])
 const NON_PACKAGE_HANDLES = new Set(["@harness/architecture"])

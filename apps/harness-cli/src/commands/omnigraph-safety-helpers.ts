@@ -1,8 +1,8 @@
 import { basename, resolve } from "node:path"
-import { Effect, Graph, Result, Schema } from "effect"
+import { Cause, Effect, Graph, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import { OmnigraphSpanName } from "@harness/contract"
-import { type HarnessGraph } from "@harness/graph"
+import { type HarnessGraph, loadGraphSnapshotEffect } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 import type { SyncHostIo } from "@harness/service/host-io"
 
@@ -319,6 +319,50 @@ export const countImplEffectFns = (
   }
   return { implEffectFnCount, remainingStubCount }
 }
+
+export const collectPlanEffectFnQualnames = (graph: HarnessGraph): ReadonlySet<string> => {
+  const qualnames = new Set<string>()
+  for (const [, node] of Graph.nodes(graph.graph)) {
+    match(node)
+      .with({ _tag: "EffectFn" }, (fnNode) => {
+        qualnames.add(fnNode.qualname)
+      })
+      .with(
+        { _tag: "ServiceTag" },
+        { _tag: "ServiceLayer" },
+        { _tag: "TaggedError" },
+        { _tag: "SchemaDef" },
+        { _tag: "VitestCase" },
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
+        () => undefined,
+      )
+      .exhaustive()
+  }
+  return qualnames
+}
+
+export const loadPlanEffectFnQualnames = (
+  planSnapshotPath: string,
+  hostIo: SyncHostIo,
+): Effect.Effect<ReadonlySet<string> | undefined> =>
+  Effect.map(Effect.exit(loadGraphSnapshotEffect(planSnapshotPath, hostIo)), (loadExit) =>
+    match(loadExit)
+      .with({ _tag: "Success" }, ({ value }) => collectPlanEffectFnQualnames(value))
+      .with({ _tag: "Failure" }, ({ cause }) => {
+        process.stderr.write(
+          `[harness:done] Warning: failed to decode plan snapshot '${planSnapshotPath}': ${Cause.pretty(cause)}\n`,
+        )
+        return undefined
+      })
+      .exhaustive(),
+  )
 
 export const readIsStubFromImage = (
   image: { readonly properties: unknown } | null | undefined,

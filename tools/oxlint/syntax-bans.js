@@ -127,17 +127,6 @@ function isRequireCallee(callee) {
   )
 }
 
-const LEGACY_PROCESS_ENV_BRIDGE_PATHS = new Set([
-  "libs/harness/graph/src/cluster-resolver.ts",
-  "libs/harness/graph/src/omnigraph-sync.ts",
-  "libs/harness/graph/src/omnigraph-operations.ts",
-  "libs/harness/gates/src/verify-stamp.ts",
-  "libs/harness/gates/src/worktree.ts",
-  "libs/harness/gates/src/mutation-check.ts",
-  "libs/harness/gates/src/dst-engine.ts",
-  "libs/harness/gates/src/services/active-mutant-context.ts",
-])
-
 function isSilentFsFallbackCheckedPathEstree(filename) {
   if (/(?:^|\/)libs\/harness\/graph\/src\/extractor\/compiler-session\.ts$/.test(filename)) {
     return false
@@ -281,8 +270,7 @@ function isPureTierProcessEnvBannedPath(filename) {
   if (libsMatch == null) return false
   const relLibsPath = libsMatch[1]
   if (relLibsPath == null) return false
-  if (/^libs\/[^/]+\/infra\/src\//.test(relLibsPath)) return false
-  return !LEGACY_PROCESS_ENV_BRIDGE_PATHS.has(relLibsPath)
+  return !/^libs\/[^/]+\/infra\/src\//.test(relLibsPath)
 }
 
 function unwrapEstreeExpr(node) {

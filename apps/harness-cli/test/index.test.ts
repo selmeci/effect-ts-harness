@@ -302,7 +302,7 @@ describe("harness-cli v2 commands", () => {
       const res = await runCli(["plan-check", "--graph-only"])
       expect(res.exitCode).toBe(0)
       expect(res.stdout).toContain("flowchart TD")
-      expect(res.stdout).toContain("Sample.greet")
+      expect(res.stdout).toContain("Album.decide")
       expect(res.stderr).toBe("")
     }, 20_000)
 

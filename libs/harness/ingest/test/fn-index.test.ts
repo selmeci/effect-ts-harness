@@ -66,18 +66,18 @@ describe("Effect.fn syntactic index", () => {
   })
 
   it.effect(
-    "buildWorkspaceFnIndex indexes workspace and finds Sample.greet and Sample.logToConsole",
+    "buildWorkspaceFnIndex indexes workspace and finds Album.decide and Sample.logToConsole",
     () =>
       Effect.gen(function* () {
         const index = yield* buildWorkspaceFnIndex(repoRoot, testHostIo)
-        expect(index.bySpanName.has("Sample.greet")).toBe(true)
-        const greet = index.bySpanName.get("Sample.greet")
-        expect(greet).toBeDefined()
-        expect(greet?.packageTag).toBe("domain")
-        expect(greet?.exportName).toBe("greet")
-        expect(greet?.file).toBe("libs/sample/domain/src/index.ts")
-        expect(greet?.qualname).toBe("libs/sample/domain/src/index.ts#greet")
-        expect(greet?.isStub).toBe(false)
+        expect(index.bySpanName.has("Album.decide")).toBe(true)
+        const decide = index.bySpanName.get("Album.decide")
+        expect(decide).toBeDefined()
+        expect(decide?.packageTag).toBe("domain")
+        expect(decide?.exportName).toBe("decideAlbumQuota")
+        expect(decide?.file).toBe("libs/sample/domain/src/index.ts")
+        expect(decide?.qualname).toBe("libs/sample/domain/src/index.ts#decideAlbumQuota")
+        expect(decide?.isStub).toBe(false)
 
         expect(index.bySpanName.has("Sample.logToConsole")).toBe(true)
         const logFn = index.bySpanName.get("Sample.logToConsole")
