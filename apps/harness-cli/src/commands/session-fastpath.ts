@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto"
-import { dirname, join, resolve } from "node:path"
+import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { Option, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
@@ -100,7 +100,7 @@ export const resolveHarnessTsgoPkgJsonPath = (
   hostIo: SyncHostIo = nodeSyncHostIo,
 ): string => {
   const localPath = join(repoRoot, "node_modules", "@effect", "tsgo", "package.json")
-  return hostIo.existsSync(localPath)
+  return tryOr(() => hostIo.existsSync(localPath), false)
     ? localPath
     : join(findWorkspaceRoot(), "node_modules", "@effect", "tsgo", "package.json")
 }
@@ -166,6 +166,20 @@ export const computePreInvocationFingerprint = (
   if (statusStdout === undefined) return Option.none()
 
   const headState = resolveGitHeadState(repoRoot, hostIo)
+  if (headState.gitBranch === null && headState.headSha === null) return Option.none()
+  const rawRelHarness = relative(repoRoot, harnessDir).replace(/\\/g, "/")
+  const customHarnessRel =
+    rawRelHarness.length > 0 &&
+    rawRelHarness !== "." &&
+    !rawRelHarness.startsWith("..") &&
+    !isAbsolute(rawRelHarness)
+      ? rawRelHarness
+      : undefined
+  const isHarnessStateRelPath = (relPath: string): boolean =>
+    relPath === ".harness" ||
+    relPath.startsWith(".harness/") ||
+    (customHarnessRel !== undefined &&
+      (relPath === customHarnessRel || relPath.startsWith(`${customHarnessRel}/`)))
   const hash = createHash("sha256")
   hash.update(`branch:${headState.gitBranch ?? ""}\nsha:${headState.headSha ?? ""}\n`)
   const seenPaths = new Set<string>()
@@ -178,11 +192,11 @@ export const computePreInvocationFingerprint = (
     if (xy[0] === "R" || xy[1] === "R" || xy[0] === "C" || xy[1] === "C") {
       const origPath = entries[i + 1] ?? ""
       i += 1
-      if (origPath.length > 0 && origPath !== ".harness" && !origPath.startsWith(".harness/")) {
+      if (origPath.length > 0 && !isHarnessStateRelPath(origPath)) {
         hash.update(`renamed-from:${origPath}\n`)
       }
     }
-    if (relPath.length === 0 || relPath === ".harness" || relPath.startsWith(".harness/")) continue
+    if (relPath.length === 0 || isHarnessStateRelPath(relPath)) continue
     seenPaths.add(relPath)
     const dirtyDigest = unwrapOption(hashDirtyPathContent(repoRoot, relPath, hostIo))
     if (dirtyDigest === undefined) return Option.none()
@@ -204,6 +218,7 @@ export const computePreInvocationFingerprint = (
     if (
       relPath.length === 0 ||
       seenPaths.has(relPath) ||
+      isHarnessStateRelPath(relPath) ||
       relPath === ".env" ||
       relPath === ".dev.vars" ||
       !isWorkspaceRelPathIncludedInStamp(relPath)
@@ -216,6 +231,7 @@ export const computePreInvocationFingerprint = (
   }
   for (const f of [
     "friction-log.jsonl",
+    "telemetry.jsonl",
     "verify-stamp.json",
     "mutate-stamp.json",
     "plan-graph-snapshot.json",
@@ -230,7 +246,9 @@ export const computePreInvocationFingerprint = (
   const tsgoPkgPath = resolveHarnessTsgoPkgJsonPath(repoRoot, hostIo)
   const workspaceTsconfig = join(findWorkspaceRoot(), "tsconfig.base.json")
   const repoTsconfig = join(repoRoot, "tsconfig.base.json")
-  const tsconfigPath = hostIo.existsSync(repoTsconfig) ? repoTsconfig : workspaceTsconfig
+  const tsconfigPath = tryOr(() => hostIo.existsSync(repoTsconfig), false)
+    ? repoTsconfig
+    : workspaceTsconfig
   const fixedInputs: ReadonlyArray<readonly [string, string, boolean]> = [
     ["tsgo", tsgoPkgPath, false],
     ["tsconfig", tsconfigPath, true],
@@ -268,7 +286,7 @@ const hasSymlinkAncestor = (
 const findDeepestExistingDir = (targetDir: string, hostIo: SyncHostIo): string | undefined => {
   let curr = resolve(targetDir)
   while (true) {
-    if (hostIo.existsSync(curr)) return curr
+    if (tryOr(() => hostIo.existsSync(curr), false)) return curr
     const parent = dirname(curr)
     if (parent === curr) return undefined
     curr = parent
@@ -374,7 +392,7 @@ export const writePreInvocationSessionCache = (
   if (shouldSuppressLiveRepoTestSideEffects(repoRoot)) return
   const cachePath = join(harnessDir, PRE_INVOCATION_CACHE_FILE)
   if (!isSafeCacheDirAndPath(repoRoot, harnessDir, cachePath, hostIo, false)) return
-  if (!hostIo.existsSync(harnessDir)) {
+  if (!tryOr(() => hostIo.existsSync(harnessDir), false)) {
     const mkdirRes = Result.try(() => hostIo.mkdirRecursiveSync(dirname(cachePath)))
     const mkdirOk = match(mkdirRes)
       .with({ _tag: "Success" }, () => true)

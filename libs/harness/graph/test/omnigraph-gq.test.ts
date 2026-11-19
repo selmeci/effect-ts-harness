@@ -490,34 +490,39 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
         )
       }
 
-      const syncRes = yield* syncToOmnigraphAndSnapshot(sampleGraph, {
-        branch: "plan/current",
-        from: "main",
-        fetch: mockFetch,
-        snapshotPath: ".harness/test-snapshot.json",
-      }).pipe(Effect.provide(OmnigraphSyncLive))
+      const repoDir = fs.mkdtempSync(path.join(tmpdir(), "og-sync-branch-"))
+      try {
+        const syncRes = yield* syncToOmnigraphAndSnapshot(sampleGraph, {
+          branch: "plan/current",
+          from: "main",
+          fetch: mockFetch,
+          snapshotPath: path.join(repoDir, ".harness", "test-snapshot.json"),
+        }).pipe(Effect.provide(OmnigraphSyncLive))
 
-      expect(syncRes.syncedToOmnigraph).toBe(true)
-      const loadReq = recorded.find((r) => r.url.endsWith("/load"))
-      expect(loadReq).toBeDefined()
-      expect(loadReq?.body).toBeDefined()
+        expect(syncRes.syncedToOmnigraph).toBe(true)
+        const loadReq = recorded.find((r) => r.url.endsWith("/load"))
+        expect(loadReq).toBeDefined()
+        expect(loadReq?.body).toBeDefined()
 
-      const parsedBody = decodeJson(loadReq?.body ?? "{}") as {
-        readonly branch: string
-        readonly from: string
-        readonly data: string
+        const parsedBody = decodeJson(loadReq?.body ?? "{}") as {
+          readonly branch: string
+          readonly from: string
+          readonly data: string
+        }
+        expect(parsedBody.branch).toBe("plan/current")
+        expect(parsedBody.from).toBe("main")
+
+        const lines = parsedBody.data
+          .split("\n")
+          .filter((l) => l.trim().length > 0)
+          .map((l) => decodeJson(l) as { readonly type?: string; readonly edge?: string })
+        expect(lines.some((l) => l.type === "EffectFn")).toBe(true)
+        expect(lines.some((l) => l.type === "EffectSignature")).toBe(true)
+        expect(lines.some((l) => l.edge === "PlaysCallerRole")).toBe(true)
+        expect(lines.every((l) => l.type !== "Any" && l.edge !== "Any")).toBe(true)
+      } finally {
+        fs.rmSync(repoDir, { recursive: true, force: true })
       }
-      expect(parsedBody.branch).toBe("plan/current")
-      expect(parsedBody.from).toBe("main")
-
-      const lines = parsedBody.data
-        .split("\n")
-        .filter((l) => l.trim().length > 0)
-        .map((l) => decodeJson(l) as { readonly type?: string; readonly edge?: string })
-      expect(lines.some((l) => l.type === "EffectFn")).toBe(true)
-      expect(lines.some((l) => l.type === "EffectSignature")).toBe(true)
-      expect(lines.some((l) => l.edge === "PlaysCallerRole")).toBe(true)
-      expect(lines.every((l) => l.type !== "Any" && l.edge !== "Any")).toBe(true)
     }),
   )
 
@@ -1585,7 +1590,10 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
                   branches: ["main", "impl/current", "plan/stale"],
                   serverRef: "9d92f397",
                 }),
-                { status: 200, headers: { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" } },
+                {
+                  status: 200,
+                  headers: { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" },
+                },
               ),
             )
           }
@@ -1600,7 +1608,10 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
                   commit: null,
                   serverRef: "9d92f397",
                 }),
-                { status: 200, headers: { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" } },
+                {
+                  status: 200,
+                  headers: { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" },
+                },
               ),
             )
           }
@@ -1649,7 +1660,10 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
             return Promise.resolve(
               new Response(
                 JSON.stringify({ outcome: "ok", branches: ["main"], serverRef: "ref-1" }),
-                { status: 200, headers: { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" } },
+                {
+                  status: 200,
+                  headers: { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" },
+                },
               ),
             )
           }
@@ -1695,11 +1709,17 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
           }
           if (urlStr.includes("/queries/")) {
             return Promise.resolve(
-              new Response("primary-404", { status: 404, headers: { "Omnigraph-Http-Api": "0.14" } }),
+              new Response("primary-404", {
+                status: 404,
+                headers: { "Omnigraph-Http-Api": "0.14" },
+              }),
             )
           }
           return Promise.resolve(
-            new Response("fallback-502", { status: 502, headers: { "Omnigraph-Http-Api": "0.14" } }),
+            new Response("fallback-502", {
+              status: 502,
+              headers: { "Omnigraph-Http-Api": "0.14" },
+            }),
           )
         }
 
@@ -1804,9 +1824,15 @@ describe("OmnigraphReconcile.decide and Git HEAD state tracking", () => {
         let fnIdx: Graph.NodeIndex | undefined
         for (const [idx, n] of Graph.nodes(mutable)) {
           match(n)
-            .with({ _tag: "AdrDoc" }, () => { adrIdx = idx })
-            .with({ _tag: "EarsSpec" }, () => { specIdx = idx })
-            .with({ _tag: "EffectFn" }, () => { fnIdx = idx })
+            .with({ _tag: "AdrDoc" }, () => {
+              adrIdx = idx
+            })
+            .with({ _tag: "EarsSpec" }, () => {
+              specIdx = idx
+            })
+            .with({ _tag: "EffectFn" }, () => {
+              fnIdx = idx
+            })
             .otherwise(() => {})
         }
         if (adrIdx !== undefined) {

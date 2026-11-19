@@ -354,6 +354,59 @@ export const isIgnoredChmodPermissionCall = (node: ts.CallExpression, sf: ts.Sou
   return false
 }
 
+const DOT_HARNESS_WRITE_CALLEES = new Set([
+  "saveGraphSnapshot", "saveGraphSnapshotEffect", "syncToOmnigraphAndSnapshot",
+  "writeFileSync", "writeTextSync", "appendFileSync", "appendTextSync", "writeTextWithModeSync",
+])
+const getCalleeTerminalName = (expr: ts.Expression): string | undefined => {
+  const u = unwrapAstExpression(expr)
+  return ts.isIdentifier(u) ? u.text : ts.isPropertyAccessExpression(u) ? u.name.text : undefined
+}
+const isDotHarnessRelativeLiteralText = (text: string): boolean => {
+  const trimmed = text.replace(/^\.[\\/]/, "")
+  return trimmed === ".harness" || trimmed.startsWith(".harness/") || trimmed.startsWith(".harness\\")
+}
+const isProcessCwdDotHarnessJoinOrResolve = (node: ts.CallExpression, sf: ts.SourceFile): boolean => {
+  const name = getCalleeTerminalName(node.expression)
+  if ((name !== "join" && name !== "resolve") || node.arguments.length < 2) return false
+  const baseArg = node.arguments[0]
+  if (baseArg === undefined || unwrapAstExpression(baseArg).getText(sf) !== "process.cwd()") return false
+  return node.arguments.slice(1).some((arg) => /(?:^|["'`\\/])\.harness(?:[\\/"'`]|$)/.test(arg.getText(sf)))
+}
+const isNonCwdJoinOrResolveCall = (node: ts.CallExpression, sf: ts.SourceFile): boolean => {
+  const name = getCalleeTerminalName(node.expression)
+  if ((name !== "join" && name !== "resolve") || node.arguments.length < 2) return false
+  const baseArg = node.arguments[0]
+  if (baseArg === undefined || unwrapAstExpression(baseArg).getText(sf) === "process.cwd()") return false
+  const baseStr = extractStringOrNoSubTemplateText(baseArg)
+  return baseStr === undefined || (!isDotHarnessRelativeLiteralText(baseStr) && baseStr !== "." && baseStr !== "./" && baseStr !== "")
+}
+const hasUnisolatedDotHarnessArgExpr = (expr: ts.Expression, sf: ts.SourceFile): boolean => {
+  const u = unwrapAstExpression(expr)
+  if (ts.isStringLiteral(u) || ts.isNoSubstitutionTemplateLiteral(u)) return isDotHarnessRelativeLiteralText(u.text)
+  if (ts.isTemplateExpression(u)) return isDotHarnessRelativeLiteralText(u.head.text)
+  if (ts.isObjectLiteralExpression(u)) {
+    return u.properties.some((p) =>
+      ts.isPropertyAssignment(p) ? hasUnisolatedDotHarnessArgExpr(p.initializer, sf) : ts.isSpreadAssignment(p) ? hasUnisolatedDotHarnessArgExpr(p.expression, sf) : false,
+    )
+  }
+  if (ts.isArrayLiteralExpression(u)) return u.elements.some((el) => hasUnisolatedDotHarnessArgExpr(el, sf))
+  if (ts.isConditionalExpression(u)) return hasUnisolatedDotHarnessArgExpr(u.whenTrue, sf) || hasUnisolatedDotHarnessArgExpr(u.whenFalse, sf)
+  if (ts.isBinaryExpression(u)) {
+    if (u.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+      if (hasUnisolatedDotHarnessArgExpr(u.left, sf)) return true
+      const leftTxt = extractStringOrNoSubTemplateText(u.left)
+      return (leftTxt === "" || leftTxt === "." || leftTxt === "./") && hasUnisolatedDotHarnessArgExpr(u.right, sf)
+    }
+    return hasUnisolatedDotHarnessArgExpr(u.left, sf) || hasUnisolatedDotHarnessArgExpr(u.right, sf)
+  }
+  if (ts.isCallExpression(u)) {
+    if (isProcessCwdDotHarnessJoinOrResolve(u, sf) || isNonCwdJoinOrResolveCall(u, sf)) return false
+    return u.arguments.some((a) => hasUnisolatedDotHarnessArgExpr(a, sf))
+  }
+  return false
+}
+
 export const visitSourceFileSinglePass = (
   sourceFile: ts.SourceFile,
   filePathOrRelPath: string | AstSourceFilePath,
@@ -522,64 +575,23 @@ export const visitSourceFileSinglePass = (
     if (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) {
       const typeNode = node.type
       let innerExpr: ts.Expression = node.expression
-      while (ts.isParenthesizedExpression(innerExpr)) {
-        innerExpr = innerExpr.expression
-      }
+      while (ts.isParenthesizedExpression(innerExpr)) innerExpr = innerExpr.expression
       match(typeNode.kind)
-        .with(ts.SyntaxKind.AnyKeyword, () => {
-          pushViolation(
-            catSyntaxBans,
-            "unsafe-type-cast",
-            `Unsafe type assertion 'as any' in '${filePath}' is banned.`,
-            node,
-          )
-        })
-        .with(ts.SyntaxKind.NeverKeyword, () => {
-          pushViolation(
-            catSyntaxBans,
-            "unsafe-type-cast",
-            `Unsafe type assertion 'as never' in '${filePath}' is banned.`,
-            node,
-          )
-        })
+        .with(ts.SyntaxKind.AnyKeyword, () => pushViolation(catSyntaxBans, "unsafe-type-cast", `Unsafe type assertion 'as any' in '${filePath}' is banned.`, node))
+        .with(ts.SyntaxKind.NeverKeyword, () => pushViolation(catSyntaxBans, "unsafe-type-cast", `Unsafe type assertion 'as never' in '${filePath}' is banned.`, node))
         .otherwise(() => {
-          if (
-            (ts.isAsExpression(innerExpr) || ts.isTypeAssertionExpression(innerExpr)) &&
-            innerExpr.type.kind === ts.SyntaxKind.UnknownKeyword
-          ) {
-            pushViolation(
-              catSyntaxBans,
-              "unsafe-type-cast",
-              `Double type assertion 'as unknown as T' in '${filePath}' is banned.`,
-              node,
-            )
+          if ((ts.isAsExpression(innerExpr) || ts.isTypeAssertionExpression(innerExpr)) && innerExpr.type.kind === ts.SyntaxKind.UnknownKeyword) {
+            pushViolation(catSyntaxBans, "unsafe-type-cast", `Double type assertion 'as unknown as T' in '${filePath}' is banned.`, node)
           }
         })
     }
 
     // 4. IfStatement & ConditionalExpression (effect-laws: discriminant-branching)
-    if (ts.isIfStatement(node) && !isTestFile) {
-      if (isDiscriminantCondition(node.expression, sourceFile)) {
-        pushViolation(
-          catEffectLaws,
-          "discriminant-branching",
-          `If statement in '${filePath}' inspects union discriminant or Option/Either/Result/Exit/Cause guard — use match(...).exhaustive().`,
-          node,
-        )
-      }
+    if (ts.isIfStatement(node) && !isTestFile && isDiscriminantCondition(node.expression, sourceFile)) {
+      pushViolation(catEffectLaws, "discriminant-branching", `If statement in '${filePath}' inspects union discriminant or Option/Either/Result/Exit/Cause guard — use match(...).exhaustive().`, node)
     }
-    if (ts.isConditionalExpression(node) && !isTestFile) {
-      if (
-        isTagGuardCondition(node.condition, sourceFile) ||
-        isDiscriminantCondition(node.condition, sourceFile)
-      ) {
-        pushViolation(
-          catEffectLaws,
-          "discriminant-branching",
-          `Ternary expression in '${filePath}' inspects union discriminant or Option/Either/Result/Exit/Cause guard — use match(...).exhaustive().`,
-          node,
-        )
-      }
+    if (ts.isConditionalExpression(node) && !isTestFile && (isTagGuardCondition(node.condition, sourceFile) || isDiscriminantCondition(node.condition, sourceFile))) {
+      pushViolation(catEffectLaws, "discriminant-branching", `Ternary expression in '${filePath}' inspects union discriminant or Option/Either/Result/Exit/Cause guard — use match(...).exhaustive().`, node)
     }
 
     // 4a. VariableDeclaration: track Effect/runSync aliases & destructuring
@@ -671,26 +683,10 @@ export const visitSourceFileSinglePass = (
 
       const isCatchCauseOnly = !isTestFile && isCatchCauseInterruptsOnlyCall(node, sourceFile)
       if (isCatchCauseOnly) {
-        pushViolation(
-          catEffectLaws,
-          "catch-cause-interrupts-only",
-          "Cause.hasInterruptsOnly(cause) inside Effect.catchCause / Exit inspection swallows fiber interruption on composite causes (Fail + Interrupt). Use isPureInterruptCause(cause) or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause) instead.",
-          node,
-        )
+        pushViolation(catEffectLaws, "catch-cause-interrupts-only", "Cause.hasInterruptsOnly(cause) inside Effect.catchCause / Exit inspection swallows fiber interruption on composite causes (Fail + Interrupt). Use isPureInterruptCause(cause) or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause) instead.", node)
       }
-
-      if (
-        !isCatchCauseOnly &&
-        !isTestOrHelperFile &&
-        /(?:^|\/)src\//.test(normalizedFilePath) &&
-        isBareCauseHasInterruptsNode(node, sourceFile, normalizedFilePath)
-      ) {
-        pushViolation(
-          catEffectLaws,
-          "bare-cause-has-interrupts",
-          "Bare Cause.hasInterrupts(cause) or Cause.hasInterruptsOnly(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) from @harness/contract (or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)).",
-          node,
-        )
+      if (!isCatchCauseOnly && !isTestOrHelperFile && /(?:^|\/)src\//.test(normalizedFilePath) && isBareCauseHasInterruptsNode(node, sourceFile, normalizedFilePath)) {
+        pushViolation(catEffectLaws, "bare-cause-has-interrupts", "Bare Cause.hasInterrupts(cause) or Cause.hasInterruptsOnly(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) from @harness/contract (or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)).", node)
       }
 
       if (!isTestFile && isSilentCatchDefectCall(node, sourceFile)) {
@@ -705,10 +701,15 @@ export const visitSourceFileSinglePass = (
       if (isContractSrcFile && isAllOptionalSchemaStructCall(node)) pushViolation(catSyntaxBans, "all-optional-contract-struct", `Schema.Struct with all Schema.optional(...) fields in '${filePath}' is banned — require canonical non-optional contract fields.`, node)
       if (isTestFile && isVacuousLengthNonNegativeAssertion(node)) pushViolation(catTestIntegrity, "vacuous-length-nonnegative-assertion", `Vacuous 'expect(...length).toBeGreaterThanOrEqual(0)' assertion in '${filePath}' is always true — assert exact length or element contents.`, node)
 
-      if (isTestFile && (calleeText === "saveGraphSnapshot" || calleeText === "saveGraphSnapshotEffect" || calleeText === "writeFileSync" || calleeText === "fs.writeFileSync")) {
-        if (node.arguments.some((arg) => /["'`]\.harness\//.test(arg.getText(sourceFile)))) {
-          pushViolation(catTestIntegrity, "unisolated-dot-harness-test-write", "Test files must not write directly to live .harness/ paths — use os.tmpdir() / fs.mkdtempSync for isolated snapshot and file tests.", node)
-        }
+      const terminalName = getCalleeTerminalName(node.expression)
+      if (
+        isTestFile &&
+        ((terminalName !== undefined &&
+          DOT_HARNESS_WRITE_CALLEES.has(terminalName) &&
+          node.arguments.some((arg) => hasUnisolatedDotHarnessArgExpr(arg, sourceFile))) ||
+          isProcessCwdDotHarnessJoinOrResolve(node, sourceFile))
+      ) {
+        pushViolation(catTestIntegrity, "unisolated-dot-harness-test-write", "Test files must not write directly to live .harness/ paths — use os.tmpdir() / fs.mkdtempSync for isolated snapshot and file tests.", node)
       }
 
       if (isTestFile && calleeText.startsWith("expect(") && /expect\s*\(\s*Exit\.isFailure\s*\(\s*([A-Za-z0-9_$]+)\s*\)\s*\)/.test(node.expression.getText(sourceFile))) {
@@ -719,18 +720,8 @@ export const visitSourceFileSinglePass = (
       }
     }
 
-    if (
-      ts.isPropertyAccessExpression(node) &&
-      !isTestOrHelperFile &&
-      /(?:^|\/)src\//.test(normalizedFilePath) &&
-      isBareCauseHasInterruptsNode(node, sourceFile, normalizedFilePath)
-    ) {
-      pushViolation(
-        catEffectLaws,
-        "bare-cause-has-interrupts",
-        "Point-free Cause.hasInterrupts or Cause.hasInterruptsOnly in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause from @harness/contract instead.",
-        node,
-      )
+    if (ts.isPropertyAccessExpression(node) && !isTestOrHelperFile && /(?:^|\/)src\//.test(normalizedFilePath) && isBareCauseHasInterruptsNode(node, sourceFile, normalizedFilePath)) {
+      pushViolation(catEffectLaws, "bare-cause-has-interrupts", "Point-free Cause.hasInterrupts or Cause.hasInterruptsOnly in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause from @harness/contract instead.", node)
     }
 
     // 6. BinaryExpression: JSON.stringify(a) === JSON.stringify(b) in tests

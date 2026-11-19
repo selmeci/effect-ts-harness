@@ -416,9 +416,14 @@ export const checkBrandedDomainTypesAndPrimitiveBoundaries = (
             const propInit = prop.getInitializer()
             if (!propInit) continue
             const propDecoded = getSchemaDecodedType(propInit)
-            const propPrim = propDecoded ? isOpenUnbrandedPrimitiveType(propDecoded, prop) : null
+            if (!propDecoded) continue
+            const propPrim = isOpenUnbrandedPrimitiveType(propDecoded, prop)
             if (propPrim !== null) {
               addViolation(violations, "unbranded-contract-schema", `Field '${prop.getName()}' of '${clsName}' in '${enclosingSymbol}' decodes to unbranded primitive '${propPrim}' without '~effect/Brand' — use a branded schema (Schema.brand("<BrandName>")) for tagged error and class fields.`, relPath, prop.getStartLineNumber(), enclosingSymbol)
+              continue
+            }
+            for (const { propName, prim, line } of collectUnbrandedObjectProperties(propDecoded, prop, 0, new Set(), prop.getName())) {
+              addViolation(violations, "unbranded-contract-schema", `Field '${propName}' of '${clsName}' in '${enclosingSymbol}' decodes to unbranded primitive '${prim}' without '~effect/Brand' — use a branded schema (Schema.brand("<BrandName>")) for tagged error and class fields.`, relPath, line, enclosingSymbol)
             }
           }
         }

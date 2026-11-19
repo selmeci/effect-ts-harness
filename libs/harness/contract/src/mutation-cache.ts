@@ -1,5 +1,11 @@
 import { Schema } from "effect"
 import { AstSourceFilePath, ContentSha256 } from "./ast-and-gate-primitives.js"
+import {
+  BatchExitCode,
+  ErrorReasonMessage,
+  SubprocessOutput,
+  SubprocessSignalName,
+} from "./workspace-and-process.js"
 
 /** Canonical persistence format version for HMAC-authenticated incremental mutant outcomes. */
 export const MUTATION_CACHE_SCHEMA_VERSION = "mutation-cache-v2" as const
@@ -13,7 +19,10 @@ export type MutationCacheVersion = typeof MutationCacheVersion.Type
 export const MutationCacheStatus = Schema.Literal("killed")
 export type MutationCacheStatus = typeof MutationCacheStatus.Type
 
-export const MutantCacheId = Schema.NonEmptyString.pipe(Schema.brand("MutantCacheId"))
+export const MutantCacheId = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isPattern(/^[^\0\r\n]+$/s)),
+  Schema.brand("MutantCacheId"),
+)
 export type MutantCacheId = typeof MutantCacheId.Type
 
 const ISO_8601_UTC_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/
@@ -48,6 +57,29 @@ export const MutationCacheHmacSecret = Schema.NonEmptyString.pipe(
   Schema.brand("MutationCacheHmacSecret"),
 )
 export type MutationCacheHmacSecret = typeof MutationCacheHmacSecret.Type
+
+export const RedactedMutationCacheHmacSecret = Schema.Redacted(MutationCacheHmacSecret)
+export type RedactedMutationCacheHmacSecret = typeof RedactedMutationCacheHmacSecret.Type
+
+export const MutationCacheHmacSecretResult = Schema.TaggedUnion({
+  Resolved: {
+    secret: RedactedMutationCacheHmacSecret,
+  },
+  Unavailable: {
+    reason: ErrorReasonMessage,
+  },
+})
+export type MutationCacheHmacSecretResult = typeof MutationCacheHmacSecretResult.Type
+
+export const MutationCacheAuth = Schema.TaggedUnion({
+  Enabled: {
+    hmacSecret: RedactedMutationCacheHmacSecret,
+  },
+  Disabled: {
+    reason: ErrorReasonMessage,
+  },
+})
+export type MutationCacheAuth = typeof MutationCacheAuth.Type
 
 export const MutationEpochMillis = Schema.Int.pipe(
   Schema.check(Schema.isGreaterThanOrEqualTo(0)),
@@ -107,8 +139,8 @@ export type MutationCacheStore = typeof MutationCacheStore.Type
 export const MutationCacheLookupInput = Schema.Struct({
   candidateKeys: Schema.Array(ContentSha256),
   store: MutationCacheStore,
-  hmacSecret: Schema.optional(MutationCacheHmacSecret),
-  nowMs: Schema.optional(MutationEpochMillis),
+  auth: MutationCacheAuth,
+  nowMs: MutationEpochMillis,
   maxAgeMs: Schema.optional(MutationMaxAgeMillis),
 })
 export type MutationCacheLookupInput = typeof MutationCacheLookupInput.Type
@@ -118,3 +150,34 @@ export const MutationCacheLookupDecision = Schema.Struct({
   missKeys: Schema.Array(ContentSha256),
 })
 export type MutationCacheLookupDecision = typeof MutationCacheLookupDecision.Type
+
+export const BatchMutantOutcomeResult = Schema.TaggedUnion({
+  Exited: {
+    exitCode: BatchExitCode,
+    stdout: SubprocessOutput,
+    stderr: SubprocessOutput,
+  },
+  TimedOut: {
+    stdout: SubprocessOutput,
+    stderr: SubprocessOutput,
+  },
+  Signaled: {
+    signal: SubprocessSignalName,
+    stdout: SubprocessOutput,
+    stderr: SubprocessOutput,
+  },
+  SpawnFailed: {
+    spawnError: ErrorReasonMessage,
+    stdout: SubprocessOutput,
+    stderr: SubprocessOutput,
+  },
+})
+export type BatchMutantOutcomeResult = typeof BatchMutantOutcomeResult.Type
+
+export const BatchMutantResultEntry = Schema.Struct({
+  id: MutantCacheId,
+  result: BatchMutantOutcomeResult,
+})
+export type BatchMutantResultEntry = typeof BatchMutantResultEntry.Type
+
+export const BatchMutantResultsSchema = Schema.fromJsonString(Schema.Array(BatchMutantResultEntry))

@@ -70,16 +70,22 @@ const mapExportTargetToWorkspacePath = (
   return undefined
 }
 
+interface WorkspaceSpecifierResolution {
+  readonly workspaceMap: ReadonlyMap<string, string>
+  readonly unresolvedWorkspaceExports: ReadonlyMap<string, string>
+}
+
 const buildWorkspaceSpecifierMap = (
   repoRoot: string,
   hostIo: SyncHostIo,
   findings: Array<GcFinding>,
-): ReadonlyMap<string, string> => {
+): WorkspaceSpecifierResolution => {
   const map = new Map<string, string>(Object.entries(FALLBACK_WORKSPACE_SPECIFIER_MAP))
+  const unresolvedWorkspaceExports = new Map<string, string>()
   const libsDir = join(repoRoot, "libs")
-  if (!hostIo.existsSync(libsDir)) return map
+  if (!hostIo.existsSync(libsDir)) return { workspaceMap: map, unresolvedWorkspaceExports }
   const scopeEntries = readdirOrReport(libsDir, hostIo, repoRoot, findings)
-  if (scopeEntries === undefined) return map
+  if (scopeEntries === undefined) return { workspaceMap: map, unresolvedWorkspaceExports }
   for (const scope of [...scopeEntries].sort((a, b) => compareCodeUnits(a.name, b.name))) {
     if (!scope.isDirectory || scope.name === "node_modules") continue
     const scopeDir = join(libsDir, scope.name)
@@ -97,10 +103,18 @@ const buildWorkspaceSpecifierMap = (
         .with({ _tag: "Some" }, ({ value }) => {
           const pkgName = value.name?.trim()
           if (pkgName === undefined || pkgName.length === 0) return
+          const isHarnessPkg = pkgName.startsWith("@harness/")
           const exp = value.exports
           if (typeof exp === "string") {
             const resolved = mapExportTargetToWorkspacePath(repoRoot, pkgRelDir, exp, hostIo)
-            if (resolved !== undefined) map.set(pkgName, resolved)
+            if (resolved !== undefined) {
+              map.set(pkgName, resolved)
+              return
+            }
+            if (isHarnessPkg) {
+              map.delete(pkgName)
+              unresolvedWorkspaceExports.set(pkgName, exp)
+            }
             return
           }
           if (typeof exp === "object" && exp !== null) {
@@ -108,7 +122,22 @@ const buildWorkspaceSpecifierMap = (
               const target = extractExportTargetString(subVal)
               if (target === undefined) continue
               const resolved = mapExportTargetToWorkspacePath(repoRoot, pkgRelDir, target, hostIo)
-              if (resolved === undefined) continue
+              if (resolved === undefined) {
+                if (!isHarnessPkg) continue
+                if (subKey === ".") {
+                  map.delete(pkgName)
+                  unresolvedWorkspaceExports.set(pkgName, target)
+                  continue
+                }
+                if (subKey.startsWith("./")) {
+                  const suffix = subKey.slice(2)
+                  const specifier = `${pkgName}/${suffix}`
+                  map.delete(specifier)
+                  if (!suffix.endsWith(".js")) map.delete(`${specifier}.js`)
+                  unresolvedWorkspaceExports.set(specifier, target)
+                }
+                continue
+              }
               if (subKey === ".") {
                 map.set(pkgName, resolved)
                 continue
@@ -124,7 +153,7 @@ const buildWorkspaceSpecifierMap = (
         .exhaustive()
     }
   }
-  return map
+  return { workspaceMap: map, unresolvedWorkspaceExports }
 }
 
 const isForbiddenRuntimeSpecifier = (spec: string): boolean =>
@@ -250,7 +279,23 @@ export const evaluateHookFastpathImportClosure = (
   hostIo: SyncHostIo,
   findings: Array<GcFinding>,
 ): void => {
-  const workspaceMap = buildWorkspaceSpecifierMap(repoRoot, hostIo, findings)
+  const { workspaceMap, unresolvedWorkspaceExports } = buildWorkspaceSpecifierMap(
+    repoRoot,
+    hostIo,
+    findings,
+  )
+  for (const [specifier, target] of [...unresolvedWorkspaceExports.entries()].sort(([a], [b]) =>
+    compareCodeUnits(a, b),
+  )) {
+    findings.push({
+      kind: "hook-fastpath-forbidden-import",
+      nodeId: `unresolved-export:${specifier}`,
+      location: specifier,
+      message: `Workspace package export '${specifier}' declares missing target '${target}', breaking hook fast-path import-closure resolution.`,
+      action: `Fix the 'exports' target '${target}' for '${specifier}' or restore the missing source file.`,
+    })
+  }
+  const hasHarnessLibs = hostIo.existsSync(join(repoRoot, "libs", "harness"))
   const fileSpecCache = new Map<string, ReadonlyArray<string>>()
   const readSpecs = (relPath: string): ReadonlyArray<string> | undefined => {
     if (fileSpecCache.has(relPath)) return fileSpecCache.get(relPath)
@@ -262,7 +307,18 @@ export const evaluateHookFastpathImportClosure = (
   }
 
   for (const entryRel of HOOK_FASTPATH_ENTRYPOINTS) {
-    if (!hostIo.existsSync(join(repoRoot, entryRel))) continue
+    if (!hostIo.existsSync(join(repoRoot, entryRel))) {
+      if (hasHarnessLibs) {
+        findings.push({
+          kind: "hook-fastpath-forbidden-import",
+          nodeId: `${entryRel}:missing-entrypoint`,
+          location: entryRel,
+          message: `Hook fast-path entrypoint '${entryRel}' is missing in harness workspace; cannot verify runtime import closure.`,
+          action: `Restore '${entryRel}' or update HOOK_FASTPATH_ENTRYPOINTS in libs/harness/gates/src/plugins/gc/gc-hook-fastpath.ts.`,
+        })
+      }
+      continue
+    }
     const visited = new Set<string>()
     const queue: Array<readonly [string, ReadonlyArray<string>]> = [[entryRel, [entryRel]]]
     const violationEdges = new Set<string>()
@@ -286,7 +342,12 @@ export const evaluateHookFastpathImportClosure = (
           workspaceMap,
           hostIo,
         )
-        if (resolved === undefined) continue
+        if (resolved === undefined) {
+          if (spec.startsWith(".") || spec.startsWith("@harness/")) {
+            violationEdges.add(`${chain.join(" -> ")} -> ${spec} (unresolved)`)
+          }
+          continue
+        }
         if (resolved === "libs/harness/graph/src/index.ts") {
           violationEdges.add(`${chain.join(" -> ")} -> ${resolved}`)
           continue

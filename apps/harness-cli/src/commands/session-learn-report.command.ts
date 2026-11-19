@@ -69,10 +69,10 @@ export const handleDoctorOrSession = (
 
     const suppressLiveWrites = shouldSuppressLiveRepoTestSideEffects(repoRoot)
     const harnessDirOpt = resolveHarnessStateDirSafe(repoRoot)
-    const harnessDir = Option.getOrElse(harnessDirOpt, () => join(repoRoot, ".harness"))
-    const snapshotDirOk = suppressLiveWrites
-      ? Option.isSome(harnessDirOpt)
-      : ensureHarnessDirSafe(harnessDirOpt, nodeSyncHostIo)
+    const harnessDir = Option.getOrUndefined(harnessDirOpt)
+    const snapshotDirOk =
+      harnessDir !== undefined &&
+      (suppressLiveWrites || ensureHarnessDirSafe(harnessDirOpt, nodeSyncHostIo))
 
     const isolatedExternal = isIsolatedExternalWorkspace(repoRoot)
     let omnigraphInitialized = isolatedExternal ? true : yield* ensureLocalOmnigraphReady(repoRoot)
@@ -82,12 +82,18 @@ export const handleDoctorOrSession = (
     const ollamaReady = requireLiveOllama ? yield* ensureLocalOllamaReady() : true
     const ollamaProbed = requireLiveOllama
 
-    const planPath = join(harnessDir, "plan-graph-snapshot.json")
-    const implPath = join(harnessDir, "graph-snapshot.json")
+    const planPath =
+      harnessDir !== undefined ? join(harnessDir, "plan-graph-snapshot.json") : undefined
+    const implPath = harnessDir !== undefined ? join(harnessDir, "graph-snapshot.json") : undefined
 
     const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
     const recordedMeta = readGraphHeadMeta(repoRoot, nodeSyncHostIo)
-    if ((!isolatedExternal || recordedMeta !== null) && !suppressLiveWrites) {
+    if (
+      harnessDir !== undefined &&
+      implPath !== undefined &&
+      (!isolatedExternal || recordedMeta !== null) &&
+      !suppressLiveWrites
+    ) {
       const reconcileDecision = yield* decideOmnigraphReconcile({
         snapshotExists: nodeSyncHostIo.existsSync(implPath),
         recordedHeadSha: recordedMeta?.headSha ?? null,
@@ -153,11 +159,10 @@ export const handleDoctorOrSession = (
       catch: () => false,
     }).pipe(Effect.orElseSucceed(() => false))
 
-    const modelWarm = isAntigravity
-      ? ollamaReady
-      : ollamaReady &&
-        Option.isSome(
-          yield* DecisionModel.decide(IdiomRouterV1, {
+    const idiomaticDecisionOpt =
+      isAntigravity || !ollamaReady
+        ? Option.none()
+        : yield* DecisionModel.decide(IdiomRouterV1, {
             input: { planStep: "Initialize session" },
           }).pipe(
             Effect.timeoutOption("10 seconds"),
@@ -170,8 +175,14 @@ export const handleDoctorOrSession = (
               }).pipe(Effect.as(Option.none()))
             }),
             Effect.provide(decisionLayer),
-          ),
-        )
+          )
+    const modelWarm = isAntigravity
+      ? ollamaReady
+      : ollamaReady &&
+        match(idiomaticDecisionOpt)
+          .with({ _tag: "Some" }, () => true)
+          .with({ _tag: "None" }, () => false)
+          .exhaustive()
 
     const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)
     const activeStubs = Array.from(fnIndex.bySpanName.values())
@@ -180,7 +191,11 @@ export const handleDoctorOrSession = (
 
     let missingPlannedFns: ReadonlyArray<string> = []
     let snapshotOk = true
-    if (nodeSyncHostIo.existsSync(planPath) && nodeSyncHostIo.existsSync(implPath)) {
+    const planExists =
+      harnessDir !== undefined && planPath !== undefined && nodeSyncHostIo.existsSync(planPath)
+    const implExists =
+      harnessDir !== undefined && implPath !== undefined && nodeSyncHostIo.existsSync(implPath)
+    if (planExists || implExists) {
       const loadSnap = (path: string, label: string) =>
         loadGraphSnapshotEffect(path, nodeSyncHostIo).pipe(
           Effect.map((graph) => ({ _tag: "Ok" as const, graph })),
@@ -190,31 +205,59 @@ export const handleDoctorOrSession = (
             ).pipe(Effect.as({ _tag: "Err" as const, err })),
           ),
         )
-      const planLoad = yield* loadSnap(planPath, "plan")
-      const implLoad = yield* loadSnap(implPath, "implementation")
+      const planLoad =
+        planExists && planPath !== undefined
+          ? yield* loadSnap(planPath, "plan")
+          : ({ _tag: "Absent" as const } as const)
+      const implLoad =
+        implExists && implPath !== undefined
+          ? yield* loadSnap(implPath, "implementation")
+          : ({ _tag: "Absent" as const } as const)
 
-      missingPlannedFns = match({ planLoad, implLoad })
-        .with({ planLoad: { _tag: "Err" } }, ({ planLoad: { err } }) => {
+      const snapshotErrors: Array<string> = []
+      match(planLoad)
+        .with({ _tag: "Err" }, ({ err }) => {
           snapshotOk = false
-          return [`Corrupt plan graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`]
+          snapshotErrors.push(
+            `Corrupt plan graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`,
+          )
         })
-        .with({ implLoad: { _tag: "Err" } }, ({ implLoad: { err } }) => {
-          snapshotOk = false
-          return [
-            `Corrupt implementation graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`,
-          ]
-        })
-        .with({ planLoad: { _tag: "Ok" }, implLoad: { _tag: "Ok" } }, ({ planLoad, implLoad }) => {
-          const diff = diffPlanAndImplGraphs(planLoad.graph, implLoad.graph)
-          return diff.ok ? [] : diff.reasons
-        })
+        .with({ _tag: "Ok" }, { _tag: "Absent" }, () => {})
         .exhaustive()
+
+      match(implLoad)
+        .with({ _tag: "Err" }, ({ err }) => {
+          snapshotOk = false
+          snapshotErrors.push(
+            `Corrupt implementation graph snapshot at '${err.path}' [${err.reason}]: ${err.message}`,
+          )
+        })
+        .with({ _tag: "Ok" }, { _tag: "Absent" }, () => {})
+        .exhaustive()
+
+      missingPlannedFns =
+        snapshotErrors.length > 0
+          ? snapshotErrors
+          : match({ planLoad, implLoad })
+              .with(
+                { planLoad: { _tag: "Ok" }, implLoad: { _tag: "Ok" } },
+                ({ planLoad, implLoad }) => {
+                  const diff = diffPlanAndImplGraphs(planLoad.graph, implLoad.graph)
+                  return diff.ok ? [] : diff.reasons
+                },
+              )
+              .otherwise(() => [])
     }
 
-    const stampCheck = checkVerifyStamp(repoRoot, nodeSyncHostIo)
+    const stampCheck =
+      harnessDir !== undefined
+        ? checkVerifyStamp(repoRoot, nodeSyncHostIo)
+        : { valid: false as const, reason: "Invalid or unavailable HARNESS_STATE_DIR." }
     const hasPlanOrStamp =
-      nodeSyncHostIo.existsSync(planPath) ||
-      nodeSyncHostIo.existsSync(join(harnessDir, "verify-stamp.json"))
+      harnessDir !== undefined &&
+      planPath !== undefined &&
+      (nodeSyncHostIo.existsSync(planPath) ||
+        nodeSyncHostIo.existsSync(join(harnessDir, "verify-stamp.json")))
     const effectiveStampValid = hasPlanOrStamp ? stampCheck.valid : true
     const stampReason = !stampCheck.valid ? stampCheck.reason : undefined
     const rawFrictionEvents = readFrictionEventsSafe(repoRoot, nodeSyncHostIo)
@@ -243,24 +286,49 @@ export const handleDoctorOrSession = (
 
     if (isAntigravity) {
       const injected: Array<string> = []
-      if (!ollamaReady) {
-        injected.push(
-          "[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is offline and could not be started automatically. Stop all implementation immediately and inform the user.",
-        )
+      const stderrWarnings: Array<string> = []
+      if (!nodeOk) {
+        const msg = `[harness:session] Warning: Node.js >= 24 is required (detected ${process.versions.node}).`
+        injected.push(msg)
+        stderrWarnings.push(msg)
       }
-      if (!snapshotOk) injected.push(...missingPlannedFns)
+      if (!snapshotDirOk) {
+        const msg =
+          "[harness:session] Warning: Harness state/snapshot directory is unavailable or invalid (check HARNESS_STATE_DIR)."
+        injected.push(msg)
+        stderrWarnings.push(msg)
+      }
+      if (!effectLspOk) {
+        const msg =
+          "[harness:session] Warning: Effect language service (@effect/language-service / @effect/tsgo) is not configured or unavailable."
+        injected.push(msg)
+        stderrWarnings.push(msg)
+      }
+      if (!omnigraphInitialized && reconcileError === undefined) {
+        const msg = "[harness:session] Warning: Omnigraph server is not ready or uninitialized."
+        injected.push(msg)
+        stderrWarnings.push(msg)
+      }
+      if (!ollamaReady) {
+        const msg =
+          "[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is offline and could not be started automatically. Stop all implementation immediately and inform the user."
+        injected.push(msg)
+        stderrWarnings.push(msg)
+      }
+      if (!snapshotOk) {
+        injected.push(...missingPlannedFns)
+        stderrWarnings.push(...missingPlannedFns)
+      }
       if (reconcileError !== undefined) {
-        injected.push(
-          `[harness:session] Warning: Omnigraph reconcile sync failed: ${reconcileError}`,
-        )
+        const msg = `[harness:session] Warning: Omnigraph reconcile sync failed: ${reconcileError}`
+        injected.push(msg)
+        stderrWarnings.push(msg)
       }
       if (handoff.handoffMessage !== null) injected.push(handoff.handoffMessage)
-      const antigravityStderr =
-        reconcileError !== undefined
-          ? `[harness:session] Warning: Omnigraph reconcile sync failed: ${reconcileError}`
-          : ""
+      const antigravityStderr = stderrWarnings.join("\n")
       if (
         !suppressLiveWrites &&
+        harnessDir !== undefined &&
         ok &&
         reconcileError === undefined &&
         options?.governanceDocs === undefined &&

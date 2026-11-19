@@ -1,13 +1,18 @@
-import { Cause, Exit, Schema } from "effect"
+import { Cause, Exit, Redacted, Schema } from "effect"
+import { match } from "ts-pattern"
 import { describe, expect, it } from "vitest"
 import {
   AstSourceFilePath,
+  BatchMutantResultsSchema,
   ContentSha256,
+  ErrorReasonMessage,
   MUTATION_CACHE_FILENAME,
   MUTATION_CACHE_SCHEMA_VERSION,
   MutantCacheId,
+  MutationCacheAuth,
   MutationCacheEntry,
   MutationCacheHmacSecret,
+  MutationCacheHmacSecretResult,
   MutationCacheLookupDecision,
   MutationCacheLookupInput,
   MutationCacheMac,
@@ -25,6 +30,7 @@ describe("MutationCache contract schemas", () => {
   const otherSha = computeContentSha256("other-mutant-key")
   const sampleMac = MutationCacheMac.make(computeContentSha256("sample-hmac-tag"))
   const sampleSecret = MutationCacheHmacSecret.make("0123456789abcdef0123456789abcdef")
+  const redactedSecret = Redacted.make(sampleSecret)
 
   it("decodes valid MutationCacheEntry, MutationCacheStore, MutationCacheLookupInput, and MutationCacheLookupDecision", () => {
     expect(MUTATION_CACHE_SCHEMA_VERSION).toBe("mutation-cache-v2")
@@ -59,13 +65,50 @@ describe("MutationCache contract schemas", () => {
     const lookupInput = Schema.decodeSync(MutationCacheLookupInput)({
       candidateKeys: [sampleSha],
       store,
-      hmacSecret: sampleSecret,
+      auth: { _tag: "Enabled", hmacSecret: redactedSecret },
       nowMs: 1_700_000_000_000,
       maxAgeMs: 43_200_000,
     })
-    expect(lookupInput.hmacSecret).toBe(sampleSecret)
+    expect(lookupInput.auth._tag).toBe("Enabled")
+    match(lookupInput.auth)
+      .with({ _tag: "Enabled" }, ({ hmacSecret }) => {
+        expect(Redacted.value(hmacSecret)).toBe(sampleSecret)
+      })
+      .with({ _tag: "Disabled" }, () => {
+        expect.unreachable("Expected Enabled auth")
+      })
+      .exhaustive()
     expect(lookupInput.nowMs).toBe(MutationEpochMillis.make(1_700_000_000_000))
     expect(lookupInput.maxAgeMs).toBe(MutationMaxAgeMillis.make(43_200_000))
+
+    const resolvedRes = Schema.decodeSync(MutationCacheHmacSecretResult)({
+      _tag: "Resolved",
+      secret: redactedSecret,
+    })
+    expect(resolvedRes._tag).toBe("Resolved")
+    const unavailableRes = Schema.decodeSync(MutationCacheHmacSecretResult)({
+      _tag: "Unavailable",
+      reason: ErrorReasonMessage.make("key dir symlink"),
+    })
+    expect(unavailableRes._tag).toBe("Unavailable")
+    const disabledAuth = Schema.decodeSync(MutationCacheAuth)({
+      _tag: "Disabled",
+      reason: ErrorReasonMessage.make("secret dir symlink"),
+    })
+    expect(disabledAuth._tag).toBe("Disabled")
+
+    const batchDecoded = Schema.decodeSync(BatchMutantResultsSchema)(
+      JSON.stringify([
+        { id: "m-1", result: { _tag: "Exited", exitCode: 1, stdout: "FAIL", stderr: "" } },
+        { id: "m-2", result: { _tag: "Signaled", signal: "SIGTERM", stdout: "", stderr: "" } },
+        { id: "m-3", result: { _tag: "TimedOut", stdout: "", stderr: "timed out" } },
+        {
+          id: "m-4",
+          result: { _tag: "SpawnFailed", spawnError: "ENOENT", stdout: "", stderr: "" },
+        },
+      ]),
+    )
+    expect(batchDecoded).toHaveLength(4)
 
     const decision = Schema.decodeSync(MutationCacheLookupDecision)({
       hitKeys: [sampleSha],
@@ -114,6 +157,12 @@ describe("MutationCache contract schemas", () => {
     // Invalid or empty branded fields & non-ISO-8601 UTC timestamps
     expectRejected(Schema.decodeUnknownExit(MutationCacheEntry)({ ...validEntry, file: "" }))
     expectRejected(Schema.decodeUnknownExit(MutationCacheEntry)({ ...validEntry, mutantId: "" }))
+    expectRejected(
+      Schema.decodeUnknownExit(MutationCacheEntry)({ ...validEntry, mutantId: "id\0injected" }),
+    )
+    expectRejected(
+      Schema.decodeUnknownExit(MutationCacheEntry)({ ...validEntry, mutantId: "id\ninjected" }),
+    )
     expectRejected(Schema.decodeUnknownExit(MutationCacheEntry)({ ...validEntry, recordedAt: "" }))
     expectRejected(
       Schema.decodeUnknownExit(MutationCacheEntry)({
@@ -185,12 +234,35 @@ describe("MutationCache contract schemas", () => {
       Schema.decodeExit(MutationCacheLookupInput)({
         candidateKeys: ["short-key"],
         store: { version: MUTATION_CACHE_SCHEMA_VERSION, entries: {} },
+        auth: { _tag: "Disabled", reason: "no secret" },
+        nowMs: 1_700_000_000_000,
       }),
     )
     expectRejected(
       Schema.decodeUnknownExit(MutationCacheLookupInput)({
         candidateKeys: [sampleSha],
         store: { version: "wrong-version", entries: {} },
+        auth: { _tag: "Disabled", reason: "no secret" },
+        nowMs: 1_700_000_000_000,
+      }),
+    )
+    expectRejected(
+      Schema.decodeExit(BatchMutantResultsSchema)(
+        JSON.stringify([
+          { id: "m-1", result: { _tag: "Signaled", signal: "bad signal", stdout: "", stderr: "" } },
+        ]),
+      ),
+    )
+    expectRejected(
+      Schema.decodeUnknownExit(MutationCacheAuth)({
+        _tag: "Enabled",
+        hmacSecret: "too-short",
+      }),
+    )
+    expectRejected(
+      Schema.decodeExit(MutationCacheAuth)({
+        _tag: "Disabled",
+        reason: "",
       }),
     )
     expectRejected(

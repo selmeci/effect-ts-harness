@@ -28,8 +28,9 @@ export const BUILD_ARTIFACT_IGNORED_NAMES: ReadonlySet<string> = new Set([
 ])
 
 /**
- * Pure entry filter matching `computeWorkspaceTreeHashChecked` so verify-stamp
- * and pre-invocation cache fingerprinting stay 1:1 without duplicate ignore sets.
+ * Pure path-segment filter shared by `computeWorkspaceTreeHashChecked` and
+ * `isWorkspaceRelPathIncludedInStamp`: skips root-level ignored/temp entries and
+ * `BUILD_ARTIFACT_IGNORED_NAMES` outside `src/` or `test/` subdirectories.
  */
 export const shouldIgnoreStampEntry = (
   isRootLevel: boolean,

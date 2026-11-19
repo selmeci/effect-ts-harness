@@ -302,7 +302,11 @@ const matchWildcardExport = (
     if (starIdx === -1) continue
     const prefix = pattern.slice(0, starIdx)
     const suffix = pattern.slice(starIdx + 1)
-    if (exportKey.startsWith(prefix) && exportKey.endsWith(suffix)) {
+    if (
+      exportKey.length >= prefix.length + suffix.length &&
+      exportKey.startsWith(prefix) &&
+      exportKey.endsWith(suffix)
+    ) {
       const captured = exportKey.slice(prefix.length, exportKey.length - suffix.length)
       const targetStr = extractExportTargetString(rawTarget)
       if (targetStr !== undefined) {
@@ -356,11 +360,14 @@ const resolveWorkspacePackageImport = (
         digests.fileDigests,
         hostIo,
       )
-      const matched = match(res)
+      return match(res)
         .with({ _tag: "Found" }, { _tag: "Disabled" }, (r) => r)
-        .with({ _tag: "Missing" }, () => undefined)
+        .with({ _tag: "Missing" }, () =>
+          isWorkspaceSpec
+            ? ({ _tag: "UnresolvedWorkspace", specifier: spec } as const)
+            : ({ _tag: "External" } as const),
+        )
         .exhaustive()
-      if (matched !== undefined) return matched
     }
   }
 
@@ -376,7 +383,7 @@ const resolveWorkspacePackageImport = (
     .with({ _tag: "Found" }, { _tag: "Disabled" }, (r) => r)
     .with({ _tag: "Missing" }, () =>
       isWorkspaceSpec
-        ? ({ _tag: "UnresolvedWorkspace" } as const)
+        ? ({ _tag: "UnresolvedWorkspace", specifier: spec } as const)
         : ({ _tag: "External" } as const),
     )
     .exhaustive()
@@ -387,8 +394,14 @@ const extractPackageKey = (relPath: string): string | undefined => {
   return m !== null ? `${m[1]!}/${m[2]!}` : undefined
 }
 
+const formatDigestPresence = (digest: ContentSha256 | undefined): string =>
+  digest !== undefined ? `present:${digest}` : "absent"
+
 /**
- * Computes a per-file transitive import-closure digest starting from `relFile` and `allReachingTests`.
+ * Computes a per-file transitive TS/JS import-closure digest starting from `relFile` and
+ * `allReachingTests`, binding `rootRuntimeDigest`, resolved file digests, touched package and
+ * test-support digests (`present:<sha>` / `absent`), conditional asset bucket digests, and
+ * `allLibsSrcDigest` fallback plus unresolved import specifiers when dynamic/unresolved imports occur.
  */
 export const computeFileMutationClosureDigest = (
   input: ComputeFileMutationClosureDigestInput,
@@ -402,6 +415,8 @@ export const computeFileMutationClosureDigest = (
   const visited = new Set<string>()
   const touchedPackages = new Set<string>()
   const filePairs: Array<readonly [string, ContentSha256]> = []
+  const unresolvedRelativeImports: Array<string> = []
+  const unresolvedWorkspaceImports: Array<string> = []
   const pkgExportsCache = new Map<string, Record<string, unknown> | null>()
 
   const enqueue = (relPath: string) => {
@@ -461,7 +476,11 @@ export const computeFileMutationClosureDigest = (
             enqueue(r)
             return undefined
           })
-          .with({ _tag: "Missing" }, () => undefined)
+          .with({ _tag: "Missing" }, () => {
+            unresolvedRelativeImports.push(`${relPath} -> ${spec}`)
+            usedFallbackAllLibs = true
+            return undefined
+          })
           .with({ _tag: "Disabled" }, ({ reason }) => reason)
           .exhaustive()
         if (disabledReason !== undefined) return { _tag: "Disabled", reason: disabledReason }
@@ -480,7 +499,8 @@ export const computeFileMutationClosureDigest = (
             enqueue(r)
             return undefined
           })
-          .with({ _tag: "UnresolvedWorkspace" }, () => {
+          .with({ _tag: "UnresolvedWorkspace" }, ({ specifier }) => {
+            unresolvedWorkspaceImports.push(`${relPath} -> ${specifier}`)
             usedFallbackAllLibs = true
             return undefined
           })
@@ -497,8 +517,8 @@ export const computeFileMutationClosureDigest = (
     const k = PackageRelKey.make(pkgKey)
     return [
       pkgKey,
-      input.digests.packageSupportDigests.get(k) ?? "",
-      input.digests.testSupportDigests.get(k) ?? "",
+      formatDigestPresence(input.digests.packageSupportDigests.get(k)),
+      formatDigestPresence(input.digests.testSupportDigests.get(k)),
     ]
   })
 
@@ -513,6 +533,8 @@ export const computeFileMutationClosureDigest = (
       tools: needsTools ? input.digests.toolsDigest : "",
       apps: needsApps ? input.digests.appsTestHelpersDigest : "",
       allLibs: usedFallbackAllLibs ? input.digests.allLibsSrcDigest : "",
+      unresolvedRelativeImports: unresolvedRelativeImports.sort(compareCodeUnits),
+      unresolvedWorkspaceImports: unresolvedWorkspaceImports.sort(compareCodeUnits),
     }),
   )
 

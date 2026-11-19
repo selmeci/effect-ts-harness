@@ -1,10 +1,12 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
-import { Result } from "effect"
+import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
-import { AstSourceFilePath, SourceLineNumber } from "@harness/contract"
+import { AstSourceFilePath, BatchMutantResultsSchema, SourceLineNumber } from "@harness/contract"
 import { ts } from "@harness/graph"
 import type { SyncHostExecResult, SyncHostIo } from "@harness/service/host-io"
 import {
@@ -190,6 +192,24 @@ describe("mutation-subprocess-helpers: classifyMutantSubprocessResult", () => {
       }),
     )
     expect(res0.kind).toBe("abort")
+
+    const missingPassSummary = classifyMutantSubprocessResult(
+      "m-5",
+      Result.succeed({
+        _tag: "Exited",
+        exitCode: 0,
+        stdout: "runner exited without vitest test summary\n",
+        stderr: "",
+      }),
+    )
+    match(missingPassSummary)
+      .with({ kind: "abort" }, ({ diagnostic }) => {
+        expect(diagnostic).toContain("missingVitestPassSummary=true")
+      })
+      .with({ kind: "outcome" }, () => {
+        expect.unreachable("Expected abort when Vitest pass summary is missing")
+      })
+      .exhaustive()
   })
 })
 
@@ -411,7 +431,10 @@ describe("mutation-subprocess-helpers & mutant-ast-generator: Wave 2B #63 satura
               id: "m-1",
               result: { _tag: "Exited", exitCode: 1, stdout: "Tests  1 failed (1)\n", stderr: "" },
             },
-            { id: "m-2", result: { _tag: "Signaled", signal: "SIGKILL", stdout: "", stderr: "" } },
+            {
+              id: "m-2",
+              result: { _tag: "Exited", exitCode: 0, stdout: "Tests  1 passed (1)\n", stderr: "" },
+            },
           ]),
           stderr: "",
         }),
@@ -424,10 +447,42 @@ describe("mutation-subprocess-helpers & mutant-ast-generator: Wave 2B #63 satura
       )
       match(batchOk)
         .with({ _tag: "Ok" }, ({ outcomes }) => {
-          expect(outcomes.map((o) => o.status)).toEqual(["killed", "killed"])
+          expect(outcomes.map((o) => o.status)).toEqual(["killed", "survived"])
         })
         .with({ _tag: "Abort" }, ({ diagnostic }) => {
           expect.unreachable(`Expected batchOk, got: ${diagnostic}`)
+        })
+        .exhaustive()
+
+      // F-2.a & F-2.b: batch Signaled preserves signal name (SIGTERM) and fails closed (abort)
+      const batchSignaled = runVitestTargetList(
+        dir,
+        domainFile,
+        makeBatchIo({
+          _tag: "Exited",
+          exitCode: 0,
+          stdout: JSON.stringify([
+            {
+              id: "m-1",
+              result: { _tag: "Exited", exitCode: 1, stdout: "Tests  1 failed (1)\n", stderr: "" },
+            },
+            { id: "m-2", result: { _tag: "Signaled", signal: "SIGTERM", stdout: "", stderr: "" } },
+          ]),
+          stderr: "",
+        }),
+        { NO_COLOR: "1" },
+        [testPath],
+        originalSource,
+        mutatedSchemaSource,
+        backupPath,
+        [m1, m2],
+      )
+      match(batchSignaled)
+        .with({ _tag: "Abort" }, ({ diagnostic }) => {
+          expect(diagnostic).toContain("terminated by signal SIGTERM")
+        })
+        .with({ _tag: "Ok" }, () => {
+          expect.unreachable("Expected batchSignaled to abort")
         })
         .exhaustive()
 
@@ -1225,6 +1280,182 @@ describe("mutation-subprocess-helpers & mutant-ast-generator: Wave 2B #63 satura
       expect(mutatedLinesSeen.every((line) => line === 2)).toBe(true)
     } finally {
       rmSync(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("F-1.a & F-2.b: batch solo recheck recovers flaky batch timeout/unconfirmed exit and parallel-vitest-batch isolates HARNESS_STATE_DIR", () => {
+    const {
+      dir,
+      testPath,
+      backupPath,
+      batchRunnerPath,
+      originalSource,
+      mutatedSchemaSource,
+      domainFile,
+      m1,
+      m2,
+    } = makeSubprocessFixture()
+    try {
+      const soloRecheckedIds: Array<string> = []
+      const recheckRecoverIo: SyncHostIo = {
+        ...testHostIo,
+        execFileSync: (_cmd, args, opts) => {
+          if (args[0] === batchRunnerPath) {
+            return {
+              _tag: "Exited",
+              exitCode: 0,
+              stdout: JSON.stringify([
+                { id: "m-1", result: { _tag: "TimedOut", stdout: "", stderr: "" } },
+                {
+                  id: "m-2",
+                  result: {
+                    _tag: "Exited",
+                    exitCode: 1,
+                    stdout: "FAIL  libs/demo/core/test/mod.test.ts\n",
+                    stderr: "",
+                  },
+                },
+              ]),
+              stderr: "",
+            }
+          }
+          const activeId = opts?.env?.["HARNESS_ACTIVE_MUTANT_ID"]
+          if (activeId === undefined) {
+            return { _tag: "Exited", exitCode: 0, stdout: "Tests  1 passed (1)\n", stderr: "" }
+          }
+          soloRecheckedIds.push(activeId)
+          if (activeId === "m-1") {
+            return { _tag: "Exited", exitCode: 0, stdout: "Tests  1 passed (1)\n", stderr: "" }
+          }
+          return { _tag: "Exited", exitCode: 1, stdout: "Tests  1 failed (1)\n", stderr: "" }
+        },
+      }
+      const recovered = runVitestTargetList(
+        dir,
+        domainFile,
+        recheckRecoverIo,
+        { NO_COLOR: "1" },
+        [testPath],
+        originalSource,
+        mutatedSchemaSource,
+        backupPath,
+        [m1, m2],
+      )
+      expect(soloRecheckedIds).toEqual(["m-1", "m-2"])
+      match(recovered)
+        .with({ _tag: "Ok" }, ({ outcomes, nonCacheableIds }) => {
+          expect(outcomes.map((o) => [o.mutant.id, o.status])).toEqual([
+            ["m-1", "survived"],
+            ["m-2", "killed"],
+          ])
+          expect(nonCacheableIds.has("m-2")).toBe(false)
+        })
+        .with({ _tag: "Abort" }, ({ diagnostic }) => {
+          expect.unreachable(`Expected recovered Ok, got: ${diagnostic}`)
+        })
+        .exhaustive()
+
+      // Persistent solo TimedOut aborts fail-closed
+      const persistentTimeoutIo: SyncHostIo = {
+        ...testHostIo,
+        execFileSync: (_cmd, args, opts) => {
+          if (args[0] === batchRunnerPath) {
+            return {
+              _tag: "Exited",
+              exitCode: 0,
+              stdout: JSON.stringify([
+                { id: "m-1", result: { _tag: "TimedOut", stdout: "", stderr: "" } },
+                {
+                  id: "m-2",
+                  result: {
+                    _tag: "Exited",
+                    exitCode: 1,
+                    stdout: "Tests  1 failed (1)\n",
+                    stderr: "",
+                  },
+                },
+              ]),
+              stderr: "",
+            }
+          }
+          if (opts?.env?.["HARNESS_ACTIVE_MUTANT_ID"] === undefined) {
+            return { _tag: "Exited", exitCode: 0, stdout: "Tests  1 passed (1)\n", stderr: "" }
+          }
+          return { _tag: "TimedOut", stdout: "", stderr: "" }
+        },
+      }
+      const persistentAbort = runVitestTargetList(
+        dir,
+        domainFile,
+        persistentTimeoutIo,
+        { NO_COLOR: "1" },
+        [testPath],
+        originalSource,
+        mutatedSchemaSource,
+        backupPath,
+        [m1, m2],
+      )
+      expect(persistentAbort._tag).toBe("Abort")
+
+      // Real tools/parallel-vitest-batch.mjs: worker HARNESS_STATE_DIR isolation + cleanup + TimedOut + SIGTERM
+      const batchScript = fileURLToPath(
+        new URL("../../../../tools/parallel-vitest-batch.mjs", import.meta.url),
+      )
+      const fakeVitest = join(dir, "fake-batch-vitest.mjs")
+      const stateDirLog = join(dir, "state-dirs.jsonl")
+      writeFileSync(
+        fakeVitest,
+        `import { appendFileSync } from "node:fs";
+const id = process.env.HARNESS_ACTIVE_MUTANT_ID;
+appendFileSync(${JSON.stringify(stateDirLog)}, JSON.stringify({ id, stateDir: process.env.HARNESS_STATE_DIR ?? null }) + "\\n");
+if (id === "m-sigterm") {
+  process.kill(process.pid, "SIGTERM");
+} else if (id === "m-timeout") {
+  setTimeout(() => {}, 10_000);
+} else {
+  process.stdout.write("Tests  1 failed (1)\\n");
+  process.exit(1);
+}
+`,
+        "utf8",
+      )
+      const sharedParentStateDir = join(dir, "shared-parent-state")
+      const proc = spawnSync(process.execPath, [batchScript], {
+        cwd: dir,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HARNESS_STATE_DIR: sharedParentStateDir,
+          HARNESS_BATCH_VITEST_CLI: fakeVitest,
+          HARNESS_BATCH_CWD: dir,
+          HARNESS_BATCH_TIMEOUT_MS: "250",
+          HARNESS_BATCH_TESTS_JSON: JSON.stringify(["a.test.ts"]),
+          HARNESS_BATCH_MUTANTS_JSON: JSON.stringify(["m-ok", "m-sigterm", "m-timeout"]),
+        },
+      })
+      expect(proc.status).toBe(0)
+      const parsed = Schema.decodeSync(BatchMutantResultsSchema)(proc.stdout)
+      const byId = new Map<string, (typeof parsed)[number]["result"]>(
+        parsed.map((e) => [e.id, e.result]),
+      )
+      expect(byId.get("m-ok")?._tag).toBe("Exited")
+      expect(byId.get("m-sigterm")).toMatchObject({ _tag: "Signaled", signal: "SIGTERM" })
+      expect(byId.get("m-timeout")?._tag).toBe("TimedOut")
+
+      const recorded = readFileSync(stateDirLog, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { id: string; stateDir: string | null })
+      expect(recorded).toHaveLength(3)
+      const stateDirs = recorded.map((r) => r.stateDir)
+      expect(stateDirs.every((s) => typeof s === "string" && s.length > 0)).toBe(true)
+      expect(stateDirs.every((s) => s !== sharedParentStateDir)).toBe(true)
+      expect(new Set(stateDirs).size).toBe(3)
+      for (const s of stateDirs) {
+        if (s !== null) expect(existsSync(s)).toBe(false)
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })

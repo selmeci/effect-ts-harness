@@ -4,14 +4,16 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Option, Schema } from "effect"
+import { Effect, Option, Redacted, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   AstSourceFilePath,
   ContentSha256,
+  ErrorReasonMessage,
   MUTATION_CACHE_FILENAME,
   MUTATION_CACHE_SCHEMA_VERSION,
   MutantCacheId,
+  type MutationCacheAuth,
   type MutationCacheEntry,
   MutationCacheHmacSecret,
   MutationCacheStore,
@@ -80,7 +82,13 @@ const makeSampleMutant = (id = "logic.ts:1:0"): CodeMutant => ({
   mutatedSource: MutantSourceText.make("export const isSame = (a: number, b: number) => false\n"),
 })
 
-const TEST_HMAC_SECRET = MutationCacheHmacSecret.make("test-hmac-secret-0123456789abcdef0123456789")
+const TEST_HMAC_SECRET = Redacted.make(
+  MutationCacheHmacSecret.make("test-hmac-secret-0123456789abcdef0123456789"),
+)
+const TEST_CACHE_AUTH: MutationCacheAuth = {
+  _tag: "Enabled",
+  hmacSecret: TEST_HMAC_SECRET,
+}
 
 const makeSignedEntry = (
   key: ContentSha256,
@@ -135,7 +143,7 @@ describe("MutationCache", () => {
           MutationCache.decide({
             candidateKeys: [k1, k2, k3],
             store,
-            hmacSecret: TEST_HMAC_SECRET,
+            auth: TEST_CACHE_AUTH,
             nowMs: MutationEpochMillis.make(Date.parse("2026-11-18T16:30:00.000Z")),
           }),
           new Map(),
@@ -187,7 +195,7 @@ describe("MutationCache", () => {
         const decision = yield* MutationCache.decide({
           candidateKeys,
           store: { version: MUTATION_CACHE_SCHEMA_VERSION, entries },
-          hmacSecret: TEST_HMAC_SECRET,
+          auth: TEST_CACHE_AUTH,
           nowMs: MutationEpochMillis.make(Date.parse("2026-11-18T16:30:00.000Z")),
         })
         expect(decision.hitKeys).toEqual(expectedHits)
@@ -196,7 +204,7 @@ describe("MutationCache", () => {
       }),
   )
 
-  it("disk cache roundtrips, handles corrupt/schema-invalid JSON, EACCES, symlinked stateDir/cacheDir, and bounds MAX_MUTATION_CACHE_ENTRIES", () => {
+  it("disk cache roundtrips, handles corrupt JSON/EACCES/symlinks, and bounds entries", () => {
     const { repoRoot } = setupTempRepo("export const isSame = (a: number, b: number) => a === b\n")
     try {
       expect(loadMutationCache(repoRoot, testHostIo)).toEqual(emptyMutationCacheStore())
@@ -208,13 +216,25 @@ describe("MutationCache", () => {
           [key1]: makeSignedEntry(key1, "m1"),
         },
       }
-      expect(saveMutationCacheAtomic(repoRoot, store1, testHostIo, TEST_HMAC_SECRET)).toEqual({
+      expect(saveMutationCacheAtomic(repoRoot, store1, testHostIo, TEST_CACHE_AUTH)).toEqual({
         _tag: "Saved",
       })
-      expect(loadMutationCache(repoRoot, testHostIo, TEST_HMAC_SECRET)).toEqual(store1)
+      expect(loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)).toEqual(store1)
       expect(loadMutationCacheWithStatus(repoRoot, testHostIo)).toEqual({
         _tag: "Unsafe",
         reason: "missing HMAC secret",
+      })
+      const disabledAuth: MutationCacheAuth = {
+        _tag: "Disabled",
+        reason: ErrorReasonMessage.make("keychain locked"),
+      }
+      expect(loadMutationCacheWithStatus(repoRoot, testHostIo, disabledAuth)).toEqual({
+        _tag: "Unsafe",
+        reason: "keychain locked",
+      })
+      expect(saveMutationCacheAtomic(repoRoot, store1, testHostIo, disabledAuth)).toEqual({
+        _tag: "Skipped",
+        reason: "keychain locked",
       })
       expect(loadMutationCache(repoRoot, testHostIo)).toEqual(emptyMutationCacheStore())
 
@@ -224,11 +244,11 @@ describe("MutationCache", () => {
 
       // Corrupt JSON & schema-invalid JSON
       writeFileSync(cacheFile, "{not-valid-json", "utf8")
-      expect(loadMutationCache(repoRoot, testHostIo, TEST_HMAC_SECRET)).toEqual(
+      expect(loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)).toEqual(
         emptyMutationCacheStore(),
       )
       writeFileSync(cacheFile, JSON.stringify({ version: "wrong-v", entries: {} }), "utf8")
-      expect(loadMutationCache(repoRoot, testHostIo, TEST_HMAC_SECRET)).toEqual(
+      expect(loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)).toEqual(
         emptyMutationCacheStore(),
       )
 
@@ -242,10 +262,10 @@ describe("MutationCache", () => {
           throw new Error("EACCES: permission denied")
         },
       }
-      expect(loadMutationCache(repoRoot, eaccesIo, TEST_HMAC_SECRET)).toEqual(
+      expect(loadMutationCache(repoRoot, eaccesIo, TEST_CACHE_AUTH)).toEqual(
         emptyMutationCacheStore(),
       )
-      expect(saveMutationCacheAtomic(repoRoot, store1, eaccesIo, TEST_HMAC_SECRET)._tag).toBe(
+      expect(saveMutationCacheAtomic(repoRoot, store1, eaccesIo, TEST_CACHE_AUTH)._tag).toBe(
         "Failed",
       )
 
@@ -254,10 +274,10 @@ describe("MutationCache", () => {
       const outsideTarget = join(repoRoot, "outside.json")
       writeFileSync(outsideTarget, JSON.stringify(store1), "utf8")
       symlinkSync(outsideTarget, cacheFile)
-      expect(loadMutationCache(repoRoot, testHostIo, TEST_HMAC_SECRET)).toEqual(
+      expect(loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)).toEqual(
         emptyMutationCacheStore(),
       )
-      expect(saveMutationCacheAtomic(repoRoot, store1, testHostIo, TEST_HMAC_SECRET)._tag).toBe(
+      expect(saveMutationCacheAtomic(repoRoot, store1, testHostIo, TEST_CACHE_AUTH)._tag).toBe(
         "Skipped",
       )
       expect(readFileSync(outsideTarget, "utf8")).toBe(JSON.stringify(store1))
@@ -276,10 +296,10 @@ describe("MutationCache", () => {
             testHostIo.mkdirRecursiveSync(dirPath, mode)
           },
         }
-        expect(loadMutationCache(repoRoot, spyMkdirIo, TEST_HMAC_SECRET)).toEqual(
+        expect(loadMutationCache(repoRoot, spyMkdirIo, TEST_CACHE_AUTH)).toEqual(
           emptyMutationCacheStore(),
         )
-        saveMutationCacheAtomic(repoRoot, store1, spyMkdirIo, TEST_HMAC_SECRET)
+        saveMutationCacheAtomic(repoRoot, store1, spyMkdirIo, TEST_CACHE_AUTH)
         expect(mkdirCalled).toBe(false)
       } finally {
         rmSync(outsideDir, { recursive: true, force: true })
@@ -287,13 +307,13 @@ describe("MutationCache", () => {
       }
 
       // Realpath escape outside stateDir fails closed even if lstat reports non-symlink
-      saveMutationCacheAtomic(repoRoot, store1, testHostIo, TEST_HMAC_SECRET)
+      saveMutationCacheAtomic(repoRoot, store1, testHostIo, TEST_CACHE_AUTH)
       const escapeRealpathIo: SyncHostIo = {
         ...testHostIo,
         realpathSync: (p) =>
           p === cacheFile ? "/outside/evil-cache.json" : testHostIo.realpathSync(p),
       }
-      expect(loadMutationCache(repoRoot, escapeRealpathIo, TEST_HMAC_SECRET)).toEqual(
+      expect(loadMutationCache(repoRoot, escapeRealpathIo, TEST_CACHE_AUTH)).toEqual(
         emptyMutationCacheStore(),
       )
 
@@ -304,7 +324,7 @@ describe("MutationCache", () => {
       const prevStateDirEnv = process.env["HARNESS_STATE_DIR"]
       try {
         process.env["HARNESS_STATE_DIR"] = externalStateDir
-        saveMutationCacheAtomic(repoRoot, store1, testHostIo, TEST_HMAC_SECRET)
+        saveMutationCacheAtomic(repoRoot, store1, testHostIo, TEST_CACHE_AUTH)
         const throwAboveStateIo: SyncHostIo = {
           ...testHostIo,
           existsSync: (p) => {
@@ -312,7 +332,7 @@ describe("MutationCache", () => {
             return testHostIo.existsSync(p)
           },
         }
-        expect(loadMutationCache(repoRoot, throwAboveStateIo, TEST_HMAC_SECRET)).toEqual(store1)
+        expect(loadMutationCache(repoRoot, throwAboveStateIo, TEST_CACHE_AUTH)).toEqual(store1)
       } finally {
         if (prevStateDirEnv === undefined) delete process.env["HARNESS_STATE_DIR"]
         else process.env["HARNESS_STATE_DIR"] = prevStateDirEnv
@@ -342,7 +362,7 @@ describe("MutationCache", () => {
         repoRoot,
         { version: MUTATION_CACHE_SCHEMA_VERSION, entries: exactEntries },
         captureExactIo,
-        TEST_HMAC_SECRET,
+        TEST_CACHE_AUTH,
       )
       const exactParsed = JSON.parse(exactWrittenJson) as { entries: Record<string, unknown> }
       expect(Object.keys(exactParsed.entries)[0]).toBe(kOldest)
@@ -358,9 +378,9 @@ describe("MutationCache", () => {
         repoRoot,
         { version: MUTATION_CACHE_SCHEMA_VERSION, entries: manyEntries },
         testHostIo,
-        TEST_HMAC_SECRET,
+        TEST_CACHE_AUTH,
       )
-      const loadedBounded = loadMutationCache(repoRoot, testHostIo, TEST_HMAC_SECRET)
+      const loadedBounded = loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)
       expect(Object.keys(loadedBounded.entries).length).toBe(MAX_MUTATION_CACHE_ENTRIES)
       const oldestKey = computeContentSha256("many-0")
       const newestKey = computeContentSha256(`many-${MAX_MUTATION_CACHE_ENTRIES + 9}`)
@@ -393,6 +413,7 @@ describe("MutationCache", () => {
       const pkgKey = PackageRelKey.make("sample/domain")
       const relFile = AstSourceFilePath.make("libs/sample/domain/src/logic.ts")
       const reachingHashes1 = unwrapOpt(hashReachingTestFiles(repoRoot, [testFile], testHostIo))
+      const dummyClosure = computeContentSha256("dummy-closure")
       const keyBase = computeMutantCacheKey({
         pkgKey,
         relFile,
@@ -401,6 +422,7 @@ describe("MutationCache", () => {
         mutant,
         reachingTestHashes: reachingHashes1,
         digests: digests1,
+        closureDigest: dummyClosure,
       })
 
       const keyDiffSrc = computeMutantCacheKey({
@@ -411,6 +433,7 @@ describe("MutationCache", () => {
         mutant,
         reachingTestHashes: reachingHashes1,
         digests: digests1,
+        closureDigest: dummyClosure,
       })
       expect(keyDiffSrc).not.toBe(keyBase)
 
@@ -422,6 +445,7 @@ describe("MutationCache", () => {
         mutant,
         reachingTestHashes: reachingHashes1,
         digests: digests1,
+        closureDigest: dummyClosure,
       })
       expect(keyDiffSchema).not.toBe(keyBase)
 
@@ -433,6 +457,7 @@ describe("MutationCache", () => {
         mutant: { ...mutant, replacement: MutantSourceText.make("true") },
         reachingTestHashes: reachingHashes1,
         digests: digests1,
+        closureDigest: dummyClosure,
       })
       expect(keyDiffMutant).not.toBe(keyBase)
 
@@ -449,6 +474,7 @@ describe("MutationCache", () => {
         mutant,
         reachingTestHashes: reachingHashes2,
         digests: digests1,
+        closureDigest: dummyClosure,
       })
       expect(keyDiffTest).not.toBe(keyBase)
 
@@ -539,7 +565,7 @@ describe("MutationCache", () => {
     }
   })
 
-  it("runDomainMutationSuite caches killed mutants, updates lastAccessedAt on hit while keeping recordedAt immutable, runs 1 baseline call on full hit, skips Signaled/TimedOut caching, and honors disableMutantCache", () => {
+  it("runDomainMutationSuite caches killed mutants, updates lastAccessedAt, aborts TimedOut, and honors disableMutantCache", () => {
     const src = "export const isSame = (a: number, b: number): boolean => a === b\n"
     const { repoRoot } = setupTempRepo(
       src,
@@ -572,9 +598,11 @@ describe("MutationCache", () => {
         },
       }
 
+      const t1 = MutationEpochMillis.make(Date.parse("2026-11-18T16:00:00.000Z"))
       const firstReport = runDomainMutationSuite(repoRoot, mockIo, {
         includeAllLines: true,
-        hmacSecret: TEST_HMAC_SECRET,
+        cacheAuth: TEST_CACHE_AUTH,
+        nowMs: t1,
       })
       expect(firstReport.passed).toBe(true)
       expect(firstReport.killedCount).toBeGreaterThan(0)
@@ -582,7 +610,7 @@ describe("MutationCache", () => {
       const callsAfterFirst = baselineCalls + mutantCalls
       expect(callsAfterFirst).toBeGreaterThan(0)
 
-      const cacheAfterFirst = loadMutationCache(repoRoot, testHostIo, TEST_HMAC_SECRET)
+      const cacheAfterFirst = loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)
       const firstEntry = Object.values(cacheAfterFirst.entries)[0]!
       const firstKey = firstEntry.key
       expect(firstEntry.lastAccessedAt).toBeUndefined()
@@ -590,18 +618,20 @@ describe("MutationCache", () => {
       // Second run: all mutants cached -> 1 unmutated baseline call, 0 mutant calls, recordedAt immutable, lastAccessedAt updated
       baselineCalls = 0
       mutantCalls = 0
+      const t2 = MutationEpochMillis.make(Date.parse("2026-11-18T16:05:00.000Z"))
       const secondReport = runDomainMutationSuite(repoRoot, mockIo, {
         includeAllLines: true,
-        hmacSecret: TEST_HMAC_SECRET,
+        cacheAuth: TEST_CACHE_AUTH,
+        nowMs: t2,
       })
       expect(secondReport.passed).toBe(true)
       expect(secondReport.killedCount).toBe(firstReport.killedCount)
       expect(secondReport.cachedKilledCount).toBe(firstReport.killedCount)
       expect(baselineCalls).toBe(1)
       expect(mutantCalls).toBe(0)
-      const cacheAfterSecond = loadMutationCache(repoRoot, testHostIo, TEST_HMAC_SECRET)
+      const cacheAfterSecond = loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)
       expect(cacheAfterSecond.entries[firstKey]?.recordedAt).toBe(firstEntry.recordedAt)
-      expect(cacheAfterSecond.entries[firstKey]?.lastAccessedAt).toBeDefined()
+      expect(cacheAfterSecond.entries[firstKey]?.lastAccessedAt).toBe("2026-11-18T16:05:00.000Z")
       expect(cacheAfterSecond.entries[firstKey]?.mac).toBe(firstEntry.mac)
 
       // disableMutantCache: true bypasses cache and runs Vitest again
@@ -610,13 +640,14 @@ describe("MutationCache", () => {
       const bypassReport = runDomainMutationSuite(repoRoot, mockIo, {
         includeAllLines: true,
         disableMutantCache: true,
-        hmacSecret: TEST_HMAC_SECRET,
+        cacheAuth: TEST_CACHE_AUTH,
+        nowMs: t2,
       })
       expect(bypassReport.passed).toBe(true)
       expect(bypassReport.cachedKilledCount).toBe(0)
       expect(baselineCalls + mutantCalls).toBe(callsAfterFirst)
 
-      // Signaled/TimedOut kills are reported as killed yet NEVER cached to disk
+      // TimedOut aborts fail-closed and NEVER caches kills to disk
       rmSync(resolveHarnessStateDir(repoRoot), { recursive: true, force: true })
       const timeoutIo: SyncHostIo = {
         ...testHostIo,
@@ -630,12 +661,14 @@ describe("MutationCache", () => {
       }
       const timeoutReport = runDomainMutationSuite(repoRoot, timeoutIo, {
         includeAllLines: true,
-        hmacSecret: TEST_HMAC_SECRET,
+        cacheAuth: TEST_CACHE_AUTH,
+        nowMs: t2,
       })
-      expect(timeoutReport.passed).toBe(true)
-      expect(timeoutReport.killedCount).toBeGreaterThan(0)
+      expect(timeoutReport.passed).toBe(false)
+      expect(timeoutReport.killedCount).toBe(0)
+      expect(timeoutReport.diagnostic).toContain("timed out")
       expect(
-        Object.keys(loadMutationCache(repoRoot, testHostIo, TEST_HMAC_SECRET).entries),
+        Object.keys(loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH).entries),
       ).toHaveLength(0)
     } finally {
       rmSync(repoRoot, { recursive: true, force: true })
@@ -976,12 +1009,14 @@ process.exit(1);
             },
           }
 
+          const nowMs = MutationEpochMillis.make(Date.now())
           writeFileSync(join(otherDir, "other.ts"), `export const o = "${unrelatedToken}-mut"\n`)
           const afterUnrelated = computeKey()
           const unrelatedDecision = yield* MutationCache.decide({
             candidateKeys: [afterUnrelated.key],
             store,
-            hmacSecret: TEST_HMAC_SECRET,
+            auth: TEST_CACHE_AUTH,
+            nowMs,
           })
           if (useDynamicFallback) {
             expect(afterUnrelated.closure.usedFallbackAllLibs).toBe(true)
@@ -997,7 +1032,8 @@ process.exit(1);
           const depDecision = yield* MutationCache.decide({
             candidateKeys: [afterDep.key],
             store,
-            hmacSecret: TEST_HMAC_SECRET,
+            auth: TEST_CACHE_AUTH,
+            nowMs,
           })
           expect(afterDep.key).not.toBe(base.key)
           expect(depDecision.missKeys).toEqual([afterDep.key])
@@ -1007,7 +1043,7 @@ process.exit(1);
       }),
   )
 
-  it("REQ-1.1 survivor coverage: dynamic quote forms, side-effect import, empty fileDigests disk fallback, package exports/corrupt/nopkg, non-TS asset, and runtimeVersion extraTag", () => {
+  it("REQ-1.1 survivor coverage: dynamic quotes, exports, assets, and runtimeVersion", () => {
     const src = [
       'import "./side.js"',
       'import { rootFn } from "@sample/custom"',
@@ -1186,7 +1222,7 @@ process.exit(1);
     }
   })
 
-  it("REQ-1.1 AST & workspace resolution: package-name mapping, wildcard/nested/dist exports, require/importActual, string-safe /*, unresolved @ fallback, and all 5 asset buckets", () => {
+  it("REQ-1.1 AST & workspace resolution: tsconfig paths, exports, require, and fallback", () => {
     const src = [
       'import { sc } from "@harness/sample-contract"',
       'import { wc } from "@sample/wild/foo"',

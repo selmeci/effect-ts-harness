@@ -6,10 +6,11 @@ import {
   type ContentSha256,
   MUTATION_CACHE_SCHEMA_VERSION,
   MutantCacheId,
+  type MutationCacheAuth,
   type MutationCacheEntry,
-  type MutationCacheHmacSecret,
   type MutationCacheStore,
   MutationCacheTimestamp,
+  type MutationEpochMillis,
   PackageRelKey,
   compareCodeUnits,
   computeContentSha256,
@@ -54,7 +55,8 @@ export const hydrateFileMutantCacheHits = (input: {
   readonly allReachingTests: ReadonlyArray<string>
   readonly hostIo: SyncHostIo
   readonly cacheEnabled: boolean
-  readonly hmacSecret: MutationCacheHmacSecret | undefined
+  readonly cacheAuth: MutationCacheAuth | undefined
+  readonly nowMs: MutationEpochMillis
   readonly contextDigests: MutationContextDigests | undefined
   readonly loadedCacheStore: MutationCacheStore | undefined
   readonly cacheEntries: Record<ContentSha256, MutationCacheEntry>
@@ -68,10 +70,17 @@ export const hydrateFileMutantCacheHits = (input: {
   let dirtiedCache = false
   if (
     !input.cacheEnabled ||
-    input.hmacSecret === undefined ||
+    input.cacheAuth === undefined ||
     input.contextDigests === undefined ||
     input.loadedCacheStore === undefined
   ) {
+    return { mutantKeys, cachedHitIds, dirtiedCache }
+  }
+  const authEnabled = match(input.cacheAuth)
+    .with({ _tag: "Enabled" }, () => true)
+    .with({ _tag: "Disabled" }, () => false)
+    .exhaustive()
+  if (!authEnabled) {
     return { mutantKeys, cachedHitIds, dirtiedCache }
   }
   const compiledSchemaSha256 = computeContentSha256(input.schemaSource)
@@ -130,9 +139,10 @@ export const hydrateFileMutantCacheHits = (input: {
     const lookupDecision = partitionMutationCacheLookup({
       candidateKeys,
       store: input.loadedCacheStore,
-      hmacSecret: input.hmacSecret,
+      auth: input.cacheAuth,
+      nowMs: input.nowMs,
     })
-    const touchedAt = MutationCacheTimestamp.make(new Date().toISOString())
+    const touchedAt = MutationCacheTimestamp.make(new Date(input.nowMs).toISOString())
     for (const hitKey of lookupDecision.hitKeys) {
       const existing = input.loadedCacheStore.entries[hitKey]
       if (existing !== undefined) {
@@ -276,7 +286,9 @@ export type PreparePackageBaselinesResult =
   | { readonly _tag: "ReadError"; readonly relFile: string; readonly reason: string }
 
 /**
- * Partitions reaching test files once per candidate file and runs 1 batched Vitest baseline per multi-file package.
+ * Partitions reaching test files for candidate files with at least one active mutant,
+ * runs one batched Vitest baseline over `primaryTests` for packages with >= 2 evaluated files,
+ * and records passing package keys (failing packages fall back to per-file baselines).
  */
 export const preparePackageBaselines = (input: {
   readonly repoRoot: string
@@ -441,25 +453,27 @@ export const recordKilledMutantsToCache = (input: {
   readonly fileOutcomes: ReadonlyMap<string, MutantOutcome>
   readonly mutantKeys: ReadonlyMap<string, ContentSha256>
   readonly fileNonCacheableIds: ReadonlySet<string>
-  readonly hmacSecret: MutationCacheHmacSecret | undefined
+  readonly cacheAuth: MutationCacheAuth | undefined
+  readonly nowMs: MutationEpochMillis
   readonly cacheEntries: Record<ContentSha256, MutationCacheEntry>
 }): boolean => {
-  if (input.hmacSecret === undefined) return false
+  if (input.cacheAuth === undefined) return false
+  const hmacSecret = match(input.cacheAuth)
+    .with({ _tag: "Enabled" }, ({ hmacSecret: secret }) => secret)
+    .with({ _tag: "Disabled" }, () => undefined)
+    .exhaustive()
+  if (hmacSecret === undefined) return false
   let dirtied = false
-  const recordedAt = MutationCacheTimestamp.make(new Date().toISOString())
+  const recordedAt = MutationCacheTimestamp.make(new Date(input.nowMs).toISOString())
   const fileAstPath = AstSourceFilePath.make(input.relFile)
   for (const mutant of input.uncachedMutants) {
     const outcome = input.fileOutcomes.get(mutant.id)
     const key = input.mutantKeys.get(mutant.id)
     match(outcome?.status)
       .with("killed", () => {
-        if (
-          key !== undefined &&
-          input.hmacSecret !== undefined &&
-          !input.fileNonCacheableIds.has(mutant.id)
-        ) {
+        if (key !== undefined && !input.fileNonCacheableIds.has(mutant.id)) {
           const mutantCacheId = MutantCacheId.make(mutant.id)
-          const mac = computeMutationEntryMac(input.hmacSecret, {
+          const mac = computeMutationEntryMac(hmacSecret, {
             key,
             file: fileAstPath,
             mutantId: mutantCacheId,
@@ -489,10 +503,10 @@ export const recordKilledMutantsToCache = (input: {
 export const flushMutationCache = (
   repoRoot: string,
   hostIo: SyncHostIo,
-  hmacSecret: MutationCacheHmacSecret,
+  cacheAuth: MutationCacheAuth,
   cacheEntries: Record<ContentSha256, MutationCacheEntry>,
 ): boolean => {
-  const freshStore = loadMutationCache(repoRoot, hostIo, hmacSecret)
+  const freshStore = loadMutationCache(repoRoot, hostIo, cacheAuth)
   const saveRes = saveMutationCacheAtomic(
     repoRoot,
     {
@@ -500,7 +514,7 @@ export const flushMutationCache = (
       entries: { ...freshStore.entries, ...cacheEntries },
     },
     hostIo,
-    hmacSecret,
+    cacheAuth,
   )
   return match(saveRes)
     .with({ _tag: "Saved" }, () => true)

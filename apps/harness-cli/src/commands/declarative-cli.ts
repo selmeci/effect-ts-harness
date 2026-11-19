@@ -20,6 +20,7 @@ import {
   makeDoneBlockResult,
   makeGuardDenyResult,
 } from "./hook-format.js"
+import type { HarnessInfraLive as HarnessInfraLiveType } from "./mutate-and-bench.command.js"
 
 const variadicArgs = Argument.String("args").pipe(Argument.variadic())
 const boolFlag = (name: string) => Flag.Boolean(name).pipe(Flag.withDefault(false))
@@ -77,6 +78,19 @@ export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.E
       yield* onResult(res)
     })
 
+  const forwardFormatSubcommand = (
+    name: "route" | "verify" | "done" | "ingest" | "session" | "doctor" | "help",
+  ) =>
+    CliCommand.make(
+      name,
+      { format: Flag.optional(Flag.String("format")), args: variadicArgs },
+      ({ format, args }) => {
+        const raw: Array<string> = [...args]
+        appendStringFlag(raw, "format", format)
+        return runSubcommand(name, raw)
+      },
+    )
+
   const guardCommand = CliCommand.make(
     "guard",
     {
@@ -89,19 +103,6 @@ export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.E
       appendStringFlag(raw, "format", format)
       appendStringFlag(raw, "file", file)
       return runSubcommand("guard", raw)
-    },
-  )
-
-  const routeCommand = CliCommand.make(
-    "route",
-    {
-      format: Flag.optional(Flag.String("format")),
-      args: variadicArgs,
-    },
-    ({ format, args }) => {
-      const raw: Array<string> = [...args]
-      appendStringFlag(raw, "format", format)
-      return runSubcommand("route", raw)
     },
   )
 
@@ -149,32 +150,6 @@ export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.E
       appendBoolFlag(raw, "write", write)
       appendBoolFlag(raw, "verify", verify)
       return runSubcommand("repair", raw)
-    },
-  )
-
-  const verifyCommand = CliCommand.make(
-    "verify",
-    {
-      format: Flag.optional(Flag.String("format")),
-      args: variadicArgs,
-    },
-    ({ format, args }) => {
-      const raw: Array<string> = [...args]
-      appendStringFlag(raw, "format", format)
-      return runSubcommand("verify", raw)
-    },
-  )
-
-  const doneCommand = CliCommand.make(
-    "done",
-    {
-      format: Flag.optional(Flag.String("format")),
-      args: variadicArgs,
-    },
-    ({ format, args }) => {
-      const raw: Array<string> = [...args]
-      appendStringFlag(raw, "format", format)
-      return runSubcommand("done", raw)
     },
   )
 
@@ -251,33 +226,6 @@ export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.E
         appendBoolFlag(raw, "compare", compare)
         appendStringFlag(raw, "baseline", baseline)
         appendStringFlag(raw, "out", out)
-        return runSubcommand(name, raw)
-      },
-    )
-
-  const ingestCommand = CliCommand.make(
-    "ingest",
-    {
-      format: Flag.optional(Flag.String("format")),
-      args: variadicArgs,
-    },
-    ({ format, args }) => {
-      const raw: Array<string> = [...args]
-      appendStringFlag(raw, "format", format)
-      return runSubcommand("ingest", raw)
-    },
-  )
-
-  const makeSessionSubcommand = (name: "session" | "doctor") =>
-    CliCommand.make(
-      name,
-      {
-        format: Flag.optional(Flag.String("format")),
-        args: variadicArgs,
-      },
-      ({ format, args }) => {
-        const raw: Array<string> = [...args]
-        appendStringFlag(raw, "format", format)
         return runSubcommand(name, raw)
       },
     )
@@ -388,43 +336,30 @@ export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.E
     },
   )
 
-  const helpCommand = CliCommand.make(
-    "help",
-    {
-      format: Flag.optional(Flag.String("format")),
-      args: variadicArgs,
-    },
-    ({ format, args }) => {
-      const raw: Array<string> = [...args]
-      appendStringFlag(raw, "format", format)
-      return runSubcommand("help", raw)
-    },
-  )
-
   return CliCommand.make("harness").pipe(
     CliCommand.withSubcommands([
       guardCommand,
-      routeCommand,
+      forwardFormatSubcommand("route"),
       planCheckCommand,
       planSynthCommand,
       repairCommand,
-      verifyCommand,
-      doneCommand,
+      forwardFormatSubcommand("verify"),
+      forwardFormatSubcommand("done"),
       learnCommand,
       gcCommand,
       mutateCommand,
       makeBenchSubcommand("bench"),
       makeBenchSubcommand("benchmark"),
-      ingestCommand,
-      makeSessionSubcommand("session"),
-      makeSessionSubcommand("doctor"),
+      forwardFormatSubcommand("ingest"),
+      forwardFormatSubcommand("session"),
+      forwardFormatSubcommand("doctor"),
       ontologyCommand,
       reportCommand,
       checkOpenApiCommand,
       checkMigrationsCommand,
       checkEventSchemasCommand,
       scenarioCommand,
-      helpCommand,
+      forwardFormatSubcommand("help"),
     ]),
   )
 }
@@ -448,6 +383,62 @@ const makeFailClosedHookResult = (
     ? makeGuardDenyResult(isAntigravity, reason, extraStderr)
     : makeDoneBlockResult(isAntigravity, reason, extraStderr)
 }
+
+export const resolveCliInfraLayer = Effect.fnUntraced(function* (
+  requested: string,
+  argv: ReadonlyArray<string>,
+  useHookFastpath: boolean,
+  options?: {
+    readonly rawStdin?: string | undefined
+    readonly hookStdinTracker?: HookStdinTracker | undefined
+    readonly importInfraModule?: () => Promise<{
+      readonly HarnessInfraLive: typeof HarnessInfraLiveType
+    }>
+  },
+): Effect.fn.Return<
+  | { readonly _tag: "Ok"; readonly layer: typeof HookInfraLive | typeof HarnessInfraLiveType }
+  | { readonly _tag: "FailClosed"; readonly result: CliResult }
+> {
+  if (useHookFastpath) {
+    return { _tag: "Ok" as const, layer: HookInfraLive }
+  }
+  const importFn = options?.importInfraModule ?? (() => import("./mutate-and-bench.command.js"))
+  const loaded = yield* Effect.tryPromise({
+    try: importFn,
+    catch: toLazyImportError,
+  }).pipe(
+    Effect.map((m) => ({ _tag: "Ok" as const, layer: m.HarnessInfraLive })),
+    Effect.catch((err) => Effect.succeed({ _tag: "Err" as const, message: err.message })),
+  )
+  return match(loaded)
+    .with({ _tag: "Ok" }, ({ layer }) => ({ _tag: "Ok" as const, layer }))
+    .with({ _tag: "Err" }, ({ message }) => {
+      const reason = `Failed to load HarnessInfraLive: ${message}`
+      if (requested === "guard" || requested === "done") {
+        process.stderr.write(`[harness:cli] ${reason}\n`)
+        return {
+          _tag: "FailClosed" as const,
+          result: makeFailClosedHookResult(
+            requested,
+            argv,
+            `${requested}: ${reason}`,
+            "",
+            options?.rawStdin,
+            options?.hookStdinTracker,
+          ),
+        }
+      }
+      return {
+        _tag: "FailClosed" as const,
+        result: {
+          exitCode: 1,
+          stdout: "",
+          stderr: `[harness:cli] ${reason}\n`,
+        },
+      }
+    })
+    .exhaustive()
+})
 
 export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(function* (
   argv: ReadonlyArray<string>,
@@ -545,101 +536,99 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
     requested === "guard" ||
     requested === "route" ||
     (requested === "session" && hasAntigravityFormat(argv))
-  const infraLayer = useHookFastpath
-    ? HookInfraLive
-    : yield* Effect.tryPromise({
-        try: () => import("./mutate-and-bench.command.js"),
-        catch: toLazyImportError,
-      }).pipe(
-        Effect.map((m) => m.HarnessInfraLive),
-        Effect.catch((err) =>
-          Effect.sync(
-            () => (process.stderr.write(`[harness:cli] Warning: ${err.message}\n`), HookInfraLive),
-          ),
-        ),
-      )
-  const mainLayer = Layer.mergeAll(
-    infraLayer,
-    decisionLayer,
-    liveCommandLayer,
-    NodeServices.layer,
-    Layer.succeed(Logger.LogToStderr, true),
-    isHookCommand ? Layer.succeed(Console.Console, hookConsole) : Layer.empty,
-  )
-
-  const normalizedArgv = argv.length === 0 ? ["help"] : argv
-  const cliErr = yield* CliCommand.runWith(rootCmd, {
-    version: "0.0.0",
-    renderErrors: false,
-  })(normalizedArgv).pipe(
-    Effect.provide(mainLayer),
-    Effect.as<string | undefined>(undefined),
-    Effect.catch((err) =>
-      Effect.succeed(
-        match(err)
-          .with(
-            { _tag: "ShowHelp" },
-            (e) => e.errors.map((sub) => sub.message).join("; ") || e.message,
-          )
-          .with(
-            { _tag: "UnrecognizedOption" },
-            { _tag: "DuplicateOption" },
-            { _tag: "MissingOption" },
-            { _tag: "MissingArgument" },
-            { _tag: "UnexpectedArgument" },
-            { _tag: "InvalidValue" },
-            { _tag: "UnknownSubcommand" },
-            { _tag: "UserError" },
-            (e) => e.message,
-          )
-          .exhaustive(),
-      ),
-    ),
-    Effect.catchCause((cause) => {
-      if (isPureInterruptCause(cause)) {
-        return Effect.interrupt
-      }
-      return Effect.succeed(`unexpected defect: ${Cause.pretty(cause)}`)
-    }),
-  )
-
-  if (cliErr !== undefined) {
-    if (requested === "guard" || requested === "done") {
-      return makeFailClosedHookResult(
-        requested,
-        argv,
-        `${requested}: CLI parse failure (${cliErr})`,
-        stderrBuffer.join(""),
-        effectiveOptions.stdin,
-        hookStdinTracker,
-      )
-    }
-    return {
-      exitCode: 1,
-      stdout: "",
-      stderr: cliErr,
-    }
-  }
-
-  const maybeResult = yield* Ref.get(resultRef)
-  return match(maybeResult)
-    .with({ _tag: "Some" }, ({ value }) => value)
-    .with({ _tag: "None" }, () => {
-      if (requested === "guard" || requested === "done") {
-        return makeFailClosedHookResult(
-          requested,
-          argv,
-          `${requested}: subcommand handler did not execute`,
-          stderrBuffer.join(""),
-          effectiveOptions.stdin,
-          hookStdinTracker,
+  const infraResolution = yield* resolveCliInfraLayer(requested, argv, useHookFastpath, {
+    rawStdin: effectiveOptions.stdin,
+    hookStdinTracker,
+  })
+  return yield* match(infraResolution)
+    .with({ _tag: "FailClosed" }, ({ result }) => Effect.succeed(result))
+    .with({ _tag: "Ok" }, ({ layer: infraLayer }) =>
+      Effect.gen(function* () {
+        const mainLayer = Layer.mergeAll(
+          infraLayer,
+          decisionLayer,
+          liveCommandLayer,
+          NodeServices.layer,
+          Layer.succeed(Logger.LogToStderr, true),
+          isHookCommand ? Layer.succeed(Console.Console, hookConsole) : Layer.empty,
         )
-      }
-      return {
-        exitCode: 1,
-        stdout: "",
-        stderr: "CLI command did not execute (invalid arguments or options).",
-      }
-    })
+
+        const normalizedArgv = argv.length === 0 ? ["help"] : argv
+        const cliErr = yield* CliCommand.runWith(rootCmd, {
+          version: "0.0.0",
+          renderErrors: false,
+        })(normalizedArgv).pipe(
+          Effect.provide(mainLayer),
+          Effect.as<string | undefined>(undefined),
+          Effect.catch((err) =>
+            Effect.succeed(
+              match(err)
+                .with(
+                  { _tag: "ShowHelp" },
+                  (e) => e.errors.map((sub) => sub.message).join("; ") || e.message,
+                )
+                .with(
+                  { _tag: "UnrecognizedOption" },
+                  { _tag: "DuplicateOption" },
+                  { _tag: "MissingOption" },
+                  { _tag: "MissingArgument" },
+                  { _tag: "UnexpectedArgument" },
+                  { _tag: "InvalidValue" },
+                  { _tag: "UnknownSubcommand" },
+                  { _tag: "UserError" },
+                  (e) => e.message,
+                )
+                .exhaustive(),
+            ),
+          ),
+          Effect.catchCause((cause) => {
+            if (isPureInterruptCause(cause)) {
+              return Effect.interrupt
+            }
+            return Effect.succeed(`unexpected defect: ${Cause.pretty(cause)}`)
+          }),
+        )
+
+        if (cliErr !== undefined) {
+          if (requested === "guard" || requested === "done") {
+            return makeFailClosedHookResult(
+              requested,
+              argv,
+              `${requested}: CLI parse failure (${cliErr})`,
+              stderrBuffer.join(""),
+              effectiveOptions.stdin,
+              hookStdinTracker,
+            )
+          }
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: cliErr,
+          }
+        }
+
+        const maybeResult = yield* Ref.get(resultRef)
+        return match(maybeResult)
+          .with({ _tag: "Some" }, ({ value }) => value)
+          .with({ _tag: "None" }, () => {
+            if (requested === "guard" || requested === "done") {
+              return makeFailClosedHookResult(
+                requested,
+                argv,
+                `${requested}: subcommand handler did not execute`,
+                stderrBuffer.join(""),
+                effectiveOptions.stdin,
+                hookStdinTracker,
+              )
+            }
+            return {
+              exitCode: 1,
+              stdout: "",
+              stderr: "CLI command did not execute (invalid arguments or options).",
+            }
+          })
+          .exhaustive()
+      }),
+    )
     .exhaustive()
 })

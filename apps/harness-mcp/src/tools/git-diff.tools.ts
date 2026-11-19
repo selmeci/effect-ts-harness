@@ -69,15 +69,38 @@ export const GitDiffToolInputSchema = Schema.Struct({
 
 export type GitDiffToolInput = typeof GitDiffToolInputSchema.Type
 
-export interface GitDiffToolResult {
+interface GitDiffToolResultBase {
   readonly resolvedBase: string | null
   readonly stat: string
   readonly changedFiles: ReadonlyArray<string>
   readonly untrackedFiles: ReadonlyArray<string>
-  readonly patch: string
-  readonly totalPatchChars: number
-  readonly truncated: boolean
 }
+
+export type GitDiffToolResult =
+  | (GitDiffToolResultBase & {
+      readonly _tag: "StatOnly"
+      readonly patch: ""
+      readonly totalPatchChars: 0
+      readonly truncated: false
+    })
+  | (GitDiffToolResultBase & {
+      readonly _tag: "PatchComplete"
+      readonly patch: string
+      readonly totalPatchChars: number
+      readonly truncated: false
+    })
+  | (GitDiffToolResultBase & {
+      readonly _tag: "PatchBudgetZero"
+      readonly patch: ""
+      readonly totalPatchChars: number
+      readonly truncated: true
+    })
+  | (GitDiffToolResultBase & {
+      readonly _tag: "PatchTruncated"
+      readonly patch: string
+      readonly totalPatchChars: number
+      readonly truncated: true
+    })
 
 const decodeGitDiffToolInput = Schema.decodeUnknownEffect(GitDiffToolInputSchema)
 
@@ -90,11 +113,49 @@ const failGitDiff = (raw: string): Effect.Effect<never, GitDiffExecutionError> =
   Effect.fail(new GitDiffExecutionError({ reason: toGitDiffReason(raw) }))
 
 const validateBaseRef = (baseRef: string): Effect.Effect<string, GitDiffExecutionError> =>
-  baseRef.length === 0 || baseRef.startsWith("-") || hasWhitespaceOrControlChar(baseRef)
+  baseRef.length === 0 ||
+  baseRef.length > 512 ||
+  baseRef.startsWith("-") ||
+  hasWhitespaceOrControlChar(baseRef)
     ? failGitDiff(
-        "Invalid baseRef: must be a non-empty git ref without leading '-' or whitespace/control characters",
+        "Invalid baseRef: must be a non-empty git ref (<= 512 chars) without leading '-' or whitespace/control characters",
       )
     : Effect.succeed(baseRef)
+
+const validateDirectInput = (
+  input: GitDiffToolInput,
+): Effect.Effect<number, GitDiffExecutionError> =>
+  Effect.gen(function* () {
+    if (
+      input.repoRoot !== undefined &&
+      (input.repoRoot.length < 1 || input.repoRoot.length > 1024)
+    ) {
+      return yield* failGitDiff("Invalid repoRoot: length must be between 1 and 1024 characters")
+    }
+    if (input.paths !== undefined) {
+      if (input.paths.length > 200) {
+        return yield* failGitDiff("Invalid paths: at most 200 path filters are allowed")
+      }
+      for (const rawPath of input.paths) {
+        if (rawPath.length < 1 || rawPath.length > 512) {
+          return yield* failGitDiff(
+            "Invalid path filter: each path length must be between 1 and 512 characters",
+          )
+        }
+      }
+    }
+    if (input.maxPatchChars === undefined) {
+      return DEFAULT_MAX_PATCH_CHARS
+    }
+    if (
+      !Number.isFinite(input.maxPatchChars) ||
+      !Number.isInteger(input.maxPatchChars) ||
+      input.maxPatchChars < 0
+    ) {
+      return yield* failGitDiff("Invalid maxPatchChars: must be a non-negative finite integer")
+    }
+    return Math.min(input.maxPatchChars, HARD_MAX_PATCH_CHARS)
+  })
 
 const confineRepoPaths = (
   root: string,
@@ -202,66 +263,118 @@ const resolveDiffBase = (
 const parseNulList = (raw: string): ReadonlyArray<string> =>
   raw.split("\0").filter((entry) => entry.length > 0)
 
-const sliceUtf8Safe = (bytes: Uint8Array, maxBytes: number): Uint8Array => {
-  if (bytes.length <= maxBytes) return bytes
-  let end = maxBytes
-  while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) end -= 1
-  return bytes.subarray(0, end)
+const trimIncompleteTrailingUtf8 = (bytes: Uint8Array): Uint8Array => {
+  if (bytes.length === 0) return bytes
+  let i = bytes.length - 1
+  let contCount = 0
+  while (i >= 0 && contCount < 3 && ((bytes[i] ?? 0) & 0xc0) === 0x80) {
+    i -= 1
+    contCount += 1
+  }
+  if (i < 0) return bytes
+  const lead = bytes[i] ?? 0
+  if ((lead & 0x80) === 0) return bytes
+  const expectedLen =
+    (lead & 0xe0) === 0xc0 ? 2 : (lead & 0xf0) === 0xe0 ? 3 : (lead & 0xf8) === 0xf0 ? 4 : 1
+  return bytes.length - i < expectedLen ? bytes.subarray(0, i) : bytes
 }
+
+type UntrackedPreviewOutput =
+  | { readonly _tag: "Preview"; readonly text: string }
+  | { readonly _tag: "Notice"; readonly text: string }
 
 const formatUntrackedPreview = (
   root: string,
   relPath: string,
   remainingChars: number,
-): string | undefined => {
+): Effect.Effect<UntrackedPreviewOutput, GitDiffExecutionError> => {
   const absPath = path.resolve(root, relPath)
-  if (!isPathInsideRoot(root, absPath)) return undefined
-  if (nodeSyncHostIo.isSymbolicLinkSync(absPath) || !nodeSyncHostIo.isFileSync(absPath)) {
-    return undefined
-  }
-  const bytesOpt = Result.getOrUndefined(Result.try(() => nodeSyncHostIo.readBytesSync(absPath)))
-  if (bytesOpt === undefined) return undefined
-  const boundedBytes = sliceUtf8Safe(bytesOpt, Math.max(4096, remainingChars * 4 + 4096))
-  const decodedOpt = boundedBytes.includes(0)
-    ? undefined
-    : Result.getOrUndefined(
-        Result.try(() => new TextDecoder("utf-8", { fatal: true }).decode(boundedBytes)),
-      )
-  if (decodedOpt === undefined) {
-    return [
-      `diff --git a/${relPath} b/${relPath}`,
-      "new file mode 100644",
-      `Binary files /dev/null and b/${relPath} differ`,
-    ].join("\n")
-  }
-  const rawLines = decodedOpt.split(/\r?\n/)
-  const lines = decodedOpt.endsWith("\n") ? rawLines.slice(0, -1) : rawLines
-  const header = [
-    `diff --git a/${relPath} b/${relPath}`,
-    "new file mode 100644",
-    "--- /dev/null",
-    `+++ b/${relPath}`,
-  ]
-  return lines.length === 0
-    ? header.join("\n")
-    : [...header, `@@ -0,0 +1,${String(lines.length)} @@`, ...lines.map((l) => `+${l}`)].join("\n")
-}
-
-const clampMaxPatchChars = (rawMax: number | undefined): number =>
-  Math.max(
-    0,
-    Math.min(
-      rawMax !== undefined && Number.isFinite(rawMax)
-        ? Math.floor(rawMax)
-        : DEFAULT_MAX_PATCH_CHARS,
-      HARD_MAX_PATCH_CHARS,
-    ),
+  const regularEntryRes = Result.try(
+    () =>
+      isPathInsideRoot(root, absPath) &&
+      !nodeSyncHostIo.isSymbolicLinkSync(absPath) &&
+      nodeSyncHostIo.isFileSync(absPath),
   )
+  const isRegularInside = match(regularEntryRes)
+    .with({ _tag: "Success" }, ({ success }) => success)
+    .with({ _tag: "Failure" }, () => false)
+    .exhaustive()
+  if (!isRegularInside) {
+    return Effect.succeed({
+      _tag: "Notice" as const,
+      text: [
+        `diff --git a/${relPath} b/${relPath}`,
+        "# [untracked entry omitted: symlink, directory, or non-regular file]",
+      ].join("\n"),
+    })
+  }
+  const maxBytes = Math.max(4096, remainingChars * 4 + 4096)
+  const probeCap = Math.min(maxBytes, 8192)
+  const isUtf8Text = (bytes: Uint8Array, isPrefixBounded: boolean): boolean => {
+    const view = isPrefixBounded ? trimIncompleteTrailingUtf8(bytes) : bytes
+    if (view.includes(0)) return false
+    return match(Result.try(() => new TextDecoder("utf-8", { fatal: true }).decode(view)))
+      .with({ _tag: "Success" }, () => true)
+      .with({ _tag: "Failure" }, () => false)
+      .exhaustive()
+  }
+  const readRes = Result.try(() => {
+    const probe = nodeSyncHostIo.readBytesPrefixSync(absPath, probeCap)
+    if (probe.length < probeCap || maxBytes <= probeCap) return probe
+    if (!isUtf8Text(probe, true)) return probe
+    return nodeSyncHostIo.readBytesPrefixSync(absPath, maxBytes)
+  })
+  return match(readRes)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      const msg = failure instanceof Error ? failure.message : String(failure)
+      return failGitDiff(`Failed to read untracked file '${relPath}': ${msg}`)
+    })
+    .with({ _tag: "Success" }, ({ success: rawBytes }) => {
+      const boundedBytes =
+        rawBytes.length === maxBytes ? trimIncompleteTrailingUtf8(rawBytes) : rawBytes
+      const decodedOpt = boundedBytes.includes(0)
+        ? undefined
+        : Result.getOrUndefined(
+            Result.try(() => new TextDecoder("utf-8", { fatal: true }).decode(boundedBytes)),
+          )
+      if (decodedOpt === undefined) {
+        return Effect.succeed({
+          _tag: "Preview" as const,
+          text: [
+            `diff --git a/${relPath} b/${relPath}`,
+            "new file mode 100644",
+            `Binary files /dev/null and b/${relPath} differ`,
+          ].join("\n"),
+        })
+      }
+      const rawLines = decodedOpt.split(/\r?\n/)
+      const lines = decodedOpt.endsWith("\n") ? rawLines.slice(0, -1) : rawLines
+      const header = [
+        `diff --git a/${relPath} b/${relPath}`,
+        "new file mode 100644",
+        "--- /dev/null",
+        `+++ b/${relPath}`,
+      ]
+      return Effect.succeed({
+        _tag: "Preview" as const,
+        text:
+          lines.length === 0
+            ? header.join("\n")
+            : [
+                ...header,
+                `@@ -0,0 +1,${String(lines.length)} @@`,
+                ...lines.map((l) => `+${l}`),
+              ].join("\n"),
+      })
+    })
+    .exhaustive()
+}
 
 export const executeGitDiffTool = Effect.fn("HarnessMcp.gitDiff")(function* (
   input: GitDiffToolInput,
   options?: ServerOptions,
 ): Effect.fn.Return<GitDiffToolResult, McpToolExecutionError> {
+  const clampedMax = yield* validateDirectInput(input)
   const root =
     options?.repoRoot ??
     resolveDefaultRepoRoot(
@@ -288,6 +401,7 @@ export const executeGitDiffTool = Effect.fn("HarnessMcp.gitDiff")(function* (
 
   if (input.statOnly === true) {
     return {
+      _tag: "StatOnly",
       resolvedBase,
       stat,
       changedFiles,
@@ -298,7 +412,6 @@ export const executeGitDiffTool = Effect.fn("HarnessMcp.gitDiff")(function* (
     }
   }
 
-  const clampedMax = clampMaxPatchChars(input.maxPatchChars)
   const trackedTrimmed = (yield* execGitOk(root, [
     "diff",
     "--no-color",
@@ -308,14 +421,27 @@ export const executeGitDiffTool = Effect.fn("HarnessMcp.gitDiff")(function* (
   ])).trimEnd()
 
   if (clampedMax === 0) {
+    if (trackedTrimmed.length > 0 || untrackedFiles.length > 0) {
+      return {
+        _tag: "PatchBudgetZero",
+        resolvedBase,
+        stat,
+        changedFiles,
+        untrackedFiles,
+        patch: "",
+        totalPatchChars: trackedTrimmed.length,
+        truncated: true,
+      }
+    }
     return {
+      _tag: "PatchComplete",
       resolvedBase,
       stat,
       changedFiles,
       untrackedFiles,
       patch: "",
-      totalPatchChars: trackedTrimmed.length,
-      truncated: trackedTrimmed.length > 0 || untrackedFiles.length > 0,
+      totalPatchChars: 0,
+      truncated: false,
     }
   }
 
@@ -327,11 +453,13 @@ export const executeGitDiffTool = Effect.fn("HarnessMcp.gitDiff")(function* (
       budgetExhausted = true
       break
     }
-    const preview = formatUntrackedPreview(root, relPath, clampedMax - accChars)
-    if (preview !== undefined) {
-      untrackedPreviews.push(preview)
-      accChars += (accChars > 0 ? 1 : 0) + preview.length
-    }
+    const previewOutcome = yield* formatUntrackedPreview(root, relPath, clampedMax - accChars)
+    const preview = match(previewOutcome)
+      .with({ _tag: "Preview" }, ({ text }) => text)
+      .with({ _tag: "Notice" }, ({ text }) => text)
+      .exhaustive()
+    untrackedPreviews.push(preview)
+    accChars += (accChars > 0 ? 1 : 0) + preview.length
   }
 
   const fullPatch = [
@@ -342,7 +470,27 @@ export const executeGitDiffTool = Effect.fn("HarnessMcp.gitDiff")(function* (
   const truncated = budgetExhausted || totalPatchChars > clampedMax
   const patch = fullPatch.length > clampedMax ? fullPatch.slice(0, clampedMax) : fullPatch
 
-  return { resolvedBase, stat, changedFiles, untrackedFiles, patch, totalPatchChars, truncated }
+  return truncated
+    ? {
+        _tag: "PatchTruncated",
+        resolvedBase,
+        stat,
+        changedFiles,
+        untrackedFiles,
+        patch,
+        totalPatchChars,
+        truncated: true,
+      }
+    : {
+        _tag: "PatchComplete",
+        resolvedBase,
+        stat,
+        changedFiles,
+        untrackedFiles,
+        patch,
+        totalPatchChars,
+        truncated: false,
+      }
 })
 
 export const buildGitDiffToolDescriptors = (

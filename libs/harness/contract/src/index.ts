@@ -33,6 +33,7 @@ export {
 } from "./ast-and-gate-primitives.js"
 export {
   ActiveMutantId,
+  BatchExitCode,
   CANONICAL_MCP_TOOL_NAMES,
   CliCommandInput,
   CliCommandName,
@@ -56,6 +57,7 @@ export {
   SubprocessFailureKind,
   SubprocessMaxBufferBytes,
   SubprocessOutput,
+  SubprocessSignalName,
   SubprocessTimeoutMs,
   TsCompilerOverlayError,
   UnknownToolError,
@@ -235,11 +237,16 @@ export {
   wavesOf,
 } from "./workflow.js"
 export {
+  BatchMutantOutcomeResult,
+  BatchMutantResultEntry,
+  BatchMutantResultsSchema,
   MUTATION_CACHE_FILENAME,
   MUTATION_CACHE_SCHEMA_VERSION,
   MutantCacheId,
+  MutationCacheAuth,
   MutationCacheEntry,
   MutationCacheHmacSecret,
+  MutationCacheHmacSecretResult,
   MutationCacheLookupDecision,
   MutationCacheLookupInput,
   MutationCacheMac,
@@ -250,5 +257,6 @@ export {
   MutationEpochMillis,
   MutationMaxAgeMillis,
   PackageRelKey,
+  RedactedMutationCacheHmacSecret,
   RuntimeVersionTag,
 } from "./mutation-cache.js"

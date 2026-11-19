@@ -3,16 +3,19 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
+import { vi } from "vitest"
 import { Cause, Effect, Exit, Schema } from "effect"
 import { match } from "ts-pattern"
 import { CANONICAL_MCP_TOOL_NAMES, GitDiffExecutionError, McpToolName } from "@harness/contract"
 import { decideSpanBudgets, type SpanSample } from "@harness/gates"
+import { nodeSyncHostIo } from "@harness/infra"
 import { runWithTestTracer, type IndexedEffectFn, type RecordedSpanEvent } from "@harness/ingest"
 import { executeGitDiffTool, GitDiffToolInputSchema } from "../src/tools/git-diff.tools.js"
 import {
   formatMcpToolExit,
   type McpToolExecutionError,
   ProjectPathEscapeError,
+  resolveDefaultRepoRoot,
 } from "../src/tools/mcp-helpers.js"
 import { dispatchMcpTool, makeMcpToolRegistryLayer } from "../src/tools/tool-registry.js"
 import { buildGitDiffToolDescriptors } from "../src/tools/git-diff.tools.js"
@@ -113,6 +116,7 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
           fs.writeFileSync(path.join(dir, "invalid-utf8.bin"), Buffer.from([0xff, 0xfe, 0x80]))
 
           const res = yield* executeGitDiffTool({ repoRoot: dir })
+          expect(res._tag).toBe("PatchComplete")
           expect(res.resolvedBase).toBe("HEAD")
           expect(res.changedFiles).toEqual(["tracked.ts"])
           expect(res.untrackedFiles).toEqual(["binary.bin", "invalid-utf8.bin", "untracked.ts"])
@@ -207,6 +211,7 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
         fs.writeFileSync(path.join(dir, "extra.ts"), "const y = 3\n", "utf8")
 
         const res = yield* executeGitDiffTool({ repoRoot: dir, statOnly: true })
+        expect(res._tag).toBe("StatOnly")
         expect(res.changedFiles).toEqual(["file.ts"])
         expect(res.untrackedFiles).toEqual(["extra.ts"])
         expect(res.stat).toContain("file.ts")
@@ -227,17 +232,20 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
           fs.writeFileSync(path.join(dir, "02-skip.ts"), "second\n".repeat(20), "utf8")
 
           const res = yield* executeGitDiffTool({ repoRoot: dir, maxPatchChars: 50 })
+          expect(res._tag).toBe("PatchTruncated")
           expect(res.truncated).toBe(true)
           expect(res.patch.length).toBeLessThanOrEqual(50)
           expect(res.totalPatchChars).toBeGreaterThan(50)
           expect(res.untrackedFiles).toEqual(["01-big.ts", "02-skip.ts"])
 
           const zeroRes = yield* executeGitDiffTool({ repoRoot: dir, maxPatchChars: 0 })
+          expect(zeroRes._tag).toBe("PatchBudgetZero")
           expect(zeroRes.patch).toBe("")
           expect(zeroRes.truncated).toBe(true)
           expect(zeroRes.untrackedFiles).toEqual(["01-big.ts", "02-skip.ts"])
 
           const clampedRes = yield* executeGitDiffTool({ repoRoot: dir, maxPatchChars: 999_999 })
+          expect(clampedRes._tag).toBe("PatchComplete")
           expect(clampedRes.truncated).toBe(false)
           expect(clampedRes.patch).toContain("02-skip.ts")
         }),
@@ -245,7 +253,7 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
   )
 
   it.effect(
-    "REQ-2.2: fails closed with GitDiffExecutionError (_tag & reason) on flag injection, invalid baseRef, or non-git dir",
+    "REQ-2.2: fails closed with GitDiffExecutionError on invalid inputs or non-git dir",
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
@@ -286,69 +294,67 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
       ),
   )
 
-  it.effect(
-    "REQ-2.2: fails closed with ProjectPathEscapeError (_tag & payload) on escape, external workspace re-root attempt, pathspec magic, or symlink escape",
-    () =>
-      withTempDir((dir) =>
-        withTempDir((outsideDir) =>
-          Effect.gen(function* () {
-            initGitRepo(dir)
-            fs.writeFileSync(path.join(dir, "a.ts"), "1\n", "utf8")
-            git(dir, ["add", "a.ts"])
-            git(dir, ["commit", "-m", "init"])
+  it.effect("REQ-2.2: fails closed with ProjectPathEscapeError on paths escaping repoRoot", () =>
+    withTempDir((dir) =>
+      withTempDir((outsideDir) =>
+        Effect.gen(function* () {
+          initGitRepo(dir)
+          fs.writeFileSync(path.join(dir, "a.ts"), "1\n", "utf8")
+          git(dir, ["add", "a.ts"])
+          git(dir, ["commit", "-m", "init"])
 
-            yield* expectFailureError(
-              executeGitDiffTool({ repoRoot: dir, paths: ["../outside"] }),
-              (err) => {
-                expect(err._tag).toBe("ProjectPathEscapeError")
-                if (err instanceof ProjectPathEscapeError) {
-                  expect(err.projectPath).toBe("../outside")
-                  expect(err.repoRoot).toBe(dir)
-                  expect(err.message.length).toBeGreaterThan(0)
-                }
-              },
-            )
+          yield* expectFailureError(
+            executeGitDiffTool({ repoRoot: dir, paths: ["../outside"] }),
+            (err) => {
+              expect(err._tag).toBe("ProjectPathEscapeError")
+              if (err instanceof ProjectPathEscapeError) {
+                expect(err.projectPath).toBe("../outside")
+                expect(err.repoRoot).toBe(dir)
+                expect(err.message.length).toBeGreaterThan(0)
+              }
+            },
+          )
 
-            fs.writeFileSync(path.join(outsideDir, "pnpm-workspace.yaml"), "packages: []\n", "utf8")
-            const otherRepoFile = path.join(outsideDir, "secret.txt")
-            fs.writeFileSync(otherRepoFile, "secret", "utf8")
-            yield* expectFailureError(
-              executeGitDiffTool({ paths: [otherRepoFile] }, { repoRoot: dir }),
-              (err) => {
-                expect(err._tag).toBe("ProjectPathEscapeError")
-                if (err instanceof ProjectPathEscapeError) {
-                  expect(err.projectPath).toBe(otherRepoFile)
-                  expect(err.repoRoot).toBe(dir)
-                }
-              },
-            )
+          fs.writeFileSync(path.join(outsideDir, "pnpm-workspace.yaml"), "packages: []\n", "utf8")
+          const otherRepoFile = path.join(outsideDir, "secret.txt")
+          fs.writeFileSync(otherRepoFile, "secret", "utf8")
+          yield* expectFailureError(
+            executeGitDiffTool({ paths: [otherRepoFile] }, { repoRoot: dir }),
+            (err) => {
+              expect(err._tag).toBe("ProjectPathEscapeError")
+              if (err instanceof ProjectPathEscapeError) {
+                expect(err.projectPath).toBe(otherRepoFile)
+                expect(err.repoRoot).toBe(dir)
+              }
+            },
+          )
 
-            yield* expectFailureError(
-              executeGitDiffTool({ repoRoot: dir, paths: [":/.env"] }),
-              (err) => {
-                expect(err._tag).toBe("ProjectPathEscapeError")
-                if (err instanceof ProjectPathEscapeError) {
-                  expect(err.projectPath).toBe(":/.env")
-                  expect(err.repoRoot).toBe(dir)
-                }
-              },
-            )
+          yield* expectFailureError(
+            executeGitDiffTool({ repoRoot: dir, paths: [":/.env"] }),
+            (err) => {
+              expect(err._tag).toBe("ProjectPathEscapeError")
+              if (err instanceof ProjectPathEscapeError) {
+                expect(err.projectPath).toBe(":/.env")
+                expect(err.repoRoot).toBe(dir)
+              }
+            },
+          )
 
-            const linkPath = path.join(dir, "escape-link.txt")
-            fs.symlinkSync(otherRepoFile, linkPath)
-            yield* expectFailureError(
-              executeGitDiffTool({ repoRoot: dir, paths: ["escape-link.txt"] }),
-              (err) => {
-                expect(err._tag).toBe("ProjectPathEscapeError")
-                if (err instanceof ProjectPathEscapeError) {
-                  expect(err.projectPath).toBe("escape-link.txt")
-                  expect(err.repoRoot).toBe(dir)
-                }
-              },
-            )
-          }),
-        ),
+          const linkPath = path.join(dir, "escape-link.txt")
+          fs.symlinkSync(otherRepoFile, linkPath)
+          yield* expectFailureError(
+            executeGitDiffTool({ repoRoot: dir, paths: ["escape-link.txt"] }),
+            (err) => {
+              expect(err._tag).toBe("ProjectPathEscapeError")
+              if (err instanceof ProjectPathEscapeError) {
+                expect(err.projectPath).toBe("escape-link.txt")
+                expect(err.repoRoot).toBe(dir)
+              }
+            },
+          )
+        }),
       ),
+    ),
   )
 
   it.effect(
@@ -415,7 +421,8 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
 
           expect(result.changedFiles).toEqual(["a.ts"])
           const diffSpan = spans.find((s) => s.name === "HarnessMcp.gitDiff")
-          expect(diffSpan?.name).toBe("HarnessMcp.gitDiff")
+          expect(diffSpan).toBeDefined()
+          expect(diffSpan?.durationMs).toBeGreaterThanOrEqual(0)
           expect(diffSpan?.exitTag).toBe("Success")
 
           const violations = yield* decideSpanBudgets({ spans: toSpanSamples(spans) })
@@ -423,4 +430,109 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
         }),
       ),
   )
+
+  it.effect(
+    "F-14.b: direct executeGitDiffTool calls reject invalid repoRoot and invalid maxPatchChars",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          initGitRepo(dir)
+          fs.writeFileSync(path.join(dir, "a.ts"), "1\n", "utf8")
+          git(dir, ["add", "a.ts"])
+          git(dir, ["commit", "-m", "init"])
+
+          yield* expectFailureError(executeGitDiffTool({ repoRoot: "" }), (err) => {
+            expect(err._tag).toBe("GitDiffExecutionError")
+          })
+          for (const badMax of [-1, Number.NaN, 1.5]) {
+            yield* expectFailureError(
+              executeGitDiffTool({ repoRoot: dir, maxPatchChars: badMax }),
+              (err) => {
+                expect(err._tag).toBe("GitDiffExecutionError")
+              },
+            )
+          }
+        }),
+      ),
+  )
+
+  it.effect(
+    "F-12.b / F-14.c: emits notice for untracked symlinks, uses bounded prefix reads, and fails closed on read error",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          initGitRepo(dir)
+          fs.writeFileSync(path.join(dir, "tracked.ts"), "export const t = 1\n", "utf8")
+          git(dir, ["add", "tracked.ts"])
+          git(dir, ["commit", "-m", "init"])
+
+          fs.symlinkSync(path.join(dir, "tracked.ts"), path.join(dir, "sym-untracked.ts"))
+          const symRes = yield* executeGitDiffTool({ repoRoot: dir })
+          expect(symRes._tag).toBe("PatchComplete")
+          expect(symRes.patch).toContain("diff --git a/sym-untracked.ts b/sym-untracked.ts")
+          expect(symRes.patch).toContain(
+            "# [untracked entry omitted: symlink, directory, or non-regular file]",
+          )
+          fs.rmSync(path.join(dir, "sym-untracked.ts"), { force: true })
+
+          const regularPath = path.join(dir, "large.txt")
+          fs.writeFileSync(regularPath, "a".repeat(20_000), "utf8")
+          const prefixSpy = vi.spyOn(nodeSyncHostIo, "readBytesPrefixSync")
+          try {
+            const boundedRes = yield* executeGitDiffTool({ repoRoot: dir, maxPatchChars: 128 })
+            expect(boundedRes._tag).toBe("PatchTruncated")
+            expect(prefixSpy).toHaveBeenCalled()
+            const maxBytesPassed = prefixSpy.mock.calls[0]?.[1]
+            expect(typeof maxBytesPassed).toBe("number")
+            expect(maxBytesPassed).toBeLessThan(10_000)
+          } finally {
+            prefixSpy.mockRestore()
+          }
+
+          const errSpy = vi.spyOn(nodeSyncHostIo, "readBytesPrefixSync").mockImplementation(() => {
+            throw new Error("EACCES: permission denied")
+          })
+          try {
+            yield* expectFailureError(executeGitDiffTool({ repoRoot: dir }), (err) => {
+              expect(err._tag).toBe("GitDiffExecutionError")
+              if (err instanceof GitDiffExecutionError) {
+                expect(err.reason).toContain("Failed to read untracked file 'large.txt'")
+              }
+            })
+          } finally {
+            errSpy.mockRestore()
+          }
+        }),
+      ),
+  )
+
+  it("F-13.d: resolveDefaultRepoRoot warns to stderr when active-workspace.json fails to decode", () => {
+    const activeWorkspacePath = path.join(
+      path.resolve(import.meta.dirname, "../../.."),
+      ".harness",
+      "active-workspace.json",
+    )
+    const existsSpy = vi.spyOn(nodeSyncHostIo, "existsSync").mockImplementation((target) => {
+      if (target === activeWorkspacePath) return true
+      return fs.existsSync(target)
+    })
+    const readSpy = vi.spyOn(nodeSyncHostIo, "readTextSync").mockImplementation((target) => {
+      if (target === activeWorkspacePath) return "{corrupt-active-workspace"
+      return fs.readFileSync(target, "utf8")
+    })
+    const stderrChunks: Array<string> = []
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+      return true
+    })
+    try {
+      const resolved = resolveDefaultRepoRoot(undefined, {})
+      expect(typeof resolved).toBe("string")
+      expect(stderrChunks.join("")).toContain("failed to decode")
+    } finally {
+      stderrSpy.mockRestore()
+      readSpy.mockRestore()
+      existsSpy.mockRestore()
+    }
+  })
 })

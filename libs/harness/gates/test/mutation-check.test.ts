@@ -9,7 +9,7 @@ import { AstSourceFilePath, computeContentSha256, SourceLineNumber } from "@harn
 import type { SyncHostExecResult, SyncHostIo } from "@harness/service/host-io"
 import { MutantId, MutantSourceText } from "../src/index.js"
 import { checkMigrationFiles } from "../src/migration-check.js"
-import { runDomainMutationSuite, stripAnsi } from "../src/mutation-check.js"
+import { normalizePriorMillis, runDomainMutationSuite, stripAnsi } from "../src/mutation-check.js"
 import {
   classifyMutantSubprocessResult,
   runVitestTargetList,
@@ -623,7 +623,7 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
     expect(notGit).toEqual({ _tag: "NotGit" })
   })
 
-  it("M-2.3 (3) & (4): Signaled/TimedOut after green baseline count as killed; SyntaxError, Tests no tests, 0 test files, and ERR_MODULE_NOT_FOUND abort/fail closed", () => {
+  it("M-2.3 (3) & (4): Signaled/TimedOut and runner/0-test errors abort and fail closed", () => {
     const source = "export const isSame = (a: number, b: number): boolean => a === b\n"
     const { repoRoot } = setupTempMutationRepo(source)
     try {
@@ -646,22 +646,25 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
       expect(baselineSignaledReport.passed).toBe(false)
       expect(baselineSignaledReport.diagnostic).toContain("signal=SIGKILL")
 
-      // After green baseline, Signaled and TimedOut count as killed
-      const mutantKillCases: ReadonlyArray<{
+      // After green baseline, Signaled and TimedOut fail closed (abort)
+      const mutantAbortCases: ReadonlyArray<{
         readonly label: string
         readonly res: SyncHostExecResult
+        readonly expectedDiag: string
       }> = [
         {
           label: "Signaled SIGKILL",
           res: { _tag: "Signaled", signal: "SIGKILL", stdout: "", stderr: "" },
+          expectedDiag: "terminated by signal SIGKILL",
         },
         {
           label: "TimedOut",
           res: { _tag: "TimedOut", stdout: "", stderr: "" },
+          expectedDiag: "timed out",
         },
       ]
 
-      for (const c of mutantKillCases) {
+      for (const c of mutantAbortCases) {
         const hostIo: SyncHostIo = {
           ...testHostIo,
           execFileSync: (cmd, _args, options) =>
@@ -676,8 +679,9 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
           enforcementMode: "strict",
           disableMutantCache: true,
         })
-        expect(report.passed, c.label).toBe(true)
-        expect(report.killedCount, c.label).toBe(1)
+        expect(report.passed, c.label).toBe(false)
+        expect(report.killedCount, c.label).toBe(0)
+        expect(report.diagnostic, c.label).toContain(c.expectedDiag)
       }
 
       // Runner/loader errors & 0-test runs fail closed / abort in strict mode
@@ -1156,5 +1160,22 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
     } finally {
       rmSync(repoRoot, { recursive: true, force: true })
     }
+  })
+
+  it("normalizePriorMillis normalizes equivalence priors on the canonical 0..1000 millis scale fail-closed", () => {
+    expect(normalizePriorMillis(Number.NaN)).toBe(0)
+    expect(normalizePriorMillis(Number.POSITIVE_INFINITY)).toBe(0)
+    expect(normalizePriorMillis(Number.NEGATIVE_INFINITY)).toBe(0)
+    expect(normalizePriorMillis(-10)).toBe(0)
+    expect(normalizePriorMillis(0)).toBe(0)
+    expect(normalizePriorMillis(0.4)).toBe(0)
+    expect(normalizePriorMillis(0.85)).toBe(1)
+    expect(normalizePriorMillis(1)).toBe(1)
+    expect(normalizePriorMillis(1.0)).toBe(1)
+    expect(normalizePriorMillis(849.4)).toBe(849)
+    expect(normalizePriorMillis(849.6)).toBe(850)
+    expect(normalizePriorMillis(850)).toBe(850)
+    expect(normalizePriorMillis(1000)).toBe(1000)
+    expect(normalizePriorMillis(1500)).toBe(1000)
   })
 })

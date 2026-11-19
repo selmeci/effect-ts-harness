@@ -146,7 +146,16 @@ export const runCliEffect = (
           join(harnessDir, "active-workspace.json"),
           JSON.stringify({ repoRoot, updatedAt: new Date().toISOString() }, null, 2),
         )
-      }).pipe(Effect.ignore)
+      }).pipe(
+        Effect.catch((err) =>
+          Effect.sync(() => {
+            const msg = err instanceof Error ? err.message : String(err)
+            process.stderr.write(
+              `[harness:cli] Warning: failed to persist active-workspace.json: ${msg}\n`,
+            )
+          }),
+        ),
+      )
     }
 
     const startTime = performance.now()

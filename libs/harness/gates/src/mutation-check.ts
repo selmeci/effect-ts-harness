@@ -7,8 +7,9 @@ import { match } from "ts-pattern"
 import {
   AstSourceFilePath,
   type ContentSha256,
+  type MutationCacheAuth,
   type MutationCacheEntry,
-  type MutationCacheHmacSecret,
+  MutationEpochMillis,
   SourceLineNumber,
 } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
@@ -142,7 +143,8 @@ export interface RunMutationOptions {
   readonly minScore?: number | undefined
   readonly disableMutantCache?: boolean | undefined
   readonly enableMutantCache?: boolean | undefined
-  readonly hmacSecret?: MutationCacheHmacSecret | undefined
+  readonly cacheAuth?: MutationCacheAuth | undefined
+  readonly nowMs?: MutationEpochMillis | undefined
   readonly testRunner?:
     | ((
         mutant: CodeMutant,
@@ -335,19 +337,31 @@ export const runDomainMutationSuite = (
     if (unclassifiedErr !== undefined) return abortWith([], unclassifiedErr)
   }
 
-  const hmacSecret = options?.hmacSecret
+  const suiteNowMs = options?.nowMs ?? MutationEpochMillis.make(Date.now())
+  const cacheAuth = options?.cacheAuth
   const cacheRequested =
     options?.disableMutantCache !== true &&
     !hasOverlays &&
     options?.testRunner === undefined &&
     (options?.enableMutantCache ?? true)
-  if (cacheRequested && hmacSecret === undefined) {
-    process.stderr.write(
-      "[mutation-check] Warning: Mutation cache disabled (missing HMAC secret).\n",
-    )
-  }
+  const enabledCacheAuth: MutationCacheAuth | undefined = cacheRequested
+    ? cacheAuth === undefined
+      ? (() => {
+          process.stderr.write(
+            "[mutation-check] Warning: Mutation cache disabled (missing HMAC secret).\n",
+          )
+          return undefined
+        })()
+      : match(cacheAuth)
+          .with({ _tag: "Disabled" }, ({ reason }) => {
+            process.stderr.write(`[mutation-check] Warning: Mutation cache disabled (${reason}).\n`)
+            return undefined
+          })
+          .with({ _tag: "Enabled" }, (enabled) => enabled)
+          .exhaustive()
+    : undefined
   const contextDigests =
-    cacheRequested && hmacSecret !== undefined
+    enabledCacheAuth !== undefined
       ? match(computeMutationContextDigestsChecked(repoRoot, hostIo))
           .with({ _tag: "Ok" }, ({ digests }) => digests)
           .with({ _tag: "Disabled" }, ({ reason }) => {
@@ -356,16 +370,16 @@ export const runDomainMutationSuite = (
           })
           .exhaustive()
       : undefined
-  const cacheEnabled = cacheRequested && hmacSecret !== undefined && contextDigests !== undefined
+  const cacheEnabled = enabledCacheAuth !== undefined && contextDigests !== undefined
   const loadedCacheStore =
-    cacheEnabled && hmacSecret !== undefined
-      ? loadMutationCache(repoRoot, hostIo, hmacSecret)
+    cacheEnabled && enabledCacheAuth !== undefined
+      ? loadMutationCache(repoRoot, hostIo, enabledCacheAuth)
       : undefined
   const cacheEntries: Record<ContentSha256, MutationCacheEntry> = {}
   let cacheDirty = false
   flushCacheIfDirty = () => {
-    if (!cacheEnabled || !cacheDirty || hmacSecret === undefined) return
-    if (flushMutationCache(repoRoot, hostIo, hmacSecret, cacheEntries)) {
+    if (!cacheEnabled || !cacheDirty || enabledCacheAuth === undefined) return
+    if (flushMutationCache(repoRoot, hostIo, enabledCacheAuth, cacheEntries)) {
       cacheDirty = false
     }
   }
@@ -511,7 +525,8 @@ export const runDomainMutationSuite = (
       allReachingTests: [...primaryTests, ...fallbackTests],
       hostIo,
       cacheEnabled,
-      hmacSecret,
+      cacheAuth: enabledCacheAuth,
+      nowMs: suiteNowMs,
       contextDigests,
       loadedCacheStore,
       cacheEntries,
@@ -610,7 +625,8 @@ export const runDomainMutationSuite = (
         fileOutcomes,
         mutantKeys,
         fileNonCacheableIds,
-        hmacSecret,
+        cacheAuth: enabledCacheAuth,
+        nowMs: suiteNowMs,
         cacheEntries,
       })
     ) {

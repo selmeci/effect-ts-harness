@@ -2,16 +2,7 @@ import * as path from "node:path"
 import { fileURLToPath } from "node:url"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js"
-import {
-  Cause,
-  Effect,
-  type Exit,
-  Layer,
-  type ManagedRuntime,
-  Option,
-  Result,
-  Schema,
-} from "effect"
+import { Cause, Effect, type Exit, Layer, type ManagedRuntime, Result, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import {
@@ -175,16 +166,38 @@ export const resolveDefaultRepoRoot = (
   if (options?.skipActiveWorkspaceLookup !== true && options?.skipOmnigraphSpawn !== true) {
     const activeWorkspacePath = path.join(SERVER_REPO_ROOT, ".harness", "active-workspace.json")
     if (nodeSyncHostIo.existsSync(activeWorkspacePath)) {
-      const resolvedActiveRoot = Result.getOrElse(
-        Result.try(() => {
-          const raw = nodeSyncHostIo.readTextSync(activeWorkspacePath)
-          const parsed = Option.getOrUndefined(decodeActiveWorkspace(raw))
-          return parsed !== undefined && nodeSyncHostIo.existsSync(parsed.repoRoot)
-            ? parsed.repoRoot
-            : undefined
-        }),
-        () => undefined,
-      )
+      const readRes = Result.try(() => nodeSyncHostIo.readTextSync(activeWorkspacePath))
+      const resolvedActiveRoot = match(readRes)
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          const msg = failure instanceof Error ? failure.message : String(failure)
+          process.stderr.write(
+            `[harness-mcp] Warning: failed to read ${activeWorkspacePath}: ${msg}\n`,
+          )
+          return undefined
+        })
+        .with({ _tag: "Success" }, ({ success: raw }) =>
+          match(decodeActiveWorkspace(raw))
+            .with({ _tag: "None" }, () => {
+              process.stderr.write(
+                `[harness-mcp] Warning: failed to decode ${activeWorkspacePath} as active-workspace.json\n`,
+              )
+              return undefined
+            })
+            .with({ _tag: "Some" }, ({ value: parsed }) =>
+              match(Result.try(() => nodeSyncHostIo.existsSync(parsed.repoRoot)))
+                .with({ _tag: "Success" }, ({ success }) => (success ? parsed.repoRoot : undefined))
+                .with({ _tag: "Failure" }, ({ failure }) => {
+                  const msg = failure instanceof Error ? failure.message : String(failure)
+                  process.stderr.write(
+                    `[harness-mcp] Warning: failed to verify active workspace '${parsed.repoRoot}': ${msg}\n`,
+                  )
+                  return undefined
+                })
+                .exhaustive(),
+            )
+            .exhaustive(),
+        )
+        .exhaustive()
       if (resolvedActiveRoot !== undefined) {
         return resolvedActiveRoot
       }

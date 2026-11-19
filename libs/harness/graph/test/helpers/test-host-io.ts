@@ -15,9 +15,7 @@ const getErrnoCode = (err: unknown): string | undefined => {
   return undefined
 }
 
-export const makeExtendedTestHostIo = (
-  overrides?: Partial<ExtendedHostIo>,
-): ExtendedHostIo => ({
+export const makeExtendedTestHostIo = (overrides?: Partial<ExtendedHostIo>): ExtendedHostIo => ({
   ...testHostIo,
   rmRecursiveSync: (targetPath) => {
     fs.rmSync(targetPath, { recursive: true, force: true })
@@ -26,6 +24,8 @@ export const makeExtendedTestHostIo = (
     fs.cpSync(srcPath, destPath, { recursive: true })
   },
   mkdtempSync: (prefix) => fs.mkdtempSync(join(tmpdir(), prefix)),
+  readBytesPrefixSync: (filePath, maxBytes) =>
+    testHostIo.readBytesSync(filePath).subarray(0, maxBytes),
   statMtimeMsSync: (filePath) => fs.statSync(filePath, { throwIfNoEntry: false })?.mtimeMs,
   statModeSync: (filePath) => fs.statSync(filePath, { throwIfNoEntry: false })?.mode,
   chmodSync: (filePath, mode) => {
@@ -35,11 +35,7 @@ export const makeExtendedTestHostIo = (
     fs.writeFileSync(filePath, content, { encoding: "utf8", mode })
     fs.chmodSync(filePath, mode)
   },
-  tryWriteExclusiveTextSync: (
-    filePath,
-    content,
-    mode = 0o600,
-  ): ExclusiveWriteResult => {
+  tryWriteExclusiveTextSync: (filePath, content, mode = 0o600): ExclusiveWriteResult => {
     const res = Result.try({
       try: () => {
         fs.writeFileSync(filePath, content, { encoding: "utf8", flag: "wx", mode })

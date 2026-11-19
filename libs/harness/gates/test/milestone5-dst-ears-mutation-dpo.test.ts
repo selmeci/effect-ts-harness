@@ -342,9 +342,7 @@ describe("Milestone 5: EARS Consistency, DST Engine, Span Causality, Mutant Sche
       [
         Schema.Struct({
           seed: DstSeed,
-          stepCount: DstStepCount.pipe(
-            Schema.check(Schema.isBetween({ minimum: 1, maximum: 8 })),
-          ),
+          stepCount: DstStepCount.pipe(Schema.check(Schema.isBetween({ minimum: 1, maximum: 8 }))),
         }),
       ],
       ([{ seed, stepCount }]) =>
@@ -431,11 +429,13 @@ describe("Milestone 5: EARS Consistency, DST Engine, Span Causality, Mutant Sche
                   )
                   yield* Effect.sleep("40 millis")
                   yield* match(decision)
-                    .with({ _tag: "FailWithError" }, () =>
-                      new SimulatedTransientError({
-                        serviceTag: "SimulatedRepo",
-                        methodName: `saveWithRetry:${orderId}`,
-                      }),
+                    .with(
+                      { _tag: "FailWithError" },
+                      () =>
+                        new SimulatedTransientError({
+                          serviceTag: "SimulatedRepo",
+                          methodName: `saveWithRetry:${orderId}`,
+                        }),
                     )
                     .otherwise(() => Effect.void)
                   return "saved-after-virtual-sleep"
@@ -643,59 +643,55 @@ describe("Milestone 5: EARS Consistency, DST Engine, Span Causality, Mutant Sche
         }),
     )
 
-    it.effect(
-      "distinct seeds produce distinct fault schedules",
-      () =>
-        Effect.gen(function* () {
-          const baseConfig = {
-            stepCount: DstStepCount.make(10),
-            targets: [
-              {
-                serviceTag: DstServiceTag.make("S1"),
-                methodName: DstMethodName.make("m1"),
-                declaredErrors: [DstErrorTag.make("E1")],
-              },
-            ],
-            baseFailureProbMillis: DstProbabilityMillis.make(500),
-            baseDelayProbMillis: DstProbabilityMillis.make(300),
-            baseInterruptProbMillis: DstProbabilityMillis.make(100),
-            maxDelayTicksMs: DstTickMillis.make(20),
-          }
-          const sched1 = yield* decideDstSchedule({ ...baseConfig, seed: DstSeed.make(1) })
-          const sched2 = yield* decideDstSchedule({ ...baseConfig, seed: DstSeed.make(2) })
-          expect(sched1.seed).not.toEqual(sched2.seed)
-          expect(sched1.steps).not.toEqual(sched2.steps)
-        }),
+    it.effect("distinct seeds produce distinct fault schedules", () =>
+      Effect.gen(function* () {
+        const baseConfig = {
+          stepCount: DstStepCount.make(10),
+          targets: [
+            {
+              serviceTag: DstServiceTag.make("S1"),
+              methodName: DstMethodName.make("m1"),
+              declaredErrors: [DstErrorTag.make("E1")],
+            },
+          ],
+          baseFailureProbMillis: DstProbabilityMillis.make(500),
+          baseDelayProbMillis: DstProbabilityMillis.make(300),
+          baseInterruptProbMillis: DstProbabilityMillis.make(100),
+          maxDelayTicksMs: DstTickMillis.make(20),
+        }
+        const sched1 = yield* decideDstSchedule({ ...baseConfig, seed: DstSeed.make(1) })
+        const sched2 = yield* decideDstSchedule({ ...baseConfig, seed: DstSeed.make(2) })
+        expect(sched1.seed).not.toEqual(sched2.seed)
+        expect(sched1.steps).not.toEqual(sched2.steps)
+      }),
     )
 
-    it.effect(
-      "makeChaosLayer advances step cursor sequentially per service+method",
-      () =>
-        Effect.gen(function* () {
-          const schedule = yield* decideDstSchedule({
-            seed: DstSeed.make(42),
-            stepCount: DstStepCount.make(3),
-            targets: [
-              {
-                serviceTag: DstServiceTag.make("S1"),
-                methodName: DstMethodName.make("m1"),
-                declaredErrors: [DstErrorTag.make("E1")],
-              },
-            ],
-            baseFailureProbMillis: DstProbabilityMillis.make(1000),
-            baseDelayProbMillis: DstProbabilityMillis.make(0),
-            baseInterruptProbMillis: DstProbabilityMillis.make(0),
-            maxDelayTicksMs: DstTickMillis.make(0),
-          })
-          const chaosLayer = makeChaosLayer(schedule)
-          const result = yield* Effect.gen(function* () {
-            const ctrl = yield* ChaosFaultController
-            const d1 = yield* ctrl.nextStepFor(DstServiceTag.make("S1"), DstMethodName.make("m1"))
-            const d2 = yield* ctrl.nextStepFor(DstServiceTag.make("S1"), DstMethodName.make("m1"))
-            return [d1._tag, d2._tag]
-          }).pipe(Effect.provide(chaosLayer))
-          expect(result).toHaveLength(2)
-        }),
+    it.effect("makeChaosLayer advances step cursor sequentially per service+method", () =>
+      Effect.gen(function* () {
+        const schedule = yield* decideDstSchedule({
+          seed: DstSeed.make(42),
+          stepCount: DstStepCount.make(3),
+          targets: [
+            {
+              serviceTag: DstServiceTag.make("S1"),
+              methodName: DstMethodName.make("m1"),
+              declaredErrors: [DstErrorTag.make("E1")],
+            },
+          ],
+          baseFailureProbMillis: DstProbabilityMillis.make(1000),
+          baseDelayProbMillis: DstProbabilityMillis.make(0),
+          baseInterruptProbMillis: DstProbabilityMillis.make(0),
+          maxDelayTicksMs: DstTickMillis.make(0),
+        })
+        const chaosLayer = makeChaosLayer(schedule)
+        const result = yield* Effect.gen(function* () {
+          const ctrl = yield* ChaosFaultController
+          const d1 = yield* ctrl.nextStepFor(DstServiceTag.make("S1"), DstMethodName.make("m1"))
+          const d2 = yield* ctrl.nextStepFor(DstServiceTag.make("S1"), DstMethodName.make("m1"))
+          return [d1._tag, d2._tag]
+        }).pipe(Effect.provide(chaosLayer))
+        expect(result).toHaveLength(2)
+      }),
     )
 
     it.effect(
@@ -765,9 +761,7 @@ describe("Milestone 5: EARS Consistency, DST Engine, Span Causality, Mutant Sche
             failOnViolation: false,
             spans: harmlessDanglingSpans,
           })
-          expect(
-            violations3.filter((v) => v.kind === "forbidden-descendant-span"),
-          ).toHaveLength(0)
+          expect(violations3.filter((v) => v.kind === "forbidden-descendant-span")).toHaveLength(0)
         }),
     )
   })
@@ -845,6 +839,22 @@ describe("Milestone 5: EARS Consistency, DST Engine, Span Causality, Mutant Sche
           expect(reportBelow1.passed).toBe(false)
           expect(reportBelow1.survivedCount).toBe(1)
           expect(reportBelow1.equivalentCount).toBe(0)
+
+          const reportAt849 = yield* decideMutationReport({
+            outcomes: [{ mutant: survivedMutant, status: "survived" }],
+            equivalencePriors: { [survivedMutant.id]: 849 },
+          })
+          expect(reportAt849.passed).toBe(false)
+          expect(reportAt849.survivedCount).toBe(1)
+          expect(reportAt849.equivalentCount).toBe(0)
+
+          const reportAt850 = yield* decideMutationReport({
+            outcomes: [{ mutant: survivedMutant, status: "survived" }],
+            equivalencePriors: { [survivedMutant.id]: 850 },
+          })
+          expect(reportAt850.passed).toBe(true)
+          expect(reportAt850.survivedCount).toBe(0)
+          expect(reportAt850.equivalentCount).toBe(1)
         }),
     )
 

@@ -1616,6 +1616,19 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
 
       export const BrandA = Schema.Int.pipe(Schema.brand("DuplicateBrand"))
       export const BrandB = Schema.NumberFromString.pipe(Schema.brand("DuplicateBrand"))
+
+      export const JsonArrayDto = Schema.fromJsonString(Schema.Array(Schema.Struct({ id: Schema.String })))
+      export const PrimitiveArrayDto = Schema.Array(Schema.String)
+      export const PrimitiveTupleDto = Schema.Tuple([Schema.String, Schema.Int])
+      export const NestedStructDto = Schema.Struct({
+        meta: Schema.Struct({ rawId: Schema.String })
+      })
+      export class CompositeError extends Schema.TaggedError<CompositeError>()(
+        "CompositeError",
+        {
+          items: Schema.Array(Schema.Struct({ tag: Schema.String })),
+        }
+      ) {}
     `
     const badDomainSchemaSource = `
       import { Schema } from "effect"
@@ -1623,6 +1636,7 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
       export const InternalStruct = Schema.Struct({
         rawCount: Schema.Int
       })
+      export const InternalJsonArray = Schema.fromJsonString(Schema.Array(Schema.Struct({ rawLabel: Schema.String })))
     `
     const badGraph = extractTypeAwareGraphFromSource([
       {
@@ -1690,6 +1704,48 @@ export const evolveCart = (state: CartState, event: CartEvent): CartState =>
     expect(
       contractViolations.some((v) =>
         v.message.includes("Duplicate Schema.brand('DuplicateBrand')"),
+      ),
+    ).toBe(true)
+    expect(
+      contractViolations.some(
+        (v) =>
+          v.message.includes("Property 'id' of contract schema 'JsonArrayDto'") &&
+          v.message.includes("unbranded primitive 'string'"),
+      ),
+    ).toBe(true)
+    expect(
+      contractViolations.some(
+        (v) =>
+          v.message.includes("Property 'rawLabel' of contract schema 'InternalJsonArray'") &&
+          v.message.includes("unbranded primitive 'string'"),
+      ),
+    ).toBe(true)
+    expect(
+      contractViolations.some(
+        (v) =>
+          v.message.includes("of contract schema 'PrimitiveArrayDto'") &&
+          v.message.includes("unbranded primitive 'string'"),
+      ),
+    ).toBe(true)
+    expect(
+      contractViolations.some(
+        (v) =>
+          v.message.includes("of contract schema 'PrimitiveTupleDto'") &&
+          v.message.includes("unbranded primitive 'string'"),
+      ),
+    ).toBe(true)
+    expect(
+      contractViolations.some(
+        (v) =>
+          v.message.includes("Property 'rawId' of contract schema 'NestedStructDto'") &&
+          v.message.includes("unbranded primitive 'string'"),
+      ),
+    ).toBe(true)
+    expect(
+      contractViolations.some(
+        (v) =>
+          v.message.includes("Field 'tag' of 'CompositeError'") &&
+          v.message.includes("unbranded primitive 'string'"),
       ),
     ).toBe(true)
 
@@ -2390,8 +2446,12 @@ export const evolveCartV2 = (state: CartState, event: CartEventV2): CartState =>
     const requiredServices = new Set<string>()
     for (const [, edge] of Graph.edges(graph.graph)) {
       match<string>(edge.data.role)
-        .with("fails-with", () => { failsWithErrors.add(edge.data.entityKey.replace(/^TaggedError:/, "")) })
-        .with("requires-service", () => { requiredServices.add(edge.data.entityKey.replace(/^ServiceTag:/, "")) })
+        .with("fails-with", () => {
+          failsWithErrors.add(edge.data.entityKey.replace(/^TaggedError:/, ""))
+        })
+        .with("requires-service", () => {
+          requiredServices.add(edge.data.entityKey.replace(/^ServiceTag:/, ""))
+        })
         .otherwise(() => {})
     }
 
@@ -2402,13 +2462,25 @@ export const evolveCartV2 = (state: CartState, event: CartEventV2): CartState =>
 
     for (const [, node] of Graph.nodes(graph.graph)) {
       match(node)
-        .with({ _tag: "TaggedError" }, (n) => { expect(n.errorTag).not.toBe("Err") })
-        .with({ _tag: "ServiceTag" }, (n) => { expect(n.tagId).not.toBe("ProjectionEnv") })
+        .with({ _tag: "TaggedError" }, (n) => {
+          expect(n.errorTag).not.toBe("Err")
+        })
+        .with({ _tag: "ServiceTag" }, (n) => {
+          expect(n.tagId).not.toBe("ProjectionEnv")
+        })
         .with(
-          { _tag: "EffectFn" }, { _tag: "ServiceLayer" }, { _tag: "SchemaDef" },
-          { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" },
-          { _tag: "EarsSpec" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" },
-          { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+          { _tag: "EffectFn" },
+          { _tag: "ServiceLayer" },
+          { _tag: "SchemaDef" },
+          { _tag: "VitestCase" },
+          { _tag: "PatternDoc" },
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          { _tag: "EffectSignature" },
+          { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
           () => undefined,
         )
         .exhaustive()

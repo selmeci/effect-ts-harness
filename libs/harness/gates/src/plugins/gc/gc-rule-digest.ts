@@ -16,7 +16,7 @@ export const GATE_RULE_SOURCE_FILES = [
 ] as const
 
 export const EXPECTED_GATE_RULE_VERSION_DIGEST =
-  "b4bb62cf4111ea1db6bbcc1b9e031d7d6fa2bed5b6aa405562517832e912ae21"
+  "0ab675d47b79f91f44c8516ac4d8ead4430bbb1184176fd8386f8136331dc805"
 
 export const extractGateRuleIdsFromSources = (
   astVisitorsSource: string,

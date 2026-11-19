@@ -176,6 +176,19 @@ const checkSafeStampFileForRead = (
     })
   })
 
+const cleanupTempStamp = (tmpPath: string, hostIo: SyncHostIo): string | undefined =>
+  match(
+    Result.try({
+      try: () => {
+        if (hostIo.existsSync(tmpPath)) hostIo.unlinkSync(tmpPath)
+      },
+      catch: (err) => formatErr(err),
+    }),
+  )
+    .with({ _tag: "Success" }, () => undefined)
+    .with({ _tag: "Failure" }, ({ failure }) => failure)
+    .exhaustive()
+
 const writeStampAtomic = (
   harnessDir: string,
   stampPath: string,
@@ -213,15 +226,27 @@ const writeStampAtomic = (
                 hostIo.writeTextSync(tmpPath, content)
                 return hostIo.realpathSync(tmpPath)
               },
-              catch: (err) => `Failed to write '${stampPath}': ${formatErr(err)}`,
+              catch: (err) => {
+                const cleanupErr = cleanupTempStamp(tmpPath, hostIo)
+                const suffix = cleanupErr !== undefined ? ` (cleanup failed: ${cleanupErr})` : ""
+                return `Failed to write '${stampPath}': ${formatErr(err)}${suffix}`
+              },
             }),
             (tmpReal) => {
               if (!isContainedIn(canonicalHarnessDir, tmpReal)) {
-                return Result.fail(`Temp stamp '${tmpPath}' escaped '${canonicalHarnessDir}'`)
+                const cleanupErr = cleanupTempStamp(tmpPath, hostIo)
+                const suffix = cleanupErr !== undefined ? ` (cleanup failed: ${cleanupErr})` : ""
+                return Result.fail(
+                  `Temp stamp '${tmpPath}' escaped '${canonicalHarnessDir}'${suffix}`,
+                )
               }
               return Result.try({
                 try: () => hostIo.renameSync(tmpPath, stampPath),
-                catch: (err) => `Failed to write '${stampPath}': ${formatErr(err)}`,
+                catch: (err) => {
+                  const cleanupErr = cleanupTempStamp(tmpPath, hostIo)
+                  const suffix = cleanupErr !== undefined ? ` (cleanup failed: ${cleanupErr})` : ""
+                  return `Failed to write '${stampPath}': ${formatErr(err)}${suffix}`
+                },
               })
             },
           )

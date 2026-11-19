@@ -875,6 +875,95 @@ enforced_by:
         rmSync(dir, { recursive: true, force: true })
       }
     })
+
+    it("F-12.a: learn --clear exits 1 and preserves friction events when learned-slices.json is corrupt", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "harness-cli-learn-corrupt-"))
+      try {
+        const reviewLayer = makeMockDecisionModelLayer({
+          fitsAnyProb: 0.3,
+          blockLabel: "review",
+          learnActionableProb: 0.92,
+          learnTargetLabel: "agent-pattern",
+        })
+
+        await runCli(["route", "Unhandled pattern"], {
+          repoRoot: dir,
+          decisionLayer: reviewLayer,
+        })
+        writeFileSync(join(dir, ".harness", "learned-slices.json"), "{corrupt-json", "utf8")
+
+        const clearRes = await runCli(["learn", "--clear"], {
+          repoRoot: dir,
+          decisionLayer: reviewLayer,
+        })
+        expect(clearRes.exitCode).toBe(1)
+        const payload = JSON.parse(clearRes.stdout)
+        expect(payload.cleared).toBe(false)
+        expect(payload.totalEvents).toBe(1)
+        expect(clearRes.stderr).toContain("failed to decode")
+
+        rmSync(join(dir, ".harness", "learned-slices.json"), { force: true })
+        const after = await runCli(["learn"], {
+          repoRoot: dir,
+          decisionLayer: reviewLayer,
+        })
+        expect(JSON.parse(after.stdout).totalEvents).toBe(1)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it("F-12.a: learn --clear exits 1 and preserves friction events when decideRuleSynthesizer returns rejectedRules", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "harness-cli-learn-rejected-"))
+      try {
+        const reviewLayer = makeMockDecisionModelLayer({
+          fitsAnyProb: 0.3,
+          blockLabel: "review",
+          learnActionableProb: 0.92,
+          learnTargetLabel: "agent-pattern",
+        })
+        await runCli(["route", "Unhandled pattern"], { repoRoot: dir, decisionLayer: reviewLayer })
+        writeFileSync(
+          join(dir, ".harness", "learned-slices.json"),
+          JSON.stringify({
+            slices: [
+              {
+                taskId: "tcb-reject-01",
+                badGraphNodes: ["libs/order/domain/src/order.ts#badFn"],
+                badGraphHyperedges: [
+                  "libs/order/domain/src/order.ts:calls->libs/order/infra/src/db.ts",
+                ],
+                goodGraphNodes: ["libs/order/domain/src/order.ts#badFn"],
+                goodGraphHyperedges: [
+                  "libs/order/domain/src/order.ts:calls->libs/order/contract/src/order.ts",
+                ],
+                healthyCorpusSnapshots: [],
+                targetFiles: ["libs/harness/gates/src/policy.ts"],
+              },
+            ],
+          }),
+          "utf8",
+        )
+        const res = await runCli(["learn", "--clear"], {
+          repoRoot: dir,
+          decisionLayer: reviewLayer,
+        })
+        expect(res.exitCode).toBe(1)
+        const payload = JSON.parse(res.stdout) as {
+          readonly cleared: boolean
+          readonly rejectedRules?: ReadonlyArray<{ readonly ruleId: string }>
+        }
+        expect(payload.cleared).toBe(false)
+        expect(payload.rejectedRules?.some((r) => r.ruleId === "tcb-reject-01")).toBe(true)
+        expect(res.stderr).toContain("rule synthesis rejected")
+
+        rmSync(join(dir, ".harness", "learned-slices.json"), { force: true })
+        const after = await runCli(["learn"], { repoRoot: dir, decisionLayer: reviewLayer })
+        expect(JSON.parse(after.stdout).totalEvents).toBe(1)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
   })
 
   describe("gc and session handoff", () => {

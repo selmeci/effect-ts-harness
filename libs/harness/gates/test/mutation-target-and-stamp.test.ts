@@ -8,7 +8,7 @@ import { match } from "ts-pattern"
 import { AstSourceContent, AstSourceFilePath } from "@harness/contract"
 import { ts } from "@harness/graph"
 import type { SyncHostExecResult, SyncHostIo } from "@harness/service/host-io"
-import { SelfDogfooding } from "../src/index.js"
+import { SelfDogfooding, writeVerifyStamp } from "../src/index.js"
 import { runDomainMutationSuite } from "../src/mutation-check.js"
 import {
   compileMutantSchemaModule,
@@ -707,7 +707,7 @@ describe("mutation-check: strict fail-closed modes and primary/fallback test par
           if (activeId === undefined)
             return { _tag: "Exited", exitCode: 0, stdout: "ok", stderr: "" }
           if (args.includes(primaryTest)) {
-            return { _tag: "Exited", exitCode: 0, stdout: "passed", stderr: "" }
+            return { _tag: "Exited", exitCode: 0, stdout: "Tests  1 passed (1)\n", stderr: "" }
           }
           return {
             _tag: "Exited",
@@ -728,12 +728,12 @@ describe("mutation-check: strict fail-closed modes and primary/fallback test par
             return { _tag: "Exited", exitCode: 128, stdout: "", stderr: "not a git repository" }
           const activeId = opts?.env?.["HARNESS_ACTIVE_MUTANT_ID"]
           if (args.includes(primaryTest)) {
-            return { _tag: "Exited", exitCode: 0, stdout: "passed", stderr: "" }
+            return { _tag: "Exited", exitCode: 0, stdout: "Tests  1 passed (1)\n", stderr: "" }
           }
           if (activeId === undefined) {
             return { _tag: "SpawnFailed", spawnError: "ENOENT", stdout: "", stderr: "" }
           }
-          return { _tag: "Exited", exitCode: 0, stdout: "passed", stderr: "" }
+          return { _tag: "Exited", exitCode: 0, stdout: "Tests  1 passed (1)\n", stderr: "" }
         },
       }
       const aborted = runDomainMutationSuite(dir, abortFallbackHostIo, {
@@ -767,6 +767,37 @@ describe("mutation-check: strict fail-closed modes and primary/fallback test par
         testHostIo,
       )
       expect(unclassified).toEqual(["libs/demo/core/extra.ts"])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("S-2.c: writeVerifyStamp cleans up temp stamp file on containment escape or renameSync failure", () => {
+    const dir = mkdtempSync(join(tmpdir(), "stamp-tmp-cleanup-"))
+    try {
+      writeFileSync(join(dir, "file.ts"), "export const x = 1\n", "utf8")
+      const tmpStampPath = join(dir, ".harness", `verify-stamp.json.tmp-${process.pid}`)
+
+      // 1. Escape containment via realpathSync returning outside path
+      const escapedHostIo: SyncHostIo = {
+        ...testHostIo,
+        realpathSync: (p) =>
+          p.includes(".tmp-") ? "/escaped/outside" : testHostIo.realpathSync(p),
+      }
+      expect(() => writeVerifyStamp(dir, escapedHostIo, "impl/current")).toThrow(/escaped/)
+      expect(testHostIo.existsSync(tmpStampPath)).toBe(false)
+
+      // 2. renameSync failure cleans up temp stamp file
+      const renameFailHostIo: SyncHostIo = {
+        ...testHostIo,
+        renameSync: () => {
+          throw new Error("EACCES: rename denied")
+        },
+      }
+      expect(() => writeVerifyStamp(dir, renameFailHostIo, "impl/current")).toThrow(
+        /EACCES: rename denied/,
+      )
+      expect(testHostIo.existsSync(tmpStampPath)).toBe(false)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

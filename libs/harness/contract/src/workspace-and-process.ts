@@ -110,6 +110,15 @@ export const SubprocessExitCode = Schema.Int.pipe(
 )
 export type SubprocessExitCode = typeof SubprocessExitCode.Type
 
+export const BatchExitCode = Schema.Int.pipe(Schema.brand("BatchExitCode"))
+export type BatchExitCode = typeof BatchExitCode.Type
+
+export const SubprocessSignalName = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isPattern(/^[A-Z][A-Z0-9_+-]{1,31}$/)),
+  Schema.brand("SubprocessSignalName"),
+)
+export type SubprocessSignalName = typeof SubprocessSignalName.Type
+
 export const SubprocessOutput = Schema.String.pipe(Schema.brand("SubprocessOutput"))
 export type SubprocessOutput = typeof SubprocessOutput.Type
 

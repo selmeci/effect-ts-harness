@@ -52,22 +52,10 @@ export const hasExportModifier = (node: ts.Node): boolean => {
 }
 
 export const addViolation = (
-  violations: Array<BranchingViolation>,
-  rule: BranchingViolation["rule"],
-  message: string,
-  file: string,
-  line: number,
-  enclosingSymbol: string,
-  path?: ReadonlyArray<string>,
+  violations: Array<BranchingViolation>, rule: BranchingViolation["rule"], message: string,
+  file: string, line: number, enclosingSymbol: string, path?: ReadonlyArray<string>,
 ): void => {
-  violations.push({
-    rule,
-    message,
-    file,
-    line,
-    enclosingSymbol,
-    ...(path !== undefined ? { path } : {}),
-  })
+  violations.push({ rule, message, file, line, enclosingSymbol, ...(path !== undefined ? { path } : {}) })
 }
 
 export const PackageJsonSchema = Schema.Struct({
@@ -296,57 +284,63 @@ export const isScalarOrBrandedScalarType = (type: Type): boolean => {
 export const collectUnbrandedObjectProperties = (
   type: Type,
   locationNode: Node,
+  depth = 0,
+  visited: Set<object> = new Set(),
+  fallbackPropName?: string,
 ): ReadonlyArray<{ readonly propName: string; readonly prim: string; readonly line: number }> => {
-  if (
-    isScalarOrBrandedScalarType(type) || type.isArray() || type.isTuple() ||
-    type.isAny() || type.isUnknown() || type.isNever() || type.isVoid()
-  ) return []
+  if (depth > 4 || visited.has(type.compilerType)) return []
+  visited.add(type.compilerType)
+  if (fallbackPropName !== undefined) {
+    const prim = isOpenUnbrandedPrimitiveType(type)
+    if (prim !== null) {
+      return [{ propName: fallbackPropName, prim, line: locationNode.getStartLineNumber() }]
+    }
+  }
+  if (isScalarOrBrandedScalarType(type) || type.isAny() || type.isUnknown() || type.isNever() || type.isVoid()) return []
   if (type.getCallSignatures().length > 0) return []
-
+  if (type.isArray()) {
+    const elemType = type.getArrayElementType()
+    return elemType !== undefined
+      ? collectUnbrandedObjectProperties(elemType, locationNode, depth + 1, visited, fallbackPropName ?? "<element>")
+      : []
+  }
+  if (type.isTuple()) {
+    return type.getTupleElements().flatMap((el) =>
+      collectUnbrandedObjectProperties(el, locationNode, depth + 1, visited, fallbackPropName ?? "<element>"),
+    )
+  }
   const results: Array<{ readonly propName: string; readonly prim: string; readonly line: number }> = []
   const seen = new Set<string>()
-
-  const inspectSingleType = (target: Type): void => {
-    if (
-      isScalarOrBrandedScalarType(target) || target.isArray() || target.isTuple() ||
-      target.isAny() || target.isUnknown() || target.isNever() || target.isVoid()
-    ) return
-    if (
-      target.getProperty("ast") !== undefined &&
-      target.getProperty("Type") !== undefined &&
-      target.getProperty("Encoded") !== undefined
-    ) return
-    for (const prop of target.getProperties()) {
-      const propName = prop.getName()
-      if (propName === "_tag" || propName === "~effect/Brand" || propName.startsWith("~")) continue
-      const decls = prop.getDeclarations()
-      if (decls.length > 0 && decls.every((d) => d.getSourceFile().getFilePath().includes("typescript/lib/"))) {
-        continue
-      }
-      const propType = prop.getTypeAtLocation(locationNode)
-      const prim = isOpenUnbrandedPrimitiveType(propType)
-      if (prim !== null) {
-        const key = `${propName}:${prim}`
-        if (!seen.has(key)) {
-          seen.add(key)
-          const declLine =
-            decls[0] && decls[0].getSourceFile() === locationNode.getSourceFile()
-              ? decls[0].getStartLineNumber()
-              : locationNode.getStartLineNumber()
-          results.push({ propName, prim, line: declLine })
-        }
-      }
-    }
+  const pushUnique = (entry: { readonly propName: string; readonly prim: string; readonly line: number }): void => {
+    const key = `${entry.propName}:${entry.prim}`
+    if (!seen.has(key)) { seen.add(key); results.push(entry) }
   }
-
   if (type.isUnion()) {
     for (const member of type.getUnionTypes()) {
-      if (!member.isUndefined() && !member.isNull()) inspectSingleType(member)
+      if (!member.isUndefined() && !member.isNull()) {
+        for (const entry of collectUnbrandedObjectProperties(member, locationNode, depth, visited, fallbackPropName)) pushUnique(entry)
+      }
     }
-  } else {
-    inspectSingleType(type)
+    return results
   }
-
+  if (type.getProperty("ast") !== undefined && type.getProperty("Type") !== undefined && type.getProperty("Encoded") !== undefined) return []
+  for (const prop of type.getProperties()) {
+    const propName = prop.getName()
+    if (propName === "_tag" || propName === "~effect/Brand" || propName.startsWith("~") || propName.startsWith("__@")) continue
+    const decls = prop.getDeclarations()
+    if (decls.length > 0 && decls.every((d) => d.getSourceFile().getFilePath().includes("typescript/lib/"))) continue
+    const propType = prop.getTypeAtLocation(locationNode)
+    const prim = isOpenUnbrandedPrimitiveType(propType)
+    if (prim !== null) {
+      const declLine = decls[0] && decls[0].getSourceFile() === locationNode.getSourceFile() ? decls[0].getStartLineNumber() : locationNode.getStartLineNumber()
+      pushUnique({ propName, prim, line: declLine })
+      continue
+    }
+    if (propType.getCallSignatures().length > 0) continue
+    if (propType.isArray() || propType.isTuple() || propType.isUnion() || (propType.isObject() && !isTypeBranded(propType))) {
+      for (const entry of collectUnbrandedObjectProperties(propType, locationNode, depth + 1, visited, propName)) pushUnique(entry)
+    }
+  }
   return results
 }
 
@@ -385,45 +379,20 @@ export const computeDynamicPaths = (
 ): Record<string, Array<string>> => {
   const graphNodeModules = path.join(workspaceRoot, "libs/harness/graph/node_modules")
   const paths: Record<string, Array<string>> = {
-    effect: [
-      path.join(repoRoot, "libs/harness/graph/node_modules/effect/dist/index.d.ts"),
-      path.join(graphNodeModules, "effect/dist/index.d.ts"),
-      path.join(repoRoot, "libs/harness/graph/node_modules/effect"),
-      path.join(graphNodeModules, "effect"),
-    ],
-    "effect/*": [
-      path.join(repoRoot, "libs/harness/graph/node_modules/effect/dist/*.d.ts"),
-      path.join(graphNodeModules, "effect/dist/*.d.ts"),
-      path.join(repoRoot, "libs/harness/graph/node_modules/effect/*"),
-      path.join(graphNodeModules, "effect/*"),
-    ],
+    effect: [path.join(repoRoot, "libs/harness/graph/node_modules/effect/dist/index.d.ts"), path.join(graphNodeModules, "effect/dist/index.d.ts"), path.join(repoRoot, "libs/harness/graph/node_modules/effect"), path.join(graphNodeModules, "effect")],
+    "effect/*": [path.join(repoRoot, "libs/harness/graph/node_modules/effect/dist/*.d.ts"), path.join(graphNodeModules, "effect/dist/*.d.ts"), path.join(repoRoot, "libs/harness/graph/node_modules/effect/*"), path.join(graphNodeModules, "effect/*")],
     "effect/cli": [path.join(repoRoot, "libs/harness/graph/node_modules/effect/dist/cli/index.d.ts"), path.join(graphNodeModules, "effect/dist/cli/index.d.ts")],
     "effect/process": [path.join(repoRoot, "libs/harness/graph/node_modules/effect/dist/process/index.d.ts"), path.join(graphNodeModules, "effect/dist/process/index.d.ts")],
     "effect/persistence": [path.join(repoRoot, "libs/harness/graph/node_modules/effect/dist/persistence/index.d.ts"), path.join(graphNodeModules, "effect/dist/persistence/index.d.ts")],
     "@effect/platform-node": [path.join(repoRoot, "apps/sample/node_modules/@effect/platform-node/dist/index.d.ts"), path.join(workspaceRoot, "node_modules/@effect/platform-node")],
-    "ts-pattern": [
-      path.join(repoRoot, "node_modules/ts-pattern"),
-      path.join(workspaceRoot, "node_modules/ts-pattern"),
-    ],
+    "ts-pattern": [path.join(repoRoot, "node_modules/ts-pattern"), path.join(workspaceRoot, "node_modules/ts-pattern")],
     "@harness/contract": [path.join(repoRoot, "libs/harness/contract/src/index.ts"), path.join(workspaceRoot, "libs/harness/contract/src/index.ts")],
     "@harness/service": [path.join(repoRoot, "libs/harness/service/src/index.ts"), path.join(workspaceRoot, "libs/harness/service/src/index.ts")],
     "@harness/infra": [path.join(repoRoot, "libs/harness/infra/src/index.ts"), path.join(workspaceRoot, "libs/harness/infra/src/index.ts")],
-    "@harness/gates": [
-      path.join(repoRoot, "libs/harness/gates/src/index.ts"),
-      path.join(workspaceRoot, "libs/harness/gates/src/index.ts"),
-    ],
-    "@harness/graph": [
-      path.join(repoRoot, "libs/harness/graph/src/index.ts"),
-      path.join(workspaceRoot, "libs/harness/graph/src/index.ts"),
-    ],
-    "@harness/decision": [
-      path.join(repoRoot, "libs/harness/decision/src/index.ts"),
-      path.join(workspaceRoot, "libs/harness/decision/src/index.ts"),
-    ],
-    "@harness/ingest": [
-      path.join(repoRoot, "libs/harness/ingest/src/index.ts"),
-      path.join(workspaceRoot, "libs/harness/ingest/src/index.ts"),
-    ],
+    "@harness/gates": [path.join(repoRoot, "libs/harness/gates/src/index.ts"), path.join(workspaceRoot, "libs/harness/gates/src/index.ts")],
+    "@harness/graph": [path.join(repoRoot, "libs/harness/graph/src/index.ts"), path.join(workspaceRoot, "libs/harness/graph/src/index.ts")],
+    "@harness/decision": [path.join(repoRoot, "libs/harness/decision/src/index.ts"), path.join(workspaceRoot, "libs/harness/decision/src/index.ts")],
+    "@harness/ingest": [path.join(repoRoot, "libs/harness/ingest/src/index.ts"), path.join(workspaceRoot, "libs/harness/ingest/src/index.ts")],
     "@harness/sample-contract": [path.join(repoRoot, "libs/sample/contract/src/index.ts")],
     "@harness/sample-service": [path.join(repoRoot, "libs/sample/service/src/index.ts")],
     "@harness/sample-domain": [path.join(repoRoot, "libs/sample/domain/src/index.ts")],

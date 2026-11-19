@@ -1,4 +1,5 @@
-import { join } from "node:path"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { Option, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
@@ -226,14 +227,75 @@ const readPkgJson = (filePath: string, hostIo: SyncHostIo) => {
     .exhaustive()
 }
 
-const resolveRuntimeVersionTag = (repoRoot: string, hostIo: SyncHostIo): RuntimeVersionTag => {
-  const vitestPkg = readPkgJson(join(repoRoot, "node_modules", "vitest", "package.json"), hostIo)
-  const rootPkg =
-    vitestPkg === undefined ? readPkgJson(join(repoRoot, "package.json"), hostIo) : undefined
-  const rawVer =
-    vitestPkg?.version ?? rootPkg?.devDependencies?.["vitest"] ?? rootPkg?.dependencies?.["vitest"]
-  const vitestVersion = typeof rawVer === "string" && rawVer.length > 0 ? rawVer : "unknown"
-  return RuntimeVersionTag.make(`node:${process.version};vitest:${vitestVersion}`)
+const EXACT_SEMVER_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
+
+const isExactSemver = (v: unknown): v is string => typeof v === "string" && EXACT_SEMVER_RE.test(v)
+
+const extractVitestVersionFromLockfile = (lockfileContent: string): string | undefined => {
+  const importerMatch =
+    /^\s+vitest:\s*\r?\n(?:\s+specifier:[^\r\n]*\r?\n)?\s+version:\s*['"]?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?:\(|['"\s]|$)/m.exec(
+      lockfileContent,
+    )
+  if (importerMatch !== null && isExactSemver(importerMatch[1])) return importerMatch[1]
+
+  const pkgSectionMatch =
+    /^\s+['"]?(?:\/)?vitest[@/](\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)['":(\s]/m.exec(
+      lockfileContent,
+    )
+  if (pkgSectionMatch !== null && isExactSemver(pkgSectionMatch[1])) return pkgSectionMatch[1]
+
+  const peerMatch = /\(vitest@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)[()]/.exec(
+    lockfileContent,
+  )
+  if (peerMatch !== null && isExactSemver(peerMatch[1])) return peerMatch[1]
+
+  return undefined
+}
+
+const resolveRuntimeVersionTag = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+):
+  | { readonly _tag: "Ok"; readonly tag: RuntimeVersionTag }
+  | { readonly _tag: "Disabled"; readonly reason: string } => {
+  const localPkg = readPkgJson(join(repoRoot, "node_modules", "vitest", "package.json"), hostIo)
+  if (isExactSemver(localPkg?.version)) {
+    return {
+      _tag: "Ok",
+      tag: RuntimeVersionTag.make(`node:${process.version};vitest:${localPkg.version}`),
+    }
+  }
+
+  const lockPath = join(repoRoot, "pnpm-lock.yaml")
+  const lockRaw =
+    checkExists(lockPath, hostIo) === true
+      ? unwrapOption(readSafeText(lockPath, hostIo))
+      : undefined
+  if (lockRaw !== undefined) {
+    const lockVer = extractVitestVersionFromLockfile(lockRaw)
+    if (lockVer !== undefined) {
+      return {
+        _tag: "Ok",
+        tag: RuntimeVersionTag.make(`node:${process.version};vitest:${lockVer}`),
+      }
+    }
+  }
+
+  let curDir = dirname(fileURLToPath(import.meta.url))
+  while (true) {
+    const ancestorPkg = readPkgJson(join(curDir, "node_modules", "vitest", "package.json"), hostIo)
+    if (isExactSemver(ancestorPkg?.version)) {
+      return {
+        _tag: "Ok",
+        tag: RuntimeVersionTag.make(`node:${process.version};vitest:${ancestorPkg.version}`),
+      }
+    }
+    const parent = dirname(curDir)
+    if (parent === curDir) break
+    curDir = parent
+  }
+
+  return { _tag: "Disabled", reason: "unable to resolve exact installed vitest version" }
 }
 
 const LIBS_EXCLUDED_DIRS = new Set(["test", "dist", "node_modules", ".git", "coverage"])
@@ -508,7 +570,12 @@ export const computeMutationContextDigestsChecked = (
       .with({ _tag: "Disabled" }, (d) => d)
       .exhaustive()
 
-  const runtimeVersion = resolveRuntimeVersionTag(repoRoot, hostIo)
+  const runtimeVersionOrErr = match(resolveRuntimeVersionTag(repoRoot, hostIo))
+    .with({ _tag: "Ok" }, ({ tag }) => tag)
+    .with({ _tag: "Disabled" }, (d) => d)
+    .exhaustive()
+  if (typeof runtimeVersionOrErr !== "string") return runtimeVersionOrErr
+  const runtimeVersion = runtimeVersionOrErr
   const rootSha = unwrapShaOrErr(
     hashCheckedOrErr(repoRoot, rootRuntimeFiles, hostIo, fileShaCache, runtimeVersion),
   )

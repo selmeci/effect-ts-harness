@@ -7,12 +7,14 @@ import {
   constants,
   cpSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   readdirSync,
   readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -22,7 +24,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { delimiter, isAbsolute, join } from "node:path"
-import { Result } from "effect"
+import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   SubprocessArg,
@@ -70,6 +72,10 @@ const validateSyncCommandInput = (
     .with({ _tag: "None" }, () => undefined)
     .exhaustive()
 }
+
+const NonNegativeMaxBytes = Schema.Finite.pipe(
+  Schema.check(Schema.isBetween({ minimum: 0, maximum: 16 * 1024 * 1024 })),
+)
 
 const getErrnoCode = (err: unknown): string | undefined =>
   typeof err === "object" && err !== null && "code" in err && typeof err.code === "string"
@@ -186,7 +192,8 @@ const resolveExecutableSync = (
  *
  * Capabilities:
  * - Reads & metadata: `existsSync`, `isFileSync`, `isDirectorySync`, `isSymbolicLinkSync`,
- *   `readTextSync`, `readBytesSync`, `readdirSync`, `realpathSync`, `statMtimeMsSync`.
+ *   `readTextSync`, `readBytesSync`, `readBytesPrefixSync`, `readdirSync`, `realpathSync`,
+ *   `statMtimeMsSync`.
  * - Writes & filesystem mutations: `writeTextSync`, `appendTextSync`, `mkdirRecursiveSync`,
  *   `renameSync`, `unlinkSync`, `rmRecursiveSync`, `cpRecursiveSync`, `mkdtempSync`,
  *   `chmodSync`.
@@ -213,6 +220,33 @@ export const nodeSyncHostIo: ExtendedHostIo = {
   },
   readTextSync: (filePath: string): string => readFileSync(filePath, "utf8"),
   readBytesSync: (filePath: string): Uint8Array => readFileSync(filePath),
+  readBytesPrefixSync: (filePath: string, maxBytes: number): Uint8Array => {
+    const cap = Math.floor(Schema.decodeSync(NonNegativeMaxBytes)(maxBytes))
+    if (cap === 0) {
+      return new Uint8Array(0)
+    }
+    const openFlags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)
+    const fd = openSync(filePath, openFlags)
+    // oxlint-disable-next-line -- foreign node:fs boundary: deterministic fd cleanup
+    try {
+      if (!fstatSync(fd).isFile()) {
+        // oxlint-disable-next-line -- foreign node:fs boundary: synchronous SyncHostIo contract throws on non-regular files
+        throw new Error(`Refusing non-regular file '${filePath}' in readBytesPrefixSync`)
+      }
+      const buf = Buffer.allocUnsafe(cap)
+      let offset = 0
+      while (offset < cap) {
+        const bytesRead = readSync(fd, buf, offset, cap - offset, offset)
+        if (bytesRead === 0) {
+          break
+        }
+        offset += bytesRead
+      }
+      return Uint8Array.from(buf.subarray(0, offset))
+    } finally {
+      closeSync(fd)
+    }
+  },
   writeTextSync: (filePath: string, content: string): void => {
     writeFileSync(filePath, content, "utf8")
   },
@@ -312,11 +346,7 @@ export const nodeSyncHostIo: ExtendedHostIo = {
   chmodSync: (filePath: string, mode: number): void => {
     chmodSync(filePath, mode)
   },
-  writeTextWithModeSync: (
-    filePath: string,
-    content: string,
-    mode: number,
-  ): void => {
+  writeTextWithModeSync: (filePath: string, content: string, mode: number): void => {
     writeFileSync(filePath, content, { encoding: "utf8", mode })
     chmodSync(filePath, mode)
   },
