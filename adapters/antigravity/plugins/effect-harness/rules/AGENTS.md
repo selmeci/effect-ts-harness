@@ -14,6 +14,12 @@ Google Code Wiki and other generated/prose docs are out — never cite them.
 - `repos/effect` and `repos/alchemy` are read-only squashed git subtrees pinned to recorded commits.
 - Never edit files under `repos/`, never import from them. App code imports `effect`, `alchemy` and scoped packages like any npm dependency.
 
+## Experimental Development (No Backwards Compatibility)
+
+- This repository is in **active experimental development** — **do not preserve backwards compatibility** for internal APIs, CLI flags, schemas, persisted prototype formats, unreleased migrations, or skill/adapter contracts unless explicitly requested.
+- **Rewrite directly & delete dead code:** Refactor in place, update all callers in the same change, and immediately delete superseded code, compatibility shims, fallback paths, deprecated aliases, unused flags, and obsolete tests/docs.
+- **Prefer clean-slate simplification over bridges:** When iterating on prototypes or architecture, replace old designs outright instead of layering wrappers, dual formats, or temporary re-exports on top.
+
 ## Workflow (one task)
 
 plan (in Effect idioms, `agent-patterns/planning.md` template) → skeleton with `stub<A, E, R>(...args)` typechecks →

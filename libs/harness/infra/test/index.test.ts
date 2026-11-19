@@ -1061,6 +1061,7 @@ describe("@harness/infra live adapters", () => {
         }
 
         const hostIo = {
+          getEnv: () => process.env,
           existsSync: () => {
             throw new Error("   ")
           },

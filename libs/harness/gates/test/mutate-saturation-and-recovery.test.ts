@@ -19,7 +19,11 @@ import {
   writeMutateStamp,
   writeVerifyStamp,
 } from "../src/index.js"
-import { evaluateMutationOutcomes, runDomainMutationSuite } from "../src/mutation-check.js"
+import {
+  evaluateMutationOutcomes,
+  getActiveMutantId,
+  runDomainMutationSuite,
+} from "../src/mutation-check.js"
 import { setActiveMutantId } from "../src/mutation/mutant-ast-generator.js"
 import { extractGitDiffModifiedLinesChecked } from "../src/mutation/mutation-backup.js"
 import {
@@ -488,22 +492,20 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
       expect(allLinesRes.diffMode).toBe("all-lines")
       expect(allLinesRes.totalMutants).toBe(2)
 
-      // testRunner HARNESS_ACTIVE_MUTANT_ID restoration (pre-set vs undefined)
-      for (const initialEnv of ["outer-mut", undefined]) {
-        if (initialEnv === undefined)
-          Reflect.deleteProperty(process.env, "HARNESS_ACTIVE_MUTANT_ID")
-        else process.env["HARNESS_ACTIVE_MUTANT_ID"] = initialEnv
-        const observedEnv: Array<string | undefined> = []
+      // testRunner globalThis.__HARNESS_ACTIVE_MUTANT_ID restoration (pre-set vs undefined)
+      for (const initialActive of ["outer-mut", undefined]) {
+        setActiveMutantId(initialActive)
+        const observedActive: Array<string | undefined> = []
         runDomainMutationSuite(dir, testHostIo, {
           targetFiles: [twoLineRel],
           testRunner: (m) => {
-            observedEnv.push(process.env["HARNESS_ACTIVE_MUTANT_ID"])
+            observedActive.push(getActiveMutantId())
             return m.id === "__baseline__" ? "survived" : "survived"
           },
         })
-        expect(observedEnv[0]).toBeUndefined()
-        expect(observedEnv[1]).toBeDefined()
-        expect(process.env["HARNESS_ACTIVE_MUTANT_ID"]).toBe(initialEnv)
+        expect(observedActive[0]).toBeUndefined()
+        expect(observedActive[1]).toBeDefined()
+        expect(getActiveMutantId()).toBe(initialActive)
       }
     } finally {
       setActiveMutantId(undefined)
@@ -649,7 +651,7 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
     try {
       // 1. HARNESS_STATE_DIR=. rejection
       process.env["HARNESS_STATE_DIR"] = "."
-      expect(() => resolveHarnessStateDir(dir)).toThrow()
+      expect(() => resolveHarnessStateDir(dir, process.env)).toThrow()
       Reflect.deleteProperty(process.env, "HARNESS_STATE_DIR")
 
       // 2. Conflicting type:contract + type:infra -> CorruptManifest

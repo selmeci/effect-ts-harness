@@ -241,7 +241,7 @@ describe("harness-mcp tools", () => {
   it("executes structural search across workspace files", async () => {
     const results = (await executeTool(
       "harness_structural_search",
-      { pattern: "export const greet = $$$" },
+      { pattern: "export const decideAlbumQuota = $$$" },
       { graph },
     )) as Array<{ file: string; text: string }>
 
@@ -253,7 +253,7 @@ describe("harness-mcp tools", () => {
     const results = (await executeTool(
       "harness_structural_search",
       {
-        pattern: "export const greet = $$$",
+        pattern: "export const decideAlbumQuota = $$$",
         filePath: "libs/sample/domain/src/index.ts",
       },
       { graph },
@@ -262,7 +262,7 @@ describe("harness-mcp tools", () => {
     expect(Array.isArray(results)).toBe(true)
     expect(results.length).toBe(1)
     expect(results[0]?.file).toBe("libs/sample/domain/src/index.ts")
-    expect(results[0]?.line).toBe(15)
+    expect(results[0]?.line).toBe(13)
   })
 
   it("executes structural search with filePath scoped to .md file", async () => {

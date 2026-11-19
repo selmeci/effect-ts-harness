@@ -203,7 +203,7 @@ export const appendFrictionEvent = (
     summary: input.summary,
     detail: input.detail,
   }
-  const harnessDir = resolveHarnessStateDir(repoRoot)
+  const harnessDir = resolveHarnessStateDir(repoRoot, hostIo.getEnv())
   const filePath = join(harnessDir, "friction-log.jsonl")
   Result.getOrElse(
     Result.try(() => {
@@ -221,7 +221,7 @@ export const readFrictionEvents = (
   repoRoot: string,
   hostIo: SyncHostIo,
 ): ReadonlyArray<FrictionEvent> => {
-  const harnessDir = resolveHarnessStateDir(repoRoot)
+  const harnessDir = resolveHarnessStateDir(repoRoot, hostIo.getEnv())
   const filePath = join(harnessDir, "friction-log.jsonl")
   if (!hostIo.existsSync(filePath)) {
     return []
@@ -250,7 +250,7 @@ export const readFrictionEvents = (
 }
 
 export const clearFrictionEvents = (repoRoot: string, hostIo: SyncHostIo): void => {
-  const harnessDir = resolveHarnessStateDir(repoRoot)
+  const harnessDir = resolveHarnessStateDir(repoRoot, hostIo.getEnv())
   const filePath = join(harnessDir, "friction-log.jsonl")
   Result.getOrElse(
     Result.try(() => {

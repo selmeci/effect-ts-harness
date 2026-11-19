@@ -17,7 +17,7 @@ const StructuralSearchInputArb = Schema.Struct({
     Schema.Literal("export const $NAME = $$$"),
     Schema.Literal("decideStructuralSearch"),
     Schema.Literal("StructuralSearchPattern"),
-    Schema.Literal("Sample.greet"),
+    Schema.Literal("Album.decide"),
   ]),
   filePath: Schema.optional(
     Schema.Union([
@@ -36,7 +36,7 @@ describe("StructuralSearch.decide", () => {
     Effect.gen(function* () {
       const results = yield* StructuralSearch.decide({
         hostIo: testHostIo,
-        pattern: "export const greet = $$$",
+        pattern: "export const decideAlbumQuota = $$$",
       })
 
       expect(Array.isArray(results)).toBe(true)
@@ -58,24 +58,24 @@ describe("StructuralSearch.decide", () => {
       // 1. AST pattern in single .ts file
       const astResults = yield* StructuralSearch.decide({
         hostIo: testHostIo,
-        pattern: "export const greet = $$$",
+        pattern: "export const decideAlbumQuota = $$$",
         filePath: "libs/sample/domain/src/index.ts",
       })
       expect(astResults.length).toBe(1)
       expect(astResults[0]?.file).toBe("libs/sample/domain/src/index.ts")
-      expect(astResults[0]?.line).toBe(15)
+      expect(astResults[0]?.line).toBe(13)
 
       // 2. Fallback line-locator in .ts file (comments/strings without ast metavariables)
       const lineResults = yield* StructuralSearch.decide({
         hostIo: testHostIo,
-        pattern: "Hello,",
+        pattern: "Album.decide",
         filePath: "libs/sample/domain/src/index.ts",
       })
       expect(lineResults.length).toBe(1)
       expect(lineResults[0]?.file).toBe("libs/sample/domain/src/index.ts")
-      expect(lineResults[0]?.line).toBe(16)
+      expect(lineResults[0]?.line).toBe(13)
       expect(lineResults[0]?.column).toBeGreaterThanOrEqual(1)
-      expect(lineResults[0]?.text).toContain("Hello,")
+      expect(lineResults[0]?.text).toContain("Album.decide")
     }),
   )
 
@@ -106,7 +106,7 @@ describe("StructuralSearch.decide", () => {
     Effect.gen(function* () {
       const scopedPathsResults = yield* StructuralSearch.decide({
         hostIo: testHostIo,
-        pattern: "greet",
+        pattern: "decideAlbumQuota",
         paths: ["libs/sample/domain/src"],
       })
       expect(scopedPathsResults.length).toBeGreaterThan(0)
@@ -116,7 +116,7 @@ describe("StructuralSearch.decide", () => {
 
       const scopedSubDirsResults = yield* StructuralSearch.decide({
         hostIo: testHostIo,
-        pattern: "greet",
+        pattern: "decideAlbumQuota",
         subDirs: ["libs/sample"],
       })
       expect(scopedSubDirsResults.length).toBeGreaterThan(0)

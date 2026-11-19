@@ -97,9 +97,12 @@ const formatErr = (err: unknown): string => (err instanceof Error ? err.message 
 const isContainedIn = (canonicalParent: string, canonicalTarget: string): boolean =>
   canonicalTarget === canonicalParent || canonicalTarget.startsWith(`${canonicalParent}/`)
 
-const resolveHarnessDirChecked = (repoRoot: string): Result.Result<string, string> =>
+const resolveHarnessDirChecked = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): Result.Result<string, string> =>
   Result.try({
-    try: () => resolveHarnessStateDir(repoRoot),
+    try: () => resolveHarnessStateDir(repoRoot, hostIo.getEnv()),
     catch: (err) => `Failed to resolve harness state directory: ${formatErr(err)}`,
   })
 
@@ -295,7 +298,7 @@ export const computeWorkspaceTreeHashChecked = (
   repoRoot: string,
   hostIo: SyncHostIo,
 ): Result.Result<WorkspaceTreeHash, string> =>
-  Result.flatMap(resolveHarnessDirChecked(repoRoot), (harnessStateDir) =>
+  Result.flatMap(resolveHarnessDirChecked(repoRoot, hostIo), (harnessStateDir) =>
     Result.flatMap(checkSafeExistingDir(repoRoot, hostIo), (canonicalRoot) => {
       if (canonicalRoot === undefined) {
         return Result.fail(`Workspace root '${repoRoot}' does not exist`)
@@ -389,7 +392,8 @@ export const writeVerifyStamp = (
   },
 ): VerifyStamp => {
   const treeHash = computeWorkspaceTreeHash(repoRoot, hostIo)
-  const envSeed = parseDstSeedEnv(process.env["DST_SEED"])
+  const env = hostIo.getEnv()
+  const envSeed = parseDstSeedEnv(env["DST_SEED"])
   const resolvedSeed = dstOptions?.dstSeed ?? envSeed ?? DstSeed.make(0)
   const resolvedBranch =
     taskBranch !== undefined && taskBranch.trim().length > 0 ? taskBranch : "unknown"
@@ -409,7 +413,7 @@ export const writeVerifyStamp = (
       : {}),
   }
   const harnessDir = Result.getOrThrowWith(
-    resolveHarnessDirChecked(repoRoot),
+    resolveHarnessDirChecked(repoRoot, hostIo),
     (err) => new Error(err),
   )
   const stampPath = join(harnessDir, "verify-stamp.json")
@@ -425,7 +429,7 @@ const decodeVerifyStamp = Schema.decodeOption(Schema.fromJsonString(VerifyStampS
 export const checkVerifyStamp = (repoRoot: string, hostIo: SyncHostIo): CheckVerifyStampResult => {
   const missingMsg =
     "Missing .harness/verify-stamp.json. Run harness verify after your latest edits before finishing."
-  const contentRes = Result.flatMap(resolveHarnessDirChecked(repoRoot), (harnessDir) =>
+  const contentRes = Result.flatMap(resolveHarnessDirChecked(repoRoot, hostIo), (harnessDir) =>
     checkSafeStampFileForRead(
       harnessDir,
       join(harnessDir, "verify-stamp.json"),
@@ -476,7 +480,7 @@ export const writeMutateStamp = (
     ...input,
   }
   const harnessDir = Result.getOrThrowWith(
-    resolveHarnessDirChecked(repoRoot),
+    resolveHarnessDirChecked(repoRoot, hostIo),
     (err) => new Error(err),
   )
   const stampPath = join(harnessDir, "mutate-stamp.json")
@@ -495,7 +499,7 @@ export const removeMutateStamp = (
   repoRoot: string,
   hostIo: SyncHostIo,
 ): Result.Result<void, string> =>
-  Result.flatMap(resolveHarnessDirChecked(repoRoot), (harnessDir) => {
+  Result.flatMap(resolveHarnessDirChecked(repoRoot, hostIo), (harnessDir) => {
     const stampPath = join(harnessDir, "mutate-stamp.json")
     return Result.flatMap(checkSafeExistingDir(harnessDir, hostIo), (canonicalHarnessDir) => {
       if (canonicalHarnessDir === undefined) return Result.succeed(undefined)
@@ -582,7 +586,7 @@ export const checkMutateStamp = (
 ): CheckMutateStampResult => {
   const missingMsg =
     "Missing .harness/mutate-stamp.json. Run pnpm harness mutate --strict after your latest edits before verify."
-  const contentRes = Result.flatMap(resolveHarnessDirChecked(repoRoot), (harnessDir) =>
+  const contentRes = Result.flatMap(resolveHarnessDirChecked(repoRoot, hostIo), (harnessDir) =>
     checkSafeStampFileForRead(
       harnessDir,
       join(harnessDir, "mutate-stamp.json"),

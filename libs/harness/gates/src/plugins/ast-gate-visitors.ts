@@ -160,8 +160,6 @@ export const isDummyEffectVoidYield = (
   )
 }
 
-export { inferAstGatePackageTagFromPath as inferPackageTagFromPath }
-
 const isEffectRunSyncOfDie = (
   node: ts.PropertyAccessExpression | ts.ElementAccessExpression,
   isEffectNs: (expr: ts.Expression) => boolean,

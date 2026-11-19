@@ -23,7 +23,7 @@ Select and invoke the read-only specialist review subagents via `harness_review_
 5. **`effect-web-reviewer` (When touching `scope:web`, `apps/*-web/**`, `*.tsx`, or `AtomHttpApi`):**
    Audits `@effect/atom-react` boundary discipline, frontend concurrency & double-submit races, exhaustive `Result`/`Option` rendering via `ts-pattern`, and form/URL brand decoding.
 6. **`effect-migration-contract-reviewer` (When touching `migrations/*.sql`, `SqliteMigrator`, `alchemy.run.ts`, or `type:contract` evolution):**
-   Audits zero-downtime expand-and-contract SQL evolution, D1/SQLite index coverage, `HttpApiEndpoint`/`RpcGroup`/event schema compatibility, and Alchemy v2 binding hygiene.
+   Audits SQL migration correctness & `SqliteMigrator` table isolation, D1/SQLite index coverage, `HttpApiEndpoint`/`RpcGroup`/event contract consistency & explicit upcaster chains, and Alchemy v2 binding hygiene.
 7. **`effect-architecture-reviewer` (When touching `type:service`, `libs/es/**`, `libs/harness/**`, `adapters/**`, or `changedLineCount >= 180`):**
    Audits framework-vs-application archetype purity, 5-tier hexagonal cohesion, `SelfDogfooding.decide` line-ceiling proximity, and agent-surface adapter parity.
 

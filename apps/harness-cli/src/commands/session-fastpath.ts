@@ -35,8 +35,11 @@ export const PreInvocationCacheSchema = Schema.Struct({
 export type PreInvocationCacheEntry = typeof PreInvocationCacheSchema.Type
 export type PreInvocationCacheRecord = Omit<PreInvocationCacheEntry, "version">
 
-export const resolveHarnessStateDirSafe = (repoRoot: string): Option.Option<string> =>
-  match(Result.try(() => resolveHarnessStateDir(repoRoot)))
+export const resolveHarnessStateDirSafe = (
+  repoRoot: string,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): Option.Option<string> =>
+  match(Result.try(() => resolveHarnessStateDir(repoRoot, env)))
     .with({ _tag: "Success" }, ({ success }) => Option.some(success))
     .with({ _tag: "Failure" }, ({ failure }) => {
       const msg = failure instanceof Error ? failure.message : String(failure)

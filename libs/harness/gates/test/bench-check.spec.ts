@@ -37,7 +37,7 @@ import {
   evaluateCachedAstGates,
   HarnessBench,
   HarnessBenchReport,
-  inferPackageTagFromPath,
+  inferAstGatePackageTagFromPath,
   LatencyExceededDimension,
   LatencyMillis,
   LatencySloViolationError,
@@ -587,7 +587,7 @@ describe("AstGateCache & Unified Single-Pass AST Gate Deciders (PERF-02, RFC-000
         expect(Exit.isSuccess(Schema.decodeExit(AstGateDecisionReport)(syntaxReport))).toBe(true)
         expect(Schema.is(AstGateDecisionReport)({ verdict: "unknown" })).toBe(false)
         expect(evaluateAstGateFiles({ files: [] }).verdict).toBe("clean")
-        expect(inferPackageTagFromPath("libs/sample/domain/src/a.ts")).toBe("domain")
+        expect(inferAstGatePackageTagFromPath("libs/sample/domain/src/a.ts")).toBe("domain")
       }),
   )
 

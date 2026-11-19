@@ -112,7 +112,7 @@ describe("Friction log and clustering", () => {
       expect(readBack[1]?.summary).toBe("rm -rf")
 
       // 3. Add malformed lines and empty lines to friction-log.jsonl
-      const filePath = join(resolveHarnessStateDir(tempDir), "friction-log.jsonl")
+      const filePath = join(resolveHarnessStateDir(tempDir, testHostIo.getEnv()), "friction-log.jsonl")
       const currentRaw = readFileSync(filePath, "utf-8")
       writeFileSync(
         filePath,

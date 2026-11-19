@@ -46,7 +46,7 @@ export interface OmnigraphConnectionOptions {
   readonly actor?: "harness-cli" | "agent-mcp" | undefined
   readonly fetch?: FetchLike | undefined
   readonly hostIo?: SyncHostIo | undefined
-  readonly env?: NodeJS.ProcessEnv | undefined
+  readonly env?: Readonly<Record<string, string | undefined>> | undefined
 }
 
 const decodeAuthTokensOption = Schema.decodeOption(Schema.fromJsonString(OmnigraphAuthTokensSchema))
