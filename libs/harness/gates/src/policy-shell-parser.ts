@@ -22,16 +22,16 @@ const OPERATOR_WORDS: ReadonlySet<string> = new Set(["&&", "||", ";", "|", "&"])
 export const hasUnquotedBackgroundOperator = (unquoted: string): boolean =>
   /(?<![>&])&(?![>&])/.test(unquoted)
 
-const WRAPPER_BINARIES: ReadonlySet<string> = new Set("pnpm npm npx pnpx yarn bun bunx".split(" "))
+const WRAPPER_BINARIES: ReadonlySet<string> = new Set("pnpm npm npx pnpx yarn bunx".split(" "))
 const WRAPPER_VALUE_FLAGS: ReadonlySet<string> = new Set(
-  "--filter -F --dir -C --prefix --package -p --loglevel --reporter --store-dir --cache-dir --config -c --userconfig".split(
+  "--filter -F --dir -C --cwd --prefix --package -p --loglevel --reporter --store-dir --cache-dir --config -c --userconfig".split(
     " ",
   ),
 )
 const WRAPPER_SUBCOMMANDS: ReadonlySet<string> = new Set(["exec", "run", "dlx"])
-const ENV_VALUE_FLAGS: ReadonlySet<string> = new Set(
-  "-u -C -S --unset --chdir --split-string".split(" "),
-)
+const BUN_PACKAGE_RUNNER_SUBCOMMANDS: ReadonlySet<string> = new Set(["x", "run", "exec"])
+const BUN_EVAL_FLAGS: ReadonlySet<string> = new Set(["-e", "--eval", "-p", "--print"])
+const ENV_VALUE_FLAGS: ReadonlySet<string> = new Set("-u -C --unset --chdir".split(" "))
 const ENV_SIMPLE_FLAGS: ReadonlySet<string> = new Set(
   "-i --ignore-environment -0 --null".split(" "),
 )
@@ -195,7 +195,7 @@ const splitShellWords = (
       continue
     }
     if (
-      ch === "|" ||
+      (ch === "|" && !unquoted.endsWith(">")) ||
       ch === ";" ||
       (ch === "&" && !unquoted.endsWith(">") && command[i + 1] !== ">")
     ) {
@@ -286,31 +286,61 @@ export const toCommandView = (command: string): CommandView => {
   }
 }
 
+const isBunPackageRunner = (words: ReadonlyArray<string>, bunIndex: number): boolean => {
+  for (let j = bunIndex + 1; j < words.length; j++) {
+    const arg = words[j]!
+    if (arg === "--" || BUN_EVAL_FLAGS.has(arg)) {
+      return false
+    }
+    if (WRAPPER_VALUE_FLAGS.has(arg)) {
+      j++
+      continue
+    }
+    if (arg.startsWith("-")) {
+      continue
+    }
+    return BUN_PACKAGE_RUNNER_SUBCOMMANDS.has(arg)
+  }
+  return false
+}
+
 export const unwrapCommandSegment = (words: ReadonlyArray<string>): UnwrappedSegment => {
+  const activeWords = [...words]
   const envAssignments: Array<string> = []
   let sawPackageRunner = false
   let i = 0
-  while (i < words.length) {
-    const w = words[i]!
+  while (i < activeWords.length) {
+    const w = activeWords[i]!
     const base = binaryBasename(w)
     if (base === "env") {
       i++
-      while (i < words.length) {
-        const arg = words[i]!
+      while (i < activeWords.length) {
+        const arg = activeWords[i]!
         if (arg === "--") {
           i++
           break
+        }
+        if (arg === "-S" || arg === "--split-string") {
+          const payload = activeWords[i + 1]
+          if (payload !== undefined) {
+            const splitWords = splitShellWords(payload).words
+            activeWords.splice(i, 2, ...splitWords)
+            continue
+          }
+          i++
+          break
+        }
+        if (arg.startsWith("--split-string=") || (arg.startsWith("-S") && arg.length > 2)) {
+          const prefixLen = arg.startsWith("--split-string=") ? "--split-string=".length : 2
+          const splitWords = splitShellWords(arg.slice(prefixLen)).words
+          activeWords.splice(i, 1, ...splitWords)
+          continue
         }
         if (ENV_VALUE_FLAGS.has(arg)) {
           i += 2
           continue
         }
-        if (
-          ENV_SIMPLE_FLAGS.has(arg) ||
-          arg.startsWith("--unset=") ||
-          arg.startsWith("--chdir=") ||
-          arg.startsWith("--split-string=")
-        ) {
+        if (ENV_SIMPLE_FLAGS.has(arg) || arg.startsWith("--unset=") || arg.startsWith("--chdir=")) {
           i++
           continue
         }
@@ -325,8 +355,8 @@ export const unwrapCommandSegment = (words: ReadonlyArray<string>): UnwrappedSeg
     }
     if (base === "command") {
       i++
-      while (i < words.length) {
-        const arg = words[i]!
+      while (i < activeWords.length) {
+        const arg = activeWords[i]!
         if (arg === "--") {
           i++
           break
@@ -348,11 +378,11 @@ export const unwrapCommandSegment = (words: ReadonlyArray<string>): UnwrappedSeg
       i++
       continue
     }
-    if (WRAPPER_BINARIES.has(base)) {
+    if (WRAPPER_BINARIES.has(base) || (base === "bun" && isBunPackageRunner(activeWords, i))) {
       sawPackageRunner = true
       i++
-      while (i < words.length) {
-        const arg = words[i]!
+      while (i < activeWords.length) {
+        const arg = activeWords[i]!
         if (WRAPPER_VALUE_FLAGS.has(arg)) {
           i += 2
           continue
@@ -364,6 +394,7 @@ export const unwrapCommandSegment = (words: ReadonlyArray<string>): UnwrappedSeg
         if (
           arg.startsWith("-") ||
           WRAPPER_SUBCOMMANDS.has(arg) ||
+          (base === "bun" && arg === "x") ||
           /^[A-Za-z_][A-Za-z0-9_]*=/.test(arg)
         ) {
           if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(arg)) envAssignments.push(arg)
@@ -378,25 +409,36 @@ export const unwrapCommandSegment = (words: ReadonlyArray<string>): UnwrappedSeg
   }
   return {
     envAssignments,
-    commandWords: words.slice(i),
+    commandWords: activeWords.slice(i),
     sawPackageRunner,
   }
+}
+
+const splitUnquotedSegmentTexts = (command: string): ReadonlyArray<string> => {
+  const { unquoted } = splitShellWords(command)
+  const parts: Array<string> = []
+  const sepPattern = /&&|\|\||[;\n]|(?<!>)\|(?![|])|(?<![>&])&(?![>&])/g
+  let start = 0
+  let m = sepPattern.exec(unquoted)
+  while (m !== null) {
+    parts.push(command.slice(start, m.index))
+    start = m.index + m[0].length
+    m = sepPattern.exec(unquoted)
+  }
+  parts.push(command.slice(start))
+  return parts
 }
 
 export const extractCommandSegments = (command: string): ReadonlyArray<UnwrappedSegment> => {
   const norm = normalizeShellLineContinuations(command)
   const segments: Array<UnwrappedSegment> = []
-  for (const line of norm.split(/\r?\n/)) {
-    const view = toCommandView(line)
-    for (const rawSeg of view.argv.split(/\s*(?:&&|\|\||[;|&])\s*/)) {
-      const cleanedSeg = rawSeg.replace(/^[()\s]+|[()\s]+$/g, "")
-      const words = cleanedSeg
-        .split(/\s+/)
-        .map((w) => w.replace(/^[()]+|[()]+$/g, ""))
-        .filter(Boolean)
-      if (words.length > 0) {
-        segments.push(unwrapCommandSegment(words))
-      }
+  for (const rawSeg of splitUnquotedSegmentTexts(norm)) {
+    const cleanedSeg = rawSeg.replace(/^[()\s]+|[()\s]+$/g, "")
+    if (cleanedSeg.length === 0) continue
+    const { words } = splitShellWords(cleanedSeg)
+    const filteredWords = dropDataArguments(words)
+    if (filteredWords.length > 0) {
+      segments.push(unwrapCommandSegment(filteredWords))
     }
   }
   return segments

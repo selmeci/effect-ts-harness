@@ -1,0 +1,99 @@
+// Durable Effect v4 Workflow & Cluster Mailbox PG-Schema (RFC-0013 — graph `harness-workflows`)
+// Mirror of Effect Cluster SqlMessageStorage (`WfMessage`, `WfReply`), single-writer fencing lease
+// (`WfWriterLease`), and reconstructible read-model execution records (`WfRun`, `WfUnit`, `WfAttempt`, `WfShipAttempt`).
+
+node WfMessage
+  @instruction("One cluster envelope: request, ack-chunk or interrupt (mirror of the SQL messages table).")
+{
+  messageKey: String @key @description("Snowflake id of the envelope, decimal string")
+  seqKey: String @index @description("20-char zero-padded Snowflake decimal string for lossless lexicographic ORDER BY")
+  primaryKeyHash: String? @index @description("message_id: composed key if <=255 chars else sha-256 hex digest; dedup key for idempotency")
+  shardId: String @index
+  entityType: String @index
+  entityId: String @index
+  kind: enum(request, ack_chunk, interrupt) @index
+  tag: String?
+  payload: String? @description("JSON of the encoded payload")
+  headers: String?
+  traceId: String?
+  spanId: String?
+  sampled: Bool?
+  requestId: String @index
+  replyId: String?
+  processed: Bool @index @description("denormalised; authoritative state is derived from WfReply")
+  lastReplyId: String?
+  lastReadMs: I64? @index @description("claim timestamp (epoch ms)")
+  deliverAtMs: I64? @index
+}
+
+node WfReply
+  @instruction("A reply (exit or chunk) to a request (mirror of the SQL replies table).")
+{
+  replyKey: String @key @description("Snowflake id of the reply")
+  seqKey: String @index @description("20-char zero-padded Snowflake decimal string for lossless ordering")
+  requestId: String @index
+  kind: enum(with_exit, chunk) @index
+  payload: String @description("JSON of the exit or chunk values")
+  sequence: I32?
+  acked: Bool @index
+}
+
+node WfWriterLease
+  @instruction("Single-writer fence for the workflow daemon.")
+{
+  name: String @key @description("always 'engine'")
+  owner: String @description("daemon instance id + pid")
+  leaseEpoch: I64 @description("monotonically incremented fencing epoch")
+  heartbeatMs: I64
+}
+
+node WfRun
+  @instruction("Read-model summary of a workflow run in harness-workflows (reconstructible from engine state).")
+{
+  runId: String @key @description("WorkflowRunId nonce")
+  executionId: String @index @description("Deterministic HarnessTaskWorkflow executionId")
+  level: enum(epic, slice) @index
+  planSha: String @index
+  baseSha: String
+  state: enum(running, waiting, completed, aborted) @index
+  planJson: String?
+  updatedMs: I64
+}
+
+node WfUnit
+  @instruction("Read-model summary of a workflow work unit in harness-workflows.")
+{
+  unitKey: String @key @description("runId/unitId")
+  runId: String @index
+  unitId: String @index
+  kind: enum(slice, package) @index
+  waveIndex: I32 @index
+  status: enum(pending, dispatched, completed, escalated) @index
+  ownedRelPaths: [String]
+  updatedMs: I64
+}
+
+node WfAttempt
+  @instruction("Read-model summary of one unit execution attempt in harness-workflows.")
+{
+  attemptKey: String @key @description("runId/unitId#attempt")
+  runId: String @index
+  unitId: String @index
+  attempt: I32
+  verdict: enum(dispatched, completed, rejected) @index
+  runner: String?
+  rejection: String?
+  packageStampHash: String?
+  updatedMs: I64
+}
+
+node WfShipAttempt
+  @instruction("Read-model ship gate attempt counter and outcome in harness-workflows.")
+{
+  shipKey: String @key @description("runId#attempt")
+  runId: String @index
+  attempt: I32 @index
+  treeHash: String @index
+  status: enum(running, passed, failed) @index
+  updatedMs: I64
+}

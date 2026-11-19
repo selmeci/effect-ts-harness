@@ -19,6 +19,7 @@ import {
   LocalDecisionModel,
   nodeSyncHostIo,
   queryUnixSocketLineDetailed,
+  resolveHarnessDaemonSocketPath,
 } from "@harness/infra/hook-fastpath"
 import type { CliResult, HookStdinTracker } from "./hook-format.js"
 export type { CliResult } from "./hook-format.js"
@@ -563,7 +564,7 @@ export const tryQueryWarmDaemonSocket = (
   files?: ReadonlyArray<string>,
 ): Effect.Effect<Option.Option<Record<string, unknown>>> =>
   Effect.gen(function* () {
-    const socketPath = join(repoRoot, ".harness", "daemon.sock")
+    const socketPath = resolveHarnessDaemonSocketPath(repoRoot)
     if (!nodeSyncHostIo.existsSync(socketPath)) {
       return Option.none()
     }

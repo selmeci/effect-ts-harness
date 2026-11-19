@@ -122,7 +122,7 @@ export interface GuardPatternRule {
  * or templates (`.env.example`, `.env.template`, `.env.sample`) — REQ-3.2.
  * Evaluated on `CommandView.argv`. */
 export const SECRET_FILE_PATTERN: RegExp =
-  /(?:^|[\s=:/<>(])(?:\.env(?:\.(?!(?:example|template|sample)(?:$|[\s/]))[\w*?-]+)*\*?|mutation-hmac[^\s;|&)<>]*(?:\.key|\*|\?|\]|\})|[^\s;|&)<>]*\.cache\/effect-harness(?:\/[^\s;|&)<>]*)?|[^\s=:/<>()]*(?:\*|\?|\[[^\]\s]+\]|\{[^}\s]+\})[^\s;|&)<>]*\.key)(?=$|[\s/;|&)<>])/
+  /(?:^|[\s=:/<>(])(?:\.env(?:\.(?!(?:example|template|sample)(?:$|[\s/]))[\w*?-]+)*\*?|mutation-hmac[^\s;|&)<>]*(?:\.key|\*|\?|\]|\})|[^\s;|&)<>]*\.cache\/effect-harness(?:\/[^\s;|&)<>]*)?|[^\s=:/<>()]*(?:\*|\?|\[[^\]\s]+\]|\{[^}\s]+\})[^\s;|&)<>]*\.key|(?:[^\s;|&)<>]*\/)?auth-tokens\.json)(?=$|[\s/;|&)<>])/
 
 /** REQ-2.1: the agent must not use the guard as an oracle to test candidate commands.
  * Hooks invoke the guard directly from the IDE, never through an agent shell command.
@@ -373,6 +373,7 @@ export type CommandDenyRuleId =
   | "invalid-clef-endpoint"
   | "denylist-token"
   | "git-force-push"
+  | "harness-state-mutation"
   | "secret-file-access"
   | "guard-self-invocation"
 
@@ -382,6 +383,103 @@ export interface CommandDenyExplanation {
 }
 
 const GIT_FORCE_PUSH_PATTERN = /\bgit\s+(?:\S+\s+)*push\b.*(?:\s|^)(?:--force|-f)(?:\s|$)/
+
+const PROTECTED_HARNESS_FILE_WRITE_PATTERN: RegExp =
+  /(^|\/)(?:[^/]*\.git\/harness(\/|$)|(?:harness\/)?workflow-backups(\/|$)|(?:auth-tokens\.json|daemon\.(?:sock|lock))(\/|$))/
+
+const PROTECTED_HARNESS_SHELL_PATH_PATTERN: RegExp =
+  /(?:^|[\s=:/<>|('"`,({[])(?:[^\s;|&)<>'"`,)}\]]*\.git\/harness(?:\/[^\s;|&)<>'"`,)}\]]*)?|(?:[^\s;|&)<>'"`,)}\]]*\/)?(?:harness\/)?workflow-backups(?:\/[^\s;|&)<>'"`,)}\]]*)?|(?:[^\s;|&)<>'"`,)}\]]*\/)?(?:auth-tokens\.json|daemon\.(?:sock|lock)))(?=$|[\s/;|&)<>'"`,)}\]])/
+
+const HARNESS_STATE_MUTATING_BINARIES: ReadonlySet<string> = new Set(
+  "rm rmdir unlink shred mv cp install tee chmod chown chgrp ln touch truncate dd mkdir mkfifo mknod flock tar rsync".split(
+    " ",
+  ),
+)
+
+const HARNESS_SOCKET_OR_SCRIPT_BINARIES: ReadonlySet<string> = new Set(
+  "curl wget http https xh nc ncat netcat socat telnet openssl python python3 node bun tsx deno ruby perl sh bash zsh dash awk sqlite3".split(
+    " ",
+  ),
+)
+
+const HARNESS_STATE_READ_BINARIES: ReadonlySet<string> = new Set(
+  "cat head tail less more strings base64 xxd od hexdump jq".split(" "),
+)
+
+const HARNESS_REDIRECTION_OP_PATTERN: RegExp =
+  /(?:&>>?|(?<![=&>-])\d*>>?(?![&>])|(?<![=&>-])\d*>&(?![\d-])|<>)(?!\s*\/dev\/null(?:\s|$))/
+
+const matchesProtectedHarnessShellText = (text: string): boolean =>
+  PROTECTED_HARNESS_SHELL_PATH_PATTERN.test(text) ||
+  text
+    .split(/[\s=:'"`(),{}[\]]+/)
+    .some((tok) => PROTECTED_HARNESS_SHELL_PATH_PATTERN.test(path.posix.normalize(tok)))
+
+const splitUnquotedShellSegments = (
+  command: string,
+  unquoted: string,
+): ReadonlyArray<{ readonly cmd: string; readonly unquoted: string }> => {
+  const parts: Array<{ readonly cmd: string; readonly unquoted: string }> = []
+  const sepPattern = /&&|\|\||[;\n]|(?<!>)\|(?![|])|(?<![>&])&(?![>&])/g
+  let start = 0
+  let m = sepPattern.exec(unquoted)
+  while (m !== null) {
+    parts.push({
+      cmd: command.slice(start, m.index),
+      unquoted: unquoted.slice(start, m.index),
+    })
+    start = m.index + m[0].length
+    m = sepPattern.exec(unquoted)
+  }
+  parts.push({
+    cmd: command.slice(start),
+    unquoted: unquoted.slice(start),
+  })
+  return parts
+}
+
+const isHarnessStateMutatingSegment = (seg: UnwrappedSegment): boolean => {
+  const rawBin = seg.commandWords[0]
+  if (rawBin === undefined) {
+    return false
+  }
+  const bin = rawBin.includes("/") ? rawBin.slice(rawBin.lastIndexOf("/") + 1) : rawBin
+  const args = seg.commandWords.slice(1)
+  const isMutatingOrProbingBin =
+    HARNESS_STATE_MUTATING_BINARIES.has(bin) ||
+    HARNESS_SOCKET_OR_SCRIPT_BINARIES.has(bin) ||
+    (bin === "sed" && args.some((w) => /^-[^-]*i|^--in-place(?:=|$)/.test(w))) ||
+    (bin === "find" &&
+      args.some((w) => /^-(?:delete|exec|execdir|ok|okdir|fprint0?|fprintf|fls)$/.test(w))) ||
+    (bin === "sort" && args.some((w) => /^(?:-o|--output(?:=|$))/.test(w))) ||
+    (bin === "git" && args.some((w) => /^--output(?:=|$)/.test(w)))
+  return isMutatingOrProbingBin && matchesProtectedHarnessShellText(args.join(" "))
+}
+
+const isHarnessStateReadingSegment = (seg: UnwrappedSegment): boolean => {
+  const rawBin = seg.commandWords[0]
+  if (rawBin === undefined) {
+    return false
+  }
+  const bin = rawBin.includes("/") ? rawBin.slice(rawBin.lastIndexOf("/") + 1) : rawBin
+  return (
+    HARNESS_STATE_READ_BINARIES.has(bin) &&
+    matchesProtectedHarnessShellText(seg.commandWords.slice(1).join(" "))
+  )
+}
+
+export const isHarnessStateMutationCommand = (command: string): boolean => {
+  const norm = normalizeShellLineContinuations(command)
+  if (extractCommandSegments(norm).some(isHarnessStateMutatingSegment)) {
+    return true
+  }
+  const view = toCommandView(norm)
+  return splitUnquotedShellSegments(norm, view.unquoted).some(
+    (part) =>
+      HARNESS_REDIRECTION_OP_PATTERN.test(part.unquoted) &&
+      matchesProtectedHarnessShellText(toCommandView(part.cmd).argv),
+  )
+}
 
 export const explainCommandDenyRule = (command: string): CommandDenyExplanation | undefined => {
   const trimmed = normalizeShellLineContinuations(command).trim()
@@ -414,11 +512,25 @@ export const explainCommandDenyRule = (command: string): CommandDenyExplanation 
       reason: "Force-pushing with '--force' or '-f' is banned by harness policy.",
     }
   }
+  if (isHarnessStateMutationCommand(trimmed)) {
+    return {
+      ruleId: "harness-state-mutation",
+      reason:
+        "Mutating or directly probing protected harness runtime state (<git-common-dir>/harness/**, auth-tokens.json, daemon.sock, daemon.lock, workflow-backups/) is banned by harness policy.",
+    }
+  }
   if (SECRET_FILE_PATTERN.test(view.argv)) {
     return {
       ruleId: "secret-file-access",
       reason:
-        "Accessing or exposing secret/credential files (.env, mutation-hmac*.key) in shell commands is banned by harness policy.",
+        "Accessing or exposing secret/credential files (.env, mutation-hmac*.key, auth-tokens.json) in shell commands is banned by harness policy.",
+    }
+  }
+  if (extractCommandSegments(trimmed).some(isHarnessStateReadingSegment)) {
+    return {
+      ruleId: "harness-state-mutation",
+      reason:
+        "Reading or inspecting protected harness runtime state (<git-common-dir>/harness/**, auth-tokens.json, daemon.sock, daemon.lock, workflow-backups/) is banned by harness policy.",
     }
   }
   if (GUARD_SELF_INVOCATION_PATTERN.test(view.argv)) {
@@ -529,8 +641,17 @@ export const classifyCommand = (command: string): GuardVerdict => {
   return isCommandAllowed(norm) ? "allow" : "escalate"
 }
 
+export type FileWriteDenyRuleId =
+  | "readonly-subtree"
+  | "verify-stamp"
+  | "mutate-stamp"
+  | "harness-cache"
+  | "harness-common-dir-state"
+  | "secret-file"
+
 export interface FileWriteGuardResult {
   readonly verdict: "allow" | "deny" | "ask"
+  readonly ruleId?: FileWriteDenyRuleId | undefined
   readonly reason?: string | undefined
 }
 
@@ -545,6 +666,7 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
   if (candidates.some((p) => /(^|\/)repos\/(effect|alchemy)(\/|$)/.test(p))) {
     return {
       verdict: "deny",
+      ruleId: "readonly-subtree",
       reason: `Protected read-only subtree cannot be modified: ${filePath}`,
     }
   }
@@ -552,6 +674,7 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
   if (candidates.some((p) => /(^|\/)\.harness\/(worktrees\/[^/]+\/)?verify-stamp\.json$/.test(p))) {
     return {
       verdict: "deny",
+      ruleId: "verify-stamp",
       reason: `Direct modification of verify-stamp.json is forbidden (stamp forgery protection): ${filePath}`,
     }
   }
@@ -559,6 +682,7 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
   if (candidates.some((p) => /(^|\/)\.harness\/(worktrees\/[^/]+\/)?mutate-stamp\.json$/.test(p))) {
     return {
       verdict: "deny",
+      ruleId: "mutate-stamp",
       reason: `Direct modification of mutate-stamp.json is forbidden (stamp forgery protection): ${filePath}`,
     }
   }
@@ -572,7 +696,16 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
   ) {
     return {
       verdict: "deny",
+      ruleId: "harness-cache",
       reason: `Direct modification of harness cache file is forbidden: ${filePath}`,
+    }
+  }
+
+  if (candidates.some((p) => PROTECTED_HARNESS_FILE_WRITE_PATTERN.test(p))) {
+    return {
+      verdict: "deny",
+      ruleId: "harness-common-dir-state",
+      reason: `Direct modification of protected harness runtime state is forbidden: ${filePath}`,
     }
   }
 
@@ -586,6 +719,7 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
   ) {
     return {
       verdict: "deny",
+      ruleId: "secret-file",
       reason: `Secret or credential file modification is forbidden by harness guard: ${filePath}`,
     }
   }

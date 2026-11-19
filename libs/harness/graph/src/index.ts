@@ -173,9 +173,20 @@ export {
   type OmnigraphSyncShape,
 } from "./omnigraph-sync.js"
 export {
+  HARNESS_OMNIGRAPH_GRAPH_ID,
+  WORKFLOW_OMNIGRAPH_GRAPH_ID,
   isLoopbackOmnigraphUrl,
+  isOmnigraphPreconditionOrConflictError,
+  isOmnigraphTooManyRequestsError,
+  isOmnigraphUnavailableError,
   readAuthTokensFromClusterDir,
+  resolveOmnigraphGraphId,
 } from "./omnigraph-v014-ops.js"
+export {
+  makeWorkflowOmnigraphClient,
+  resolveWorkflowOmnigraphConfig,
+  type ResolvedOmnigraphClientConfig,
+} from "./omnigraph-operations.js"
 export {
   MAX_STRUCTURAL_SEARCH_MATCHES,
   StructuralSearch,
@@ -196,9 +207,7 @@ export {
   type StructuralSearchOptions,
   type StructuralSearchResult,
 } from "./structural-search.js"
-export {
-  loadPatternDocs,
-} from "./pattern-index.js"
+export { loadPatternDocs } from "./pattern-index.js"
 export {
   computeBaseTopologyHash,
   computeDeclHash,
@@ -283,6 +292,7 @@ export {
   readGraphHeadMeta,
   readGraphHeadMetaState,
   resolveCanonicalRepoRoot,
+  resolveGitCommonDir,
   resolveGitHeadState,
   resolveOmnigraphClusterDir,
   resolveOmnigraphTaskBranches,

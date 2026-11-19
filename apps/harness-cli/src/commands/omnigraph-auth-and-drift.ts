@@ -22,6 +22,8 @@ import {
   type OfflineOmnigraphLintResult,
   runOfflineOmnigraphLintGate,
 } from "./omnigraph-lint-gate.js"
+import { matchExecSyncStdout } from "./omnigraph-workflow-backup.js"
+import { buildOmnigraphClusterKillArgs } from "./repo-path.js"
 
 export {
   type OfflineOmnigraphLintResult,
@@ -38,6 +40,9 @@ const CONFIG_DIGEST_FILES = [
   "queries/harness.gq",
   "graph.policy.yaml",
   "cluster.policy.yaml",
+  "workflows.schema.pg",
+  "workflow-queries/workflows.gq",
+  "workflows.policy.yaml",
 ] as const
 
 const ConfigDigestsSchema = Schema.fromJsonString(
@@ -48,6 +53,10 @@ const ConfigDigestsSchema = Schema.fromJsonString(
     "queries/harness.gq": Schema.String,
     "graph.policy.yaml": Schema.String,
     "cluster.policy.yaml": Schema.String,
+    "workflows.schema.pg": Schema.optional(Schema.String),
+    "workflows.schema.pg@keys": Schema.optional(Schema.String),
+    "workflow-queries/workflows.gq": Schema.optional(Schema.String),
+    "workflows.policy.yaml": Schema.optional(Schema.String),
   }),
 )
 
@@ -78,10 +87,14 @@ export const resolveOmnigraphConfigDir = (
 
 export const computeOmnigraphConfigStamp = (configDir: string): string => {
   const baseFiles = ["cluster.yaml", "schema.pg", "queries/harness.gq"]
-  const optionalPolicyFiles = ["graph.policy.yaml", "cluster.policy.yaml"].filter((f) =>
-    nodeSyncHostIo.existsSync(join(configDir, f)),
-  )
-  return [...baseFiles, ...optionalPolicyFiles]
+  const optionalConfigFiles = [
+    "graph.policy.yaml",
+    "cluster.policy.yaml",
+    "workflows.schema.pg",
+    "workflow-queries/workflows.gq",
+    "workflows.policy.yaml",
+  ].filter((f) => nodeSyncHostIo.existsSync(join(configDir, f)))
+  return [...baseFiles, ...optionalConfigFiles]
     .map((f) => {
       const p = join(configDir, f)
       return nodeSyncHostIo.existsSync(p) ? nodeSyncHostIo.readTextSync(p) : ""
@@ -96,6 +109,8 @@ export const extractSchemaEdgeKeyDigest = (schemaContent: string): string => {
   return createHash("sha256").update(keys.join("\n")).digest("hex")
 }
 
+const EMPTY_CONTENT_SHA256 = createHash("sha256").update("").digest("hex")
+
 export const computeConfigDigests = (configDir: string): ConfigDigests => {
   const readFileOrEmpty = (relPath: string): string => {
     const fullPath = join(configDir, relPath)
@@ -104,6 +119,7 @@ export const computeConfigDigests = (configDir: string): ConfigDigests => {
   const hashContent = (content: string): string =>
     createHash("sha256").update(content).digest("hex")
   const schemaContent = readFileOrEmpty(CONFIG_DIGEST_FILES[1])
+  const workflowsSchemaContent = readFileOrEmpty(CONFIG_DIGEST_FILES[5])
   return {
     "cluster.yaml": hashContent(readFileOrEmpty(CONFIG_DIGEST_FILES[0])),
     "schema.pg": hashContent(schemaContent),
@@ -111,6 +127,10 @@ export const computeConfigDigests = (configDir: string): ConfigDigests => {
     "queries/harness.gq": hashContent(readFileOrEmpty(CONFIG_DIGEST_FILES[2])),
     "graph.policy.yaml": hashContent(readFileOrEmpty(CONFIG_DIGEST_FILES[3])),
     "cluster.policy.yaml": hashContent(readFileOrEmpty(CONFIG_DIGEST_FILES[4])),
+    "workflows.schema.pg": hashContent(workflowsSchemaContent),
+    "workflows.schema.pg@keys": extractSchemaEdgeKeyDigest(workflowsSchemaContent),
+    "workflow-queries/workflows.gq": hashContent(readFileOrEmpty(CONFIG_DIGEST_FILES[6])),
+    "workflows.policy.yaml": hashContent(readFileOrEmpty(CONFIG_DIGEST_FILES[7])),
   }
 }
 
@@ -160,18 +180,28 @@ export const evaluateClusterConfigDrift = (
 
     const queriesChanged =
       prevDigests !== undefined
-        ? digests["queries/harness.gq"] !== prevDigests["queries/harness.gq"]
+        ? digests["queries/harness.gq"] !== prevDigests["queries/harness.gq"] ||
+          digests["workflow-queries/workflows.gq"] !==
+            (prevDigests["workflow-queries/workflows.gq"] ?? EMPTY_CONTENT_SHA256)
         : stampChanged
     const schemaAdditiveChanged =
-      prevDigests !== undefined ? digests["schema.pg"] !== prevDigests["schema.pg"] : stampChanged
+      prevDigests !== undefined
+        ? digests["schema.pg"] !== prevDigests["schema.pg"] ||
+          digests["workflows.schema.pg"] !==
+            (prevDigests["workflows.schema.pg"] ?? EMPTY_CONTENT_SHA256)
+        : stampChanged
     const policyBundleOrEdgeKeyChanged =
       (clusterExists && !epochMatches) ||
       (prevDigests !== undefined
         ? digests["cluster.yaml"] !== prevDigests["cluster.yaml"] ||
           digests["graph.policy.yaml"] !== prevDigests["graph.policy.yaml"] ||
           digests["cluster.policy.yaml"] !== prevDigests["cluster.policy.yaml"] ||
+          digests["workflows.policy.yaml"] !==
+            (prevDigests["workflows.policy.yaml"] ?? EMPTY_CONTENT_SHA256) ||
           (prevDigests["schema.pg@keys"] !== undefined &&
-            digests["schema.pg@keys"] !== prevDigests["schema.pg@keys"])
+            digests["schema.pg@keys"] !== prevDigests["schema.pg@keys"]) ||
+          (prevDigests["workflows.schema.pg@keys"] !== undefined &&
+            digests["workflows.schema.pg@keys"] !== prevDigests["workflows.schema.pg@keys"])
         : stampChanged)
 
     const driftKind: OmnigraphConfigDriftKind = policyBundleOrEdgeKeyChanged
@@ -259,6 +289,18 @@ export const writeServerMetaAtomic = (
   meta: OmnigraphServerMeta,
 ): Result.Result<void, Error> => writeSecureJsonAtomic(join(clusterRootDir, "server.json"), meta)
 
+export const unlinkServerMetaIfExists = (clusterRootDir: string): void => {
+  const serverJsonPath = join(clusterRootDir, "server.json")
+  if (
+    !nodeSyncHostIo.isSymbolicLinkSync(serverJsonPath) &&
+    nodeSyncHostIo.existsSync(serverJsonPath)
+  ) {
+    Result.try(() => {
+      nodeSyncHostIo.unlinkSync(serverJsonPath)
+    })
+  }
+}
+
 export const ensureOmnigraphEndpointTokens = (
   clusterRootDir: string,
 ): Result.Result<OmnigraphEndpointTokens, Error> => {
@@ -331,10 +373,17 @@ const compareAndUnlinkStaleLock = (lockPath: string, expectedRaw: string): boole
         Result.try(() => nodeSyncHostIo.renameSync(tombstonePath, lockPath))
         return false
       }
-      match(Result.try({ try: () => nodeSyncHostIo.unlinkSync(tombstonePath), catch: (e) => String(e) }))
+      match(
+        Result.try({
+          try: () => nodeSyncHostIo.unlinkSync(tombstonePath),
+          catch: (e) => String(e),
+        }),
+      )
         .with({ _tag: "Success" }, () => undefined)
         .with({ _tag: "Failure" }, ({ failure }) => {
-          process.stderr.write(`[harness:omnigraph] Warning: failed to unlink tombstone ${tombstonePath}: ${failure}\n`)
+          process.stderr.write(
+            `[harness:omnigraph] Warning: failed to unlink tombstone ${tombstonePath}: ${failure}\n`,
+          )
         })
         .exhaustive()
       return true
@@ -389,7 +438,10 @@ export const tryAcquireOmnigraphClusterLock = (
     const raw = readOutcome.raw
     const parsedOpt = Schema.decodeOption(StartupLockJsonSchema)(raw)
     const canUnlinkStale = match(parsedOpt)
-      .with({ _tag: "Some" }, ({ value }) => !(typeof value.pid === "number" && isProcessPidAlive(value.pid)))
+      .with(
+        { _tag: "Some" },
+        ({ value }) => !(typeof value.pid === "number" && isProcessPidAlive(value.pid)),
+      )
       .with({ _tag: "None" }, () => {
         const mtimeMs = nodeSyncHostIo.statMtimeMsSync(lockPath)
         return mtimeMs !== undefined && Date.now() - mtimeMs >= RAW_LOCK_DECODE_GRACE_MS
@@ -421,7 +473,9 @@ export const acquireOmnigraphClusterLockEffect = (
       const resolved = match(attempt)
         .with({ _tag: "Acquired" }, ({ handle }) => ({ done: true as const, handle }))
         .with({ _tag: "Failed" }, ({ reason }) => {
-          process.stderr.write(`[harness:omnigraph] Error: startup lock failed for ${clusterRootDir}: ${reason}\n`)
+          process.stderr.write(
+            `[harness:omnigraph] Error: startup lock failed for ${clusterRootDir}: ${reason}\n`,
+          )
           return { done: true as const, handle: undefined }
         })
         .with({ _tag: "Contended" }, () => ({ done: false as const, handle: undefined }))
@@ -448,9 +502,14 @@ export const releaseOmnigraphClusterLock = (
         return
       }
       if (!nodeSyncHostIo.existsSync(handle.lockPath)) return
-      const parsedOpt = Schema.decodeOption(StartupLockJsonSchema)(nodeSyncHostIo.readTextSync(handle.lockPath))
+      const parsedOpt = Schema.decodeOption(StartupLockJsonSchema)(
+        nodeSyncHostIo.readTextSync(handle.lockPath),
+      )
       const isOwner = match(parsedOpt)
-        .with({ _tag: "Some" }, ({ value }) => value.pid === process.pid && value.lockToken === handle.lockToken)
+        .with(
+          { _tag: "Some" },
+          ({ value }) => value.pid === process.pid && value.lockToken === handle.lockToken,
+        )
         .with({ _tag: "None" }, () => false)
         .exhaustive()
       if (isOwner) nodeSyncHostIo.unlinkSync(handle.lockPath)
@@ -460,10 +519,33 @@ export const releaseOmnigraphClusterLock = (
   match(res)
     .with({ _tag: "Success" }, () => undefined)
     .with({ _tag: "Failure" }, ({ failure }) => {
-      process.stderr.write(`[harness:omnigraph] Warning: failed to release lock ${targetPath}: ${failure}\n`)
+      process.stderr.write(
+        `[harness:omnigraph] Warning: failed to release lock ${targetPath}: ${failure}\n`,
+      )
     })
     .exhaustive()
 }
+
+const sendSignalOrEsrch = (pid: number, signal: "SIGTERM" | "SIGKILL"): Effect.Effect<boolean> =>
+  Effect.try({
+    try: () => {
+      process.kill(pid, signal)
+      return true
+    },
+    catch: (err) => {
+      const code =
+        typeof err === "object" && err !== null && "code" in err && typeof err.code === "string"
+          ? err.code
+          : undefined
+      if (code === "ESRCH") {
+        return true
+      }
+      process.stderr.write(
+        `[harness:omnigraph] Error: failed to ${signal} omnigraph PID ${pid}: ${err instanceof Error ? err.message : String(err)}\n`,
+      )
+      return false
+    },
+  }).pipe(Effect.orElseSucceed(() => false))
 
 export const killOmnigraphServerPidIfAlive = (
   serverPid: number | undefined,
@@ -485,36 +567,58 @@ export const killOmnigraphServerPidIfAlive = (
       )
       return false
     }
-    const killTermRes = yield* Effect.try({
-      try: () => {
-        process.kill(serverPid, "SIGTERM")
-        return { ok: true as const }
-      },
-      catch: (err) => {
-        const code =
-          typeof err === "object" && err !== null && "code" in err && typeof err.code === "string"
-            ? err.code
-            : undefined
-        if (code === "ESRCH") {
-          return { ok: true as const }
-        }
-        process.stderr.write(
-          `[harness:omnigraph] Error: failed to SIGTERM omnigraph PID ${serverPid}: ${err instanceof Error ? err.message : String(err)}\n`,
-        )
-        return { ok: false as const }
-      },
-    }).pipe(Effect.orElseSucceed(() => ({ ok: false as const })))
-    if (!killTermRes.ok) {
+    if (!(yield* sendSignalOrEsrch(serverPid, "SIGTERM"))) {
       return false
     }
     for (let attempt = 0; attempt < 10 && isProcessPidAlive(serverPid); attempt++) {
       yield* Effect.sleep("50 millis")
     }
     if (isProcessPidAlive(serverPid)) {
-      process.stderr.write(
-        `[harness:omnigraph] Error: omnigraph PID ${serverPid} is still alive after SIGTERM during ${phaseLabel}\n`,
-      )
-      return false
+      if (!(yield* sendSignalOrEsrch(serverPid, "SIGKILL"))) {
+        return false
+      }
+      for (let attempt = 0; attempt < 5 && isProcessPidAlive(serverPid); attempt++) {
+        yield* Effect.sleep("50 millis")
+      }
+      if (isProcessPidAlive(serverPid)) {
+        process.stderr.write(
+          `[harness:omnigraph] Error: omnigraph PID ${serverPid} is still alive after SIGTERM+SIGKILL during ${phaseLabel}\n`,
+        )
+        return false
+      }
     }
     return true
   })
+
+export const stopStaleOmnigraphClusterBeforeDelete = (
+  clusterRootDir: string,
+  serverPid: number | undefined,
+  hostIo: typeof nodeSyncHostIo = nodeSyncHostIo,
+  isPidAlive: (pid: number) => boolean = isProcessPidAlive,
+): boolean => {
+  const [killBin, killArgs] = buildOmnigraphClusterKillArgs(clusterRootDir)
+  const killResult = Result.try({
+    try: () =>
+      matchExecSyncStdout(
+        "Warning: pkill",
+        hostIo.execFileSync(killBin, [...killArgs], { timeoutMs: 5_000 }),
+        true,
+      ) !== undefined,
+    catch: (err) => {
+      process.stderr.write(
+        `[harness:omnigraph] Warning: pkill failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      )
+      return false
+    },
+  })
+  const killOk = Result.getOrElse(killResult, () => false)
+  if (!killOk) {
+    if (serverPid !== undefined && isPidAlive(serverPid)) {
+      process.stderr.write(
+        `[harness:omnigraph] Error: pkill failed and stale omnigraph PID ${serverPid} is still alive; aborting RocksDB cleanup\n`,
+      )
+    }
+    return false
+  }
+  return true
+}

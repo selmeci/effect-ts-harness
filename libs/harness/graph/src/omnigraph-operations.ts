@@ -14,6 +14,8 @@ import {
 import { mapPlaysRoleToOmnigraphEdgeName } from "./graph-engine.js"
 import { getNodeKey, type HarnessGraph, type HarnessNode } from "./model.js"
 import {
+  HARNESS_OMNIGRAPH_GRAPH_ID,
+  WORKFLOW_OMNIGRAPH_GRAPH_ID,
   decodeStrictOptionalCommitId,
   decodeStrictOptionalCursor,
   executeGetBlobText,
@@ -21,6 +23,8 @@ import {
   executeStatBlob,
   isChangeFeedGapError,
   isLoopbackOmnigraphUrl,
+  isOmnigraphPreconditionOrConflictError,
+  isOmnigraphTooManyRequestsError,
   isOmnigraphUnavailableError,
   mapOmnigraphConflictError,
   mapOmnigraphPreconditionError,
@@ -40,9 +44,12 @@ import {
   type OmnigraphProposeMergeInput,
   type OmnigraphPutBlobInput,
   readAuthTokensFromClusterDir,
+  resolveOmnigraphGraphId,
 } from "./omnigraph-v014-ops.js"
 
 export {
+  HARNESS_OMNIGRAPH_GRAPH_ID,
+  WORKFLOW_OMNIGRAPH_GRAPH_ID,
   decodeStrictOptionalCommitId,
   decodeStrictOptionalCursor,
   executeGetBlobText,
@@ -50,11 +57,14 @@ export {
   executeStatBlob,
   isChangeFeedGapError,
   isLoopbackOmnigraphUrl,
+  isOmnigraphPreconditionOrConflictError,
+  isOmnigraphTooManyRequestsError,
   isOmnigraphUnavailableError,
   mapOmnigraphConflictError,
   mapOmnigraphPreconditionError,
   OmnigraphLoadError,
   readAuthTokensFromClusterDir,
+  resolveOmnigraphGraphId,
   type OmnigraphBlobSelectorInput,
   type OmnigraphBlobStatResult,
   type OmnigraphChangeFeedResult,
@@ -73,9 +83,7 @@ export {
 
 export const OmnigraphClient = Omnigraph
 
-const decodeServerMetaOption = Schema.decodeOption(
-  Schema.fromJsonString(OmnigraphServerMetaSchema),
-)
+const decodeServerMetaOption = Schema.decodeOption(Schema.fromJsonString(OmnigraphServerMetaSchema))
 
 /**
  * Resolves the Omnigraph server base URL from explicit options, environment
@@ -99,9 +107,7 @@ export const resolveOmnigraphBaseUrl = (
     const serverJsonPath = join(clusterDir, "server.json")
     if (effectiveHostIo.existsSync(serverJsonPath)) {
       const expectedCanonicalRoot = resolveCanonicalRepoRoot(options.repoRoot, effectiveHostIo)
-      const baseUrlFromMeta = match(
-        Result.try(() => effectiveHostIo.readTextSync(serverJsonPath)),
-      )
+      const baseUrlFromMeta = match(Result.try(() => effectiveHostIo.readTextSync(serverJsonPath)))
         .with({ _tag: "Failure" }, ({ failure }) => {
           process.stderr.write(
             `[harness/graph] Warning: failed to read ${serverJsonPath}: ${toErrorReasonMessage(failure)}\n`,
@@ -144,15 +150,21 @@ export const resolveOmnigraphBaseUrl = (
   return effectiveEnv.OMNIGRAPH_URL ?? "http://127.0.0.1:8080"
 }
 
-export const makeOmnigraphClient = (
+export interface ResolvedOmnigraphClientConfig {
+  readonly baseUrl: string
+  readonly graphId: string
+  readonly token: string | undefined
+}
+
+export const resolveWorkflowOmnigraphConfig = (
   options?: OmnigraphConnectionOptions,
   hostIo?: SyncHostIo,
   env?: Readonly<Record<string, string | undefined>>,
-): Omnigraph => {
+): ResolvedOmnigraphClientConfig => {
   const effectiveHostIo = hostIo ?? options?.hostIo
   const effectiveEnv = options?.env ?? env ?? effectiveHostIo?.getEnv() ?? {}
   const baseUrl = resolveOmnigraphBaseUrl(options, effectiveEnv, effectiveHostIo)
-  const graphId = options?.graphId ?? effectiveEnv.OMNIGRAPH_GRAPH_ID ?? "harness"
+  const graphId = options?.graphId ?? WORKFLOW_OMNIGRAPH_GRAPH_ID
   const localAuthToken =
     options?.token === undefined &&
     effectiveEnv.OMNIGRAPH_TOKEN === undefined &&
@@ -166,11 +178,46 @@ export const makeOmnigraphClient = (
         )
       : undefined
   const token = options?.token ?? effectiveEnv.OMNIGRAPH_TOKEN ?? localAuthToken
+  return { baseUrl, graphId, token }
+}
 
+export const makeOmnigraphClient = (
+  options?: OmnigraphConnectionOptions,
+  hostIo?: SyncHostIo,
+  env?: Readonly<Record<string, string | undefined>>,
+): Omnigraph => {
+  const effectiveHostIo = hostIo ?? options?.hostIo
+  const effectiveEnv = options?.env ?? env ?? effectiveHostIo?.getEnv() ?? {}
+  const resolved = resolveWorkflowOmnigraphConfig(
+    {
+      ...options,
+      graphId: resolveOmnigraphGraphId(options, effectiveEnv, HARNESS_OMNIGRAPH_GRAPH_ID),
+    },
+    effectiveHostIo,
+    effectiveEnv,
+  )
   return new Omnigraph({
-    baseUrl,
-    graphId,
-    ...(token ? { token } : {}),
+    baseUrl: resolved.baseUrl,
+    graphId: resolved.graphId,
+    ...(resolved.token ? { token: resolved.token } : {}),
+    ...(options?.fetch ? { fetch: options.fetch } : {}),
+  })
+}
+
+export const makeWorkflowOmnigraphClient = (
+  options?: OmnigraphConnectionOptions,
+  hostIo?: SyncHostIo,
+  env?: Readonly<Record<string, string | undefined>>,
+): Omnigraph => {
+  const resolved = resolveWorkflowOmnigraphConfig(
+    { ...options, actor: options?.actor ?? "harness-cli" },
+    hostIo,
+    env,
+  )
+  return new Omnigraph({
+    baseUrl: resolved.baseUrl,
+    graphId: resolved.graphId,
+    ...(resolved.token ? { token: resolved.token } : {}),
     ...(options?.fetch ? { fetch: options.fetch } : {}),
   })
 }
@@ -212,8 +259,13 @@ export const toOmnigraphServerNdjsonResult = (
         if (!n.qualname) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.qualname })
         pushNode("EffectFn", n.qualname, {
-          qualname: n.qualname, spanName: n.spanName, packageTag: n.packageTag, file: n.file, line: n.line,
-          successType: n.successType ?? "unknown", isStub: n.isStub ?? false,
+          qualname: n.qualname,
+          spanName: n.spanName,
+          packageTag: n.packageTag,
+          file: n.file,
+          line: n.line,
+          successType: n.successType ?? "unknown",
+          isStub: n.isStub ?? false,
           ...(n.payloadSchemas ? { payloadSchemas: n.payloadSchemas } : {}),
           ...(n.inputSchema ? { inputSchema: n.inputSchema } : {}),
           ...(n.outputSchema ? { outputSchema: n.outputSchema } : {}),
@@ -224,48 +276,70 @@ export const toOmnigraphServerNdjsonResult = (
         if (!n.tagId) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.tagId })
         pushNode("ServiceTag", n.tagId, {
-          tagId: n.tagId, qualname: n.qualname ?? n.tagId, name: n.name,
+          tagId: n.tagId,
+          qualname: n.qualname ?? n.tagId,
+          name: n.name,
           ...(n.identifier ? { identifier: n.identifier } : {}),
           ...(n.packageTag ? { packageTag: n.packageTag } : {}),
-          file: n.file, ...(n.line !== undefined ? { line: n.line } : {}), ...archimateFields,
+          file: n.file,
+          ...(n.line !== undefined ? { line: n.line } : {}),
+          ...archimateFields,
         })
       })
       .with({ _tag: "ServiceLayer" }, (n) => {
         if (!n.qualname) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.qualname })
         pushNode("ServiceLayer", n.qualname, {
-          qualname: n.qualname, ...(n.layerKind ? { layerKind: n.layerKind } : {}),
+          qualname: n.qualname,
+          ...(n.layerKind ? { layerKind: n.layerKind } : {}),
           ...(n.packageTag ? { packageTag: n.packageTag } : {}),
-          file: n.file, ...(n.line !== undefined ? { line: n.line } : {}), ...archimateFields,
+          file: n.file,
+          ...(n.line !== undefined ? { line: n.line } : {}),
+          ...archimateFields,
         })
       })
       .with({ _tag: "TaggedError" }, (n) => {
         if (!n.errorTag) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.errorTag })
         pushNode("TaggedError", n.errorTag, {
-          errorTag: n.errorTag, qualname: n.qualname ?? n.errorTag, ...(n.tag ? { tag: n.tag } : {}),
-          file: n.file, ...(n.line !== undefined ? { line: n.line } : {}), ...archimateFields,
+          errorTag: n.errorTag,
+          qualname: n.qualname ?? n.errorTag,
+          ...(n.tag ? { tag: n.tag } : {}),
+          file: n.file,
+          ...(n.line !== undefined ? { line: n.line } : {}),
+          ...archimateFields,
         })
       })
       .with({ _tag: "SchemaDef" }, (n) => {
         if (!n.schemaName) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.schemaName })
         pushNode("SchemaDef", n.schemaName, {
-          schemaName: n.schemaName, qualname: n.qualname ?? n.schemaName, name: n.name ?? n.schemaName,
-          ...(n.packageTag ? { packageTag: n.packageTag } : {}), file: n.file,
+          schemaName: n.schemaName,
+          qualname: n.qualname ?? n.schemaName,
+          name: n.name ?? n.schemaName,
+          ...(n.packageTag ? { packageTag: n.packageTag } : {}),
+          file: n.file,
           ...(n.line !== undefined ? { line: n.line } : {}),
-          ...(n.isBranded !== undefined ? { isBranded: n.isBranded } : {}), ...archimateFields,
+          ...(n.isBranded !== undefined ? { isBranded: n.isBranded } : {}),
+          ...archimateFields,
         })
       })
       .with({ _tag: "VitestCase" }, (n) => {
         if (!n.testId) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.testId })
         pushNode("VitestCase", n.testId, {
-          testId: n.testId, qualname: n.qualname ?? n.testId, testFile: n.testFile, testName: n.testName,
-          ...(n.name ? { name: n.name } : {}), ...(n.file ? { file: n.file } : {}),
-          ...(n.line !== undefined ? { line: n.line } : {}), lastTreeHash: n.lastTreeHash ?? "",
+          testId: n.testId,
+          qualname: n.qualname ?? n.testId,
+          testFile: n.testFile,
+          testName: n.testName,
+          ...(n.name ? { name: n.name } : {}),
+          ...(n.file ? { file: n.file } : {}),
+          ...(n.line !== undefined ? { line: n.line } : {}),
+          lastTreeHash: n.lastTreeHash ?? "",
           isPropertyTest: n.isPropertyTest ?? false,
-          ...(n.hasNonPrimitiveArbitrary !== undefined ? { hasNonPrimitiveArbitrary: n.hasNonPrimitiveArbitrary } : {}),
+          ...(n.hasNonPrimitiveArbitrary !== undefined
+            ? { hasNonPrimitiveArbitrary: n.hasNonPrimitiveArbitrary }
+            : {}),
           ...archimateFields,
         })
       })
@@ -273,54 +347,79 @@ export const toOmnigraphServerNdjsonResult = (
         if (!n.slug) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.slug })
         pushNode("PatternDoc", n.slug, {
-          slug: n.slug, qualname: n.slug, path: n.path, summary: n.summary,
+          slug: n.slug,
+          qualname: n.slug,
+          path: n.path,
+          summary: n.summary,
           ...(n.title ? { title: n.title } : {}),
           ...(n.coveredSpans ? { coveredSpans: n.coveredSpans } : {}),
-          ...(n.coveredTags ? { coveredTags: n.coveredTags } : {}), ...archimateFields,
+          ...(n.coveredTags ? { coveredTags: n.coveredTags } : {}),
+          ...archimateFields,
         })
       })
       .with({ _tag: "AdrDoc" }, (n) => {
         if (!n.id) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.id })
         pushNode("AdrDoc", n.id, {
-          id: n.id, qualname: n.id, title: n.title, status: n.status, ...(n.date ? { date: n.date } : {}),
-          path: n.path, enforcedByFiles: n.enforcedByFiles,
+          id: n.id,
+          qualname: n.id,
+          title: n.title,
+          status: n.status,
+          ...(n.date ? { date: n.date } : {}),
+          path: n.path,
+          enforcedByFiles: n.enforcedByFiles,
           ...(n.referencedSpans ? { referencedSpans: n.referencedSpans } : {}),
           ...(n.referencedServices ? { referencedServices: n.referencedServices } : {}),
-          ...(n.referencedErrors ? { referencedErrors: n.referencedErrors } : {}), ...archimateFields,
+          ...(n.referencedErrors ? { referencedErrors: n.referencedErrors } : {}),
+          ...archimateFields,
         })
       })
       .with({ _tag: "EarsSpec" }, (n) => {
         if (!n.id) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.id })
         pushNode("EarsSpec", n.id, {
-          id: n.id, qualname: n.id, title: n.title, status: n.status, ...(n.date ? { date: n.date } : {}),
-          path: n.path, enforcedByFiles: n.enforcedByFiles,
+          id: n.id,
+          qualname: n.id,
+          title: n.title,
+          status: n.status,
+          ...(n.date ? { date: n.date } : {}),
+          path: n.path,
+          enforcedByFiles: n.enforcedByFiles,
           ...(n.informedByAdrs ? { informedByAdrs: n.informedByAdrs } : {}),
           ...(n.referencedSpans ? { referencedSpans: n.referencedSpans } : {}),
           ...(n.referencedServices ? { referencedServices: n.referencedServices } : {}),
-          ...(n.referencedErrors ? { referencedErrors: n.referencedErrors } : {}), ...archimateFields,
+          ...(n.referencedErrors ? { referencedErrors: n.referencedErrors } : {}),
+          ...archimateFields,
         })
       })
       .with({ _tag: "EffectSignature" }, (n) => {
         if (!n.relationId) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.relationId })
         pushNode("EffectSignature", n.relationId, {
-          relationId: n.relationId, qualname: n.relationId, callerQualname: n.callerQualname, file: n.file, line: n.line,
+          relationId: n.relationId,
+          qualname: n.relationId,
+          callerQualname: n.callerQualname,
+          file: n.file,
+          line: n.line,
         })
       })
       .with({ _tag: "LayerFlow" }, (n) => {
         if (!n.relationId) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.relationId })
         pushNode("LayerFlow", n.relationId, {
-          relationId: n.relationId, qualname: n.relationId, layerQualname: n.layerQualname, file: n.file, line: n.line,
+          relationId: n.relationId,
+          qualname: n.relationId,
+          layerQualname: n.layerQualname,
+          file: n.file,
+          line: n.line,
         })
       })
       .with({ _tag: "TraceabilityTuple" }, (n) => {
         if (!n.relationId) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.relationId })
         pushNode("TraceabilityTuple", n.relationId, {
-          relationId: n.relationId, qualname: n.relationId,
+          relationId: n.relationId,
+          qualname: n.relationId,
           ...(n.adrId ? { adrId: n.adrId } : {}),
           ...(n.earsSpecId ? { earsSpecId: n.earsSpecId } : {}),
           ...(n.requirementId ? { requirementId: n.requirementId } : {}),
@@ -332,17 +431,28 @@ export const toOmnigraphServerNdjsonResult = (
         if (!n.relationId) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.relationId })
         pushNode("HttpEndpointTuple", n.relationId, {
-          relationId: n.relationId, qualname: n.relationId, endpointGroup: n.endpointGroup,
-          endpointName: n.endpointName, method: n.method, path: n.path,
-          ...(n.handlerQualname ? { handlerQualname: n.handlerQualname } : {}), file: n.file, line: n.line,
+          relationId: n.relationId,
+          qualname: n.relationId,
+          endpointGroup: n.endpointGroup,
+          endpointName: n.endpointName,
+          method: n.method,
+          path: n.path,
+          ...(n.handlerQualname ? { handlerQualname: n.handlerQualname } : {}),
+          file: n.file,
+          line: n.line,
         })
       })
       .with({ _tag: "MigrationTuple" }, (n) => {
         if (!n.relationId) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.relationId })
         pushNode("MigrationTuple", n.relationId, {
-          relationId: n.relationId, qualname: n.relationId, migrationId: n.migrationId,
-          engine: n.engine, moduleFile: n.moduleFile, isDestructive: n.isDestructive, line: n.line,
+          relationId: n.relationId,
+          qualname: n.relationId,
+          migrationId: n.migrationId,
+          engine: n.engine,
+          moduleFile: n.moduleFile,
+          isDestructive: n.isDestructive,
+          line: n.line,
         })
       })
       .exhaustive()

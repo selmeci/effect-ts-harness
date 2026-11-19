@@ -14,10 +14,13 @@ import {
   toErrorReasonMessage,
   type WorkspaceFilePath,
 } from "@harness/contract"
+import { resolveGitCommonDir } from "@harness/graph/cluster-resolver"
 import { UnixSocketDaemonPort, type UnixSocketDaemonPortShape } from "@harness/service"
+import { nodeSyncHostIo } from "./node-host-io.js"
 
 const MAX_DAEMON_BUFFER_BYTES = 1_048_576
-const DAEMON_SOCKET_TIMEOUT_MS = 5000
+export const DAEMON_SOCKET_TIMEOUT_MS = 5000
+export const DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS = 35_000
 const PROBE_SOCKET_TIMEOUT_MS = 1500
 const MAX_DAEMON_LINE_CONCURRENCY = 4
 const MAX_DAEMON_LINE_QUEUE_CAPACITY = 256
@@ -56,12 +59,21 @@ const DaemonLineRequestSchema = Schema.Struct({
   command: Schema.Literals(["plan-check", "gc", "verify", "bench"]),
 })
 
-const decodeDaemonLineRequest = Schema.decodeOption(
-  Schema.fromJsonString(DaemonLineRequestSchema),
-)
+const decodeDaemonLineRequest = Schema.decodeOption(Schema.fromJsonString(DaemonLineRequestSchema))
 
-const resolveHarnessDaemonSocketPath = (repoRoot: string): DaemonSocketPath =>
-  DaemonSocketPath.make(nodePath.join(repoRoot, ".harness", "daemon.sock"))
+/**
+ * Resolves the canonical harness daemon Unix socket path.
+ * In git repositories (including linked worktrees), resolves to `<git-common-dir>/harness/daemon.sock`
+ * so all worktrees share one canonical daemon within Linux's 107-byte `UNIX_PATH_MAX`.
+ * Falls back to `<repoRoot>/.harness/daemon.sock` for non-git directories.
+ */
+const resolveHarnessDaemonSocketPath = (repoRoot: string): DaemonSocketPath => {
+  const commonGitDir = resolveGitCommonDir(repoRoot, nodeSyncHostIo)
+  if (commonGitDir !== null) {
+    return DaemonSocketPath.make(nodePath.join(commonGitDir, "harness", "daemon.sock"))
+  }
+  return DaemonSocketPath.make(nodePath.join(repoRoot, ".harness", "daemon.sock"))
+}
 
 export { resolveHarnessDaemonSocketPath }
 
@@ -76,17 +88,30 @@ const toDaemonServerError = (
     reason: toErrorReasonMessage(err, "Unix socket daemon failure"),
   })
 
+export interface UnixSocketQueryOptions {
+  readonly timeoutMs?: number | undefined
+}
+
 export interface UnixSocketDaemonLayerOptions {
   readonly socketPathOverride?: DaemonSocketPath
   readonly lineHandler?: (line: string) => Effect.Effect<string>
+  readonly socketTimeoutMs?: number | undefined
+}
+
+const resolveQueryTimeoutMs = (timeoutOrOptions?: number | UnixSocketQueryOptions): number => {
+  if (typeof timeoutOrOptions === "number") {
+    return timeoutOrOptions
+  }
+  return timeoutOrOptions?.timeoutMs ?? PROBE_SOCKET_TIMEOUT_MS
 }
 
 export const queryUnixSocketLineDetailed = Effect.fn("UnixSocketDaemon.queryLineDetailed")(
   function* (
     socketPath: string,
     linePayload: string,
-    timeoutMs: number = 1500,
+    timeoutOrOptions?: number | UnixSocketQueryOptions,
   ): Effect.fn.Return<UnixSocketQueryResult> {
+    const timeoutMs = resolveQueryTimeoutMs(timeoutOrOptions)
     return yield* Effect.callback<UnixSocketQueryResult>((resume) => {
       const socket = net.createConnection(socketPath)
       let settled = false
@@ -143,9 +168,9 @@ export const queryUnixSocketLineDetailed = Effect.fn("UnixSocketDaemon.queryLine
 export const queryUnixSocketLine = Effect.fn("UnixSocketDaemon.queryLine")(function* (
   socketPath: string,
   linePayload: string,
-  timeoutMs: number = 1500,
+  timeoutOrOptions?: number | UnixSocketQueryOptions,
 ): Effect.fn.Return<Option.Option<string>> {
-  const result = yield* queryUnixSocketLineDetailed(socketPath, linePayload, timeoutMs)
+  const result = yield* queryUnixSocketLineDetailed(socketPath, linePayload, timeoutOrOptions)
   return match(result)
     .with({ _tag: "Reply" }, ({ line }) => Option.some(line))
     .with({ _tag: "Unavailable" }, () => Option.none<string>())
@@ -233,13 +258,14 @@ const closeNetServer = (
 const createDaemonNetServer = (
   openSockets: Set<net.Socket>,
   runLineHandler?: (line: string, socket: net.Socket) => void,
+  socketTimeoutMs: number = DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
 ): net.Server =>
   net.createServer((socket) => {
     openSockets.add(socket)
     socket.once("close", () => {
       openSockets.delete(socket)
     })
-    socket.setTimeout(DAEMON_SOCKET_TIMEOUT_MS, () => {
+    socket.setTimeout(socketTimeoutMs, () => {
       socket.destroy()
     })
     socket.on("error", () => {
@@ -285,7 +311,9 @@ const createDaemonNetServer = (
       match(reqOpt)
         .with({ _tag: "None" }, () => {
           if (!socket.destroyed && socket.writable) {
-            socket.end(`${JSON.stringify({ ok: false, error: "Invalid daemon request payload" })}\n`)
+            socket.end(
+              `${JSON.stringify({ ok: false, error: "Invalid daemon request payload" })}\n`,
+            )
           }
         })
         .with({ _tag: "Some" }, ({ value: req }) => {
@@ -315,13 +343,13 @@ const makeUnixSocketDaemonLayer = (
       const fs = yield* FileSystem.FileSystem
       const path = yield* Path.Path
       const lineHandler = options?.lineHandler
+      const socketTimeoutMs = options?.socketTimeoutMs ?? DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS
 
       const startServer = (
         repoRoot: WorkspaceFilePath,
       ): Effect.Effect<DaemonServerInfo, DaemonServerError, Scope.Scope> =>
         Effect.gen(function* () {
-          const socketPath =
-            options?.socketPathOverride ?? resolveHarnessDaemonSocketPath(repoRoot)
+          const socketPath = options?.socketPathOverride ?? resolveHarnessDaemonSocketPath(repoRoot)
           const dirPath = path.dirname(socketPath)
 
           const dirExistedBefore = yield* fs
@@ -374,7 +402,9 @@ const makeUnixSocketDaemonLayer = (
                         }
                         return Effect.sync(() => {
                           const causeText = Cause.pretty(cause)
-                          process.stderr.write(`[harness-daemon] lineHandler failed: ${causeText}\n`)
+                          process.stderr.write(
+                            `[harness-daemon] lineHandler failed: ${causeText}\n`,
+                          )
                           if (!socket.destroyed && socket.writable) {
                             socket.end(
                               `${JSON.stringify({ ok: false, error: "Daemon line handler failed", cause: causeText })}\n`,
@@ -390,7 +420,9 @@ const makeUnixSocketDaemonLayer = (
             runLineHandler = (line: string, socket: net.Socket): void => {
               if (!Queue.offerUnsafe(lineQueue, { socket, line })) {
                 if (!socket.destroyed && socket.writable) {
-                  socket.end(`${JSON.stringify({ ok: false, error: "Daemon request queue full" })}\n`)
+                  socket.end(
+                    `${JSON.stringify({ ok: false, error: "Daemon request queue full" })}\n`,
+                  )
                 } else {
                   socket.destroy()
                 }
@@ -414,9 +446,7 @@ const makeUnixSocketDaemonLayer = (
                 new DaemonServerError({
                   socketPath,
                   reasonKind: "already-alive",
-                  reason: ErrorReasonMessage.make(
-                    `Daemon socket '${socketPath}' is already alive`,
-                  ),
+                  reason: ErrorReasonMessage.make(`Daemon socket '${socketPath}' is already alive`),
                 }),
               ),
             )
@@ -455,7 +485,7 @@ const makeUnixSocketDaemonLayer = (
           yield* Effect.acquireRelease(
             Effect.gen(function* () {
               const openSockets = new Set<net.Socket>()
-              const server = createDaemonNetServer(openSockets, runLineHandler)
+              const server = createDaemonNetServer(openSockets, runLineHandler, socketTimeoutMs)
 
               const onServerRuntimeError = (err: Error) => {
                 process.stderr.write(
@@ -544,7 +574,9 @@ export const startScopedUnixSocketDaemon = Effect.fn("UnixSocketDaemon.startScop
     return yield* Effect.gen(function* () {
       const port = yield* UnixSocketDaemonPort
       return yield* port.startServer(repoRoot)
-    }).pipe(Effect.provide(makeUnixSocketDaemonLayer(options).pipe(Layer.provide(NodeServices.layer))))
+    }).pipe(
+      Effect.provide(makeUnixSocketDaemonLayer(options).pipe(Layer.provide(NodeServices.layer))),
+    )
   }
   const port = yield* UnixSocketDaemonPort
   return yield* port.startServer(repoRoot)
