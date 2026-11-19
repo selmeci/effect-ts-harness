@@ -321,15 +321,13 @@ export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.E
   const checkOpenApiCommand = CliCommand.make(
     "check-openapi",
     {
-      baseline: Flag.optional(Flag.String("baseline")),
       write: boolFlag("write"),
       module: Flag.optional(Flag.String("module")),
       out: Flag.optional(Flag.String("out")),
       args: variadicArgs,
     },
-    ({ baseline, write, module, out, args }) => {
+    ({ write, module, out, args }) => {
       const raw: Array<string> = [...args]
-      appendStringFlag(raw, "baseline", baseline)
       appendBoolFlag(raw, "write", write)
       appendStringFlag(raw, "module", module)
       appendStringFlag(raw, "out", out)

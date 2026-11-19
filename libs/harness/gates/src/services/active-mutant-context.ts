@@ -10,8 +10,7 @@ interface GlobalWithMutantId {
 }
 
 export const getActiveMutantId = (): string | undefined =>
-  (globalThis as GlobalWithMutantId).__HARNESS_ACTIVE_MUTANT_ID ??
-  process.env["HARNESS_ACTIVE_MUTANT_ID"]
+  (globalThis as GlobalWithMutantId).__HARNESS_ACTIVE_MUTANT_ID
 
 export const setActiveMutantId = (mutantId: string | undefined): void => {
   ;(globalThis as GlobalWithMutantId).__HARNESS_ACTIVE_MUTANT_ID = mutantId

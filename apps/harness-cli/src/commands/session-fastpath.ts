@@ -34,8 +34,11 @@ export type PreInvocationCacheRecord = Omit<PreInvocationCacheEntry, "version">
 
 const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
-export const resolveHarnessStateDirSafe = (repoRoot: string): Option.Option<string> =>
-  match(Result.try(() => resolveHarnessStateDir(repoRoot)))
+export const resolveHarnessStateDirSafe = (
+  repoRoot: string,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): Option.Option<string> =>
+  match(Result.try(() => resolveHarnessStateDir(repoRoot, env)))
     .with({ _tag: "Success" }, ({ success }) => Option.some(success))
     .with({ _tag: "Failure" }, ({ failure }) => {
       const msg = failure instanceof Error ? failure.message : String(failure)

@@ -86,7 +86,7 @@ const resolveRefSha = (
 export const resolveGitHeadState = (
   repoRoot: string,
   hostIo: SyncHostIo,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Readonly<Record<string, string | undefined>> = hostIo.getEnv(),
 ): GitHeadState => {
   const envBranch = env.HARNESS_GIT_BRANCH?.trim()
   const envSha = env.HARNESS_GIT_HEAD_SHA?.trim()
@@ -143,7 +143,7 @@ const decodeGraphHeadMetaOption = Schema.decodeOption(Schema.fromJsonString(Grap
 
 const resolveGraphMetaStateDir = (
   repoRoot: string,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Readonly<Record<string, string | undefined>>,
 ): string => {
   const validRoot = normalizeNonRootWorkspacePath(resolve(normalizeNonRootWorkspacePath(repoRoot)))
   const rawCustomDir = env.HARNESS_STATE_DIR
@@ -175,7 +175,7 @@ export type GraphHeadMetaReadState =
 export const readGraphHeadMetaState = (
   repoRoot: string,
   hostIo: SyncHostIo,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Readonly<Record<string, string | undefined>> = hostIo.getEnv(),
 ): GraphHeadMetaReadState =>
   match(Result.try(() => resolveGraphMetaStateDir(repoRoot, env)))
     .with({ _tag: "Failure" }, ({ failure }) => ({
@@ -215,7 +215,7 @@ export const readGraphHeadMetaState = (
 export const readGraphHeadMeta = (
   repoRoot: string,
   hostIo: SyncHostIo,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Readonly<Record<string, string | undefined>> = hostIo.getEnv(),
 ): GraphHeadMeta | null =>
   match(readGraphHeadMetaState(repoRoot, hostIo, env))
     .with({ _tag: "Present" }, ({ meta }) => meta)
@@ -257,7 +257,7 @@ export const withGraphHeadLock = <A>(
   repoRoot: string,
   hostIo: SyncHostIo,
   fn: () => A,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Readonly<Record<string, string | undefined>> = hostIo.getEnv(),
 ): A => {
   if (!hasTryWriteExclusiveTextSync(hostIo)) {
     return fn()
@@ -333,7 +333,7 @@ const persistGraphHeadMeta = (
   repoRoot: string,
   hostIo: SyncHostIo,
   meta: GraphHeadMeta,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Readonly<Record<string, string | undefined>> = hostIo.getEnv(),
 ): GraphHeadMeta | null =>
   match(Result.try(() => resolveGraphMetaStateDir(repoRoot, env)))
     .with({ _tag: "Failure" }, ({ failure }) => {
@@ -376,7 +376,7 @@ export const updateGraphHeadCursor = (
   repoRoot: string,
   hostIo: SyncHostIo,
   cursor: OmnigraphChangeCursor | null,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Readonly<Record<string, string | undefined>> = hostIo.getEnv(),
 ): GraphHeadMeta | null =>
   withGraphHeadLock(
     repoRoot,
@@ -415,7 +415,7 @@ export const writeGraphHeadMeta = (
   repoRoot: string,
   hostIo: SyncHostIo,
   headState?: GitHeadState & GraphHeadMetaExtra,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Readonly<Record<string, string | undefined>> = hostIo.getEnv(),
   extra?: GraphHeadMetaExtra,
 ): GraphHeadMeta | null =>
   withGraphHeadLock(
@@ -577,7 +577,7 @@ export const resolveCanonicalRepoRoot = (repoRoot: string, hostIo: SyncHostIo): 
 export const resolveOmnigraphClusterDir = (
   repoRoot: string,
   hostIo: SyncHostIo,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Readonly<Record<string, string | undefined>> = hostIo.getEnv(),
 ): string => {
   const rawCustomDir = env.HARNESS_STATE_DIR
   if (rawCustomDir !== undefined && rawCustomDir.length > 0) {
@@ -599,7 +599,7 @@ export const deriveRepoOmnigraphPort = (repoRoot: string, hostIo: SyncHostIo): n
 export const resolveOmnigraphTaskBranches = (
   repoRoot: string,
   hostIo: SyncHostIo,
-  env: NodeJS.ProcessEnv = process.env,
+  env: Readonly<Record<string, string | undefined>> = hostIo.getEnv(),
 ): {
   readonly planBranch: string
   readonly implBranch: string

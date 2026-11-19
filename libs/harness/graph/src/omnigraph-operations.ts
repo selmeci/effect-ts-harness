@@ -83,17 +83,17 @@ const decodeServerMetaOption = Schema.decodeOption(
  */
 export const resolveOmnigraphBaseUrl = (
   options?: OmnigraphConnectionOptions,
-  env: NodeJS.ProcessEnv = process.env,
+  env?: Readonly<Record<string, string | undefined>>,
   hostIo?: SyncHostIo,
 ): string => {
-  const effectiveEnv = options?.env ?? env
+  const effectiveHostIo = hostIo ?? options?.hostIo
+  const effectiveEnv = options?.env ?? env ?? effectiveHostIo?.getEnv() ?? {}
   if (options?.baseUrl !== undefined) {
     return options.baseUrl
   }
   if (effectiveEnv.OMNIGRAPH_URL && effectiveEnv.OMNIGRAPH_URL !== "http://127.0.0.1:8080") {
     return effectiveEnv.OMNIGRAPH_URL
   }
-  const effectiveHostIo = hostIo ?? options?.hostIo
   if (options?.repoRoot && effectiveHostIo !== undefined) {
     const clusterDir = resolveOmnigraphClusterDir(options.repoRoot, effectiveHostIo, effectiveEnv)
     const serverJsonPath = join(clusterDir, "server.json")
@@ -147,12 +147,12 @@ export const resolveOmnigraphBaseUrl = (
 export const makeOmnigraphClient = (
   options?: OmnigraphConnectionOptions,
   hostIo?: SyncHostIo,
-  env: NodeJS.ProcessEnv = process.env,
+  env?: Readonly<Record<string, string | undefined>>,
 ): Omnigraph => {
-  const effectiveEnv = options?.env ?? env
-  const baseUrl = resolveOmnigraphBaseUrl(options, effectiveEnv, hostIo)
-  const graphId = options?.graphId ?? effectiveEnv.OMNIGRAPH_GRAPH_ID ?? "harness"
   const effectiveHostIo = hostIo ?? options?.hostIo
+  const effectiveEnv = options?.env ?? env ?? effectiveHostIo?.getEnv() ?? {}
+  const baseUrl = resolveOmnigraphBaseUrl(options, effectiveEnv, effectiveHostIo)
+  const graphId = options?.graphId ?? effectiveEnv.OMNIGRAPH_GRAPH_ID ?? "harness"
   const localAuthToken =
     options?.token === undefined &&
     effectiveEnv.OMNIGRAPH_TOKEN === undefined &&

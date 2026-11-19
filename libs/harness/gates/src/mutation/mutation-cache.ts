@@ -202,8 +202,8 @@ const isPathContained = (parentReal: string, childReal: string): boolean => {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
 }
 
-const resolveCachePaths = (repoRoot: string) =>
-  match(Result.try(() => resolveHarnessStateDir(repoRoot)))
+const resolveCachePaths = (repoRoot: string, hostIo: SyncHostIo) =>
+  match(Result.try(() => resolveHarnessStateDir(repoRoot, hostIo.getEnv())))
     .with({ _tag: "Success" }, ({ success: stateDir }) => {
       const cacheDir = join(stateDir, "cache")
       return {
@@ -351,7 +351,7 @@ export const loadMutationCacheWithStatus = (
   if (hmacSecret === undefined) {
     return { _tag: "Unsafe", reason: "missing HMAC secret" }
   }
-  return match(resolveCachePaths(repoRoot))
+  return match(resolveCachePaths(repoRoot, hostIo))
     .with({ _tag: "Unsafe" }, (u) => u)
     .with({ _tag: "Ok" }, ({ stateDir, cacheDir, cacheFile }) => {
       const exists = checkExists(cacheFile, hostIo)
@@ -459,7 +459,7 @@ export const saveMutationCacheAtomic = (
   hmacSecret?: MutationCacheHmacSecret,
 ): SaveMutationCacheResult => {
   if (hmacSecret === undefined) return { _tag: "Skipped", reason: "missing HMAC secret" }
-  return match(resolveCachePaths(repoRoot))
+  return match(resolveCachePaths(repoRoot, hostIo))
     .with({ _tag: "Unsafe" }, ({ reason }) => ({ _tag: "Skipped" as const, reason }))
     .with({ _tag: "Ok" }, ({ stateDir, cacheDir, cacheFile }) => {
       if (checkCacheAncestors(repoRoot, stateDir, cacheDir, hostIo) === undefined) {

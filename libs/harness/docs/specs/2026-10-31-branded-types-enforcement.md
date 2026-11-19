@@ -26,7 +26,6 @@ spans:
   - Sample.uploadPhoto
   - Sample.getPhotoById
   - Sample.listPhotos
-  - Sample.greet
 services:
   - PhotoRepo
   - AlbumCounterClient
@@ -43,7 +42,7 @@ In TypeScript's structural type system, distinct domain concepts backed by the s
 
 Existing Graph Context:
 
-- **Reused Contracts / Errors:** `Photo`, `CreatePhotoInput`, `GreetInput`, `PhotoNotFoundError`, `AlbumQuotaExceededError` in [`libs/sample/contract/src/index.ts`](file:///home/roan/WebstormProjects/effect-ts-harness/.worktrees/feat/brand-types/libs/sample/contract/src/index.ts).
+- **Reused Contracts / Errors:** `Photo`, `CreatePhotoInput`, `PhotoNotFoundError`, `AlbumQuotaExceededError` in [`libs/sample/contract/src/index.ts`](file:///home/roan/WebstormProjects/effect-ts-harness/.worktrees/feat/brand-types/libs/sample/contract/src/index.ts).
 - **Reused Services:** `PhotoRepo`, `AlbumCounterClient` in [`libs/sample/service/src/index.ts`](file:///home/roan/WebstormProjects/effect-ts-harness/.worktrees/feat/brand-types/libs/sample/service/src/index.ts).
 - **New Capabilities Needed:** Two-layer enforcement combining fast AST lint rules in `tools/oxlint/syntax-bans.js` with TypeScript `TypeChecker` `"~effect/Brand"` inspection (`unbranded-contract-schema` and `unbranded-primitive-boundary`) in `libs/harness/graph/src/extractor/schema-and-brand-extractor.ts` (orchestrated by `libs/harness/graph/src/type-extractor.ts`) and `libs/harness/graph/src/policy-check.ts`, deterministic routing/triage in `@harness/decision`, and full branded domain types across `@harness/sample-*`.
 
@@ -99,7 +98,6 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | REQ-4.3 | Event-driven       | **When** `Sample.uploadPhoto` is invoked with a `CreatePhotoInput` containing branded `PhotoName` and `AlbumId`, `Sample.uploadPhoto` **shall** check quota via `Album.decide`, increment `AlbumCounterClient`, and persist the `Photo` via `PhotoRepo`.                                              | `Sample.uploadPhoto` | GraphCheck   |
 | REQ-4.4 | Unwanted behaviour | **If** `Sample.getPhotoById` is invoked with a branded `PhotoId` (decoded directly or via `PhotoIdFromString` composed with `Schema.decodeTo(PhotoId)`) that does not exist in `PhotoRepo`, **then** `Sample.getPhotoById` **shall** fail with `PhotoNotFoundError` containing the branded `PhotoId`. | `PhotoNotFoundError` | GraphCheck   |
 | REQ-4.5 | Event-driven       | **When** `Sample.listPhotos` is invoked, `Sample.listPhotos` **shall** return `ReadonlyArray<Photo>` with branded `PhotoId`, `PhotoName`, `AlbumId`, and `CreatedAtMillis` fields.                                                                                                                    | `Sample.listPhotos`  | GraphCheck   |
-| REQ-4.6 | Event-driven       | **When** `Sample.greet` is invoked with `GreetInput` containing branded `PersonName`, `Sample.greet` **shall** return a branded `GreetingMessage`.                                                                                                                                                    | `Sample.greet`       | GraphCheck   |
 
 ## Assumptions
 
@@ -126,7 +124,7 @@ flowchart TD
   Contract["type:contract<br/>Schema.brand('PhotoId' | 'AlbumId' | 'AlbumPhotoCount')"] --> AstGate["oxlint: harness/syntax-bans<br/>(AstGate)"]
   Contract --> GraphGate["@harness/graph: checkEffectGraph<br/>(unbranded-contract-schema & unbranded-primitive-boundary)"]
   Service["type:service<br/>PhotoRepo & AlbumCounterClient"] --> GraphGate
-  Domain["type:domain<br/>Album.decide, Sample.uploadPhoto, Sample.getPhotoById, Sample.listPhotos, Sample.greet"] --> GraphGate
+  Domain["type:domain<br/>Album.decide, Sample.uploadPhoto, Sample.getPhotoById, Sample.listPhotos"] --> GraphGate
   Domain --> ErrNotFound["PhotoNotFoundError"]
   Domain --> ErrQuota["AlbumQuotaExceededError"]
   Router["Harness.routeStep & Harness.triageFailure"] --> PatternDoc["agent-patterns/schema.md"]

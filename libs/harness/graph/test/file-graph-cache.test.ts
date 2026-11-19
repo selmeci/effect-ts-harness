@@ -40,6 +40,7 @@ describe("S-6a: isSyncHostIo and saveFileGraphFragmentsToDisk", () => {
     const tmpDir = fs.mkdtempSync(path.join(tmpdir(), "file-graph-cache-ro-"))
     try {
       const readOnlyHostIo: SyncHostReader = {
+        getEnv: () => process.env,
         existsSync: testHostIo.existsSync,
         isFileSync: testHostIo.isFileSync,
         isDirectorySync: testHostIo.isDirectorySync,

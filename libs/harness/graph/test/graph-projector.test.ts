@@ -1145,6 +1145,7 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
             calls.realpathSync += 1
             return testHostIo.realpathSync(p)
           },
+          getEnv: () => process.env,
         }
 
         const specGraph = buildHarnessGraph({

@@ -40,6 +40,7 @@ import {
   countImplEffectFns,
   formatDiffErrorMessage,
   isBranchNotFoundError,
+  loadPlanEffectFnQualnames,
   readEffectFnStubAfterFromImage,
   readExistingSpanTraceBlobIfSpansMissing,
   readIsStubFromImage,
@@ -163,6 +164,24 @@ export const runPreMergeOmnigraphBranchVerify = (
       .with({ _tag: "DiffFailed" }, { _tag: "MissingMergeBase" }, () => taskBranches.planBranch)
       .exhaustive()
 
+    const shouldLoadPlanSnapshot = match(branchDiffOpt)
+      .with(
+        { _tag: "Ok" },
+        ({ diff }) =>
+          hasPlanSnapshot &&
+          effectivePlanBranch === taskBranches.planBranch &&
+          diff.changes.some((c) => c.type.name === "EffectFn" && c.op === "delete"),
+      )
+      .with({ _tag: "DiffFailed" }, { _tag: "MissingMergeBase" }, () => false)
+      .exhaustive()
+
+    const planEffectFnQualnames = shouldLoadPlanSnapshot
+      ? yield* loadPlanEffectFnQualnames(
+          join(repoRoot, ".harness", "plan-graph-snapshot.json"),
+          nodeSyncHostIo,
+        )
+      : undefined
+
     const diffState = match(branchDiffOpt)
       .with({ _tag: "DiffFailed" }, { _tag: "MissingMergeBase" }, () => ({
         _tag: "MissingMergeBase" as const,
@@ -186,12 +205,22 @@ export const runPreMergeOmnigraphBranchVerify = (
                 stubAfter: readEffectFnStubAfterFromImage(c.after),
                 spanName,
               }))
-              .with("delete", () => ({
-                _tag: "EffectFnDeleted" as const,
-                entityId,
-                wasStubBefore: readIsStubFromImage(c.before),
-                spanName,
-              }))
+              .with("delete", () =>
+                planEffectFnQualnames !== undefined && !planEffectFnQualnames.has(c.id)
+                  ? {
+                      _tag: "EntityDiffChange" as const,
+                      entityKind: c.kind,
+                      typeName: OmnigraphTypeName.make(c.type.name),
+                      entityId,
+                      op: c.op,
+                    }
+                  : {
+                      _tag: "EffectFnDeleted" as const,
+                      entityId,
+                      wasStubBefore: readIsStubFromImage(c.before),
+                      spanName,
+                    },
+              )
               .exhaustive()
           }
           return {

@@ -291,16 +291,11 @@ const resolveDecisionPriors = Effect.fn("HarnessMcp.resolveDecisionPriors")(func
 
 const extractPriorSourceEntries = (
   rawPriors: object,
-  primaryKey: string,
-  legacyKey: string,
+  key: string,
 ): ReadonlyArray<readonly [string, unknown]> => {
-  const primary = Reflect.get(rawPriors, primaryKey)
-  if (typeof primary === "object" && primary !== null) {
-    return Object.entries(primary)
-  }
-  const legacy = Reflect.get(rawPriors, legacyKey)
-  if (typeof legacy === "object" && legacy !== null) {
-    return Object.entries(legacy)
+  const value = Reflect.get(rawPriors, key)
+  if (typeof value === "object" && value !== null) {
+    return Object.entries(value)
   }
   return []
 }
@@ -316,11 +311,7 @@ const decodeRawPriors = Effect.fn("HarnessMcp.decodeRawPriors")(function* (
   }
   const edgeOverrides: Record<string, ConfidenceMillis> = {}
   const teleportWeights: Record<NodeKey, PageRankScoreMillis> = {}
-  const edgeEntries = extractPriorSourceEntries(
-    rawPriors,
-    "edgeConfidenceOverrides",
-    "edgeConfidenceByRelationTargetRole",
-  )
+  const edgeEntries = extractPriorSourceEntries(rawPriors, "edgeConfidenceOverrides")
   for (const [k, v] of edgeEntries) {
     edgeOverrides[k] = yield* decodeConfidence(v).pipe(
       Effect.mapError(
@@ -332,11 +323,7 @@ const decodeRawPriors = Effect.fn("HarnessMcp.decodeRawPriors")(function* (
       ),
     )
   }
-  const teleportEntries = extractPriorSourceEntries(
-    rawPriors,
-    "holeTeleportationWeights",
-    "teleportationWeightByNodeKey",
-  )
+  const teleportEntries = extractPriorSourceEntries(rawPriors, "holeTeleportationWeights")
   for (const [k, v] of teleportEntries) {
     teleportWeights[NodeKey.make(k)] = yield* decodeTeleportWeight(v).pipe(
       Effect.mapError(

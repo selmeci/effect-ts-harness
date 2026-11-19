@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process"
 import { readFileSync, rmSync, writeFileSync } from "node:fs"
-import { dirname, resolve } from "node:path"
+import { relative, resolve } from "node:path"
 import process from "node:process"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
@@ -13,10 +13,7 @@ import {
   CreatedAtMillis,
   CreatePhotoInput,
   DecideAlbumQuotaInput,
-  detectOpenApiBreakingChanges,
-  GreetInput,
   GreetingMessage,
-  PersonName,
   Photo,
   PhotoCounterRpc,
   PhotoId,
@@ -33,10 +30,10 @@ const resolverPath = resolve(repoRoot, "tools/node-ts-resolver.mjs")
 const openApiPath = resolve(currentDir, "../openapi.json")
 
 describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
-  it("preserves GreetInput and constructs branded PersonName and GreetingMessage", () => {
-    const decoded = Schema.decodeSync(GreetInput)({ name: "Roman" })
-    expect(decoded.name).toBe(PersonName.make("Roman"))
-    expect(GreetingMessage.make("Hello, Roman!")).toBe("Hello, Roman!")
+  it("constructs branded GreetingMessage", () => {
+    const message = GreetingMessage.make("Hello, Roman!")
+    expect(message).toBe("Hello, Roman!")
+    expect(Schema.decodeSync(GreetingMessage)("Hello, Roman!")).toBe(message)
   })
 
   it("decodes Photo, CreatePhotoInput, DecideAlbumQuotaInput, and PhotoIdFromString branded Schemas", () => {
@@ -97,159 +94,38 @@ describe("sample-contract (Schemas, HttpApi, RpcGroup, OpenAPI)", () => {
     expect(liveSpec).toEqual(committed)
   })
 
-  it("harness-cli check-openapi exits with code 2 and ESCALATE on breaking change", () => {
-    interface OpenApiDoc {
-      paths?: Record<
-        string,
-        Record<
-          string,
-          {
-            responses?: Record<
-              string,
-              {
-                content?: Record<
-                  string,
-                  {
-                    schema?: {
-                      items?: {
-                        required?: string[]
-                        properties?: Record<string, unknown>
-                      }
-                    }
-                  }
-                >
-              }
-            >
-          }
-        >
-      >
-    }
-    const liveSpec = buildOpenApiSpec()
-    const baselineSpec: OpenApiDoc = JSON.parse(JSON.stringify(liveSpec))
-    const items =
-      baselineSpec.paths?.["/photos"]?.["get"]?.responses?.["200"]?.content?.["application/json"]
-        ?.schema?.items
-    if (items) {
-      items.required = [...(items.required ?? []), "extraRequiredField"]
-      items.properties = { ...items.properties, extraRequiredField: { type: "string" } }
-    }
-    const tmpBaselineFile = resolve(
-      dirname(fileURLToPath(import.meta.url)),
-      `..`,
-      `.tmp-baseline-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+  it("harness-cli check-openapi exits 0 on fresh openapi.json and 1 when stale", () => {
+    const freshRes = spawnSync(
+      process.execPath,
+      ["--import", resolverPath, harnessCliEntryPath, "check-openapi"],
+      { cwd: repoRoot, encoding: "utf8" },
+    )
+    expect(freshRes.status).toBe(0)
+    expect(freshRes.stdout).toContain("fresh")
+
+    const tmpStaleFile = resolve(
+      currentDir,
+      "..",
+      `.tmp-stale-openapi-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
     )
     try {
-      writeFileSync(tmpBaselineFile, JSON.stringify(baselineSpec, null, 2), "utf8")
-      const res = spawnSync(
+      writeFileSync(tmpStaleFile, JSON.stringify({ openapi: "3.1.0", paths: {} }), "utf8")
+      const staleRes = spawnSync(
         process.execPath,
         [
           "--import",
           resolverPath,
           harnessCliEntryPath,
           "check-openapi",
-          "--baseline",
-          tmpBaselineFile,
+          "--out",
+          relative(repoRoot, tmpStaleFile),
         ],
-        { encoding: "utf8" },
+        { cwd: repoRoot, encoding: "utf8" },
       )
-      expect(res.status).toBe(2)
-      expect(res.stderr).toContain("ESCALATE")
+      expect(staleRes.status).toBe(1)
+      expect(staleRes.stderr).toContain("stale")
     } finally {
-      rmSync(tmpBaselineFile, { force: true })
+      rmSync(tmpStaleFile, { force: true })
     }
-  })
-
-  describe("detectOpenApiBreakingChanges", () => {
-    it("reports no breaking changes when baseline matches current", () => {
-      const baseline = {
-        paths: {
-          "/photos": {
-            get: {
-              responses: {
-                "200": {
-                  content: {
-                    "application/json": {
-                      schema: {
-                        type: "array",
-                        items: {
-                          type: "object",
-                          required: ["id", "name"],
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      }
-      expect(detectOpenApiBreakingChanges(baseline, baseline)).toEqual([])
-    })
-
-    it("detects removed path", () => {
-      const baseline = { paths: { "/photos": {}, "/albums": {} } }
-      const current = { paths: { "/photos": {} } }
-      const changes = detectOpenApiBreakingChanges(baseline, current)
-      expect(changes).toContain("Removed path: /albums")
-    })
-
-    it("detects removed HTTP method", () => {
-      const baseline = { paths: { "/photos": { get: {}, post: {} } } }
-      const current = { paths: { "/photos": { get: {} } } }
-      const changes = detectOpenApiBreakingChanges(baseline, current)
-      expect(changes).toContain("Removed method: POST /photos")
-    })
-
-    it("detects removed required response schema property", () => {
-      const baseline = {
-        paths: {
-          "/photos": {
-            get: {
-              responses: {
-                "200": {
-                  content: {
-                    "application/json": {
-                      schema: {
-                        type: "array",
-                        items: {
-                          type: "object",
-                          required: ["id", "name", "albumId"],
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      }
-      const current = {
-        paths: {
-          "/photos": {
-            get: {
-              responses: {
-                "200": {
-                  content: {
-                    "application/json": {
-                      schema: {
-                        type: "array",
-                        items: {
-                          type: "object",
-                          required: ["id", "name"],
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      }
-      const changes = detectOpenApiBreakingChanges(baseline, current)
-      expect(changes.some((c) => c.includes("albumId"))).toBe(true)
-    })
   })
 })

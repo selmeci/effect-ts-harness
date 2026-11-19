@@ -265,10 +265,10 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
     const repoRoot = path.resolve(__dirname, "../../../..")
     const resultGraph = Effect.runSync(extractWorkspaceTypeAwareGraph(repoRoot, testHostIo))
 
-    // Sample greet function should be indexed
-    const greetNode = resolveNode(resultGraph, "Sample.greet")
-    expect(greetNode).toBeDefined()
-    expect(greetNode?._tag).toBe("EffectFn")
+    // Sample album decide function should be indexed
+    const decideNode = resolveNode(resultGraph, "Album.decide")
+    expect(decideNode).toBeDefined()
+    expect(decideNode?._tag).toBe("EffectFn")
   }, 15_000)
 
   it("stripCommentsAndTestTitles strips comments and describe/it/test titles", () => {
