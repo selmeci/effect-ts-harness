@@ -7,12 +7,7 @@ import {
 } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { Context, Effect, Layer, Option, Schema } from "effect"
-import {
-  type BlobWrite,
-  type Commit,
-  type CommitChanges,
-  type Diff,
-} from "@modernrelay/omnigraph"
+import { type BlobWrite, type Commit, type CommitChanges, type Diff } from "@modernrelay/omnigraph"
 import { match } from "ts-pattern"
 import { writeGraphHeadMeta } from "./cluster-resolver.js"
 import {
@@ -50,7 +45,7 @@ import {
   toOmnigraphServerNdjson,
   toOmnigraphServerNdjsonResult,
 } from "./omnigraph-operations.js"
-import { decodeStrictOptionalCommitId } from "./omnigraph-v014-ops.js"
+import { decodeStrictOptionalCommitId, executeLoadWithStaleRefork } from "./omnigraph-v014-ops.js"
 
 export {
   OmnigraphClient,
@@ -187,9 +182,7 @@ export interface OmnigraphCommitProposalOpsShape {
 }
 
 export interface OmnigraphBlobOpsShape {
-  readonly putBlob: (
-    input: OmnigraphPutBlobInput,
-  ) => Effect.Effect<BlobWrite, OmnigraphLoadError>
+  readonly putBlob: (input: OmnigraphPutBlobInput) => Effect.Effect<BlobWrite, OmnigraphLoadError>
   readonly getBlobText: (
     input: OmnigraphGetBlobInput,
   ) => Effect.Effect<string | null, OmnigraphLoadError>
@@ -199,7 +192,8 @@ export interface OmnigraphBlobOpsShape {
 }
 
 export interface OmnigraphSyncShape
-  extends OmnigraphBranchOpsShape,
+  extends
+    OmnigraphBranchOpsShape,
     OmnigraphQueryOpsShape,
     OmnigraphChangeFeedOpsShape,
     OmnigraphCommitProposalOpsShape,
@@ -257,15 +251,11 @@ export const makeOmnigraphSyncLayer = (
           const mode = options?.mode ?? (branch !== "main" ? "overwrite" : "merge")
           const fromOpt = branch !== "main" ? (options?.from ?? "main") : undefined
 
-          return yield* Effect.tryPromise({
-            try: () =>
-              og.load({
-                branch,
-                ...(fromOpt ? { from: fromOpt } : {}),
-                mode,
-                data: ndjson,
-              }),
-            catch: (cause) => new OmnigraphLoadError({ cause }),
+          return yield* executeLoadWithStaleRefork(og, {
+            branch,
+            from: fromOpt,
+            mode,
+            data: ndjson,
           }).pipe(
             Effect.flatMap((loadRes) => {
               const legacyCommitId =
@@ -273,7 +263,8 @@ export const makeOmnigraphSyncLayer = (
                   ? (loadRes as { readonly graphCommitId?: unknown }).graphCommitId
                   : undefined
               const rawCommitId =
-                loadRes.commit?.graphCommitId !== undefined && loadRes.commit?.graphCommitId !== null
+                loadRes.commit?.graphCommitId !== undefined &&
+                loadRes.commit?.graphCommitId !== null
                   ? loadRes.commit.graphCommitId
                   : legacyCommitId
               return match(decodeStrictOptionalCommitId(rawCommitId))
@@ -291,7 +282,9 @@ export const makeOmnigraphSyncLayer = (
                     if (commitId !== undefined && metaSaved === null) {
                       return Effect.fail(
                         new OmnigraphLoadError({
-                          cause: new Error("Failed to persist graph-head.json with omnigraphCommitId"),
+                          cause: new Error(
+                            "Failed to persist graph-head.json with omnigraphCommitId",
+                          ),
                         }),
                       )
                     }
@@ -465,9 +458,7 @@ export const makeOmnigraphSyncLayer = (
           })
           const decodeRowsEnvelope = Schema.decodeUnknownOption(rowsEnvelopeSchema)
           const extractRows = (res: unknown): ReadonlyArray<Record<string, unknown>> | undefined =>
-            Option.getOrUndefined(
-              Option.map(decodeRowsEnvelope(res), (decoded) => decoded.rows),
-            )
+            Option.getOrUndefined(Option.map(decodeRowsEnvelope(res), (decoded) => decoded.rows))
 
           return yield* Effect.tryPromise({
             try: () =>
