@@ -44,6 +44,7 @@ import {
 import {
   MAX_MUTATION_CACHE_AGE_MS,
   MAX_MUTATION_CACHE_ENTRIES,
+  computeFileMutationClosureDigest,
   computeMutantCacheKey,
   computeMutationContextDigestsChecked,
   computeMutationEntryMac,
@@ -54,6 +55,11 @@ import {
   saveMutationCacheAtomic,
   verifyMutationEntryMac,
 } from "../src/mutation/mutation-cache.js"
+import {
+  flushMutationCache,
+  preparePackageBaselines,
+  recordKilledMutantsToCache,
+} from "../src/mutation/mutation-suite-helpers.js"
 import { resolveHarnessStateDir } from "../src/worktree.js"
 import { testHostIo } from "./helpers/test-host-io.js"
 
@@ -982,6 +988,326 @@ it("second should not run", () => {
       expect(executed).toEqual(["first"])
     } finally {
       rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("REQ-1.1 hardening: computeFileMutationClosureDigest fails closed on symlinked or unreadable transitive imports", () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "mutation-closure-hard-"))
+    try {
+      const srcDir = join(repoRoot, "libs", "sample", "domain", "src")
+      const testDir = join(repoRoot, "libs", "sample", "domain", "test")
+      mkdirSync(srcDir, { recursive: true })
+      mkdirSync(testDir, { recursive: true })
+      writeFileSync(join(repoRoot, "package.json"), '{"name":"tmp"}\n')
+      writeFileSync(
+        join(srcDir, "logic.ts"),
+        'import { d } from "./dep.js"\nexport const f = () => d\n',
+      )
+      writeFileSync(join(srcDir, "dep.ts"), "export const d = 1\n")
+      writeFileSync(join(testDir, "logic.test.ts"), 'import { f } from "../src/logic.js"\n')
+
+      const digests = match(computeMutationContextDigestsChecked(repoRoot, testHostIo))
+        .with({ _tag: "Ok" }, ({ digests: d }) => d)
+        .with({ _tag: "Disabled" }, ({ reason }) => {
+          throw new Error(`Expected Ok: ${reason}`)
+        })
+        .exhaustive()
+
+      const depPath = join(srcDir, "dep.ts")
+      const unreadableIo: SyncHostIo = {
+        ...testHostIo,
+        readTextSync: (p) => {
+          if (p === depPath) throw new Error("EACCES: dep")
+          return testHostIo.readTextSync(p)
+        },
+      }
+      expect(
+        computeFileMutationClosureDigest({
+          repoRoot,
+          relFile: "libs/sample/domain/src/logic.ts",
+          allReachingTests: ["libs/sample/domain/test/logic.test.ts"],
+          digests,
+          hostIo: unreadableIo,
+        })._tag,
+      ).toBe("Disabled")
+
+      const symlinkIo: SyncHostIo = {
+        ...testHostIo,
+        isSymbolicLinkSync: (p) => (p === depPath ? true : testHostIo.isSymbolicLinkSync(p)),
+      }
+      expect(
+        computeFileMutationClosureDigest({
+          repoRoot,
+          relFile: "libs/sample/domain/src/logic.ts",
+          allReachingTests: ["libs/sample/domain/test/logic.test.ts"],
+          digests,
+          hostIo: symlinkIo,
+        })._tag,
+      ).toBe("Disabled")
+
+      // Realpath escape / symlinked ancestor inside closure fails closed
+      const escapeIo: SyncHostIo = {
+        ...testHostIo,
+        realpathSync: (p) => (p === depPath ? "/etc/passwd" : testHostIo.realpathSync(p)),
+      }
+      expect(
+        computeFileMutationClosureDigest({
+          repoRoot,
+          relFile: "libs/sample/domain/src/logic.ts",
+          allReachingTests: ["libs/sample/domain/test/logic.test.ts"],
+          digests,
+          hostIo: escapeIo,
+        })._tag,
+      ).toBe("Disabled")
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("REQ-1.2 & cache helpers: preparePackageBaselines honors diffLinesMap, recordKilledMutantsToCache checks hmacSecret, and flushMutationCache handles Saved/Skipped/Failed", () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "suite-helpers-hard-"))
+    try {
+      const srcDir = join(repoRoot, "libs", "demo", "domain", "src")
+      const testDir = join(repoRoot, "libs", "demo", "domain", "test")
+      mkdirSync(srcDir, { recursive: true })
+      mkdirSync(testDir, { recursive: true })
+      writeFileSync(join(repoRoot, "package.json"), '{"name":"tmp"}\n')
+      const fileA = {
+        scope: "demo",
+        pkgDir: "domain",
+        tier: "domain" as const,
+        fullPath: join(srcDir, "a.ts"),
+        relFile: "libs/demo/domain/src/a.ts",
+      }
+      const fileB = {
+        scope: "demo",
+        pkgDir: "domain",
+        tier: "domain" as const,
+        fullPath: join(srcDir, "b.ts"),
+        relFile: "libs/demo/domain/src/b.ts",
+      }
+      writeFileSync(fileA.fullPath, "export const eqA = (x: number, y: number) => x === y\n")
+      writeFileSync(fileB.fullPath, "export const eqB = (x: number, y: number) => x === y\n")
+      writeFileSync(join(testDir, "a.test.ts"), 'import { eqA } from "../src/a.js"\n')
+      writeFileSync(join(testDir, "b.test.ts"), 'import { eqB } from "../src/b.js"\n')
+
+      const baselineTestsSeen: Array<string> = []
+      const prepIo: SyncHostIo = {
+        ...testHostIo,
+        execFileSync: (_cmd, args) => {
+          baselineTestsSeen.push(...args)
+          return { _tag: "Exited", exitCode: 0, stdout: "Tests  1 passed (1)\n", stderr: "" }
+        },
+      }
+      const diffLinesMap = new Map<string, ReadonlySet<number>>([[fileA.relFile, new Set([1])]])
+      const prepRes = preparePackageBaselines({
+        repoRoot,
+        targets: [fileA, fileB],
+        hostIo: prepIo,
+        baseSubprocessEnv: {},
+        diffLinesMap,
+        bypassDiffFilter: false,
+      })
+      const prepOk = match(prepRes)
+        .with({ _tag: "Ok" }, (ok) => ok)
+        .with({ _tag: "ReadError" }, ({ relFile, reason }) => {
+          throw new Error(`Expected Ok for ${relFile}: ${reason}`)
+        })
+        .exhaustive()
+      expect(prepOk.partitionCache.has(fileA.relFile)).toBe(true)
+      expect(prepOk.partitionCache.has(fileB.relFile)).toBe(false)
+      expect(baselineTestsSeen.some((a) => a.includes("b.test.ts"))).toBe(false)
+
+      // recordKilledMutantsToCache
+      const mutant = makeSampleMutant()
+      const key = computeContentSha256("k1")
+      const mutantKeys = new Map([[mutant.id, key]])
+      const fileOutcomes = new Map([[mutant.id, { mutant, status: "killed" as const }]])
+      const cacheEntries: Record<ContentSha256, MutationCacheEntry> = {}
+      expect(
+        recordKilledMutantsToCache({
+          relFile: fileA.relFile,
+          uncachedMutants: [mutant],
+          fileOutcomes,
+          mutantKeys,
+          fileNonCacheableIds: new Set(),
+          hmacSecret: undefined,
+          cacheEntries,
+        }),
+      ).toBe(false)
+      expect(
+        recordKilledMutantsToCache({
+          relFile: fileA.relFile,
+          uncachedMutants: [mutant],
+          fileOutcomes,
+          mutantKeys,
+          fileNonCacheableIds: new Set(),
+          hmacSecret: TEST_HMAC_SECRET,
+          cacheEntries,
+        }),
+      ).toBe(true)
+      expect(cacheEntries[key]?.status).toBe("killed")
+
+      // flushMutationCache: Saved -> true, Failed -> false, Skipped (symlink) -> false
+      expect(flushMutationCache(repoRoot, testHostIo, TEST_HMAC_SECRET, cacheEntries)).toBe(true)
+      const failMkdirIo: SyncHostIo = {
+        ...testHostIo,
+        mkdirRecursiveSync: () => {
+          throw new Error("EACCES: mkdir")
+        },
+      }
+      expect(flushMutationCache(repoRoot, failMkdirIo, TEST_HMAC_SECRET, cacheEntries)).toBe(false)
+      const symlinkStateIo: SyncHostIo = {
+        ...testHostIo,
+        isSymbolicLinkSync: (p) =>
+          p.endsWith(".harness") ? true : testHostIo.isSymbolicLinkSync(p),
+      }
+      expect(flushMutationCache(repoRoot, symlinkStateIo, TEST_HMAC_SECRET, cacheEntries)).toBe(
+        false,
+      )
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("REQ-1.1 edge cases: ancestor symlinks fail closed, module-specifier strings avoid asset leaks, tsconfig paths map non-harness packages, and bare '.' resolves index.ts", () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "closure-edges-"))
+    try {
+      mkdirSync(join(repoRoot, "libs", "acme", "core", "src"), { recursive: true })
+      mkdirSync(join(repoRoot, "libs", "app", "domain", "src", "nested"), { recursive: true })
+      mkdirSync(join(repoRoot, "docs", "specs"), { recursive: true })
+      writeFileSync(
+        join(repoRoot, "package.json"),
+        '{"name":"tmp","devDependencies":{"vitest":"1.0.0"}}\n',
+      )
+      writeFileSync(
+        join(repoRoot, "tsconfig.base.json"),
+        JSON.stringify({
+          compilerOptions: {
+            paths: {
+              "@acme/core": ["./libs/acme/core/src/index.ts"],
+              "@acme/core/*": ["./libs/acme/core/src/*"],
+              "@alias-only/core": ["./tools/noop.ts", "./libs/acme/core/src/index.ts"],
+            },
+          },
+        }),
+      )
+      writeFileSync(join(repoRoot, "docs", "specs", "guide.md"), "# Guide v1\n")
+      writeFileSync(join(repoRoot, "index.ts"), "export const rootVal = 1\n")
+      writeFileSync(
+        join(repoRoot, "entry.ts"),
+        'import { rootVal } from "."\nexport const out = rootVal\n',
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "acme", "core", "package.json"),
+        '{"name":"@acme/core"}\n',
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "acme", "core", "src", "index.ts"),
+        "export const c = 1\n",
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "app", "domain", "src", "docs-helper.ts"),
+        "export const d = 1\n",
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "app", "domain", "src", "nested", "dep.ts"),
+        "export const n = 1\n",
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "app", "domain", "src", "clean.ts"),
+        'import { d } from "./docs-helper.js"\nexport { d as dd } from "./docs-helper.js"\nexport const x = d\n',
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "app", "domain", "src", "uses-docs.ts"),
+        'export const pathHint = "docs/specs/guide.md"\n',
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "app", "domain", "src", "uses-acme-missing.ts"),
+        'import { x } from "@acme/core/missing"\nexport const y = x\n',
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "app", "domain", "src", "uses-nested.ts"),
+        'import { n } from "./nested/dep.js"\nexport const z = n\n',
+      )
+
+      const digests1 = match(computeMutationContextDigestsChecked(repoRoot, testHostIo))
+        .with({ _tag: "Ok" }, ({ digests }) => digests)
+        .with({ _tag: "Disabled" }, ({ reason }) => {
+          throw new Error(`Expected Ok digests1: ${reason}`)
+        })
+        .exhaustive()
+
+      expect(digests1.workspacePackages.get("@acme/core")).toBe("libs/acme/core")
+      expect(digests1.workspacePackages.get("@alias-only/core")).toBe("libs/acme/core")
+
+      const unwrapOk = (
+        relFile: string,
+        digests: typeof digests1,
+        hostIo: SyncHostIo = testHostIo,
+      ) =>
+        match(
+          computeFileMutationClosureDigest({
+            repoRoot,
+            relFile,
+            allReachingTests: [],
+            digests,
+            hostIo,
+          }),
+        )
+          .with({ _tag: "Ok" }, (ok) => ok)
+          .with({ _tag: "Disabled" }, ({ reason }) => {
+            throw new Error(`Expected Ok closure for ${relFile}: ${reason}`)
+          })
+          .exhaustive()
+
+      const clean1 = unwrapOk("libs/app/domain/src/clean.ts", digests1)
+      const docs1 = unwrapOk("libs/app/domain/src/uses-docs.ts", digests1)
+      const rootEntry1 = unwrapOk("entry.ts", digests1)
+      const acmeMissing = unwrapOk("libs/app/domain/src/uses-acme-missing.ts", digests1)
+      expect(acmeMissing.usedFallbackAllLibs).toBe(true)
+
+      // Mutating docs/specs/guide.md & index.ts isolates clean.ts while invalidating uses-docs.ts & entry.ts
+      writeFileSync(join(repoRoot, "docs", "specs", "guide.md"), "# Guide v2\n")
+      writeFileSync(join(repoRoot, "index.ts"), "export const rootVal = 2\n")
+      const digests2 = match(computeMutationContextDigestsChecked(repoRoot, testHostIo))
+        .with({ _tag: "Ok" }, ({ digests }) => digests)
+        .with({ _tag: "Disabled" }, ({ reason }) => {
+          throw new Error(`Expected Ok digests2: ${reason}`)
+        })
+        .exhaustive()
+
+      const clean2 = unwrapOk("libs/app/domain/src/clean.ts", digests2)
+      const docs2 = unwrapOk("libs/app/domain/src/uses-docs.ts", digests2)
+      const rootEntry2 = unwrapOk("entry.ts", digests2)
+
+      expect(clean2.closureDigest).toBe(clean1.closureDigest)
+      expect(docs2.closureDigest).not.toBe(docs1.closureDigest)
+      expect(rootEntry2.closureDigest).not.toBe(rootEntry1.closureDigest)
+
+      // Ancestor symlink check catches symlinked parent directory even when leaf is inside repoReal
+      const nestedDir = join(repoRoot, "libs", "app", "domain", "src", "nested")
+      const symParentIo: SyncHostIo = {
+        ...testHostIo,
+        isSymbolicLinkSync: (p) => (p === nestedDir ? true : testHostIo.isSymbolicLinkSync(p)),
+      }
+      const symAncestorRes = computeFileMutationClosureDigest({
+        repoRoot,
+        relFile: "libs/app/domain/src/uses-nested.ts",
+        allReachingTests: [],
+        digests: digests2,
+        hostIo: symParentIo,
+      })
+      match(symAncestorRes)
+        .with({ _tag: "Disabled" }, ({ reason }) => {
+          expect(reason).toContain("symlink")
+        })
+        .with({ _tag: "Ok" }, () => {
+          expect.unreachable("Expected Disabled on symlinked ancestor directory")
+        })
+        .exhaustive()
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true })
     }
   })
 })

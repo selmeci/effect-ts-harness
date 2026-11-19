@@ -59,7 +59,11 @@ export {
   type FrictionCluster,
   type LoopThrashingStatus,
 } from "./friction-log.js"
-export { resolveHarnessStateDir } from "./worktree.js"
+export {
+  isWorkspaceRelPathIncludedInStamp,
+  resolveHarnessStateDir,
+  shouldIgnoreStampEntry,
+} from "./worktree.js"
 export {
   isWorkspaceTsSourceFileName,
   scanWorkspaceTsFilesChecked,

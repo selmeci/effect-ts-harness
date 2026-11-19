@@ -214,16 +214,18 @@ export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.E
       scope: Flag.optional(Flag.String("scope")),
       strict: boolFlag("strict"),
       all: boolFlag("all"),
+      diff: boolFlag("diff"),
       noCache: boolFlag("no-cache"),
       file: Flag.optional(Flag.String("file")),
       base: Flag.optional(Flag.String("base")),
       args: variadicArgs,
     },
-    ({ scope, strict, all, noCache, file, base, args }) => {
+    ({ scope, strict, all, diff, noCache, file, base, args }) => {
       const raw: Array<string> = [...args]
       appendStringFlag(raw, "scope", scope)
       appendBoolFlag(raw, "strict", strict)
       appendBoolFlag(raw, "all", all)
+      appendBoolFlag(raw, "diff", diff)
       appendBoolFlag(raw, "no-cache", noCache)
       appendStringFlag(raw, "file", file)
       appendStringFlag(raw, "base", base)

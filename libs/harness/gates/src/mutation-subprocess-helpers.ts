@@ -122,7 +122,7 @@ export const classifyMutantSubprocessResult = (
             if (
               hasExplicitFailedCount ||
               hasAssertionOrExpectError ||
-              /^\s*FAIL\s+/m.test(cleanStdout)
+              /^\s*FAIL\s+/m.test(combinedOutput)
             ) {
               return { kind: "outcome" as const, status: "killed" as const }
             }
@@ -140,40 +140,36 @@ export const classifyMutantSubprocessResult = (
     )
     .exhaustive()
 
-export const runVitestTargetList = (
+export type VitestPackageBaselineResult =
+  | { readonly _tag: "Ok" }
+  | { readonly _tag: "Failed"; readonly diagnostic: string }
+
+const runVitestBaselineCheck = (
   repoRoot: string,
-  file: DomainFile,
   hostIo: SyncHostIo,
   baseSubprocessEnv: Readonly<Record<string, string | undefined>>,
-  reachingTestFiles: ReadonlyArray<string>,
-  originalSource: string,
-  mutatedSchemaSource: string,
-  backupPath: string,
-  mutantsToRun: ReadonlyArray<CodeMutant>,
-): MutantBatchRunResult => {
+  testFiles: ReadonlyArray<string>,
+  targetLabel: string,
+  timeoutMs: number,
+): string | undefined => {
   const vitestCliPath = join(repoRoot, "node_modules", "vitest", "vitest.mjs")
-  const batchRunnerPath = join(repoRoot, "tools", "parallel-vitest-batch.mjs")
   const useDirectVitest = hostIo.existsSync(vitestCliPath)
   const execCmd = useDirectVitest ? process.execPath : "pnpm"
   const execArgs = useDirectVitest
-    ? [vitestCliPath, "run", "--maxWorkers=2", ...reachingTestFiles]
-    : ["vitest", "run", ...reachingTestFiles]
-  const mutantExecArgs = useDirectVitest
-    ? [vitestCliPath, "run", "--bail=1", "--maxWorkers=2", ...reachingTestFiles]
-    : ["vitest", "run", "--bail=1", ...reachingTestFiles]
-
+    ? [vitestCliPath, "run", "--maxWorkers=2", ...testFiles]
+    : ["vitest", "run", ...testFiles]
   const baselineExecRes = Result.try(() =>
     hostIo.execFileSync(execCmd, execArgs, {
       cwd: repoRoot,
-      timeoutMs: 30_000,
+      timeoutMs,
       env: baseSubprocessEnv,
     }),
   )
   const formatErr = (stderr: string) =>
     stripAnsi(stderr).trim().length > 0 ? `, stderr=${stripAnsi(stderr).trim()}` : ""
   const baseFail = (detail: string) =>
-    `[mutation-check] Baseline test suite failed on unmutated file '${file.relFile}'${detail}`
-  const baselineDiag = match(baselineExecRes)
+    `[mutation-check] Baseline test suite failed ${targetLabel}${detail}`
+  return match(baselineExecRes)
     .with({ _tag: "Failure" }, ({ failure }) =>
       baseFail(`: ${failure instanceof Error ? failure.message : String(failure)}`),
     )
@@ -198,7 +194,60 @@ export const runVitestTargetList = (
         .exhaustive(),
     )
     .exhaustive()
-  if (baselineDiag !== undefined) return { _tag: "Abort", diagnostic: baselineDiag }
+}
+
+export const runVitestPackageBaseline = (
+  repoRoot: string,
+  pkgKey: string,
+  testFiles: ReadonlyArray<string>,
+  hostIo: SyncHostIo,
+  baseSubprocessEnv: Readonly<Record<string, string | undefined>>,
+): VitestPackageBaselineResult => {
+  const timeoutMs = Math.max(30_000, Math.min(180_000, testFiles.length * 10_000))
+  const diag = runVitestBaselineCheck(
+    repoRoot,
+    hostIo,
+    baseSubprocessEnv,
+    testFiles,
+    `on package '${pkgKey}'`,
+    timeoutMs,
+  )
+  return diag === undefined ? { _tag: "Ok" } : { _tag: "Failed", diagnostic: diag }
+}
+
+export const runVitestTargetList = (
+  repoRoot: string,
+  file: DomainFile,
+  hostIo: SyncHostIo,
+  baseSubprocessEnv: Readonly<Record<string, string | undefined>>,
+  reachingTestFiles: ReadonlyArray<string>,
+  originalSource: string,
+  mutatedSchemaSource: string,
+  backupPath: string,
+  mutantsToRun: ReadonlyArray<CodeMutant>,
+  options?: { readonly skipBaselineCheck?: boolean | undefined },
+): MutantBatchRunResult => {
+  const vitestCliPath = join(repoRoot, "node_modules", "vitest", "vitest.mjs")
+  const batchRunnerPath = join(repoRoot, "tools", "parallel-vitest-batch.mjs")
+  const useDirectVitest = hostIo.existsSync(vitestCliPath)
+  const execCmd = useDirectVitest ? process.execPath : "pnpm"
+  const mutantExecArgs = useDirectVitest
+    ? [vitestCliPath, "run", "--bail=1", "--maxWorkers=1", ...reachingTestFiles]
+    : ["vitest", "run", "--bail=1", ...reachingTestFiles]
+
+  const scaledTimeoutMs = Math.max(30_000, Math.min(180_000, reachingTestFiles.length * 10_000))
+
+  if (options?.skipBaselineCheck !== true) {
+    const baselineDiag = runVitestBaselineCheck(
+      repoRoot,
+      hostIo,
+      baseSubprocessEnv,
+      reachingTestFiles,
+      `on unmutated file '${file.relFile}'`,
+      scaledTimeoutMs,
+    )
+    if (baselineDiag !== undefined) return { _tag: "Abort", diagnostic: baselineDiag }
+  }
   if (mutantsToRun.length === 0) {
     return { _tag: "Ok", outcomes: [], nonCacheableIds: new Set() }
   }
@@ -369,13 +418,16 @@ export const runVitestTargetList = (
         const batchExecRes = Result.try(() =>
           hostIo.execFileSync(process.execPath, [batchRunnerPath], {
             cwd: repoRoot,
-            timeoutMs: Math.max(120_000, mutantsToRun.length * 10_000),
+            timeoutMs: Math.max(
+              120_000,
+              mutantsToRun.length * Math.max(10_000, Math.ceil(scaledTimeoutMs / 3)),
+            ),
             maxBufferBytes: 64 * 1024 * 1024,
             env: {
               ...baseSubprocessEnv,
               HARNESS_BATCH_VITEST_CLI: vitestCliPath,
               HARNESS_BATCH_CWD: repoRoot,
-              HARNESS_BATCH_TIMEOUT_MS: "30000",
+              HARNESS_BATCH_TIMEOUT_MS: String(scaledTimeoutMs),
               HARNESS_BATCH_TESTS_JSON: JSON.stringify(reachingTestFiles),
               HARNESS_BATCH_MUTANTS_JSON: JSON.stringify(mutantsToRun.map((m) => m.id)),
             },
@@ -446,7 +498,7 @@ export const runVitestTargetList = (
           const execRes = Result.try(() =>
             hostIo.execFileSync(execCmd, mutantExecArgs, {
               cwd: repoRoot,
-              timeoutMs: 30_000,
+              timeoutMs: scaledTimeoutMs,
               env: { ...baseSubprocessEnv, HARNESS_ACTIVE_MUTANT_ID: mutant.id },
             }),
           )

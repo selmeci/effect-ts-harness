@@ -161,7 +161,11 @@ export {
   type SpanBudgetViolation,
   type SpanSample,
 } from "./span-budget.js"
-export { resolveHarnessStateDir } from "./worktree.js"
+export {
+  isWorkspaceRelPathIncludedInStamp,
+  resolveHarnessStateDir,
+  shouldIgnoreStampEntry,
+} from "./worktree.js"
 export {
   checkMigrationFiles,
   checkMigrationSqlSafety,
@@ -493,12 +497,15 @@ export {
   MAX_MUTATION_CACHE_AGE_MS,
   MAX_MUTATION_CACHE_ENTRIES,
   MutationCache,
+  type ComputeFileMutationClosureDigestInput,
   type ComputeMutantCacheKeyInput,
   type ComputeMutationEntryMacInput,
+  type FileMutationClosureDigestResult,
   type LoadMutationCacheResult,
   type MutationContextDigests,
   type MutationContextDigestsResult,
   type SaveMutationCacheResult,
+  computeFileMutationClosureDigest,
   computeMutantCacheKey,
   computeMutationContextDigests,
   computeMutationContextDigestsChecked,

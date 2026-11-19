@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Fiber, Layer, Logger } from "effect"
+import { Effect, Fiber, Layer, Logger, Tracer } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { TestClock } from "effect/testing"
 import { SKIP_NX_CACHE_BANNED_REASON } from "@harness/gates/hook-fastpath"
@@ -499,6 +499,37 @@ describe("Harness decision definitions & fallbacks", () => {
             ),
           ),
         ).toBe(true)
+      }),
+  )
+
+  it.effect(
+    "REQ-3.1: decideGuardCommand allows quoted regexes/single-quoted $() and escalates double-quoted $() with traced span",
+    () =>
+      Effect.gen(function* () {
+        const failingLayer = makeFailingDecisionModelLayer()
+        const spanNames: Array<string> = []
+        const testTracer = Tracer.make({
+          span: (options) => {
+            spanNames.push(options.name)
+            return new Tracer.NativeSpan(options)
+          },
+        })
+        const quotedPipe = yield* decideGuardCommand('rg -n "foo|bar" libs/').pipe(
+          Effect.provide(failingLayer),
+          Effect.provideService(Tracer.Tracer, testTracer),
+        )
+        expect(quotedPipe.verdict).toBe("allow")
+        expect(spanNames.length).toBeGreaterThan(0)
+
+        const singleQuoted = yield* decideGuardCommand("rg -n 'hello $(curl x)'").pipe(
+          Effect.provide(failingLayer),
+        )
+        expect(singleQuoted.verdict).toBe("allow")
+
+        const doubleQuoted = yield* decideGuardCommand('rg -n "hello $(curl x)"').pipe(
+          Effect.provide(failingLayer),
+        )
+        expect(doubleQuoted.verdict).toBe("ask")
       }),
   )
 })

@@ -5,7 +5,13 @@ import { match } from "ts-pattern"
 import { WorkspaceTreeHash } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { DstSeed } from "./dst-engine.js"
-import { resolveHarnessStateDir } from "./worktree.js"
+import {
+  isWorkspaceRelPathIncludedInStamp,
+  resolveHarnessStateDir,
+  shouldIgnoreStampEntry,
+} from "./worktree.js"
+
+export { isWorkspaceRelPathIncludedInStamp, shouldIgnoreStampEntry }
 
 export const DstSeedsRunCount = Schema.Int.pipe(
   Schema.check(Schema.isGreaterThanOrEqualTo(0)),
@@ -85,27 +91,6 @@ export type VerifyStamp = Schema.Schema.Type<typeof VerifyStampSchema>
 export type CheckVerifyStampResult =
   | { readonly valid: true; readonly stamp: VerifyStamp }
   | { readonly valid: false; readonly reason: string }
-
-const ROOT_ONLY_IGNORED_NAMES = new Set([
-  ".git",
-  ".superpowers",
-  "repos",
-  ".idea",
-  ".vscode",
-  ".alchemy",
-  ".remember",
-  ".worktrees",
-])
-
-const BUILD_ARTIFACT_IGNORED_NAMES = new Set([
-  ".harness",
-  ".nx",
-  "node_modules",
-  "dist",
-  "coverage",
-  ".DS_Store",
-  ".vite",
-])
 
 const formatErr = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
@@ -243,12 +228,8 @@ const writeStampAtomic = (
   })
 
 const shouldIgnoreEntry = (dir: string, baseDir: string, name: string): boolean => {
-  if (dir === baseDir && (ROOT_ONLY_IGNORED_NAMES.has(name) || /^(?:temp-|__temp_)/.test(name))) {
-    return true
-  }
   const relDir = relative(baseDir, dir).replace(/\\/g, "/")
-  const insideSrcOrTest = /(?:^|\/)(?:src|test)(?:\/|$)/.test(relDir)
-  return !insideSrcOrTest && BUILD_ARTIFACT_IGNORED_NAMES.has(name)
+  return shouldIgnoreStampEntry(dir === baseDir, relDir, name)
 }
 
 const collectFilesChecked = (

@@ -1,6 +1,7 @@
 import { Context, Effect, Layer, Option } from "effect"
 import { match } from "ts-pattern"
 import { buildDatalogAndDpoToolDescriptors } from "./datalog-and-dpo.tools.js"
+import { buildGitDiffToolDescriptors } from "./git-diff.tools.js"
 import { buildGraphNavigationToolDescriptors } from "./graph-navigation.tools.js"
 import { buildLspAndTelemetryToolDescriptors } from "./lsp-and-telemetry.tools.js"
 import {
@@ -66,6 +67,7 @@ export const buildLiveMcpToolDescriptors = (
   ...buildOntologyAndGqToolDescriptors(options),
   ...buildLspAndTelemetryToolDescriptors(options),
   ...buildDatalogAndDpoToolDescriptors(options),
+  ...buildGitDiffToolDescriptors(options),
 ]
 
 const STATIC_LIVE_TOOL_DESCRIPTORS: ReadonlyArray<McpToolPluginDescriptor> =
@@ -99,6 +101,9 @@ export const dispatchMcpTool = Effect.fn("HarnessMcp.dispatchTool")(function* (
   const resolved = yield* registry.resolveTool(input.toolName)
   return yield* match(resolved)
     .with({ _tag: "Some" }, ({ value }) => value.execute(input.args))
-    .with({ _tag: "None" }, () => new UnknownToolError({ toolName: McpToolInputName.make(input.toolName) }))
+    .with(
+      { _tag: "None" },
+      () => new UnknownToolError({ toolName: McpToolInputName.make(input.toolName) }),
+    )
     .exhaustive()
 })

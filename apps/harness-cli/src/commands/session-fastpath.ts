@@ -2,7 +2,10 @@ import { createHash, randomBytes } from "node:crypto"
 import { dirname, join, resolve } from "node:path"
 import { Option, Result, Schema } from "effect"
 import { match } from "ts-pattern"
-import { resolveHarnessStateDir } from "@harness/gates/hook-fastpath"
+import {
+  isWorkspaceRelPathIncludedInStamp,
+  resolveHarnessStateDir,
+} from "@harness/gates/hook-fastpath"
 import { resolveGitHeadState } from "@harness/graph/cluster-resolver"
 import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
 import type { ExtendedHostIo, SyncHostIo } from "@harness/service/host-io"
@@ -15,7 +18,7 @@ import {
   shouldSuppressLiveRepoTestSideEffects,
 } from "./repo-path.js"
 
-export const PRE_INVOCATION_CACHE_TTL_MS = 15_000
+export const PRE_INVOCATION_CACHE_TTL_MS = 300_000
 const PRE_INVOCATION_CACHE_FILE = "session-preinvocation-cache.json"
 
 export const PreInvocationCacheSchema = Schema.Struct({
@@ -31,8 +34,6 @@ export const PreInvocationCacheSchema = Schema.Struct({
 })
 export type PreInvocationCacheEntry = typeof PreInvocationCacheSchema.Type
 export type PreInvocationCacheRecord = Omit<PreInvocationCacheEntry, "version">
-
-const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 export const resolveHarnessStateDirSafe = (repoRoot: string): Option.Option<string> =>
   match(Result.try(() => resolveHarnessStateDir(repoRoot)))
@@ -164,6 +165,7 @@ export const computePreInvocationFingerprint = (
   const headState = resolveGitHeadState(repoRoot, hostIo)
   const hash = createHash("sha256")
   hash.update(`branch:${headState.gitBranch ?? ""}\nsha:${headState.headSha ?? ""}\n`)
+  const seenPaths = new Set<string>()
   const entries = statusStdout.split("\0")
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i]
@@ -178,15 +180,37 @@ export const computePreInvocationFingerprint = (
       }
     }
     if (relPath.length === 0 || relPath === ".harness" || relPath.startsWith(".harness/")) continue
+    seenPaths.add(relPath)
     const dirtyDigest = unwrapOption(hashDirtyPathContent(repoRoot, relPath, hostIo))
     if (dirtyDigest === undefined) return Option.none()
     hash.update(`dirty:${xy}:${relPath}:${dirtyDigest}\n`)
   }
-  const frictionDigest = unwrapOption(
-    digestFile(join(harnessDir, "friction-log.jsonl"), hostIo, true),
-  )
-  if (frictionDigest === undefined) return Option.none()
-  const hasNonEmptyFriction = frictionDigest !== "absent" && frictionDigest !== EMPTY_SHA256
+  const ignoredStdout = tryOr(() => {
+    const res = hostIo.execFileSync(
+      "git",
+      ["--no-optional-locks", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+      { cwd: repoRoot, timeoutMs: 2_000 },
+    )
+    return match(res)
+      .with({ _tag: "Exited" }, ({ exitCode, stdout }) => (exitCode === 0 ? stdout : undefined))
+      .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => undefined)
+      .exhaustive()
+  }, undefined)
+  if (ignoredStdout === undefined) return Option.none()
+  for (const relPath of ignoredStdout.split("\0")) {
+    if (
+      relPath.length === 0 ||
+      seenPaths.has(relPath) ||
+      relPath === ".env" ||
+      relPath === ".dev.vars" ||
+      !isWorkspaceRelPathIncludedInStamp(relPath)
+    ) {
+      continue
+    }
+    const ignoredDigest = unwrapOption(hashDirtyPathContent(repoRoot, relPath, hostIo))
+    if (ignoredDigest === undefined) return Option.none()
+    hash.update(`ignored:${relPath}:${ignoredDigest}\n`)
+  }
   for (const f of [
     "friction-log.jsonl",
     "verify-stamp.json",
@@ -194,7 +218,7 @@ export const computePreInvocationFingerprint = (
     "plan-graph-snapshot.json",
     "graph-head.json",
     "graph-snapshot.json",
-    ...(hasNonEmptyFriction ? ["telemetry-log.jsonl"] : []),
+    "last-done.json",
   ]) {
     const d = unwrapOption(digestFile(join(harnessDir, f), hostIo, true))
     if (d === undefined) return Option.none()
@@ -230,7 +254,7 @@ const hasSymlinkAncestor = (
   const resolvedStop = resolve(stopBoundary)
   let curr = resolve(targetPath)
   while (true) {
-    if (tryOr(() => hostIo.existsSync(curr) && hostIo.isSymbolicLinkSync(curr), true)) return true
+    if (tryOr(() => hostIo.isSymbolicLinkSync(curr), true)) return true
     if (curr === resolvedStop) return false
     const parent = dirname(curr)
     if (parent === curr) return false
@@ -262,17 +286,18 @@ const isSafeCacheDirAndPath = (
 ): boolean => {
   const hasStateDirOverride =
     process.env.HARNESS_STATE_DIR !== undefined && process.env.HARNESS_STATE_DIR !== ""
-  const stopBoundary =
-    !hasStateDirOverride && isInsideRoot(resolve(repoRoot), resolve(harnessDir))
-      ? resolve(repoRoot)
-      : resolve(harnessDir)
+  const isInsideRepo = isInsideRoot(resolve(repoRoot), resolve(harnessDir))
+  const stopBoundary = isInsideRepo ? resolve(repoRoot) : resolve(harnessDir)
   if (
     hasSymlinkAncestor(harnessDir, stopBoundary, hostIo) ||
     hasSymlinkAncestor(cachePath, stopBoundary, hostIo)
   ) {
     return warnUnsafeCache(`symlink detected in ${cachePath}`)
   }
-  if (!hasStateDirOverride) {
+  if (tryOr(() => hostIo.isSymbolicLinkSync(cachePath), true)) {
+    return warnUnsafeCache(`symlink detected in ${cachePath}`)
+  }
+  if (!hasStateDirOverride || isInsideRepo) {
     const realRepo = tryOr(() => hostIo.realpathSync(repoRoot), undefined)
     const existingAnchor = findDeepestExistingDir(harnessDir, hostIo)
     const realAnchor = existingAnchor
@@ -380,6 +405,37 @@ export const writePreInvocationSessionCache = (
       process.stderr.write(
         `[harness:session] Warning: Failed to write hook session cache: ${msg}\n`,
       )
+      Result.try(() => {
+        if (hostIo.existsSync(tmpPath)) hostIo.unlinkSync(tmpPath)
+      })
+    })
+    .exhaustive()
+}
+
+export const writeLastDoneMarker = (
+  repoRoot: string,
+  hostIo: SyncHostIo = nodeSyncHostIo,
+): void => {
+  if (shouldSuppressLiveRepoTestSideEffects(repoRoot)) return
+  const harnessDir = unwrapOption(resolveHarnessStateDirSafe(repoRoot))
+  if (harnessDir === undefined) return
+  const markerPath = join(harnessDir, "last-done.json")
+  if (!isSafeCacheDirAndPath(repoRoot, harnessDir, markerPath, hostIo, false)) return
+  if (!ensureHarnessDirSafe(Option.some(harnessDir), hostIo)) return
+  const tmpPath = join(
+    harnessDir,
+    `.last-done.json.${process.pid}.${randomBytes(6).toString("hex")}.tmp`,
+  )
+  match(
+    Result.try(() => {
+      hostIo.writeTextSync(tmpPath, JSON.stringify({ completedAt: new Date().toISOString() }))
+      hostIo.renameSync(tmpPath, markerPath)
+    }),
+  )
+    .with({ _tag: "Success" }, () => undefined)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      const msg = failure instanceof Error ? failure.message : String(failure)
+      process.stderr.write(`[harness:done] Warning: Failed to write last-done.json: ${msg}\n`)
       Result.try(() => {
         if (hostIo.existsSync(tmpPath)) hostIo.unlinkSync(tmpPath)
       })

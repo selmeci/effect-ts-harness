@@ -2,11 +2,22 @@ import * as path from "node:path"
 import { fileURLToPath } from "node:url"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js"
-import { Cause, Effect, type Exit, Layer, type ManagedRuntime, Option, Result, Schema } from "effect"
+import {
+  Cause,
+  Effect,
+  type Exit,
+  Layer,
+  type ManagedRuntime,
+  Option,
+  Result,
+  Schema,
+} from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import {
   CANONICAL_MCP_TOOL_NAMES,
+  GitDiffErrorReason,
+  GitDiffExecutionError,
   InvalidReviewRouteInputError,
   McpToolInputName,
   McpToolName,
@@ -37,7 +48,14 @@ import {
 import type { GovernanceDocReference } from "@harness/decision"
 import { nodeSyncHostIo, resolveHarnessStateDir } from "@harness/infra"
 
-export { CANONICAL_MCP_TOOL_NAMES, McpToolInputName, McpToolName, UnknownToolError }
+export {
+  CANONICAL_MCP_TOOL_NAMES,
+  GitDiffErrorReason,
+  GitDiffExecutionError,
+  McpToolInputName,
+  McpToolName,
+  UnknownToolError,
+}
 
 export class ProjectPathEscapeError extends Schema.TaggedError<ProjectPathEscapeError>()(
   "ProjectPathEscapeError",
@@ -52,6 +70,7 @@ export type McpToolExecutionError =
   | UnknownToolError
   | Schema.SchemaError
   | ProjectPathEscapeError
+  | GitDiffExecutionError
   | InvalidReviewRouteInputError
   | ConceptLatticeCycleError
   | GraphInferenceError
@@ -243,7 +262,10 @@ export const resolveGraphWithStatus = (
             const freshGraph = yield* extractWorkspaceTypeAwareGraph(root, nodeSyncHostIo)
             saveGraphSnapshot(freshGraph, verifySnap, nodeSyncHostIo)
             const savedMeta = writeGraphHeadMeta(root, nodeSyncHostIo, headState)
-            if (savedMeta === null && (headState.headSha !== null || headState.gitBranch !== null)) {
+            if (
+              savedMeta === null &&
+              (headState.headSha !== null || headState.gitBranch !== null)
+            ) {
               process.stderr.write(
                 `[harness-mcp] Warning: failed to persist graph-head.json in '${root}'\n`,
               )
@@ -256,16 +278,15 @@ export const resolveGraphWithStatus = (
     }
     if (snapshotPath && nodeSyncHostIo.existsSync(snapshotPath)) {
       return yield* loadGraphSnapshotEffect(snapshotPath, nodeSyncHostIo).pipe(
-        Effect.map(
-          (graph): GraphResolutionStatus =>
-            stalenessDegradedReason !== undefined
-              ? {
-                  graph,
-                  degraded: true,
-                  degradedReason: stalenessDegradedReason,
-                  evaluationError: stalenessEvaluationError,
-                }
-              : { graph, degraded: false },
+        Effect.map((graph): GraphResolutionStatus =>
+          stalenessDegradedReason !== undefined
+            ? {
+                graph,
+                degraded: true,
+                degradedReason: stalenessDegradedReason,
+                evaluationError: stalenessEvaluationError,
+              }
+            : { graph, degraded: false },
         ),
         Effect.catchTag("GraphSnapshotError", (error) => {
           const evaluationError = `Failed to load graph snapshot from '${snapshotPath}' [${error.reason}]: ${error.message}`
@@ -388,8 +409,7 @@ export const normalizeProjectPathEffect = (
 export const normalizeProjectPath = (
   repoRoot: string,
   rawProject: string,
-): Effect.Effect<string, ProjectPathEscapeError> =>
-  normalizeProjectPathEffect(repoRoot, rawProject)
+): Effect.Effect<string, ProjectPathEscapeError> => normalizeProjectPathEffect(repoRoot, rawProject)
 
 const extractJsonSchemaProperties = (raw: unknown): Record<string, object> | undefined => {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
@@ -494,7 +514,10 @@ export const formatMcpToolExit = (
   toolName: string,
   exit: Exit.Exit<unknown, unknown>,
 ):
-  | { readonly content: ReadonlyArray<{ readonly type: "text"; readonly text: string }>; readonly isError?: boolean }
+  | {
+      readonly content: ReadonlyArray<{ readonly type: "text"; readonly text: string }>
+      readonly isError?: boolean
+    }
   | Promise<never> =>
   match(exit)
     .with({ _tag: "Success" }, ({ value }) => ({
@@ -516,6 +539,12 @@ export const formatMcpToolExit = (
         )
       }
       if (squashed instanceof InvalidReviewRouteInputError) {
+        return {
+          content: [{ type: "text" as const, text: squashed.reason }],
+          isError: true,
+        }
+      }
+      if (squashed instanceof GitDiffExecutionError) {
         return {
           content: [{ type: "text" as const, text: squashed.reason }],
           isError: true,

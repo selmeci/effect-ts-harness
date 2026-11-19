@@ -53,11 +53,13 @@ import {
   writeSessionReportFilesSafe,
 } from "./learn-and-report.command.js"
 import { shouldSuppressLiveRepoTestSideEffects } from "./repo-path.js"
+import { writeLastDoneMarker } from "./session-fastpath.js"
 
 export { HarnessInfraLive }
 
 export const writeDoneSessionReport = (repoRoot: string): void => {
   if (shouldSuppressLiveRepoTestSideEffects(repoRoot)) return
+  writeLastDoneMarker(repoRoot, nodeSyncHostIo)
   const finalEvents = readTelemetryEventsSafe(repoRoot, nodeSyncHostIo)
   const finalFriction = readFrictionEventsSafe(repoRoot, nodeSyncHostIo)
   const finalReport = buildSessionReport({
@@ -96,6 +98,7 @@ export const handleMutate = (
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
     const isStrict = argv.includes("--strict")
     const isAll = argv.includes("--all")
+    const isDiff = argv.includes("--diff")
     const disableMutantCache = argv.includes("--no-cache")
 
     const cleanupStamp = (): string | undefined =>
@@ -180,6 +183,7 @@ export const handleMutate = (
       targetFiles,
       baseRef,
       explicitBaseRef: baseRef !== undefined,
+      diffOnly: isDiff,
       disableMutantCache,
       hmacSecret,
     })
@@ -191,7 +195,8 @@ export const handleMutate = (
       isStrict &&
       scope === undefined &&
       targetFiles === undefined &&
-      baseRef === undefined
+      baseRef === undefined &&
+      !isDiff
     ) {
       const writeRes = Result.try(() =>
         writeMutateStamp(repoRoot, nodeSyncHostIo, {

@@ -26,9 +26,12 @@ import type { SyncHostIo } from "@harness/service/host-io"
 import { resolveHarnessStateDir } from "../worktree.js"
 import type { CodeMutant } from "./mutant-ast-generator.js"
 import {
+  type ComputeFileMutationClosureDigestInput,
+  type FileMutationClosureDigestResult,
   type MutationContextDigests,
   type MutationContextDigestsResult,
   checkExists,
+  computeFileMutationClosureDigest,
   computeMutationContextDigests,
   computeMutationContextDigestsChecked,
   isNonSymlink,
@@ -38,8 +41,11 @@ import {
 } from "./mutation-context-digest.js"
 
 export {
+  type ComputeFileMutationClosureDigestInput,
+  type FileMutationClosureDigestResult,
   type MutationContextDigests,
   type MutationContextDigestsResult,
+  computeFileMutationClosureDigest,
   computeMutationContextDigests,
   computeMutationContextDigestsChecked,
 }
@@ -62,6 +68,7 @@ export interface ComputeMutantCacheKeyInput {
   readonly mutant: CodeMutant
   readonly reachingTestHashes: ReadonlyMap<AstSourceFilePath, ContentSha256>
   readonly digests: MutationContextDigests
+  readonly closureDigest?: ContentSha256 | undefined
 }
 
 export type SaveMutationCacheResult =
@@ -175,7 +182,7 @@ export const computeMutantCacheKey = (input: ComputeMutantCacheKeyInput): Conten
       category: input.mutant.category,
       original: input.mutant.original,
       replacement: input.mutant.replacement,
-      ws: input.digests.workspaceSrcDigest,
+      ws: input.closureDigest ?? input.digests.workspaceSrcDigest,
       ts: input.digests.testSupportDigests.get(input.pkgKey) ?? "",
       tests: [...input.reachingTestHashes.entries()].sort((a, b) => compareCodeUnits(a[0], b[0])),
     }),

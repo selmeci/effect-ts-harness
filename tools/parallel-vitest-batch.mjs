@@ -29,7 +29,7 @@ const runOneMutant = (mutantId) =>
     let settled = false
     const child = spawn(
       process.execPath,
-      [vitestCli, "run", "--bail=1", "--maxWorkers=2", ...testFiles],
+      [vitestCli, "run", "--bail=1", "--maxWorkers=1", ...testFiles],
       {
         cwd,
         env: { ...childBaseEnv, HARNESS_ACTIVE_MUTANT_ID: mutantId },

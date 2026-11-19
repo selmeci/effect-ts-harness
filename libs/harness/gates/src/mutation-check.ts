@@ -7,11 +7,8 @@ import { match } from "ts-pattern"
 import {
   AstSourceFilePath,
   type ContentSha256,
-  MUTATION_CACHE_SCHEMA_VERSION,
-  MutantCacheId,
   type MutationCacheEntry,
   type MutationCacheHmacSecret,
-  MutationCacheTimestamp,
   SourceLineNumber,
 } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
@@ -40,13 +37,17 @@ import {
 } from "./mutation/mutation-backup.js"
 import {
   computeMutationContextDigestsChecked,
-  computeMutationEntryMac,
   loadMutationCache,
-  saveMutationCacheAtomic,
 } from "./mutation/mutation-cache.js"
 import {
+  checkUnclassifiedStrictFiles,
   collectOrderedFileOutcomes,
+  flushMutationCache,
   hydrateFileMutantCacheHits,
+  preparePackageBaselines,
+  recordKilledMutantsToCache,
+  resolveSuiteDiff,
+  resolveTargetsForSuite,
 } from "./mutation/mutation-suite-helpers.js"
 import {
   decideMutationCheck,
@@ -67,11 +68,9 @@ import {
 import {
   type DomainFile,
   findDomainFiles,
-  findDomainFilesChecked,
   findReachingTestFiles,
   findReachingTestFilesChecked,
   findUnclassifiedModifiedLibFiles,
-  findUnclassifiedModifiedLibFilesChecked,
   partitionReachingTestFiles,
   partitionReachingTestFilesChecked,
 } from "./mutation/mutation-target-discovery.js"
@@ -135,6 +134,7 @@ export const collectReachingTestAssertions = (
 export interface RunMutationOptions {
   readonly scope?: string | undefined
   readonly includeAllLines?: boolean | undefined
+  readonly diffOnly?: boolean | undefined
   readonly enforcementMode?: "strict" | "advisory" | undefined
   readonly targetFiles?: ReadonlyArray<string> | undefined
   readonly baseRef?: string | undefined
@@ -288,93 +288,39 @@ export const runDomainMutationSuite = (
   const targetFilesOpt = options?.targetFiles
   const hasTargetFilesOpt = targetFilesOpt !== undefined
   const isExplicitTarget = (targetFilesOpt?.length ?? 0) > 0
-  if (!hasOverlays && hasTargetFilesOpt && !isExplicitTarget) {
-    return abortWith([], "[mutation-check] Explicit targetFiles (--file) was provided but empty.")
-  }
-
-  const domainFiles = match(
-    findDomainFilesChecked(repoRoot, hostIo, options?.scope, options?.targetFiles),
-  )
-    .with({ _tag: "Ok" }, ({ files }) => files)
-    .with({ _tag: "Error" }, ({ reason }) => reason)
+  const resolvedTargets = resolveTargetsForSuite({
+    repoRoot,
+    hostIo,
+    scope: options?.scope,
+    targetFiles: targetFilesOpt,
+    hasOverlays,
+    normalizedOverlays,
+    isStrictMode,
+  })
+  const targetsOrAbort = match(resolvedTargets)
+    .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
+    .with({ _tag: "Ok" }, ({ domainFiles, targets }) => ({ domainFiles, targets }))
     .exhaustive()
-  if (typeof domainFiles === "string") {
-    return abortWith([], `[mutation-check] Target discovery failed: ${domainFiles}`)
-  }
-
-  const domainByRel = new Map(domainFiles.map((f) => [f.relFile, f]))
-  const targets: Array<DomainFile> = []
-  if (hasOverlays) {
-    for (const relFile of normalizedOverlays.keys()) {
-      const existing = domainByRel.get(relFile)
-      if (existing !== undefined) {
-        targets.push(existing)
-        continue
-      }
-      const parts = /^libs\/([^/]+)\/([^/]+)\//.exec(relFile)
-      if (parts === null) {
-        return abortWith(
-          [],
-          `[mutation-check] Invalid overlay path '${relFile}': expected 'libs/<scope>/<pkg>/...'`,
-        )
-      }
-      const scope = parts[1]!
-      const pkgDir = parts[2]!
-      const tier = match<string, DomainFile["tier"]>(pkgDir)
-        .with("contract", () => "contract")
-        .with("core", "gates", "graph", "decision", "ingest", () => "core")
-        .otherwise(() => "domain")
-      targets.push({ scope, pkgDir, tier, fullPath: join(repoRoot, relFile), relFile })
-    }
-  } else {
-    targets.push(...domainFiles)
-  }
+  if (typeof targetsOrAbort === "string") return abortWith([], targetsOrAbort)
+  const { domainFiles, targets } = targetsOrAbort
   scannedCandidateFiles = targets.length
 
-  if (!hasOverlays && hasTargetFilesOpt) {
-    const discoveredSet = new Set(domainFiles.map((f) => f.relFile))
-    for (const rawTarget of targetFilesOpt) {
-      const normTarget = rawTarget.replace(/\\/g, "/").replace(/^\.\//, "")
-      if (!discoveredSet.has(normTarget)) {
-        return abortWith(
-          [],
-          `[mutation-check] Requested target file '${normTarget}' was not found in discovered domain/core/contract files.`,
-        )
-      }
-    }
-  }
-  if (!hasOverlays && isStrictMode && options?.scope !== undefined && domainFiles.length === 0) {
-    return abortWith(
-      [],
-      `[mutation-check] No domain/core/contract files matched scope '${options.scope}' in strict mode.`,
-    )
-  }
-
-  const resolvedDiff =
-    hasOverlays || isExplicitTarget
-      ? { _tag: "Ok" as const, diffMode: "explicit-files" as const, diffLinesMap: undefined }
-      : match(
-          extractGitDiffModifiedLinesChecked(repoRoot, hostIo, {
-            fallbackBaseRef: options?.baseRef ?? (isStrictMode ? "main" : undefined),
-            explicitBaseRef: options?.explicitBaseRef,
-          }),
-        )
-          .with(
-            { _tag: "Failed" },
-            ({ reason }) => `[mutation-check] Failed to extract git diff modified lines: ${reason}`,
-          )
-          .with({ _tag: "Ok" }, ({ lines, diffMode: extractedMode }) => ({
-            _tag: "Ok" as const,
-            diffMode: options?.includeAllLines === true ? ("all-lines" as const) : extractedMode,
-            diffLinesMap: lines,
-          }))
-          .with({ _tag: "NotGit" }, () => ({
-            _tag: "Ok" as const,
-            diffMode:
-              options?.includeAllLines === true ? ("all-lines" as const) : ("not-git" as const),
-            diffLinesMap: undefined,
-          }))
-          .exhaustive()
+  const resolvedDiff = match(
+    resolveSuiteDiff({
+      repoRoot,
+      hostIo,
+      hasOverlays,
+      isExplicitTarget,
+      diffOnly: options?.diffOnly,
+      includeAllLines: options?.includeAllLines,
+      baseRef: options?.baseRef,
+      explicitBaseRef: options?.explicitBaseRef,
+      isStrictMode,
+    }),
+  )
+    .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
+    .with({ _tag: "Ok" }, (ok) => ok)
+    .exhaustive()
   if (typeof resolvedDiff === "string") return abortWith([], resolvedDiff)
   diffMode = resolvedDiff.diffMode
   const diffLinesMap = resolvedDiff.diffLinesMap
@@ -385,23 +331,12 @@ export const runDomainMutationSuite = (
     !hasTargetFilesOpt &&
     diffLinesMap !== undefined
   ) {
-    const unclassifiedRes = findUnclassifiedModifiedLibFilesChecked(
+    const unclassifiedErr = checkUnclassifiedStrictFiles(
       repoRoot,
       diffLinesMap,
       domainFiles,
       hostIo,
     )
-    const unclassifiedErr = match(unclassifiedRes)
-      .with(
-        { _tag: "Error" },
-        ({ reason }) => `[mutation-check] Failed to classify modified lib files: ${reason}`,
-      )
-      .with({ _tag: "Ok" }, ({ files }) =>
-        files.length > 0
-          ? `[mutation-check] Unclassified modified lib file(s) in strict mode: ${files.join(", ")}`
-          : undefined,
-      )
-      .exhaustive()
     if (unclassifiedErr !== undefined) return abortWith([], unclassifiedErr)
   }
 
@@ -435,27 +370,44 @@ export const runDomainMutationSuite = (
   let cacheDirty = false
   flushCacheIfDirty = () => {
     if (!cacheEnabled || !cacheDirty || hmacSecret === undefined) return
-    const freshStore = loadMutationCache(repoRoot, hostIo, hmacSecret)
-    const saveRes = saveMutationCacheAtomic(
-      repoRoot,
-      {
-        version: MUTATION_CACHE_SCHEMA_VERSION,
-        entries: { ...freshStore.entries, ...cacheEntries },
-      },
-      hostIo,
-      hmacSecret,
-    )
-    match(saveRes)
-      .with({ _tag: "Saved" }, () => {
-        cacheDirty = false
-      })
-      .with({ _tag: "Skipped" }, { _tag: "Failed" }, ({ reason }) => {
-        process.stderr.write(
-          `[mutation-check] Warning: Failed to persist mutation cache: ${reason}\n`,
-        )
-      })
-      .exhaustive()
+    if (flushMutationCache(repoRoot, hostIo, hmacSecret, cacheEntries)) {
+      cacheDirty = false
+    }
   }
+
+  const baseSubprocessEnv: Record<string, string | undefined> = {
+    ...process.env,
+    NO_COLOR: "1",
+    FORCE_COLOR: "0",
+    HARNESS_ACTIVE_BACKUP_PATH: resolvedBackupPath,
+  }
+  delete baseSubprocessEnv["HARNESS_ACTIVE_MUTANT_ID"]
+
+  const globalBypassDiffFilter =
+    options?.includeAllLines === true || (isExplicitTarget && options?.diffOnly !== true)
+  const baselinePrepRes =
+    !hasOverlays && options?.testRunner === undefined
+      ? preparePackageBaselines({
+          repoRoot,
+          targets,
+          hostIo,
+          baseSubprocessEnv,
+          diffLinesMap,
+          bypassDiffFilter: globalBypassDiffFilter,
+        })
+      : undefined
+  const baselinePrep =
+    baselinePrepRes === undefined
+      ? undefined
+      : match(baselinePrepRes)
+          .with({ _tag: "Ok" }, (ok) => ok)
+          .with(
+            { _tag: "ReadError" },
+            ({ relFile, reason }) =>
+              `[mutation-check] Failed to read source file '${relFile}': ${reason}`,
+          )
+          .exhaustive()
+  if (typeof baselinePrep === "string") return abortWith([], baselinePrep)
 
   const outcomes: Array<MutantOutcome> = []
   for (const file of targets) {
@@ -463,8 +415,7 @@ export const runDomainMutationSuite = (
     if (diffLinesMap !== undefined && diffLinesMap.has(file.relFile)) {
       diffMatchedFiles.push(file.relFile)
     }
-    const bypassDiffFilter =
-      overlaySource !== undefined || options?.includeAllLines === true || isExplicitTarget
+    const bypassDiffFilter = overlaySource !== undefined || globalBypassDiffFilter
     if (!bypassDiffFilter && diffLinesMap !== undefined && !diffLinesMap.has(file.relFile)) {
       continue
     }
@@ -539,16 +490,9 @@ export const runDomainMutationSuite = (
       continue
     }
 
-    const baseSubprocessEnv: Record<string, string | undefined> = {
-      ...process.env,
-      NO_COLOR: "1",
-      FORCE_COLOR: "0",
-      HARNESS_ACTIVE_BACKUP_PATH: resolvedBackupPath,
-    }
-    delete baseSubprocessEnv["HARNESS_ACTIVE_MUTANT_ID"]
-
     const partition = match(
-      partitionReachingTestFilesChecked(repoRoot, file, originalContent, hostIo),
+      baselinePrep?.partitionCache.get(file.relFile) ??
+        partitionReachingTestFilesChecked(repoRoot, file, originalContent, hostIo),
     )
       .with({ _tag: "Ok" }, ({ partition: p }) => p)
       .with({ _tag: "Error" }, ({ reason }) => reason)
@@ -582,6 +526,8 @@ export const runDomainMutationSuite = (
     const uncachedMutants = mutants.filter((m) => !cachedHitIds.has(m.id))
     cachedKilledCount += mutants.length - uncachedMutants.length
 
+    const pkgBaselinePassed =
+      baselinePrep?.passedPackageBaselines.has(`${file.scope}/${file.pkgDir}`) === true
     const primaryRes = runVitestTargetList(
       repoRoot,
       file,
@@ -592,6 +538,7 @@ export const runDomainMutationSuite = (
       schemaBundle.schemaSource,
       backupPath,
       uncachedMutants,
+      { skipBaselineCheck: pkgBaselinePassed },
     )
     const fileNonCacheableIds = new Set<string>()
     const primaryOutcomes = match(primaryRes)
@@ -661,39 +608,18 @@ export const runDomainMutationSuite = (
         `[mutation-check] Missing outcome(s) for mutant(s) in '${file.relFile}': ${ordered.missingIds.join(", ")}`,
       )
     }
-    const recordedAt = MutationCacheTimestamp.make(new Date().toISOString())
-    const fileAstPath = AstSourceFilePath.make(file.relFile)
-    for (const mutant of uncachedMutants) {
-      const outcome = fileOutcomes.get(mutant.id)
-      const key = mutantKeys.get(mutant.id)
-      match(outcome?.status)
-        .with("killed", () => {
-          if (
-            key !== undefined &&
-            hmacSecret !== undefined &&
-            !fileNonCacheableIds.has(mutant.id)
-          ) {
-            const mutantCacheId = MutantCacheId.make(mutant.id)
-            const mac = computeMutationEntryMac(hmacSecret, {
-              key,
-              file: fileAstPath,
-              mutantId: mutantCacheId,
-              status: "killed",
-              recordedAt,
-            })
-            cacheEntries[key] = {
-              key,
-              file: fileAstPath,
-              mutantId: mutantCacheId,
-              status: "killed",
-              recordedAt,
-              mac,
-            }
-            cacheDirty = true
-          }
-        })
-        .with("survived", "equivalent", undefined, () => {})
-        .exhaustive()
+    if (
+      recordKilledMutantsToCache({
+        relFile: file.relFile,
+        uncachedMutants,
+        fileOutcomes,
+        mutantKeys,
+        fileNonCacheableIds,
+        hmacSecret,
+        cacheEntries,
+      })
+    ) {
+      cacheDirty = true
     }
     outcomes.push(...ordered.present)
     flushCacheIfDirty()

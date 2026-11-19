@@ -35,6 +35,7 @@ import {
 import {
   MAX_MUTATION_CACHE_ENTRIES,
   MutationCache,
+  computeFileMutationClosureDigest,
   computeMutantCacheKey,
   computeMutationContextDigests,
   computeMutationEntryMac,
@@ -451,23 +452,88 @@ describe("MutationCache", () => {
       })
       expect(keyDiffTest).not.toBe(keyBase)
 
-      // .tsx file change invalidates workspaceSrcDigest
+      const digests2 = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
+      const getClosure = (d: typeof digests1) =>
+        match(
+          computeFileMutationClosureDigest({
+            repoRoot,
+            relFile,
+            allReachingTests: [testFile],
+            digests: d,
+            hostIo: testHostIo,
+          }),
+        )
+          .with({ _tag: "Ok" }, (ok) => ok)
+          .with({ _tag: "Disabled" }, ({ reason }) => {
+            throw new Error(`Expected Ok closure: ${reason}`)
+          })
+          .exhaustive()
+
+      const closure1 = getClosure(digests2)
+      expect(closure1.usedFallbackAllLibs).toBe(false)
+      const keyClosureBase = computeMutantCacheKey({
+        pkgKey,
+        relFile,
+        originalContentSha256: origSha1,
+        compiledSchemaSha256: schemaSha1,
+        mutant,
+        reachingTestHashes: reachingHashes2,
+        digests: digests2,
+        closureDigest: closure1.closureDigest,
+      })
+
+      // Unrelated .tsx file change keeps closureDigest & computeMutantCacheKey IDENTICAL
       writeFileSync(
         join(repoRoot, "libs", "shared", "service", "src", "view.tsx"),
         "export const V = 2\n",
       )
       const digestsTsx = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
-      expect(digestsTsx.workspaceSrcDigest).not.toBe(digests1.workspaceSrcDigest)
+      const closureTsx = getClosure(digestsTsx)
+      expect(closureTsx.closureDigest).toBe(closure1.closureDigest)
+      expect(
+        computeMutantCacheKey({
+          pkgKey,
+          relFile,
+          originalContentSha256: origSha1,
+          compiledSchemaSha256: schemaSha1,
+          mutant,
+          reachingTestHashes: reachingHashes2,
+          digests: digestsTsx,
+          closureDigest: closureTsx.closureDigest,
+        }),
+      ).toBe(keyClosureBase)
 
-      // Cross-package test helper change invalidates workspaceSrcDigest
+      // Unrelated cross-package test helper change keeps closureDigest IDENTICAL
       writeFileSync(join(helperDir, "test-host-io.ts"), "export const helper = 2\n")
       const digestsHelper = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
-      expect(digestsHelper.workspaceSrcDigest).not.toBe(digestsTsx.workspaceSrcDigest)
+      expect(getClosure(digestsHelper).closureDigest).toBe(closure1.closureDigest)
 
-      // tools/ change invalidates workspaceSrcDigest
+      // Unreferenced docs/specs change keeps closureDigest IDENTICAL
+      mkdirSync(join(repoRoot, "docs", "specs"), { recursive: true })
+      writeFileSync(join(repoRoot, "docs", "specs", "s1.md"), "# spec v1\n")
+      const digestsSpec1 = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
+      expect(getClosure(digestsSpec1).closureDigest).toBe(closure1.closureDigest)
+      writeFileSync(join(repoRoot, "docs", "specs", "s1.md"), "# spec v2\n")
+      const digestsSpec2 = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
+      expect(getClosure(digestsSpec2).closureDigest).toBe(closure1.closureDigest)
+
+      // tools/parallel-vitest-batch.mjs (rootRuntimeDigest) change DOES invalidate closureDigest & key
       writeFileSync(join(repoRoot, "tools", "parallel-vitest-batch.mjs"), "// v2\n")
       const digestsTools = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
-      expect(digestsTools.workspaceSrcDigest).not.toBe(digestsHelper.workspaceSrcDigest)
+      const closureTools = getClosure(digestsTools)
+      expect(closureTools.closureDigest).not.toBe(closure1.closureDigest)
+      expect(
+        computeMutantCacheKey({
+          pkgKey,
+          relFile,
+          originalContentSha256: origSha1,
+          compiledSchemaSha256: schemaSha1,
+          mutant,
+          reachingTestHashes: reachingHashes2,
+          digests: digestsTools,
+          closureDigest: closureTools.closureDigest,
+        }),
+      ).not.toBe(keyClosureBase)
     } finally {
       rmSync(repoRoot, { recursive: true, force: true })
     }
@@ -638,7 +704,7 @@ describe("MutationCache", () => {
     }
   })
 
-  it("tools/parallel-vitest-batch.mjs passes --bail=1, --maxWorkers=2, HARNESS_ACTIVE_MUTANT_ID, and strips HARNESS_BATCH_*", () => {
+  it("tools/parallel-vitest-batch.mjs passes --bail=1, --maxWorkers=1, HARNESS_ACTIVE_MUTANT_ID, and strips HARNESS_BATCH_*", () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "parallel-batch-test-"))
     try {
       const fakeVitest = join(tmpDir, "fake-vitest.mjs")
@@ -681,7 +747,7 @@ process.exit(1);
         )
       expect(calls).toHaveLength(2)
       for (const call of calls) {
-        expect(call.argv).toEqual(["run", "--bail=1", "--maxWorkers=2", "a.test.ts"])
+        expect(call.argv).toEqual(["run", "--bail=1", "--maxWorkers=1", "a.test.ts"])
         expect(["m-1", "m-2"]).toContain(call.activeMutant)
         expect(call.hasBatchEnv).toBe(false)
       }
@@ -724,6 +790,509 @@ process.exit(1);
       writeFileSync(outsideFile, "export const x = 1\n", "utf8")
       symlinkSync(outsideFile, join(nestedDir, "link.ts"))
       expect(computeMutationContextDigests(repoRoot, testHostIo)._tag).toBe("None")
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("computeFileMutationClosureDigest tracks transitive relative & @harness/* imports, referenced asset buckets, and dynamic-import fallback", () => {
+    const src =
+      'import { helper } from "./dep.js"\nimport { x } from "@harness/contract"\nexport const f = () => helper() + x\n'
+    const { repoRoot } = setupTempRepo(
+      src,
+      'import { expect, it } from "vitest"\nimport { f } from "../src/logic.js"\nit("ok", () => { expect(f()).toBe(2) })\n',
+    )
+    try {
+      const srcDir = join(repoRoot, "libs", "sample", "domain", "src")
+      writeFileSync(join(srcDir, "dep.ts"), "export const helper = () => 1\n")
+      const contractDir = join(repoRoot, "libs", "harness", "contract")
+      mkdirSync(join(contractDir, "src"), { recursive: true })
+      writeFileSync(
+        join(contractDir, "package.json"),
+        '{"name":"@harness/contract","exports":{".":"./src/index.ts"}}\n',
+      )
+      writeFileSync(join(contractDir, "src", "index.ts"), "export const x = 1\n")
+      mkdirSync(join(repoRoot, "libs", "unrelated", "core", "src"), { recursive: true })
+      writeFileSync(
+        join(repoRoot, "libs", "unrelated", "core", "src", "other.ts"),
+        "export const u = 1\n",
+      )
+      mkdirSync(join(repoRoot, "docs", "specs"), { recursive: true })
+      writeFileSync(join(repoRoot, "docs", "specs", "s1.md"), "# s1\n")
+
+      const getClosure = (rel: string) => {
+        const d = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
+        return match(
+          computeFileMutationClosureDigest({
+            repoRoot,
+            relFile: rel,
+            allReachingTests: ["libs/sample/domain/test/logic.test.ts"],
+            digests: d,
+            hostIo: testHostIo,
+          }),
+        )
+          .with({ _tag: "Ok" }, (ok) => ok)
+          .with({ _tag: "Disabled" }, ({ reason }) => {
+            throw new Error(`Expected Ok: ${reason}`)
+          })
+          .exhaustive()
+      }
+
+      const c0 = getClosure("libs/sample/domain/src/logic.ts")
+      expect(c0.usedFallbackAllLibs).toBe(false)
+      expect(c0.resolvedFiles).toContain("libs/sample/domain/src/dep.ts")
+      expect(c0.resolvedFiles).toContain("libs/harness/contract/src/index.ts")
+
+      // Transitive relative import change invalidates
+      writeFileSync(join(srcDir, "dep.ts"), "export const helper = () => 2\n")
+      const cDep = getClosure("libs/sample/domain/src/logic.ts")
+      expect(cDep.closureDigest).not.toBe(c0.closureDigest)
+
+      // Transitive @harness/contract import change invalidates
+      writeFileSync(join(contractDir, "src", "index.ts"), "export const x = 2\n")
+      const cContract = getClosure("libs/sample/domain/src/logic.ts")
+      expect(cContract.closureDigest).not.toBe(cDep.closureDigest)
+
+      // Referenced docs/ bucket invalidates when "docs/" is in closure
+      writeFileSync(
+        join(srcDir, "dep.ts"),
+        'export const p = "docs/specs/s1.md"\nexport const helper = () => 2\n',
+      )
+      const cDocs1 = getClosure("libs/sample/domain/src/logic.ts")
+      writeFileSync(join(repoRoot, "docs", "specs", "s1.md"), "# s1 v2\n")
+      const cDocs2 = getClosure("libs/sample/domain/src/logic.ts")
+      expect(cDocs2.closureDigest).not.toBe(cDocs1.closureDigest)
+
+      // Non-literal dynamic import triggers usedFallbackAllLibs and invalidates on unrelated libs/ change
+      writeFileSync(
+        join(srcDir, "dep.ts"),
+        "export const load = (m: string) => import(m)\nexport const helper = () => 2\n",
+      )
+      const cDyn1 = getClosure("libs/sample/domain/src/logic.ts")
+      expect(cDyn1.usedFallbackAllLibs).toBe(true)
+      writeFileSync(
+        join(repoRoot, "libs", "unrelated", "core", "src", "other.ts"),
+        "export const u = 2\n",
+      )
+      const cDyn2 = getClosure("libs/sample/domain/src/logic.ts")
+      expect(cDyn2.closureDigest).not.toBe(cDyn1.closureDigest)
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it.effect.prop(
+    "REQ-1.1 property: full closure -> key -> MutationCache.decide preserves hits on unrelated edits and misses on dependency or dynamic-fallback edits",
+    {
+      unrelatedToken: Schema.String.check(Schema.isPattern(/^[a-z0-9]{1,12}$/)),
+      depToken: Schema.String.check(Schema.isPattern(/^[a-z0-9]{1,12}$/)),
+      useDynamicFallback: Schema.Boolean,
+    },
+    ({ unrelatedToken, depToken, useDynamicFallback }) =>
+      Effect.gen(function* () {
+        const src = 'import { depVal } from "./dep.js"\nexport const val = () => depVal\n'
+        const { repoRoot } = setupTempRepo(src)
+        try {
+          const srcDir = join(repoRoot, "libs", "sample", "domain", "src")
+          writeFileSync(
+            join(srcDir, "dep.ts"),
+            useDynamicFallback
+              ? 'export const load = (m: string) => import(m)\nexport const depVal = "init"\n'
+              : 'export const depVal = "init"\n',
+          )
+          const otherDir = join(repoRoot, "libs", "other", "core", "src")
+          mkdirSync(otherDir, { recursive: true })
+          writeFileSync(join(otherDir, "other.ts"), 'export const o = "init"\n')
+
+          const relFile = AstSourceFilePath.make("libs/sample/domain/src/logic.ts")
+          const testFile = "libs/sample/domain/test/logic.test.ts"
+          const pkgKey = PackageRelKey.make("sample/domain")
+          const origSha = computeContentSha256(src)
+          const schemaSha = computeContentSha256("schema")
+          const mutant = {
+            id: MutantId.make("m-prop"),
+            file: relFile,
+            line: SourceLineNumber.make(1),
+            category: "boolean-return" as const,
+            original: MutantSourceText.make("true"),
+            replacement: MutantSourceText.make("false"),
+            mutatedSource: MutantSourceText.make(src),
+          }
+
+          const computeKey = () => {
+            const d = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
+            const reachingTestHashes = unwrapOpt(
+              hashReachingTestFiles(repoRoot, [testFile], testHostIo),
+            )
+            const closure = match(
+              computeFileMutationClosureDigest({
+                repoRoot,
+                relFile,
+                allReachingTests: [testFile],
+                digests: d,
+                hostIo: testHostIo,
+              }),
+            )
+              .with({ _tag: "Ok" }, (ok) => ok)
+              .with({ _tag: "Disabled" }, ({ reason }) => {
+                throw new Error(`Expected Ok: ${reason}`)
+              })
+              .exhaustive()
+            return {
+              closure,
+              key: computeMutantCacheKey({
+                pkgKey,
+                relFile,
+                originalContentSha256: origSha,
+                compiledSchemaSha256: schemaSha,
+                mutant,
+                reachingTestHashes,
+                digests: d,
+                closureDigest: closure.closureDigest,
+              }),
+            }
+          }
+
+          const base = computeKey()
+          const recordedAt = MutationCacheTimestamp.make(new Date().toISOString())
+          const mutantCacheId = MutantCacheId.make(mutant.id)
+          const store = {
+            version: MUTATION_CACHE_SCHEMA_VERSION,
+            entries: {
+              [base.key]: {
+                key: base.key,
+                file: relFile,
+                mutantId: mutantCacheId,
+                status: "killed" as const,
+                recordedAt,
+                mac: computeMutationEntryMac(TEST_HMAC_SECRET, {
+                  key: base.key,
+                  file: relFile,
+                  mutantId: mutantCacheId,
+                  status: "killed",
+                  recordedAt,
+                }),
+              },
+            },
+          }
+
+          writeFileSync(join(otherDir, "other.ts"), `export const o = "${unrelatedToken}-mut"\n`)
+          const afterUnrelated = computeKey()
+          const unrelatedDecision = yield* MutationCache.decide({
+            candidateKeys: [afterUnrelated.key],
+            store,
+            hmacSecret: TEST_HMAC_SECRET,
+          })
+          if (useDynamicFallback) {
+            expect(afterUnrelated.closure.usedFallbackAllLibs).toBe(true)
+            expect(unrelatedDecision.missKeys).toEqual([afterUnrelated.key])
+          } else {
+            expect(afterUnrelated.closure.usedFallbackAllLibs).toBe(false)
+            expect(afterUnrelated.key).toBe(base.key)
+            expect(unrelatedDecision.hitKeys).toEqual([base.key])
+          }
+
+          writeFileSync(join(srcDir, "dep.ts"), `export const depVal = "${depToken}-mut"\n`)
+          const afterDep = computeKey()
+          const depDecision = yield* MutationCache.decide({
+            candidateKeys: [afterDep.key],
+            store,
+            hmacSecret: TEST_HMAC_SECRET,
+          })
+          expect(afterDep.key).not.toBe(base.key)
+          expect(depDecision.missKeys).toEqual([afterDep.key])
+        } finally {
+          rmSync(repoRoot, { recursive: true, force: true })
+        }
+      }),
+  )
+
+  it("REQ-1.1 survivor coverage: dynamic quote forms, side-effect import, empty fileDigests disk fallback, package exports/corrupt/nopkg, non-TS asset, and runtimeVersion extraTag", () => {
+    const src = [
+      'import "./side.js"',
+      'import { rootFn } from "@sample/custom"',
+      'import { subFn } from "@sample/custom/sub"',
+      'import { brokenFn } from "@sample/corrupt"',
+      'import { noPkgRoot } from "@sample/nopkg"',
+      'import { noPkgLeaf } from "@sample/nopkg/leaf"',
+      "export const loadAll = async () => {",
+      '  await import("./double.js")',
+      "  await import('./single.js')",
+      "  await import(`./backtick.js`)",
+      "  return rootFn() + subFn() + brokenFn() + noPkgRoot() + noPkgLeaf()",
+      "}",
+    ].join("\n")
+    const { repoRoot } = setupTempRepo(src)
+    try {
+      const srcDir = join(repoRoot, "libs", "sample", "domain", "src")
+      writeFileSync(join(srcDir, "side.ts"), "export const side = 1\n")
+      writeFileSync(join(srcDir, "double.ts"), "export const d = 1\n")
+      writeFileSync(join(srcDir, "single.ts"), "export const s = 1\n")
+      writeFileSync(join(srcDir, "backtick.ts"), "export const b = 1\n")
+      writeFileSync(
+        join(repoRoot, "libs", "sample", "domain", "schema.pg"),
+        "CREATE TABLE t(id int);\n",
+      )
+
+      // @sample/custom with package.json exports and NO src/index.ts or src/sub.ts
+      const customDir = join(repoRoot, "libs", "sample", "custom")
+      mkdirSync(join(customDir, "src", "nested"), { recursive: true })
+      writeFileSync(
+        join(customDir, "package.json"),
+        JSON.stringify({
+          name: "@sample/custom",
+          exports: {
+            ".": "./src/custom-root.ts",
+            "./sub": { import: "./src/nested/sub-entry.ts" },
+          },
+        }),
+      )
+      writeFileSync(join(customDir, "src", "custom-root.ts"), "export const rootFn = () => 1\n")
+      writeFileSync(
+        join(customDir, "src", "nested", "sub-entry.ts"),
+        "export const subFn = () => 1\n",
+      )
+
+      // @sample/corrupt with invalid JSON package.json falling back to src/index.ts
+      const corruptDir = join(repoRoot, "libs", "sample", "corrupt")
+      mkdirSync(join(corruptDir, "src"), { recursive: true })
+      writeFileSync(join(corruptDir, "package.json"), "{not-valid-json")
+      writeFileSync(join(corruptDir, "src", "index.ts"), "export const brokenFn = () => 1\n")
+
+      // @sample/nopkg with NO package.json at all
+      const noPkgDir = join(repoRoot, "libs", "sample", "nopkg")
+      mkdirSync(join(noPkgDir, "src"), { recursive: true })
+      writeFileSync(join(noPkgDir, "src", "index.ts"), "export const noPkgRoot = () => 1\n")
+      writeFileSync(join(noPkgDir, "src", "leaf.ts"), "export const noPkgLeaf = () => 1\n")
+
+      // Unrelated package for non-TS asset isolation check
+      const otherDir = join(repoRoot, "libs", "other", "core", "src")
+      const otherTestDir = join(repoRoot, "libs", "other", "core", "test")
+      mkdirSync(otherDir, { recursive: true })
+      mkdirSync(otherTestDir, { recursive: true })
+      writeFileSync(join(otherDir, "other.ts"), "export const o = 1\n")
+      writeFileSync(join(otherTestDir, "other.test.ts"), 'import { o } from "../src/other.js"\n')
+
+      // Vitest package.json for runtimeVersion extraTag check
+      mkdirSync(join(repoRoot, "node_modules", "vitest"), { recursive: true })
+      writeFileSync(
+        join(repoRoot, "node_modules", "vitest", "package.json"),
+        '{"name":"vitest","version":"5.0.0"}\n',
+      )
+
+      const d0 = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
+      const getClosure = (rel: string, tests: ReadonlyArray<string>, digests = d0) =>
+        match(
+          computeFileMutationClosureDigest({
+            repoRoot,
+            relFile: rel,
+            allReachingTests: tests,
+            digests,
+            hostIo: testHostIo,
+          }),
+        )
+          .with({ _tag: "Ok" }, (ok) => ok)
+          .with({ _tag: "Disabled" }, ({ reason }) => {
+            throw new Error(`Expected Ok: ${reason}`)
+          })
+          .exhaustive()
+
+      const c0 = getClosure("libs/sample/domain/src/logic.ts", [
+        "libs/sample/domain/test/logic.test.ts",
+      ])
+      expect(c0.usedFallbackAllLibs).toBe(false)
+      expect(c0.resolvedFiles).toContain("libs/sample/domain/src/side.ts")
+      expect(c0.resolvedFiles).toContain("libs/sample/domain/src/double.ts")
+      expect(c0.resolvedFiles).toContain("libs/sample/domain/src/single.ts")
+      expect(c0.resolvedFiles).toContain("libs/sample/domain/src/backtick.ts")
+      expect(c0.resolvedFiles).toContain("libs/sample/custom/src/custom-root.ts")
+      expect(c0.resolvedFiles).toContain("libs/sample/custom/src/nested/sub-entry.ts")
+      expect(c0.resolvedFiles).toContain("libs/sample/corrupt/src/index.ts")
+      expect(c0.resolvedFiles).toContain("libs/sample/nopkg/src/index.ts")
+      expect(c0.resolvedFiles).toContain("libs/sample/nopkg/src/leaf.ts")
+
+      // Empty fileDigests still resolves via disk existence
+      const cEmptyDigests = getClosure(
+        "libs/sample/domain/src/logic.ts",
+        ["libs/sample/domain/test/logic.test.ts"],
+        { ...d0, fileDigests: new Map() },
+      )
+      expect(cEmptyDigests.resolvedFiles).toContain("libs/sample/domain/src/double.ts")
+      expect(cEmptyDigests.closureDigest).toBe(c0.closureDigest)
+
+      // Side-effect import change invalidates closureDigest
+      writeFileSync(join(srcDir, "side.ts"), "export const side = 2\n")
+      const dSide = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
+      expect(
+        getClosure(
+          "libs/sample/domain/src/logic.ts",
+          ["libs/sample/domain/test/logic.test.ts"],
+          dSide,
+        ).closureDigest,
+      ).not.toBe(c0.closureDigest)
+
+      // Non-TS asset in sample/domain invalidates sample/domain closure but NOT other/core closure
+      const cOtherBefore = getClosure(
+        "libs/other/core/src/other.ts",
+        ["libs/other/core/test/other.test.ts"],
+        dSide,
+      )
+      writeFileSync(
+        join(repoRoot, "libs", "sample", "domain", "schema.pg"),
+        "CREATE TABLE t(id text);\n",
+      )
+      const dAsset = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
+      expect(
+        getClosure(
+          "libs/sample/domain/src/logic.ts",
+          ["libs/sample/domain/test/logic.test.ts"],
+          dAsset,
+        ).closureDigest,
+      ).not.toBe(
+        getClosure(
+          "libs/sample/domain/src/logic.ts",
+          ["libs/sample/domain/test/logic.test.ts"],
+          dSide,
+        ).closureDigest,
+      )
+      expect(
+        getClosure("libs/other/core/src/other.ts", ["libs/other/core/test/other.test.ts"], dAsset)
+          .closureDigest,
+      ).toBe(cOtherBefore.closureDigest)
+
+      // Template-literal dynamic import with interpolation triggers fallback
+      writeFileSync(
+        join(srcDir, "side.ts"),
+        "export const load = (x: string) => import(`./${x}.js`)\n",
+      )
+      const dInterp = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
+      expect(
+        getClosure(
+          "libs/sample/domain/src/logic.ts",
+          ["libs/sample/domain/test/logic.test.ts"],
+          dInterp,
+        ).usedFallbackAllLibs,
+      ).toBe(true)
+
+      // Mutating vitest version changes rootRuntimeDigest (extraTag binding)
+      writeFileSync(
+        join(repoRoot, "node_modules", "vitest", "package.json"),
+        '{"name":"vitest","version":"5.1.0"}\n',
+      )
+      const dVitest = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
+      expect(dVitest.rootRuntimeDigest).not.toBe(dInterp.rootRuntimeDigest)
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("REQ-1.1 AST & workspace resolution: package-name mapping, wildcard/nested/dist exports, require/importActual, string-safe /*, unresolved @ fallback, and all 5 asset buckets", () => {
+    const src = [
+      'import { sc } from "@harness/sample-contract"',
+      'import { wc } from "@sample/wild/foo"',
+      'const commentLike = "/* not a comment */"',
+      'const req = require("./req-dep.js")',
+      "export const run = () => sc() + wc() + commentLike.length + req",
+    ].join("\n")
+    const { repoRoot } = setupTempRepo(src)
+    try {
+      const srcDir = join(repoRoot, "libs", "sample", "domain", "src")
+      writeFileSync(join(srcDir, "req-dep.ts"), "export const reqDep = 1\n")
+
+      // Package with name "@harness/sample-contract" located at libs/sample/contract + nested dist export
+      const scDir = join(repoRoot, "libs", "sample", "contract")
+      mkdirSync(join(scDir, "src"), { recursive: true })
+      writeFileSync(
+        join(scDir, "package.json"),
+        JSON.stringify({
+          name: "@harness/sample-contract",
+          exports: { ".": { import: { default: "./dist/entry.js" } } },
+        }),
+      )
+      writeFileSync(join(scDir, "src", "entry.ts"), "export const sc = () => 1\n")
+
+      // Package with wildcard "./*" export
+      const wildDir = join(repoRoot, "libs", "sample", "wild")
+      mkdirSync(join(wildDir, "src", "items"), { recursive: true })
+      writeFileSync(
+        join(wildDir, "package.json"),
+        JSON.stringify({ name: "@sample/wild", exports: { "./*": "./src/items/*.ts" } }),
+      )
+      writeFileSync(join(wildDir, "src", "items", "foo.ts"), "export const wc = () => 1\n")
+
+      // All 5 asset buckets
+      mkdirSync(join(repoRoot, "agent-patterns"), { recursive: true })
+      writeFileSync(join(repoRoot, "agent-patterns", "p.md"), "# p1\n")
+      mkdirSync(join(repoRoot, "adapters"), { recursive: true })
+      writeFileSync(join(repoRoot, "adapters", "a.txt"), "a1\n")
+      mkdirSync(join(repoRoot, "tools"), { recursive: true })
+      writeFileSync(join(repoRoot, "tools", "helper.ts"), "export const t = 1\n")
+      mkdirSync(join(repoRoot, "apps", "sample", "src"), { recursive: true })
+      writeFileSync(join(repoRoot, "apps", "sample", "src", "helper.ts"), "export const app = 1\n")
+      mkdirSync(join(repoRoot, "docs", "specs"), { recursive: true })
+      writeFileSync(join(repoRoot, "docs", "specs", "s1.md"), "# s1\n")
+
+      const getClosure = () => {
+        const d = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
+        return match(
+          computeFileMutationClosureDigest({
+            repoRoot,
+            relFile: "libs/sample/domain/src/logic.ts",
+            allReachingTests: ["libs/sample/domain/test/logic.test.ts"],
+            digests: d,
+            hostIo: testHostIo,
+          }),
+        )
+          .with({ _tag: "Ok" }, (ok) => ok)
+          .with({ _tag: "Disabled" }, ({ reason }) => {
+            throw new Error(`Expected Ok: ${reason}`)
+          })
+          .exhaustive()
+      }
+
+      const c0 = getClosure()
+      expect(c0.usedFallbackAllLibs).toBe(false)
+      expect(c0.resolvedFiles).toContain("libs/sample/contract/src/entry.ts")
+      expect(c0.resolvedFiles).toContain("libs/sample/wild/src/items/foo.ts")
+      expect(c0.resolvedFiles).toContain("libs/sample/domain/src/req-dep.ts")
+
+      // Verify each of the 5 asset buckets invalidates when referenced via join/path
+      const bucketCases: ReadonlyArray<readonly [string, string, string]> = [
+        ['join(r, "docs", "specs")', join(repoRoot, "docs", "specs", "s1.md"), "# s2\n"],
+        ['join(r, "agent-patterns")', join(repoRoot, "agent-patterns", "p.md"), "# p2\n"],
+        ['join(r, "adapters")', join(repoRoot, "adapters", "a.txt"), "a2\n"],
+        [
+          'join(r, "tools", "helper.ts")',
+          join(repoRoot, "tools", "helper.ts"),
+          "export const t = 2\n",
+        ],
+        [
+          'join(r, "apps", "sample")',
+          join(repoRoot, "apps", "sample", "src", "helper.ts"),
+          "export const app = 2\n",
+        ],
+      ]
+      for (const [refExpr, assetPath, nextContent] of bucketCases) {
+        writeFileSync(join(srcDir, "req-dep.ts"), `export const ref = ${refExpr}\n`)
+        const before = getClosure()
+        writeFileSync(assetPath, nextContent)
+        const after = getClosure()
+        expect(after.closureDigest).not.toBe(before.closureDigest)
+      }
+
+      // Unresolved @harness/* package sets usedFallbackAllLibs = true
+      writeFileSync(
+        join(srcDir, "req-dep.ts"),
+        'import { missing } from "@harness/missing"\nexport const x = missing\n',
+      )
+      expect(getClosure().usedFallbackAllLibs).toBe(true)
+
+      // vi.importActual(nonLiteral) sets usedFallbackAllLibs = true
+      writeFileSync(
+        join(srcDir, "req-dep.ts"),
+        "export const f = (vi: any, p: string) => vi.importActual(p)\n",
+      )
+      expect(getClosure().usedFallbackAllLibs).toBe(true)
     } finally {
       rmSync(repoRoot, { recursive: true, force: true })
     }

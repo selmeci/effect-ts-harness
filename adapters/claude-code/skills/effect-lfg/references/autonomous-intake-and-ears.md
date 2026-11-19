@@ -22,7 +22,7 @@ Before modifying any tracked repository file:
      ```
    - Otherwise, if in a clean primary checkout on `main`, switch to `feat/<slug>` (`git switch -c feat/<slug>`).
    - **Two-Tier Worktree Rule (Linked Worktrees vs. `HARNESS_WORKTREE_ID`):**
-     - Inside any linked git worktree (`.harness/worktrees/<slug>` or `Workspace: "share"`), keep `HARNESS_WORKTREE_ID` **unset**: the worktree's own `<worktreeRoot>/.harness/` directory isolates `plan-graph-snapshot.json`, `graph-snapshot.json`, `verify-stamp.json`, and `graph-head.json`, while `resolveOmnigraphTaskBranches` (`libs/harness/graph/src/cluster-resolver.ts`) automatically binds to the shared `<canonicalRoot>/.harness/omnigraph-cluster` via `plan/wt-<worktree-basename>` and `impl/wt-<worktree-basename>`.
+     - Inside any linked git worktree (`.harness/worktrees/<slug>` or `isolation: "worktree"`), keep `HARNESS_WORKTREE_ID` **unset**: the worktree's own `<worktreeRoot>/.harness/` directory isolates `plan-graph-snapshot.json`, `graph-snapshot.json`, `verify-stamp.json`, and `graph-head.json`, while `resolveOmnigraphTaskBranches` (`libs/harness/graph/src/cluster-resolver.ts`) automatically binds to the shared `<canonicalRoot>/.harness/omnigraph-cluster` via `plan/wt-<worktree-basename>` and `impl/wt-<worktree-basename>`.
      - Reserve `HARNESS_WORKTREE_ID=<unit>` strictly for Stage 3 package implementers or Phase 4 review fixers running package-level checks (`CI=true pnpm nx run <project>:verify`) inside a shared checkout.
 2. **Inspect Session Readiness:**
    Run `pnpm harness session` (or `node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts session`) to verify active stubs, `.harness/verify-stamp.json` freshness, and Omnigraph connectivity.
@@ -37,7 +37,7 @@ Classify the input request using bounded Graph MCP queries (`harness_resolve`, `
 
 - **Trigger:** The prompt provides a GitHub PR number/URL (`#42`, `https://github.com/.../pull/42`) or pasted review markdown (from Grok, Codex, Claude, or a human reviewer) asking to resolve feedback.
 - **Action:**
-  1. Execute the 5-phase `resolving-effect-review-feedback` workflow autonomously (Ingest -> Central Graph MCP Adjudication -> Spec/ADR Sync -> Package-Isolated `flash` Fixers).
+  1. Execute the 5-phase `resolving-effect-review-feedback` workflow autonomously (Ingest -> Central Graph MCP Adjudication -> Spec/ADR Sync -> Package-Isolated `haiku` Fixers).
   2. Advance directly to **Stage 5 (Compounding Learnings & Final Deterministic Gate Sequence)** and **Stage 6 (Shipping)**.
 
 ### Route D — Multi-Phase RFC or Multi-Slice Epic (Worktree-per-Slice DAG)

@@ -41,6 +41,8 @@ export {
   CompilerRepoRootInput,
   CompilerRepoRootPath,
   ErrorReasonMessage,
+  GitDiffErrorReason,
+  GitDiffExecutionError,
   HarnessSubprocessError,
   McpToolInputName,
   McpToolName,

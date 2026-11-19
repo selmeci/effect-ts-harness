@@ -13,6 +13,7 @@ import { DETERMINISTIC_TRIAGE_RULES, makeMockDecisionModelLayer } from "@harness
 import { CLEF_SYSTEMONE_ONLY_BANNED_REASON, DstSeed, writeVerifyStamp } from "@harness/gates"
 import { resolveOmnigraphClusterDir } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
+import { runWithTestTracer } from "@harness/ingest"
 import {
   ensureLocalOmnigraphReady,
   isLoopbackOmnigraphUrl,
@@ -1278,7 +1279,8 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       const originalRaw = readFileSync(cachePath, "utf8")
       const original = JSON.parse(originalRaw) as Record<string, unknown>
 
-      // 1. > 15_000ms TTL expiry miss
+      // 1. > 300_000ms TTL expiry miss
+      expect(PRE_INVOCATION_CACHE_TTL_MS).toBe(300_000)
       writeFileSync(
         cachePath,
         JSON.stringify({
@@ -1332,12 +1334,36 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       rmSync(cachePath, { force: true })
       rmSync(outsideTarget, { force: true })
 
+      // 5b. Dangling symlink at cachePath is rejected even though existsSync is false
+      symlinkSync("/nonexistent/dangling-target", cachePath)
+      expect(tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag).toBe(
+        "None",
+      )
+      rmSync(cachePath, { force: true })
+
       // 6. Modifying .harness/verify-stamp.json invalidates PreInvocation cache
       writeFileSync(cachePath, originalRaw, "utf8")
       expect(tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag).toBe(
         "Some",
       )
       writeFileSync(join(dir, ".harness", "verify-stamp.json"), '{"valid":true}\n', "utf8")
+      expect(tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag).toBe(
+        "None",
+      )
+
+      // 7. Non-root gitignored file (.env.local) invalidates PreInvocation cache
+      rmSync(join(dir, ".harness", "verify-stamp.json"), { force: true })
+      writeFileSync(join(dir, ".gitignore"), "*.local\n", "utf8")
+      execFileSync("git", ["add", ".gitignore"], { cwd: dir })
+      execFileSync("git", ["commit", "-m", "gitignore"], { cwd: dir })
+      const rewarm = await Effect.runPromise(
+        runDeclarativeCli(["session", "--format=antigravity"], opts),
+      )
+      expect(rewarm.exitCode).toBe(0)
+      expect(tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag).toBe(
+        "Some",
+      )
+      writeFileSync(join(dir, "libs", "demo", ".env.local"), "SECRET=1\n", "utf8")
       expect(tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag).toBe(
         "None",
       )
@@ -1516,6 +1542,16 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       )
       expect(first.exitCode).toBe(0)
 
+      // REQ-3.2: non-empty friction-log.jsonl must not self-invalidate on telemetry-log.jsonl appends
+      writeFileSync(join(dir, ".harness", "friction-log.jsonl"), '{"kind":"note"}\n', "utf8")
+      const warmedWithFriction = await Effect.runPromise(
+        runCliEffect(["session", "--format=antigravity"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(warmedWithFriction.exitCode).toBe(0)
+
       const second = await Effect.runPromise(
         runCliEffect(["session", "--format=antigravity"], {
           repoRoot: dir,
@@ -1524,6 +1560,33 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       )
       expect(second.exitCode).toBe(0)
       expect(second.telemetryDetail).toBe("cache=hit")
+
+      // REQ-3.2: `done` writes last-done.json and invalidates SessionHandoff.decide cache (cache=miss)
+      writeVerifyStamp(dir, nodeSyncHostIo, "impl/test", {
+        dstSeed: DstSeed.make(1),
+        dstSeedsRun: 1,
+      })
+      const doneRes = await Effect.runPromise(
+        runCliEffect(["done"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+          stdin: JSON.stringify({ stop_hook_active: false }),
+        }),
+      )
+      expect(doneRes.exitCode).toBe(0)
+      expect(existsSync(join(dir, ".harness", "last-done.json"))).toBe(true)
+      const { result: afterDone } = await Effect.runPromise(
+        runWithTestTracer(
+          "session-after-done",
+          runCliEffect(["session", "--format=antigravity"], {
+            repoRoot: dir,
+            skipBackgroundDaemons: true,
+          }),
+          new Map(),
+        ),
+      )
+      expect(afterDone.exitCode).toBe(0)
+      expect(afterDone.telemetryDetail).toBe("cache=miss")
 
       const telemetryLines = readFileSync(join(dir, ".harness", "telemetry-log.jsonl"), "utf8")
         .trim()

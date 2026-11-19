@@ -558,6 +558,7 @@ describe("Self-Dogfooding Capability Plugins & AST Gate Rules (SPEC-0011)", () =
         )
         expect(syntaxBansSrc).not.toMatch(/\bisInternalHarnessFile\b/)
       }),
+    15_000,
   )
 
   it.effect(

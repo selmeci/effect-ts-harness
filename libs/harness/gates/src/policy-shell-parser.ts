@@ -6,6 +6,9 @@
 export interface CommandView {
   readonly argv: string
   readonly unquoted: string
+  readonly unclosedQuote: boolean
+  readonly hasDoubleQuotedSubstitution: boolean
+  readonly hasAnsiCQuote: boolean
 }
 
 export interface UnwrappedSegment {
@@ -36,14 +39,79 @@ const ENV_SIMPLE_FLAGS: ReadonlySet<string> = new Set(
 const binaryBasename = (word: string): string =>
   word.includes("/") ? word.slice(word.lastIndexOf("/") + 1) : word
 
+export const normalizeShellLineContinuations = (command: string): string => {
+  let out = ""
+  let quote: "'" | '"' | undefined
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!
+    if (quote === "'") {
+      if (ch === "'") quote = undefined
+      out += ch
+      continue
+    }
+    if (quote === '"') {
+      if (ch === '"') {
+        quote = undefined
+        out += ch
+        continue
+      }
+      if (ch === "\\") {
+        if (command[i + 1] === "\n") {
+          i += 1
+          continue
+        }
+        if (command[i + 1] === "\r" && command[i + 2] === "\n") {
+          i += 2
+          continue
+        }
+        if (i + 1 < command.length) {
+          out += ch + command[++i]!
+          continue
+        }
+      }
+      out += ch
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      out += ch
+      continue
+    }
+    if (ch === "\\") {
+      if (command[i + 1] === "\n") {
+        i += 1
+        continue
+      }
+      if (command[i + 1] === "\r" && command[i + 2] === "\n") {
+        i += 2
+        continue
+      }
+      if (i + 1 < command.length) {
+        out += ch + command[++i]!
+        continue
+      }
+    }
+    out += ch
+  }
+  return out
+}
+
 const splitShellWords = (
   command: string,
-): { readonly words: ReadonlyArray<string>; readonly unquoted: string } => {
+): {
+  readonly words: ReadonlyArray<string>
+  readonly unquoted: string
+  readonly unclosedQuote: boolean
+  readonly hasDoubleQuotedSubstitution: boolean
+  readonly hasAnsiCQuote: boolean
+} => {
   const words: Array<string> = []
   let current = ""
   let inWord = false
-  let quote: "'" | '"' | undefined
+  let quote: "'" | '"' | "$'" | undefined
   let unquoted = ""
+  let hasDoubleQuotedSubstitution = false
+  let hasAnsiCQuote = false
   const flush = (): void => {
     if (inWord) {
       words.push(current)
@@ -55,6 +123,19 @@ const splitShellWords = (
     const ch = command[i]!
     if (quote !== undefined) {
       unquoted += " "
+      if (quote === "$'") {
+        if (ch === "'") {
+          quote = undefined
+          continue
+        }
+        if (ch === "\\" && i + 1 < command.length) {
+          current += command[++i]!
+          unquoted += " "
+          continue
+        }
+        current += ch
+        continue
+      }
       if (ch === quote) {
         quote = undefined
         continue
@@ -64,7 +145,28 @@ const splitShellWords = (
         unquoted += " "
         continue
       }
+      if (quote === '"' && (ch === "`" || (ch === "$" && command[i + 1] === "("))) {
+        hasDoubleQuotedSubstitution = true
+      }
       current += ch
+      continue
+    }
+    if (ch === "$" && command[i + 1] === "'") {
+      hasAnsiCQuote = true
+      quote = "$'"
+      inWord = true
+      unquoted += "  "
+      i += 1
+      continue
+    }
+    if (!inWord && ch === "#") {
+      while (i < command.length && command[i] !== "\n") {
+        unquoted += " "
+        i++
+      }
+      if (i < command.length && command[i] === "\n") {
+        unquoted += "\n"
+      }
       continue
     }
     if (ch === "'" || ch === '"') {
@@ -107,7 +209,13 @@ const splitShellWords = (
     unquoted += ch
   }
   if (inWord) words.push(current)
-  return { words, unquoted }
+  return {
+    words,
+    unquoted,
+    unclosedQuote: quote !== undefined,
+    hasDoubleQuotedSubstitution,
+    hasAnsiCQuote,
+  }
 }
 
 /** REQ-4.2: drop words that are data, not paths or flags — the message of
@@ -166,8 +274,16 @@ const dropDataArguments = (words: ReadonlyArray<string>): ReadonlyArray<string> 
 }
 
 export const toCommandView = (command: string): CommandView => {
-  const { words, unquoted } = splitShellWords(command)
-  return { argv: dropDataArguments(words).join(" "), unquoted }
+  const norm = normalizeShellLineContinuations(command)
+  const { words, unquoted, unclosedQuote, hasDoubleQuotedSubstitution, hasAnsiCQuote } =
+    splitShellWords(norm)
+  return {
+    argv: dropDataArguments(words).join(" "),
+    unquoted,
+    unclosedQuote,
+    hasDoubleQuotedSubstitution,
+    hasAnsiCQuote,
+  }
 }
 
 export const unwrapCommandSegment = (words: ReadonlyArray<string>): UnwrappedSegment => {
@@ -268,8 +384,9 @@ export const unwrapCommandSegment = (words: ReadonlyArray<string>): UnwrappedSeg
 }
 
 export const extractCommandSegments = (command: string): ReadonlyArray<UnwrappedSegment> => {
+  const norm = normalizeShellLineContinuations(command)
   const segments: Array<UnwrappedSegment> = []
-  for (const line of command.split(/\r?\n/)) {
+  for (const line of norm.split(/\r?\n/)) {
     const view = toCommandView(line)
     for (const rawSeg of view.argv.split(/\s*(?:&&|\|\||[;|&])\s*/)) {
       const cleanedSeg = rawSeg.replace(/^[()\s]+|[()\s]+$/g, "")

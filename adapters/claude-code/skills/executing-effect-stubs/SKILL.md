@@ -7,13 +7,13 @@ description: Use when stub<A, E, R>() skeletons have passed plan-check and are r
 
 ## Overview
 
-Once `harness plan-check` has locked the `type:contract` Schemas, `type:service` interfaces, and `stub<A, E, R>()` signatures, replace every stub with a tested production implementation. For multi-package work across our 5 hexagonal Nx tiers, dispatch fast `flash` subagents per package boundary (`type:core` / `type:domain`, `type:infra`, `type:app` / `scope:web`), review their diffs, and close with `harness verify` and `harness done`.
+Once `harness plan-check` has locked the `type:contract` Schemas, `type:service` interfaces, and `stub<A, E, R>()` signatures, replace every stub with a tested production implementation. For multi-package work across our 5 hexagonal Nx tiers, dispatch fast `haiku` subagents per package boundary (`type:core` / `type:domain`, `type:infra`, `type:app` / `scope:web`), review their diffs, and close with `harness verify` and `harness done`.
 
 **Violating the letter of the rules is violating the spirit of the rules.**
 
 ## Execution Recipe
 
-### 1. Partition by Nx Taxonomy (`flash` Subagents)
+### 1. Partition by Nx Taxonomy (`haiku` Subagents)
 
 Because `type:contract` and `type:service` are already compiled and locked by `plan-check` (and `type:service` contains pure `Context.Service` ports only with zero `Layer.*` constructors per `impure-service-tier-import`), work in downstream packages is isolated:
 
@@ -22,7 +22,7 @@ Because `type:contract` and `type:service` are already compiled and locked by `p
 - **Unit B (`type:infra`):** Implement live `Layer`s, native `@effect/sql-d1` / `@effect/sql-sqlite-do` repositories (`D1Client.layer`, `SqlClient`, `SqliteMigrator`; `drizzle-orm` / `drizzle-kit` banned) decoding rows into contract Schemas, synchronous DO SQLite transactions, and W3C `traceparent` headers, and test with `@effect/vitest`.
 - **Unit C (`type:app` / `scope:web`):** Compose runtime Layers (`NodeRuntime.runMain`, `ManagedRuntime`, `runFork`) in `type:app`, or derive `AtomHttpApi` query/mutation atoms from `type:contract` in `scope:web` (zero raw `fetch`).
 
-When launching parallel subagents that run CLI or build commands concurrently, isolate their workspaces using an isolated git worktree (`Workspace: "share"` with `HARNESS_WORKTREE_ID` unset when running a full `plan-check -> verify` slice, or `HARNESS_WORKTREE_ID=<unit>` in a shared checkout when running package-scoped `CI=true pnpm nx run <project>:verify` checks) so `.harness/` snapshots and stamps never collide.
+When launching parallel subagents that run CLI or build commands concurrently, isolate their workspaces using an isolated git worktree (`isolation: "worktree"` or `git worktree add` with `HARNESS_WORKTREE_ID` unset when running a full `plan-check -> verify` slice, or `HARNESS_WORKTREE_ID=<unit>` in a shared checkout when running package-scoped `CI=true pnpm nx run <project>:verify` checks) so `.harness/` snapshots and stamps never collide.
 
 When delegating a unit to an implementer subagent, provide this exact 4-part prompt:
 
@@ -42,7 +42,7 @@ Implement the production code and tests within each package boundary:
 
 ### 3. Final Verification & Closeout (Controller Only)
 
-1. **Signal-Routed Multi-Lens `flash` Review (Parallel Specialist Subagents):** Before running `harness gc --strict` and `harness verify`, the controller selects and dispatches parallel `flash` review lenses using the [Reviewer Dispatch Guide](references/dispatch-reviewers.md) (read-only reviewer subagents with `model: "flash"` or `model: haiku`) based on the packages and capabilities touched by the task:
+1. **Signal-Routed Multi-Lens `haiku` Review (Parallel Specialist Subagents):** Before running `harness gc --strict` and `harness verify`, the controller selects and dispatches parallel `haiku` review lenses using the [Reviewer Dispatch Guide](references/dispatch-reviewers.md) (read-only reviewer `Agent` dispatches with `model: "haiku"` or `model: "sonnet"`) based on the packages and capabilities touched by the task:
    - **Mandatory Reviewers for Core / Domain / Event Sourcing:** For ANY task touching `type:core`, `type:domain`, deciders, or event sourcing, dispatching **BOTH** `@effect-ears-test-reviewer` AND `@effect-adversarial-reviewer` is strictly mandatory.
    - **Neutral & Adversarial Prompting Protocol:** Prompts dispatched to reviewers MUST be neutral and adversarial ("Assume there are at least 3 P0/P1 bugs hiding across the spec, ADR, contract, fixtures, and tests; find them using the 8-Point Anti-Rubber-Stamp Audit") — never spoon-feed confirmation-biased prompts or assume implementations are correct.
    - **`EARS & Test-Fidelity Lens` ([@effect-ears-test-reviewer](references/personas/ears-test-reviewer.md), Always & Mandatory for Core/Domain):** Reads the feature's `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (or `docs/specs/`) file, executes the 8-Point Anti-Rubber-Stamp Deep Audit, and verifies that every EARS clause (`WHEN`, `IF/THEN`, `WHILE`) and every declared `spans` / `errors` entry has a behavior-sensitive `@effect/vitest` assertion (rejecting vacuous/mock-only tests, checking sad-path `TaggedError` coverage, folded state properties, contract brands, and `type:infra` guard-deletion falsification).
@@ -71,15 +71,15 @@ Implement the production code and tests within each package boundary:
 
 ## Rationalization Table
 
-| Excuse                                                               | Reality                                                                                                                                                                                                                                    |
-| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| "I'll implement all 5 hexagonal tiers in one giant turn myself"      | Monolithic edits across `core`/`domain`, `infra`, and `app`/`web` pollute context. Locked `stub<A, E, R>()` boundaries let `flash` subagents implement each package cleanly.                                                               |
-| "I'll import `node:fs`, read `process.env`, or cache in a `Map` in core/domain" | `SelfDogfooding.decide` rejects `node:*` (`no-node-builtins-outside-infra`), `process.env` (`process-env-outside-infra-or-app`), and module-scope mutable caches (`no-global-mutable-cache`). |
-| "Unit tests passed in `vitest`, so I don't need `harness verify`"    | Only `harness verify` checks for leftover `stub()` calls, runs `checkEffectGraph`, and writes `.harness/verify-stamp.json`. Without it, `harness done` (and the `Stop` hook) blocks completion.                                            |
-| "I tweaked a comment/file after `harness verify`, no need to re-run" | `.harness/verify-stamp.json` hashes the entire working tree via SHA-256. Any post-verify file edit invalidates the stamp.                                                                                                                  |
-| "harness gc isn't necessary if TypeScript builds"                    | TypeScript does not check for unused `TaggedError`s, unprovided service tags in layers, untested domain functions, or missing pattern documentation. `harness gc --strict` stops code entropy before it merges.                            |
-| "Single example unit tests are enough for deciders"                  | Example tests suffer from test reward hacking and shared blind spots. `missing-decider-property-test` in `gc --strict` requires `it.effect.prop` / `it.prop`, and `harness mutate --strict` verifies zero mutants survive boundary shifts. |
-| "I don't need to update docs/specs to status: accepted"              | Leaving specs as `proposed` causes documentation drift. Setting `accepted` activates `stale-doc-reference` verification in `GraphGc.decide`.                                                                                               |
+| Excuse                                                                          | Reality                                                                                                                                                                                                                                    |
+| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| "I'll implement all 5 hexagonal tiers in one giant turn myself"                 | Monolithic edits across `core`/`domain`, `infra`, and `app`/`web` pollute context. Locked `stub<A, E, R>()` boundaries let `haiku` subagents implement each package cleanly.                                                               |
+| "I'll import `node:fs`, read `process.env`, or cache in a `Map` in core/domain" | `SelfDogfooding.decide` rejects `node:*` (`no-node-builtins-outside-infra`), `process.env` (`process-env-outside-infra-or-app`), and module-scope mutable caches (`no-global-mutable-cache`).                                              |
+| "Unit tests passed in `vitest`, so I don't need `harness verify`"               | Only `harness verify` checks for leftover `stub()` calls, runs `checkEffectGraph`, and writes `.harness/verify-stamp.json`. Without it, `harness done` (and the `Stop` hook) blocks completion.                                            |
+| "I tweaked a comment/file after `harness verify`, no need to re-run"            | `.harness/verify-stamp.json` hashes the entire working tree via SHA-256. Any post-verify file edit invalidates the stamp.                                                                                                                  |
+| "harness gc isn't necessary if TypeScript builds"                               | TypeScript does not check for unused `TaggedError`s, unprovided service tags in layers, untested domain functions, or missing pattern documentation. `harness gc --strict` stops code entropy before it merges.                            |
+| "Single example unit tests are enough for deciders"                             | Example tests suffer from test reward hacking and shared blind spots. `missing-decider-property-test` in `gc --strict` requires `it.effect.prop` / `it.prop`, and `harness mutate --strict` verifies zero mutants survive boundary shifts. |
+| "I don't need to update docs/specs to status: accepted"                         | Leaving specs as `proposed` causes documentation drift. Setting `accepted` activates `stale-doc-reference` verification in `GraphGc.decide`.                                                                                               |
 
 ## Red Flags — STOP
 

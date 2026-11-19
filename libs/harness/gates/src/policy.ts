@@ -7,6 +7,7 @@ import * as path from "node:path"
 import {
   extractCommandSegments,
   hasUnquotedBackgroundOperator,
+  normalizeShellLineContinuations,
   toCommandView,
   type CommandView,
   type UnwrappedSegment,
@@ -194,11 +195,53 @@ export const FILE_REDIRECTION_PATTERN: RegExp =
  * Evaluated on the raw command. */
 export const OBFUSCATION_PATTERNS: ReadonlyArray<GuardPatternRule> = [
   {
-    pattern: /\[[^\]\s]+\](?=[\w./*-])|(?<=[\w./*-])\[[^\]\s]+\]/,
+    pattern: /\[[^\]\s]\](?=[\w./*'"-])|(?<=[\w./*'"-])\[[^\]\s]\]/,
     reason: "character-class glob inside a word or path",
   },
-  { pattern: /(?<=[\w.])(?:''|"")(?=[\w.])/, reason: "empty quotes inside a word" },
+  { pattern: /(?<=[\w./*\]-])(?:''|"")(?=[\w./*[-])/, reason: "empty quotes inside a word" },
 ]
+
+const BRACKET_CLASS_GLOBAL_PATTERN: RegExp = /\[[^\]\s]+\]/g
+const BRACKET_ADJACENT_CHAR_PATTERN: RegExp = /[\w./*'"-]/
+
+const hasUnquotedAdjacentBracketGlob = (norm: string, unquoted: string): boolean => {
+  BRACKET_CLASS_GLOBAL_PATTERN.lastIndex = 0
+  let m = BRACKET_CLASS_GLOBAL_PATTERN.exec(unquoted)
+  while (m !== null) {
+    const start = m.index
+    const end = start + m[0].length
+    const prev = start > 0 ? norm[start - 1]! : ""
+    const next = end < norm.length ? norm[end]! : ""
+    if (BRACKET_ADJACENT_CHAR_PATTERN.test(prev) || BRACKET_ADJACENT_CHAR_PATTERN.test(next)) {
+      return true
+    }
+    m = BRACKET_CLASS_GLOBAL_PATTERN.exec(unquoted)
+  }
+  return false
+}
+
+const splitByUnquotedOperator = (
+  command: string,
+  unquoted: string,
+  op: string,
+): ReadonlyArray<{ readonly cmd: string; readonly unquoted: string }> => {
+  const parts: Array<{ readonly cmd: string; readonly unquoted: string }> = []
+  let start = 0
+  let idx = unquoted.indexOf(op, start)
+  while (idx !== -1) {
+    parts.push({
+      cmd: command.slice(start, idx).trim(),
+      unquoted: unquoted.slice(start, idx).trim(),
+    })
+    start = idx + op.length
+    idx = unquoted.indexOf(op, start)
+  }
+  parts.push({
+    cmd: command.slice(start).trim(),
+    unquoted: unquoted.slice(start).trim(),
+  })
+  return parts
+}
 
 const containsToken = (command: string, token: string): boolean =>
   command.toLowerCase().includes(token.toLowerCase())
@@ -341,7 +384,7 @@ export interface CommandDenyExplanation {
 const GIT_FORCE_PUSH_PATTERN = /\bgit\s+(?:\S+\s+)*push\b.*(?:\s|^)(?:--force|-f)(?:\s|$)/
 
 export const explainCommandDenyRule = (command: string): CommandDenyExplanation | undefined => {
-  const trimmed = command.trim()
+  const trimmed = normalizeShellLineContinuations(command).trim()
   if (trimmed === "") {
     return undefined
   }
@@ -393,7 +436,8 @@ export const explainCommandDenyReason = (command: string): string | undefined =>
 /** Rule order is load-bearing (harness:ADR-0003): deny → ask → escalate → allow.
  * Every rule that removes the automatic `allow` must run before the prefix allowlist. */
 export const classifyCommand = (command: string): GuardVerdict => {
-  const trimmed = command.trim()
+  const norm = normalizeShellLineContinuations(command)
+  const trimmed = norm.trim()
   if (trimmed === "") {
     return "escalate"
   }
@@ -403,7 +447,7 @@ export const classifyCommand = (command: string): GuardVerdict => {
   if (isSkipNxCacheOverrideCommand(trimmed)) {
     return "ask"
   }
-  const view = toCommandView(command)
+  const view = toCommandView(norm)
   const hasBgOp = hasUnquotedBackgroundOperator(view.unquoted)
   const hasUnquotedBraceExpansion = /\{[^}\s,]+,[^}\s]*\}/.test(view.unquoted)
   if (
@@ -413,15 +457,19 @@ export const classifyCommand = (command: string): GuardVerdict => {
     return "ask"
   }
   if (
+    view.unclosedQuote ||
+    view.hasDoubleQuotedSubstitution ||
+    view.hasAnsiCQuote ||
     matchesAny(view.argv, DESTRUCTIVE_ARGUMENT_PATTERNS) ||
     FILE_REDIRECTION_PATTERN.test(view.unquoted) ||
-    matchesAny(command, OBFUSCATION_PATTERNS) ||
+    matchesAny(norm, OBFUSCATION_PATTERNS) ||
+    hasUnquotedAdjacentBracketGlob(norm, view.unquoted) ||
     hasUnquotedBraceExpansion ||
-    /\$\(|`/.test(view.argv)
+    /\$\(|`|<\(|>\(/.test(view.unquoted)
   ) {
     return "escalate"
   }
-  if (hasBgOp || SHELL_OPERATORS.some((op) => command.includes(op))) {
+  if (hasBgOp || SHELL_OPERATORS.some((op) => view.unquoted.includes(op))) {
     const isAllowedFilter = (p: string): boolean =>
       p.startsWith("grep ") ||
       p.startsWith("head ") ||
@@ -432,43 +480,45 @@ export const classifyCommand = (command: string): GuardVerdict => {
       p.startsWith("sort ") ||
       p === "sort"
 
-    const isAllowedPipedSegment = (seg: string): boolean => {
-      if (!seg.includes("|") || seg.includes("||")) {
+    const isAllowedPipedSegment = (segCmd: string, segUnquoted: string): boolean => {
+      if (!segUnquoted.includes("|") || segUnquoted.includes("||")) {
         return false
       }
-      const parts = seg.split("|").map((p) => p.trim())
+      const parts = splitByUnquotedOperator(segCmd, segUnquoted, "|")
       return (
-        parts.length >= 2 && isCommandAllowed(parts[0]!) && parts.slice(1).every(isAllowedFilter)
+        parts.length >= 2 &&
+        isCommandAllowed(parts[0]!.cmd) &&
+        parts.slice(1).every((p) => isAllowedFilter(p.cmd))
       )
     }
 
     if (
       !hasBgOp &&
-      command.includes("|") &&
-      !command.includes("||") &&
-      !command.includes("&&") &&
-      !command.includes(";") &&
-      !command.includes("\n")
+      view.unquoted.includes("|") &&
+      !view.unquoted.includes("||") &&
+      !view.unquoted.includes("&&") &&
+      !view.unquoted.includes(";") &&
+      !view.unquoted.includes("\n")
     ) {
-      if (isAllowedPipedSegment(command)) {
+      if (isAllowedPipedSegment(norm, view.unquoted)) {
         return "allow"
       }
     }
     if (
       !hasBgOp &&
-      command.includes("&&") &&
-      !command.includes("||") &&
-      !command.includes(";") &&
-      !command.includes("\n")
+      view.unquoted.includes("&&") &&
+      !view.unquoted.includes("||") &&
+      !view.unquoted.includes(";") &&
+      !view.unquoted.includes("\n")
     ) {
-      const parts = command.split("&&").map((p) => p.trim())
+      const parts = splitByUnquotedOperator(norm, view.unquoted, "&&")
       if (
         parts.length >= 2 &&
         parts.every(
           (p) =>
-            p.length > 0 &&
-            (isCommandAllowed(p) || isAllowedPipedSegment(p)) &&
-            !/^\s*git\s+(?:add|commit|push)\b/.test(p),
+            p.cmd.length > 0 &&
+            (isCommandAllowed(p.cmd) || isAllowedPipedSegment(p.cmd, p.unquoted)) &&
+            !/^\s*git\s+(?:add|commit|push)\b/.test(p.cmd),
         )
       ) {
         return "allow"
@@ -476,7 +526,7 @@ export const classifyCommand = (command: string): GuardVerdict => {
     }
     return "escalate"
   }
-  return isCommandAllowed(command) ? "allow" : "escalate"
+  return isCommandAllowed(norm) ? "allow" : "escalate"
 }
 
 export interface FileWriteGuardResult {
@@ -515,7 +565,7 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
 
   if (
     candidates.some((p) =>
-      /(^|\/)\.harness\/(worktrees\/[^/]+\/)?(cache\/mutation-cache-v\d+\.(?:json(?:\.corrupt)?|corrupt)|session-preinvocation-cache\.json)$/.test(
+      /(^|\/)\.harness\/(worktrees\/[^/]+\/)?(cache\/mutation-cache-v\d+\.(?:json(?:\.corrupt)?|corrupt)|session-preinvocation-cache\.json|last-done\.json)$/.test(
         p,
       ),
     )
