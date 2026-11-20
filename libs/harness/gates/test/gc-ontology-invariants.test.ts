@@ -418,6 +418,14 @@ errors:
               'import type * as Graph from "@harness/graph"\nexport type G = Graph.HarnessGraph\nexport const ok = () => "allow"\n',
             )
             writeFileSync(
+              join(tempDir, "libs", "harness", "gates", "src", "policy-helper.ts"),
+              'export const helper = () => "allow"\n',
+            )
+            writeFileSync(
+              join(tempDir, "libs", "harness", "gates", "src", "policy.ts"),
+              'import { helper } from "./policy-helper.js"\nexport const ok = () => helper()\n',
+            )
+            writeFileSync(
               join(tempDir, "libs", "harness", "decision", "src", "hook-fastpath.ts"),
               'export const ok = () => "allow"\n',
             )
@@ -426,12 +434,34 @@ errors:
               'export const ok = () => "allow"\n',
             )
             writeFileSync(
+              join(tempDir, "libs", "harness", "infra", "src", "hook-io.ts"),
+              'import * as Option from "effect/Option"\nimport * as Result from "effect/Result"\nimport * as Schema from "effect/Schema"\nexport const io = { Option, Result, Schema }\n',
+            )
+            writeFileSync(
               join(tempDir, "apps", "harness-cli", "src", "index.ts"),
               'export const ok = () => "allow"\n',
             )
             writeFileSync(
+              join(tempDir, "apps", "harness-cli", "src", "commands", "hook-fastpath-core.ts"),
+              [
+                'import * as Option from "effect/Option"',
+                'import { ok } from "@harness/gates/policy"',
+                'import { io } from "@harness/infra/hook-io"',
+                "export const run = () => ({ Option, ok, io })",
+                'export const fallback = () => import("./hook-fallback.js")',
+              ].join("\n") + "\n",
+            )
+            writeFileSync(
+              join(tempDir, "apps", "harness-cli", "src", "hook-entry.ts"),
+              'import { run } from "./commands/hook-fastpath-core.js"\nexport const main = () => run()\n',
+            )
+            writeFileSync(
               join(tempDir, "apps", "harness-cli", "src", "commands", "session-fastpath.ts"),
               'export const ok = () => "allow"\n',
+            )
+            writeFileSync(
+              join(tempDir, "apps", "harness-cli", "src", "commands", "ingest-fastpath.ts"),
+              'import { io } from "@harness/infra/hook-io"\nexport const ok = () => io\n',
             )
             writeFileSync(
               join(tempDir, "apps", "harness-cli", "src", "commands", "guard-helper.ts"),
@@ -508,6 +538,86 @@ errors:
                   f.message.includes("@harness/graph/type-extractor"),
               ),
             ).toBe(true)
+
+            // SPEC-0022: policy.ts must not pull effect/*/@harness/*, hook-io.ts/hook-entry.ts/ingest-fastpath.ts must not pull heavy effect/* or @effect/* or @harness/*, and hook-fastpath-core.ts must not lazy-import ../index.js
+            writeFileSync(
+              join(tempDir, "libs", "harness", "gates", "src", "policy-helper.ts"),
+              'import * as Option from "effect/Option"\nimport { compareCodeUnits } from "@harness/contract"\nexport const helper = () => ({ Option, compareCodeUnits })\n',
+            )
+            writeFileSync(
+              join(tempDir, "libs", "harness", "infra", "src", "hook-io.ts"),
+              [
+                'import { Effect } from "effect"',
+                'import * as EffectMod from "effect/Effect"',
+                'import * as Ai from "@effect/ai-typesafe"',
+                "export const badIo = { Effect, EffectMod, Ai }",
+              ].join("\n") + "\n",
+            )
+            writeFileSync(
+              join(tempDir, "apps", "harness-cli", "src", "commands", "ingest-fastpath.ts"),
+              [
+                'import ts from "typescript"',
+                'import * as Layer from "effect/Layer"',
+                "export const badIngest = { ts, Layer }",
+              ].join("\n") + "\n",
+            )
+            writeFileSync(
+              join(tempDir, "apps", "harness-cli", "src", "commands", "hook-fastpath-core.ts"),
+              'export const lazyBad = () => import("../index.js")\n',
+            )
+            writeFileSync(
+              join(tempDir, "apps", "harness-cli", "src", "hook-entry.ts"),
+              [
+                'import { Effect } from "effect"',
+                'import { NodeRuntime } from "@effect/platform-node"',
+                'import { compareCodeUnits } from "@harness/contract"',
+                'import { resolveCluster } from "@harness/graph/cluster-resolver"',
+                'import * as gates from "@harness/gates"',
+                'import * as gatesFastpath from "@harness/gates/hook-fastpath"',
+                'import * as hookFastpath from "@harness/infra/hook-fastpath"',
+                'import { lazyBad } from "./commands/hook-fastpath-core.js"',
+                "export const bad = { Effect, NodeRuntime, compareCodeUnits, resolveCluster, gates, gatesFastpath, hookFastpath, lazyBad }",
+              ].join("\n") + "\n",
+            )
+            const spec22Findings = (yield* evaluatePackageAndMigrationPlugin({
+              graph: buildHarnessGraph({}),
+              workspaceRoot: tempDir,
+              hostIo: testHostIo,
+            })).filter((f) => f.kind === "hook-fastpath-forbidden-import")
+            const policyTraces = spec22Findings
+              .filter((f) => f.location === "libs/harness/gates/src/policy.ts")
+              .map((f) => f.message)
+              .join("\n")
+            expect(policyTraces).toContain("-> effect/Option")
+            expect(policyTraces).toContain("-> @harness/contract")
+
+            const hookIoTraces = spec22Findings
+              .filter((f) => f.location === "libs/harness/infra/src/hook-io.ts")
+              .map((f) => f.message)
+              .join("\n")
+            expect(hookIoTraces).toContain("-> effect")
+            expect(hookIoTraces).toContain("-> effect/Effect")
+            expect(hookIoTraces).toContain("-> @effect/ai-typesafe")
+
+            const ingestTraces = spec22Findings
+              .filter((f) => f.location === "apps/harness-cli/src/commands/ingest-fastpath.ts")
+              .map((f) => f.message)
+              .join("\n")
+            expect(ingestTraces).toContain("-> typescript")
+            expect(ingestTraces).toContain("-> effect/Layer")
+
+            const hookEntryTraces = spec22Findings
+              .filter((f) => f.location === "apps/harness-cli/src/hook-entry.ts")
+              .map((f) => f.message)
+              .join("\n")
+            expect(hookEntryTraces).toContain("-> effect")
+            expect(hookEntryTraces).toContain("-> @effect/platform-node")
+            expect(hookEntryTraces).toContain("-> @harness/contract")
+            expect(hookEntryTraces).toContain("-> @harness/graph/cluster-resolver")
+            expect(hookEntryTraces).toContain("-> @harness/gates")
+            expect(hookEntryTraces).toContain("-> @harness/gates/hook-fastpath")
+            expect(hookEntryTraces).toContain("-> @harness/infra/hook-fastpath")
+            expect(hookEntryTraces).toContain("-> apps/harness-cli/src/index.ts")
           } finally {
             rmSync(tempDir, { recursive: true, force: true })
           }

@@ -302,10 +302,11 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       }
       collect(JSON.parse(rawJson))
       return commands.map((cmd) => {
-        const idx = cmd.indexOf("index.ts ")
+        const marker = cmd.includes("hook-entry.ts ") ? "hook-entry.ts " : "index.ts "
+        const idx = cmd.indexOf(marker)
         expect(idx).toBeGreaterThan(-1)
         return cmd
-          .slice(idx + "index.ts ".length)
+          .slice(idx + marker.length)
           .replace(/\s+\|\|\s+[\s\S]*$/, "")
           .trim()
           .split(/\s+/)
@@ -394,38 +395,32 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       try {
         // 1. Exit.succeed
         process.exitCode = 2
-        teardownCliMain(
-          Exit.succeed(undefined),
-          (code) => onExitCodes.push(code),
-          (s) => stderrChunks.push(s),
-          ["node", "index.ts", "guard"],
-          (s) => stdoutChunks.push(s),
-        )
+        teardownCliMain(Exit.succeed(undefined), (code) => onExitCodes.push(code), {
+          writeStderr: (s) => stderrChunks.push(s),
+          argv: ["node", "index.ts", "guard"],
+          writeStdout: (s) => stdoutChunks.push(s),
+        })
         expect(process.exitCode).toBe(2)
         expect(onExitCodes).toEqual([2])
 
         // 2. Exit.fail normal (1)
         reset()
-        teardownCliMain(
-          Exit.fail("verify-err"),
-          (code) => onExitCodes.push(code),
-          (s) => stderrChunks.push(s),
-          ["node", "index.ts", "verify"],
-          (s) => stdoutChunks.push(s),
-        )
+        teardownCliMain(Exit.fail("verify-err"), (code) => onExitCodes.push(code), {
+          writeStderr: (s) => stderrChunks.push(s),
+          argv: ["node", "index.ts", "verify"],
+          writeStdout: (s) => stdoutChunks.push(s),
+        })
         expect(stderrChunks.join("")).toContain("verify-err")
         expect(process.exitCode).toBe(1)
         expect(onExitCodes).toEqual([1])
 
         // 3. Exit.fail hook (2)
         reset()
-        teardownCliMain(
-          Exit.fail("guard-err"),
-          (code) => onExitCodes.push(code),
-          (s) => stderrChunks.push(s),
-          ["node", "index.ts", "guard"],
-          (s) => stdoutChunks.push(s),
-        )
+        teardownCliMain(Exit.fail("guard-err"), (code) => onExitCodes.push(code), {
+          writeStderr: (s) => stderrChunks.push(s),
+          argv: ["node", "index.ts", "guard"],
+          writeStdout: (s) => stdoutChunks.push(s),
+        })
         expect(stderrChunks.join("")).toContain("guard-err")
         expect(process.exitCode).toBe(2)
         expect(onExitCodes).toEqual([2])
@@ -435,9 +430,11 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         teardownCliMain(
           Exit.failCause(Cause.die(new Error("boom-normal"))),
           (code) => onExitCodes.push(code),
-          (s) => stderrChunks.push(s),
-          ["node", "index.ts", "verify"],
-          (s) => stdoutChunks.push(s),
+          {
+            writeStderr: (s) => stderrChunks.push(s),
+            argv: ["node", "index.ts", "verify"],
+            writeStdout: (s) => stdoutChunks.push(s),
+          },
         )
         expect(stderrChunks.join("")).toContain("boom-normal")
         expect(process.exitCode).toBe(1)
@@ -448,9 +445,11 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         teardownCliMain(
           Exit.failCause(Cause.die(new Error("boom-hook"))),
           (code) => onExitCodes.push(code),
-          (s) => stderrChunks.push(s),
-          ["guard", "--format=claude", "--bogus"],
-          (s) => stdoutChunks.push(s),
+          {
+            writeStderr: (s) => stderrChunks.push(s),
+            argv: ["guard", "--format=claude", "--bogus"],
+            writeStdout: (s) => stdoutChunks.push(s),
+          },
         )
         expect(stderrChunks.join("")).toContain("boom-hook")
         expect(process.exitCode).toBe(2)
@@ -458,25 +457,21 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
 
         // 6. Exit.interrupt: hook commands (guard/done) fail closed with 2; non-hook (verify) returns 130
         reset()
-        teardownCliMain(
-          Exit.interrupt(1),
-          (code) => onExitCodes.push(code),
-          (s) => stderrChunks.push(s),
-          ["node", "index.ts", "guard"],
-          (s) => stdoutChunks.push(s),
-        )
+        teardownCliMain(Exit.interrupt(1), (code) => onExitCodes.push(code), {
+          writeStderr: (s) => stderrChunks.push(s),
+          argv: ["node", "index.ts", "guard"],
+          writeStdout: (s) => stdoutChunks.push(s),
+        })
         expect(process.exitCode).toBe(2)
         expect(onExitCodes).toEqual([2])
         expect(stderrChunks.join("")).toContain("interrupted by signal")
 
         reset()
-        teardownCliMain(
-          Exit.interrupt(1),
-          (code) => onExitCodes.push(code),
-          (s) => stderrChunks.push(s),
-          ["node", "index.ts", "done"],
-          (s) => stdoutChunks.push(s),
-        )
+        teardownCliMain(Exit.interrupt(1), (code) => onExitCodes.push(code), {
+          writeStderr: (s) => stderrChunks.push(s),
+          argv: ["node", "index.ts", "done"],
+          writeStdout: (s) => stdoutChunks.push(s),
+        })
         expect(process.exitCode).toBe(2)
         expect(onExitCodes).toEqual([2])
         expect(JSON.parse(stdoutChunks.join(""))).toEqual({
@@ -485,13 +480,11 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         })
 
         reset()
-        teardownCliMain(
-          Exit.interrupt(1),
-          (code) => onExitCodes.push(code),
-          (s) => stderrChunks.push(s),
-          ["node", "index.ts", "guard", "--format=antigravity"],
-          (s) => stdoutChunks.push(s),
-        )
+        teardownCliMain(Exit.interrupt(1), (code) => onExitCodes.push(code), {
+          writeStderr: (s) => stderrChunks.push(s),
+          argv: ["node", "index.ts", "guard", "--format=antigravity"],
+          writeStdout: (s) => stdoutChunks.push(s),
+        })
         expect(process.exitCode).toBe(2)
         expect(onExitCodes).toEqual([2])
         expect(JSON.parse(stdoutChunks.join(""))).toEqual({
@@ -500,13 +493,11 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         })
 
         reset()
-        teardownCliMain(
-          Exit.interrupt(1),
-          (code) => onExitCodes.push(code),
-          (s) => stderrChunks.push(s),
-          ["node", "index.ts", "verify"],
-          (s) => stdoutChunks.push(s),
-        )
+        teardownCliMain(Exit.interrupt(1), (code) => onExitCodes.push(code), {
+          writeStderr: (s) => stderrChunks.push(s),
+          argv: ["node", "index.ts", "verify"],
+          writeStdout: (s) => stdoutChunks.push(s),
+        })
         expect(process.exitCode).toBe(130)
         expect(onExitCodes).toEqual([130])
 
@@ -515,9 +506,11 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         teardownCliMain(
           Exit.failCause(Cause.die(new Error("agy-guard-die"))),
           (code) => onExitCodes.push(code),
-          (s) => stderrChunks.push(s),
-          ["guard", "--format=antigravity"],
-          (s) => stdoutChunks.push(s),
+          {
+            writeStderr: (s) => stderrChunks.push(s),
+            argv: ["guard", "--format=antigravity"],
+            writeStdout: (s) => stdoutChunks.push(s),
+          },
         )
         expect(JSON.parse(stdoutChunks.join(""))).toEqual({
           decision: "deny",
@@ -528,9 +521,11 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         teardownCliMain(
           Exit.failCause(Cause.die(new Error("agy-done-die"))),
           (code) => onExitCodes.push(code),
-          (s) => stderrChunks.push(s),
-          ["done", "--format", "antigravity"],
-          (s) => stdoutChunks.push(s),
+          {
+            writeStderr: (s) => stderrChunks.push(s),
+            argv: ["done", "--format", "antigravity"],
+            writeStdout: (s) => stdoutChunks.push(s),
+          },
         )
         expect(JSON.parse(stdoutChunks.join(""))).toEqual({
           decision: "continue",
@@ -1912,6 +1907,130 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         .exhaustive()
     } finally {
       stderrSpy.mockRestore()
+    }
+  })
+
+  it("F-11.4: session-fastpath rejects symlinked .harness dir and symlinked session-preinvocation-cache.json", async () => {
+    const { symlinkSync } = await import("node:fs")
+    const { execFileSync } = await import("node:child_process")
+    const {
+      computePreInvocationFingerprint,
+      tryReadPreInvocationSessionCache,
+      writePreInvocationSessionCache,
+    } = await import("../src/commands/session-fastpath.js")
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+    const dir = mkdtempSync(join(tmpdir(), "harness-f114-symlink-"))
+    const outsideDir = mkdtempSync(join(tmpdir(), "harness-f114-outside-"))
+    try {
+      writeFileSync(join(dir, "pnpm-workspace.yaml"), "packages:\n  - 'libs/*'\n", "utf8")
+      writeFileSync(
+        join(dir, "tsconfig.base.json"),
+        JSON.stringify({ compilerOptions: { plugins: [{ name: "@effect/language-service" }] } }),
+        "utf8",
+      )
+      mkdirSync(join(dir, "node_modules", "@effect", "tsgo"), { recursive: true })
+      writeFileSync(join(dir, "node_modules", "@effect", "tsgo", "package.json"), "{}", "utf8")
+      execFileSync("git", ["init"], { cwd: dir })
+      execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir })
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: dir })
+      execFileSync("git", ["add", "."], { cwd: dir })
+      execFileSync("git", ["commit", "-m", "init"], { cwd: dir })
+
+      // 1. Symlinked .harness directory is rejected for both write and read
+      const symlinkHarnessDir = join(dir, ".harness")
+      symlinkSync(outsideDir, symlinkHarnessDir)
+      const validEntry = {
+        fingerprint: "a".repeat(64),
+        recordedAtMs: Date.now(),
+        ollamaReady: true,
+        ollamaProbed: true,
+        injectSteps: [],
+        stderr: "",
+      }
+      writePreInvocationSessionCache(dir, symlinkHarnessDir, validEntry)
+      expect(existsSync(join(outsideDir, "session-preinvocation-cache.json"))).toBe(false)
+      writeFileSync(
+        join(outsideDir, "session-preinvocation-cache.json"),
+        JSON.stringify({ version: "session-preinvocation-v1", ...validEntry }),
+        "utf8",
+      )
+      expect(
+        tryReadPreInvocationSessionCache(["session", "--format=antigravity"], { repoRoot: dir })
+          ._tag,
+      ).toBe("None")
+
+      // 2. Real .harness directory with symlinked session-preinvocation-cache.json is rejected
+      rmSync(symlinkHarnessDir, { force: true })
+      mkdirSync(symlinkHarnessDir, { recursive: true })
+      const fpOpt = computePreInvocationFingerprint(dir, symlinkHarnessDir, nodeSyncHostIo)
+      expect(fpOpt._tag).toBe("Some")
+      const fpVal = match(fpOpt)
+        .with({ _tag: "Some" }, ({ value }) => value)
+        .with({ _tag: "None" }, () => expect.unreachable())
+        .exhaustive()
+      const outsideCacheFile = join(outsideDir, "real-cache.json")
+      writeFileSync(
+        outsideCacheFile,
+        JSON.stringify({
+          version: "session-preinvocation-v1",
+          ...validEntry,
+          fingerprint: fpVal,
+        }),
+        "utf8",
+      )
+      symlinkSync(outsideCacheFile, join(symlinkHarnessDir, "session-preinvocation-cache.json"))
+      expect(
+        tryReadPreInvocationSessionCache(["session", "--format=antigravity"], { repoRoot: dir })
+          ._tag,
+      ).toBe("None")
+    } finally {
+      stderrSpy.mockRestore()
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(outsideDir, { recursive: true, force: true })
+    }
+  })
+
+  it("F-11.5: handleDoctorOrSession recovers when decisionLayer dies and exits 0 with modelWarm: false", async () => {
+    const { execFileSync } = await import("node:child_process")
+    const { handleDoctorOrSession } =
+      await import("../src/commands/session-learn-report.command.js")
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+    const dir = mkdtempSync(join(tmpdir(), "harness-f115-decision-die-"))
+    try {
+      writeFileSync(join(dir, "pnpm-workspace.yaml"), "packages:\n  - 'libs/*'\n", "utf8")
+      writeFileSync(
+        join(dir, "tsconfig.base.json"),
+        JSON.stringify({ compilerOptions: { plugins: [{ name: "@effect/language-service" }] } }),
+        "utf8",
+      )
+      mkdirSync(join(dir, "node_modules", "@effect", "tsgo"), { recursive: true })
+      writeFileSync(join(dir, "node_modules", "@effect", "tsgo", "package.json"), "{}", "utf8")
+      execFileSync("git", ["init"], { cwd: dir })
+      execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir })
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: dir })
+      execFileSync("git", ["add", "."], { cwd: dir })
+      execFileSync("git", ["commit", "-m", "init"], { cwd: dir })
+
+      const failingDecisionLayer = Layer.effect(
+        DecisionModel.DecisionModel,
+        Effect.die(new Error("boom")),
+      )
+      const res = await Effect.runPromise(
+        handleDoctorOrSession(["session"], {
+          repoRoot: dir,
+          decisionLayer: failingDecisionLayer,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(res.exitCode).toBe(0)
+      const parsed = JSON.parse(res.stdout) as { modelWarm: boolean }
+      expect(parsed.modelWarm).toBe(false)
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining("[harness learn] decision model fallback:"),
+      )
+    } finally {
+      stderrSpy.mockRestore()
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })

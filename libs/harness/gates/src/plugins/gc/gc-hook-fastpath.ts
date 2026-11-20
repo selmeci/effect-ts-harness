@@ -8,12 +8,16 @@ import { type GcFinding, readdirOrReport, readTextOrReport } from "./gc-helpers.
 
 export const HOOK_FASTPATH_ENTRYPOINTS: ReadonlyArray<string> = [
   "libs/harness/gates/src/hook-fastpath.ts",
+  "libs/harness/gates/src/policy.ts",
   "libs/harness/decision/src/hook-fastpath.ts",
   "libs/harness/infra/src/hook-fastpath.ts",
+  "libs/harness/infra/src/hook-io.ts",
   "libs/harness/graph/src/cluster-resolver.ts",
   "apps/harness-cli/src/index.ts",
+  "apps/harness-cli/src/hook-entry.ts",
   "apps/harness-cli/src/commands/guard-and-route.command.ts",
   "apps/harness-cli/src/commands/session-fastpath.ts",
+  "apps/harness-cli/src/commands/ingest-fastpath.ts",
 ]
 
 const FALLBACK_WORKSPACE_SPECIFIER_MAP: Readonly<Record<string, string>> = {
@@ -22,10 +26,12 @@ const FALLBACK_WORKSPACE_SPECIFIER_MAP: Readonly<Record<string, string>> = {
   "@harness/service/host-io": "libs/harness/service/src/host-io.ts",
   "@harness/gates": "libs/harness/gates/src/index.ts",
   "@harness/gates/hook-fastpath": "libs/harness/gates/src/hook-fastpath.ts",
+  "@harness/gates/policy": "libs/harness/gates/src/policy.ts",
   "@harness/decision": "libs/harness/decision/src/index.ts",
   "@harness/decision/hook-fastpath": "libs/harness/decision/src/hook-fastpath.ts",
   "@harness/infra": "libs/harness/infra/src/index.ts",
   "@harness/infra/hook-fastpath": "libs/harness/infra/src/hook-fastpath.ts",
+  "@harness/infra/hook-io": "libs/harness/infra/src/hook-io.ts",
   "@harness/graph/cluster-resolver": "libs/harness/graph/src/cluster-resolver.ts",
 }
 
@@ -156,15 +162,106 @@ const buildWorkspaceSpecifierMap = (
   return { workspaceMap: map, unresolvedWorkspaceExports }
 }
 
-const isForbiddenRuntimeSpecifier = (spec: string): boolean =>
-  spec === "typescript" ||
-  spec.startsWith("typescript/") ||
-  spec === "ts-morph" ||
-  spec.startsWith("ts-morph/") ||
-  spec === "@harness/graph" ||
-  (spec.startsWith("@harness/graph/") &&
-    spec !== "@harness/graph/cluster-resolver" &&
-    spec !== "@harness/graph/cluster-resolver.js")
+type FastpathClosureProfile = "standard" | "policy-zero-dep" | "hook-entry-lightweight"
+
+const LIGHTWEIGHT_EFFECT_SUBPATHS: ReadonlySet<string> = new Set([
+  "effect/Option",
+  "effect/Result",
+  "effect/Schema",
+])
+
+const getClosureProfile = (entryRel: string): FastpathClosureProfile => {
+  if (entryRel === "libs/harness/gates/src/policy.ts") return "policy-zero-dep"
+  if (
+    entryRel === "apps/harness-cli/src/hook-entry.ts" ||
+    entryRel === "apps/harness-cli/src/commands/ingest-fastpath.ts" ||
+    entryRel === "libs/harness/infra/src/hook-io.ts"
+  ) {
+    return "hook-entry-lightweight"
+  }
+  return "standard"
+}
+
+const isForbiddenRuntimeSpecifier = (spec: string, profile: FastpathClosureProfile): boolean =>
+  match(profile)
+    .with(
+      "standard",
+      () =>
+        spec === "typescript" ||
+        spec.startsWith("typescript/") ||
+        spec === "ts-morph" ||
+        spec.startsWith("ts-morph/") ||
+        spec === "@harness/graph" ||
+        (spec.startsWith("@harness/graph/") &&
+          spec !== "@harness/graph/cluster-resolver" &&
+          spec !== "@harness/graph/cluster-resolver.js"),
+    )
+    .with(
+      "policy-zero-dep",
+      () =>
+        spec === "effect" ||
+        spec.startsWith("effect/") ||
+        spec.startsWith("@effect/") ||
+        spec === "typescript" ||
+        spec.startsWith("typescript/") ||
+        spec === "ts-morph" ||
+        spec.startsWith("ts-morph/") ||
+        spec.startsWith("@harness/"),
+    )
+    .with(
+      "hook-entry-lightweight",
+      () =>
+        spec === "effect" ||
+        (spec.startsWith("effect/") && !LIGHTWEIGHT_EFFECT_SUBPATHS.has(spec)) ||
+        spec === "@effect/platform-node" ||
+        spec.startsWith("@effect/platform-node/") ||
+        spec === "@effect/ai-typesafe" ||
+        spec.startsWith("@effect/ai-typesafe/") ||
+        spec === "@harness/contract" ||
+        spec.startsWith("@harness/contract/") ||
+        spec === "@harness/service" ||
+        spec.startsWith("@harness/service/") ||
+        spec === "@harness/decision" ||
+        spec.startsWith("@harness/decision/") ||
+        spec === "@harness/ingest" ||
+        spec.startsWith("@harness/ingest/") ||
+        spec === "@harness/graph" ||
+        spec.startsWith("@harness/graph/") ||
+        spec === "@harness/gates" ||
+        (spec.startsWith("@harness/gates/") &&
+          spec !== "@harness/gates/policy" &&
+          spec !== "@harness/gates/policy.js") ||
+        spec === "@harness/infra" ||
+        (spec.startsWith("@harness/infra/") &&
+          spec !== "@harness/infra/hook-io" &&
+          spec !== "@harness/infra/hook-io.js") ||
+        spec === "typescript" ||
+        spec.startsWith("typescript/") ||
+        spec === "ts-morph" ||
+        spec.startsWith("ts-morph/"),
+    )
+    .exhaustive()
+
+const isForbiddenResolvedTarget = (resolved: string, profile: FastpathClosureProfile): boolean =>
+  match(profile)
+    .with("standard", () => resolved === "libs/harness/graph/src/index.ts")
+    .with("policy-zero-dep", () => !resolved.startsWith("libs/harness/gates/src/policy"))
+    .with(
+      "hook-entry-lightweight",
+      () =>
+        resolved === "apps/harness-cli/src/index.ts" ||
+        resolved === "libs/harness/graph/src/index.ts" ||
+        resolved === "libs/harness/graph/src/cluster-resolver.ts" ||
+        resolved === "libs/harness/gates/src/index.ts" ||
+        resolved === "libs/harness/gates/src/hook-fastpath.ts" ||
+        resolved === "libs/harness/infra/src/index.ts" ||
+        resolved === "libs/harness/infra/src/hook-fastpath.ts" ||
+        resolved.startsWith("libs/harness/contract/") ||
+        resolved.startsWith("libs/harness/service/") ||
+        resolved.startsWith("libs/harness/decision/") ||
+        resolved.startsWith("libs/harness/ingest/"),
+    )
+    .exhaustive()
 
 const extractStringLiteralText = (expr: ts.Expression): string | undefined =>
   ts.isStringLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr) ? expr.text : undefined
@@ -172,6 +269,7 @@ const extractStringLiteralText = (expr: ts.Expression): string | undefined =>
 const extractStaticRuntimeSpecifiers = (
   filePath: string,
   content: string,
+  profile: FastpathClosureProfile,
 ): ReadonlyArray<string> => {
   const sourceFile = ts.createSourceFile(filePath, content, ts.ScriptTarget.Latest, true)
   const specifiers: Array<string> = []
@@ -235,8 +333,18 @@ const extractStaticRuntimeSpecifiers = (
         (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "require")
       if (isDynImport || isRequire) {
         const spec = extractStringLiteralText(node.arguments[0])
-        if (spec !== undefined && (!insideFunctionLike || isForbiddenRuntimeSpecifier(spec))) {
-          specifiers.push(spec)
+        if (spec !== undefined) {
+          const isAllowedLazyFallback =
+            profile === "hook-entry-lightweight" &&
+            filePath === "apps/harness-cli/src/commands/hook-fastpath-core.ts" &&
+            spec === "./hook-fallback.js"
+          const shouldPush =
+            profile === "standard"
+              ? !insideFunctionLike || isForbiddenRuntimeSpecifier(spec, profile)
+              : !insideFunctionLike || !isAllowedLazyFallback
+          if (shouldPush) {
+            specifiers.push(spec)
+          }
         }
       }
     }
@@ -271,8 +379,13 @@ const resolveWorkspaceImportTarget = (
 }
 
 /**
- * Verifies that zero-`typescript` hook fast-path entrypoints never pull `"typescript"`,
- * `"ts-morph"`, or non-fastpath `"@harness/graph"` modules into their runtime import closure.
+ * Verifies hook fast-path import closures across all three closure profiles:
+ * - `"standard"`: forbids `"typescript"`, `"ts-morph"`, and non-cluster-resolver `"@harness/graph"` modules.
+ * - `"policy-zero-dep"`: forbids `"effect"`, `"@effect/*"`, `"typescript"`, `"ts-morph"`, and any `"@harness/*"`
+ *   module outside `libs/harness/gates/src/policy*`.
+ * - `"hook-entry-lightweight"`: forbids `"effect"` root, heavy `"effect/*"` subpaths, `"@effect/platform-node"`,
+ *   `"@effect/ai-typesafe"`, `"typescript"`, `"ts-morph"`, and heavy `"@harness/*"` modules (allowing only
+ *   lightweight `effect/*` subpaths, `@harness/gates/policy`, and `@harness/infra/hook-io`).
  */
 export const evaluateHookFastpathImportClosure = (
   repoRoot: string,
@@ -297,16 +410,21 @@ export const evaluateHookFastpathImportClosure = (
   }
   const hasHarnessLibs = hostIo.existsSync(join(repoRoot, "libs", "harness"))
   const fileSpecCache = new Map<string, ReadonlyArray<string>>()
-  const readSpecs = (relPath: string): ReadonlyArray<string> | undefined => {
-    if (fileSpecCache.has(relPath)) return fileSpecCache.get(relPath)
+  const readSpecs = (
+    relPath: string,
+    profile: FastpathClosureProfile,
+  ): ReadonlyArray<string> | undefined => {
+    const cacheKey = `${profile}:${relPath}`
+    if (fileSpecCache.has(cacheKey)) return fileSpecCache.get(cacheKey)
     const content = readTextOrReport(join(repoRoot, relPath), hostIo, repoRoot, findings)
     if (content === undefined) return undefined
-    const specs = extractStaticRuntimeSpecifiers(relPath, content)
-    fileSpecCache.set(relPath, specs)
+    const specs = extractStaticRuntimeSpecifiers(relPath, content, profile)
+    fileSpecCache.set(cacheKey, specs)
     return specs
   }
 
   for (const entryRel of HOOK_FASTPATH_ENTRYPOINTS) {
+    const profile = getClosureProfile(entryRel)
     if (!hostIo.existsSync(join(repoRoot, entryRel))) {
       if (hasHarnessLibs) {
         findings.push({
@@ -328,10 +446,10 @@ export const evaluateHookFastpathImportClosure = (
       const [currentRel, chain] = nextItem
       if (visited.has(currentRel)) continue
       visited.add(currentRel)
-      const specs = readSpecs(currentRel)
+      const specs = readSpecs(currentRel, profile)
       if (specs === undefined) continue
       for (const spec of specs) {
-        if (isForbiddenRuntimeSpecifier(spec)) {
+        if (isForbiddenRuntimeSpecifier(spec, profile)) {
           violationEdges.add(`${chain.join(" -> ")} -> ${spec}`)
           continue
         }
@@ -348,7 +466,7 @@ export const evaluateHookFastpathImportClosure = (
           }
           continue
         }
-        if (resolved === "libs/harness/graph/src/index.ts") {
+        if (isForbiddenResolvedTarget(resolved, profile)) {
           violationEdges.add(`${chain.join(" -> ")} -> ${resolved}`)
           continue
         }
@@ -357,13 +475,25 @@ export const evaluateHookFastpathImportClosure = (
         }
       }
     }
+    const profileRuleSummary = match(profile)
+      .with("standard", () => "'typescript', 'ts-morph', and '@harness/graph'")
+      .with(
+        "policy-zero-dep",
+        () => "'effect', 'effect/*', '@effect/*', 'typescript', 'ts-morph', and '@harness/*'",
+      )
+      .with(
+        "hook-entry-lightweight",
+        () =>
+          "full 'effect' barrel, heavy 'effect/*' subpaths, '@effect/platform-node', '@effect/ai-typesafe', 'typescript', 'ts-morph', and heavy '@harness/*' packages",
+      )
+      .exhaustive()
     for (const trace of [...violationEdges].sort(compareCodeUnits)) {
       findings.push({
         kind: "hook-fastpath-forbidden-import",
         nodeId: `${entryRel}:${trace}`,
         location: entryRel,
-        message: `Hook fast-path entrypoint '${entryRel}' transitively imports forbidden runtime dependency (${trace}). Keep hook fast-path modules free of 'typescript', 'ts-morph', and '@harness/graph'.`,
-        action: `Replace direct/transitive runtime imports of 'typescript', 'ts-morph', or '@harness/graph' in ${entryRel} with a lightweight subpath export or 'import type'.`,
+        message: `Hook fast-path entrypoint '${entryRel}' transitively imports forbidden runtime dependency (${trace}). Keep ${entryRel} free of ${profileRuleSummary}.`,
+        action: `Replace direct/transitive runtime imports of ${profileRuleSummary} in ${entryRel} with a lightweight subpath export or 'import type'.`,
       })
     }
   }

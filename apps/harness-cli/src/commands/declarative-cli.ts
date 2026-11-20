@@ -535,7 +535,7 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
   const useHookFastpath =
     requested === "guard" ||
     requested === "route" ||
-    (requested === "session" && hasAntigravityFormat(argv))
+    ((requested === "session" || requested === "ingest") && hasAntigravityFormat(argv))
   const infraResolution = yield* resolveCliInfraLayer(requested, argv, useHookFastpath, {
     rawStdin: effectiveOptions.stdin,
     hookStdinTracker,

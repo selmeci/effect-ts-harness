@@ -114,6 +114,7 @@ export interface CliEnv {
   readonly stdinMaxBytes?: number | undefined
   readonly governanceDocs?: ReadonlyArray<GovernanceDocReference> | undefined
   readonly hookStdinTracker?: HookStdinTracker | undefined
+  readonly skipInitialSessionCacheRead?: boolean | undefined
 }
 
 export const resolveDecisionModelLayer = (

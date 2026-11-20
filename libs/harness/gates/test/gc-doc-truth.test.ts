@@ -355,6 +355,149 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
             f.nodeId === "adapters/antigravity/plugins/effect-harness/hooks.json:Stop",
         ),
       ).toBe(true)
+
+      // hook-entry.ts guard/done must also enforce || exit 2 and antigravity fallback JSON
+      writeFileSync(
+        claudeHooks,
+        JSON.stringify({
+          hooks: {
+            PreToolUse: [
+              {
+                hooks: [
+                  {
+                    type: "command",
+                    command:
+                      "node ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard",
+                    timeout: 15,
+                  },
+                ],
+              },
+            ],
+            Stop: [
+              {
+                hooks: [
+                  {
+                    type: "command",
+                    command:
+                      "node ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts done || exit 2",
+                    timeout: 30,
+                  },
+                ],
+              },
+            ],
+          },
+        }),
+      )
+      writeFileSync(
+        agyHooks,
+        JSON.stringify({
+          "effect-harness": {
+            PreToolUse: [
+              {
+                type: "command",
+                command:
+                  "node apps/harness-cli/src/hook-entry.ts guard --format=antigravity || exit 2",
+                timeout: 15,
+              },
+            ],
+            Stop: [
+              {
+                type: "command",
+                command:
+                  'node apps/harness-cli/src/hook-entry.ts done --format=antigravity || { printf \'{"decision":"continue"}\'; exit 2; }',
+                timeout: 30,
+              },
+            ],
+          },
+        }),
+      )
+      const hookEntryFindings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: tempDir,
+        hostIo: testHostIo,
+      })
+      expect(
+        hookEntryFindings.some(
+          (f) =>
+            f.kind === "hook-bootstrap-fail-closed" &&
+            f.nodeId === "adapters/claude-code/hooks.json:PreToolUse",
+        ),
+      ).toBe(true)
+      expect(
+        hookEntryFindings.some(
+          (f) =>
+            f.kind === "hook-bootstrap-fail-closed" &&
+            f.nodeId === "adapters/antigravity/plugins/effect-harness/hooks.json:PreToolUse",
+        ),
+      ).toBe(true)
+      expect(
+        hookEntryFindings.some(
+          (f) =>
+            f.kind === "hook-bootstrap-fail-closed" &&
+            f.nodeId === "adapters/antigravity/plugins/effect-harness/hooks.json:Stop",
+        ),
+      ).toBe(false)
+
+      // Flag-before-subcommand hook-entry.ts --format=antigravity guard without fail-closed fallback
+      writeFileSync(
+        agyHooks,
+        JSON.stringify({
+          "effect-harness": {
+            PreToolUse: [
+              {
+                type: "command",
+                command:
+                  "node apps/harness-cli/src/hook-entry.ts --format=antigravity guard || exit 2",
+                timeout: 15,
+              },
+            ],
+            Stop: [
+              {
+                type: "command",
+                command:
+                  'node apps/harness-cli/src/hook-entry.ts --format=antigravity done || { printf \'{"decision":"continue"}\'; exit 2; }',
+                timeout: 30,
+              },
+            ],
+          },
+        }),
+      )
+      const flagBeforeSubFindings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: tempDir,
+        hostIo: testHostIo,
+      })
+      expect(
+        flagBeforeSubFindings.some(
+          (f) =>
+            f.kind === "hook-bootstrap-fail-closed" &&
+            f.nodeId === "adapters/antigravity/plugins/effect-harness/hooks.json:PreToolUse",
+        ),
+      ).toBe(true)
+
+      // Claude Code resolving-effect-review-feedback must not leak Antigravity terminology
+      const claudeReviewSkill = join(
+        tempDir,
+        "adapters/claude-code/skills/resolving-effect-review-feedback/SKILL.md",
+      )
+      mkdirSync(dirname(claudeReviewSkill), { recursive: true })
+      writeFileSync(
+        claudeReviewSkill,
+        "# Review Feedback\nDispatch fixes to warm swarm workers in parallel.\n",
+      )
+      const claudeLeakFindings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: tempDir,
+        hostIo: testHostIo,
+      })
+      expect(
+        claudeLeakFindings.some(
+          (f) =>
+            f.kind === "doc-banned-or-phantom-tech" &&
+            f.nodeId ===
+              "adapters/claude-code/skills/resolving-effect-review-feedback/SKILL.md:claude-antigravity-terminology",
+        ),
+      ).toBe(true)
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
     }

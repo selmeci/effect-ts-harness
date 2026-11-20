@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts session"
+            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts session"
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard || exit 2",
+            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard || exit 2",
             "timeout": 15
           }
         ]
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard || exit 2",
+            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard || exit 2",
             "timeout": 15
           }
         ]
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts ingest"
+            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts ingest"
           }
         ]
       }

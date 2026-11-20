@@ -12,6 +12,7 @@ export {
   indexEffectFnsInFile,
   validateUniqueSpanNames,
   buildWorkspaceFnIndex,
+  findActiveWorkspaceStubs,
 } from "./fn-index.js"
 export {
   type RecordedExitTag,

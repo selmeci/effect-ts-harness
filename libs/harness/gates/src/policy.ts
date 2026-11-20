@@ -49,6 +49,7 @@ export const ALLOWLIST: ReadonlyArray<string> = [
   "git log",
   "git branch",
   "git rev-parse",
+  "git ls-files",
   "git checkout",
   "git switch",
   "git add",
@@ -133,7 +134,7 @@ export const SECRET_FILE_PATTERN: RegExp =
  * Hooks invoke the guard directly from the IDE, never through an agent shell command.
  * Flags (and flag values such as `--cwd /tmp`) or `--` before `guard` are tolerated. */
 export const GUARD_SELF_INVOCATION_PATTERN: RegExp =
-  /(?:(?:^|\s)harness|harness-cli\/src\/index\.ts)(?:\s+(?:--(?=\s|$)|-\S+(?:\s+(?!guard\b)[^\s;|&)<>]+)?))*\s+guard\b/
+  /(?:(?:^|\s)harness|harness-cli\/src\/(?:index|hook-entry)\.ts)(?:\s+(?:--(?=\s|$)|-\S+(?:\s+(?!guard\b)[^\s;|&)<>]+)?))*\s+guard\b/
 
 /** REQ-1.2: git commands that irreversibly discard work. Always a human decision —
  * clef rated `git checkout -- .` only destructive=0.26 (would auto-allow). */
@@ -254,15 +255,85 @@ const containsToken = (command: string, token: string): boolean =>
 const matchesAny = (command: string, rules: ReadonlyArray<GuardPatternRule>): boolean =>
   rules.some((rule) => rule.pattern.test(command))
 
+const MAX_LEADING_ENV_VARS = 32
+const MAX_CLASSIFY_COMMAND_LENGTH = 65_536
+
+const SAFE_ENV_PATH_PATTERN = /^\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/
+const UNSAFE_ENV_PATH_PATTERN =
+  /\.\.|\/\.env|\/\.git(?:\/|$)|\/\.harness|secret|\/repos\/(?:effect|alchemy)(?:\/|$)|\/tools\/|\/adapters\//i
+const SAFE_TEMP_PATH_VALIDATOR = (value: string): boolean =>
+  SAFE_ENV_PATH_PATTERN.test(value) && !UNSAFE_ENV_PATH_PATTERN.test(value)
+
+const SAFE_LEADING_ENV_VALIDATORS: Readonly<Record<string, (value: string) => boolean>> = {
+  CI: (v) => /^(?:true|false|0|1)$/.test(v),
+  NX_INTERACTIVE: (v) => /^(?:true|false|0|1)$/.test(v),
+  NX_DAEMON: (v) => /^(?:true|false|0|1)$/.test(v),
+  FORCE_COLOR: (v) => /^[0-3]$/.test(v),
+  NO_COLOR: (v) => /^[01]$/.test(v),
+  HARNESS_PLAN_CHECK: (v) => /^(?:0|1|true|false)$/.test(v),
+  HARNESS_REQUIRE_OLLAMA: (v) => /^[01]$/.test(v),
+  HARNESS_LOG_LEVEL: (v) => /^(?:debug|info|warn|error)$/.test(v),
+  HARNESS_WORKTREE_ID: (v) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(v),
+  TMPDIR: SAFE_TEMP_PATH_VALIDATOR,
+  NX_SOCKET_DIR: SAFE_TEMP_PATH_VALIDATOR,
+  NODE_COMPILE_CACHE: SAFE_TEMP_PATH_VALIDATOR,
+}
+
+const isSafeLeadingEnvAssignment = (name: string, value: string): boolean => {
+  if (/[\s;|&]/.test(value)) return false
+  if (!Object.hasOwn(SAFE_LEADING_ENV_VALIDATORS, name)) return false
+  return SAFE_LEADING_ENV_VALIDATORS[name]!(value)
+}
+
+const LEADING_ENV_TOKEN_PATTERN = /([A-Za-z_][A-Za-z0-9_]*)=([^\s;|&]+)(?=\s|$)/y
+const WORKTREE_ID_BLOCKED_HARNESS_PATTERN =
+  /^pnpm\s+(?:run\s+)?harness\b|^CI=true\s+pnpm\s+harness\b|^node\b.*apps\/harness-cli\/src\//
+
+interface StripLeadingEnvResult {
+  readonly rest: string
+  readonly sawWorktreeId: boolean
+}
+
+const stripSafeLeadingEnvVarsDetailed = (command: string): StripLeadingEnvResult => {
+  const len = command.length
+  let pos = 0
+  let count = 0
+  let sawWorktreeId = false
+  while (count < MAX_LEADING_ENV_VARS) {
+    while (pos < len && /\s/.test(command[pos]!)) {
+      pos++
+    }
+    if (pos >= len) {
+      return { rest: "", sawWorktreeId }
+    }
+    LEADING_ENV_TOKEN_PATTERN.lastIndex = pos
+    const match = LEADING_ENV_TOKEN_PATTERN.exec(command)
+    if (match === null) {
+      break
+    }
+    const name = match[1]!
+    const value = match[2]!
+    if (!isSafeLeadingEnvAssignment(name, value)) {
+      break
+    }
+    if (name === "HARNESS_WORKTREE_ID") {
+      sawWorktreeId = true
+    }
+    pos = LEADING_ENV_TOKEN_PATTERN.lastIndex
+    count++
+  }
+  return { rest: command.slice(pos).trim(), sawWorktreeId }
+}
+
+const stripSafeLeadingEnvVars = (command: string): string =>
+  stripSafeLeadingEnvVarsDetailed(command).rest
+
 export const isCommandAllowed = (command: string): boolean => {
-  const stripped = command
-    .trim()
-    .replace(
-      /^(?:(?:CI|NX_INTERACTIVE|(?!HARNESS_STATE_DIR=|HARNESS_DISABLE_LIVE_TELEMETRY=|HARNESS_TEST_ISOLATION=|HARNESS_ALLOW_SKIP_NX_CACHE=)HARNESS_[A-Z0-9_]+)=[^\s;|&]+\s+)+/,
-      "",
-    )
-  const trimmed = stripped.trim()
+  const { rest: trimmed, sawWorktreeId } = stripSafeLeadingEnvVarsDetailed(command)
   if (trimmed === "") return false
+  if (sawWorktreeId && WORKTREE_ID_BLOCKED_HARNESS_PATTERN.test(trimmed)) {
+    return false
+  }
   return ALLOWLIST.some((prefix) => {
     if (trimmed === prefix) return true
     if (prefix.endsWith(" ") || prefix.endsWith("/")) return trimmed.startsWith(prefix)
@@ -378,6 +449,7 @@ export type CommandDenyRuleId =
   | "invalid-clef-endpoint"
   | "denylist-token"
   | "git-force-push"
+  | "git-pack-exec-override"
   | "harness-state-mutation"
   | "secret-file-access"
   | "guard-self-invocation"
@@ -388,6 +460,14 @@ export interface CommandDenyExplanation {
 }
 
 const GIT_FORCE_PUSH_PATTERN = /\bgit\s+(?:\S+\s+)*push\b.*(?:\s|^)(?:--force|-f)(?:\s|$)/
+
+const GIT_PACK_EXEC_OVERRIDE_PATTERNS: ReadonlyArray<RegExp> = [
+  /\bgit\s+(?:\S+\s+)*(?:ls-remote|clone)\b.*(?:\s--u[a-z-]*(?:=|\s|$)|\s-u\S*|\s--exe(?:c)?(?:=|\s|$))/s,
+  /\bgit\s+(?:\S+\s+)*fetch\b.*(?:\s--upl[a-z-]*(?:=|\s|$)|\s--exe(?:c)?(?:=|\s|$))/s,
+  /\bgit\s+(?:\S+\s+)*push\b.*(?:\s--rece[a-z-]*(?:=|\s|$)|\s--ex(?:e(?:c)?)?(?:=|\s|$))/s,
+  /\bgit\s+(?:\S+\s+)*archive\b.*\s--ex(?:e(?:c)?)?(?:=|\s|$)/s,
+  /\bgit\b.*\bext::/s,
+]
 
 export const explainCommandDenyRule = (command: string): CommandDenyExplanation | undefined => {
   const trimmed = normalizeShellLineContinuations(command).trim()
@@ -418,6 +498,13 @@ export const explainCommandDenyRule = (command: string): CommandDenyExplanation 
     return {
       ruleId: "git-force-push",
       reason: "Force-pushing with '--force' or '-f' is banned by harness policy.",
+    }
+  }
+  if (GIT_PACK_EXEC_OVERRIDE_PATTERNS.some((pattern) => pattern.test(view.argv))) {
+    return {
+      ruleId: "git-pack-exec-override",
+      reason:
+        "Git remote/transfer command with custom upload-pack/receive-pack/exec or ext:: helper is banned by harness policy.",
     }
   }
   if (isHarnessStateMutationCommand(trimmed)) {
@@ -456,6 +543,9 @@ export const explainCommandDenyReason = (command: string): string | undefined =>
 /** Rule order is load-bearing (harness:ADR-0003): deny → ask → escalate → allow.
  * Every rule that removes the automatic `allow` must run before the prefix allowlist. */
 export const classifyCommand = (command: string): GuardVerdict => {
+  if (command.length > MAX_CLASSIFY_COMMAND_LENGTH) {
+    return "ask"
+  }
   const norm = normalizeShellLineContinuations(command)
   const trimmed = norm.trim()
   if (trimmed === "") {
@@ -538,7 +628,7 @@ export const classifyCommand = (command: string): GuardVerdict => {
           (p) =>
             p.cmd.length > 0 &&
             (isCommandAllowed(p.cmd) || isAllowedPipedSegment(p.cmd, p.unquoted)) &&
-            !/^\s*git\s+(?:add|commit|push)\b/.test(p.cmd),
+            !/^\s*git\s+(?:add|commit|push)\b/.test(stripSafeLeadingEnvVars(p.cmd)),
         )
       ) {
         return "allow"
@@ -597,7 +687,7 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
 
   if (
     candidates.some((p) =>
-      /(^|\/)\.harness\/(worktrees\/[^/]+\/)?(cache\/mutation-cache-v\d+\.(?:json(?:\.corrupt)?|corrupt)|session-preinvocation-cache\.json|last-done\.json)$/.test(
+      /(^|\/)\.harness\/(worktrees\/[^/]+\/)?(cache\/mutation-cache-v\d+\.(?:json(?:\.corrupt)?|corrupt)|session-preinvocation-cache\.json|last-done\.json|graph-snapshot\.json|graph-head\.json)$/.test(
         p,
       ),
     )

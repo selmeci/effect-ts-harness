@@ -21,6 +21,7 @@ The controller calls `harness_review_route` (or inspects the files, package boun
 > [!IMPORTANT]
 > **Mandatory Dual-Review for Core / Domain / Event Sourcing:** For any task touching `type:core`, `type:domain`, deciders, or event sourcing, dispatching **BOTH** `effect-ears-test-reviewer` AND `effect-adversarial-reviewer` is strictly mandatory.
 > **Neutral & Adversarial Prompting:** Prompts to reviewers MUST be neutral and adversarial ("Assume there are at least 3 P0/P1 bugs hiding across the spec, ADR, contract, fixtures, and tests; find them using the 8-Point Anti-Rubber-Stamp Audit") — never spoon-feed confirmation-biased prompts.
+> **Domain-Scoped `harness_git_diff` Reviews:** Every specialist reviewer prompt MUST pass the exact list of domain-owned changed files + `baseRef` and instruct the reviewer to start with `harness_git_diff` (`statOnly: true`, then targeted `paths`) instead of re-reading all unchanged files in the PR.
 
 ---
 
@@ -43,7 +44,9 @@ invoke_subagent({
       Model: "flash", // Use "gemini-4-hydrogen-medium" if in Model enum, or "inherit" if session runs on Hydrogen
       Workspace: "share",
       Prompt: `Assume there are at least 3 P0/P1 bugs hiding across the spec, ADR, contract, fixtures, and tests; find them using the 8-Point Anti-Rubber-Stamp Audit. Do not assume any code or test is correct:
-- Target Files: libs/sample/domain/src/sample.ts, libs/sample/domain/test/sample.test.ts
+- Base Ref: <baseRef>
+- Domain-Owned Changed Files: libs/sample/domain/src/sample.ts, libs/sample/domain/test/sample.test.ts
+- Start with harness_git_diff (statOnly: true, then targeted paths on your domain-owned changed files) instead of re-reading all unchanged files in the PR.
 - EARS Requirements & ADRs: libs/sample/docs/specs/SPEC-0001.md, libs/sample/docs/adr/0001.md
 - Execute the 8-Point Anti-Rubber-Stamp Deep Audit.
 - Adhere strictly to the Quote-the-Line Gate and False-Positive Suppression List.`,
@@ -54,7 +57,9 @@ invoke_subagent({
       Model: "flash", // Use "gemini-4-hydrogen-medium" if in Model enum, or "inherit" if session runs on Hydrogen
       Workspace: "share",
       Prompt: `Assume there are at least 3 P0/P1 bugs hiding across the spec, ADR, contract, fixtures, and tests; find them using adversarial falsification. Do not assume any code or test is correct:
-- Target Files: libs/sample/domain/src/sample.ts, libs/sample/domain/test/sample.test.ts
+- Base Ref: <baseRef>
+- Domain-Owned Changed Files: libs/sample/domain/src/sample.ts, libs/sample/domain/test/sample.test.ts
+- Start with harness_git_diff (statOnly: true, then targeted paths on your domain-owned changed files) instead of re-reading all unchanged files in the PR.
 - Hunt for: Cross-entity command/event injection, property test generator weakening, protocol tracing enforcement in Decider.make, inter-step crashes, idempotency bypass, and optimistic concurrency races.
 - Adhere strictly to the Quote-the-Line Gate and False-Positive Suppression List.`,
     },
@@ -73,7 +78,9 @@ swarm({
   workspace: "inherit",
   brief: `Read the specialist reviewer instructions at adapters/antigravity/plugins/effect-harness/agents/effect-ears-test-reviewer.md.
 Assume there are at least 3 P0/P1 bugs hiding across the spec, ADR, contract, fixtures, and tests; find them using the 8-Point Anti-Rubber-Stamp Audit:
-- Target Files: libs/sample/domain/src/sample.ts, libs/sample/domain/test/sample.test.ts
+- Base Ref: <baseRef>
+- Domain-Owned Changed Files: libs/sample/domain/src/sample.ts, libs/sample/domain/test/sample.test.ts
+- Start with harness_git_diff (statOnly: true, then targeted paths on your domain-owned changed files) instead of re-reading all unchanged files in the PR.
 - EARS Requirements & ADRs: libs/sample/docs/specs/SPEC-0001.md, libs/sample/docs/adr/0001.md
 - Adhere strictly to the Quote-the-Line Gate and False-Positive Suppression List.
 - Post your structured review report to @coordinator when finished.`,

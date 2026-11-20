@@ -56,12 +56,16 @@ export const decideGuardCommand = Effect.fn("Harness.decideGuardCommand")(functi
           Effect.map((value) => ({ _tag: "Success" as const, value })),
           Effect.catchCauseIf(
             (cause) => !isPureInterruptCause(cause),
-            (cause) =>
-              Effect.logWarning(`Decision model fallback: ${Cause.pretty(cause)}`).pipe(
-                Effect.as({ _tag: "ModelError" as const }),
-              ),
+            (cause) => {
+              const collapsed = Cause.pretty(cause).replace(/\s+/g, " ").trim()
+              const truncated = collapsed.length > 160 ? `${collapsed.slice(0, 157)}...` : collapsed
+              const detail = truncated.length > 0 ? truncated : "unknown error"
+              return Effect.logWarning(`Decision model fallback: ${Cause.pretty(cause)}`).pipe(
+                Effect.as({ _tag: "ModelError" as const, detail }),
+              )
+            },
           ),
-          Effect.orElseSucceed(() => ({ _tag: "ModelError" as const })),
+          Effect.orElseSucceed(() => ({ _tag: "ModelError" as const, detail: "unknown error" })),
           Effect.timeoutOption("1500 millis"),
         )
 
@@ -76,10 +80,10 @@ export const decideGuardCommand = Effect.fn("Harness.decideGuardCommand")(functi
               }),
             ),
           )
-          .with({ _tag: "Some", value: { _tag: "ModelError" } }, () =>
+          .with({ _tag: "Some", value: { _tag: "ModelError" } }, ({ value: { detail } }) =>
             Effect.succeed({
               verdict: "ask" as const,
-              reason: "DecisionModel unavailable or timed out; requires human confirmation.",
+              reason: `DecisionModel unavailable (${detail}); requires human confirmation.`,
             }),
           )
           .with({ _tag: "Some", value: { _tag: "Success" } }, ({ value: { value } }) =>

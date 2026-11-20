@@ -3,7 +3,7 @@
     "PreInvocation": [
       {
         "type": "command",
-        "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts session --format=antigravity",
+        "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/hook-entry.ts session --format=antigravity",
         "timeout": 15
       }
     ],
@@ -13,7 +13,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts guard --format=antigravity || { rc=$?; if [ \"$rc\" -ne 2 ]; then printf '%s\\n' '{\"decision\":\"deny\",\"reason\":\"guard: runtime bootstrap failed\"}'; fi; exit 2; }",
+            "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/hook-entry.ts guard --format=antigravity || { rc=$?; if [ \"$rc\" -ne 2 ]; then printf '%s\\n' '{\"decision\":\"deny\",\"reason\":\"guard: runtime bootstrap failed\"}'; fi; exit 2; }",
             "timeout": 15
           }
         ]
@@ -23,7 +23,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts guard --format=antigravity || { rc=$?; if [ \"$rc\" -ne 2 ]; then printf '%s\\n' '{\"decision\":\"deny\",\"reason\":\"guard: runtime bootstrap failed\"}'; fi; exit 2; }",
+            "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/hook-entry.ts guard --format=antigravity || { rc=$?; if [ \"$rc\" -ne 2 ]; then printf '%s\\n' '{\"decision\":\"deny\",\"reason\":\"guard: runtime bootstrap failed\"}'; fi; exit 2; }",
             "timeout": 15
           }
         ]
@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts ingest --format=antigravity",
+            "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/hook-entry.ts ingest --format=antigravity",
             "timeout": 30
           }
         ]
