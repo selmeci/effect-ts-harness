@@ -13,6 +13,7 @@ import {
   UnauthorizedError,
 } from "@modernrelay/omnigraph"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { WORKFLOW_GQ_QUERY_NAMES } from "@harness/contract"
 import {
   HARNESS_OMNIGRAPH_GRAPH_ID,
   OmnigraphLoadError,
@@ -27,6 +28,18 @@ import {
 import { makeExtendedTestHostIo, testHostIo } from "./helpers/test-host-io.js"
 
 const graphConfigDir = resolve(import.meta.dirname, "..")
+
+const isRowsEnvelope = (
+  value: unknown,
+): value is { readonly rows: ReadonlyArray<Readonly<Record<string, unknown>>> } =>
+  typeof value === "object" && value !== null && "rows" in value && Array.isArray(value.rows)
+
+const requireRows = (res: unknown): ReadonlyArray<Readonly<Record<string, unknown>>> => {
+  if (!isRowsEnvelope(res)) {
+    return expect.unreachable("Expected Omnigraph query result envelope with a rows array")
+  }
+  return res.rows
+}
 const omnigraphBin = join(process.env.HOME ?? "/root", ".local", "bin", "omnigraph")
 const omnigraphServerBin = join(process.env.HOME ?? "/root", ".local", "bin", "omnigraph-server")
 
@@ -187,7 +200,7 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
     const declaredQueryNames = [...gqText.matchAll(/^query\s+([a-zA-Z0-9_]+)\s*\(/gm)].map(
       (match) => match[1] ?? "",
     )
-    expect(declaredQueryNames).toHaveLength(36)
+    expect(declaredQueryNames).toEqual([...WORKFLOW_GQ_QUERY_NAMES])
 
     const out = execFileSync(
       omnigraphBin,
@@ -451,13 +464,10 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       expectMutation: false,
       params: { primaryKeyHash: "pk-1" },
     })
-    expect("rows" in pkRes && pkRes.rows).toBeTruthy()
-    if ("rows" in pkRes) {
-      const rows = pkRes.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows).toHaveLength(1)
-      expect(rows[0]?.messageKey).toBe(msg1)
-      expect(rows[0]?.seqKey).toBe(padSeqKey(msg1))
-    }
+    const pkRows = requireRows(pkRes)
+    expect(pkRows).toHaveLength(1)
+    expect(pkRows[0]?.messageKey).toBe(msg1)
+    expect(pkRows[0]?.seqKey).toBe(padSeqKey(msg1))
 
     // 3. Unprocessed candidate queries (unfiltered vs address-filtered before limit 1024)
     const candAll = await og.queries.invoke("wf_unprocessed_candidate_messages", {
@@ -465,10 +475,7 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       expectMutation: false,
       params: { shardIds: ["shard-0"], claimCutoffMs: 500, nowMs: 2_000 },
     })
-    if ("rows" in candAll) {
-      const rows = candAll.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows.map((r) => r.messageKey)).toEqual([msg1, msg2])
-    }
+    expect(requireRows(candAll).map((r) => r.messageKey)).toEqual([msg1, msg2])
 
     const candAddr = await og.queries.invoke("wf_unprocessed_candidate_messages_for_addresses", {
       branch: "main",
@@ -481,10 +488,7 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         nowMs: 2_000,
       },
     })
-    if ("rows" in candAddr) {
-      const rows = candAddr.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows.map((r) => r.messageKey)).toEqual([msg1])
-    }
+    expect(requireRows(candAddr).map((r) => r.messageKey)).toEqual([msg1])
 
     // Single-entityType filter rejects another entityType even when entityId matches
     const crossTypeMsg = "248476693641609225"
@@ -522,10 +526,7 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         },
       },
     )
-    if ("rows" in candAddrSingleType) {
-      const rows = candAddrSingleType.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows.map((r) => r.messageKey)).toEqual([msg1])
-    }
+    expect(requireRows(candAddrSingleType).map((r) => r.messageKey)).toEqual([msg1])
 
     // 4. Claim & resets
     await og.queries.invoke("wf_claim_messages", {
@@ -538,20 +539,14 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       expectMutation: false,
       params: { shardIds: ["shard-0"], claimCutoffMs: 500, nowMs: 2_000 },
     })
-    if ("rows" in candAfterClaim) {
-      const rows = candAfterClaim.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows.map((r) => r.messageKey)).toEqual([msg2, crossTypeMsg])
-    }
+    expect(requireRows(candAfterClaim).map((r) => r.messageKey)).toEqual([msg2, crossTypeMsg])
 
     const byId = await og.queries.invoke("wf_unprocessed_messages_by_id", {
       branch: "main",
       expectMutation: false,
       params: { messageKeys: [msg1, msg3], nowMs: 2_000 },
     })
-    if ("rows" in byId) {
-      const rows = byId.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows.map((r) => r.messageKey)).toEqual([msg1])
-    }
+    expect(requireRows(byId).map((r) => r.messageKey)).toEqual([msg1])
 
     await og.queries.invoke("wf_reset_requests", {
       branch: "main",
@@ -640,19 +635,13 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       expectMutation: false,
       params: { requestIds: [msg1] },
     })
-    if ("rows" in repliesFiltered) {
-      const rows = repliesFiltered.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows.map((r) => r.replyKey)).toEqual([exit1])
-    }
+    expect(requireRows(repliesFiltered).map((r) => r.replyKey)).toEqual([exit1])
     const repliesUnfiltered = await og.queries.invoke("wf_replies_for_unfiltered", {
       branch: "main",
       expectMutation: false,
       params: { requestIds: [msg1] },
     })
-    if ("rows" in repliesUnfiltered) {
-      const rows = repliesUnfiltered.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows.map((r) => r.replyKey)).toEqual([chunk1, exit1])
-    }
+    expect(requireRows(repliesUnfiltered).map((r) => r.replyKey)).toEqual([chunk1, exit1])
 
     // 6. clearReplies CAS delete (preserves Interrupt) + dangling repair + CAS reset on BOTH request & interrupt + unconditional clear
     await og.queries.invoke("wf_clear_replies_cas_delete", {
@@ -664,28 +653,24 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       branch: "main",
       expectMutation: false,
     })
-    if ("rows" in dangling) {
-      const rows = dangling.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows.map((r) => r.messageKey)).toEqual([msg1])
-    }
+    expect(requireRows(dangling).map((r) => r.messageKey)).toEqual([msg1])
     await og.queries.invoke("wf_repair_dangling_requests", {
       branch: "main",
       expectMutation: true,
       params: { messageKeys: [msg1], clearReplyId: null, clearReadMs: null },
     })
-    const repairedRows = await og.queries.invoke("wf_messages_by_keys", {
-      branch: "main",
-      expectMutation: false,
-      params: { messageKeys: [msg1, int1] },
-    })
-    if ("rows" in repairedRows) {
-      const rows = repairedRows.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows).toHaveLength(2)
-      for (const row of rows) {
-        expect(row.processed).toBe(false)
-        expect(row.lastReplyId ?? null).toBeNull()
-        expect(row.lastReadMs ?? null).toBeNull()
-      }
+    const repairedList = requireRows(
+      await og.queries.invoke("wf_messages_by_keys", {
+        branch: "main",
+        expectMutation: false,
+        params: { messageKeys: [msg1, int1] },
+      }),
+    )
+    expect(repairedList).toHaveLength(2)
+    for (const row of repairedList) {
+      expect(row.processed).toBe(false)
+      expect(row.lastReplyId ?? null).toBeNull()
+      expect(row.lastReadMs ?? null).toBeNull()
     }
 
     // Re-save exit so BOTH msg1 and int1 get lastReplyId = exit1 & processed = true, then test CAS reset
@@ -715,19 +700,18 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         clearReadMs: null,
       },
     })
-    const casResetRows = await og.queries.invoke("wf_messages_by_keys", {
-      branch: "main",
-      expectMutation: false,
-      params: { messageKeys: [msg1, int1] },
-    })
-    if ("rows" in casResetRows) {
-      const rows = casResetRows.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows).toHaveLength(2)
-      for (const row of rows) {
-        expect(row.processed).toBe(false)
-        expect(row.lastReplyId ?? null).toBeNull()
-        expect(row.lastReadMs ?? null).toBeNull()
-      }
+    const casResetList = requireRows(
+      await og.queries.invoke("wf_messages_by_keys", {
+        branch: "main",
+        expectMutation: false,
+        params: { messageKeys: [msg1, int1] },
+      }),
+    )
+    expect(casResetList).toHaveLength(2)
+    for (const row of casResetList) {
+      expect(row.processed).toBe(false)
+      expect(row.lastReplyId ?? null).toBeNull()
+      expect(row.lastReadMs ?? null).toBeNull()
     }
 
     await og.queries.invoke("wf_clear_replies_unconditional_delete", {
@@ -741,19 +725,18 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       params: { requestId: msg1, clearReplyId: null, clearReadMs: null },
     })
 
-    const msg1AfterClear = await og.queries.invoke("wf_messages_by_keys", {
-      branch: "main",
-      expectMutation: false,
-      params: { messageKeys: [msg1, int1] },
-    })
-    if ("rows" in msg1AfterClear) {
-      const rows = msg1AfterClear.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows).toHaveLength(1)
-      expect(rows[0]?.messageKey).toBe(msg1)
-      expect(rows[0]?.lastReplyId ?? null).toBeNull()
-      expect(rows[0]?.lastReadMs ?? null).toBeNull()
-      expect(rows[0]?.processed).toBe(false)
-    }
+    const msg1AfterClearList = requireRows(
+      await og.queries.invoke("wf_messages_by_keys", {
+        branch: "main",
+        expectMutation: false,
+        params: { messageKeys: [msg1, int1] },
+      }),
+    )
+    expect(msg1AfterClearList).toHaveLength(1)
+    expect(msg1AfterClearList[0]?.messageKey).toBe(msg1)
+    expect(msg1AfterClearList[0]?.lastReplyId ?? null).toBeNull()
+    expect(msg1AfterClearList[0]?.lastReadMs ?? null).toBeNull()
+    expect(msg1AfterClearList[0]?.processed).toBe(false)
 
     // 7. Orphan entityType scan + quarantine + pagination + count
     await og.queries.invoke("wf_insert_request_message", {
@@ -781,43 +764,45 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       expectMutation: false,
       params: { knownEntityTypes: ["HarnessTask", "OtherEntity"] },
     })
-    if ("rows" in orphans) {
-      const rows = orphans.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows.map((r) => r.messageKey)).toEqual([orphan1])
-    }
+    expect(requireRows(orphans).map((r) => r.messageKey)).toEqual([orphan1])
     await og.queries.invoke("wf_quarantine_orphan_messages", {
       branch: "main",
       expectMutation: true,
       params: { messageKeys: [orphan1] },
     })
 
-    const countRes = await og.queries.invoke("wf_count_all", {
-      branch: "main",
-      expectMutation: false,
-    })
-    if ("rows" in countRes) {
-      const rows = countRes.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows[0]?.totalMessages).toBe(6)
-    }
+    const countRows = requireRows(
+      await og.queries.invoke("wf_count_all", {
+        branch: "main",
+        expectMutation: false,
+      }),
+    )
+    expect(countRows[0]?.totalMessages).toBe(6)
 
-    const pageRes = await og.queries.invoke("wf_all_entities", {
-      branch: "main",
-      expectMutation: false,
-      params: { afterSeqKey: "" },
-    })
-    if ("rows" in pageRes) {
-      const rows = pageRes.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows).toHaveLength(6)
-    }
-    const repliesPageRes = await og.queries.invoke("wf_all_replies", {
-      branch: "main",
-      expectMutation: false,
-      params: { afterSeqKey: "" },
-    })
-    if ("rows" in repliesPageRes) {
-      const rows = repliesPageRes.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows.map((r) => r.replyKey)).toEqual([chunk1])
-    }
+    const replyCountRows = requireRows(
+      await og.queries.invoke("wf_count_replies", {
+        branch: "main",
+        expectMutation: false,
+      }),
+    )
+    expect(replyCountRows[0]?.totalReplies).toBe(1)
+
+    const pageRows = requireRows(
+      await og.queries.invoke("wf_all_entities", {
+        branch: "main",
+        expectMutation: false,
+        params: { afterSeqKey: "" },
+      }),
+    )
+    expect(pageRows).toHaveLength(6)
+    const repliesPageRows = requireRows(
+      await og.queries.invoke("wf_all_replies", {
+        branch: "main",
+        expectMutation: false,
+        params: { afterSeqKey: "" },
+      }),
+    )
+    expect(repliesPageRows.map((r) => r.replyKey)).toEqual([chunk1])
 
     // 8. WfWriterLease CAS lifecycle
     await og.queries.invoke("wf_insert_writer_lease", {
@@ -841,76 +826,72 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       expectMutation: true,
       params: { name: "engine", owner: "daemon-2", expectedEpoch: 2, heartbeatMs: 3000 },
     })
-    const leaseRes = await og.queries.invoke("wf_get_writer_lease", {
-      branch: "main",
-      expectMutation: false,
-      params: { name: "engine" },
+    const leaseRows = requireRows(
+      await og.queries.invoke("wf_get_writer_lease", {
+        branch: "main",
+        expectMutation: false,
+        params: { name: "engine" },
+      }),
+    )
+    expect(leaseRows[0]).toMatchObject({
+      name: "engine",
+      owner: "daemon-2",
+      leaseEpoch: 2,
+      heartbeatMs: 3000,
     })
-    if ("rows" in leaseRes) {
-      const rows = leaseRes.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows[0]).toMatchObject({
-        name: "engine",
-        owner: "daemon-2",
-        leaseEpoch: 2,
-        heartbeatMs: 3000,
-      })
-    }
 
     // 9. clearAddress + replies_by_keys + reply_by_key
-    const singleReply = await og.queries.invoke("wf_reply_by_key", {
-      branch: "main",
-      expectMutation: false,
-      params: { replyKey: chunk1 },
-    })
-    if ("rows" in singleReply) {
-      const rows = singleReply.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows).toHaveLength(1)
-    }
-    const batchReplies = await og.queries.invoke("wf_replies_by_keys", {
-      branch: "main",
-      expectMutation: false,
-      params: { replyKeys: [chunk1] },
-    })
-    if ("rows" in batchReplies) {
-      const rows = batchReplies.rows as ReadonlyArray<Record<string, unknown>>
-      expect(rows).toHaveLength(1)
-    }
-
-    const keysRes = await og.queries.invoke("wf_message_keys_for_address", {
-      branch: "main",
-      expectMutation: false,
-      params: { entityType: "HarnessTask", entityId: "run-1" },
-    })
-    if ("rows" in keysRes) {
-      const rows = keysRes.rows as ReadonlyArray<Record<string, unknown>>
-      const reqIds = Array.from(new Set(rows.map((r) => String(r.requestId))))
-      expect(reqIds.length).toBeGreaterThan(0)
-      await og.queries.invoke("wf_clear_address", {
+    const singleReplyRows = requireRows(
+      await og.queries.invoke("wf_reply_by_key", {
         branch: "main",
-        expectMutation: true,
-        params: {
-          requestIds: reqIds,
-          entityType: "HarnessTask",
-          entityId: "run-1",
-        },
-      })
-      const keysAfterClear = await og.queries.invoke("wf_message_keys_for_address", {
+        expectMutation: false,
+        params: { replyKey: chunk1 },
+      }),
+    )
+    expect(singleReplyRows).toHaveLength(1)
+    const batchRepliesRows = requireRows(
+      await og.queries.invoke("wf_replies_by_keys", {
+        branch: "main",
+        expectMutation: false,
+        params: { replyKeys: [chunk1] },
+      }),
+    )
+    expect(batchRepliesRows).toHaveLength(1)
+
+    const keysRows = requireRows(
+      await og.queries.invoke("wf_message_keys_for_address", {
         branch: "main",
         expectMutation: false,
         params: { entityType: "HarnessTask", entityId: "run-1" },
-      })
-      if ("rows" in keysAfterClear) {
-        expect(keysAfterClear.rows).toEqual([])
-      }
-      const repliesAfterClear = await og.queries.invoke("wf_replies_for_unfiltered", {
+      }),
+    )
+    const reqIds = Array.from(new Set(keysRows.map((r) => String(r.requestId))))
+    expect(reqIds.length).toBeGreaterThan(0)
+    await og.queries.invoke("wf_clear_address", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        requestIds: reqIds,
+        entityType: "HarnessTask",
+        entityId: "run-1",
+      },
+    })
+    const keysAfterClear = requireRows(
+      await og.queries.invoke("wf_message_keys_for_address", {
+        branch: "main",
+        expectMutation: false,
+        params: { entityType: "HarnessTask", entityId: "run-1" },
+      }),
+    )
+    expect(keysAfterClear).toEqual([])
+    const repliesAfterClear = requireRows(
+      await og.queries.invoke("wf_replies_for_unfiltered", {
         branch: "main",
         expectMutation: false,
         params: { requestIds: reqIds },
-      })
-      if ("rows" in repliesAfterClear) {
-        expect(repliesAfterClear.rows).toEqual([])
-      }
-    }
+      }),
+    )
+    expect(repliesAfterClear).toEqual([])
   })
 
   it("exports resolveGitCommonDir, error classifiers, and workflow client helpers", () => {

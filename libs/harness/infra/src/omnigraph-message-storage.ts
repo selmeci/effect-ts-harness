@@ -1,8 +1,11 @@
-import { Effect, Layer, Option, Semaphore } from "effect"
+import { Effect, Layer, Option, Schema, Semaphore } from "effect"
 import { MessageStorage, type Reply, ShardId, Snowflake } from "effect/cluster"
 import { match } from "ts-pattern"
 import {
   type AbsoluteRepoRoot,
+  type LeaseEpoch,
+  type LeaseFilePath,
+  type MessageKey,
   WorkflowStoreOperation,
   type WorkflowStoreUnavailableError,
 } from "@harness/contract"
@@ -13,6 +16,7 @@ import {
   invokeWorkflowStoreQueryOnce,
   retryWorkflowStoreAttempt,
   toWorkflowStoreUnavailableError,
+  type WorkflowStoreAttemptFailure,
 } from "./omnigraph-workflow-store.js"
 import {
   clearOmnigraphReplies,
@@ -23,19 +27,29 @@ import {
 } from "./workflow/message-storage-cas.js"
 import {
   addressKeyFor,
+  assertAffectedNodes,
+  CandidateRowMetaSchema,
   collectDanglingRequestIds,
   computePrimaryKeyHash,
+  decodeMessageKeyAsAttemptFailure,
+  decodeMessageKeysAsAttemptFailure,
   decodeRepliesWithIsolation,
+  decodeReplyKeyAsAttemptFailure,
   encodeSeqKeyAsAttemptFailure,
-  hydrateCandidateRows,
-  insertEnvelopeRow,
   toPersistenceError,
+  WfMessageByPkRowSchema,
+  WfMessageKeyForAddressRowSchema,
 } from "./workflow/message-storage-codec.js"
+import { hydrateCandidateRows, insertEnvelopeRow } from "./workflow/message-storage-hydration.js"
 
 type Omnigraph = InstanceType<typeof OmnigraphClient>
 
 /** Default claim timeout (`6 hours`, matching Effect Cluster `Sharding` activity protection). */
 export const DEFAULT_WORKFLOW_CLAIM_TIMEOUT_MS = 6 * 60 * 60 * 1_000
+
+const decodeCandidateRowMetaOption = Schema.decodeUnknownOption(CandidateRowMetaSchema)
+const decodeByPkRowOption = Schema.decodeUnknownOption(WfMessageByPkRowSchema)
+const decodeAddressKeyRowOption = Schema.decodeUnknownOption(WfMessageKeyForAddressRowSchema)
 
 export interface OmnigraphMessageStorageOptions {
   readonly client?: Omnigraph | undefined
@@ -43,14 +57,23 @@ export interface OmnigraphMessageStorageOptions {
   readonly hostIo?: SyncHostIo | undefined
   readonly env?: Readonly<Record<string, string | undefined>> | undefined
   readonly writeMutex?: Semaphore.Semaphore | undefined
+  readonly expectedLeaseEpoch?: LeaseEpoch | undefined
+  readonly expectedLeaseOwner?: string | undefined
+  readonly lockFilePath?: LeaseFilePath | undefined
 }
+
+const seqKeyForRow = (row: Readonly<Record<string, unknown>>): string =>
+  match(decodeCandidateRowMetaOption(row))
+    .with({ _tag: "Some" }, ({ value }) => value.seqKey ?? "")
+    .with({ _tag: "None" }, () => "")
+    .exhaustive()
 
 const compareCandidateRowsBySeqKey = (
   a: Readonly<Record<string, unknown>>,
   b: Readonly<Record<string, unknown>>,
 ): number => {
-  const aSeq = typeof a.seqKey === "string" ? a.seqKey : ""
-  const bSeq = typeof b.seqKey === "string" ? b.seqKey : ""
+  const aSeq = seqKeyForRow(a)
+  const bSeq = seqKeyForRow(b)
   if (aSeq < bSeq) return -1
   if (aSeq > bSeq) return 1
   return 0
@@ -77,11 +100,14 @@ const groupEntityIdsByType = (
 const mergeUniqueCandidateRows = (
   batches: ReadonlyArray<ReadonlyArray<Readonly<Record<string, unknown>>>>,
 ): Array<Readonly<Record<string, unknown>>> => {
-  const seenKeys = new Set<string>()
+  const seenKeys = new Set<MessageKey>()
   const merged: Array<Readonly<Record<string, unknown>>> = []
   for (const rows of batches) {
     for (const row of rows) {
-      const key = typeof row.messageKey === "string" ? row.messageKey : undefined
+      const key = match(decodeCandidateRowMetaOption(row))
+        .with({ _tag: "Some" }, ({ value }) => value.messageKey ?? undefined)
+        .with({ _tag: "None" }, () => undefined)
+        .exhaustive()
       if (key !== undefined) {
         if (seenKeys.has(key)) continue
         seenKeys.add(key)
@@ -96,7 +122,8 @@ const mergeUniqueCandidateRows = (
 /**
  * Constructs the 13-method `MessageStorage.Encoded` driver backed by Omnigraph
  * graph `harness-workflows` (`seqKey` ordering, per-`entityType` GQ `addresses` pre-limit
- * filtering, local `writeMutex`, and per-row JSON decode isolation).
+ * filtering, local `writeMutex`, optional `expectedLeaseEpoch` fencing, and per-row
+ * decode isolation).
  */
 const makeOmnigraphEncodedDriver = (
   repoRoot: AbsoluteRepoRoot,
@@ -108,9 +135,13 @@ const makeOmnigraphEncodedDriver = (
     const env = options?.env
     const claimTimeoutMs = options?.claimTimeoutMs ?? DEFAULT_WORKFLOW_CLAIM_TIMEOUT_MS
     const writeMutex = options?.writeMutex ?? (yield* Semaphore.make(1))
+    const expectedLeaseEpoch = options?.expectedLeaseEpoch
+    const expectedLeaseOwner = options?.expectedLeaseOwner
+    const lockFilePath = options?.lockFilePath
 
     const storeConfig = { client, hostIo, env }
-    const storeTarget = { repoRoot, client, hostIo, env }
+    const fenceConfig = { expectedLeaseEpoch, expectedLeaseOwner, lockFilePath }
+    const storeTarget = { repoRoot, ...storeConfig, ...fenceConfig }
 
     const encoded: MessageStorage.Encoded = {
       saveEnvelope: ({ envelope, primaryKey, deliverAt }) => {
@@ -126,24 +157,33 @@ const makeOmnigraphEncodedDriver = (
                   const existingRes = yield* invokeWorkflowStoreQueryOnce({
                     repoRoot,
                     operation,
-                    queryName: WorkflowStoreOperation.make("wf_message_by_pk"),
+                    queryName: "wf_message_by_pk",
                     params: { primaryKeyHash },
                     expectMutation: false,
                     ...storeConfig,
                   })
-                  const existingRow = existingRes.rows[0]
-                  if (existingRow !== undefined) {
-                    const originalId = Snowflake.Snowflake(String(existingRow.messageKey))
-                    const lastReplyId =
-                      typeof existingRow.lastReplyId === "string"
-                        ? existingRow.lastReplyId
-                        : undefined
+                  const rawExisting = existingRes.rows[0]
+                  if (rawExisting !== undefined) {
+                    const existingRow = yield* match(decodeByPkRowOption(rawExisting))
+                      .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+                      .with({ _tag: "None" }, () =>
+                        Effect.fail<WorkflowStoreAttemptFailure>({
+                          _tag: "WorkflowStoreAttemptFailure",
+                          operation,
+                          cause: new Error(
+                            "Corrupt WfMessage row returned by wf_message_by_pk lookup",
+                          ),
+                        }),
+                      )
+                      .exhaustive()
+                    const originalId = Snowflake.Snowflake(existingRow.messageKey)
+                    const lastReplyId = existingRow.lastReplyId ?? undefined
                     let lastReceivedReply: Option.Option<Reply.Encoded> = Option.none()
-                    if (lastReplyId !== undefined && lastReplyId.length > 0) {
+                    if (lastReplyId !== undefined) {
                       const replyRes = yield* invokeWorkflowStoreQueryOnce({
                         repoRoot,
                         operation,
-                        queryName: WorkflowStoreOperation.make("wf_reply_by_key"),
+                        queryName: "wf_reply_by_key",
                         params: { replyKey: lastReplyId },
                         expectMutation: false,
                         ...storeConfig,
@@ -188,38 +228,59 @@ const makeOmnigraphEncodedDriver = (
           runAttempt: () =>
             writeMutex.withPermit(
               Effect.gen(function* () {
-                const seqKey = yield* encodeSeqKeyAsAttemptFailure(operation, reply.id)
+                const replyKey = yield* decodeReplyKeyAsAttemptFailure(operation, reply.id)
+                const requestId = yield* decodeMessageKeyAsAttemptFailure(
+                  operation,
+                  reply.requestId,
+                )
+                const seqKey = yield* encodeSeqKeyAsAttemptFailure(operation, replyKey)
                 yield* match(reply)
                   .with({ _tag: "WithExit" }, (exitReply) =>
                     invokeWorkflowStoreQueryOnce({
                       repoRoot,
                       operation,
-                      queryName: WorkflowStoreOperation.make("wf_save_reply_exit"),
+                      queryName: "wf_save_reply_exit",
                       params: {
-                        replyKey: exitReply.id,
+                        replyKey,
                         seqKey,
-                        requestId: exitReply.requestId,
+                        requestId,
                         payload: JSON.stringify(exitReply.exit),
                       },
                       expectMutation: true,
+                      ...fenceConfig,
                       ...storeConfig,
-                    }),
+                    }).pipe(
+                      Effect.flatMap((res) =>
+                        assertAffectedNodes(operation, "wf_save_reply_exit", res.affectedNodes, {
+                          kind: "min",
+                          count: 1,
+                        }),
+                      ),
+                    ),
                   )
                   .with({ _tag: "Chunk" }, (chunkReply) =>
                     invokeWorkflowStoreQueryOnce({
                       repoRoot,
                       operation,
-                      queryName: WorkflowStoreOperation.make("wf_save_reply_chunk"),
+                      queryName: "wf_save_reply_chunk",
                       params: {
-                        replyKey: chunkReply.id,
+                        replyKey,
                         seqKey,
-                        requestId: chunkReply.requestId,
+                        requestId,
                         payload: JSON.stringify(chunkReply.values),
                         sequence: chunkReply.sequence,
                       },
                       expectMutation: true,
+                      ...fenceConfig,
                       ...storeConfig,
-                    }),
+                    }).pipe(
+                      Effect.flatMap((res) =>
+                        assertAffectedNodes(operation, "wf_save_reply_chunk", res.affectedNodes, {
+                          kind: "min",
+                          count: 1,
+                        }),
+                      ),
+                    ),
                   )
                   .exhaustive()
               }),
@@ -233,6 +294,7 @@ const makeOmnigraphEncodedDriver = (
           requestId,
           expectedReplyId: clearOptions?.expectedReplyId,
           ...storeConfig,
+          ...fenceConfig,
           writeMutex,
         }).pipe(Effect.mapError(toPersistenceError)),
 
@@ -243,41 +305,71 @@ const makeOmnigraphEncodedDriver = (
         return invokeWorkflowStoreQuery({
           repoRoot,
           operation,
-          queryName: WorkflowStoreOperation.make("wf_message_by_pk"),
+          queryName: "wf_message_by_pk",
           params: { primaryKeyHash: computePrimaryKeyHash(primaryKey) },
           expectMutation: false,
           ...storeConfig,
         }).pipe(
-          Effect.map((rows) => {
+          Effect.flatMap((rows) => {
             const first = rows[0]
-            if (!first || typeof first.messageKey !== "string" || first.messageKey.length === 0) {
-              return Option.none<Snowflake.Snowflake>()
+            if (first === undefined) {
+              return Effect.succeed(Option.none<Snowflake.Snowflake>())
             }
-            return Option.some(Snowflake.Snowflake(first.messageKey))
+            return match(decodeByPkRowOption(first))
+              .with({ _tag: "Some" }, ({ value }) =>
+                Effect.succeedSome(Snowflake.Snowflake(value.messageKey)),
+              )
+              .with({ _tag: "None" }, () =>
+                Effect.fail(
+                  toWorkflowStoreUnavailableError(
+                    operation,
+                    new Error("Corrupt WfMessage row returned by wf_message_by_pk"),
+                  ),
+                ),
+              )
+              .exhaustive()
           }),
           Effect.mapError(toPersistenceError),
         )
       },
 
-      repliesFor: (requestIds) =>
-        invokeWorkflowStoreQuery({
-          repoRoot,
-          operation: WorkflowStoreOperation.make("OmnigraphMessageStorage.repliesFor"),
-          queryName: WorkflowStoreOperation.make("wf_replies_for"),
-          params: { requestIds: [...requestIds] },
-          expectMutation: false,
-          ...storeConfig,
-        }).pipe(Effect.flatMap(decodeRepliesWithIsolation), Effect.mapError(toPersistenceError)),
+      repliesFor: (requestIds) => {
+        const operation = WorkflowStoreOperation.make("OmnigraphMessageStorage.repliesFor")
+        return decodeMessageKeysAsAttemptFailure(operation, requestIds).pipe(
+          Effect.flatMap((keys) =>
+            invokeWorkflowStoreQuery({
+              repoRoot,
+              operation,
+              queryName: "wf_replies_for",
+              params: { requestIds: keys },
+              expectMutation: false,
+              ...storeConfig,
+            }),
+          ),
+          Effect.flatMap((rows) => decodeRepliesWithIsolation(rows)),
+          Effect.mapError(toPersistenceError),
+        )
+      },
 
-      repliesForUnfiltered: (requestIds) =>
-        invokeWorkflowStoreQuery({
-          repoRoot,
-          operation: WorkflowStoreOperation.make("OmnigraphMessageStorage.repliesForUnfiltered"),
-          queryName: WorkflowStoreOperation.make("wf_replies_for_unfiltered"),
-          params: { requestIds: [...requestIds] },
-          expectMutation: false,
-          ...storeConfig,
-        }).pipe(Effect.flatMap(decodeRepliesWithIsolation), Effect.mapError(toPersistenceError)),
+      repliesForUnfiltered: (requestIds) => {
+        const operation = WorkflowStoreOperation.make(
+          "OmnigraphMessageStorage.repliesForUnfiltered",
+        )
+        return decodeMessageKeysAsAttemptFailure(operation, requestIds).pipe(
+          Effect.flatMap((keys) =>
+            invokeWorkflowStoreQuery({
+              repoRoot,
+              operation,
+              queryName: "wf_replies_for_unfiltered",
+              params: { requestIds: keys },
+              expectMutation: false,
+              ...storeConfig,
+            }),
+          ),
+          Effect.flatMap((rows) => decodeRepliesWithIsolation(rows)),
+          Effect.mapError(toPersistenceError),
+        )
+      },
 
       unprocessedMessages: (shardIds, now, queryOptions) => {
         if (queryOptions?.addresses !== undefined && queryOptions.addresses.length === 0) {
@@ -310,9 +402,7 @@ const makeOmnigraphEncodedDriver = (
                       invokeWorkflowStoreQueryOnce({
                         repoRoot,
                         operation,
-                        queryName: WorkflowStoreOperation.make(
-                          "wf_unprocessed_candidate_messages_for_addresses",
-                        ),
+                        queryName: "wf_unprocessed_candidate_messages_for_addresses",
                         params: {
                           shardIds: shardIdList,
                           entityType: group.entityType,
@@ -332,7 +422,7 @@ const makeOmnigraphEncodedDriver = (
                   const candidateRes = yield* invokeWorkflowStoreQueryOnce({
                     repoRoot,
                     operation,
-                    queryName: WorkflowStoreOperation.make("wf_unprocessed_candidate_messages"),
+                    queryName: "wf_unprocessed_candidate_messages",
                     params: {
                       shardIds: shardIdList,
                       claimCutoffMs,
@@ -351,23 +441,29 @@ const makeOmnigraphEncodedDriver = (
                   operation,
                   addressFilter,
                   queryOptions?.limit,
+                  { persistCorruptDefect: true },
                 )
 
                 if (hydrated.messageKeys.length === 0) {
                   return []
                 }
 
-                yield* invokeWorkflowStoreQueryOnce({
+                const claimRes = yield* invokeWorkflowStoreQueryOnce({
                   repoRoot,
                   operation,
-                  queryName: WorkflowStoreOperation.make("wf_claim_messages"),
+                  queryName: "wf_claim_messages",
                   params: {
                     messageKeys: hydrated.messageKeys,
                     nowMs: now,
                   },
                   expectMutation: true,
                   ifGraphCommit: candidateGraphCommitId,
+                  ...fenceConfig,
                   ...storeConfig,
+                })
+                yield* assertAffectedNodes(operation, "wf_claim_messages", claimRes.affectedNodes, {
+                  kind: "exact",
+                  count: hydrated.messageKeys.length,
                 })
 
                 return hydrated.items
@@ -380,8 +476,8 @@ const makeOmnigraphEncodedDriver = (
         const operation = WorkflowStoreOperation.make(
           "OmnigraphMessageStorage.unprocessedMessagesById",
         )
-        const messageKeys = Array.from(messageIds, String)
-        if (messageKeys.length === 0) {
+        const rawIds = Array.from(messageIds, String)
+        if (rawIds.length === 0) {
           return Effect.succeed([])
         }
         return retryWorkflowStoreAttempt({
@@ -389,10 +485,11 @@ const makeOmnigraphEncodedDriver = (
           retryConflicts: true,
           runAttempt: () =>
             Effect.gen(function* () {
+              const messageKeys = yield* decodeMessageKeysAsAttemptFailure(operation, rawIds)
               const res = yield* invokeWorkflowStoreQueryOnce({
                 repoRoot,
                 operation,
-                queryName: WorkflowStoreOperation.make("wf_unprocessed_messages_by_id"),
+                queryName: "wf_unprocessed_messages_by_id",
                 params: { messageKeys, nowMs: now },
                 expectMutation: false,
                 ...storeConfig,
@@ -408,19 +505,23 @@ const makeOmnigraphEncodedDriver = (
           return Effect.void
         }
         const operation = WorkflowStoreOperation.make("OmnigraphMessageStorage.resetRequests")
-        const messageKeys = requestIds.map(String)
+        const rawIds = requestIds.map(String)
         return retryWorkflowStoreAttempt({
           operation,
           retryConflicts: true,
           runAttempt: () =>
             writeMutex.withPermit(
-              invokeWorkflowStoreQueryOnce({
-                repoRoot,
-                operation,
-                queryName: WorkflowStoreOperation.make("wf_reset_requests"),
-                params: { messageKeys, clearReadMs: null },
-                expectMutation: true,
-                ...storeConfig,
+              Effect.gen(function* () {
+                const messageKeys = yield* decodeMessageKeysAsAttemptFailure(operation, rawIds)
+                yield* invokeWorkflowStoreQueryOnce({
+                  repoRoot,
+                  operation,
+                  queryName: "wf_reset_requests",
+                  params: { messageKeys, clearReadMs: null },
+                  expectMutation: true,
+                  ...fenceConfig,
+                  ...storeConfig,
+                })
               }),
             ),
         }).pipe(Effect.asVoid, Effect.mapError(toPersistenceError))
@@ -464,25 +565,27 @@ const makeOmnigraphEncodedDriver = (
             writeMutex.withPermit(
               Effect.forEach(
                 groups,
-                (group) =>
-                  group.entityIds.length === 1
+                (group) => {
+                  const singleEntityId = group.entityIds[0]
+                  return group.entityIds.length === 1 && singleEntityId !== undefined
                     ? invokeWorkflowStoreQueryOnce({
                         repoRoot,
                         operation,
-                        queryName: WorkflowStoreOperation.make("wf_reset_address"),
+                        queryName: "wf_reset_address",
                         params: {
                           shardId: group.shardId,
                           entityType: group.entityType,
-                          entityId: group.entityIds[0],
+                          entityId: singleEntityId,
                           clearReadMs: null,
                         },
                         expectMutation: true,
+                        ...fenceConfig,
                         ...storeConfig,
                       })
                     : invokeWorkflowStoreQueryOnce({
                         repoRoot,
                         operation,
-                        queryName: WorkflowStoreOperation.make("wf_reset_address_group"),
+                        queryName: "wf_reset_address_group",
                         params: {
                           shardId: group.shardId,
                           entityType: group.entityType,
@@ -490,8 +593,10 @@ const makeOmnigraphEncodedDriver = (
                           clearReadMs: null,
                         },
                         expectMutation: true,
+                        ...fenceConfig,
                         ...storeConfig,
-                      }),
+                      })
+                },
                 { discard: true },
               ),
             ),
@@ -509,7 +614,7 @@ const makeOmnigraphEncodedDriver = (
                 const keysRes = yield* invokeWorkflowStoreQueryOnce({
                   repoRoot,
                   operation,
-                  queryName: WorkflowStoreOperation.make("wf_message_keys_for_address"),
+                  queryName: "wf_message_keys_for_address",
                   params: {
                     entityType: address.entityType,
                     entityId: address.entityId,
@@ -520,17 +625,25 @@ const makeOmnigraphEncodedDriver = (
                 if (keysRes.rows.length === 0) {
                   return
                 }
-                const requestIds = Array.from(
-                  new Set(
-                    keysRes.rows
-                      .map((row) => row.requestId)
-                      .filter((id): id is string => typeof id === "string" && id.length > 0),
-                  ),
-                )
-                yield* invokeWorkflowStoreQueryOnce({
+                const requestIdSet = new Set<MessageKey>()
+                for (const rawRow of keysRes.rows) {
+                  const decodedRow = yield* match(decodeAddressKeyRowOption(rawRow))
+                    .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+                    .with({ _tag: "None" }, () =>
+                      Effect.fail<WorkflowStoreAttemptFailure>({
+                        _tag: "WorkflowStoreAttemptFailure",
+                        operation,
+                        cause: new Error("Corrupt row returned by wf_message_keys_for_address"),
+                      }),
+                    )
+                    .exhaustive()
+                  requestIdSet.add(decodedRow.requestId)
+                }
+                const requestIds = Array.from(requestIdSet)
+                const clearRes = yield* invokeWorkflowStoreQueryOnce({
                   repoRoot,
                   operation,
-                  queryName: WorkflowStoreOperation.make("wf_clear_address"),
+                  queryName: "wf_clear_address",
                   params: {
                     requestIds,
                     entityType: address.entityType,
@@ -538,7 +651,12 @@ const makeOmnigraphEncodedDriver = (
                   },
                   expectMutation: true,
                   ifGraphCommit: keysRes.graphCommitId ?? undefined,
+                  ...fenceConfig,
                   ...storeConfig,
+                })
+                yield* assertAffectedNodes(operation, "wf_clear_address", clearRes.affectedNodes, {
+                  kind: "min",
+                  count: 1,
                 })
               }),
             ),
@@ -560,7 +678,7 @@ const makeOmnigraphEncodedDriver = (
                 const danglingRes = yield* invokeWorkflowStoreQueryOnce({
                   repoRoot,
                   operation,
-                  queryName: WorkflowStoreOperation.make("wf_dangling_processed_requests"),
+                  queryName: "wf_dangling_processed_requests",
                   params: {},
                   expectMutation: false,
                   ...storeConfig,
@@ -571,13 +689,14 @@ const makeOmnigraphEncodedDriver = (
                     yield* invokeWorkflowStoreQueryOnce({
                       repoRoot,
                       operation,
-                      queryName: WorkflowStoreOperation.make("wf_repair_dangling_requests"),
+                      queryName: "wf_repair_dangling_requests",
                       params: {
                         messageKeys,
                         clearReplyId: null,
                         clearReadMs: null,
                       },
                       expectMutation: true,
+                      ...fenceConfig,
                       ...storeConfig,
                     })
                   }
@@ -585,12 +704,13 @@ const makeOmnigraphEncodedDriver = (
                 yield* invokeWorkflowStoreQueryOnce({
                   repoRoot,
                   operation,
-                  queryName: WorkflowStoreOperation.make("wf_reset_shards"),
+                  queryName: "wf_reset_shards",
                   params: {
                     shardIds: shardIdList,
                     clearReadMs: null,
                   },
                   expectMutation: true,
+                  ...fenceConfig,
                   ...storeConfig,
                 })
               }),

@@ -6,16 +6,18 @@ import {
   AbsoluteRepoRoot,
   type BackupDirPath,
   BackupFileHash,
+  toBoundedReason,
   toErrorReasonMessage,
   WorkflowBackupCount,
   WorkflowBackupFilePath,
-  type WorkflowBackupMode,
+  WorkflowBackupMode,
+  WorkflowBackupReceiptFields,
   type WorkflowBackupSummary,
   WorkflowBackupTimestampMs,
   type WorkflowRestoreRequest,
   type WorkflowRestoreSummary,
   WorkflowStoreOperation,
-  type WorkflowStoreUnavailableError,
+  WorkflowStoreUnavailableError,
   WorkspaceFilePath,
   WorkspaceFsError,
   WorkspaceFsOperation,
@@ -29,6 +31,7 @@ import {
   parseFiniteNumberOrString,
   resolveWorkflowClientForStore,
   retryWorkflowStoreAttempt,
+  toWorkflowStoreUnavailableError,
   type WorkflowStoreAttemptFailure,
   withWorkflowHttpPermit,
 } from "./omnigraph-workflow-store.js"
@@ -38,13 +41,12 @@ type Omnigraph = InstanceType<typeof OmnigraphClient>
 /** HTTP timeout (ms) enforced on backup export/load operations via `AbortSignal.timeout`. */
 export const WORKFLOW_BACKUP_HTTP_TIMEOUT_MS = 30_000
 
-export interface WorkflowBackupArtifactMetadata {
-  readonly backupFile: WorkflowBackupFilePath
-  readonly mode: WorkflowBackupMode
-  readonly entityCount: WorkflowBackupCount
-  readonly timestampMs: WorkflowBackupTimestampMs
-  readonly sha256: BackupFileHash
-}
+export const WorkflowBackupArtifactMetadata = Schema.Struct({
+  ...WorkflowBackupReceiptFields,
+  mode: WorkflowBackupMode,
+  entityCount: WorkflowBackupCount,
+})
+export type WorkflowBackupArtifactMetadata = typeof WorkflowBackupArtifactMetadata.Type
 
 export interface WorkflowGraphBackupOptions {
   readonly repoRoot?: AbsoluteRepoRoot | undefined
@@ -68,8 +70,8 @@ const ExportEdgeRecordSchema = Schema.Struct({
   data: Schema.Record(Schema.String, Schema.Unknown),
 })
 
-const ExportRecordSchema = Schema.Union([ExportNodeRecordSchema, ExportEdgeRecordSchema])
-type ParsedExportRecord = typeof ExportRecordSchema.Type
+export const ExportRecordSchema = Schema.Union([ExportNodeRecordSchema, ExportEdgeRecordSchema])
+export type ParsedExportRecord = typeof ExportRecordSchema.Type
 
 const isExtendedHostIo = (hostIo: SyncHostIo): hostIo is ExtendedHostIo =>
   "chmodSync" in hostIo &&
@@ -181,6 +183,54 @@ const serializeExportRecordDeterministic = (record: ParsedExportRecord): string 
 const computeSha256Hex = (content: string): BackupFileHash =>
   BackupFileHash.make(createHash("sha256").update(content, "utf8").digest("hex"))
 
+/**
+ * Validates every non-empty line in an Omnigraph NDJSON export against `ExportRecordSchema`,
+ * ensuring zero unparsed lines and exact record-count parity.
+ */
+const parseAndValidateExportNdjson = (
+  rawContent: string,
+  filePath: string,
+): Result.Result<ReadonlyArray<ParsedExportRecord>, WorkspaceFsError> => {
+  const lines = rawContent
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+  const recordDecoder = Schema.decodeResult(Schema.fromJsonString(ExportRecordSchema))
+  const parsedRecords: Array<ParsedExportRecord> = []
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? ""
+    const decoded = recordDecoder(line)
+    let lineError: WorkspaceFsError | undefined
+    match(decoded)
+      .with({ _tag: "Failure" }, ({ failure }) => {
+        lineError = toWorkspaceFsError(
+          filePath,
+          "read",
+          new Error(`Corrupt backup NDJSON at line ${i + 1}: ${toErrorReasonMessage(failure)}`),
+        )
+      })
+      .with({ _tag: "Success" }, ({ success }) => {
+        parsedRecords.push(success)
+      })
+      .exhaustive()
+    if (lineError !== undefined) {
+      return Result.fail(lineError)
+    }
+  }
+  if (parsedRecords.length !== lines.length) {
+    return Result.fail(
+      toWorkspaceFsError(
+        filePath,
+        "read",
+        new Error(
+          `Backup NDJSON record count mismatch: parsed ${parsedRecords.length} of ${lines.length} lines`,
+        ),
+      ),
+    )
+  }
+  return Result.succeed(parsedRecords)
+}
+
 const prepareSecureDir = (dirPath: string, hostIo: SyncHostIo): Result.Result<void, string> => {
   if (hostIo.isSymbolicLinkSync(dirPath)) {
     return Result.fail(`Refusing symlink backup directory: ${dirPath}`)
@@ -236,6 +286,33 @@ const writeSecureBackupAndVerifySha = (
     })
     .exhaustive()
 
+const annotatePostLoadVerificationError = (
+  backupFile: WorkflowBackupFilePath,
+  err: WorkspaceFsError | WorkflowStoreUnavailableError,
+): WorkspaceFsError | WorkflowStoreUnavailableError => {
+  const prefix =
+    "Post-restore verification failed after og.load already ran (target graph may be in a partial-restore state)"
+  return match(err)
+    .with(
+      { _tag: "WorkspaceFsError" },
+      (fsErr) =>
+        new WorkspaceFsError({
+          filePath: fsErr.filePath,
+          operation: fsErr.operation,
+          reason: toErrorReasonMessage(`${prefix}: ${fsErr.reason}`, `${prefix} for ${backupFile}`),
+        }),
+    )
+    .with(
+      { _tag: "WorkflowStoreUnavailableError" },
+      (storeErr) =>
+        new WorkflowStoreUnavailableError({
+          operation: storeErr.operation,
+          reason: toBoundedReason(`${prefix}: ${storeErr.reason}`, prefix),
+        }),
+    )
+    .exhaustive()
+}
+
 /**
  * Exports all `harness-workflows` entities on branch `main` to a timestamped
  * NDJSON backup file inside `backupDir` (`0o700` dir / `0o600` file) with read-back
@@ -288,7 +365,16 @@ export const exportWorkflowGraphBackup = Effect.fn("WorkflowGraphBackup.exportBa
             }),
         ),
       ),
-  })
+  }).pipe(
+    Effect.mapError((err) =>
+      match(err)
+        .with({ _tag: "WriterLeaseHeldError" }, (held) =>
+          toWorkflowStoreUnavailableError(operation, held),
+        )
+        .with({ _tag: "WorkflowStoreUnavailableError" }, (unavail) => unavail)
+        .exhaustive(),
+    ),
+  )
 
   const decodedRecords: Array<ParsedExportRecord> = []
   for (let i = 0; i < rawRecords.length; i += 1) {
@@ -337,11 +423,20 @@ export const exportWorkflowGraphBackup = Effect.fn("WorkflowGraphBackup.exportBa
     .exhaustive()
     .pipe(
       Effect.ensuring(
-        Effect.sync(() => {
+        Effect.gen(function* () {
           if (hostIo.existsSync(tmpFilePath)) {
-            Result.try(() => {
-              hostIo.unlinkSync(tmpFilePath)
+            const unlinkRes = Result.try({
+              try: () => {
+                hostIo.unlinkSync(tmpFilePath)
+              },
+              catch: (err) => toErrorReasonMessage(err, `Failed to unlink ${tmpFilePath}`),
             })
+            yield* match(unlinkRes)
+              .with({ _tag: "Success" }, () => Effect.void)
+              .with({ _tag: "Failure" }, ({ failure }) =>
+                Effect.logWarning(`Failed to unlink temporary backup ${tmpFilePath}: ${failure}`),
+              )
+              .exhaustive()
           }
         }),
       ),
@@ -357,8 +452,10 @@ export const exportWorkflowGraphBackup = Effect.fn("WorkflowGraphBackup.exportBa
 
 /**
  * Restores a verified `harness-workflows` NDJSON backup onto protected branch `main`
- * via `og.load({ mode: request.mode })`, validating `expectedSha256` on the single
- * read buffer before calling `og.load` and verifying post-restore entity count.
+ * via `og.load({ mode: request.mode })`, refusing empty `mode: "replace"` restores,
+ * validating `expectedSha256` on the single read buffer before calling `og.load`, and
+ * verifying both `WfMessage` (`wf_count_all`) and `WfReply` (`wf_count_replies`) counts
+ * post-restore with explicit partial-restore error annotation if post-load checks fail.
  */
 export const restoreWorkflowGraphBackup = Effect.fn("WorkflowGraphBackup.restoreBackup")(function* (
   request: WorkflowRestoreRequest,
@@ -395,41 +492,88 @@ export const restoreWorkflowGraphBackup = Effect.fn("WorkflowGraphBackup.restore
     )
   }
 
-  const lines = rawContent
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-
-  const recordDecoder = Schema.decodeResult(Schema.fromJsonString(ExportRecordSchema))
-  const parsedRecords: Array<ParsedExportRecord> = []
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i] ?? ""
-    const parsedRecord = yield* match(recordDecoder(line))
-      .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))
-      .with({ _tag: "Failure" }, ({ failure }) =>
-        Effect.fail(
-          toWorkspaceFsError(
-            request.backupFile,
-            "read",
-            new Error(`Corrupt backup NDJSON at line ${i + 1}: ${toErrorReasonMessage(failure)}`),
-          ),
-        ),
-      )
-      .exhaustive()
-    parsedRecords.push(parsedRecord)
-  }
+  const parsedRecords = yield* match(parseAndValidateExportNdjson(rawContent, request.backupFile))
+    .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))
+    .with({ _tag: "Failure" }, ({ failure }) => Effect.fail(failure))
+    .exhaustive()
 
   const expectedTotalEntities = parsedRecords.length
   const expectedWfMessageCount = parsedRecords.filter(
     (rec) => "type" in rec && rec.type === "WfMessage",
   ).length
+  const expectedWfReplyCount = parsedRecords.filter(
+    (rec) => "type" in rec && rec.type === "WfReply",
+  ).length
+
+  if (request.mode === "replace" && expectedTotalEntities === 0) {
+    return yield* toWorkspaceFsError(
+      request.backupFile,
+      "read",
+      new Error("Refusing destructive mode='replace' restore from an empty (0-entity) backup"),
+    )
+  }
 
   const omnigraphMode = match(request.mode)
     .with("merge", () => "merge" as const)
     .with("replace", () => "overwrite" as const)
     .exhaustive()
 
-  if (expectedTotalEntities > 0 || omnigraphMode === "overwrite") {
+  const verifyPostRestoreCounts = Effect.gen(function* () {
+    const messageCountRows = yield* invokeWorkflowStoreQuery({
+      repoRoot,
+      operation: WorkflowStoreOperation.make("WorkflowGraphBackup.verifyMessages"),
+      queryName: "wf_count_all",
+      params: {},
+      expectMutation: false,
+      client: options?.client,
+      hostIo,
+      env: options?.env,
+    })
+
+    const replyCountRows = yield* invokeWorkflowStoreQuery({
+      repoRoot,
+      operation: WorkflowStoreOperation.make("WorkflowGraphBackup.verifyReplies"),
+      queryName: "wf_count_replies",
+      params: {},
+      expectMutation: false,
+      client: options?.client,
+      hostIo,
+      env: options?.env,
+    })
+
+    const rawMessages = messageCountRows[0]?.totalMessages
+    const rawReplies = replyCountRows[0]?.totalReplies
+    const actualWfMessages = parseFiniteNumberOrString(rawMessages) ?? Number.NaN
+    const actualWfReplies = parseFiniteNumberOrString(rawReplies) ?? Number.NaN
+
+    const messagesValid = match(request.mode)
+      .with("replace", () => actualWfMessages === expectedWfMessageCount)
+      .with(
+        "merge",
+        () => Number.isFinite(actualWfMessages) && actualWfMessages >= expectedWfMessageCount,
+      )
+      .exhaustive()
+
+    const repliesValid = match(request.mode)
+      .with("replace", () => actualWfReplies === expectedWfReplyCount)
+      .with(
+        "merge",
+        () => Number.isFinite(actualWfReplies) && actualWfReplies >= expectedWfReplyCount,
+      )
+      .exhaustive()
+
+    if (!messagesValid || !repliesValid) {
+      return yield* toWorkspaceFsError(
+        request.backupFile,
+        "read",
+        new Error(
+          `Post-restore count verification failed (mode=${request.mode}, expectedMessages=${expectedWfMessageCount}, actualMessages=${String(rawMessages)}, expectedReplies=${expectedWfReplyCount}, actualReplies=${String(rawReplies)})`,
+        ),
+      )
+    }
+  })
+
+  if (expectedTotalEntities > 0) {
     const loadResult = yield* retryWorkflowStoreAttempt({
       operation,
       retryConflicts: false,
@@ -464,49 +608,31 @@ export const restoreWorkflowGraphBackup = Effect.fn("WorkflowGraphBackup.restore
             }),
           }),
         ),
-    })
-
-    if (expectedTotalEntities > 0 && loadResult.totalEntities !== expectedTotalEntities) {
-      return yield* toWorkspaceFsError(
-        request.backupFile,
-        "read",
-        new Error(
-          `Backup restore entity count mismatch: loaded ${loadResult.totalEntities}, expected ${expectedTotalEntities}`,
-        ),
-      )
-    }
-  }
-
-  const countRows = yield* invokeWorkflowStoreQuery({
-    repoRoot,
-    operation: WorkflowStoreOperation.make("WorkflowGraphBackup.verifyCount"),
-    queryName: WorkflowStoreOperation.make("wf_count_all"),
-    params: {},
-    expectMutation: false,
-    client: options?.client,
-    hostIo,
-    env: options?.env,
-  })
-
-  const rawCount = countRows[0]?.totalMessages
-  const actualWfMessages = parseFiniteNumberOrString(rawCount) ?? Number.NaN
-
-  const countValid = match(request.mode)
-    .with("replace", () => actualWfMessages === expectedWfMessageCount)
-    .with(
-      "merge",
-      () => Number.isFinite(actualWfMessages) && actualWfMessages >= expectedWfMessageCount,
-    )
-    .exhaustive()
-
-  if (!countValid) {
-    return yield* toWorkspaceFsError(
-      request.backupFile,
-      "read",
-      new Error(
-        `Post-restore wf_count_all verification failed (mode=${request.mode}, expected=${expectedWfMessageCount}, actual=${String(rawCount)})`,
+    }).pipe(
+      Effect.mapError((err) =>
+        match(err)
+          .with({ _tag: "WriterLeaseHeldError" }, (held) =>
+            toWorkflowStoreUnavailableError(operation, held),
+          )
+          .with({ _tag: "WorkflowStoreUnavailableError" }, (unavail) => unavail)
+          .exhaustive(),
       ),
     )
+
+    yield* Effect.gen(function* () {
+      if (loadResult.totalEntities !== expectedTotalEntities) {
+        return yield* toWorkspaceFsError(
+          request.backupFile,
+          "read",
+          new Error(
+            `Backup restore entity count mismatch: loaded ${loadResult.totalEntities}, expected ${expectedTotalEntities}`,
+          ),
+        )
+      }
+      yield* verifyPostRestoreCounts
+    }).pipe(Effect.mapError((err) => annotatePostLoadVerificationError(request.backupFile, err)))
+  } else {
+    yield* verifyPostRestoreCounts
   }
 
   return {
@@ -535,4 +661,9 @@ const makeWorkflowGraphBackupLayer = (
 export const WorkflowGraphBackupLive: Layer.Layer<WorkflowGraphBackup> =
   makeWorkflowGraphBackupLayer()
 
-export { makeWorkflowGraphBackupLayer }
+export {
+  computeSha256Hex,
+  makeWorkflowGraphBackupLayer,
+  parseAndValidateExportNdjson,
+  writeSecureBackupAndVerifySha,
+}

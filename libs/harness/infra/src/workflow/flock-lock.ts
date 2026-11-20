@@ -2,7 +2,7 @@ import { spawn, type ChildProcessByStdio } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { dirname } from "node:path"
 import type { Readable, Writable } from "node:stream"
-import { Effect, Option, Result, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   LeaseEpoch,
@@ -16,63 +16,44 @@ import {
 } from "@harness/contract"
 import type { ExtendedHostIo } from "@harness/service/host-io"
 import { nodeSyncHostIo } from "../node-host-io.js"
-import {
-  parseFiniteNumberOrString,
-  toWorkflowStoreUnavailableError,
-} from "../omnigraph-workflow-store.js"
+import { toWorkflowStoreUnavailableError } from "../omnigraph-workflow-store.js"
+import { makeHeldLeaseError } from "./writer-lease-codec.js"
 
 const FLOCK_BIN_PATH = "/usr/bin/flock"
 const CAT_BIN_PATH = "/usr/bin/cat"
 const FLOCK_CONFLICT_EXIT_CODE = 75
+const UNKNOWN_FLOCK_HOLDER = LeaseHolderId.make("unknown-holder")
 
 const WriterLeaseMetaSchema = Schema.Struct({
-  holderId: Schema.String,
-  holderPid: Schema.Int,
-  leaseEpoch: Schema.Int,
-  acquiredAtMs: Schema.Finite,
-  holderStartTime: Schema.optional(Schema.String),
+  holderId: LeaseHolderId,
+  holderPid: LeaseHolderPid,
+  leaseEpoch: LeaseEpoch.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(1))),
+  acquiredAtMs: Schema.Finite.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0))),
+  holderStartTime: Schema.optional(Schema.NonEmptyString),
 })
-type WriterLeaseMeta = typeof WriterLeaseMetaSchema.Type
-const decodeWriterLeaseMetaOption = Schema.decodeUnknownOption(
+export type WriterLeaseMeta = typeof WriterLeaseMetaSchema.Type
+
+const decodeWriterLeaseMetaResult = Schema.decodeUnknownResult(
   Schema.fromJsonString(WriterLeaseMetaSchema),
 )
 
+export interface LockMetaMissing {
+  readonly _tag: "Missing"
+}
+
+export interface LockMetaValid {
+  readonly _tag: "Valid"
+  readonly meta: WriterLeaseMeta
+}
+
+export interface LockMetaCorrupt {
+  readonly _tag: "Corrupt"
+  readonly reason: string
+}
+
+export type LockMetaReadResult = LockMetaMissing | LockMetaValid | LockMetaCorrupt
+
 const metaFilePathFor = (lockFilePath: LeaseFilePath): string => `${lockFilePath}.meta.json`
-
-const safeDecodeLeaseHolderId = (raw: string): LeaseHolderId =>
-  match(Schema.decodeOption(LeaseHolderId)(raw.trim().slice(0, 256)))
-    .with({ _tag: "Some" }, ({ value }) => value)
-    .with({ _tag: "None" }, () => LeaseHolderId.make("unknown-holder"))
-    .exhaustive()
-
-const safeDecodeLeaseEpoch = (raw: unknown): LeaseEpoch => {
-  const num = parseFiniteNumberOrString(raw)
-  return num !== undefined && Number.isSafeInteger(num) && num >= 0
-    ? LeaseEpoch.make(num)
-    : LeaseEpoch.make(0)
-}
-
-const safeDecodeLeaseHolderPid = (raw: unknown): LeaseHolderPid | undefined => {
-  const num = parseFiniteNumberOrString(raw)
-  return num !== undefined && Number.isSafeInteger(num) && num >= 1
-    ? LeaseHolderPid.make(num)
-    : undefined
-}
-
-const makeHeldLeaseError = (
-  holderId: string,
-  leaseEpoch: LeaseEpoch,
-  lockFilePath: LeaseFilePath,
-  holderPid: number | undefined,
-): WriterLeaseHeldError => {
-  const decodedPid = safeDecodeLeaseHolderPid(holderPid)
-  return new WriterLeaseHeldError({
-    holderId: safeDecodeLeaseHolderId(holderId),
-    leaseEpoch,
-    lockFilePath,
-    ...(decodedPid !== undefined ? { holderPid: decodedPid } : {}),
-  })
-}
 
 const readLinuxProcStartTime = (pid: number, hostIo: ExtendedHostIo): string | undefined => {
   if (process.platform !== "linux" || !Number.isInteger(pid) || pid < 1) {
@@ -139,13 +120,42 @@ const prepareLockPathsAndModes = (
   })
 }
 
-const readLockMeta = (metaPath: string, hostIo: ExtendedHostIo): Option.Option<WriterLeaseMeta> => {
-  if (hostIo.isSymbolicLinkSync(metaPath) || !hostIo.existsSync(metaPath)) {
-    return Option.none()
-  }
-  return match(Result.try(() => hostIo.readTextSync(metaPath)))
-    .with({ _tag: "Failure" }, () => Option.none())
-    .with({ _tag: "Success" }, ({ success }) => decodeWriterLeaseMetaOption(success))
+const readLockMeta = (metaPath: string, hostIo: ExtendedHostIo): LockMetaReadResult => {
+  const probeOutcome = Result.try({
+    try: () => {
+      if (hostIo.isSymbolicLinkSync(metaPath)) {
+        return { _tag: "Symlink" as const }
+      }
+      if (!hostIo.existsSync(metaPath)) {
+        return { _tag: "Missing" as const }
+      }
+      return { _tag: "Text" as const, raw: hostIo.readTextSync(metaPath) }
+    },
+    catch: (err) => toErrorReasonMessage(err, `Failed to inspect lock metadata at ${metaPath}`),
+  })
+  return match(probeOutcome)
+    .with({ _tag: "Failure" }, ({ failure }) => ({ _tag: "Corrupt" as const, reason: failure }))
+    .with({ _tag: "Success" }, ({ success }) =>
+      match(success)
+        .with({ _tag: "Symlink" }, () => ({
+          _tag: "Corrupt" as const,
+          reason: `Refusing symlink lock metadata file: ${metaPath}`,
+        }))
+        .with({ _tag: "Missing" }, () => ({ _tag: "Missing" as const }))
+        .with({ _tag: "Text" }, ({ raw }) =>
+          match(decodeWriterLeaseMetaResult(raw))
+            .with({ _tag: "Success" }, ({ success: meta }) => ({
+              _tag: "Valid" as const,
+              meta,
+            }))
+            .with({ _tag: "Failure" }, ({ failure }) => ({
+              _tag: "Corrupt" as const,
+              reason: toErrorReasonMessage(failure, `Corrupt lock metadata JSON at ${metaPath}`),
+            }))
+            .exhaustive(),
+        )
+        .exhaustive(),
+    )
     .exhaustive()
 }
 
@@ -168,10 +178,17 @@ const writeLockMetaAtomic = (
       hostIo.chmodSync(metaPath, 0o600)
     },
     catch: (err) => {
-      Result.try(() => {
-        if (hostIo.existsSync(tmpPath)) hostIo.unlinkSync(tmpPath)
+      const baseMsg = toErrorReasonMessage(err, `Failed to write ${metaPath}`)
+      const unlinkRes = Result.try({
+        try: () => {
+          if (hostIo.existsSync(tmpPath)) hostIo.unlinkSync(tmpPath)
+        },
+        catch: (unlinkErr) => toErrorReasonMessage(unlinkErr, `Failed to unlink ${tmpPath}`),
       })
-      return toErrorReasonMessage(err, `Failed to write ${metaPath}`)
+      return match(unlinkRes)
+        .with({ _tag: "Success" }, () => baseMsg)
+        .with({ _tag: "Failure" }, ({ failure }) => `${baseMsg} (temp cleanup failed: ${failure})`)
+        .exhaustive()
     },
   })
 }
@@ -181,23 +198,24 @@ const unlinkLockMetaIfOwned = (
   holderId: LeaseHolderId,
   holderPid: LeaseHolderPid,
   hostIo: ExtendedHostIo,
-): void => {
+): Result.Result<void, string> =>
   match(readLockMeta(metaPath, hostIo))
-    .with({ _tag: "Some" }, ({ value }) => {
-      if (
-        value.holderId === holderId &&
-        value.holderPid === holderPid &&
-        !hostIo.isSymbolicLinkSync(metaPath) &&
-        hostIo.existsSync(metaPath)
-      ) {
-        Result.try(() => {
-          hostIo.unlinkSync(metaPath)
+    .with({ _tag: "Missing" }, () => Result.void)
+    .with({ _tag: "Corrupt" }, ({ reason }) => Result.fail(reason))
+    .with({ _tag: "Valid" }, ({ meta }) => {
+      if (meta.holderId === holderId && meta.holderPid === holderPid) {
+        return Result.try({
+          try: () => {
+            if (!hostIo.isSymbolicLinkSync(metaPath) && hostIo.existsSync(metaPath)) {
+              hostIo.unlinkSync(metaPath)
+            }
+          },
+          catch: (err) => toErrorReasonMessage(err, `Failed to unlink ${metaPath}`),
         })
       }
+      return Result.void
     })
-    .with({ _tag: "None" }, () => undefined)
     .exhaustive()
-}
 
 type FlockChild = ChildProcessByStdio<Writable, Readable, Readable>
 
@@ -267,10 +285,15 @@ const stopFlockChild = (child: FlockChild): Effect.Effect<void> =>
     killTimer.unref?.()
   })
 
+export interface AcquireOsFlockOptions {
+  readonly onUnexpectedLoss?: (() => void) | undefined
+}
+
 const acquireOsFlock = (
   lockFilePath: LeaseFilePath,
   metaPath: string,
   hostIo: ExtendedHostIo,
+  options?: AcquireOsFlockOptions,
 ): Effect.Effect<FlockChild, WriterLeaseHeldError | WorkflowStoreUnavailableError> => {
   const operation = WorkflowStoreOperation.make("WfWriterLease.acquire")
   return Effect.callback<FlockChild, WriterLeaseHeldError | WorkflowStoreUnavailableError>(
@@ -285,11 +308,21 @@ const acquireOsFlock = (
       )
 
       let settled = false
+      let lossNotified = false
       let stdoutBuf = ""
       let stderrBuf = ""
 
+      const notifyUnexpectedLoss = (): void => {
+        if (!settled || lossNotified) return
+        lossNotified = true
+        options?.onUnexpectedLoss?.()
+      }
+
       const failAndCleanup = (err: WriterLeaseHeldError | WorkflowStoreUnavailableError): void => {
-        if (settled) return
+        if (settled) {
+          notifyUnexpectedLoss()
+          return
+        }
         settled = true
         destroyFlockStreams(child)
         if (!isChildTerminated(child)) {
@@ -332,22 +365,23 @@ const acquireOsFlock = (
       })
 
       child.once("exit", (code) => {
-        if (settled) return
+        if (settled) {
+          notifyUnexpectedLoss()
+          return
+        }
         if (code === FLOCK_CONFLICT_EXIT_CODE) {
-          const heldErr = match(readLockMeta(metaPath, hostIo))
-            .with({ _tag: "Some" }, ({ value }) =>
-              makeHeldLeaseError(
-                value.holderId,
-                safeDecodeLeaseEpoch(value.leaseEpoch),
-                lockFilePath,
-                value.holderPid,
-              ),
+          const conflictErr = match(readLockMeta(metaPath, hostIo))
+            .with({ _tag: "Valid" }, ({ meta }) =>
+              makeHeldLeaseError(meta.holderId, meta.leaseEpoch, lockFilePath, meta.holderPid),
             )
-            .with({ _tag: "None" }, () =>
-              makeHeldLeaseError("unknown-holder", LeaseEpoch.make(0), lockFilePath, undefined),
+            .with({ _tag: "Missing" }, () =>
+              makeHeldLeaseError(UNKNOWN_FLOCK_HOLDER, LeaseEpoch.make(0), lockFilePath, undefined),
+            )
+            .with({ _tag: "Corrupt" }, ({ reason }) =>
+              toWorkflowStoreUnavailableError(operation, new Error(reason)),
             )
             .exhaustive()
-          failAndCleanup(heldErr)
+          failAndCleanup(conflictErr)
           return
         }
         const detail = stderrBuf.trim() || `flock exited unexpectedly with code ${String(code)}`
@@ -400,16 +434,13 @@ const withAdvisoryFlock = <A, E, R>(
 export {
   acquireOsFlock,
   isLocalPidAlive,
-  makeHeldLeaseError,
   metaFilePathFor,
   prepareLockPathsAndModes,
   readLinuxProcStartTime,
   readLockMeta,
-  safeDecodeLeaseEpoch,
   stopFlockChild,
   unlinkLockMetaIfOwned,
   withAdvisoryFlock,
   writeLockMetaAtomic,
   type FlockChild,
-  type WriterLeaseMeta,
 }

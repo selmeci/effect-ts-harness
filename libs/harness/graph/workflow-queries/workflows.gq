@@ -519,6 +519,15 @@ query wf_count_all() {
   }
 }
 
+query wf_count_replies() {
+  match {
+    $r: WfReply
+  }
+  return {
+    count($r) as totalReplies
+  }
+}
+
 query wf_all_entities($afterSeqKey: String) {
   match {
     $m: WfMessage

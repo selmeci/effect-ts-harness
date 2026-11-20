@@ -41,9 +41,23 @@ export {
   resolveOmnigraphTaskBranches,
   writeGraphHeadMeta,
 } from "@harness/graph"
-export { type HarnessDaemonServerHandle, resolveDaemonSocketPath, startHarnessDaemonServer } from "./daemon/unix-socket-daemon.js"
-export { executeManagedMcpTool, makeMcpMainLayer, makeMcpManagedRuntime } from "./managed-runtime.js"
-export { type LspDiagnosticsReport, runDefaultLspDiagnostics } from "./tools/lsp-and-telemetry.tools.js"
+export {
+  type HarnessDaemonServerHandle,
+  resolveDaemonSocketPath,
+  startHarnessDaemonServer,
+  type StartHarnessDaemonServerOptions,
+  type WorkflowEngineDaemonMode,
+  type WorkflowEngineDaemonOptions,
+} from "./daemon/unix-socket-daemon.js"
+export {
+  executeManagedMcpTool,
+  makeMcpMainLayer,
+  makeMcpManagedRuntime,
+} from "./managed-runtime.js"
+export {
+  type LspDiagnosticsReport,
+  runDefaultLspDiagnostics,
+} from "./tools/lsp-and-telemetry.tools.js"
 export {
   isPathInsideRoot,
   normalizeProjectPath,
@@ -109,9 +123,7 @@ export const createServer = (options?: ServerOptions): McpServer => {
     const toolName = request.params.name
     const descriptor = descriptorsByName.get(toolName)
     if (descriptor === undefined) {
-      return Promise.reject(
-        new McpError(ErrorCode.MethodNotFound, `Tool '${toolName}' not found`),
-      )
+      return Promise.reject(new McpError(ErrorCode.MethodNotFound, `Tool '${toolName}' not found`))
     }
     const rawArgs = request.params.arguments ?? {}
     return runtime
@@ -138,7 +150,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   let shuttingDown = false
   const daemonStartupPromise: Promise<HarnessDaemonServerHandle | undefined> =
     process.env.HARNESS_DAEMON_SOCK !== "0"
-      ? startHarnessDaemonServer(process.cwd())
+      ? startHarnessDaemonServer(process.cwd(), { workflowEngine: { mode: "auto" } })
           .then((handle) => {
             daemonHandle = handle
             return handle
@@ -191,25 +203,23 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   process.once("SIGTERM", () => shutdown(0))
   process.stdin.once("end", () => shutdown(0))
   process.stdin.once("close", () => shutdown(0))
-  void cliRuntime
-    .runPromiseExit(Effect.tryPromise(() => server.connect(transport)))
-    .then((exit) =>
-      Exit.match(exit, {
-        onFailure: (cause) => {
-          if (isPureInterruptCause(cause)) return
-          const squashed = Cause.squash(cause)
-          process.stderr.write(
-            `[harness-mcp] Fatal error: ${squashed instanceof Error ? squashed.message : String(squashed)}\n`,
-          )
-          shutdown(1)
-        },
-        onSuccess: () => {
-          const previousTransportOnClose = transport.onclose
-          transport.onclose = () => {
-            previousTransportOnClose?.()
-            shutdown(0)
-          }
-        },
-      }),
-    )
+  void cliRuntime.runPromiseExit(Effect.tryPromise(() => server.connect(transport))).then((exit) =>
+    Exit.match(exit, {
+      onFailure: (cause) => {
+        if (isPureInterruptCause(cause)) return
+        const squashed = Cause.squash(cause)
+        process.stderr.write(
+          `[harness-mcp] Fatal error: ${squashed instanceof Error ? squashed.message : String(squashed)}\n`,
+        )
+        shutdown(1)
+      },
+      onSuccess: () => {
+        const previousTransportOnClose = transport.onclose
+        transport.onclose = () => {
+          previousTransportOnClose?.()
+          shutdown(0)
+        }
+      },
+    }),
+  )
 }

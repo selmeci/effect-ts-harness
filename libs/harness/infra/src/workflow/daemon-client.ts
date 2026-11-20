@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { Effect, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   type DaemonHandshakeRequest,
@@ -7,17 +7,25 @@ import {
   DaemonProtocolMismatchDetail,
   DaemonProtocolMismatchError,
   type DaemonSocketPath,
+  toBoundedReason,
   WORKFLOW_DAEMON_PROTOCOL_VERSION,
   type WorkflowDaemonCapability,
   WorkflowProtocolVersion,
-  WorkflowStoreFailureReason,
+  type WorkflowStoreFailureReason,
   WorkflowStoreOperation,
   WorkflowStoreUnavailableError,
 } from "@harness/contract"
+import { nodeSyncHostIo } from "../node-host-io.js"
 import {
   queryUnixSocketLineDetailed,
   type UnixSocketQueryReason,
 } from "../unix-socket-daemon-live.js"
+
+const canonicalPathOrRaw = (filePath: string): string =>
+  match(Result.try(() => nodeSyncHostIo.realpathSync(filePath)))
+    .with({ _tag: "Success" }, ({ success }) => success)
+    .with({ _tag: "Failure" }, () => filePath)
+    .exhaustive()
 
 /** Dedicated workflow daemon IPC timeout (decoupled from the 5 s LSP query socket timeout). */
 export const WORKFLOW_DAEMON_IPC_TIMEOUT_MS = 30_000
@@ -30,15 +38,17 @@ const decodeJsonRecordOption = Schema.decodeUnknownOption(JsonRecordSchema)
 const decodeHandshakeResponseOption = Schema.decodeUnknownOption(DaemonHandshakeResponse)
 const decodeProtocolVersionOption = Schema.decodeUnknownOption(WorkflowProtocolVersion)
 
-const isPlainRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
-  typeof value === "object" && value !== null && !Array.isArray(value)
+const CanonicalHandshakeEnvelopeSchema = Schema.Struct({
+  id: Schema.NonEmptyString,
+  ok: Schema.Literal(true),
+  handshake: Schema.Record(Schema.String, Schema.Unknown),
+})
+const decodeCanonicalHandshakeEnvelopeOption = Schema.decodeUnknownOption(
+  CanonicalHandshakeEnvelopeSchema,
+)
 
-const toStoreFailureReason = (raw: string): WorkflowStoreFailureReason => {
-  const sanitized = raw.trim().slice(0, 1024).trim()
-  return WorkflowStoreFailureReason.make(
-    sanitized.length > 0 ? sanitized : "Workflow daemon IPC transport unavailable",
-  )
-}
+const toStoreFailureReason = (raw: string): WorkflowStoreFailureReason =>
+  toBoundedReason(raw, "Workflow daemon IPC transport unavailable")
 
 const toMismatchDetail = (raw: string): DaemonProtocolMismatchDetail => {
   const sanitized = raw.trim().slice(0, 1024).trim()
@@ -83,6 +93,7 @@ export interface WorkflowDaemonHandshakeInput {
   readonly socketPath: DaemonSocketPath
   readonly request: DaemonHandshakeRequest
   readonly requiredCapabilities: ReadonlyArray<WorkflowDaemonCapability>
+  readonly requireActiveLease?: boolean | undefined
 }
 
 export interface WorkflowDaemonExpectedProtocol {
@@ -153,9 +164,11 @@ export const handshakeWorkflowDaemon = Effect.fn("HarnessDaemonClient.handshake"
   DaemonHandshakeResponse,
   DaemonProtocolMismatchError | WorkflowStoreUnavailableError
 > {
+  const requestId = randomUUID()
   const expectedVersion = input.request.protocolVersion ?? WORKFLOW_DAEMON_PROTOCOL_VERSION
+  const requireActiveLease = input.requireActiveLease ?? true
   const requestPayload = {
-    id: randomUUID(),
+    id: requestId,
     command: "workflow.handshake",
     repoRoot: input.request.repoRoot,
     protocolVersion: expectedVersion,
@@ -210,11 +223,32 @@ export const handshakeWorkflowDaemon = Effect.fn("HarnessDaemonClient.handshake"
     })
   }
 
-  const candidate = isPlainRecord(record.handshake)
-    ? record.handshake
-    : isPlainRecord(record.result)
-      ? record.result
-      : record
+  const envelope = yield* match(decodeCanonicalHandshakeEnvelopeOption(record))
+    .with({ _tag: "None" }, () =>
+      Effect.fail(
+        new DaemonProtocolMismatchError({
+          expectedVersion,
+          socketPath: input.socketPath,
+          detail: toMismatchDetail(
+            "Daemon response missing canonical { id, ok: true, handshake } envelope",
+          ),
+        }),
+      ),
+    )
+    .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+    .exhaustive()
+
+  if (envelope.id !== requestId) {
+    return yield* new DaemonProtocolMismatchError({
+      expectedVersion,
+      socketPath: input.socketPath,
+      detail: toMismatchDetail(
+        `Daemon handshake response id mismatch: expected '${requestId}', got '${envelope.id}'`,
+      ),
+    })
+  }
+
+  const candidate = envelope.handshake
 
   const actualVersion = extractOptionalProtocolVersion(candidate.protocolVersion)
   if (actualVersion === undefined) {
@@ -253,6 +287,20 @@ export const handshakeWorkflowDaemon = Effect.fn("HarnessDaemonClient.handshake"
     .exhaustive()
 
   if (
+    response.repoRoot !== input.request.repoRoot &&
+    canonicalPathOrRaw(response.repoRoot) !== canonicalPathOrRaw(input.request.repoRoot)
+  ) {
+    return yield* new DaemonProtocolMismatchError({
+      expectedVersion,
+      actualVersion: response.protocolVersion,
+      socketPath: input.socketPath,
+      detail: toMismatchDetail(
+        `Daemon repoRoot mismatch: expected '${input.request.repoRoot}', got '${response.repoRoot}'`,
+      ),
+    })
+  }
+
+  if (
     input.request.commonGitDir !== undefined &&
     response.commonGitDir !== input.request.commonGitDir
   ) {
@@ -277,6 +325,17 @@ export const handshakeWorkflowDaemon = Effect.fn("HarnessDaemonClient.handshake"
       socketPath: input.socketPath,
       detail: toMismatchDetail(
         `Daemon missing required workflow capabilities: ${missingCapabilities.join(", ")}`,
+      ),
+    })
+  }
+
+  if (requireActiveLease && response.writerLeaseEpoch < 1) {
+    return yield* new DaemonProtocolMismatchError({
+      expectedVersion,
+      actualVersion: response.protocolVersion,
+      socketPath: input.socketPath,
+      detail: toMismatchDetail(
+        `Daemon has no active writer lease (writerLeaseEpoch=${response.writerLeaseEpoch}, expected >= 1)`,
       ),
     })
   }

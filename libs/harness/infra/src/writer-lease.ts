@@ -1,12 +1,12 @@
 import { dirname, resolve } from "node:path"
-import { Effect, Result, Schema } from "effect"
+import { Deferred, Effect, Schema, type Scope } from "effect"
 import { match } from "ts-pattern"
 import {
   AbsoluteRepoRoot,
   type GitCommonDirPath,
   LeaseEpoch,
   type LeaseFilePath,
-  type LeaseHolderId,
+  LeaseHolderId,
   type LeaseHolderPid,
   WorkflowStoreOperation,
   type WorkflowStoreUnavailableError,
@@ -18,23 +18,29 @@ import { nodeSyncHostIo } from "./node-host-io.js"
 import {
   invokeWorkflowStoreQuery,
   invokeWorkflowStoreQueryWithMeta,
-  parseFiniteNumberOrString,
   toWorkflowStoreUnavailableError,
 } from "./omnigraph-workflow-store.js"
 import {
   acquireOsFlock,
+  type FlockChild,
   isLocalPidAlive,
-  makeHeldLeaseError,
   metaFilePathFor,
   prepareLockPathsAndModes,
   readLinuxProcStartTime,
   readLockMeta,
-  safeDecodeLeaseEpoch,
   stopFlockChild,
   unlinkLockMetaIfOwned,
   withAdvisoryFlock,
   writeLockMetaAtomic,
 } from "./workflow/flock-lock.js"
+import {
+  decodeWriterLeaseRow,
+  evaluateWriterLeaseTakeover,
+  type LeaseTakeoverDecision,
+  type LeaseTakeoverEvaluationInput,
+  makeHeldLeaseError,
+  writerLeaseRowToHeldError,
+} from "./workflow/writer-lease-codec.js"
 
 type Omnigraph = InstanceType<typeof OmnigraphClient>
 
@@ -55,13 +61,17 @@ export interface WriterLeaseAcquireInput {
   readonly readProcessStartTime?: ((pid: number) => string | undefined) | undefined
 }
 
-export interface WriterLeaseHandle {
+export interface ActiveWriterLease {
   readonly holderId: LeaseHolderId
   readonly holderPid: LeaseHolderPid
   readonly lockFilePath: LeaseFilePath
   readonly leaseEpoch: LeaseEpoch
-  readonly release: Effect.Effect<void>
+  readonly owner: string
+  /** Resolves immediately if the OS `flock` child exits or errors unexpectedly before intentional teardown. */
+  readonly waitForFlockLoss: Effect.Effect<void>
 }
+
+export type WriterLeaseHandle = ActiveWriterLease
 
 export interface WriterLeaseRefreshInput {
   readonly commonGitDir: GitCommonDirPath
@@ -84,33 +94,6 @@ const formatLeaseOwner = (
 ): string =>
   startTime !== undefined ? `${holderId}#${holderPid}@${startTime}` : `${holderId}#${holderPid}`
 
-const parseOwnerIdentity = (
-  owner: string,
-): {
-  readonly holderId: string
-  readonly holderPid: number | undefined
-  readonly holderStartTime: string | undefined
-} => {
-  const hashIdx = owner.lastIndexOf("#")
-  if (hashIdx > 0) {
-    const suffix = owner.slice(hashIdx + 1)
-    const atIdx = suffix.indexOf("@")
-    const pidPart = atIdx > 0 ? suffix.slice(0, atIdx) : suffix
-    const startPart = atIdx > 0 ? suffix.slice(atIdx + 1) : undefined
-    if (/^[1-9]\d*$/.test(pidPart)) {
-      const parsedPid = Number(pidPart)
-      if (Number.isSafeInteger(parsedPid) && parsedPid >= 1) {
-        return {
-          holderId: owner.slice(0, hashIdx),
-          holderPid: parsedPid,
-          holderStartTime: startPart && startPart.length > 0 ? startPart : undefined,
-        }
-      }
-    }
-  }
-  return { holderId: owner, holderPid: undefined, holderStartTime: undefined }
-}
-
 const deriveRepoRootFromCommonGitDir = (commonGitDir: GitCommonDirPath): AbsoluteRepoRoot => {
   const candidate = resolve(dirname(commonGitDir))
   return match(Schema.decodeOption(AbsoluteRepoRoot)(candidate))
@@ -119,14 +102,25 @@ const deriveRepoRootFromCommonGitDir = (commonGitDir: GitCommonDirPath): Absolut
     .exhaustive()
 }
 
+interface AcquiredLeaseResource {
+  readonly lease: ActiveWriterLease
+  readonly flockChild: FlockChild
+  readonly markIntentionalStop: () => void
+}
+
 /**
  * Acquires the single-writer workflow daemon lease via OS advisory `flock` on
  * `<git-common-dir>/harness/daemon.lock` and fenced `WfWriterLease` epoch takeover
- * in Omnigraph, failing with `WriterLeaseHeldError` when another live daemon owns it.
+ * in Omnigraph, returning a scoped `ActiveWriterLease` that releases flock and
+ * lock metadata automatically when `Scope` closes.
  */
 export const acquireWriterLease = Effect.fn("WfWriterLease.acquire")(function* (
   input: WriterLeaseAcquireInput,
-): Effect.fn.Return<WriterLeaseHandle, WriterLeaseHeldError | WorkflowStoreUnavailableError> {
+): Effect.fn.Return<
+  ActiveWriterLease,
+  WriterLeaseHeldError | WorkflowStoreUnavailableError,
+  Scope.Scope
+> {
   const hostIo = input.hostIo ?? nodeSyncHostIo
   const operation = WorkflowStoreOperation.make("WfWriterLease.acquire")
   const metaPath = metaFilePathFor(input.lockFilePath)
@@ -136,168 +130,294 @@ export const acquireWriterLease = Effect.fn("WfWriterLease.acquire")(function* (
   const readStartTimeFn =
     input.readProcessStartTime ?? ((pid: number) => readLinuxProcStartTime(pid, hostIo))
 
-  const acquireOmnigraphLease = Effect.gen(function* () {
-    const holderStartTime = readStartTimeFn(input.holderPid)
-    const owner = formatLeaseOwner(input.holderId, input.holderPid, holderStartTime)
-    const nowMs = nowMsFn()
+  const acquireOmnigraphLease = (
+    holderStartTime: string | undefined,
+    owner: string,
+    isFlockLost: () => boolean,
+  ): Effect.Effect<LeaseEpoch, WriterLeaseHeldError | WorkflowStoreUnavailableError> =>
+    Effect.gen(function* () {
+      const nowMs = nowMsFn()
+      const existingRows = yield* invokeWorkflowStoreQuery({
+        repoRoot,
+        operation: WorkflowStoreOperation.make("WfWriterLease.get"),
+        queryName: "wf_get_writer_lease",
+        params: { name: "engine" },
+        expectMutation: false,
+        client: input.client,
+        hostIo,
+        env: input.env,
+      })
 
-    const existingRows = yield* invokeWorkflowStoreQuery({
-      repoRoot,
-      operation: WorkflowStoreOperation.make("WfWriterLease.get"),
-      queryName: WorkflowStoreOperation.make("wf_get_writer_lease"),
-      params: { name: "engine" },
-      expectMutation: false,
-      client: input.client,
-      hostIo,
-      env: input.env,
+      let leaseEpoch: LeaseEpoch
+      const firstRow = existingRows[0]
+      if (firstRow === undefined) {
+        const metaCheck = readLockMeta(metaPath, hostIo)
+        yield* match(metaCheck)
+          .with({ _tag: "Corrupt" }, ({ reason }) =>
+            Effect.fail(toWorkflowStoreUnavailableError(operation, new Error(reason))),
+          )
+          .with({ _tag: "Missing" }, { _tag: "Valid" }, () => Effect.void)
+          .exhaustive()
+
+        const initialEpoch = LeaseEpoch.make(1)
+        const insertRes = yield* invokeWorkflowStoreQueryWithMeta({
+          repoRoot,
+          operation: WorkflowStoreOperation.make("WfWriterLease.insert"),
+          queryName: "wf_insert_writer_lease",
+          params: { name: "engine", owner, leaseEpoch: initialEpoch, heartbeatMs: nowMs },
+          expectMutation: true,
+          client: input.client,
+          hostIo,
+          env: input.env,
+        })
+        if (insertRes.affectedNodes < 1) {
+          return yield* toWorkflowStoreUnavailableError(
+            operation,
+            new Error(
+              `wf_insert_writer_lease affected ${insertRes.affectedNodes} nodes (expected >= 1)`,
+            ),
+          )
+        }
+        leaseEpoch = initialEpoch
+      } else {
+        const decodedRow = yield* match(decodeWriterLeaseRow(firstRow))
+          .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))
+          .with({ _tag: "Failure" }, ({ failure }) =>
+            Effect.fail(toWorkflowStoreUnavailableError(operation, new Error(failure))),
+          )
+          .exhaustive()
+
+        const metaRes = readLockMeta(metaPath, hostIo)
+        const metaInfo = match(metaRes)
+          .with({ _tag: "Valid" }, ({ meta }) => ({
+            metaState: "present" as const,
+            metaCorruptReason: undefined,
+            metaPid: meta.holderPid as LeaseHolderPid | undefined,
+            metaStartTime: meta.holderStartTime,
+          }))
+          .with({ _tag: "Missing" }, () => ({
+            metaState: "missing" as const,
+            metaCorruptReason: undefined,
+            metaPid: undefined,
+            metaStartTime: undefined,
+          }))
+          .with({ _tag: "Corrupt" }, ({ reason }) => ({
+            metaState: "corrupt" as const,
+            metaCorruptReason: reason,
+            metaPid: undefined,
+            metaStartTime: undefined,
+          }))
+          .exhaustive()
+
+        const oldPid = decodedRow.parsedOwner.holderPid ?? metaInfo.metaPid
+        const oldStartTime = decodedRow.parsedOwner.holderStartTime ?? metaInfo.metaStartTime
+        const currentOldPidStartTime = oldPid !== undefined ? readStartTimeFn(oldPid) : undefined
+        const pidReusedOrSamePid =
+          oldPid !== undefined &&
+          (oldPid === input.holderPid ||
+            (oldStartTime !== undefined &&
+              currentOldPidStartTime !== undefined &&
+              oldStartTime !== currentOldPidStartTime))
+        const staleByHeartbeat = nowMs - decodedRow.row.heartbeatMs >= WRITER_LEASE_HEARTBEAT_TTL_MS
+        const pidAlive = oldPid !== undefined ? pidAliveFn(oldPid) : false
+
+        const decision = evaluateWriterLeaseTakeover({
+          flockHeld: false,
+          metaState: metaInfo.metaState,
+          metaCorruptReason: metaInfo.metaCorruptReason,
+          rowValid: true,
+          oldPid,
+          pidAlive,
+          samePidOrReused: pidReusedOrSamePid,
+          staleByHeartbeat,
+        })
+
+        yield* match(decision)
+          .with({ _tag: "Allow" }, () => Effect.void)
+          .with({ _tag: "Held" }, () =>
+            Effect.fail(
+              makeHeldLeaseError(
+                decodedRow.parsedOwner.holderId,
+                decodedRow.row.leaseEpoch,
+                input.lockFilePath,
+                decodedRow.parsedOwner.holderPid,
+              ),
+            ),
+          )
+          .with({ _tag: "Corrupt" }, ({ reason }) =>
+            Effect.fail(toWorkflowStoreUnavailableError(operation, new Error(reason))),
+          )
+          .exhaustive()
+
+        const nextEpoch = LeaseEpoch.make(decodedRow.row.leaseEpoch + 1)
+        const casRes = yield* invokeWorkflowStoreQueryWithMeta({
+          repoRoot,
+          operation: WorkflowStoreOperation.make("WfWriterLease.cas"),
+          queryName: "wf_cas_writer_lease",
+          params: {
+            name: "engine",
+            expectedEpoch: decodedRow.row.leaseEpoch,
+            owner,
+            nextEpoch,
+            heartbeatMs: nowMs,
+          },
+          expectMutation: true,
+          client: input.client,
+          hostIo,
+          env: input.env,
+        })
+
+        if (casRes.affectedNodes === 0) {
+          const latestRows = yield* invokeWorkflowStoreQuery({
+            repoRoot,
+            operation: WorkflowStoreOperation.make("WfWriterLease.get"),
+            queryName: "wf_get_writer_lease",
+            params: { name: "engine" },
+            expectMutation: false,
+            client: input.client,
+            hostIo,
+            env: input.env,
+          })
+          const latestRow = latestRows[0]
+          if (latestRow !== undefined) {
+            const heldFromLatest = yield* match(
+              writerLeaseRowToHeldError(latestRow, input.lockFilePath),
+            )
+              .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))
+              .with({ _tag: "Failure" }, ({ failure }) =>
+                Effect.fail(toWorkflowStoreUnavailableError(operation, new Error(failure))),
+              )
+              .exhaustive()
+            return yield* heldFromLatest
+          }
+          return yield* makeHeldLeaseError(
+            decodedRow.parsedOwner.holderId,
+            decodedRow.row.leaseEpoch,
+            input.lockFilePath,
+            decodedRow.parsedOwner.holderPid,
+          )
+        }
+        leaseEpoch = nextEpoch
+      }
+
+      if (isFlockLost()) {
+        return yield* toWorkflowStoreUnavailableError(
+          operation,
+          new Error("OS flock child exited during writer lease acquisition"),
+        )
+      }
+
+      yield* match(
+        writeLockMetaAtomic(
+          metaPath,
+          {
+            holderId: input.holderId,
+            holderPid: input.holderPid,
+            leaseEpoch,
+            acquiredAtMs: nowMs,
+            ...(holderStartTime !== undefined ? { holderStartTime } : {}),
+          },
+          hostIo,
+        ),
+      )
+        .with({ _tag: "Success" }, () => Effect.void)
+        .with({ _tag: "Failure" }, ({ failure }) =>
+          Effect.fail(toWorkflowStoreUnavailableError(operation, failure)),
+        )
+        .exhaustive()
+
+      return leaseEpoch
     })
 
-    let leaseEpoch: LeaseEpoch
-    const firstRow = existingRows[0]
-    if (firstRow === undefined) {
-      yield* invokeWorkflowStoreQuery({
-        repoRoot,
-        operation: WorkflowStoreOperation.make("WfWriterLease.insert"),
-        queryName: WorkflowStoreOperation.make("wf_insert_writer_lease"),
-        params: { name: "engine", owner, leaseEpoch: 1, heartbeatMs: nowMs },
-        expectMutation: true,
-        client: input.client,
-        hostIo,
-        env: input.env,
-      })
-      leaseEpoch = LeaseEpoch.make(1)
-    } else {
-      const oldOwnerRaw = typeof firstRow.owner === "string" ? firstRow.owner : "unknown-holder"
-      const oldEpoch = safeDecodeLeaseEpoch(firstRow.leaseEpoch)
-      const oldHeartbeatMs = parseFiniteNumberOrString(firstRow.heartbeatMs) ?? 0
-      const parsedOwner = parseOwnerIdentity(oldOwnerRaw)
-      const metaOpt = readLockMeta(metaPath, hostIo)
-      const metaPresent = match(metaOpt)
-        .with({ _tag: "Some" }, () => true)
-        .with({ _tag: "None" }, () => false)
-        .exhaustive()
-      const oldPid =
-        parsedOwner.holderPid ??
-        match(metaOpt)
-          .with({ _tag: "Some" }, ({ value }) => value.holderPid)
-          .with({ _tag: "None" }, () => undefined)
-          .exhaustive()
-      const oldStartTime =
-        parsedOwner.holderStartTime ??
-        match(metaOpt)
-          .with({ _tag: "Some" }, ({ value }) => value.holderStartTime)
-          .with({ _tag: "None" }, () => undefined)
-          .exhaustive()
-
-      const currentOldPidStartTime = oldPid !== undefined ? readStartTimeFn(oldPid) : undefined
-      const pidReusedOrSamePid =
-        oldPid !== undefined &&
-        (oldPid === input.holderPid ||
-          (oldStartTime !== undefined &&
-            currentOldPidStartTime !== undefined &&
-            oldStartTime !== currentOldPidStartTime))
-      const staleByHeartbeat =
-        !Number.isFinite(oldHeartbeatMs) || nowMs - oldHeartbeatMs >= WRITER_LEASE_HEARTBEAT_TTL_MS
-
-      const canTakeOver =
-        oldPid !== undefined
-          ? !pidAliveFn(oldPid) || pidReusedOrSamePid || !metaPresent || staleByHeartbeat
-          : !metaPresent || staleByHeartbeat
-
-      if (!canTakeOver) {
-        return yield* makeHeldLeaseError(parsedOwner.holderId, oldEpoch, input.lockFilePath, oldPid)
-      }
-
-      const nextEpoch = oldEpoch + 1
-      const casRes = yield* invokeWorkflowStoreQueryWithMeta({
-        repoRoot,
-        operation: WorkflowStoreOperation.make("WfWriterLease.cas"),
-        queryName: WorkflowStoreOperation.make("wf_cas_writer_lease"),
-        params: {
-          name: "engine",
-          expectedEpoch: oldEpoch,
-          owner,
-          nextEpoch,
-          heartbeatMs: nowMs,
-        },
-        expectMutation: true,
-        client: input.client,
-        hostIo,
-        env: input.env,
-      })
-
-      if (casRes.affectedNodes === 0) {
-        return yield* makeHeldLeaseError(parsedOwner.holderId, oldEpoch, input.lockFilePath, oldPid)
-      }
-      leaseEpoch = LeaseEpoch.make(nextEpoch)
-    }
-
-    yield* match(
-      writeLockMetaAtomic(
-        metaPath,
-        {
-          holderId: input.holderId,
-          holderPid: input.holderPid,
-          leaseEpoch,
-          acquiredAtMs: nowMs,
-          ...(holderStartTime !== undefined ? { holderStartTime } : {}),
-        },
-        hostIo,
-      ),
-    )
+  const acquireResource: Effect.Effect<
+    AcquiredLeaseResource,
+    WriterLeaseHeldError | WorkflowStoreUnavailableError
+  > = Effect.gen(function* () {
+    yield* match(prepareLockPathsAndModes(input.lockFilePath, metaPath, hostIo))
       .with({ _tag: "Success" }, () => Effect.void)
       .with({ _tag: "Failure" }, ({ failure }) =>
         Effect.fail(toWorkflowStoreUnavailableError(operation, failure)),
       )
       .exhaustive()
 
-    return leaseEpoch
+    const holderStartTime = readStartTimeFn(input.holderPid)
+    const owner = formatLeaseOwner(input.holderId, input.holderPid, holderStartTime)
+    const flockLossDeferred = yield* Deferred.make<void>()
+    let intentionalStop = false
+    const markIntentionalStop = (): void => {
+      intentionalStop = true
+    }
+
+    const flockChild = yield* acquireOsFlock(input.lockFilePath, metaPath, hostIo, {
+      onUnexpectedLoss: () => {
+        if (!intentionalStop) {
+          Deferred.doneUnsafe(flockLossDeferred, Effect.void)
+        }
+      },
+    })
+    const leaseEpoch = yield* acquireOmnigraphLease(holderStartTime, owner, () =>
+      Deferred.isDoneUnsafe(flockLossDeferred),
+    ).pipe(
+      Effect.onExit((exit) =>
+        match(exit)
+          .with({ _tag: "Failure" }, () =>
+            Effect.sync(markIntentionalStop).pipe(Effect.andThen(stopFlockChild(flockChild))),
+          )
+          .with({ _tag: "Success" }, () => Effect.void)
+          .exhaustive(),
+      ),
+    )
+
+    if (Deferred.isDoneUnsafe(flockLossDeferred)) {
+      markIntentionalStop()
+      yield* stopFlockChild(flockChild)
+      return yield* toWorkflowStoreUnavailableError(
+        operation,
+        new Error("OS flock child exited during writer lease acquisition"),
+      )
+    }
+
+    return {
+      lease: {
+        holderId: input.holderId,
+        holderPid: input.holderPid,
+        lockFilePath: input.lockFilePath,
+        leaseEpoch,
+        owner,
+        waitForFlockLoss: Deferred.await(flockLossDeferred),
+      },
+      flockChild,
+      markIntentionalStop,
+    }
   })
 
-  const { flockChild, leaseEpoch } = yield* Effect.uninterruptibleMask((restore) =>
-    Effect.gen(function* () {
-      yield* match(prepareLockPathsAndModes(input.lockFilePath, metaPath, hostIo))
-        .with({ _tag: "Success" }, () => Effect.void)
-        .with({ _tag: "Failure" }, ({ failure }) =>
-          Effect.fail(toWorkflowStoreUnavailableError(operation, failure)),
-        )
-        .exhaustive()
-      const child = yield* restore(acquireOsFlock(input.lockFilePath, metaPath, hostIo))
-      const epoch = yield* restore(acquireOmnigraphLease).pipe(
-        Effect.onExit((exit) =>
-          match(exit)
-            .with({ _tag: "Failure" }, () => stopFlockChild(child))
-            .with({ _tag: "Success" }, () => Effect.void)
-            .exhaustive(),
-        ),
-      )
-      return { flockChild: child, leaseEpoch: epoch }
-    }),
-  )
+  const releaseResource = (acquired: AcquiredLeaseResource): Effect.Effect<void> =>
+    Effect.sync(acquired.markIntentionalStop).pipe(
+      Effect.andThen(
+        match(unlinkLockMetaIfOwned(metaPath, input.holderId, input.holderPid, hostIo))
+          .with({ _tag: "Success" }, () => Effect.void)
+          .with({ _tag: "Failure" }, ({ failure }) =>
+            Effect.logWarning(`Failed to unlink writer lock metadata at ${metaPath}: ${failure}`),
+          )
+          .exhaustive(),
+      ),
+      Effect.ensuring(stopFlockChild(acquired.flockChild)),
+    )
 
-  const release: Effect.Effect<void> = Effect.sync(() => {
-    Result.try(() => {
-      unlinkLockMetaIfOwned(metaPath, input.holderId, input.holderPid, hostIo)
-    })
-  }).pipe(Effect.ensuring(stopFlockChild(flockChild)))
-
-  return {
-    holderId: input.holderId,
-    holderPid: input.holderPid,
-    lockFilePath: input.lockFilePath,
-    leaseEpoch,
-    release,
-  }
+  const acquired = yield* Effect.acquireRelease(acquireResource, releaseResource)
+  return acquired.lease
 })
 
 /**
  * Refreshes the active `WfWriterLease` heartbeat in Omnigraph under epoch fencing,
- * failing with `WriterLeaseHeldError` if the epoch was superseded by another writer.
+ * failing with `WriterLeaseHeldError` if the epoch was superseded by another writer
+ * and failing closed on corrupt/missing lease rows.
  */
 export const refreshWriterLease = Effect.fn("WfWriterLease.refresh")(function* (
   input: WriterLeaseRefreshInput,
 ): Effect.fn.Return<void, WriterLeaseHeldError | WorkflowStoreUnavailableError> {
   const hostIo = input.hostIo ?? nodeSyncHostIo
+  const operation = WorkflowStoreOperation.make("WfWriterLease.refresh")
   const repoRoot = input.repoRoot ?? deriveRepoRootFromCommonGitDir(input.commonGitDir)
   const nowMs = (input.nowMs ?? (() => Date.now()))()
   const startTime = (input.readProcessStartTime ?? ((pid) => readLinuxProcStartTime(pid, hostIo)))(
@@ -307,8 +427,8 @@ export const refreshWriterLease = Effect.fn("WfWriterLease.refresh")(function* (
 
   const res = yield* invokeWorkflowStoreQueryWithMeta({
     repoRoot,
-    operation: WorkflowStoreOperation.make("WfWriterLease.refresh"),
-    queryName: WorkflowStoreOperation.make("wf_refresh_writer_lease"),
+    operation,
+    queryName: "wf_refresh_writer_lease",
     params: {
       name: "engine",
       owner,
@@ -325,7 +445,7 @@ export const refreshWriterLease = Effect.fn("WfWriterLease.refresh")(function* (
     const rows = yield* invokeWorkflowStoreQuery({
       repoRoot,
       operation: WorkflowStoreOperation.make("WfWriterLease.get"),
-      queryName: WorkflowStoreOperation.make("wf_get_writer_lease"),
+      queryName: "wf_get_writer_lease",
       params: { name: "engine" },
       expectMutation: false,
       client: input.client,
@@ -333,17 +453,29 @@ export const refreshWriterLease = Effect.fn("WfWriterLease.refresh")(function* (
       env: input.env,
     })
     const currentRow = rows[0]
-    const currentOwner =
-      typeof currentRow?.owner === "string"
-        ? parseOwnerIdentity(currentRow.owner)
-        : { holderId: "unknown-holder", holderPid: undefined, holderStartTime: undefined }
-    return yield* makeHeldLeaseError(
-      currentOwner.holderId,
-      safeDecodeLeaseEpoch(currentRow?.leaseEpoch),
-      input.lockFilePath,
-      currentOwner.holderPid,
-    )
+    if (currentRow === undefined) {
+      return yield* makeHeldLeaseError(
+        LeaseHolderId.make("no-active-lease"),
+        LeaseEpoch.make(0),
+        input.lockFilePath,
+        undefined,
+      )
+    }
+    const heldErr = yield* match(writerLeaseRowToHeldError(currentRow, input.lockFilePath))
+      .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        Effect.fail(toWorkflowStoreUnavailableError(operation, new Error(failure))),
+      )
+      .exhaustive()
+    return yield* heldErr
   }
 })
 
-export { isLocalPidAlive, stopFlockChild, withAdvisoryFlock }
+export {
+  evaluateWriterLeaseTakeover,
+  isLocalPidAlive,
+  stopFlockChild,
+  withAdvisoryFlock,
+  type LeaseTakeoverDecision,
+  type LeaseTakeoverEvaluationInput,
+}

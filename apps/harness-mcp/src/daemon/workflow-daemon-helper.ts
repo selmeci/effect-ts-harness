@@ -1,5 +1,4 @@
-import * as path from "node:path"
-import { Effect, Option, Result, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   AbsoluteRepoRoot,
@@ -15,8 +14,32 @@ import {
   WorkflowDaemonCapability,
   WorkflowProtocolVersion,
 } from "@harness/contract"
-import { resolveWorkflowRuntimePaths, validateWorktreeRepoRoot } from "@harness/infra"
-import { isPathInsideRoot } from "../tools/mcp-helpers.js"
+import { nodeSyncHostIo, resolveWorkflowRuntimePaths } from "@harness/infra"
+import {
+  type DaemonRequestScopeAllowed,
+  type DaemonRequestScopeRejected,
+  type DaemonRequestScopeResult,
+  type DaemonWorktreeScopeCache,
+  type DaemonWorktreeScopeCacheStats,
+  makeDaemonWorktreeScopeCache,
+  resolveDaemonRequestScope,
+  resolveOptionalWorktree,
+  type StartupWorktreeState,
+  type WorktreeValidatorFn,
+} from "./worktree-scope-cache.js"
+
+export {
+  type DaemonRequestScopeAllowed,
+  type DaemonRequestScopeRejected,
+  type DaemonRequestScopeResult,
+  type DaemonWorktreeScopeCache,
+  type DaemonWorktreeScopeCacheStats,
+  makeDaemonWorktreeScopeCache,
+  resolveDaemonRequestScope,
+  resolveOptionalWorktree,
+  type StartupWorktreeState,
+  type WorktreeValidatorFn,
+}
 
 export const WORKFLOW_DAEMON_CAPABILITIES: ReadonlyArray<WorkflowDaemonCapability> = [
   WorkflowDaemonCapability.make("workflow.handshake"),
@@ -37,26 +60,13 @@ export interface WorkflowDaemonProtocolMetadata {
   readonly mismatchDetail?: DaemonProtocolMismatchDetail | undefined
 }
 
-export interface DaemonRequestScopeAllowed {
-  readonly _tag: "Allowed"
-  readonly resolvedRoot: string
-  readonly validatedWorktree: ValidatedWorktreeRoot | undefined
-  readonly daemonWorktree: ValidatedWorktreeRoot | undefined
-}
-
-export interface DaemonRequestScopeRejected {
-  readonly _tag: "Rejected"
-  readonly error: string
-}
-
-export type DaemonRequestScopeResult = DaemonRequestScopeAllowed | DaemonRequestScopeRejected
-
 export interface DaemonWorkflowHandshakeRequestInput {
   readonly requestId: string
   readonly scope: DaemonRequestScopeAllowed
   readonly writerLeaseEpoch: LeaseEpoch
   readonly protocolVersion?: string | undefined
   readonly commonGitDir?: string | undefined
+  readonly requestedRepoRoot?: string | undefined
   readonly socketPath?: DaemonSocketPath | undefined
 }
 
@@ -72,19 +82,6 @@ const toMismatchDetail = (raw: string): DaemonProtocolMismatchDetail => {
     sanitized.length > 0 ? sanitized : "Daemon protocol handshake failed",
   )
 }
-
-const resolveOptionalWorktree = (
-  candidateRoot: string,
-): Effect.Effect<Option.Option<ValidatedWorktreeRoot>> =>
-  match(Schema.decodeOption(AbsoluteRepoRoot)(candidateRoot))
-    .with({ _tag: "None" }, () => Effect.succeedNone)
-    .with({ _tag: "Some" }, ({ value: absRoot }) =>
-      validateWorktreeRepoRoot(absRoot).pipe(
-        Effect.asSome,
-        Effect.catchTag("WorkflowStoreUnavailableError", () => Effect.succeedNone),
-      ),
-    )
-    .exhaustive()
 
 /**
  * Validates an incoming `workflow.handshake` IPC request against the daemon's
@@ -152,97 +149,6 @@ export const handleWorkflowDaemonHandshake = Effect.fn("WorkflowDaemonHelper.han
   }
 })
 
-/**
- * Resolves and validates an incoming daemon request's `repoRoot`.
- * When the daemon runs inside a registered git worktree, allows canonical and linked
- * worktrees sharing the same `commonGitDir` while failing closed on unregistered paths.
- * When the daemon runs in a non-git directory (e.g. unit test temp dirs), preserves
- * `isPathInsideRoot(baseRoot, resolvedRoot)`.
- */
-export const resolveDaemonRequestScope = Effect.fn("WorkflowDaemonHelper.resolveRequestScope")(
-  function* (
-    baseRoot: string,
-    requestedRepoRoot?: string,
-  ): Effect.fn.Return<DaemonRequestScopeResult> {
-    if (requestedRepoRoot !== undefined && requestedRepoRoot.trim().length === 0) {
-      return {
-        _tag: "Rejected",
-        error: `Requested repoRoot '${requestedRepoRoot}' escapes daemon root (empty repoRoot)`,
-      }
-    }
-
-    const logicalResolvedRoot =
-      requestedRepoRoot !== undefined
-        ? path.isAbsolute(requestedRepoRoot)
-          ? path.resolve(requestedRepoRoot)
-          : path.resolve(baseRoot, requestedRepoRoot)
-        : baseRoot
-
-    const daemonWorktreeOpt = yield* resolveOptionalWorktree(baseRoot)
-
-    return yield* match(daemonWorktreeOpt)
-      .with({ _tag: "None" }, () => {
-        if (requestedRepoRoot !== undefined && !isPathInsideRoot(baseRoot, logicalResolvedRoot)) {
-          return Effect.succeed<DaemonRequestScopeResult>({
-            _tag: "Rejected",
-            error: `Requested repoRoot '${requestedRepoRoot}' escapes daemon root`,
-          })
-        }
-        return Effect.succeed<DaemonRequestScopeResult>({
-          _tag: "Allowed",
-          resolvedRoot: logicalResolvedRoot,
-          validatedWorktree: undefined,
-          daemonWorktree: undefined,
-        })
-      })
-      .with({ _tag: "Some" }, ({ value: daemonWorktree }) => {
-        if (requestedRepoRoot === undefined) {
-          return Effect.succeed<DaemonRequestScopeResult>({
-            _tag: "Allowed",
-            resolvedRoot: daemonWorktree.worktreeRoot,
-            validatedWorktree: daemonWorktree,
-            daemonWorktree,
-          })
-        }
-
-        const reqAbsOpt = Schema.decodeOption(AbsoluteRepoRoot)(logicalResolvedRoot)
-        return match(reqAbsOpt)
-          .with({ _tag: "None" }, () =>
-            Effect.succeed<DaemonRequestScopeResult>({
-              _tag: "Rejected",
-              error: `Requested repoRoot '${requestedRepoRoot}' escapes daemon root`,
-            }),
-          )
-          .with({ _tag: "Some" }, ({ value: absRequested }) =>
-            validateWorktreeRepoRoot(absRequested).pipe(
-              Effect.map((validated): DaemonRequestScopeResult => {
-                if (validated.commonGitDir !== daemonWorktree.commonGitDir) {
-                  return {
-                    _tag: "Rejected",
-                    error: `Requested repoRoot '${requestedRepoRoot}' escapes daemon root: commonGitDir mismatch`,
-                  }
-                }
-                return {
-                  _tag: "Allowed",
-                  resolvedRoot: validated.worktreeRoot,
-                  validatedWorktree: validated,
-                  daemonWorktree,
-                }
-              }),
-              Effect.catchTag("WorkflowStoreUnavailableError", (err) =>
-                Effect.succeed<DaemonRequestScopeResult>({
-                  _tag: "Rejected",
-                  error: `Requested repoRoot '${requestedRepoRoot}' escapes daemon root: ${err.reason}`,
-                }),
-              ),
-            ),
-          )
-          .exhaustive()
-      })
-      .exhaustive()
-  },
-)
-
 const handshakeErrorPayload = (
   requestId: string,
   detail: string,
@@ -259,7 +165,7 @@ const handshakeErrorPayload = (
 
 /**
  * Processes a JSON-RPC `workflow.handshake` request over the daemon Unix socket,
- * returning a structured payload compatible with `handshakeWorkflowDaemon`.
+ * returning the canonical `{ id, ok: true, command: "workflow.handshake", handshake }` envelope.
  */
 export const handleDaemonWorkflowHandshakeRequest = Effect.fn(
   "WorkflowDaemonHelper.handleHandshakeRequest",
@@ -314,12 +220,35 @@ export const handleDaemonWorkflowHandshakeRequest = Effect.fn(
           .exhaustive()
       : Result.succeed<GitCommonDirPath | undefined>(undefined)
 
+  const requestedRepoRoot = input.requestedRepoRoot
+  const decodedRepoRootRes =
+    requestedRepoRoot !== undefined
+      ? (() => {
+          const canonicalRequested = match(
+            Result.try(() => nodeSyncHostIo.realpathSync(requestedRepoRoot)),
+          )
+            .with({ _tag: "Success" }, ({ success }) => success)
+            .with({ _tag: "Failure" }, () => requestedRepoRoot)
+            .exhaustive()
+          return match(Schema.decodeOption(AbsoluteRepoRoot)(canonicalRequested))
+            .with({ _tag: "Some" }, ({ value }) => Result.succeed(value))
+            .with({ _tag: "None" }, () =>
+              Result.fail(
+                handshakeErrorPayload(input.requestId, `Invalid repoRoot '${requestedRepoRoot}'`),
+              ),
+            )
+            .exhaustive()
+        })()
+      : Result.succeed(validatedWorktree.worktreeRoot)
+
   const parsedRequestRes = Result.flatMap(decodedVersionRes, (protocolVersion) =>
-    Result.map(decodedCommonGitDirRes, (commonGitDir): DaemonHandshakeRequest => ({
-      protocolVersion,
-      repoRoot: validatedWorktree.worktreeRoot,
-      ...(commonGitDir !== undefined ? { commonGitDir } : {}),
-    })),
+    Result.flatMap(decodedRepoRootRes, (repoRoot) =>
+      Result.map(decodedCommonGitDirRes, (commonGitDir): DaemonHandshakeRequest => ({
+        protocolVersion,
+        repoRoot,
+        ...(commonGitDir !== undefined ? { commonGitDir } : {}),
+      })),
+    ),
   )
 
   return yield* match(parsedRequestRes)
@@ -341,11 +270,7 @@ export const handleDaemonWorkflowHandshakeRequest = Effect.fn(
             id: input.requestId,
             ok: true,
             command: "workflow.handshake",
-            protocolVersion: response.protocolVersion,
-            capabilities: response.capabilities,
-            repoRoot: response.repoRoot,
-            commonGitDir: response.commonGitDir,
-            writerLeaseEpoch: response.writerLeaseEpoch,
+            handshake: response,
           }))
           .with({ _tag: "Failure" }, ({ failure }) =>
             handshakeErrorPayload(input.requestId, failure.detail, failure.message),
@@ -358,17 +283,21 @@ export const handleDaemonWorkflowHandshakeRequest = Effect.fn(
 
 /**
  * Processes a JSON-RPC `workflow.status` request over the daemon Unix socket.
+ * Reports `status: "ready"` only when an active writer lease (`writerLeaseEpoch >= 1`)
+ * and a validated git worktree are both present; otherwise reports `status: "inactive"`.
  */
 export const handleDaemonWorkflowStatusRequest = (
   input: DaemonWorkflowStatusRequestInput,
 ): Record<string, unknown> => {
   const { scope } = input
+  const status =
+    input.writerLeaseEpoch >= 1 && scope.validatedWorktree !== undefined ? "ready" : "inactive"
   if (scope.validatedWorktree !== undefined) {
     return {
       id: input.requestId,
       ok: true,
       command: "workflow.status",
-      status: "ready",
+      status,
       protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
       capabilities: [...WORKFLOW_DAEMON_CAPABILITIES],
       repoRoot: scope.validatedWorktree.worktreeRoot,
@@ -381,7 +310,7 @@ export const handleDaemonWorkflowStatusRequest = (
     id: input.requestId,
     ok: true,
     command: "workflow.status",
-    status: "ready",
+    status,
     protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
     capabilities: [...WORKFLOW_DAEMON_CAPABILITIES],
     repoRoot: scope.resolvedRoot,

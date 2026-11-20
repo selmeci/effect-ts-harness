@@ -1039,4 +1039,354 @@ describe("guard policy", () => {
       ),
     ).toEqual([["node", "-e", "const a=1; const b=2;\nconsole.log(a+b)"]])
   })
+
+  it("F-7.1/F-7.2/F-7.3 denies protected harness paths, custom common-dir targets, and command substitutions across any binary while preserving exemptions", () => {
+    // F-7.1: arbitrary / non-allowlisted binaries targeting protected harness paths
+    for (const cmd of [
+      "grep foo .git/harness/daemon.lock",
+      "grep -rn foo .git/harness",
+      "grep foo .git/harness/custom.json",
+      "diff -u .git/harness/daemon.lock /tmp/other",
+      "stat .git/harness/daemon.sock",
+      "wc -l .git/harness/pending-workflow-restore.json",
+      "custom-bin --state .git/harness/custom.json",
+      "rg foo .git/harness/daemon.lock",
+      "rg -n foo .git/harness/custom.json",
+      "rg -e foo .git/harness/daemon.lock",
+      "rg -- -foo .git/harness/daemon.lock",
+      "rg -f .git/harness/daemon.lock libs/",
+      "find .git/harness -exec cat {} +",
+      "find .git/harness -execdir ls {} +",
+      "find .git/harness -ok rm {} \\;",
+      "find .git/harness -okdir rm {} \\;",
+      "find .git/harness -delete",
+      "find . -maxdepth 1 -fls .git/harness/daemon.lock",
+      "find . -maxdepth 1 -fprint .git/harness/daemon.lock",
+      "find . -maxdepth 1 -fprint0 .git/harness/daemon.lock",
+      "find . -maxdepth 1 -fprintf .git/harness/daemon.lock '%p\\n'",
+      "bun harness .git/harness/daemon.lock",
+    ]) {
+      expect(classifyCommand(cmd), cmd).toBe("deny")
+      expect(explainCommandDenyRule(cmd)?.ruleId, cmd).toBe("harness-state-mutation")
+    }
+
+    for (const secretCmd of [
+      "grep foo .git/harness/auth-tokens.json",
+      "rg -f .git/harness/auth-tokens.json libs/",
+      "cat /custom/common-dir/harness/auth-tokens.json",
+      "grep foo /custom/common-dir/harness/auth-tokens.json",
+      "cat $(git rev-parse --git-common-dir)/harness/auth-tokens.json",
+    ]) {
+      expect(classifyCommand(secretCmd), secretCmd).toBe("deny")
+      expect(explainCommandDenyRule(secretCmd)?.ruleId, secretCmd).toBe("secret-file-access")
+    }
+
+    // F-7.2: custom non-.git common-dir targets and explicit --git-common-dir / GIT_COMMON_DIR
+    for (const customCommonCmd of [
+      "cat /custom/common-dir/harness/daemon.sock",
+      "curl --unix-socket /tmp/custom-common-dir/harness/daemon.sock http://localhost/ping",
+      "cat /custom/common-dir/harness/daemon.lock",
+      "cat /custom/common-dir/harness/pending-workflow-restore.json",
+      "rm /custom/common-dir/harness/pending-workflow-restore.json",
+      "cat /custom/common-dir/harness/custom.json",
+      "GIT_COMMON_DIR=/tmp/my-repo-meta cat /tmp/my-repo-meta/harness/custom.json",
+      "git --git-common-dir=/tmp/my-repo-meta diff --output=/tmp/my-repo-meta/harness/custom.json",
+    ]) {
+      expect(classifyCommand(customCommonCmd), customCommonCmd).toBe("deny")
+      expect(explainCommandDenyRule(customCommonCmd)?.ruleId, customCommonCmd).toBe(
+        "harness-state-mutation",
+      )
+    }
+
+    for (const writePath of [
+      "/custom/common-dir/harness/auth-tokens.json",
+      "/custom/common-dir/harness/daemon.sock",
+      "/custom/common-dir/harness/pending-workflow-restore.json",
+      "/custom/common-dir/harness/custom.json",
+    ]) {
+      const res = classifyFileWrite(writePath)
+      expect(res.verdict, writePath).toBe("deny")
+      expect(res.ruleId, writePath).toBe("harness-common-dir-state")
+    }
+
+    // F-7.3: command substitutions targeting harness state must deny (never merely escalate)
+    for (const substCmd of [
+      'rm -f "$(git rev-parse --git-common-dir)/harness/daemon.lock"',
+      'rm -f "$(git rev-parse --git-common-dir)/harness/custom.json"',
+      "cat $(git rev-parse --git-common-dir)/harness",
+      "cat `git rev-parse --git-common-dir`/harness/state.json",
+      'rm -f "`git rev-parse --git-common-dir`/harness/daemon.lock"',
+      'echo x > "$(git rev-parse --git-common-dir)/harness/state.json"',
+      'COMMON=$(git rev-parse --git-common-dir) && cat "$COMMON/harness/state.json"',
+    ]) {
+      expect(classifyCommand(substCmd), substCmd).toBe("deny")
+      expect(explainCommandDenyRule(substCmd)?.ruleId, substCmd).toBe("harness-state-mutation")
+    }
+
+    // F-7.1/F-7.2/F-7.3 exemptions & non-blocking normal repo source/docs/tests
+    for (const allowedCmd of [
+      "ls .git/harness",
+      "ls -la /custom/common-dir/harness",
+      "find .git/harness -maxdepth 2",
+      "find .git/harness -type f",
+      "pnpm harness workflow restore .git/harness/workflow-backups/2026-11-19.ndjson",
+      "rg 'daemon.sock' libs/",
+      "rg -n 'auth-tokens.json' libs/",
+      "rg -g '*.ts' 'daemon.sock' libs/",
+      "rg -e 'daemon.sock' libs/",
+      "rg -- 'daemon.sock' libs/",
+      "rg '$(git rev-parse --git-common-dir)/harness' libs/",
+      "git commit -m 'protect .git/harness/pending-workflow-restore.json and $(git rev-parse --git-common-dir)/harness'",
+      "git log --grep='.git/harness/daemon.lock' -n 5",
+      "git grep 'auth-tokens.json' -- libs",
+      "gh pr create --title 'protect .git/harness/daemon.lock' --body 'fixes auth-tokens.json'",
+      "cat libs/harness/infra/src/workflow-graph-backup.ts",
+      "cat libs/harness/gates/test/policy.test.ts",
+      "cat docs/rfcs/0013-deterministic-workflow-as-code-plan-dag-orchestration.md",
+    ]) {
+      expect(classifyCommand(allowedCmd), allowedCmd).toBe("allow")
+    }
+    expect(classifyCommand("git --git-common-dir=/tmp/my-repo-meta status")).toBe("escalate")
+  })
+
+  it("F-7.4/F-18.1 unwraps process wrappers and bun package-runner commands cleanly without regressing bun script/eval forms", () => {
+    // F-7.4: process wrapper unwrapping for deny, skip-nx-cache, ask, and exempted read-only escalate
+    for (const denied of [
+      { cmd: "timeout 5 rm .git/harness/daemon.lock", ruleId: "harness-state-mutation" },
+      { cmd: "timeout -k 5 10 rm .git/harness/daemon.lock", ruleId: "harness-state-mutation" },
+      {
+        cmd: "timeout --signal=TERM 10s grep foo .git/harness/daemon.lock",
+        ruleId: "harness-state-mutation",
+      },
+      { cmd: "timeout 10 grep foo .git/harness/auth-tokens.json", ruleId: "secret-file-access" },
+      { cmd: "nice -n 10 rm .git/harness/daemon.lock", ruleId: "harness-state-mutation" },
+      {
+        cmd: "nice --adjustment=5 grep foo .git/harness/daemon.lock",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "nohup python3 -c \"open('.git/harness/auth-tokens.json','w')\"",
+        ruleId: "harness-state-mutation",
+      },
+      { cmd: "stdbuf -o0 -e0 rm .git/harness/daemon.lock", ruleId: "harness-state-mutation" },
+      {
+        cmd: "stdbuf -o 0 -e L grep foo .git/harness/daemon.lock",
+        ruleId: "harness-state-mutation",
+      },
+      { cmd: "time -p rm .git/harness/daemon.lock", ruleId: "harness-state-mutation" },
+      { cmd: "time -o .git/harness/daemon.lock ls", ruleId: "harness-state-mutation" },
+      { cmd: "timeout 10 nx test @harness/gates --skip-nx-cache", ruleId: "skip-nx-cache-banned" },
+      {
+        cmd: "nice -n 10 nx run @harness/gates:verify --skip-nx-cache",
+        ruleId: "skip-nx-cache-banned",
+      },
+      { cmd: "time -p pnpm nx test --skip-nx-cache", ruleId: "skip-nx-cache-banned" },
+      {
+        cmd: "stdbuf -o0 -e0 bun nx affected -t verify --skip-nx-cache",
+        ruleId: "skip-nx-cache-banned",
+      },
+    ] as const) {
+      expect(classifyCommand(denied.cmd), denied.cmd).toBe("deny")
+      expect(explainCommandDenyRule(denied.cmd)?.ruleId, denied.cmd).toBe(denied.ruleId)
+    }
+
+    expect(classifyCommand("timeout 5 git reset --hard HEAD~1")).toBe("ask")
+    expect(
+      classifyCommand("HARNESS_ALLOW_SKIP_NX_CACHE=1 timeout 10 nx test --skip-nx-cache"),
+    ).toBe("ask")
+    expect(classifyCommand("timeout 5 ls .git/harness")).toBe("escalate")
+    expect(classifyCommand("nice -n 10 find .git/harness -maxdepth 2")).toBe("escalate")
+    expect(classifyCommand("nohup python3 script.py")).toBe("escalate")
+
+    expect(
+      unwrapCommandSegment(["timeout", "-k", "5", "10", "rm", ".git/harness/daemon.lock"]),
+    ).toEqual({
+      envAssignments: [],
+      commandWords: ["rm", ".git/harness/daemon.lock"],
+      sawPackageRunner: false,
+    })
+    expect(unwrapCommandSegment(["nice", "-n", "10", "grep", "foo", "bar"])).toEqual({
+      envAssignments: [],
+      commandWords: ["grep", "foo", "bar"],
+      sawPackageRunner: false,
+    })
+    expect(unwrapCommandSegment(["stdbuf", "-o0", "-e0", "cat", "foo"])).toEqual({
+      envAssignments: [],
+      commandWords: ["cat", "foo"],
+      sawPackageRunner: false,
+    })
+    expect(unwrapCommandSegment(["time", "-p", "nx", "test"])).toEqual({
+      envAssignments: [],
+      commandWords: ["nx", "test"],
+      sawPackageRunner: false,
+    })
+    expect(unwrapCommandSegment(["nohup", "python3", "script.py"])).toEqual({
+      envAssignments: [],
+      commandWords: ["python3", "script.py"],
+      sawPackageRunner: false,
+    })
+
+    // F-18.1: bun package-runner unwrapping vs script/eval non-runner preservation
+    for (const bunSkipCmd of [
+      "bun nx affected -t verify --skip-nx-cache",
+      "bun nx run @harness/gates:verify --skip-nx-cache",
+      "bun --bun nx affected -t verify --skip-nx-cache",
+      "bun --cwd apps/cli nx test --skip-nx-cache",
+      "bun --preload ./setup.ts nx test --skip-nx-cache",
+      "bun verify --skip-nx-cache",
+    ]) {
+      expect(isSkipNxCacheCommand(bunSkipCmd), bunSkipCmd).toBe(true)
+      expect(classifyCommand(bunSkipCmd), bunSkipCmd).toBe("deny")
+      expect(explainCommandDenyRule(bunSkipCmd)?.ruleId, bunSkipCmd).toBe("skip-nx-cache-banned")
+      expect(explainCommandDenyReason(bunSkipCmd), bunSkipCmd).toBe(SKIP_NX_CACHE_BANNED_REASON)
+    }
+
+    expect(
+      classifyCommand(
+        "HARNESS_ALLOW_SKIP_NX_CACHE=1 bun nx run @harness/gates:verify --skip-nx-cache",
+      ),
+    ).toBe("ask")
+
+    expect(
+      unwrapCommandSegment(["bun", "nx", "affected", "-t", "verify", "--skip-nx-cache"]),
+    ).toEqual({
+      envAssignments: [],
+      commandWords: ["nx", "affected", "-t", "verify", "--skip-nx-cache"],
+      sawPackageRunner: true,
+    })
+
+    for (const nonRunnerWords of [
+      ["bun", "script.js"],
+      ["bun", "path/to/file.ts"],
+      ["bun", "-e", "console.log(1)"],
+      ["bun", "--eval", "console.log(1)"],
+      ["bun", "-p", "1+1"],
+      ["bun", "--version"],
+      ["bun", "--", "run"],
+      ["bun", "test"],
+    ]) {
+      expect(unwrapCommandSegment(nonRunnerWords).sawPackageRunner, nonRunnerWords.join(" ")).toBe(
+        false,
+      )
+    }
+  })
+
+  it("closes P0/P1/P2 bypass vectors on rg/git grep -f/-e/--files, wrapper -C/--dir/--cwd, env -S/-u, time -o, parameter/double-slash harness paths, export GIT_COMMON_DIR, command -pv cd, and harness --cwd guard", () => {
+    const deniedCases: ReadonlyArray<{ readonly cmd: string; readonly ruleId: string }> = [
+      {
+        cmd: "rg -f tsconfig.json .git/harness/auth-tokens.json",
+        ruleId: "secret-file-access",
+      },
+      {
+        cmd: "rg -f tsconfig.json .git/harness/server.json",
+        ruleId: "harness-state-mutation",
+      },
+      { cmd: "rg --file=tsconfig.json .env", ruleId: "secret-file-access" },
+      { cmd: "rg -ftsconfig.json .env", ruleId: "secret-file-access" },
+      { cmd: "rg -f.env libs/", ruleId: "secret-file-access" },
+      { cmd: "rg --files .git/harness/auth-tokens.json", ruleId: "secret-file-access" },
+      { cmd: "rg --files .git/harness/daemon.lock.meta.json", ruleId: "harness-state-mutation" },
+      { cmd: "rg --regexp=foo .env", ruleId: "secret-file-access" },
+      {
+        cmd: "git grep -e. --no-index .git/harness/auth-tokens.json",
+        ruleId: "secret-file-access",
+      },
+      {
+        cmd: "git grep -e. --no-index .git/harness/server.json",
+        ruleId: "harness-state-mutation",
+      },
+      { cmd: "git grep --regexp=. --no-index .env", ruleId: "secret-file-access" },
+      { cmd: "git grep --regexp . --no-index .env", ruleId: "secret-file-access" },
+      {
+        cmd: "git grep -f .git/harness/auth-tokens.json --no-index libs/",
+        ruleId: "secret-file-access",
+      },
+      {
+        cmd: "git grep -f .git/harness/server.json --no-index libs/",
+        ruleId: "harness-state-mutation",
+      },
+      { cmd: "git grep --file=.env --no-index libs/", ruleId: "secret-file-access" },
+      { cmd: "git grep -f.env --no-index libs/", ruleId: "secret-file-access" },
+      {
+        cmd: "pnpm --filter . -C .git/harness/workflow-backups exec rm workflow-backup-123.ndjson",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "pnpm --filter . --dir .git/harness/omnigraph exec truncate -s 0 server.json",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "pnpm --filter . --dir=.git/harness/workflow-backups exec rm snap.ndjson",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "pnpm --filter . -C .git/harness exec cat daemon.lock.meta.json",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "pnpm --filter . -C .git exec rm harness/daemon.lock.meta.json",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "env -C .git/harness/workflow-backups rm snap.ndjson",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "env --chdir=.git/harness/workflow-backups rm snap.ndjson",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "env -C.git/harness/workflow-backups rm snap.ndjson",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "bun --cwd .git/harness rm -f daemon.lock.meta.json",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "bun --cwd=.git/harness rm -f daemon.lock.meta.json",
+        ruleId: "harness-state-mutation",
+      },
+      { cmd: 'env -S "ls; rm .git/harness/daemon.lock"', ruleId: "harness-state-mutation" },
+      {
+        cmd: 'env -S "pnpm harness status; chmod 777 .git/harness/auth-tokens.json"',
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: 'env -S "pnpm harness status; chmod 777 .git/harness/daemon.lock"',
+        ruleId: "harness-state-mutation",
+      },
+      { cmd: "env -uFOO cd /tmp", ruleId: "cd-command-banned" },
+      { cmd: "command -pv cd /tmp", ruleId: "cd-command-banned" },
+      { cmd: 'pnpm harness --cwd /tmp guard "rm -r dist"', ruleId: "guard-self-invocation" },
+      { cmd: 'pnpm harness --cwd /tmp -- guard "rm -r dist"', ruleId: "guard-self-invocation" },
+      {
+        cmd: 'rm "$(git rev-parse --git-common-dir)//harness/custom.json"',
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: 'COMMON=$(git rev-parse --git-common-dir); rm "${COMMON%/}/harness/custom.json"',
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "export GIT_COMMON_DIR=/tmp/meta; rm /tmp/meta/harness/custom.json",
+        ruleId: "harness-state-mutation",
+      },
+      { cmd: "time --output=.git/harness/custom.log ls", ruleId: "harness-state-mutation" },
+      { cmd: "time -o.git/harness/custom.log ls", ruleId: "harness-state-mutation" },
+    ]
+    for (const c of deniedCases) {
+      expect(classifyCommand(c.cmd), c.cmd).toBe("deny")
+      expect(explainCommandDenyRule(c.cmd)?.ruleId, c.cmd).toBe(c.ruleId)
+    }
+
+    for (const allowedCmd of [
+      "rg --files libs/",
+      "rg -f tsconfig.json libs/",
+      "git grep '\\.env' -- libs",
+      "pnpm --filter @harness/gates -C libs/harness/gates exec vitest",
+    ]) {
+      expect(classifyCommand(allowedCmd), allowedCmd).toBe("allow")
+    }
+  })
 })

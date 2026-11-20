@@ -10,8 +10,8 @@ import {
   DaemonSocketPath,
   GitCommonDirPath,
   LeaseFilePath,
-  type ValidatedWorktreeRoot,
-  WorkflowStoreFailureReason,
+  toBoundedReason,
+  ValidatedWorktreeRoot,
   WorkflowStoreOperation,
   WorkflowStoreUnavailableError,
   type WorktreePathKind,
@@ -22,17 +22,10 @@ import { nodeSyncHostIo } from "./node-host-io.js"
 const GIT_WORKTREE_LIST_TIMEOUT_MS = 5000
 const WORKTREE_VALIDATE_OPERATION = WorkflowStoreOperation.make("WorktreeRepoRoot.validate")
 
-const toFailureReason = (raw: string): WorkflowStoreFailureReason => {
-  const sanitized = raw.trim().slice(0, 1024).trim()
-  return WorkflowStoreFailureReason.make(
-    sanitized.length > 0 ? sanitized : "Unknown worktree validation failure",
-  )
-}
-
-const makeWorktreeUnavailableError = (reason: string): WorkflowStoreUnavailableError =>
+const makeWorktreeUnavailableError = (reason: unknown): WorkflowStoreUnavailableError =>
   new WorkflowStoreUnavailableError({
     operation: WORKTREE_VALIDATE_OPERATION,
-    reason: toFailureReason(reason),
+    reason: toBoundedReason(reason, "Unknown worktree validation failure"),
   })
 
 const execFileAsync = promisify(execFile)
@@ -130,6 +123,7 @@ export { resolveWorkflowRuntimePaths }
 
 const decodeAbsoluteRepoRoot = Schema.decodeUnknownEffect(AbsoluteRepoRoot)
 const decodeGitCommonDirPath = Schema.decodeUnknownEffect(GitCommonDirPath)
+const decodeValidatedWorktreeRoot = Schema.decodeUnknownEffect(ValidatedWorktreeRoot)
 
 /**
  * Validates an explicit `repoRoot` against `git worktree list` and resolves its
@@ -197,13 +191,17 @@ export const validateWorktreeRepoRoot = Effect.fn("WorktreeRepoRoot.validate")(f
   )
 
   const kind: WorktreePathKind =
-    matched.stanzaIndex === 0 || nodeSyncHostIo.isDirectorySync(join(realRoot, ".git"))
-      ? "canonical"
-      : "linked"
+    realCommonGitDir === join(realRoot, ".git") ? "canonical" : "linked"
 
-  return {
+  return yield* decodeValidatedWorktreeRoot({
     worktreeRoot,
     commonGitDir,
     kind,
-  }
+  }).pipe(
+    Effect.mapError((err) =>
+      makeWorktreeUnavailableError(
+        `Invalid ValidatedWorktreeRoot for '${realRoot}': ${err.message}`,
+      ),
+    ),
+  )
 })

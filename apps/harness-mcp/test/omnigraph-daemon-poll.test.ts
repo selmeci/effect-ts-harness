@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process"
 import { createServer } from "node:http"
 import { connect } from "node:net"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
@@ -241,9 +242,20 @@ describe("RFC-0009 unix-socket-daemon poll-changes", () => {
   it("F-1.1b: poll-changes persists changeFeedCursor while leaving headSha and gitBranch untouched", async () => {
     const repoRoot = makeMockRepo()
     rmSync(join(repoRoot, ".harness", "graph-head.json"))
-    mkdirSync(join(repoRoot, ".git", "refs", "heads"), { recursive: true })
-    writeFileSync(join(repoRoot, ".git", "HEAD"), "ref: refs/heads/feat/wip\n", "utf8")
-    writeFileSync(join(repoRoot, ".git", "refs", "heads", "feat"), "unused", "utf8")
+    execFileSync("git", ["init"], { cwd: repoRoot, stdio: "ignore" })
+    execFileSync("git", ["config", "user.email", "poll@example.com"], {
+      cwd: repoRoot,
+      stdio: "ignore",
+    })
+    execFileSync("git", ["config", "user.name", "Poll Test"], {
+      cwd: repoRoot,
+      stdio: "ignore",
+    })
+    execFileSync("git", ["commit", "--allow-empty", "-m", "init"], {
+      cwd: repoRoot,
+      stdio: "ignore",
+    })
+    execFileSync("git", ["checkout", "-b", "feat/wip"], { cwd: repoRoot, stdio: "ignore" })
 
     const headers = {
       "Content-Type": "application/json",
@@ -663,7 +675,9 @@ describe("RFC-0009 unix-socket-daemon poll-changes", () => {
                     op: "insert",
                     type: { id: "t1", name: "EffectFn" },
                     before: null,
-                    after: { properties: { file: "libs/demo/src/extra.ts", spanName: "Extra.run" } },
+                    after: {
+                      properties: { file: "libs/demo/src/extra.ts", spanName: "Extra.run" },
+                    },
                   },
                   {
                     id: "adr-1",

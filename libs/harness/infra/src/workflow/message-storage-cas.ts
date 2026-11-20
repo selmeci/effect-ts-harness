@@ -1,21 +1,35 @@
-import { Effect, Semaphore } from "effect"
+import { Effect, Schema, Semaphore } from "effect"
 import type { ClusterError, Snowflake } from "effect/cluster"
+import { match } from "ts-pattern"
 import {
   type AbsoluteRepoRoot,
+  type LeaseEpoch,
+  type LeaseFilePath,
   type SeqKey,
   toErrorReasonMessage,
   WorkflowStoreOperation,
   type WorkflowStoreUnavailableError,
+  WriterLeaseHeldError,
 } from "@harness/contract"
 import type { OmnigraphClient } from "@harness/graph"
 import type { SyncHostIo } from "@harness/service/host-io"
 import {
   invokeWorkflowStoreQueryOnce,
   retryWorkflowStoreAttempt,
+  toWorkflowStoreUnavailableError,
+  type WorkflowStoreAttemptFailure,
 } from "../omnigraph-workflow-store.js"
-import { collectDanglingRequestIds } from "./message-storage-codec.js"
+import {
+  assertAffectedNodes,
+  collectDanglingRequestIds,
+  decodeMessageKeyAsAttemptFailure,
+  decodeReplyKeyAsAttemptFailure,
+  WfMessageClearStateRowSchema,
+} from "./message-storage-codec.js"
 
 type Omnigraph = InstanceType<typeof OmnigraphClient>
+
+const decodeClearStateRowOption = Schema.decodeUnknownOption(WfMessageClearStateRowSchema)
 
 export interface OmnigraphClearRepliesInput {
   readonly repoRoot: AbsoluteRepoRoot
@@ -26,6 +40,9 @@ export interface OmnigraphClearRepliesInput {
   readonly hostIo?: SyncHostIo | undefined
   readonly env?: Readonly<Record<string, string | undefined>> | undefined
   readonly writeMutex?: Semaphore.Semaphore | undefined
+  readonly expectedLeaseEpoch?: LeaseEpoch | undefined
+  readonly expectedLeaseOwner?: string | undefined
+  readonly lockFilePath?: LeaseFilePath | undefined
 }
 
 export interface ClearRepliesCoreInput {
@@ -36,6 +53,9 @@ export interface ClearRepliesCoreInput {
   readonly hostIo?: SyncHostIo | undefined
   readonly env?: Readonly<Record<string, string | undefined>> | undefined
   readonly writeMutex: Semaphore.Semaphore
+  readonly expectedLeaseEpoch?: LeaseEpoch | undefined
+  readonly expectedLeaseOwner?: string | undefined
+  readonly lockFilePath?: LeaseFilePath | undefined
 }
 
 export interface RepairDanglingRequestsInput {
@@ -44,38 +64,69 @@ export interface RepairDanglingRequestsInput {
   readonly hostIo?: SyncHostIo | undefined
   readonly env?: Readonly<Record<string, string | undefined>> | undefined
   readonly writeMutex?: Semaphore.Semaphore | undefined
+  readonly expectedLeaseEpoch?: LeaseEpoch | undefined
+  readonly expectedLeaseOwner?: string | undefined
+  readonly lockFilePath?: LeaseFilePath | undefined
 }
+
+const mapUnfencedLeaseError = (
+  operation: WorkflowStoreOperation,
+  expectedLeaseEpoch: LeaseEpoch | undefined,
+  err: WorkflowStoreUnavailableError | WriterLeaseHeldError,
+): WorkflowStoreUnavailableError | WriterLeaseHeldError =>
+  expectedLeaseEpoch === undefined && err instanceof WriterLeaseHeldError
+    ? toWorkflowStoreUnavailableError(operation, err)
+    : err
 
 const executeClearRepliesCore = (
   input: ClearRepliesCoreInput,
-): Effect.Effect<void, WorkflowStoreUnavailableError> => {
-  const reqId = String(input.requestId)
-  const expectedReplyId =
-    input.expectedReplyId !== undefined ? String(input.expectedReplyId) : undefined
+): Effect.Effect<void, WorkflowStoreUnavailableError | WriterLeaseHeldError> => {
   const operation = WorkflowStoreOperation.make("OmnigraphMessageStorage.clearReplies")
 
-  // Single unretried compensation inside writeMutex; outer retry handles any backoff outside mutex.
-  const compensateDanglingOnce = (): Effect.Effect<void> =>
+  const compensateDanglingOnce = (
+    reqId: ReturnType<typeof decodeMessageKeyAsAttemptFailure> extends Effect.Effect<
+      infer A,
+      infer _
+    >
+      ? A
+      : never,
+    commit2Err: WorkflowStoreAttemptFailure,
+  ): Effect.Effect<never, WorkflowStoreAttemptFailure> =>
     invokeWorkflowStoreQueryOnce({
       repoRoot: input.repoRoot,
       operation: WorkflowStoreOperation.make("OmnigraphMessageStorage.clearReplies.compensate"),
-      queryName: WorkflowStoreOperation.make("wf_repair_dangling_requests"),
+      queryName: "wf_repair_dangling_requests",
       params: {
         messageKeys: [reqId],
         clearReplyId: null,
         clearReadMs: null,
       },
       expectMutation: true,
+      expectedLeaseEpoch: input.expectedLeaseEpoch,
+      expectedLeaseOwner: input.expectedLeaseOwner,
+      lockFilePath: input.lockFilePath,
       client: input.client,
       hostIo: input.hostIo,
       env: input.env,
     }).pipe(
-      Effect.asVoid,
-      Effect.catch((compErr) =>
-        Effect.logWarning(
-          `clearReplies Commit-2 compensation failed for ${reqId}: ${toErrorReasonMessage(compErr.cause, "Commit-2 compensation failed")}`,
-        ),
-      ),
+      Effect.flatMap(() => Effect.fail(commit2Err)),
+      Effect.catch((compErr) => {
+        if (commit2Err.cause instanceof WriterLeaseHeldError) {
+          return Effect.fail(commit2Err)
+        }
+        if (compErr.cause instanceof WriterLeaseHeldError) {
+          return Effect.fail(compErr)
+        }
+        const commit2Msg = toErrorReasonMessage(commit2Err.cause, "Commit-2 reset failed")
+        const compMsg = toErrorReasonMessage(compErr.cause, "Commit-2 compensation failed")
+        return Effect.fail<WorkflowStoreAttemptFailure>({
+          _tag: "WorkflowStoreAttemptFailure",
+          operation,
+          cause: new Error(
+            `Commit-2 failed (${commit2Msg}); compensation also failed (${compMsg})`,
+          ),
+        })
+      }),
     )
 
   return retryWorkflowStoreAttempt({
@@ -84,24 +135,38 @@ const executeClearRepliesCore = (
     runAttempt: () =>
       input.writeMutex.withPermit(
         Effect.gen(function* () {
+          const reqId = yield* decodeMessageKeyAsAttemptFailure(operation, String(input.requestId))
+          const expectedReplyId =
+            input.expectedReplyId !== undefined
+              ? yield* decodeReplyKeyAsAttemptFailure(operation, String(input.expectedReplyId))
+              : undefined
+
           if (expectedReplyId !== undefined) {
             const readRes = yield* invokeWorkflowStoreQueryOnce({
               repoRoot: input.repoRoot,
               operation,
-              queryName: WorkflowStoreOperation.make("wf_messages_by_keys"),
+              queryName: "wf_messages_by_keys",
               params: { messageKeys: [reqId] },
               expectMutation: false,
               client: input.client,
               hostIo: input.hostIo,
               env: input.env,
             })
-            const msg = readRes.rows[0]
-            if (msg === undefined) {
+            const rawMsg = readRes.rows[0]
+            if (rawMsg === undefined) {
               return
             }
-            const currentLastReplyId =
-              typeof msg.lastReplyId === "string" ? msg.lastReplyId : undefined
-            if (currentLastReplyId !== expectedReplyId) {
+            const msg = yield* match(decodeClearStateRowOption(rawMsg))
+              .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+              .with({ _tag: "None" }, () =>
+                Effect.fail<WorkflowStoreAttemptFailure>({
+                  _tag: "WorkflowStoreAttemptFailure",
+                  operation,
+                  cause: new Error(`Corrupt WfMessage row returned during clearReplies(${reqId})`),
+                }),
+              )
+              .exhaustive()
+            if ((msg.lastReplyId ?? undefined) !== expectedReplyId) {
               return
             }
 
@@ -109,10 +174,13 @@ const executeClearRepliesCore = (
             yield* invokeWorkflowStoreQueryOnce({
               repoRoot: input.repoRoot,
               operation,
-              queryName: WorkflowStoreOperation.make("wf_clear_replies_cas_delete"),
+              queryName: "wf_clear_replies_cas_delete",
               params: { requestId: reqId },
               expectMutation: true,
               ifGraphCommit: readRes.graphCommitId ?? undefined,
+              expectedLeaseEpoch: input.expectedLeaseEpoch,
+              expectedLeaseOwner: input.expectedLeaseOwner,
+              lockFilePath: input.lockFilePath,
               client: input.client,
               hostIo: input.hostIo,
               env: input.env,
@@ -122,7 +190,7 @@ const executeClearRepliesCore = (
             yield* invokeWorkflowStoreQueryOnce({
               repoRoot: input.repoRoot,
               operation,
-              queryName: WorkflowStoreOperation.make("wf_reset_message_for_clear_cas"),
+              queryName: "wf_reset_message_for_clear_cas",
               params: {
                 requestId: reqId,
                 expectedReplyId,
@@ -130,10 +198,23 @@ const executeClearRepliesCore = (
                 clearReadMs: null,
               },
               expectMutation: true,
+              expectedLeaseEpoch: input.expectedLeaseEpoch,
+              expectedLeaseOwner: input.expectedLeaseOwner,
+              lockFilePath: input.lockFilePath,
               client: input.client,
               hostIo: input.hostIo,
               env: input.env,
-            }).pipe(Effect.tapError(() => compensateDanglingOnce()))
+            }).pipe(
+              Effect.flatMap((resetRes) =>
+                assertAffectedNodes(
+                  operation,
+                  "wf_reset_message_for_clear_cas",
+                  resetRes.affectedNodes,
+                  { kind: "min", count: 1 },
+                ),
+              ),
+              Effect.catch((commit2Err) => compensateDanglingOnce(reqId, commit2Err)),
+            )
             return
           }
 
@@ -141,9 +222,12 @@ const executeClearRepliesCore = (
           yield* invokeWorkflowStoreQueryOnce({
             repoRoot: input.repoRoot,
             operation,
-            queryName: WorkflowStoreOperation.make("wf_clear_replies_unconditional_delete"),
+            queryName: "wf_clear_replies_unconditional_delete",
             params: { requestId: reqId },
             expectMutation: true,
+            expectedLeaseEpoch: input.expectedLeaseEpoch,
+            expectedLeaseOwner: input.expectedLeaseOwner,
+            lockFilePath: input.lockFilePath,
             client: input.client,
             hostIo: input.hostIo,
             env: input.env,
@@ -153,17 +237,28 @@ const executeClearRepliesCore = (
           yield* invokeWorkflowStoreQueryOnce({
             repoRoot: input.repoRoot,
             operation,
-            queryName: WorkflowStoreOperation.make("wf_reset_message_for_clear"),
+            queryName: "wf_reset_message_for_clear",
             params: {
               requestId: reqId,
               clearReplyId: null,
               clearReadMs: null,
             },
             expectMutation: true,
+            expectedLeaseEpoch: input.expectedLeaseEpoch,
+            expectedLeaseOwner: input.expectedLeaseOwner,
+            lockFilePath: input.lockFilePath,
             client: input.client,
             hostIo: input.hostIo,
             env: input.env,
-          }).pipe(Effect.tapError(() => compensateDanglingOnce()))
+          }).pipe(
+            Effect.flatMap((resetRes) =>
+              assertAffectedNodes(operation, "wf_reset_message_for_clear", resetRes.affectedNodes, {
+                kind: "min",
+                count: 1,
+              }),
+            ),
+            Effect.catch((commit2Err) => compensateDanglingOnce(reqId, commit2Err)),
+          )
         }),
       ),
   })
@@ -172,11 +267,16 @@ const executeClearRepliesCore = (
 /**
  * Performs `D2` two-commit `$expectedReplyId` CAS reply clearing while holding
  * `writeMutex` across both commits, compensating intra-process Commit-2 failures
- * via a single unretried `wf_repair_dangling_requests` call.
+ * via a single unretried `wf_repair_dangling_requests` call and propagating dual
+ * Commit-2 + compensation failures explicitly.
  */
 export const clearOmnigraphReplies = Effect.fn("OmnigraphMessageStorage.clearReplies")(function* (
   input: OmnigraphClearRepliesInput,
-): Effect.fn.Return<void, ClusterError.PersistenceError | WorkflowStoreUnavailableError> {
+): Effect.fn.Return<
+  void,
+  ClusterError.PersistenceError | WorkflowStoreUnavailableError | WriterLeaseHeldError
+> {
+  const operation = WorkflowStoreOperation.make("OmnigraphMessageStorage.clearReplies")
   const writeMutex = input.writeMutex ?? (yield* Semaphore.make(1))
   return yield* executeClearRepliesCore({
     repoRoot: input.repoRoot,
@@ -186,7 +286,10 @@ export const clearOmnigraphReplies = Effect.fn("OmnigraphMessageStorage.clearRep
     hostIo: input.hostIo,
     env: input.env,
     writeMutex,
-  })
+    expectedLeaseEpoch: input.expectedLeaseEpoch,
+    expectedLeaseOwner: input.expectedLeaseOwner,
+    lockFilePath: input.lockFilePath,
+  }).pipe(Effect.mapError((err) => mapUnfencedLeaseError(operation, input.expectedLeaseEpoch, err)))
 })
 
 /**
@@ -197,7 +300,7 @@ export const clearOmnigraphReplies = Effect.fn("OmnigraphMessageStorage.clearRep
 export const repairDanglingProcessedRequests = Effect.fn("OmnigraphMessageStorage.repairDangling")(
   function* (
     input: RepairDanglingRequestsInput,
-  ): Effect.fn.Return<number, WorkflowStoreUnavailableError> {
+  ): Effect.fn.Return<number, WorkflowStoreUnavailableError | WriterLeaseHeldError> {
     const writeMutex = input.writeMutex ?? (yield* Semaphore.make(1))
     const operation = WorkflowStoreOperation.make("OmnigraphMessageStorage.repairDangling")
 
@@ -210,7 +313,7 @@ export const repairDanglingProcessedRequests = Effect.fn("OmnigraphMessageStorag
             const danglingRes = yield* invokeWorkflowStoreQueryOnce({
               repoRoot: input.repoRoot,
               operation,
-              queryName: WorkflowStoreOperation.make("wf_dangling_processed_requests"),
+              queryName: "wf_dangling_processed_requests",
               params: {},
               expectMutation: false,
               client: input.client,
@@ -227,10 +330,10 @@ export const repairDanglingProcessedRequests = Effect.fn("OmnigraphMessageStorag
               return 0
             }
 
-            yield* invokeWorkflowStoreQueryOnce({
+            const repairRes = yield* invokeWorkflowStoreQueryOnce({
               repoRoot: input.repoRoot,
               operation,
-              queryName: WorkflowStoreOperation.make("wf_repair_dangling_requests"),
+              queryName: "wf_repair_dangling_requests",
               params: {
                 messageKeys: idList,
                 clearReplyId: null,
@@ -238,15 +341,26 @@ export const repairDanglingProcessedRequests = Effect.fn("OmnigraphMessageStorag
               },
               expectMutation: true,
               ifGraphCommit: danglingRes.graphCommitId ?? undefined,
+              expectedLeaseEpoch: input.expectedLeaseEpoch,
+              expectedLeaseOwner: input.expectedLeaseOwner,
+              lockFilePath: input.lockFilePath,
               client: input.client,
               hostIo: input.hostIo,
               env: input.env,
             })
+            yield* assertAffectedNodes(
+              operation,
+              "wf_repair_dangling_requests",
+              repairRes.affectedNodes,
+              { kind: "min", count: 1 },
+            )
 
             return idList.length
           }),
         ),
-    })
+    }).pipe(
+      Effect.mapError((err) => mapUnfencedLeaseError(operation, input.expectedLeaseEpoch, err)),
+    )
   },
 )
 

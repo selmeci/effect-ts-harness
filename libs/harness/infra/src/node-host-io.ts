@@ -342,7 +342,7 @@ export const nodeSyncHostIo: ExtendedHostIo = {
   statMtimeMsSync: (filePath: string): number | undefined =>
     statSync(filePath, { throwIfNoEntry: false })?.mtimeMs,
   statModeSync: (filePath: string): number | undefined =>
-    statSync(filePath, { throwIfNoEntry: false })?.mode,
+    lstatSync(filePath, { throwIfNoEntry: false })?.mode,
   chmodSync: (filePath: string, mode: number): void => {
     chmodSync(filePath, mode)
   },

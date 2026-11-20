@@ -1,51 +1,59 @@
-import { createHash, randomUUID } from "node:crypto"
-import { join, resolve } from "node:path"
+import { join } from "node:path"
 import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
-  AbsoluteRepoRoot,
-  BackupDirPath,
-  BackupFileHash,
-  GitCommonDirPath,
+  type BackupDirPath,
+  type BackupFileHash,
+  toBoundedReason,
   WorkflowBackupCount,
   WorkflowBackupFilePath,
-  WorkflowBackupMode,
+  type WorkflowBackupMode,
   type WorkflowBackupSummary,
+  WorkflowBackupTimestampMs,
   type WorkflowRestoreRequest,
   type WorkflowRestoreSummary,
   type WorkflowStoreUnavailableError,
   type WorkspaceFsError,
 } from "@harness/contract"
-import {
-  OmnigraphClient,
-  readAuthTokensFromClusterDir,
-  resolveGitCommonDir,
-  WORKFLOW_OMNIGRAPH_GRAPH_ID,
-} from "@harness/graph"
-import {
-  makeWorkflowGraphBackupLayer,
-  nodeSyncHostIo,
-  resolveWorkflowRuntimePaths,
-  withAdvisoryFlock,
-} from "@harness/infra"
+import { makeWorkflowGraphBackupLayer, nodeSyncHostIo } from "@harness/infra"
 import { WorkflowGraphBackup } from "@harness/service"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { isValidLockId, probeOmnigraphServerReady } from "./omnigraph-safety-helpers.js"
+import {
+  clearPendingWorkflowRestoreJournal,
+  computeSha256Hex,
+  decodeAbsClusterRepoRoot,
+  makeWorkflowClientForCluster,
+  type PendingRestoreJournalRead,
+  readClusterConfigStampDigest,
+  readPendingWorkflowRestoreJournal,
+  type ReadPendingWorkflowRestoreJournalOptions,
+  resolveWorkflowBackupDir,
+  verifyWorkflowGraphEmptyBeforeNonRebuildRestore,
+  withClusterDaemonLockIfGit,
+  type WorkflowBeforeRebuildResult,
+  writePendingWorkflowRestoreJournal,
+  writeSecureBackupFileAtomic,
+} from "./omnigraph-workflow-journal.js"
+
+export {
+  clearPendingWorkflowRestoreJournal,
+  computeSha256Hex,
+  type PendingRestoreJournalRead,
+  readClusterConfigStampDigest,
+  readPendingWorkflowRestoreJournal,
+  type ReadPendingWorkflowRestoreJournalOptions,
+  resolveWorkflowBackupDir,
+  verifyWorkflowGraphEmptyBeforeNonRebuildRestore,
+  withClusterDaemonLockIfGit,
+  type WorkflowBeforeRebuildResult,
+  writePendingWorkflowRestoreJournal,
+}
 
 export interface WorkflowRebuildBackupArtifact {
   readonly mode: WorkflowBackupMode
   readonly sha256: BackupFileHash
 }
-
-export type WorkflowBeforeRebuildResult =
-  | { readonly _tag: "Skipped"; readonly reason: "no-cluster" | "no-workflow-graph" }
-  | {
-      readonly _tag: "BackedUp"
-      readonly backupFile: WorkflowBackupFilePath
-      readonly sha256: BackupFileHash
-      readonly entityCount: WorkflowBackupCount
-    }
-  | { readonly _tag: "Failed"; readonly reason: string }
 
 const LockJsonSchema = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
 
@@ -66,9 +74,6 @@ const ExportEdgeRecordSchema = Schema.Struct({
 const ExportRecordLineSchema = Schema.fromJsonString(
   Schema.Union([ExportNodeRecordSchema, ExportEdgeRecordSchema]),
 )
-
-const computeSha256Hex = (content: string): BackupFileHash =>
-  BackupFileHash.make(createHash("sha256").update(content, "utf8").digest("hex"))
 
 export const matchExecSyncStdout = (
   label: string,
@@ -122,13 +127,13 @@ export function unlockOmnigraphClusterIfNeeded(
     const rawLock = match(readRes)
       .with({ _tag: "Success" }, ({ success }) => success)
       .with({ _tag: "Failure" }, ({ failure }) => {
-        const reason = `Failed to read ${lockPath}: ${failure instanceof Error ? failure.message : String(failure)}`
+        const reason = toBoundedReason(failure, `Failed to read ${lockPath}`)
         process.stderr.write(`[harness:omnigraph] ${reason}\n`)
         return undefined
       })
       .exhaustive()
     if (rawLock === undefined) {
-      return { ok: false, reason: `failed-to-read-lock-json` }
+      return { ok: false, reason: "failed-to-read-lock-json" }
     }
     const parsedOpt = Schema.decodeOption(LockJsonSchema)(rawLock)
     const decodedOk = match(parsedOpt)
@@ -153,7 +158,7 @@ export function unlockOmnigraphClusterIfNeeded(
       })
       .exhaustive()
     if (!decodedOk) {
-      return { ok: false, reason: `invalid-lock-json` }
+      return { ok: false, reason: "invalid-lock-json" }
     }
   }
   for (const lockId of lockIds) {
@@ -167,7 +172,7 @@ export function unlockOmnigraphClusterIfNeeded(
     const unlockOk = match(execTry)
       .with({ _tag: "Failure" }, ({ failure }) => {
         process.stderr.write(
-          `[harness:omnigraph] force-unlock threw for ${lockId}: ${failure instanceof Error ? failure.message : String(failure)}\n`,
+          `[harness:omnigraph] force-unlock threw for ${lockId}: ${toBoundedReason(failure)}\n`,
         )
         return false
       })
@@ -182,230 +187,6 @@ export function unlockOmnigraphClusterIfNeeded(
     }
   }
   return { ok: true }
-}
-
-const PENDING_RESTORE_JOURNAL_NAME = "pending-workflow-restore.json"
-
-const PendingRestoreJournalSchema = Schema.fromJsonString(
-  Schema.Struct({
-    backupFile: WorkflowBackupFilePath,
-    sha256: BackupFileHash,
-    entityCount: WorkflowBackupCount,
-    createdAt: Schema.String,
-  }),
-)
-
-const decodeAbsClusterRepoRoot = (clusterRepoRoot: string): AbsoluteRepoRoot | undefined =>
-  match(Schema.decodeOption(AbsoluteRepoRoot)(resolve(clusterRepoRoot)))
-    .with({ _tag: "Some" }, ({ value }) => value)
-    .with({ _tag: "None" }, () => undefined)
-    .exhaustive()
-
-const makeWorkflowClientForCluster = (baseUrl: string, clusterRootDir: string) => {
-  const cliToken = readAuthTokensFromClusterDir(clusterRootDir, nodeSyncHostIo, "harness-cli")
-  return new OmnigraphClient({
-    baseUrl,
-    graphId: WORKFLOW_OMNIGRAPH_GRAPH_ID,
-    ...(cliToken !== undefined ? { token: cliToken } : {}),
-  })
-}
-
-export type PendingRestoreJournalRead =
-  | { readonly _tag: "None" }
-  | {
-      readonly _tag: "Some"
-      readonly backup: Extract<WorkflowBeforeRebuildResult, { readonly _tag: "BackedUp" }>
-    }
-  | { readonly _tag: "Invalid"; readonly reason: string }
-
-/**
- * Resolves the canonical workflow backup directory under `<git-common-dir>/harness/workflow-backups`,
- * falling back to `<clusterRepoRoot>/.harness/workflow-backups` outside git checkouts.
- */
-export const resolveWorkflowBackupDir = (clusterRepoRoot: string): BackupDirPath => {
-  const absRoot = resolve(clusterRepoRoot)
-  const commonGitDir = resolveGitCommonDir(absRoot, nodeSyncHostIo)
-  if (commonGitDir !== null) {
-    const decodedGitDir = Schema.decodeOption(GitCommonDirPath)(commonGitDir)
-    const resolvedFromGit = match(decodedGitDir)
-      .with({ _tag: "Some" }, ({ value }) => resolveWorkflowRuntimePaths(value).backupDirPath)
-      .with({ _tag: "None" }, () => undefined)
-      .exhaustive()
-    if (resolvedFromGit !== undefined) {
-      return resolvedFromGit
-    }
-  }
-  return BackupDirPath.make(join(absRoot, ".harness", "workflow-backups"))
-}
-
-const writeSecureBackupFileAtomic = (
-  dirPath: string,
-  targetPath: string,
-  content: string,
-  expectedSha256?: BackupFileHash,
-): Result.Result<void, string> => {
-  if (nodeSyncHostIo.isSymbolicLinkSync(dirPath)) {
-    return Result.fail(`Refusing symlink workflow backup dir: ${dirPath}`)
-  }
-  if (nodeSyncHostIo.isSymbolicLinkSync(targetPath)) {
-    return Result.fail(`Refusing symlink workflow backup target: ${targetPath}`)
-  }
-  const tmpPath = `${targetPath}.${process.pid}.${randomUUID()}.tmp`
-  const res = Result.try({
-    try: () => {
-      nodeSyncHostIo.mkdirRecursiveSync(dirPath, 0o700)
-      nodeSyncHostIo.chmodSync(dirPath, 0o700)
-      nodeSyncHostIo.writeTextWithModeSync(tmpPath, content, 0o600)
-      nodeSyncHostIo.renameSync(tmpPath, targetPath)
-      nodeSyncHostIo.chmodSync(targetPath, 0o600)
-      if (expectedSha256 !== undefined) {
-        return computeSha256Hex(nodeSyncHostIo.readTextSync(targetPath)) === expectedSha256
-      }
-      return true
-    },
-    catch: (err) => (err instanceof Error ? err.message : String(err)),
-  })
-  if (nodeSyncHostIo.existsSync(tmpPath)) {
-    Result.try(() => {
-      nodeSyncHostIo.unlinkSync(tmpPath)
-    })
-  }
-  return Result.flatMap(res, (shaOk) =>
-    shaOk ? Result.void : Result.fail(`Backup SHA-256 verification mismatch for ${targetPath}`),
-  )
-}
-
-export const writePendingWorkflowRestoreJournal = (
-  clusterRepoRoot: string,
-  backup: Extract<WorkflowBeforeRebuildResult, { readonly _tag: "BackedUp" }>,
-): Result.Result<void, string> => {
-  const backupDir = resolveWorkflowBackupDir(clusterRepoRoot)
-  const payload = JSON.stringify(
-    {
-      backupFile: backup.backupFile,
-      sha256: backup.sha256,
-      entityCount: backup.entityCount,
-      createdAt: new Date().toISOString(),
-    },
-    null,
-    2,
-  )
-  return writeSecureBackupFileAtomic(
-    backupDir,
-    join(backupDir, PENDING_RESTORE_JOURNAL_NAME),
-    payload,
-  )
-}
-
-export const readPendingWorkflowRestoreJournal = (
-  clusterRepoRoot: string,
-): PendingRestoreJournalRead => {
-  const backupDir = resolveWorkflowBackupDir(clusterRepoRoot)
-  if (nodeSyncHostIo.isSymbolicLinkSync(backupDir)) {
-    return { _tag: "Invalid", reason: `Refusing symlink workflow backup dir: ${backupDir}` }
-  }
-  const journalPath = join(backupDir, PENDING_RESTORE_JOURNAL_NAME)
-  if (nodeSyncHostIo.isSymbolicLinkSync(journalPath)) {
-    return { _tag: "Invalid", reason: `Refusing symlink pending-restore journal: ${journalPath}` }
-  }
-  if (!nodeSyncHostIo.existsSync(journalPath)) {
-    return { _tag: "None" }
-  }
-  if (!nodeSyncHostIo.isFileSync(journalPath)) {
-    return {
-      _tag: "Invalid",
-      reason: `Pending-restore journal is not a regular file: ${journalPath}`,
-    }
-  }
-  return match(Result.try(() => nodeSyncHostIo.readTextSync(journalPath)))
-    .with({ _tag: "Failure" }, ({ failure }) => ({
-      _tag: "Invalid" as const,
-      reason: `Failed to read ${journalPath}: ${failure instanceof Error ? failure.message : String(failure)}`,
-    }))
-    .with({ _tag: "Success" }, ({ success: raw }) =>
-      match(Schema.decodeOption(PendingRestoreJournalSchema)(raw))
-        .with({ _tag: "None" }, () => ({
-          _tag: "Invalid" as const,
-          reason: `Corrupt pending-restore journal JSON at ${journalPath}`,
-        }))
-        .with({ _tag: "Some" }, ({ value }) => {
-          if (
-            nodeSyncHostIo.isSymbolicLinkSync(value.backupFile) ||
-            !nodeSyncHostIo.isFileSync(value.backupFile)
-          ) {
-            return {
-              _tag: "Invalid" as const,
-              reason: `Pending-restore backup file missing or unsafe: ${value.backupFile}`,
-            }
-          }
-          return match(
-            Result.try(() => computeSha256Hex(nodeSyncHostIo.readTextSync(value.backupFile))),
-          )
-            .with({ _tag: "Failure" }, ({ failure }) => ({
-              _tag: "Invalid" as const,
-              reason: `Failed to verify pending backup ${value.backupFile}: ${failure instanceof Error ? failure.message : String(failure)}`,
-            }))
-            .with({ _tag: "Success" }, ({ success: actualSha }) =>
-              actualSha === value.sha256
-                ? {
-                    _tag: "Some" as const,
-                    backup: {
-                      _tag: "BackedUp" as const,
-                      backupFile: value.backupFile,
-                      sha256: value.sha256,
-                      entityCount: value.entityCount,
-                    },
-                  }
-                : {
-                    _tag: "Invalid" as const,
-                    reason: `Pending-restore backup SHA-256 mismatch for ${value.backupFile}`,
-                  },
-            )
-            .exhaustive()
-        })
-        .exhaustive(),
-    )
-    .exhaustive()
-}
-
-export const clearPendingWorkflowRestoreJournal = (clusterRepoRoot: string): void => {
-  const journalPath = join(resolveWorkflowBackupDir(clusterRepoRoot), PENDING_RESTORE_JOURNAL_NAME)
-  if (!nodeSyncHostIo.isSymbolicLinkSync(journalPath) && nodeSyncHostIo.existsSync(journalPath)) {
-    Result.try(() => {
-      nodeSyncHostIo.unlinkSync(journalPath)
-    })
-  }
-}
-
-/**
- * Acquires `<git-common-dir>/harness/daemon.lock` inside `.startup.lock` when operating inside
- * a git checkout, matching `runOfflineWorkflowMaintenance` lock ordering (`.startup.lock` -> `daemon.lock`).
- */
-export const withClusterDaemonLockIfGit = (
-  clusterRepoRoot: string,
-  effect: Effect.Effect<boolean>,
-): Effect.Effect<boolean> => {
-  const commonGitDir = resolveGitCommonDir(resolve(clusterRepoRoot), nodeSyncHostIo)
-  if (commonGitDir === null) {
-    return effect
-  }
-  const decoded = Schema.decodeOption(GitCommonDirPath)(commonGitDir)
-  return match(decoded)
-    .with({ _tag: "None" }, () => effect)
-    .with({ _tag: "Some" }, ({ value }) => {
-      const { lockFilePath } = resolveWorkflowRuntimePaths(value)
-      return withAdvisoryFlock(lockFilePath, effect, nodeSyncHostIo).pipe(
-        Effect.catch((err) =>
-          Effect.sync(() => {
-            process.stderr.write(
-              `[harness:omnigraph] Error: unable to acquire workflow daemon lock (${err.message}); aborting cluster lifecycle change\n`,
-            )
-            return false
-          }),
-        ),
-      )
-    })
-    .exhaustive()
 }
 
 /**
@@ -449,13 +230,17 @@ const runOfflineWorkflowBackupExport = (options: {
   readonly backupDir: BackupDirPath
 }): WorkflowBeforeRebuildResult => {
   if (!nodeSyncHostIo.existsSync(options.omnigraphBin)) {
-    const reason = `Missing omnigraph binary (${options.omnigraphBin}) for offline harness-workflows backup`
+    const reason = toBoundedReason(
+      `Missing omnigraph binary (${options.omnigraphBin}) for offline harness-workflows backup`,
+    )
     process.stderr.write(`[harness:omnigraph] Error: ${reason}\n`)
     return { _tag: "Failed", reason }
   }
   const preUnlock = unlockOmnigraphClusterIfNeeded(options.omnigraphBin, options.clusterRootDir)
   if (!preUnlock.ok) {
-    const reason = `Failed to unlock cluster before offline workflow backup: ${preUnlock.reason ?? "unknown"}`
+    const reason = toBoundedReason(
+      `Failed to unlock cluster before offline workflow backup: ${preUnlock.reason ?? "unknown"}`,
+    )
     process.stderr.write(`[harness:omnigraph] Error: ${reason}\n`)
     return { _tag: "Failed", reason }
   }
@@ -477,7 +262,7 @@ const runOfflineWorkflowBackupExport = (options: {
   const rawStdout = match(execAttempt)
     .with({ _tag: "Failure" }, ({ failure }) => {
       process.stderr.write(
-        `[harness:omnigraph] Error: offline harness-workflows export threw: ${failure instanceof Error ? failure.message : String(failure)}\n`,
+        `[harness:omnigraph] Error: offline harness-workflows export threw: ${toBoundedReason(failure)}\n`,
       )
       return undefined
     })
@@ -486,7 +271,7 @@ const runOfflineWorkflowBackupExport = (options: {
     )
     .exhaustive()
   if (rawStdout === undefined) {
-    return { _tag: "Failed", reason: "offline-export-failed" }
+    return { _tag: "Failed", reason: toBoundedReason("offline-export-failed") }
   }
 
   const lines = rawStdout
@@ -500,7 +285,9 @@ const runOfflineWorkflowBackupExport = (options: {
       .with({ _tag: "None" }, () => false)
       .exhaustive()
     if (!validLine) {
-      const reason = `Offline workflow backup NDJSON validation failed at line ${idx + 1}`
+      const reason = toBoundedReason(
+        `Offline workflow backup NDJSON validation failed at line ${idx + 1}`,
+      )
       process.stderr.write(`[harness:omnigraph] Error: ${reason}\n`)
       return { _tag: "Failed", reason }
     }
@@ -508,7 +295,7 @@ const runOfflineWorkflowBackupExport = (options: {
 
   const content = lines.length === 0 ? "" : `${lines.join("\n")}\n`
   const sha256 = computeSha256Hex(content)
-  const timestampMs = Math.max(0, Math.floor(Date.now()))
+  const timestampMs = WorkflowBackupTimestampMs.make(Math.max(0, Math.floor(Date.now())))
   const backupFile = WorkflowBackupFilePath.make(
     join(options.backupDir, `workflow-backup-${timestampMs}-${sha256.slice(0, 12)}.ndjson`),
   )
@@ -520,6 +307,7 @@ const runOfflineWorkflowBackupExport = (options: {
     .with({ _tag: "Success" }, () => ({
       _tag: "BackedUp" as const,
       backupFile,
+      timestampMs,
       sha256,
       entityCount: WorkflowBackupCount.make(lines.length),
     }))
@@ -565,7 +353,9 @@ export const runWorkflowBackupBeforeRebuild = (options: {
 
     const absClusterRepoRoot = decodeAbsClusterRepoRoot(options.clusterRepoRoot)
     if (absClusterRepoRoot === undefined) {
-      const reason = `Invalid absolute clusterRepoRoot for workflow backup: ${options.clusterRepoRoot}`
+      const reason = toBoundedReason(
+        `Invalid absolute clusterRepoRoot for workflow backup: ${options.clusterRepoRoot}`,
+      )
       process.stderr.write(`[harness:omnigraph] Error: ${reason}\n`)
       return { _tag: "Failed" as const, reason }
     }
@@ -576,15 +366,17 @@ export const runWorkflowBackupBeforeRebuild = (options: {
       Effect.map((summary): WorkflowBeforeRebuildResult => ({
         _tag: "BackedUp",
         backupFile: summary.backupFile,
+        timestampMs: summary.timestampMs,
         sha256: summary.sha256,
         entityCount: summary.entityCount,
       })),
       Effect.catch((err): Effect.Effect<WorkflowBeforeRebuildResult> =>
         Effect.sync(() => {
+          const reason = toBoundedReason(err, "Pre-rebuild harness-workflows backup failed")
           process.stderr.write(
-            `[harness:omnigraph] Error: pre-rebuild harness-workflows backup failed: ${err.message}\n`,
+            `[harness:omnigraph] Error: pre-rebuild harness-workflows backup failed: ${reason}\n`,
           )
-          return { _tag: "Failed", reason: err.message }
+          return { _tag: "Failed", reason }
         }),
       ),
     )
@@ -603,7 +395,7 @@ export const runWorkflowRestoreAfterRebuild = (options: {
   match(options.backup)
     .with({ _tag: "Skipped" }, () => Effect.succeed(true))
     .with({ _tag: "Failed" }, () => Effect.succeed(false))
-    .with({ _tag: "BackedUp" }, ({ backupFile, sha256 }) =>
+    .with({ _tag: "BackedUp" }, ({ backupFile, sha256, entityCount }) =>
       Effect.gen(function* () {
         const absClusterRepoRoot = decodeAbsClusterRepoRoot(options.clusterRepoRoot)
         if (absClusterRepoRoot === undefined) {
@@ -616,15 +408,23 @@ export const runWorkflowRestoreAfterRebuild = (options: {
         const client = makeWorkflowClientForCluster(options.baseUrl, options.clusterRootDir)
         return yield* afterRebuildWorkflowBackup({
           backupFile,
-          mode: WorkflowBackupMode.make("merge"),
+          mode: "merge",
           expectedSha256: sha256,
         }).pipe(
           Effect.provide(makeWorkflowGraphBackupLayer({ repoRoot: absClusterRepoRoot, client })),
-          Effect.map(() => true),
+          Effect.map((summary) => {
+            if (summary.restoredEntityCount !== entityCount) {
+              process.stderr.write(
+                `[harness:omnigraph] Error: post-rebuild harness-workflows restore entityCount mismatch (expected ${entityCount}, restored ${summary.restoredEntityCount})\n`,
+              )
+              return false
+            }
+            return true
+          }),
           Effect.catch((err) =>
             Effect.sync(() => {
               process.stderr.write(
-                `[harness:omnigraph] Error: post-rebuild harness-workflows restore failed: ${err.message}\n`,
+                `[harness:omnigraph] Error: post-rebuild harness-workflows restore failed: ${toBoundedReason(err)}\n`,
               )
               return false
             }),

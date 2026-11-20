@@ -352,6 +352,13 @@ const makeUnixSocketDaemonLayer = (
           const socketPath = options?.socketPathOverride ?? resolveHarnessDaemonSocketPath(repoRoot)
           const dirPath = path.dirname(socketPath)
 
+          if (nodeFs.lstatSync(dirPath, { throwIfNoEntry: false })?.isSymbolicLink() === true) {
+            return yield* toDaemonServerError(
+              socketPath,
+              new Error(`Refusing symlink daemon socket directory: ${dirPath}`),
+            )
+          }
+
           const dirExistedBefore = yield* fs
             .exists(dirPath)
             .pipe(Effect.mapError((err) => toDaemonServerError(socketPath, err)))

@@ -1,21 +1,24 @@
 import { execFile } from "node:child_process"
-import { randomBytes, randomUUID } from "node:crypto"
-import { statSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { randomUUID } from "node:crypto"
+import { lstatSync } from "node:fs"
+import { join } from "node:path"
 import { promisify } from "node:util"
 import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   type AbsoluteRepoRoot,
   type BackupDirPath,
+  type ErrorReasonMessage,
   type GitCommonDirPath,
   OmnigraphServerMetaSchema,
+  toBoundedReason,
   toErrorReasonMessage,
   WorkflowBackupCount,
   WorkflowBackupFilePath,
   WorkflowBackupTimestampMs,
+  WorkflowCleanupKeepVersions,
   WorkflowStoreOperation,
-  type WorkflowStoreUnavailableError,
+  WorkflowStoreUnavailableError,
   WorkspaceFilePath,
   WorkspaceFsError,
   WorkspaceFsOperation,
@@ -24,25 +27,23 @@ import { resolveOmnigraphClusterDir, WORKFLOW_OMNIGRAPH_GRAPH_ID } from "@harnes
 import type { ExtendedHostIo } from "@harness/service/host-io"
 import { nodeSyncHostIo } from "./node-host-io.js"
 import { toWorkflowStoreUnavailableError } from "./omnigraph-workflow-store.js"
+import { withOmnigraphClusterStartupLock } from "./workflow/cluster-startup-lock.js"
+import {
+  computeSha256Hex,
+  parseAndValidateExportNdjson,
+  writeSecureBackupAndVerifySha,
+} from "./workflow-graph-backup.js"
 import { resolveWorkflowRuntimePaths } from "./worktree-repo-root.js"
 import { isLocalPidAlive, withAdvisoryFlock } from "./writer-lease.js"
 
 const execFileAsync = promisify(execFile)
 
 /** Default number of recent Lance MVCC versions retained during offline cleanup. */
-export const DEFAULT_WORKFLOW_CLEANUP_KEEP_VERSIONS: WorkflowBackupCount =
-  WorkflowBackupCount.make(1)
+export const DEFAULT_WORKFLOW_CLEANUP_KEEP_VERSIONS: WorkflowCleanupKeepVersions =
+  WorkflowCleanupKeepVersions.make(1)
 
 const LOCK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
-const RAW_STARTUP_LOCK_GRACE_MS = 2_000
 const LockJsonSchema = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
-const StartupLockJsonSchema = Schema.fromJsonString(
-  Schema.Struct({
-    pid: Schema.optional(Schema.Finite),
-    lockToken: Schema.optional(Schema.String),
-    createdAtMs: Schema.optional(Schema.Finite),
-  }),
-)
 const ServerPidFallbackSchema = Schema.fromJsonString(
   Schema.Struct({
     pid: Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(1))),
@@ -57,7 +58,7 @@ export interface WorkflowMaintenanceInput {
   readonly repoRoot: AbsoluteRepoRoot
   readonly commonGitDir: GitCommonDirPath
   readonly backupDir: BackupDirPath
-  readonly keepVersions?: WorkflowBackupCount | undefined
+  readonly keepVersions?: WorkflowCleanupKeepVersions | undefined
   readonly omnigraphBin?: string | undefined
   readonly clusterDir?: string | undefined
   readonly hostIo?: ExtendedHostIo | undefined
@@ -92,181 +93,38 @@ const resolveDefaultOmnigraphBin = (env: Readonly<Record<string, string | undefi
   env.OMNIGRAPH_BIN?.trim() ||
   join(env.HOME ?? process.env.HOME ?? "/root", ".local", "bin", "omnigraph")
 
-const measureTreeBytes = (targetPath: string, hostIo: ExtendedHostIo): number => {
+const measureTreeBytes = (
+  targetPath: string,
+  hostIo: ExtendedHostIo,
+): Result.Result<number, ErrorReasonMessage> => {
   if (!hostIo.existsSync(targetPath)) {
-    return 0
+    return Result.succeed(0)
   }
-  const res = Result.try(() => {
-    let total = 0
-    const walk = (current: string): void => {
-      if (hostIo.isDirectorySync(current)) {
-        for (const entry of hostIo.readdirSync(current)) {
-          walk(join(current, entry.name))
-        }
-        return
-      }
-      if (hostIo.isFileSync(current)) {
-        const st = statSync(current, { throwIfNoEntry: false })
-        if (st !== undefined) {
-          total += st.size
-        }
-      }
-    }
-    walk(targetPath)
-    return total
-  })
-  return match(res)
-    .with({ _tag: "Success" }, ({ success }) => success)
-    .with({ _tag: "Failure" }, () => 0)
-    .exhaustive()
-}
-
-const compareAndUnlinkStaleStartupLock = (
-  lockPath: string,
-  expectedRaw: string,
-  hostIo: ExtendedHostIo,
-): boolean =>
-  Result.getOrElse(
-    Result.try(() => {
-      if (hostIo.readTextSync(lockPath) !== expectedRaw) return false
-      const tombstonePath = `${lockPath}.tombstone.${process.pid}.${randomBytes(6).toString("hex")}`
-      hostIo.renameSync(lockPath, tombstonePath)
-      const movedMatches = Result.getOrElse(
-        Result.try(() => hostIo.readTextSync(tombstonePath) === expectedRaw),
-        () => false,
-      )
-      if (!movedMatches) {
-        Result.try(() => {
-          hostIo.renameSync(tombstonePath, lockPath)
-        })
-        return false
-      }
-      Result.try(() => {
-        hostIo.unlinkSync(tombstonePath)
-      })
-      return true
-    }),
-    () => false,
-  )
-
-interface StartupLockHandle {
-  readonly lockPath: string
-  readonly lockToken: string
-}
-
-const withOmnigraphClusterStartupLock = <A, E, R>(
-  clusterDir: string,
-  hostIo: ExtendedHostIo,
-  nowMsFn: () => number,
-  pidAliveFn: (pid: number) => boolean,
-  operation: WorkflowStoreOperation,
-  use: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E | WorkflowStoreUnavailableError, R> => {
-  const lockPath = `${clusterDir}.startup.lock`
-  const lockToken = randomBytes(16).toString("hex")
-
-  const acquire = Effect.suspend(
-    (): Effect.Effect<StartupLockHandle, WorkflowStoreUnavailableError> => {
-      const prepRes = Result.try({
-        try: () => {
-          hostIo.mkdirRecursiveSync(dirname(clusterDir), 0o700)
-        },
-        catch: (err) => toErrorReasonMessage(err, `Failed to create lock dir for ${lockPath}`),
-      })
-      if (
-        match(prepRes)
-          .with({ _tag: "Failure" }, () => true)
-          .with({ _tag: "Success" }, () => false)
-          .exhaustive()
-      ) {
-        const msg = match(prepRes)
-          .with({ _tag: "Failure" }, ({ failure }) => failure)
-          .with({ _tag: "Success" }, () => "")
-          .exhaustive()
-        return Effect.fail(toWorkflowStoreUnavailableError(operation, msg))
-      }
-      if (hostIo.isSymbolicLinkSync(lockPath)) {
-        return Effect.fail(
-          toWorkflowStoreUnavailableError(
-            operation,
-            `Refusing symlink cluster startup lock: ${lockPath}`,
-          ),
-        )
-      }
-      const payload = JSON.stringify({ pid: process.pid, lockToken, createdAtMs: nowMsFn() })
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        const writeStep = match(hostIo.tryWriteExclusiveTextSync(lockPath, payload, 0o600))
-          .with({ _tag: "Written" }, () => ({
-            done: true as const,
-            result: Effect.succeed<StartupLockHandle>({ lockPath, lockToken }),
-          }))
-          .with({ _tag: "Failed" }, ({ message }) => ({
-            done: true as const,
-            result: Effect.fail<WorkflowStoreUnavailableError>(
-              toWorkflowStoreUnavailableError(
-                operation,
-                `Startup lock ${lockPath} failed: ${message}`,
-              ),
-            ),
-          }))
-          .with({ _tag: "Exists" }, () => ({
-            done: false as const,
-            result: undefined,
-          }))
-          .exhaustive()
-        if (writeStep.done) {
-          return writeStep.result
-        }
-        const existingRaw = match(Result.try(() => hostIo.readTextSync(lockPath)))
-          .with({ _tag: "Success" }, ({ success }) => success)
-          .with({ _tag: "Failure" }, () => undefined)
-          .exhaustive()
-        if (existingRaw === undefined) {
-          if (!hostIo.existsSync(lockPath)) continue
-          return Effect.fail(
-            toWorkflowStoreUnavailableError(operation, `Cluster startup lock held at ${lockPath}`),
-          )
-        }
-        const canBreakStale = match(Schema.decodeOption(StartupLockJsonSchema)(existingRaw))
-          .with(
-            { _tag: "Some" },
-            ({ value }) => !(typeof value.pid === "number" && pidAliveFn(value.pid)),
-          )
-          .with({ _tag: "None" }, () => {
-            const mtimeMs = hostIo.statMtimeMsSync(lockPath)
-            return mtimeMs !== undefined && nowMsFn() - mtimeMs >= RAW_STARTUP_LOCK_GRACE_MS
-          })
-          .exhaustive()
-        if (!canBreakStale || !compareAndUnlinkStaleStartupLock(lockPath, existingRaw, hostIo)) {
-          return Effect.fail(
-            toWorkflowStoreUnavailableError(operation, `Cluster startup lock held at ${lockPath}`),
-          )
-        }
-      }
-      return Effect.fail(
-        toWorkflowStoreUnavailableError(operation, `Cluster startup lock held at ${lockPath}`),
-      )
-    },
-  )
-
-  const release = (handle: StartupLockHandle): Effect.Effect<void> =>
-    Effect.sync(() => {
-      Result.try(() => {
-        if (hostIo.isSymbolicLinkSync(handle.lockPath) || !hostIo.existsSync(handle.lockPath)) {
+  return Result.try({
+    try: () => {
+      let total = 0
+      const walk = (current: string): void => {
+        if (hostIo.isSymbolicLinkSync(current)) {
           return
         }
-        match(Schema.decodeOption(StartupLockJsonSchema)(hostIo.readTextSync(handle.lockPath)))
-          .with({ _tag: "Some" }, ({ value }) => {
-            if (value.pid === process.pid && value.lockToken === handle.lockToken) {
-              hostIo.unlinkSync(handle.lockPath)
-            }
-          })
-          .with({ _tag: "None" }, () => undefined)
-          .exhaustive()
-      })
-    })
-
-  return Effect.acquireUseRelease(acquire, () => use, release)
+        if (hostIo.isDirectorySync(current)) {
+          for (const entry of hostIo.readdirSync(current)) {
+            walk(join(current, entry.name))
+          }
+          return
+        }
+        if (hostIo.isFileSync(current)) {
+          const st = lstatSync(current, { throwIfNoEntry: false })
+          if (st !== undefined && !st.isSymbolicLink()) {
+            total += st.size
+          }
+        }
+      }
+      walk(targetPath)
+      return total
+    },
+    catch: (err) => toErrorReasonMessage(err, `Failed to measure bytes under ${targetPath}`),
+  })
 }
 
 const runOmnigraphCli = (
@@ -289,6 +147,33 @@ const runOmnigraphCli = (
     catch: (cause) => toWorkflowStoreUnavailableError(operation, cause),
   })
 
+const readLockIdsFromLockJson = (
+  lockJsonPath: string,
+  hostIo: ExtendedHostIo,
+): ReadonlyArray<string> => {
+  const ids = new Set<string>()
+  if (!hostIo.existsSync(lockJsonPath) || hostIo.isSymbolicLinkSync(lockJsonPath)) {
+    return []
+  }
+  match(Result.try(() => hostIo.readTextSync(lockJsonPath)))
+    .with({ _tag: "Failure" }, () => undefined)
+    .with({ _tag: "Success" }, ({ success }) => {
+      match(Schema.decodeOption(LockJsonSchema)(success))
+        .with({ _tag: "None" }, () => undefined)
+        .with({ _tag: "Some" }, ({ value }) => {
+          for (const key of ["lock_id", "id", "lockId"]) {
+            const val = value[key]
+            if (typeof val === "string" && LOCK_ID_PATTERN.test(val)) {
+              ids.add(val)
+            }
+          }
+        })
+        .exhaustive()
+    })
+    .exhaustive()
+  return Array.from(ids)
+}
+
 const collectAdmissionLockIds = (
   clusterDir: string,
   hostIo: ExtendedHostIo,
@@ -307,28 +192,36 @@ const collectAdmissionLockIds = (
     return Array.from(runLockIds)
   }
 
-  const fallbackLockIds = new Set<string>()
-  const lockJsonPath = join(clusterDir, "__cluster", "lock.json")
-  if (hostIo.existsSync(lockJsonPath)) {
-    match(Result.try(() => hostIo.readTextSync(lockJsonPath)))
-      .with({ _tag: "Failure" }, () => undefined)
-      .with({ _tag: "Success" }, ({ success }) => {
-        match(Schema.decodeOption(LockJsonSchema)(success))
-          .with({ _tag: "None" }, () => undefined)
-          .with({ _tag: "Some" }, ({ value }) => {
-            for (const key of ["lock_id", "id", "lockId"]) {
-              const val = value[key]
-              if (typeof val === "string" && LOCK_ID_PATTERN.test(val)) {
-                fallbackLockIds.add(val)
-              }
-            }
-          })
-          .exhaustive()
-      })
-      .exhaustive()
-  }
-  return Array.from(fallbackLockIds)
+  return readLockIdsFromLockJson(join(clusterDir, "__cluster", "lock.json"), hostIo)
 }
+
+const assertNoPreexistingAdmissionLock = (
+  clusterDir: string,
+  hostIo: ExtendedHostIo,
+  operation: WorkflowStoreOperation,
+): Effect.Effect<void, WorkflowStoreUnavailableError> =>
+  Effect.suspend(() => {
+    const lockJsonPath = join(clusterDir, "__cluster", "lock.json")
+    if (hostIo.isSymbolicLinkSync(lockJsonPath)) {
+      return Effect.fail(
+        toWorkflowStoreUnavailableError(
+          operation,
+          `Refusing offline maintenance: symlink admission lock at ${lockJsonPath}`,
+        ),
+      )
+    }
+    if (!hostIo.existsSync(lockJsonPath)) {
+      return Effect.void
+    }
+    const existingIds = readLockIdsFromLockJson(lockJsonPath, hostIo)
+    const idSuffix = existingIds.length > 0 ? ` (lockId=${existingIds.join(",")})` : ""
+    return Effect.fail(
+      toWorkflowStoreUnavailableError(
+        operation,
+        `Refusing offline maintenance while pre-existing foreign cluster admission lock exists at ${lockJsonPath}${idSuffix}`,
+      ),
+    )
+  })
 
 const forceUnlockClusterAdmissionLocks = (
   omnigraphBin: string,
@@ -360,11 +253,31 @@ const assertOmnigraphServerStopped = (
 ): Effect.Effect<void, WorkflowStoreUnavailableError> =>
   Effect.suspend(() => {
     const serverJsonPath = join(clusterDir, "server.json")
+    if (hostIo.isSymbolicLinkSync(serverJsonPath)) {
+      return Effect.fail(
+        toWorkflowStoreUnavailableError(
+          operation,
+          `Refusing offline maintenance: symlink server metadata at ${serverJsonPath}`,
+        ),
+      )
+    }
     if (!hostIo.existsSync(serverJsonPath)) {
       return Effect.void
     }
-    return match(Result.try(() => hostIo.readTextSync(serverJsonPath)))
-      .with({ _tag: "Failure" }, () => Effect.void)
+    return match(
+      Result.try({
+        try: () => hostIo.readTextSync(serverJsonPath),
+        catch: (err) => toErrorReasonMessage(err, `Failed to read ${serverJsonPath}`),
+      }),
+    )
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        Effect.fail(
+          toWorkflowStoreUnavailableError(
+            operation,
+            `Failed to read ${serverJsonPath} to verify omnigraph-server is stopped: ${failure}`,
+          ),
+        ),
+      )
       .with({ _tag: "Success" }, ({ success }) => {
         const pidFromMeta = match(decodeServerMetaOption(success))
           .with({ _tag: "Some" }, ({ value }) => value.pid)
@@ -375,7 +288,15 @@ const assertOmnigraphServerStopped = (
               .exhaustive(),
           )
           .exhaustive()
-        if (pidFromMeta !== undefined && pidAliveFn(pidFromMeta)) {
+        if (pidFromMeta === undefined) {
+          return Effect.fail(
+            toWorkflowStoreUnavailableError(
+              operation,
+              `Failed to decode ${serverJsonPath} to verify omnigraph-server PID`,
+            ),
+          )
+        }
+        if (pidAliveFn(pidFromMeta)) {
           return Effect.fail(
             toWorkflowStoreUnavailableError(
               operation,
@@ -391,7 +312,8 @@ const assertOmnigraphServerStopped = (
 /**
  * Runs offline Lance maintenance (`omnigraph optimize`, `omnigraph cleanup --keep <n> --confirm`,
  * and post-quiescence `omnigraph cluster force-unlock`) while the daemon and server are stopped,
- * acquiring `<clusterDir>.startup.lock` strictly before `daemon.lock`.
+ * refusing pre-existing admission locks or undecodable `server.json`, verifying exported safety
+ * backups before destructive cleanup, and acquiring `<clusterDir>.startup.lock` strictly before `daemon.lock`.
  */
 export const runOfflineWorkflowMaintenance = Effect.fn("WorkflowMaintenance.runOffline")(function* (
   input: WorkflowMaintenanceInput,
@@ -405,21 +327,28 @@ export const runOfflineWorkflowMaintenance = Effect.fn("WorkflowMaintenance.runO
 
   const omnigraphBin = input.omnigraphBin ?? resolveDefaultOmnigraphBin(env)
   if (!hostIo.existsSync(omnigraphBin)) {
-    return yield* toWorkflowStoreUnavailableError(
+    return yield* new WorkflowStoreUnavailableError({
       operation,
-      `omnigraph binary not found at ${omnigraphBin}`,
-    )
+      reason: toBoundedReason(`omnigraph binary not found at ${omnigraphBin}`),
+    })
   }
 
   const clusterDir = input.clusterDir ?? resolveOmnigraphClusterDir(input.repoRoot, hostIo, env)
-  if (!hostIo.existsSync(clusterDir)) {
-    return yield* toWorkflowStoreUnavailableError(
+  if (hostIo.isSymbolicLinkSync(clusterDir)) {
+    return yield* new WorkflowStoreUnavailableError({
       operation,
-      `Omnigraph cluster directory does not exist at ${clusterDir}`,
-    )
+      reason: toBoundedReason(`Refusing symlink Omnigraph cluster directory at ${clusterDir}`),
+    })
+  }
+  if (!hostIo.existsSync(clusterDir)) {
+    return yield* new WorkflowStoreUnavailableError({
+      operation,
+      reason: toBoundedReason(`Omnigraph cluster directory does not exist at ${clusterDir}`),
+    })
   }
 
   yield* assertOmnigraphServerStopped(clusterDir, hostIo, pidAliveFn, operation)
+  yield* assertNoPreexistingAdmissionLock(clusterDir, hostIo, operation)
 
   const { lockFilePath } = resolveWorkflowRuntimePaths(input.commonGitDir)
   const targetUri = `file://${clusterDir}`
@@ -427,8 +356,14 @@ export const runOfflineWorkflowMaintenance = Effect.fn("WorkflowMaintenance.runO
 
   const maintenanceSteps = Effect.gen(function* () {
     yield* assertOmnigraphServerStopped(clusterDir, hostIo, pidAliveFn, operation)
+    yield* assertNoPreexistingAdmissionLock(clusterDir, hostIo, operation)
 
-    const bytesBefore = measureTreeBytes(workflowGraphDir, hostIo)
+    const bytesBefore = yield* match(measureTreeBytes(workflowGraphDir, hostIo))
+      .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        Effect.fail(toWorkspaceFsError(workflowGraphDir, "read", failure)),
+      )
+      .exhaustive()
     const startedAtMs = Math.max(0, Math.floor(nowMsFn()))
 
     // 1. Export offline safety backup before destructive cleanup (no --as on file://).
@@ -466,27 +401,52 @@ export const runOfflineWorkflowMaintenance = Effect.fn("WorkflowMaintenance.runO
         `Refusing symlink maintenance backup file: ${backupFile}`,
       )
     }
+
+    // Schema-validate every exported record line and verify SHA-256 read-back before cleanup.
+    yield* match(parseAndValidateExportNdjson(exportAttempt.stdout, backupFile))
+      .with({ _tag: "Success" }, () => Effect.void)
+      .with({ _tag: "Failure" }, ({ failure }) => Effect.fail(failure))
+      .exhaustive()
+
+    const expectedSha256 = computeSha256Hex(exportAttempt.stdout)
     const tmpBackupFile = `${backupFile}.${process.pid}.${randomUUID()}.tmp`
-    yield* Effect.try({
-      try: () => {
-        hostIo.mkdirRecursiveSync(input.backupDir, 0o700)
-        hostIo.chmodSync(input.backupDir, 0o700)
-        hostIo.writeTextWithModeSync(tmpBackupFile, exportAttempt.stdout, 0o600)
-        hostIo.renameSync(tmpBackupFile, backupFile)
-        hostIo.chmodSync(backupFile, 0o600)
-      },
-      catch: (err) => toWorkspaceFsError(backupFile, "write", err),
-    }).pipe(
-      Effect.ensuring(
-        Effect.sync(() => {
-          if (hostIo.existsSync(tmpBackupFile)) {
-            Result.try(() => {
-              hostIo.unlinkSync(tmpBackupFile)
-            })
-          }
-        }),
+    yield* match(
+      writeSecureBackupAndVerifySha(
+        input.backupDir,
+        backupFile,
+        tmpBackupFile,
+        exportAttempt.stdout,
+        expectedSha256,
+        hostIo,
       ),
     )
+      .with({ _tag: "Success" }, () => Effect.void)
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        Effect.fail(toWorkspaceFsError(backupFile, "write", failure)),
+      )
+      .exhaustive()
+      .pipe(
+        Effect.ensuring(
+          Effect.gen(function* () {
+            if (hostIo.existsSync(tmpBackupFile)) {
+              const unlinkRes = Result.try({
+                try: () => {
+                  hostIo.unlinkSync(tmpBackupFile)
+                },
+                catch: (err) => toErrorReasonMessage(err, `Failed to unlink ${tmpBackupFile}`),
+              })
+              yield* match(unlinkRes)
+                .with({ _tag: "Success" }, () => Effect.void)
+                .with({ _tag: "Failure" }, ({ failure }) =>
+                  Effect.logWarning(
+                    `Failed to unlink temporary maintenance backup ${tmpBackupFile}: ${failure}`,
+                  ),
+                )
+                .exhaustive()
+            }
+          }),
+        ),
+      )
 
     // 2. Offline optimize (never pass --as to optimize/cleanup per omnigraph 0.14.0 behavior)
     const optimizeRes = yield* runOmnigraphCli(
@@ -535,7 +495,12 @@ export const runOfflineWorkflowMaintenance = Effect.fn("WorkflowMaintenance.runO
       cleanupRes.stderr,
     ])
 
-    const bytesAfter = measureTreeBytes(workflowGraphDir, hostIo)
+    const bytesAfter = yield* match(measureTreeBytes(workflowGraphDir, hostIo))
+      .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        Effect.fail(toWorkspaceFsError(workflowGraphDir, "read", failure)),
+      )
+      .exhaustive()
     const reclaimedBytes = WorkflowBackupCount.make(Math.max(0, bytesBefore - bytesAfter))
     const completedAtMs = WorkflowBackupTimestampMs.make(Math.max(0, Math.floor(nowMsFn())))
 
@@ -548,11 +513,8 @@ export const runOfflineWorkflowMaintenance = Effect.fn("WorkflowMaintenance.runO
 
   return yield* withOmnigraphClusterStartupLock(
     clusterDir,
-    hostIo,
-    nowMsFn,
-    pidAliveFn,
-    operation,
     withAdvisoryFlock(lockFilePath, maintenanceSteps, hostIo),
+    { hostIo, nowMs: nowMsFn, isPidAlive: pidAliveFn, operation, timeoutMs: 0 },
   ).pipe(
     Effect.mapError((err) =>
       match(err)

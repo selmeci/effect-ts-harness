@@ -5,7 +5,6 @@ import {
   BackupFileHash,
   WorkflowBackupCount,
   WorkflowBackupFilePath,
-  WorkflowBackupMode,
   WorkflowBackupTimestampMs,
   WorkflowStoreFailureReason,
   WorkflowStoreOperation,
@@ -28,10 +27,18 @@ describe("@harness/service workflow ports", () => {
 
       const restored = yield* backup.restoreBackup({
         backupFile: exported.backupFile,
-        mode: WorkflowBackupMode.make("merge"),
+        mode: "merge",
       })
       expect(restored.mode).toBe("merge")
       expect(restored.restoredEntityCount).toBe(42)
+
+      const replaced = yield* backup.restoreBackup({
+        backupFile: exported.backupFile,
+        mode: "replace",
+        expectedSha256: BACKUP_SHA,
+      })
+      expect(replaced.mode).toBe("replace")
+      expect(replaced.sha256).toBe(BACKUP_SHA)
     }).pipe(
       Effect.provideService(WorkflowGraphBackup, {
         exportBackup: (backupDir) =>

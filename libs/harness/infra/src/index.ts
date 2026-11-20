@@ -95,19 +95,27 @@ export {
 } from "./worktree-repo-root.js"
 export {
   invokeWorkflowStoreQuery,
+  invokeWorkflowStoreQueryWithMeta,
+  MAX_ORPHAN_QUARANTINE_BATCHES,
   quarantineOrphanEntityMessages,
   WORKFLOW_MAX_CONCURRENT_HTTP,
   WORKFLOW_MAX_OCC_RETRIES,
   type QuarantineOrphanEntityMessagesInput,
   type QuarantineOrphanEntityMessagesResult,
+  type WorkflowStoreInvokeError,
   type WorkflowStoreQueryInput,
+  type WorkflowStoreQueryWithMetaResult,
   type WorkflowStoreRetryPolicy,
 } from "./omnigraph-workflow-store.js"
 export {
   acquireWriterLease,
+  evaluateWriterLeaseTakeover,
   refreshWriterLease,
   withAdvisoryFlock,
   WRITER_LEASE_HEARTBEAT_TTL_MS,
+  type ActiveWriterLease,
+  type LeaseTakeoverDecision,
+  type LeaseTakeoverEvaluationInput,
   type WriterLeaseAcquireInput,
   type WriterLeaseHandle,
   type WriterLeaseRefreshInput,
@@ -124,14 +132,15 @@ export {
 export {
   makeHarnessShardingLayer,
   makeHarnessWorkflowEngineLayer,
+  type HarnessWorkflowEngineLayerOptions,
   type HarnessWorkflowEngineOptions,
 } from "./workflow-engine-live.js"
 export {
   exportWorkflowGraphBackup,
   makeWorkflowGraphBackupLayer,
   restoreWorkflowGraphBackup,
+  WorkflowBackupArtifactMetadata,
   WorkflowGraphBackupLive,
-  type WorkflowBackupArtifactMetadata,
   type WorkflowGraphBackupOptions,
 } from "./workflow-graph-backup.js"
 export {
@@ -140,6 +149,15 @@ export {
   type WorkflowMaintenanceInput,
   type WorkflowMaintenanceSummary,
 } from "./workflow-maintenance.js"
+export {
+  acquireOmnigraphClusterLockEffect,
+  releaseOmnigraphClusterLock,
+  tryAcquireOmnigraphClusterLock,
+  withOmnigraphClusterStartupLock,
+  type OmnigraphClusterLockAttemptResult,
+  type OmnigraphClusterLockHandle,
+  type OmnigraphClusterStartupLockOptions,
+} from "./workflow/cluster-startup-lock.js"
 export {
   handshakeWorkflowDaemon,
   queryWorkflowDaemonCommand,

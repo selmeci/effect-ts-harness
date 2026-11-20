@@ -11,7 +11,16 @@ import {
   type OmnigraphServerMeta,
 } from "@harness/contract"
 import { decideOmnigraphSchemaEvolution } from "@harness/gates"
-import { nodeSyncHostIo } from "@harness/infra"
+import {
+  acquireOmnigraphClusterLockEffect,
+  nodeSyncHostIo,
+  type OmnigraphClusterLockAttemptResult,
+  type OmnigraphClusterLockHandle,
+  type OmnigraphClusterStartupLockOptions,
+  releaseOmnigraphClusterLock,
+  tryAcquireOmnigraphClusterLock,
+  withOmnigraphClusterStartupLock,
+} from "@harness/infra"
 import {
   isProcessPidAlive,
   isSafeOmnigraphPidToKill,
@@ -26,10 +35,17 @@ import { matchExecSyncStdout } from "./omnigraph-workflow-backup.js"
 import { buildOmnigraphClusterKillArgs } from "./repo-path.js"
 
 export {
+  acquireOmnigraphClusterLockEffect,
   type OfflineOmnigraphLintResult,
+  type OmnigraphClusterLockAttemptResult,
+  type OmnigraphClusterLockHandle,
+  type OmnigraphClusterStartupLockOptions,
+  releaseOmnigraphClusterLock,
   resolveDefaultOmnigraphBin,
   runOfflineOmnigraphLintGate,
   runOmnigraphOptimizeAndCleanup,
+  tryAcquireOmnigraphClusterLock,
+  withOmnigraphClusterStartupLock,
 }
 
 export const CLUSTER_SCHEMA_EPOCH = "rfc-0009-v2"
@@ -244,24 +260,19 @@ export const writeClusterDriftReceipts = (
   nodeSyncHostIo.writeTextSync(join(clusterRootDir, ".cluster-schema-epoch"), CLUSTER_SCHEMA_EPOCH)
 }
 
-const StartupLockJsonSchema = Schema.fromJsonString(
-  Schema.Struct({
-    pid: Schema.optional(Schema.Finite),
-    lockToken: Schema.optional(Schema.String),
-    createdAtMs: Schema.optional(Schema.Finite),
-  }),
-)
-
-export interface OmnigraphClusterLockHandle {
-  readonly lockPath: string
-  readonly lockToken: string
-}
-
-const ensureSecureClusterDir = (clusterRootDir: string): void => {
-  if (!nodeSyncHostIo.existsSync(clusterRootDir)) {
-    nodeSyncHostIo.mkdirRecursiveSync(clusterRootDir)
+const ensureSecureClusterDir = (clusterRootDir: string): Result.Result<void, Error> => {
+  if (nodeSyncHostIo.isSymbolicLinkSync(clusterRootDir)) {
+    return Result.fail(new Error(`Refusing symlink cluster directory: ${clusterRootDir}`))
   }
-  nodeSyncHostIo.chmodSync(clusterRootDir, 0o700)
+  return Result.try({
+    try: () => {
+      if (!nodeSyncHostIo.existsSync(clusterRootDir)) {
+        nodeSyncHostIo.mkdirRecursiveSync(clusterRootDir)
+      }
+      nodeSyncHostIo.chmodSync(clusterRootDir, 0o700)
+    },
+    catch: (failure) => (failure instanceof Error ? failure : new Error(String(failure))),
+  })
 }
 
 const writeSecureJsonAtomic = (
@@ -269,18 +280,22 @@ const writeSecureJsonAtomic = (
   payload: unknown,
 ): Result.Result<void, Error> => {
   const dir = dirname(targetPath)
-  const tmpPath = `${targetPath}.tmp.${process.pid}.${randomBytes(6).toString("hex")}`
-  return Result.try({
-    try: () => {
-      ensureSecureClusterDir(dir)
-      nodeSyncHostIo.writeTextWithModeSync(tmpPath, JSON.stringify(payload, null, 2), 0o600)
-      nodeSyncHostIo.chmodSync(tmpPath, 0o600)
-      nodeSyncHostIo.renameSync(tmpPath, targetPath)
-    },
-    catch: (failure) => {
-      Result.try(() => nodeSyncHostIo.unlinkSync(tmpPath))
-      return failure instanceof Error ? failure : new Error(String(failure))
-    },
+  if (nodeSyncHostIo.isSymbolicLinkSync(dir) || nodeSyncHostIo.isSymbolicLinkSync(targetPath)) {
+    return Result.fail(new Error(`Refusing symlink target path: ${targetPath}`))
+  }
+  return Result.flatMap(ensureSecureClusterDir(dir), () => {
+    const tmpPath = `${targetPath}.tmp.${process.pid}.${randomBytes(6).toString("hex")}`
+    return Result.try({
+      try: () => {
+        nodeSyncHostIo.writeTextWithModeSync(tmpPath, JSON.stringify(payload, null, 2), 0o600)
+        nodeSyncHostIo.chmodSync(tmpPath, 0o600)
+        nodeSyncHostIo.renameSync(tmpPath, targetPath)
+      },
+      catch: (failure) => {
+        Result.try(() => nodeSyncHostIo.unlinkSync(tmpPath))
+        return failure instanceof Error ? failure : new Error(String(failure))
+      },
+    })
   })
 }
 
@@ -304,14 +319,16 @@ export const unlinkServerMetaIfExists = (clusterRootDir: string): void => {
 export const ensureOmnigraphEndpointTokens = (
   clusterRootDir: string,
 ): Result.Result<OmnigraphEndpointTokens, Error> => {
-  const dirRes = Result.try({
-    try: () => ensureSecureClusterDir(clusterRootDir),
-    catch: (err) => (err instanceof Error ? err : new Error(String(err))),
-  })
-  return match(dirRes)
+  const tokensPath = join(clusterRootDir, "auth-tokens.json")
+  if (
+    nodeSyncHostIo.isSymbolicLinkSync(clusterRootDir) ||
+    nodeSyncHostIo.isSymbolicLinkSync(tokensPath)
+  ) {
+    return Result.fail(new Error(`Refusing symlink cluster auth path under ${clusterRootDir}`))
+  }
+  return match(ensureSecureClusterDir(clusterRootDir))
     .with({ _tag: "Failure" }, ({ failure }) => Result.fail(failure))
     .with({ _tag: "Success" }, () => {
-      const tokensPath = join(clusterRootDir, "auth-tokens.json")
       if (nodeSyncHostIo.existsSync(tokensPath)) {
         const mode = nodeSyncHostIo.statModeSync(tokensPath)
         if (mode === undefined || (mode & 0o077) !== 0) {
@@ -348,180 +365,6 @@ export const ensureOmnigraphEndpointTokens = (
         mcpToken: OmnigraphActorToken.make(randomBytes(32).toString("hex")),
       }
       return Result.map(writeSecureJsonAtomic(tokensPath, tokens), () => tokens)
-    })
-    .exhaustive()
-}
-
-const RAW_LOCK_DECODE_GRACE_MS = 2_000
-
-export type OmnigraphClusterLockAttemptResult =
-  | { readonly _tag: "Acquired"; readonly handle: OmnigraphClusterLockHandle }
-  | { readonly _tag: "Contended" }
-  | { readonly _tag: "Failed"; readonly reason: string }
-
-const compareAndUnlinkStaleLock = (lockPath: string, expectedRaw: string): boolean =>
-  Result.getOrElse(
-    Result.try(() => {
-      if (nodeSyncHostIo.readTextSync(lockPath) !== expectedRaw) return false
-      const tombstonePath = `${lockPath}.tombstone.${process.pid}.${randomBytes(6).toString("hex")}`
-      nodeSyncHostIo.renameSync(lockPath, tombstonePath)
-      const movedMatches = Result.getOrElse(
-        Result.try(() => nodeSyncHostIo.readTextSync(tombstonePath) === expectedRaw),
-        () => false,
-      )
-      if (!movedMatches) {
-        Result.try(() => nodeSyncHostIo.renameSync(tombstonePath, lockPath))
-        return false
-      }
-      match(
-        Result.try({
-          try: () => nodeSyncHostIo.unlinkSync(tombstonePath),
-          catch: (e) => String(e),
-        }),
-      )
-        .with({ _tag: "Success" }, () => undefined)
-        .with({ _tag: "Failure" }, ({ failure }) => {
-          process.stderr.write(
-            `[harness:omnigraph] Warning: failed to unlink tombstone ${tombstonePath}: ${failure}\n`,
-          )
-        })
-        .exhaustive()
-      return true
-    }),
-    () => false,
-  )
-
-export const tryAcquireOmnigraphClusterLock = (
-  clusterRootDir: string,
-): OmnigraphClusterLockAttemptResult => {
-  const lockParent = dirname(clusterRootDir)
-  const mkdirErr = match(
-    Result.try({
-      try: () => {
-        if (!nodeSyncHostIo.existsSync(lockParent)) nodeSyncHostIo.mkdirRecursiveSync(lockParent)
-      },
-      catch: (err) => (err instanceof Error ? err.message : String(err)),
-    }),
-  )
-    .with({ _tag: "Success" }, () => undefined)
-    .with({ _tag: "Failure" }, ({ failure }) => failure)
-    .exhaustive()
-  if (mkdirErr !== undefined) {
-    return { _tag: "Failed", reason: mkdirErr }
-  }
-  const lockPath = `${clusterRootDir}.startup.lock`
-  const lockToken = randomBytes(16).toString("hex")
-  const payload = JSON.stringify({ pid: process.pid, lockToken, createdAtMs: Date.now() })
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const writeStep = match(nodeSyncHostIo.tryWriteExclusiveTextSync(lockPath, payload, 0o600))
-      .with({ _tag: "Written" }, () => ({
-        done: true as const,
-        result: { _tag: "Acquired" as const, handle: { lockPath, lockToken } },
-      }))
-      .with({ _tag: "Failed" }, ({ message }) => ({
-        done: true as const,
-        result: { _tag: "Failed" as const, reason: message },
-      }))
-      .with({ _tag: "Exists" }, () => ({ done: false as const, result: undefined }))
-      .exhaustive()
-    if (writeStep.done) {
-      return writeStep.result
-    }
-    const readOutcome = match(Result.try(() => nodeSyncHostIo.readTextSync(lockPath)))
-      .with({ _tag: "Success" }, ({ success }) => ({ ok: true as const, raw: success }))
-      .with({ _tag: "Failure" }, () => ({ ok: false as const, raw: "" }))
-      .exhaustive()
-    if (!readOutcome.ok) {
-      if (!nodeSyncHostIo.existsSync(lockPath)) continue
-      return { _tag: "Contended" }
-    }
-    const raw = readOutcome.raw
-    const parsedOpt = Schema.decodeOption(StartupLockJsonSchema)(raw)
-    const canUnlinkStale = match(parsedOpt)
-      .with(
-        { _tag: "Some" },
-        ({ value }) => !(typeof value.pid === "number" && isProcessPidAlive(value.pid)),
-      )
-      .with({ _tag: "None" }, () => {
-        const mtimeMs = nodeSyncHostIo.statMtimeMsSync(lockPath)
-        return mtimeMs !== undefined && Date.now() - mtimeMs >= RAW_LOCK_DECODE_GRACE_MS
-      })
-      .exhaustive()
-    if (!canUnlinkStale || !compareAndUnlinkStaleLock(lockPath, raw)) {
-      return { _tag: "Contended" }
-    }
-  }
-  return { _tag: "Contended" }
-}
-
-export const acquireOmnigraphClusterLock = (
-  clusterRootDir: string,
-): OmnigraphClusterLockHandle | undefined =>
-  match(tryAcquireOmnigraphClusterLock(clusterRootDir))
-    .with({ _tag: "Acquired" }, ({ handle }) => handle)
-    .with({ _tag: "Contended" }, { _tag: "Failed" }, () => undefined)
-    .exhaustive()
-
-export const acquireOmnigraphClusterLockEffect = (
-  clusterRootDir: string,
-  timeoutMs = 45_000,
-): Effect.Effect<OmnigraphClusterLockHandle | undefined> =>
-  Effect.gen(function* () {
-    const deadlineMs = Date.now() + Math.max(0, timeoutMs)
-    while (true) {
-      const attempt = tryAcquireOmnigraphClusterLock(clusterRootDir)
-      const resolved = match(attempt)
-        .with({ _tag: "Acquired" }, ({ handle }) => ({ done: true as const, handle }))
-        .with({ _tag: "Failed" }, ({ reason }) => {
-          process.stderr.write(
-            `[harness:omnigraph] Error: startup lock failed for ${clusterRootDir}: ${reason}\n`,
-          )
-          return { done: true as const, handle: undefined }
-        })
-        .with({ _tag: "Contended" }, () => ({ done: false as const, handle: undefined }))
-        .exhaustive()
-      if (resolved.done) {
-        return resolved.handle
-      }
-      if (Date.now() >= deadlineMs) {
-        return undefined
-      }
-      yield* Effect.sleep("100 millis")
-    }
-  })
-
-export const releaseOmnigraphClusterLock = (
-  handle: OmnigraphClusterLockHandle | string | undefined,
-): void => {
-  if (handle === undefined) return
-  const targetPath = typeof handle === "string" ? handle : handle.lockPath
-  const res = Result.try({
-    try: () => {
-      if (typeof handle === "string") {
-        nodeSyncHostIo.unlinkSync(handle)
-        return
-      }
-      if (!nodeSyncHostIo.existsSync(handle.lockPath)) return
-      const parsedOpt = Schema.decodeOption(StartupLockJsonSchema)(
-        nodeSyncHostIo.readTextSync(handle.lockPath),
-      )
-      const isOwner = match(parsedOpt)
-        .with(
-          { _tag: "Some" },
-          ({ value }) => value.pid === process.pid && value.lockToken === handle.lockToken,
-        )
-        .with({ _tag: "None" }, () => false)
-        .exhaustive()
-      if (isOwner) nodeSyncHostIo.unlinkSync(handle.lockPath)
-    },
-    catch: (err) => (err instanceof Error ? err.message : String(err)),
-  })
-  match(res)
-    .with({ _tag: "Success" }, () => undefined)
-    .with({ _tag: "Failure" }, ({ failure }) => {
-      process.stderr.write(
-        `[harness:omnigraph] Warning: failed to release lock ${targetPath}: ${failure}\n`,
-      )
     })
     .exhaustive()
 }

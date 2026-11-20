@@ -13,9 +13,10 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { Effect } from "effect"
+import { Cause, Effect } from "effect"
 import { match } from "ts-pattern"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { WorkflowStoreUnavailableError } from "@harness/contract"
 import { readTelemetryEvents, writeVerifyStamp } from "@harness/gates"
 import {
   buildHarnessGraph,
@@ -35,7 +36,6 @@ import {
 } from "../src/commands/done-omnigraph-helpers.js"
 import { handleGc } from "../src/commands/gc-and-ontology.command.js"
 import {
-  acquireOmnigraphClusterLock,
   acquireOmnigraphClusterLockEffect,
   CLUSTER_SCHEMA_EPOCH,
   ensureOmnigraphEndpointTokens,
@@ -1490,7 +1490,7 @@ setTimeout(() => process.exit(0), 5000);
     )
     const oldDate = new Date(Date.now() - 120_000)
     utimesSync(lockPath, oldDate, oldDate)
-    expect(acquireOmnigraphClusterLock(clusterDir)).toBeUndefined()
+    expect(tryAcquireOmnigraphClusterLock(clusterDir)._tag).toBe("Contended")
 
     // releaseOmnigraphClusterLock does not unlink lock owned by another token
     releaseOmnigraphClusterLock({ lockPath, lockToken: "wrong-token" })
@@ -1500,21 +1500,34 @@ setTimeout(() => process.exit(0), 5000);
     setTimeout(() => {
       rmSync(lockPath, { force: true })
     }, 150)
-    const acquired = await Effect.runPromise(acquireOmnigraphClusterLockEffect(clusterDir, 2_000))
-    expect(acquired).toBeDefined()
-    if (acquired !== undefined) {
-      releaseOmnigraphClusterLock(acquired)
-      expect(nodeSyncHostIo.existsSync(lockPath)).toBe(false)
-    }
+    const acquired = await Effect.runPromise(
+      acquireOmnigraphClusterLockEffect(clusterDir, { timeoutMs: 2_000 }),
+    )
+    expect(acquired.lockPath).toBe(lockPath)
+    releaseOmnigraphClusterLock(acquired)
+    expect(nodeSyncHostIo.existsSync(lockPath)).toBe(false)
 
-    // Bounded timeout returns undefined when live owner holds lock
+    // Bounded timeout fails with WorkflowStoreUnavailableError when live owner holds lock
     writeFileSync(
       lockPath,
       JSON.stringify({ pid: process.pid, lockToken: "held-token", createdAtMs: Date.now() }),
       "utf8",
     )
-    const timedOut = await Effect.runPromise(acquireOmnigraphClusterLockEffect(clusterDir, 150))
-    expect(timedOut).toBeUndefined()
+    const timedOutExit = await Effect.runPromiseExit(
+      acquireOmnigraphClusterLockEffect(clusterDir, { timeoutMs: 150 }),
+    )
+    match(timedOutExit)
+      .with({ _tag: "Success" }, () => expect.fail("Expected timeout failure"))
+      .with({ _tag: "Failure" }, ({ cause }) => {
+        const errOpt = Cause.findErrorOption(cause)
+        match(errOpt)
+          .with({ _tag: "Some" }, ({ value }) => {
+            expect(value).toBeInstanceOf(WorkflowStoreUnavailableError)
+          })
+          .with({ _tag: "None" }, () => expect.fail("Expected WorkflowStoreUnavailableError"))
+          .exhaustive()
+      })
+      .exhaustive()
     rmSync(lockPath, { force: true })
 
     // ensureLocalOmnigraphReady waits on startup lock before evaluating readyz/drift
@@ -1822,19 +1835,24 @@ setTimeout(() => process.exit(0), 5000);
       code: "EACCES",
       message: "EACCES: permission denied",
     })
-    const stderrChunks: Array<string> = []
-    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
-      stderrChunks.push(String(chunk))
-      return true
-    })
     const started = Date.now()
-    const failedHandle = await Effect.runPromise(
-      acquireOmnigraphClusterLockEffect(clusterDir, 10_000),
+    const failedExit = await Effect.runPromiseExit(
+      acquireOmnigraphClusterLockEffect(clusterDir, { timeoutMs: 10_000 }),
     )
-    stderrSpy.mockRestore()
-    expect(failedHandle).toBeUndefined()
     expect(Date.now() - started).toBeLessThan(2_000)
-    expect(stderrChunks.join("")).toContain("EACCES: permission denied")
+    match(failedExit)
+      .with({ _tag: "Success" }, () => expect.fail("Expected immediate lock write failure"))
+      .with({ _tag: "Failure" }, ({ cause }) => {
+        const errOpt = Cause.findErrorOption(cause)
+        match(errOpt)
+          .with({ _tag: "Some" }, ({ value }) => {
+            expect(value).toBeInstanceOf(WorkflowStoreUnavailableError)
+            expect(value.reason).toContain("EACCES: permission denied")
+          })
+          .with({ _tag: "None" }, () => expect.fail("Expected WorkflowStoreUnavailableError"))
+          .exhaustive()
+      })
+      .exhaustive()
   })
 
   it("killOmnigraphServerPidIfAlive terminates a real matching omnigraph-server child process", async () => {

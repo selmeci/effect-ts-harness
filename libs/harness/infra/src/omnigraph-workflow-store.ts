@@ -1,13 +1,23 @@
+import { randomInt } from "node:crypto"
 import { Effect, Result, Schema, Semaphore } from "effect"
 import { match, P } from "ts-pattern"
 import {
   type AbsoluteRepoRoot,
   encodeSeqKey,
   ErrorReasonMessage,
+  LeaseEpoch,
+  LeaseFilePath,
+  LeaseHolderId,
+  MessageKey,
+  ReplyKey,
+  toBoundedReason,
   toErrorReasonMessage,
-  WorkflowStoreFailureReason,
+  type WorkflowGqParamsMap,
+  type WorkflowGqQueryName,
+  type WorkflowStoreFailureReason,
   WorkflowStoreOperation,
   WorkflowStoreUnavailableError,
+  WriterLeaseHeldError,
 } from "@harness/contract"
 import {
   isOmnigraphPreconditionOrConflictError,
@@ -17,6 +27,7 @@ import {
 } from "@harness/graph"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { nodeSyncHostIo } from "./node-host-io.js"
+import { decodeWriterLeaseRow, makeHeldLeaseError } from "./workflow/writer-lease-codec.js"
 
 type Omnigraph = InstanceType<typeof OmnigraphClient>
 
@@ -29,12 +40,14 @@ export const WORKFLOW_MAX_OCC_RETRIES = 48
 /** Per-HTTP request timeout (ms) enforced via `AbortSignal.timeout` on GQ store calls. */
 export const WORKFLOW_HTTP_TIMEOUT_MS = 15_000
 
-/** Default active entity types registered by `ClusterWorkflowEngine` in `harness-workflows`. */
-export const DEFAULT_KNOWN_WORKFLOW_ENTITY_TYPES: ReadonlyArray<string> = [
-  "Workflow/HarnessTaskWorkflow",
-  "Workflow/ShipWorkflow",
-  "Workflow/-/DurableClock",
-]
+const DEFAULT_FENCE_LOCK_PATH = LeaseFilePath.make("/harness/daemon.lock")
+const NO_ACTIVE_LEASE_HOLDER = LeaseHolderId.make("no-active-lease")
+
+const LEASE_MANAGEMENT_QUERY_NAMES: ReadonlySet<WorkflowGqQueryName> = new Set([
+  "wf_insert_writer_lease",
+  "wf_cas_writer_lease",
+  "wf_refresh_writer_lease",
+])
 
 /**
  * Single process-wide semaphore bounding all HTTP traffic targeting `harness-workflows`
@@ -61,11 +74,13 @@ const MutationEnvelopeSchema = Schema.Struct({
 })
 const decodeMutationEnvelopeOption = Schema.decodeUnknownOption(MutationEnvelopeSchema)
 
-export interface WorkflowStoreQueryInput {
+const decodeMessageKeyOption = Schema.decodeUnknownOption(MessageKey)
+
+export interface WorkflowStoreQueryInput<Q extends WorkflowGqQueryName = WorkflowGqQueryName> {
   readonly repoRoot: AbsoluteRepoRoot
   readonly operation: WorkflowStoreOperation
-  readonly queryName: WorkflowStoreOperation
-  readonly params: Readonly<Record<string, unknown>>
+  readonly queryName: Q
+  readonly params: WorkflowGqParamsMap[Q]
   readonly client?: Omnigraph | undefined
   readonly ifGraphCommit?: string | undefined
   readonly branch?: string | undefined
@@ -73,7 +88,16 @@ export interface WorkflowStoreQueryInput {
   readonly hostIo?: SyncHostIo | undefined
   readonly env?: Readonly<Record<string, string | undefined>> | undefined
   readonly maxOccRetries?: number | undefined
+  readonly expectedLeaseEpoch?: LeaseEpoch | undefined
+  readonly expectedLeaseOwner?: string | undefined
+  readonly lockFilePath?: LeaseFilePath | undefined
 }
+
+export type WorkflowStoreInvokeError<TInput> = "expectedLeaseEpoch" extends keyof TInput
+  ? TInput["expectedLeaseEpoch"] extends undefined
+    ? WorkflowStoreUnavailableError
+    : WorkflowStoreUnavailableError | WriterLeaseHeldError
+  : WorkflowStoreUnavailableError
 
 export interface WorkflowStoreRetryPolicy {
   readonly maxConcurrentHttp: number
@@ -94,16 +118,6 @@ export interface WorkflowStoreAttemptFailure {
   readonly cause: unknown
 }
 
-const toWorkflowStoreFailureReason = (
-  cause: unknown,
-  fallback = "Workflow store request failed",
-): WorkflowStoreFailureReason => {
-  const raw = toErrorReasonMessage(cause, fallback).trim()
-  const nonEmpty = raw.length > 0 ? raw : fallback
-  const bounded = nonEmpty.length > 1024 ? `${nonEmpty.slice(0, 1021)}...` : nonEmpty
-  return WorkflowStoreFailureReason.make(bounded.trim())
-}
-
 const toWorkflowStoreUnavailableError = (
   operation: WorkflowStoreOperation,
   cause: unknown,
@@ -113,7 +127,7 @@ const toWorkflowStoreUnavailableError = (
   }
   return new WorkflowStoreUnavailableError({
     operation,
-    reason: toWorkflowStoreFailureReason(cause),
+    reason: toBoundedReason(cause, "Workflow store request failed"),
   })
 }
 
@@ -121,8 +135,9 @@ const isRetryableWorkflowStoreCause = (
   cause: unknown,
   retryConflictAndPrecondition: boolean,
 ): boolean =>
-  isOmnigraphTooManyRequestsError(cause) ||
-  (retryConflictAndPrecondition && isOmnigraphPreconditionOrConflictError(cause))
+  !(cause instanceof WriterLeaseHeldError) &&
+  (isOmnigraphTooManyRequestsError(cause) ||
+    (retryConflictAndPrecondition && isOmnigraphPreconditionOrConflictError(cause)))
 
 const computeWorkflowRetryDelayMs = (attempt: number, cause?: unknown): number => {
   if (typeof cause === "object" && cause !== null) {
@@ -159,90 +174,192 @@ const resolveWorkflowClientForStore = (options: {
     ...(options.env !== undefined ? { env: options.env } : {}),
   })
 
-const extractInvokeQueryResult = (raw: unknown): WorkflowStoreQueryWithMetaResult => {
-  const rowsOpt = decodeRowsEnvelopeOption(raw)
-  return match(rowsOpt)
-    .with({ _tag: "Some" }, ({ value }) => ({
-      rows: value.rows,
-      graphCommitId: value.graphCommitId ?? null,
-      affectedNodes: 0,
-      affectedEdges: 0,
-    }))
+const extractInvokeQueryResult = (
+  raw: unknown,
+  operation: WorkflowStoreOperation,
+): Effect.Effect<WorkflowStoreQueryWithMetaResult, WorkflowStoreAttemptFailure> =>
+  match(decodeRowsEnvelopeOption(raw))
+    .with({ _tag: "Some" }, ({ value }) =>
+      Effect.succeed<WorkflowStoreQueryWithMetaResult>({
+        rows: value.rows,
+        graphCommitId: value.graphCommitId ?? null,
+        affectedNodes: 0,
+        affectedEdges: 0,
+      }),
+    )
     .with({ _tag: "None" }, () =>
       match(decodeMutationEnvelopeOption(raw))
-        .with({ _tag: "Some" }, ({ value }) => ({
-          rows: [] as ReadonlyArray<Readonly<Record<string, unknown>>>,
-          graphCommitId: value.commit?.graphCommitId ?? null,
-          affectedNodes: value.affectedNodes,
-          affectedEdges: value.affectedEdges,
-        }))
-        .with({ _tag: "None" }, () => ({
-          rows: [] as ReadonlyArray<Readonly<Record<string, unknown>>>,
-          graphCommitId: null,
-          affectedNodes: 0,
-          affectedEdges: 0,
-        }))
+        .with({ _tag: "Some" }, ({ value }) =>
+          Effect.succeed<WorkflowStoreQueryWithMetaResult>({
+            rows: [] as ReadonlyArray<Readonly<Record<string, unknown>>>,
+            graphCommitId: value.commit?.graphCommitId ?? null,
+            affectedNodes: value.affectedNodes,
+            affectedEdges: value.affectedEdges,
+          }),
+        )
+        .with({ _tag: "None" }, () =>
+          Effect.fail<WorkflowStoreAttemptFailure>({
+            _tag: "WorkflowStoreAttemptFailure",
+            operation,
+            cause: new Error("Omnigraph query response matched neither rows nor mutation envelope"),
+          }),
+        )
         .exhaustive(),
     )
     .exhaustive()
-}
 
-/**
- * Executes a single HTTP attempt of a named GQ 2.1 query/mutation under the shared
- * HTTP semaphore, preserving the raw failure cause for outer retry/CAS loops.
- */
-const invokeWorkflowStoreQueryOnce = (
-  input: WorkflowStoreQueryInput,
-): Effect.Effect<WorkflowStoreQueryWithMetaResult, WorkflowStoreAttemptFailure> =>
+const invokeRawQueryOnce = (options: {
+  readonly og: Omnigraph
+  readonly operation: WorkflowStoreOperation
+  readonly queryName: WorkflowGqQueryName
+  readonly params: Readonly<Record<string, unknown>>
+  readonly branch: string
+  readonly expectMutation: boolean | undefined
+  readonly ifGraphCommit: string | undefined
+}): Effect.Effect<WorkflowStoreQueryWithMetaResult, WorkflowStoreAttemptFailure> =>
   withWorkflowHttpPermit(
     Effect.tryPromise({
       try: (fiberSignal) => {
-        const og = resolveWorkflowClientForStore({
-          repoRoot: input.repoRoot,
-          client: input.client,
-          hostIo: input.hostIo,
-          env: input.env,
-        })
-        const hasParams = Object.keys(input.params).length > 0
+        const hasParams = Object.keys(options.params).length > 0
         const signal = AbortSignal.any([fiberSignal, AbortSignal.timeout(WORKFLOW_HTTP_TIMEOUT_MS)])
-        return og.queries.invoke(
-          input.queryName,
+        return options.og.queries.invoke(
+          options.queryName,
           {
-            branch: input.branch ?? "main",
-            ...(input.expectMutation !== undefined ? { expectMutation: input.expectMutation } : {}),
-            ...(hasParams ? { params: input.params } : {}),
+            branch: options.branch,
+            ...(options.expectMutation !== undefined
+              ? { expectMutation: options.expectMutation }
+              : {}),
+            ...(hasParams ? { params: options.params } : {}),
           },
           {
             signal,
-            ...(input.ifGraphCommit !== undefined ? { ifGraphCommit: input.ifGraphCommit } : {}),
+            ...(options.ifGraphCommit !== undefined
+              ? { ifGraphCommit: options.ifGraphCommit }
+              : {}),
           },
         )
       },
       catch: (cause): WorkflowStoreAttemptFailure => ({
         _tag: "WorkflowStoreAttemptFailure",
-        operation: input.operation,
+        operation: options.operation,
         cause,
       }),
-    }).pipe(Effect.map(extractInvokeQueryResult)),
+    }).pipe(Effect.flatMap((raw) => extractInvokeQueryResult(raw, options.operation))),
   )
+
+const checkWriterLeaseFence = <Q extends WorkflowGqQueryName>(
+  og: Omnigraph,
+  input: WorkflowStoreQueryInput<Q>,
+  branch: string,
+): Effect.Effect<string | undefined, WorkflowStoreAttemptFailure> =>
+  Effect.gen(function* () {
+    const expectedEpoch = input.expectedLeaseEpoch
+    if (expectedEpoch === undefined) {
+      return undefined
+    }
+    const leaseMeta = yield* invokeRawQueryOnce({
+      og,
+      operation: input.operation,
+      queryName: "wf_get_writer_lease",
+      params: { name: "engine" },
+      branch,
+      expectMutation: false,
+      ifGraphCommit: undefined,
+    })
+    const lockPath = input.lockFilePath ?? DEFAULT_FENCE_LOCK_PATH
+    const firstRow = leaseMeta.rows[0]
+    if (firstRow === undefined) {
+      return yield* Effect.fail<WorkflowStoreAttemptFailure>({
+        _tag: "WorkflowStoreAttemptFailure",
+        operation: input.operation,
+        cause: makeHeldLeaseError(NO_ACTIVE_LEASE_HOLDER, LeaseEpoch.make(0), lockPath, undefined),
+      })
+    }
+    const decoded = yield* match(decodeWriterLeaseRow(firstRow))
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        Effect.fail<WorkflowStoreAttemptFailure>({
+          _tag: "WorkflowStoreAttemptFailure",
+          operation: input.operation,
+          cause: new Error(failure),
+        }),
+      )
+      .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))
+      .exhaustive()
+
+    const ownerMismatch =
+      input.expectedLeaseOwner !== undefined && decoded.row.owner !== input.expectedLeaseOwner
+    if (decoded.row.leaseEpoch !== expectedEpoch || ownerMismatch) {
+      return yield* Effect.fail<WorkflowStoreAttemptFailure>({
+        _tag: "WorkflowStoreAttemptFailure",
+        operation: input.operation,
+        cause: makeHeldLeaseError(
+          decoded.parsedOwner.holderId,
+          decoded.row.leaseEpoch,
+          lockPath,
+          decoded.parsedOwner.holderPid,
+        ),
+      })
+    }
+    return leaseMeta.graphCommitId ?? undefined
+  })
+
+/**
+ * Executes a single HTTP attempt of a named GQ 2.1 query/mutation under the shared
+ * HTTP semaphore, enforcing `expectedLeaseEpoch` fencing on mutations and preserving
+ * the raw failure cause for outer retry/CAS loops.
+ */
+const invokeWorkflowStoreQueryOnce = <Q extends WorkflowGqQueryName>(
+  input: WorkflowStoreQueryInput<Q>,
+): Effect.Effect<WorkflowStoreQueryWithMetaResult, WorkflowStoreAttemptFailure> =>
+  Effect.gen(function* () {
+    const og = resolveWorkflowClientForStore({
+      repoRoot: input.repoRoot,
+      client: input.client,
+      hostIo: input.hostIo,
+      env: input.env,
+    })
+    const branch = input.branch ?? "main"
+    const shouldFence =
+      input.expectedLeaseEpoch !== undefined &&
+      input.expectMutation === true &&
+      !LEASE_MANAGEMENT_QUERY_NAMES.has(input.queryName)
+
+    const leaseCommitId = shouldFence ? yield* checkWriterLeaseFence(og, input, branch) : undefined
+    const effectiveIfGraphCommit = input.ifGraphCommit ?? leaseCommitId
+
+    return yield* invokeRawQueryOnce({
+      og,
+      operation: input.operation,
+      queryName: input.queryName,
+      params: input.params as Readonly<Record<string, unknown>>,
+      branch,
+      expectMutation: input.expectMutation,
+      ifGraphCommit: effectiveIfGraphCommit,
+    })
+  })
 
 /**
  * Retries a store operation with bounded exponential jittered backoff on `429` and
- * (when `retryConflicts` is enabled) `412`/`409` OCC conflicts. Never holds an HTTP
- * semaphore permit or caller mutex during backoff sleep.
+ * (when `retryConflicts` is enabled) `412`/`409` OCC conflicts. Never retries
+ * `WriterLeaseHeldError` and never holds an HTTP semaphore permit during backoff sleep.
  */
 const retryWorkflowStoreAttempt = <A>(options: {
   readonly operation: WorkflowStoreOperation
   readonly maxRetries?: number | undefined
   readonly retryConflicts?: boolean | undefined
   readonly runAttempt: () => Effect.Effect<A, WorkflowStoreAttemptFailure>
-}): Effect.Effect<A, WorkflowStoreUnavailableError> => {
+}): Effect.Effect<A, WorkflowStoreUnavailableError | WriterLeaseHeldError> => {
   const maxRetries = Math.max(0, options.maxRetries ?? WORKFLOW_MAX_OCC_RETRIES)
   const retryConflicts = options.retryConflicts ?? true
 
-  const loop = (attempt: number): Effect.Effect<A, WorkflowStoreUnavailableError> =>
+  const loop = (
+    attempt: number,
+  ): Effect.Effect<A, WorkflowStoreUnavailableError | WriterLeaseHeldError> =>
     options.runAttempt().pipe(
       Effect.catch((failure) => {
+        if (failure.cause instanceof WriterLeaseHeldError) {
+          return Effect.fail(failure.cause)
+        }
         if (attempt < maxRetries && isRetryableWorkflowStoreCause(failure.cause, retryConflicts)) {
           const delayMs = computeWorkflowRetryDelayMs(attempt, failure.cause)
           return Effect.sleep(delayMs).pipe(Effect.andThen(loop(attempt + 1)))
@@ -254,47 +371,77 @@ const retryWorkflowStoreAttempt = <A>(options: {
   return loop(0)
 }
 
+const mapUnfencedLeaseError = (
+  operation: WorkflowStoreOperation,
+  expectedLeaseEpoch: LeaseEpoch | undefined,
+  err: WorkflowStoreUnavailableError | WriterLeaseHeldError,
+): WorkflowStoreUnavailableError | WriterLeaseHeldError =>
+  expectedLeaseEpoch === undefined && err instanceof WriterLeaseHeldError
+    ? toWorkflowStoreUnavailableError(operation, err)
+    : err
+
 /**
  * Executes a named GQ 2.1 query or mutation against `harness-workflows` and returns
  * rows alongside `graphCommitId` and mutation `affectedNodes` / `affectedEdges`.
  */
 export const invokeWorkflowStoreQueryWithMeta = Effect.fn("WorkflowStore.invokeWithMeta")(
-  function* (
-    input: WorkflowStoreQueryInput,
-  ): Effect.fn.Return<WorkflowStoreQueryWithMetaResult, WorkflowStoreUnavailableError> {
+  function* <Q extends WorkflowGqQueryName, const TInput extends WorkflowStoreQueryInput<Q>>(
+    input: TInput,
+  ): Effect.fn.Return<WorkflowStoreQueryWithMetaResult, WorkflowStoreInvokeError<TInput>> {
     return yield* retryWorkflowStoreAttempt({
       operation: input.operation,
       maxRetries: input.maxOccRetries,
       retryConflicts: input.ifGraphCommit === undefined,
       runAttempt: () => invokeWorkflowStoreQueryOnce(input),
-    })
+    }).pipe(
+      Effect.mapError(
+        (err) =>
+          mapUnfencedLeaseError(
+            input.operation,
+            input.expectedLeaseEpoch,
+            err,
+          ) as WorkflowStoreInvokeError<TInput>,
+      ),
+    )
   },
 )
 
 /**
  * Executes a named GQ 2.1 query or mutation against the `harness-workflows` graph
  * through the shared process-wide HTTP semaphore (`WORKFLOW_MAX_CONCURRENT_HTTP`)
- * with bounded `429`/`412` retries and `WorkflowStoreUnavailableError` mapping.
+ * with bounded `429`/`412` retries and `WorkflowStoreUnavailableError` / `WriterLeaseHeldError` mapping.
  */
-export const invokeWorkflowStoreQuery = Effect.fn("WorkflowStore.invoke")(function* (
-  input: WorkflowStoreQueryInput,
+export const invokeWorkflowStoreQuery = Effect.fn("WorkflowStore.invoke")(function* <
+  Q extends WorkflowGqQueryName,
+  const TInput extends WorkflowStoreQueryInput<Q>,
+>(
+  input: TInput,
 ): Effect.fn.Return<
   ReadonlyArray<Readonly<Record<string, unknown>>>,
-  WorkflowStoreUnavailableError
+  WorkflowStoreInvokeError<TInput>
 > {
   const res = yield* retryWorkflowStoreAttempt({
     operation: input.operation,
     maxRetries: input.maxOccRetries,
     retryConflicts: input.ifGraphCommit === undefined,
     runAttempt: () => invokeWorkflowStoreQueryOnce(input),
-  })
+  }).pipe(
+    Effect.mapError(
+      (err) =>
+        mapUnfencedLeaseError(
+          input.operation,
+          input.expectedLeaseEpoch,
+          err,
+        ) as WorkflowStoreInvokeError<TInput>,
+    ),
+  )
   return res.rows
 })
 
 /**
  * Safely decodes a JSON string against an Effect `Schema` without throwing,
- * returning a `Result` so individual corrupt storage rows can be isolated and
- * skipped without aborting healthy sibling rows.
+ * returning a `Result` so individual corrupt storage rows can be isolated without
+ * throwing raw `SchemaError` defects.
  */
 const decodeJsonFieldSafely = <
   S extends Schema.Top & { readonly DecodingServices: never; readonly EncodingServices: never },
@@ -318,6 +465,8 @@ export interface QuarantineOrphanEntityMessagesInput {
   readonly client?: Omnigraph | undefined
   readonly hostIo?: SyncHostIo | undefined
   readonly env?: Readonly<Record<string, string | undefined>> | undefined
+  readonly expectedLeaseEpoch?: LeaseEpoch | undefined
+  readonly lockFilePath?: LeaseFilePath | undefined
 }
 
 export interface QuarantineOrphanEntityMessagesResult {
@@ -325,7 +474,7 @@ export interface QuarantineOrphanEntityMessagesResult {
   readonly orphanEntityTypes: ReadonlyArray<string>
 }
 
-const MAX_ORPHAN_QUARANTINE_BATCHES = 128
+export const MAX_ORPHAN_QUARANTINE_BATCHES = 128
 
 const parseFiniteNumberOrString = (raw: unknown): number | undefined =>
   match(raw)
@@ -344,27 +493,36 @@ const parseFiniteNumberOrString = (raw: unknown): number | undefined =>
  * Scans `harness-workflows` for unprocessed `WfMessage` rows whose `entityType` is
  * no longer in `knownEntityTypes` and marks them `processed = true` (with a terminal
  * `WfReply` so `resetShards` dangling-request repair does not un-quarantine them) before
- * `Sharding` begins polling.
+ * `Sharding` begins polling. Fails closed on empty `knownEntityTypes` or incomplete
+ * quarantine after `MAX_ORPHAN_QUARANTINE_BATCHES` batches.
  */
 export const quarantineOrphanEntityMessages = Effect.fn("WorkflowStore.quarantineOrphans")(
   function* (
     input: QuarantineOrphanEntityMessagesInput,
-  ): Effect.fn.Return<QuarantineOrphanEntityMessagesResult, WorkflowStoreUnavailableError> {
-    const knownList =
-      input.knownEntityTypes.length > 0 ? [...input.knownEntityTypes] : ["__never_empty__"]
-    const seenTypes = new Set<string>()
-    let quarantinedCount = 0
-    let orphanReplyCounter = 0n
-    const mintSyntheticOrphanReplyKey = (): string => {
-      orphanReplyCounter = (orphanReplyCounter + 1n) % 10000n
-      return (BigInt(Date.now()) * 10000n + orphanReplyCounter).toString()
+  ): Effect.fn.Return<
+    QuarantineOrphanEntityMessagesResult,
+    WorkflowStoreUnavailableError | WriterLeaseHeldError
+  > {
+    const operation = WorkflowStoreOperation.make("WorkflowStore.quarantineOrphans")
+    const knownList = input.knownEntityTypes.filter((entry) => entry.trim().length > 0)
+    if (knownList.length === 0) {
+      return yield* new WorkflowStoreUnavailableError({
+        operation,
+        reason: toBoundedReason(
+          "knownEntityTypes must be non-empty when running orphan entity quarantine",
+        ),
+      })
     }
 
+    const seenTypes = new Set<string>()
+    let quarantinedCount = 0
+
+    let exhaustedBatches = true
     for (let batch = 0; batch < MAX_ORPHAN_QUARANTINE_BATCHES; batch += 1) {
       const rows = yield* invokeWorkflowStoreQuery({
         repoRoot: input.repoRoot,
         operation: WorkflowStoreOperation.make("WorkflowStore.quarantineOrphans.scan"),
-        queryName: WorkflowStoreOperation.make("wf_orphan_entity_messages"),
+        queryName: "wf_orphan_entity_messages",
         params: { knownEntityTypes: knownList },
         expectMutation: false,
         client: input.client,
@@ -373,42 +531,58 @@ export const quarantineOrphanEntityMessages = Effect.fn("WorkflowStore.quarantin
       })
 
       if (rows.length === 0) {
+        exhaustedBatches = false
         break
       }
 
-      const messageKeys: Array<string> = []
-      const requestIds = new Set<string>()
+      const messageKeys: Array<MessageKey> = []
+      const requestIds = new Set<MessageKey>()
       for (const row of rows) {
-        const key = row.messageKey
-        if (typeof key === "string" && key.length > 0) {
-          messageKeys.push(key)
-        }
-        const requestId = row.requestId
-        if (typeof requestId === "string" && requestId.length > 0) {
-          requestIds.add(requestId)
-        }
-        const entityType = row.entityType
-        if (typeof entityType === "string" && entityType.length > 0) {
-          seenTypes.add(entityType)
+        match(decodeMessageKeyOption(row.messageKey))
+          .with({ _tag: "Some" }, ({ value }) => {
+            messageKeys.push(value)
+          })
+          .with({ _tag: "None" }, () => undefined)
+          .exhaustive()
+        match(decodeMessageKeyOption(row.requestId))
+          .with({ _tag: "Some" }, ({ value }) => {
+            requestIds.add(value)
+          })
+          .with({ _tag: "None" }, () => undefined)
+          .exhaustive()
+        if (typeof row.entityType === "string" && row.entityType.length > 0) {
+          seenTypes.add(row.entityType)
         }
       }
 
       if (messageKeys.length === 0) {
-        break
+        return yield* new WorkflowStoreUnavailableError({
+          operation,
+          reason: toBoundedReason(
+            "Orphan entity scan returned rows without valid MessageKey identifiers",
+          ),
+        })
       }
 
       // Save terminal WithExit replies so resetShards dangling-request repair preserves quarantine.
+      const mintReplyKey = makeMintReplyKey()
       for (const requestId of requestIds) {
-        const replyKey = mintSyntheticOrphanReplyKey()
-        const seqKeyRes = encodeSeqKey(replyKey)
-        const seqKey = match(seqKeyRes)
-          .with({ _tag: "Success" }, ({ success }) => success)
-          .with({ _tag: "Failure" }, () => replyKey.padStart(20, "0"))
+        const replyKey = mintReplyKey()
+        const seqKey = yield* match(encodeSeqKey(replyKey))
+          .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))
+          .with({ _tag: "Failure" }, ({ failure }) =>
+            Effect.fail(
+              new WorkflowStoreUnavailableError({
+                operation: WorkflowStoreOperation.make("WorkflowStore.quarantineOrphans.saveExit"),
+                reason: toBoundedReason(failure),
+              }),
+            ),
+          )
           .exhaustive()
         yield* invokeWorkflowStoreQuery({
           repoRoot: input.repoRoot,
           operation: WorkflowStoreOperation.make("WorkflowStore.quarantineOrphans.saveExit"),
-          queryName: WorkflowStoreOperation.make("wf_save_reply_exit"),
+          queryName: "wf_save_reply_exit",
           params: {
             replyKey,
             seqKey,
@@ -419,6 +593,8 @@ export const quarantineOrphanEntityMessages = Effect.fn("WorkflowStore.quarantin
             }),
           },
           expectMutation: true,
+          expectedLeaseEpoch: input.expectedLeaseEpoch,
+          lockFilePath: input.lockFilePath,
           client: input.client,
           hostIo: input.hostIo,
           env: input.env,
@@ -428,15 +604,38 @@ export const quarantineOrphanEntityMessages = Effect.fn("WorkflowStore.quarantin
       yield* invokeWorkflowStoreQuery({
         repoRoot: input.repoRoot,
         operation: WorkflowStoreOperation.make("WorkflowStore.quarantineOrphans.mark"),
-        queryName: WorkflowStoreOperation.make("wf_quarantine_orphan_messages"),
+        queryName: "wf_quarantine_orphan_messages",
         params: { messageKeys },
         expectMutation: true,
+        expectedLeaseEpoch: input.expectedLeaseEpoch,
+        lockFilePath: input.lockFilePath,
         client: input.client,
         hostIo: input.hostIo,
         env: input.env,
       })
 
       quarantinedCount += messageKeys.length
+    }
+
+    if (exhaustedBatches) {
+      const remainingRows = yield* invokeWorkflowStoreQuery({
+        repoRoot: input.repoRoot,
+        operation: WorkflowStoreOperation.make("WorkflowStore.quarantineOrphans.verifyRemaining"),
+        queryName: "wf_orphan_entity_messages",
+        params: { knownEntityTypes: knownList },
+        expectMutation: false,
+        client: input.client,
+        hostIo: input.hostIo,
+        env: input.env,
+      })
+      if (remainingRows.length > 0) {
+        return yield* new WorkflowStoreUnavailableError({
+          operation,
+          reason: toBoundedReason(
+            `Orphan entity message quarantine exceeded ${MAX_ORPHAN_QUARANTINE_BATCHES} batches with ${remainingRows.length} remaining orphan rows`,
+          ),
+        })
+      }
     }
 
     const orphanEntityTypes = Array.from(seenTypes).sort()
@@ -450,15 +649,39 @@ export const quarantineOrphanEntityMessages = Effect.fn("WorkflowStore.quarantin
   },
 )
 
+/**
+ * Creates a strictly monotonic 64-bit decimal `ReplyKey` minter without module-level
+ * mutable state, mixing in a per-instance random salt to prevent intra-millisecond collisions.
+ */
+const makeMintReplyKey = (): (() => ReplyKey) => {
+  let lastMs = 0n
+  let lastSeq = 0n
+  const randomSalt = BigInt(randomInt(0, 1000))
+  return (): ReplyKey => {
+    const nowMs = BigInt(Date.now())
+    if (nowMs > lastMs) {
+      lastMs = nowMs
+      lastSeq = 0n
+    } else {
+      lastSeq += 1n
+      if (lastSeq >= 1000n) {
+        lastMs += 1n
+        lastSeq = 0n
+      }
+    }
+    return ReplyKey.make(((lastMs * 1000n + lastSeq) * 1000n + randomSalt).toString())
+  }
+}
+
 export {
   computeWorkflowRetryDelayMs,
   decodeJsonFieldSafely,
   invokeWorkflowStoreQueryOnce,
   isRetryableWorkflowStoreCause,
+  makeMintReplyKey,
   parseFiniteNumberOrString,
   resolveWorkflowClientForStore,
   retryWorkflowStoreAttempt,
-  toWorkflowStoreFailureReason,
   toWorkflowStoreUnavailableError,
   withWorkflowHttpPermit,
 }

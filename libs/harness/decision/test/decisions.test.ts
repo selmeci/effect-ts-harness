@@ -513,7 +513,7 @@ describe("Harness decision definitions & fallbacks", () => {
           Effect.provideService(Tracer.Tracer, testTracer),
         )
         expect(quotedPipe.verdict).toBe("allow")
-        expect(spanNames.length).toBeGreaterThan(0)
+        expect(spanNames).toContain("Harness.decideGuardCommand")
 
         const singleQuoted = yield* decideGuardCommand("rg -n 'hello $(curl x)'").pipe(
           Effect.provide(failingLayer),

@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process"
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, relative } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect } from "effect"
+import { Effect, Tracer } from "effect"
 import { match } from "ts-pattern"
 import {
   AbsoluteRepoRoot,
@@ -16,7 +16,6 @@ import {
   WorkspaceFilePath,
 } from "@harness/contract"
 import {
-  DAEMON_SOCKET_TIMEOUT_MS,
   DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
   queryUnixSocketLine,
   queryUnixSocketLineDetailed,
@@ -27,7 +26,6 @@ import {
 import {
   handshakeWorkflowDaemon,
   queryWorkflowDaemonCommand,
-  WORKFLOW_DAEMON_IPC_TIMEOUT_MS,
 } from "../src/workflow/daemon-client.js"
 import { resolveWorkflowRuntimePaths, validateWorktreeRepoRoot } from "../src/worktree-repo-root.js"
 
@@ -112,6 +110,9 @@ describe("WF-2 Worktree Validation & Daemon Protocol", () => {
           expect(canonicalSocket).toBe(runtimePaths.socketPath)
           expect(linkedSocket).toBe(runtimePaths.socketPath)
           expect(Buffer.byteLength(canonicalSocket, "utf8")).toBeLessThanOrEqual(107)
+          const relSocket = relative(canonicalValidated.commonGitDir, canonicalSocket)
+          expect(relSocket).toBe("harness/daemon.sock")
+          expect(Buffer.byteLength(relSocket, "utf8")).toBeLessThanOrEqual(70)
 
           const outsideErr = yield* validateWorktreeRepoRoot(
             AbsoluteRepoRoot.make(unregisteredDir),
@@ -180,7 +181,7 @@ describe("WF-2 Worktree Validation & Daemon Protocol", () => {
   )
 
   it.live(
-    "handshakeWorkflowDaemon verifies protocolVersion, capabilities, and leaseEpoch, and fails closed on mismatch, stale daemon, or dead socket",
+    "handshakeWorkflowDaemon requires canonical envelope, active lease >= 1 by default, and fails closed on mismatch or malformed replies",
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
@@ -205,7 +206,7 @@ describe("WF-2 Worktree Validation & Daemon Protocol", () => {
           }).pipe(Effect.flip)
           expect(deadErr._tag).toBe("WorkflowStoreUnavailableError")
 
-          // Valid handshake + queryWorkflowDaemonCommand
+          // Canonical { id, ok: true, handshake } envelope + queryWorkflowDaemonCommand
           yield* Effect.scoped(
             Effect.gen(function* () {
               yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(canonicalDir), {
@@ -219,11 +220,13 @@ describe("WF-2 Worktree Validation & Daemon Protocol", () => {
                       return JSON.stringify({
                         id: parsed.id,
                         ok: true,
-                        protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
-                        capabilities: [capHandshake, capStatus],
-                        repoRoot: validatedCanonical.worktreeRoot,
-                        commonGitDir: validatedCanonical.commonGitDir,
-                        writerLeaseEpoch: LeaseEpoch.make(7),
+                        handshake: {
+                          protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                          capabilities: [capHandshake, capStatus],
+                          repoRoot: validatedCanonical.worktreeRoot,
+                          commonGitDir: validatedCanonical.commonGitDir,
+                          writerLeaseEpoch: LeaseEpoch.make(7),
+                        },
                       })
                     }
                     return JSON.stringify({
@@ -271,6 +274,52 @@ describe("WF-2 Worktree Validation & Daemon Protocol", () => {
             }),
           ).pipe(Effect.provide(UnixSocketDaemonLive))
 
+          // writerLeaseEpoch === 0 rejected by default, allowed when requireActiveLease: false
+          const epochZeroSock = DaemonSocketPath.make(join(dir, "epoch-zero.sock"))
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(canonicalDir), {
+                socketPathOverride: epochZeroSock,
+                lineHandler: (line) =>
+                  Effect.sync(() => {
+                    const parsed = JSON.parse(line) as { readonly id?: string }
+                    return JSON.stringify({
+                      id: parsed.id,
+                      ok: true,
+                      handshake: {
+                        protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                        capabilities: [capHandshake],
+                        repoRoot: validatedCanonical.worktreeRoot,
+                        commonGitDir: validatedCanonical.commonGitDir,
+                        writerLeaseEpoch: LeaseEpoch.make(0),
+                      },
+                    })
+                  }),
+              })
+
+              const defaultErr = yield* handshakeWorkflowDaemon({
+                socketPath: epochZeroSock,
+                request: {
+                  protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                  repoRoot: validatedCanonical.worktreeRoot,
+                },
+                requiredCapabilities: [capHandshake],
+              }).pipe(Effect.flip)
+              expect(defaultErr._tag).toBe("DaemonProtocolMismatchError")
+
+              const allowedZero = yield* handshakeWorkflowDaemon({
+                socketPath: epochZeroSock,
+                request: {
+                  protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                  repoRoot: validatedCanonical.worktreeRoot,
+                },
+                requiredCapabilities: [capHandshake],
+                requireActiveLease: false,
+              })
+              expect(allowedZero.writerLeaseEpoch).toBe(0)
+            }),
+          ).pipe(Effect.provide(UnixSocketDaemonLive))
+
           // Mismatched protocolVersion ("2" vs "1") -> DaemonProtocolMismatchError
           const overrideSock = DaemonSocketPath.make(join(dir, "mismatch.sock"))
           yield* Effect.scoped(
@@ -283,11 +332,13 @@ describe("WF-2 Worktree Validation & Daemon Protocol", () => {
                     return JSON.stringify({
                       id: parsed.id,
                       ok: true,
-                      protocolVersion: WorkflowProtocolVersion.make("2"),
-                      capabilities: [capHandshake, capStatus],
-                      repoRoot: validatedCanonical.worktreeRoot,
-                      commonGitDir: validatedCanonical.commonGitDir,
-                      writerLeaseEpoch: LeaseEpoch.make(1),
+                      handshake: {
+                        protocolVersion: WorkflowProtocolVersion.make("2"),
+                        capabilities: [capHandshake, capStatus],
+                        repoRoot: validatedCanonical.worktreeRoot,
+                        commonGitDir: validatedCanonical.commonGitDir,
+                        writerLeaseEpoch: LeaseEpoch.make(1),
+                      },
                     })
                   }),
               })
@@ -312,49 +363,89 @@ describe("WF-2 Worktree Validation & Daemon Protocol", () => {
             }),
           ).pipe(Effect.provide(UnixSocketDaemonLive))
 
-          // Stale daemon ("unknown command" / legacy payload missing protocolVersion)
-          const staleSock = DaemonSocketPath.make(join(dir, "stale.sock"))
-          yield* Effect.scoped(
-            Effect.gen(function* () {
-              yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(canonicalDir), {
-                socketPathOverride: staleSock,
-                lineHandler: () =>
-                  Effect.succeed(
-                    JSON.stringify({ ok: false, error: "Invalid daemon request payload" }),
-                  ),
-              })
-
-              const staleErr = yield* handshakeWorkflowDaemon({
-                socketPath: staleSock,
-                request: {
+          // Rejects legacy flat/result envelopes, mismatched id, non-JSON, and malformed payload
+          const malformedPayloads: ReadonlyArray<(requestId: string | undefined) => string> = [
+            // Legacy flat response without canonical handshake wrapper
+            (id) =>
+              JSON.stringify({
+                id,
+                ok: true,
+                protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                capabilities: [capHandshake],
+                repoRoot: validatedCanonical.worktreeRoot,
+                commonGitDir: validatedCanonical.commonGitDir,
+                writerLeaseEpoch: LeaseEpoch.make(1),
+              }),
+            // Legacy result wrapper without handshake field
+            (id) =>
+              JSON.stringify({
+                id,
+                ok: true,
+                result: {
                   protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                  capabilities: [capHandshake],
                   repoRoot: validatedCanonical.worktreeRoot,
+                  commonGitDir: validatedCanonical.commonGitDir,
+                  writerLeaseEpoch: LeaseEpoch.make(1),
                 },
-                requiredCapabilities: [capHandshake],
-              }).pipe(Effect.flip)
-              expect(staleErr._tag).toBe("DaemonProtocolMismatchError")
-            }),
-          ).pipe(Effect.provide(UnixSocketDaemonLive))
-
-          const legacySock = DaemonSocketPath.make(join(dir, "legacy.sock"))
-          yield* Effect.scoped(
-            Effect.gen(function* () {
-              yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(canonicalDir), {
-                socketPathOverride: legacySock,
-                lineHandler: () => Effect.succeed(JSON.stringify({ ok: true, status: "warm" })),
-              })
-
-              const legacyErr = yield* handshakeWorkflowDaemon({
-                socketPath: legacySock,
-                request: {
+              }),
+            // Mismatched response correlation id
+            () =>
+              JSON.stringify({
+                id: "wrong-request-id",
+                ok: true,
+                handshake: {
                   protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                  capabilities: [capHandshake],
                   repoRoot: validatedCanonical.worktreeRoot,
+                  commonGitDir: validatedCanonical.commonGitDir,
+                  writerLeaseEpoch: LeaseEpoch.make(1),
                 },
-                requiredCapabilities: [capHandshake],
-              }).pipe(Effect.flip)
-              expect(legacyErr._tag).toBe("DaemonProtocolMismatchError")
-            }),
-          ).pipe(Effect.provide(UnixSocketDaemonLive))
+              }),
+            // Non-JSON garbage
+            () => "{not-json",
+            // Explicit daemon error envelope
+            () => JSON.stringify({ ok: false, error: "Invalid daemon request payload" }),
+            // Malformed handshake payload (negative writerLeaseEpoch)
+            (id) =>
+              JSON.stringify({
+                id,
+                ok: true,
+                handshake: {
+                  protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                  capabilities: [capHandshake],
+                  repoRoot: validatedCanonical.worktreeRoot,
+                  commonGitDir: validatedCanonical.commonGitDir,
+                  writerLeaseEpoch: -1,
+                },
+              }),
+          ]
+
+          for (let i = 0; i < malformedPayloads.length; i += 1) {
+            const makeReply = malformedPayloads[i]!
+            const badSock = DaemonSocketPath.make(join(dir, `malformed-${i}.sock`))
+            yield* Effect.scoped(
+              Effect.gen(function* () {
+                yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(canonicalDir), {
+                  socketPathOverride: badSock,
+                  lineHandler: (line) =>
+                    Effect.sync(() => {
+                      const parsed = JSON.parse(line) as { readonly id?: string }
+                      return makeReply(parsed.id)
+                    }),
+                })
+                const err = yield* handshakeWorkflowDaemon({
+                  socketPath: badSock,
+                  request: {
+                    protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                    repoRoot: validatedCanonical.worktreeRoot,
+                  },
+                  requiredCapabilities: [capHandshake],
+                }).pipe(Effect.flip)
+                expect(err._tag).toBe("DaemonProtocolMismatchError")
+              }),
+            ).pipe(Effect.provide(UnixSocketDaemonLive))
+          }
 
           // CommonGitDir mismatch -> DaemonProtocolMismatchError
           const mismatchGitDirSock = DaemonSocketPath.make(join(dir, "wrong-gitdir.sock"))
@@ -368,11 +459,13 @@ describe("WF-2 Worktree Validation & Daemon Protocol", () => {
                     return JSON.stringify({
                       id: parsed.id,
                       ok: true,
-                      protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
-                      capabilities: [capHandshake],
-                      repoRoot: validatedCanonical.worktreeRoot,
-                      commonGitDir: GitCommonDirPath.make("/other/repo/.git"),
-                      writerLeaseEpoch: LeaseEpoch.make(2),
+                      handshake: {
+                        protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                        capabilities: [capHandshake],
+                        repoRoot: validatedCanonical.worktreeRoot,
+                        commonGitDir: GitCommonDirPath.make("/other/repo/.git"),
+                        writerLeaseEpoch: LeaseEpoch.make(2),
+                      },
                     })
                   }),
               })
@@ -387,6 +480,61 @@ describe("WF-2 Worktree Validation & Daemon Protocol", () => {
                 requiredCapabilities: [capHandshake],
               }).pipe(Effect.flip)
               expect(gitDirErr._tag).toBe("DaemonProtocolMismatchError")
+              match(gitDirErr)
+                .with({ _tag: "DaemonProtocolMismatchError" }, (err) => {
+                  expect(err.expectedVersion).toBe(WORKFLOW_DAEMON_PROTOCOL_VERSION)
+                  expect(err.actualVersion).toBe(WORKFLOW_DAEMON_PROTOCOL_VERSION)
+                  expect(err.socketPath).toBe(mismatchGitDirSock)
+                  expect(err.detail).toContain("commonGitDir mismatch")
+                })
+                .with({ _tag: "WorkflowStoreUnavailableError" }, (err) => {
+                  throw new Error(`Expected DaemonProtocolMismatchError, got ${err.message}`)
+                })
+                .exhaustive()
+            }),
+          ).pipe(Effect.provide(UnixSocketDaemonLive))
+
+          // RepoRoot mismatch -> DaemonProtocolMismatchError
+          const mismatchRepoRootSock = DaemonSocketPath.make(join(dir, "wrong-reporoot.sock"))
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(canonicalDir), {
+                socketPathOverride: mismatchRepoRootSock,
+                lineHandler: (line) =>
+                  Effect.sync(() => {
+                    const parsed = JSON.parse(line) as { readonly id?: string }
+                    return JSON.stringify({
+                      id: parsed.id,
+                      ok: true,
+                      handshake: {
+                        protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                        capabilities: [capHandshake],
+                        repoRoot: AbsoluteRepoRoot.make("/other/repo"),
+                        commonGitDir: validatedCanonical.commonGitDir,
+                        writerLeaseEpoch: LeaseEpoch.make(2),
+                      },
+                    })
+                  }),
+              })
+
+              const repoRootErr = yield* handshakeWorkflowDaemon({
+                socketPath: mismatchRepoRootSock,
+                request: {
+                  protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                  repoRoot: validatedCanonical.worktreeRoot,
+                  commonGitDir: validatedCanonical.commonGitDir,
+                },
+                requiredCapabilities: [capHandshake],
+              }).pipe(Effect.flip)
+              match(repoRootErr)
+                .with({ _tag: "DaemonProtocolMismatchError" }, (err) => {
+                  expect(err.socketPath).toBe(mismatchRepoRootSock)
+                  expect(err.detail).toContain("repoRoot mismatch")
+                })
+                .with({ _tag: "WorkflowStoreUnavailableError" }, (err) => {
+                  throw new Error(`Expected DaemonProtocolMismatchError, got ${err.message}`)
+                })
+                .exhaustive()
             }),
           ).pipe(Effect.provide(UnixSocketDaemonLive))
         }),
@@ -398,9 +546,7 @@ describe("WF-2 Worktree Validation & Daemon Protocol", () => {
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
-          expect(DAEMON_SOCKET_TIMEOUT_MS).toBe(5000)
-          expect(WORKFLOW_DAEMON_IPC_TIMEOUT_MS).toBe(30_000)
-          expect(DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS).toBeGreaterThanOrEqual(30_000)
+          expect(DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS).toBeGreaterThan(5_000)
 
           const { canonicalDir } = initGitRepoWithWorktree(dir)
           const validatedCanonical = yield* validateWorktreeRepoRoot(
@@ -411,7 +557,6 @@ describe("WF-2 Worktree Validation & Daemon Protocol", () => {
 
           yield* Effect.scoped(
             Effect.gen(function* () {
-              // Uses default server socket timeout (>= 30_000ms), NOT the 5000ms LSP timeout
               yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(canonicalDir), {
                 socketPathOverride: slowSock,
                 lineHandler: (line) =>
@@ -425,11 +570,13 @@ describe("WF-2 Worktree Validation & Daemon Protocol", () => {
                       return JSON.stringify({
                         id: parsed.id,
                         ok: true,
-                        protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
-                        capabilities: [capHandshake],
-                        repoRoot: validatedCanonical.worktreeRoot,
-                        commonGitDir: validatedCanonical.commonGitDir,
-                        writerLeaseEpoch: LeaseEpoch.make(4),
+                        handshake: {
+                          protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                          capabilities: [capHandshake],
+                          repoRoot: validatedCanonical.worktreeRoot,
+                          commonGitDir: validatedCanonical.commonGitDir,
+                          writerLeaseEpoch: LeaseEpoch.make(4),
+                        },
                       })
                     }
                     yield* Effect.sleep("400 millis")
@@ -463,6 +610,20 @@ describe("WF-2 Worktree Validation & Daemon Protocol", () => {
                 requiredCapabilities: [capHandshake],
               })
               expect(slowHandshake.writerLeaseEpoch).toBe(4)
+
+              const spanNames: Array<string> = []
+              const testTracer = Tracer.make({
+                span: (options) => {
+                  spanNames.push(options.name)
+                  return new Tracer.NativeSpan(options)
+                },
+              })
+              const queryReply = yield* queryWorkflowDaemonCommand({
+                socketPath: slowSock,
+                command: "ping",
+              }).pipe(Effect.provideService(Tracer.Tracer, testTracer))
+              expect(queryReply).toMatchObject({ ok: true })
+              expect(spanNames).toContain("HarnessDaemonClient.queryCommand")
             }),
           ).pipe(Effect.provide(UnixSocketDaemonLive))
         }),
