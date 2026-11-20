@@ -31,8 +31,12 @@ import {
   Omnigraph,
   PreconditionFailedError,
   ServiceUnavailableError,
+  TooManyRequestsError,
 } from "@modernrelay/omnigraph"
 import { match } from "ts-pattern"
+
+export const HARNESS_OMNIGRAPH_GRAPH_ID = "harness" as const
+export const WORKFLOW_OMNIGRAPH_GRAPH_ID = "harness-workflows" as const
 
 export class OmnigraphLoadError extends Data.TaggedError("OmnigraphLoadError")<{
   readonly cause: unknown
@@ -149,6 +153,47 @@ export const isOmnigraphUnavailableError = (cause: unknown): boolean => {
   }
   return false
 }
+
+const matchesErrorChain = (error: unknown, predicate: (item: unknown) => boolean): boolean => {
+  const visited = new Set<unknown>()
+  let current: unknown = error
+  while (current !== undefined && current !== null && !visited.has(current)) {
+    if (predicate(current)) {
+      return true
+    }
+    visited.add(current)
+    if (typeof current !== "object") {
+      break
+    }
+    current = Reflect.get(current, "cause")
+  }
+  return false
+}
+
+export const isOmnigraphTooManyRequestsError = (error: unknown): boolean =>
+  matchesErrorChain(
+    error,
+    (item) =>
+      item instanceof TooManyRequestsError ||
+      (typeof item === "object" && item !== null && Reflect.get(item, "status") === 429),
+  )
+
+export const isOmnigraphPreconditionOrConflictError = (error: unknown): boolean =>
+  matchesErrorChain(
+    error,
+    (item) =>
+      item instanceof PreconditionFailedError ||
+      item instanceof ConflictError ||
+      (typeof item === "object" &&
+        item !== null &&
+        (Reflect.get(item, "status") === 412 || Reflect.get(item, "status") === 409)),
+  )
+
+export const resolveOmnigraphGraphId = (
+  options?: Pick<OmnigraphConnectionOptions, "graphId">,
+  env?: Readonly<Record<string, string | undefined>>,
+  defaultGraphId: string = HARNESS_OMNIGRAPH_GRAPH_ID,
+): string => options?.graphId ?? env?.OMNIGRAPH_GRAPH_ID ?? defaultGraphId
 
 const decodeStrictOptionalEntityId = (
   raw: unknown,

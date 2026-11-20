@@ -89,13 +89,19 @@ export const runOmnigraphOptimizeAndCleanup = (
             }
           })
           .with({ _tag: "TimedOut" }, ({ stderr }) => {
-            process.stderr.write(`[harness:omnigraph] Warning: omnigraph ${subcommand} timed out: ${stderr}\n`)
+            process.stderr.write(
+              `[harness:omnigraph] Warning: omnigraph ${subcommand} timed out: ${stderr}\n`,
+            )
           })
           .with({ _tag: "Signaled" }, ({ signal, stderr }) => {
-            process.stderr.write(`[harness:omnigraph] Warning: omnigraph ${subcommand} killed by ${signal}: ${stderr}\n`)
+            process.stderr.write(
+              `[harness:omnigraph] Warning: omnigraph ${subcommand} killed by ${signal}: ${stderr}\n`,
+            )
           })
           .with({ _tag: "SpawnFailed" }, ({ spawnError }) => {
-            process.stderr.write(`[harness:omnigraph] Warning: omnigraph ${subcommand} spawn failed: ${spawnError}\n`)
+            process.stderr.write(
+              `[harness:omnigraph] Warning: omnigraph ${subcommand} spawn failed: ${spawnError}\n`,
+            )
           })
           .exhaustive()
       })
@@ -167,11 +173,14 @@ export const uploadAndVerifySpanTraceBlob = (
   failExitCode: number,
   blockDecision?: string,
   fallbackBlobData?: string,
-): Effect.Effect<{
-  readonly exitCode: number
-  readonly stdout: string
-  readonly stderr: string
-} | undefined> =>
+): Effect.Effect<
+  | {
+      readonly exitCode: number
+      readonly stdout: string
+      readonly stderr: string
+    }
+  | undefined
+> =>
   Effect.gen(function* () {
     const spansPath = join(repoRoot, ".harness", "spans.jsonl")
     const hasSpansFile = nodeSyncHostIo.existsSync(spansPath)
@@ -204,21 +213,22 @@ export const uploadAndVerifySpanTraceBlob = (
       branch: OmnigraphBranchName.make(branchName),
     }
     const ogSync = yield* OmnigraphSync.pipe(Effect.provide(syncLayer))
-    const putOutcome = yield* ogSync
-      .putBlob({ ...blobSelector, data: readOutcome.data })
-      .pipe(
-        Effect.map(() => ({ ok: true as const })),
-        Effect.catch((err) =>
-          Effect.succeed({ ok: false as const, reason: `putBlob failed: ${String(err)}` }),
-        ),
-      )
+    const putOutcome = yield* ogSync.putBlob({ ...blobSelector, data: readOutcome.data }).pipe(
+      Effect.map(() => ({ ok: true as const })),
+      Effect.catch((err) =>
+        Effect.succeed({ ok: false as const, reason: `putBlob failed: ${String(err)}` }),
+      ),
+    )
     if (!putOutcome.ok) return makeFail(putOutcome.reason)
 
     const statOutcome = yield* ogSync.statBlob(blobSelector).pipe(
       Effect.map((stat) =>
         match(stat.status)
           .with(200, () => ({ ok: true as const }))
-          .otherwise((status) => ({ ok: false as const, reason: `statBlob returned status ${status}` })),
+          .otherwise((status) => ({
+            ok: false as const,
+            reason: `statBlob returned status ${status}`,
+          })),
       ),
       Effect.catch((err) =>
         Effect.succeed({ ok: false as const, reason: `statBlob failed: ${String(err)}` }),
@@ -231,19 +241,13 @@ export type OfflineOmnigraphLintResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly message: string }
 
-export const runOfflineOmnigraphLintGate = (
+const lintOmnigraphSchemaAndQueryPair = (
   repoRoot: string,
-  omnigraphBin: string = resolveDefaultOmnigraphBin(),
+  omnigraphBin: string,
+  schemaPath: string,
+  queryPath: string,
 ): Effect.Effect<OfflineOmnigraphLintResult> =>
   Effect.gen(function* () {
-    if (!nodeSyncHostIo.existsSync(omnigraphBin)) {
-      return {
-        ok: false as const,
-        message: `omnigraph binary not found at ${omnigraphBin}; cannot run offline lint gate`,
-      }
-    }
-    const schemaPath = join(repoRoot, "libs", "harness", "graph", "schema.pg")
-    const queryPath = join(repoRoot, "libs", "harness", "graph", "queries", "harness.gq")
     if (!nodeSyncHostIo.existsSync(schemaPath) || !nodeSyncHostIo.existsSync(queryPath)) {
       return {
         ok: false as const,
@@ -289,9 +293,7 @@ export const runOfflineOmnigraphLintGate = (
       .exhaustive()
 
     return yield* match(execOutcome)
-      .with({ _tag: "ExecError" }, ({ message }) =>
-        Effect.succeed({ ok: false as const, message }),
-      )
+      .with({ _tag: "ExecError" }, ({ message }) => Effect.succeed({ ok: false as const, message }))
       .with({ _tag: "Exited" }, ({ exitCode, stdout, stderr }) =>
         Effect.gen(function* () {
           const parsedOpt = Schema.decodeOption(OmnigraphLintJsonSchema)(stdout)
@@ -311,12 +313,14 @@ export const runOfflineOmnigraphLintGate = (
           const rawDiagnostics = parsed.findings ?? parsed.diagnostics ?? []
           const diagnostics: Array<OmnigraphLintDiagnostic> = rawDiagnostics.map((d) => {
             const rawCode = (d.code ?? "LINT_ERROR").trim() || "LINT_ERROR"
-            const rawMsg = (d.message ?? "Omnigraph lint diagnostic").trim() || "Omnigraph lint diagnostic"
+            const rawMsg =
+              (d.message ?? "Omnigraph lint diagnostic").trim() || "Omnigraph lint diagnostic"
             const rawTarget = (d.targetName ?? d.target_name ?? d.target ?? null)?.trim() ?? null
             return {
               code: OmnigraphDiagnosticCode.make(rawCode),
               message: ErrorReasonMessage.make(rawMsg),
-              targetName: rawTarget && rawTarget.length > 0 ? OmnigraphTargetName.make(rawTarget) : null,
+              targetName:
+                rawTarget && rawTarget.length > 0 ? OmnigraphTargetName.make(rawTarget) : null,
               severity: d.severity ?? "error",
             }
           })
@@ -344,7 +348,9 @@ export const runOfflineOmnigraphLintGate = (
 
           const lintRes = yield* decideOmnigraphLint(lintInput).pipe(
             Effect.map((report) => ({ _tag: "Report" as const, report })),
-            Effect.catchTag("OmnigraphLintError", (err) => Effect.succeed({ _tag: "Err" as const, err })),
+            Effect.catchTag("OmnigraphLintError", (err) =>
+              Effect.succeed({ _tag: "Err" as const, err }),
+            ),
           )
 
           return match(lintRes)
@@ -371,6 +377,40 @@ export const runOfflineOmnigraphLintGate = (
         }),
       )
       .exhaustive()
+  })
+
+export const runOfflineOmnigraphLintGate = (
+  repoRoot: string,
+  omnigraphBin: string = resolveDefaultOmnigraphBin(),
+): Effect.Effect<OfflineOmnigraphLintResult> =>
+  Effect.gen(function* () {
+    if (!nodeSyncHostIo.existsSync(omnigraphBin)) {
+      return {
+        ok: false as const,
+        message: `omnigraph binary not found at ${omnigraphBin}; cannot run offline lint gate`,
+      }
+    }
+    const graphDir = join(repoRoot, "libs", "harness", "graph")
+    const primaryRes = yield* lintOmnigraphSchemaAndQueryPair(
+      repoRoot,
+      omnigraphBin,
+      join(graphDir, "schema.pg"),
+      join(graphDir, "queries", "harness.gq"),
+    )
+    if (!primaryRes.ok) {
+      return primaryRes
+    }
+    const wfSchemaPath = join(graphDir, "workflows.schema.pg")
+    const wfQueryPath = join(graphDir, "workflow-queries", "workflows.gq")
+    if (nodeSyncHostIo.existsSync(wfSchemaPath) || nodeSyncHostIo.existsSync(wfQueryPath)) {
+      return yield* lintOmnigraphSchemaAndQueryPair(
+        repoRoot,
+        omnigraphBin,
+        wfSchemaPath,
+        wfQueryPath,
+      )
+    }
+    return primaryRes
   })
 
 export const runVerifyOmnigraphLintCheck = (

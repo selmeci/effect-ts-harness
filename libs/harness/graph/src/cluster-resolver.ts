@@ -46,6 +46,16 @@ const resolveGitDirs = (
   return null
 }
 
+/**
+ * Resolves the repository's `.git` common directory (`commondir` for linked worktrees,
+ * `.git` for the primary checkout), or `null` when `repoRoot` is not a git checkout.
+ */
+export const resolveGitCommonDir = (repoRoot: string, hostIo: SyncHostIo): string | null =>
+  Result.getOrElse(
+    Result.try(() => resolveGitDirs(repoRoot, hostIo)?.commonGitDir ?? null),
+    () => null,
+  )
+
 const resolveRefSha = (
   gitDir: string,
   commonGitDir: string,

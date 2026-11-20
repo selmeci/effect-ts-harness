@@ -28,6 +28,8 @@ import {
   makeHarnessSubprocessRunnerLayer,
 } from "./subprocess-runner-live.js"
 import {
+  DAEMON_SOCKET_TIMEOUT_MS,
+  DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
   makeUnixSocketDaemonLayer,
   queryUnixSocketLine,
   queryUnixSocketLineDetailed,
@@ -35,6 +37,7 @@ import {
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
   type UnixSocketDaemonLayerOptions,
+  type UnixSocketQueryOptions,
   type UnixSocketQueryReason,
   type UnixSocketQueryReply,
   type UnixSocketQueryResult,
@@ -69,6 +72,8 @@ export {
   type ResolveMutationHmacSecretOptions,
 } from "./mutation-hmac-secret.js"
 export {
+  DAEMON_SOCKET_TIMEOUT_MS,
+  DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
   makeUnixSocketDaemonLayer,
   queryUnixSocketLine,
   queryUnixSocketLineDetailed,
@@ -76,11 +81,91 @@ export {
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
   type UnixSocketDaemonLayerOptions,
+  type UnixSocketQueryOptions,
   type UnixSocketQueryReason,
   type UnixSocketQueryReply,
   type UnixSocketQueryResult,
   type UnixSocketQueryUnavailable,
 }
+export {
+  resolveWorkflowRuntimePaths,
+  validateWorktreeRepoRoot,
+  type ResolvedWorktreeKind,
+  type WorkflowRuntimePaths,
+} from "./worktree-repo-root.js"
+export {
+  invokeWorkflowStoreQuery,
+  invokeWorkflowStoreQueryWithMeta,
+  MAX_ORPHAN_QUARANTINE_BATCHES,
+  quarantineOrphanEntityMessages,
+  WORKFLOW_MAX_CONCURRENT_HTTP,
+  WORKFLOW_MAX_OCC_RETRIES,
+  type QuarantineOrphanEntityMessagesInput,
+  type QuarantineOrphanEntityMessagesResult,
+  type WorkflowStoreInvokeError,
+  type WorkflowStoreQueryInput,
+  type WorkflowStoreQueryWithMetaResult,
+  type WorkflowStoreRetryPolicy,
+} from "./omnigraph-workflow-store.js"
+export {
+  acquireWriterLease,
+  evaluateWriterLeaseTakeover,
+  refreshWriterLease,
+  withAdvisoryFlock,
+  WRITER_LEASE_HEARTBEAT_TTL_MS,
+  type ActiveWriterLease,
+  type LeaseTakeoverDecision,
+  type LeaseTakeoverEvaluationInput,
+  type WriterLeaseAcquireInput,
+  type WriterLeaseHandle,
+  type WriterLeaseRefreshInput,
+} from "./writer-lease.js"
+export {
+  clearOmnigraphReplies,
+  makeOmnigraphEncodedDriver,
+  makeOmnigraphMessageStorageLayer,
+  repairDanglingProcessedRequests,
+  type OmnigraphClearRepliesInput,
+  type OmnigraphMessageStorageOptions,
+  type RepairDanglingRequestsInput,
+} from "./omnigraph-message-storage.js"
+export {
+  makeHarnessShardingLayer,
+  makeHarnessWorkflowEngineLayer,
+  type HarnessWorkflowEngineLayerOptions,
+  type HarnessWorkflowEngineOptions,
+} from "./workflow-engine-live.js"
+export {
+  exportWorkflowGraphBackup,
+  makeWorkflowGraphBackupLayer,
+  restoreWorkflowGraphBackup,
+  WorkflowBackupArtifactMetadata,
+  WorkflowGraphBackupLive,
+  type WorkflowGraphBackupOptions,
+} from "./workflow-graph-backup.js"
+export {
+  DEFAULT_WORKFLOW_CLEANUP_KEEP_VERSIONS,
+  runOfflineWorkflowMaintenance,
+  type WorkflowMaintenanceInput,
+  type WorkflowMaintenanceSummary,
+} from "./workflow-maintenance.js"
+export {
+  acquireOmnigraphClusterLockEffect,
+  releaseOmnigraphClusterLock,
+  tryAcquireOmnigraphClusterLock,
+  withOmnigraphClusterStartupLock,
+  type OmnigraphClusterLockAttemptResult,
+  type OmnigraphClusterLockHandle,
+  type OmnigraphClusterStartupLockOptions,
+} from "./workflow/cluster-startup-lock.js"
+export {
+  handshakeWorkflowDaemon,
+  queryWorkflowDaemonCommand,
+  WORKFLOW_DAEMON_IPC_TIMEOUT_MS,
+  type WorkflowDaemonCommandInput,
+  type WorkflowDaemonExpectedProtocol,
+  type WorkflowDaemonHandshakeInput,
+} from "./workflow/daemon-client.js"
 
 export const TsCompilerOverlayServiceLive: Layer.Layer<TsCompilerOverlayService> =
   makeTsCompilerOverlayLayer(nodeSyncHostIo)

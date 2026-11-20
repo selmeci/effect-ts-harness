@@ -5,6 +5,11 @@
 
 import * as path from "node:path"
 import {
+  PROTECTED_HARNESS_FILE_WRITE_PATTERN,
+  isHarnessStateAccessCommand,
+  isHarnessStateMutationCommand,
+} from "./policy-harness-state.js"
+import {
   extractCommandSegments,
   hasUnquotedBackgroundOperator,
   normalizeShellLineContinuations,
@@ -13,7 +18,7 @@ import {
   type UnwrappedSegment,
 } from "./policy-shell-parser.js"
 
-export { toCommandView, type CommandView }
+export { isHarnessStateMutationCommand, toCommandView, type CommandView }
 
 export type GuardVerdict = "allow" | "deny" | "ask" | "escalate"
 
@@ -122,13 +127,13 @@ export interface GuardPatternRule {
  * or templates (`.env.example`, `.env.template`, `.env.sample`) — REQ-3.2.
  * Evaluated on `CommandView.argv`. */
 export const SECRET_FILE_PATTERN: RegExp =
-  /(?:^|[\s=:/<>(])(?:\.env(?:\.(?!(?:example|template|sample)(?:$|[\s/]))[\w*?-]+)*\*?|mutation-hmac[^\s;|&)<>]*(?:\.key|\*|\?|\]|\})|[^\s;|&)<>]*\.cache\/effect-harness(?:\/[^\s;|&)<>]*)?|[^\s=:/<>()]*(?:\*|\?|\[[^\]\s]+\]|\{[^}\s]+\})[^\s;|&)<>]*\.key)(?=$|[\s/;|&)<>])/
+  /(?:^|[\s=:/<>(])(?:\.env(?:\.(?!(?:example|template|sample)(?:$|[\s/]))[\w*?-]+)*\*?|mutation-hmac[^\s;|&)<>]*(?:\.key|\*|\?|\]|\})|[^\s;|&)<>]*\.cache\/effect-harness(?:\/[^\s;|&)<>]*)?|[^\s=:/<>()]*(?:\*|\?|\[[^\]\s]+\]|\{[^}\s]+\})[^\s;|&)<>]*\.key|(?:[^\s;|&)<>]*\/)?auth-tokens\.json)(?=$|[\s/;|&)<>])/
 
 /** REQ-2.1: the agent must not use the guard as an oracle to test candidate commands.
  * Hooks invoke the guard directly from the IDE, never through an agent shell command.
- * Flags between the entrypoint and `guard` (`pnpm harness -- guard`) are tolerated. */
+ * Flags (and flag values such as `--cwd /tmp`) or `--` before `guard` are tolerated. */
 export const GUARD_SELF_INVOCATION_PATTERN: RegExp =
-  /(?:^|\s)harness(?:\s+-\S*)*\s+guard\b|harness-cli\/src\/index\.ts(?:\s+-\S*)*\s+guard\b/
+  /(?:(?:^|\s)harness|harness-cli\/src\/index\.ts)(?:\s+(?:--(?=\s|$)|-\S+(?:\s+(?!guard\b)[^\s;|&)<>]+)?))*\s+guard\b/
 
 /** REQ-1.2: git commands that irreversibly discard work. Always a human decision —
  * clef rated `git checkout -- .` only destructive=0.26 (would auto-allow). */
@@ -373,6 +378,7 @@ export type CommandDenyRuleId =
   | "invalid-clef-endpoint"
   | "denylist-token"
   | "git-force-push"
+  | "harness-state-mutation"
   | "secret-file-access"
   | "guard-self-invocation"
 
@@ -414,11 +420,25 @@ export const explainCommandDenyRule = (command: string): CommandDenyExplanation 
       reason: "Force-pushing with '--force' or '-f' is banned by harness policy.",
     }
   }
+  if (isHarnessStateMutationCommand(trimmed)) {
+    return {
+      ruleId: "harness-state-mutation",
+      reason:
+        "Mutating or directly probing protected harness runtime state (<git-common-dir>/harness/**, auth-tokens.json, daemon.sock, daemon.lock, workflow-backups/, pending-workflow-restore.json) is banned by harness policy.",
+    }
+  }
   if (SECRET_FILE_PATTERN.test(view.argv)) {
     return {
       ruleId: "secret-file-access",
       reason:
-        "Accessing or exposing secret/credential files (.env, mutation-hmac*.key) in shell commands is banned by harness policy.",
+        "Accessing or exposing secret/credential files (.env, mutation-hmac*.key, auth-tokens.json) in shell commands is banned by harness policy.",
+    }
+  }
+  if (isHarnessStateAccessCommand(trimmed)) {
+    return {
+      ruleId: "harness-state-mutation",
+      reason:
+        "Reading or inspecting protected harness runtime state (<git-common-dir>/harness/**, auth-tokens.json, daemon.sock, daemon.lock, workflow-backups/, pending-workflow-restore.json) is banned by harness policy.",
     }
   }
   if (GUARD_SELF_INVOCATION_PATTERN.test(view.argv)) {
@@ -529,8 +549,17 @@ export const classifyCommand = (command: string): GuardVerdict => {
   return isCommandAllowed(norm) ? "allow" : "escalate"
 }
 
+export type FileWriteDenyRuleId =
+  | "readonly-subtree"
+  | "verify-stamp"
+  | "mutate-stamp"
+  | "harness-cache"
+  | "harness-common-dir-state"
+  | "secret-file"
+
 export interface FileWriteGuardResult {
   readonly verdict: "allow" | "deny" | "ask"
+  readonly ruleId?: FileWriteDenyRuleId | undefined
   readonly reason?: string | undefined
 }
 
@@ -545,6 +574,7 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
   if (candidates.some((p) => /(^|\/)repos\/(effect|alchemy)(\/|$)/.test(p))) {
     return {
       verdict: "deny",
+      ruleId: "readonly-subtree",
       reason: `Protected read-only subtree cannot be modified: ${filePath}`,
     }
   }
@@ -552,6 +582,7 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
   if (candidates.some((p) => /(^|\/)\.harness\/(worktrees\/[^/]+\/)?verify-stamp\.json$/.test(p))) {
     return {
       verdict: "deny",
+      ruleId: "verify-stamp",
       reason: `Direct modification of verify-stamp.json is forbidden (stamp forgery protection): ${filePath}`,
     }
   }
@@ -559,6 +590,7 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
   if (candidates.some((p) => /(^|\/)\.harness\/(worktrees\/[^/]+\/)?mutate-stamp\.json$/.test(p))) {
     return {
       verdict: "deny",
+      ruleId: "mutate-stamp",
       reason: `Direct modification of mutate-stamp.json is forbidden (stamp forgery protection): ${filePath}`,
     }
   }
@@ -572,7 +604,16 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
   ) {
     return {
       verdict: "deny",
+      ruleId: "harness-cache",
       reason: `Direct modification of harness cache file is forbidden: ${filePath}`,
+    }
+  }
+
+  if (candidates.some((p) => PROTECTED_HARNESS_FILE_WRITE_PATTERN.test(p))) {
+    return {
+      verdict: "deny",
+      ruleId: "harness-common-dir-state",
+      reason: `Direct modification of protected harness runtime state is forbidden: ${filePath}`,
     }
   }
 
@@ -586,6 +627,7 @@ export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
   ) {
     return {
       verdict: "deny",
+      ruleId: "secret-file",
       reason: `Secret or credential file modification is forbidden by harness guard: ${filePath}`,
     }
   }

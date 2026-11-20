@@ -14,8 +14,14 @@ policies:
   graph-access:
     file: graph.policy.yaml
     applies_to: [harness]
+  workflow-access:
+    file: workflows.policy.yaml
+    applies_to: [harness-workflows]
 graphs:
   harness:
     schema: schema.pg
     queries: queries/
     embedding_provider: local-ollama
+  harness-workflows:
+    schema: workflows.schema.pg
+    queries: workflow-queries/

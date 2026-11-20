@@ -1,0 +1,653 @@
+// Named GQ 2.1 Queries for `harness-workflows` (RFC-0013 WF-2)
+// Rules verified against Omnigraph 0.14.0:
+// - Use `is null` (not `= null`) for null predicates.
+// - Never put bare `null` literals in insert/update; pass typed nullable params `$p: T?`.
+// - Never mix `delete` and `update` in a single mutation (D2 two-commit CAS for clearReplies).
+// - Filter `opts.addresses` in GQ before `limit 1024` so non-resident entities never starve resident ones.
+
+query wf_message_by_pk($primaryKeyHash: String) {
+  match {
+    $m: WfMessage
+    $m.primaryKeyHash = $primaryKeyHash
+  }
+  return {
+    $m.messageKey as messageKey,
+    $m.seqKey as seqKey,
+    $m.primaryKeyHash as primaryKeyHash,
+    $m.shardId as shardId,
+    $m.entityType as entityType,
+    $m.entityId as entityId,
+    $m.kind as kind,
+    $m.tag as tag,
+    $m.payload as payload,
+    $m.headers as headers,
+    $m.traceId as traceId,
+    $m.spanId as spanId,
+    $m.sampled as sampled,
+    $m.requestId as requestId,
+    $m.replyId as replyId,
+    $m.processed as processed,
+    $m.lastReplyId as lastReplyId,
+    $m.lastReadMs as lastReadMs,
+    $m.deliverAtMs as deliverAtMs
+  }
+}
+
+query wf_messages_by_keys($messageKeys: [String]) {
+  match {
+    $m: WfMessage
+    $m.messageKey in $messageKeys
+  }
+  return {
+    $m.messageKey as messageKey,
+    $m.seqKey as seqKey,
+    $m.primaryKeyHash as primaryKeyHash,
+    $m.shardId as shardId,
+    $m.entityType as entityType,
+    $m.entityId as entityId,
+    $m.kind as kind,
+    $m.tag as tag,
+    $m.payload as payload,
+    $m.headers as headers,
+    $m.traceId as traceId,
+    $m.spanId as spanId,
+    $m.sampled as sampled,
+    $m.requestId as requestId,
+    $m.replyId as replyId,
+    $m.processed as processed,
+    $m.lastReplyId as lastReplyId,
+    $m.lastReadMs as lastReadMs,
+    $m.deliverAtMs as deliverAtMs
+  }
+  order { $m.seqKey asc }
+}
+
+query wf_reply_by_key($replyKey: String) {
+  match {
+    $r: WfReply
+    $r.replyKey = $replyKey
+  }
+  return {
+    $r.replyKey as replyKey,
+    $r.seqKey as seqKey,
+    $r.requestId as requestId,
+    $r.kind as kind,
+    $r.payload as payload,
+    $r.sequence as sequence,
+    $r.acked as acked
+  }
+}
+
+query wf_replies_by_keys($replyKeys: [String]) {
+  match {
+    $r: WfReply
+    $r.replyKey in $replyKeys
+  }
+  return {
+    $r.replyKey as replyKey,
+    $r.seqKey as seqKey,
+    $r.requestId as requestId,
+    $r.kind as kind,
+    $r.payload as payload,
+    $r.sequence as sequence,
+    $r.acked as acked
+  }
+  order { $r.seqKey asc }
+}
+
+query wf_insert_request_message(
+  $messageKey: String,
+  $seqKey: String,
+  $primaryKeyHash: String?,
+  $shardId: String,
+  $entityType: String,
+  $entityId: String,
+  $tag: String,
+  $payload: String,
+  $headers: String,
+  $traceId: String?,
+  $spanId: String?,
+  $sampled: Bool?,
+  $requestId: String,
+  $deliverAtMs: I64?
+) {
+  insert WfMessage {
+    messageKey: $messageKey,
+    seqKey: $seqKey,
+    primaryKeyHash: $primaryKeyHash,
+    shardId: $shardId,
+    entityType: $entityType,
+    entityId: $entityId,
+    kind: "request",
+    tag: $tag,
+    payload: $payload,
+    headers: $headers,
+    traceId: $traceId,
+    spanId: $spanId,
+    sampled: $sampled,
+    requestId: $requestId,
+    processed: false,
+    deliverAtMs: $deliverAtMs
+  }
+}
+
+query wf_insert_ack_chunk(
+  $messageKey: String,
+  $seqKey: String,
+  $primaryKeyHash: String?,
+  $shardId: String,
+  $entityType: String,
+  $entityId: String,
+  $requestId: String,
+  $replyId: String,
+  $deliverAtMs: I64?
+) {
+  update WfReply set {
+    acked: true
+  } where replyKey = $replyId
+  update WfMessage set {
+    processed: true
+  } where processed = false and requestId = $requestId and kind = "ack_chunk"
+  insert WfMessage {
+    messageKey: $messageKey,
+    seqKey: $seqKey,
+    primaryKeyHash: $primaryKeyHash,
+    shardId: $shardId,
+    entityType: $entityType,
+    entityId: $entityId,
+    kind: "ack_chunk",
+    requestId: $requestId,
+    replyId: $replyId,
+    processed: false,
+    deliverAtMs: $deliverAtMs
+  }
+}
+
+query wf_insert_interrupt(
+  $messageKey: String,
+  $seqKey: String,
+  $primaryKeyHash: String?,
+  $shardId: String,
+  $entityType: String,
+  $entityId: String,
+  $requestId: String,
+  $deliverAtMs: I64?
+) {
+  insert WfMessage {
+    messageKey: $messageKey,
+    seqKey: $seqKey,
+    primaryKeyHash: $primaryKeyHash,
+    shardId: $shardId,
+    entityType: $entityType,
+    entityId: $entityId,
+    kind: "interrupt",
+    requestId: $requestId,
+    processed: false,
+    deliverAtMs: $deliverAtMs
+  }
+}
+
+query wf_save_reply_exit(
+  $replyKey: String,
+  $seqKey: String,
+  $requestId: String,
+  $payload: String
+) {
+  insert WfReply {
+    replyKey: $replyKey,
+    seqKey: $seqKey,
+    requestId: $requestId,
+    kind: "with_exit",
+    payload: $payload,
+    acked: false
+  }
+  update WfMessage set {
+    processed: true,
+    lastReplyId: $replyKey
+  } where requestId = $requestId
+}
+
+query wf_save_reply_chunk(
+  $replyKey: String,
+  $seqKey: String,
+  $requestId: String,
+  $payload: String,
+  $sequence: I32
+) {
+  insert WfReply {
+    replyKey: $replyKey,
+    seqKey: $seqKey,
+    requestId: $requestId,
+    kind: "chunk",
+    payload: $payload,
+    sequence: $sequence,
+    acked: false
+  }
+  update WfMessage set {
+    lastReplyId: $replyKey
+  } where messageKey = $requestId
+}
+
+query wf_clear_replies_unconditional_delete($requestId: String) {
+  delete WfReply where requestId = $requestId and kind = "with_exit"
+  delete WfMessage where requestId = $requestId and kind = "interrupt"
+}
+
+query wf_clear_replies_cas_delete($requestId: String) {
+  delete WfReply where requestId = $requestId and kind = "with_exit"
+}
+
+query wf_reset_message_for_clear(
+  $requestId: String,
+  $clearReplyId: String?,
+  $clearReadMs: I64?
+) {
+  update WfMessage set {
+    processed: false,
+    lastReplyId: $clearReplyId,
+    lastReadMs: $clearReadMs
+  } where requestId = $requestId
+}
+
+query wf_reset_message_for_clear_cas(
+  $requestId: String,
+  $expectedReplyId: String,
+  $clearReplyId: String?,
+  $clearReadMs: I64?
+) {
+  update WfMessage set {
+    processed: false,
+    lastReplyId: $clearReplyId,
+    lastReadMs: $clearReadMs
+  } where requestId = $requestId and lastReplyId = $expectedReplyId
+}
+
+query wf_dangling_processed_requests() {
+  match {
+    $m: WfMessage
+    $m.processed = true and $m.kind = "request"
+    not {
+      $r: WfReply
+      $r.requestId = $m.requestId and $r.kind = "with_exit"
+    }
+  }
+  return {
+    $m.messageKey as messageKey,
+    $m.requestId as requestId,
+    $m.shardId as shardId,
+    $m.lastReplyId as lastReplyId
+  }
+}
+
+query wf_repair_dangling_requests(
+  $messageKeys: [String],
+  $clearReplyId: String?,
+  $clearReadMs: I64?
+) {
+  update WfMessage set {
+    processed: false,
+    lastReplyId: $clearReplyId,
+    lastReadMs: $clearReadMs
+  } where requestId in $messageKeys and processed = true
+}
+
+query wf_replies_for($requestIds: [String]) {
+  match {
+    $r: WfReply
+    $r.requestId in $requestIds
+    $r.kind = "with_exit" or ($r.kind = "chunk" and $r.acked = false)
+  }
+  return {
+    $r.replyKey as replyKey,
+    $r.seqKey as seqKey,
+    $r.requestId as requestId,
+    $r.kind as kind,
+    $r.payload as payload,
+    $r.sequence as sequence,
+    $r.acked as acked
+  }
+  order { $r.seqKey asc }
+}
+
+query wf_replies_for_unfiltered($requestIds: [String]) {
+  match {
+    $r: WfReply
+    $r.requestId in $requestIds
+  }
+  return {
+    $r.replyKey as replyKey,
+    $r.seqKey as seqKey,
+    $r.requestId as requestId,
+    $r.kind as kind,
+    $r.payload as payload,
+    $r.sequence as sequence,
+    $r.acked as acked
+  }
+  order { $r.seqKey asc }
+}
+
+query wf_unprocessed_candidate_messages(
+  $shardIds: [String],
+  $claimCutoffMs: I64,
+  $nowMs: I64
+) {
+  match {
+    $m: WfMessage
+    $m.shardId in $shardIds
+    $m.processed = false
+    $m.lastReadMs is null or $m.lastReadMs < $claimCutoffMs
+    $m.deliverAtMs is null or $m.deliverAtMs <= $nowMs
+    not {
+      $r: WfReply
+      $r.requestId = $m.requestId
+      $r.kind = "with_exit" or ($r.kind = "chunk" and $r.acked = false)
+    }
+  }
+  return {
+    $m.messageKey as messageKey,
+    $m.seqKey as seqKey,
+    $m.primaryKeyHash as primaryKeyHash,
+    $m.shardId as shardId,
+    $m.entityType as entityType,
+    $m.entityId as entityId,
+    $m.kind as kind,
+    $m.tag as tag,
+    $m.payload as payload,
+    $m.headers as headers,
+    $m.traceId as traceId,
+    $m.spanId as spanId,
+    $m.sampled as sampled,
+    $m.requestId as requestId,
+    $m.replyId as replyId,
+    $m.processed as processed,
+    $m.lastReplyId as lastReplyId,
+    $m.lastReadMs as lastReadMs,
+    $m.deliverAtMs as deliverAtMs
+  }
+  order { $m.seqKey asc }
+  limit 1024
+}
+
+query wf_unprocessed_candidate_messages_for_addresses(
+  $shardIds: [String],
+  $entityType: String,
+  $entityIds: [String],
+  $claimCutoffMs: I64,
+  $nowMs: I64
+) {
+  match {
+    $m: WfMessage
+    $m.shardId in $shardIds
+    $m.entityType = $entityType
+    $m.entityId in $entityIds
+    $m.processed = false
+    $m.lastReadMs is null or $m.lastReadMs < $claimCutoffMs
+    $m.deliverAtMs is null or $m.deliverAtMs <= $nowMs
+    not {
+      $r: WfReply
+      $r.requestId = $m.requestId
+      $r.kind = "with_exit" or ($r.kind = "chunk" and $r.acked = false)
+    }
+  }
+  return {
+    $m.messageKey as messageKey,
+    $m.seqKey as seqKey,
+    $m.primaryKeyHash as primaryKeyHash,
+    $m.shardId as shardId,
+    $m.entityType as entityType,
+    $m.entityId as entityId,
+    $m.kind as kind,
+    $m.tag as tag,
+    $m.payload as payload,
+    $m.headers as headers,
+    $m.traceId as traceId,
+    $m.spanId as spanId,
+    $m.sampled as sampled,
+    $m.requestId as requestId,
+    $m.replyId as replyId,
+    $m.processed as processed,
+    $m.lastReplyId as lastReplyId,
+    $m.lastReadMs as lastReadMs,
+    $m.deliverAtMs as deliverAtMs
+  }
+  order { $m.seqKey asc }
+  limit 1024
+}
+
+query wf_claim_messages($messageKeys: [String], $nowMs: I64) {
+  update WfMessage set {
+    lastReadMs: $nowMs
+  } where messageKey in $messageKeys and processed = false
+}
+
+query wf_unprocessed_messages_by_id($messageKeys: [String], $nowMs: I64) {
+  match {
+    $m: WfMessage
+    $m.messageKey in $messageKeys
+    $m.processed = false
+    $m.deliverAtMs is null or $m.deliverAtMs <= $nowMs
+    not {
+      $r: WfReply
+      $r.requestId = $m.requestId
+      $r.kind = "with_exit" or ($r.kind = "chunk" and $r.acked = false)
+    }
+  }
+  return {
+    $m.messageKey as messageKey,
+    $m.seqKey as seqKey,
+    $m.primaryKeyHash as primaryKeyHash,
+    $m.shardId as shardId,
+    $m.entityType as entityType,
+    $m.entityId as entityId,
+    $m.kind as kind,
+    $m.tag as tag,
+    $m.payload as payload,
+    $m.headers as headers,
+    $m.traceId as traceId,
+    $m.spanId as spanId,
+    $m.sampled as sampled,
+    $m.requestId as requestId,
+    $m.replyId as replyId,
+    $m.processed as processed,
+    $m.lastReplyId as lastReplyId,
+    $m.lastReadMs as lastReadMs,
+    $m.deliverAtMs as deliverAtMs
+  }
+  order { $m.seqKey asc }
+}
+
+query wf_reset_requests($messageKeys: [String], $clearReadMs: I64?) {
+  update WfMessage set {
+    lastReadMs: $clearReadMs
+  } where processed = false and messageKey in $messageKeys
+}
+
+query wf_reset_address(
+  $shardId: String,
+  $entityType: String,
+  $entityId: String,
+  $clearReadMs: I64?
+) {
+  update WfMessage set {
+    lastReadMs: $clearReadMs
+  } where processed = false and shardId = $shardId and entityType = $entityType and entityId = $entityId
+}
+
+query wf_reset_address_group(
+  $shardId: String,
+  $entityType: String,
+  $entityIds: [String],
+  $clearReadMs: I64?
+) {
+  update WfMessage set {
+    lastReadMs: $clearReadMs
+  } where processed = false and shardId = $shardId and entityType = $entityType and entityId in $entityIds
+}
+
+query wf_reset_shards($shardIds: [String], $clearReadMs: I64?) {
+  update WfMessage set {
+    lastReadMs: $clearReadMs
+  } where processed = false and shardId in $shardIds
+}
+
+query wf_message_keys_for_address($entityType: String, $entityId: String) {
+  match {
+    $m: WfMessage
+    $m.entityType = $entityType and $m.entityId = $entityId
+  }
+  return {
+    $m.messageKey as messageKey,
+    $m.requestId as requestId
+  }
+}
+
+query wf_clear_address(
+  $requestIds: [String],
+  $entityType: String,
+  $entityId: String
+) {
+  delete WfMessage where entityType = $entityType and entityId = $entityId
+  delete WfReply where requestId in $requestIds
+}
+
+query wf_count_all() {
+  match {
+    $m: WfMessage
+  }
+  return {
+    count($m) as totalMessages
+  }
+}
+
+query wf_count_replies() {
+  match {
+    $r: WfReply
+  }
+  return {
+    count($r) as totalReplies
+  }
+}
+
+query wf_all_entities($afterSeqKey: String) {
+  match {
+    $m: WfMessage
+    $m.seqKey > $afterSeqKey
+  }
+  return {
+    $m.messageKey as messageKey,
+    $m.seqKey as seqKey,
+    $m.primaryKeyHash as primaryKeyHash,
+    $m.shardId as shardId,
+    $m.entityType as entityType,
+    $m.entityId as entityId,
+    $m.kind as kind,
+    $m.tag as tag,
+    $m.payload as payload,
+    $m.headers as headers,
+    $m.traceId as traceId,
+    $m.spanId as spanId,
+    $m.sampled as sampled,
+    $m.requestId as requestId,
+    $m.replyId as replyId,
+    $m.processed as processed,
+    $m.lastReplyId as lastReplyId,
+    $m.lastReadMs as lastReadMs,
+    $m.deliverAtMs as deliverAtMs
+  }
+  order { $m.seqKey asc }
+  limit 1024
+}
+
+query wf_all_replies($afterSeqKey: String) {
+  match {
+    $r: WfReply
+    $r.seqKey > $afterSeqKey
+  }
+  return {
+    $r.replyKey as replyKey,
+    $r.seqKey as seqKey,
+    $r.requestId as requestId,
+    $r.kind as kind,
+    $r.payload as payload,
+    $r.sequence as sequence,
+    $r.acked as acked
+  }
+  order { $r.seqKey asc }
+  limit 1024
+}
+
+query wf_orphan_entity_messages($knownEntityTypes: [String]) {
+  match {
+    $m: WfMessage
+    $m.processed = false
+    not ($m.entityType in $knownEntityTypes)
+  }
+  return {
+    $m.messageKey as messageKey,
+    $m.seqKey as seqKey,
+    $m.shardId as shardId,
+    $m.entityType as entityType,
+    $m.entityId as entityId,
+    $m.requestId as requestId
+  }
+  order { $m.seqKey asc }
+  limit 1024
+}
+
+query wf_quarantine_orphan_messages($messageKeys: [String]) {
+  update WfMessage set {
+    processed: true
+  } where messageKey in $messageKeys
+}
+
+query wf_get_writer_lease($name: String) {
+  match {
+    $l: WfWriterLease
+    $l.name = $name
+  }
+  return {
+    $l.name as name,
+    $l.owner as owner,
+    $l.leaseEpoch as leaseEpoch,
+    $l.heartbeatMs as heartbeatMs
+  }
+}
+
+query wf_insert_writer_lease(
+  $name: String,
+  $owner: String,
+  $leaseEpoch: I64,
+  $heartbeatMs: I64
+) {
+  insert WfWriterLease {
+    name: $name,
+    owner: $owner,
+    leaseEpoch: $leaseEpoch,
+    heartbeatMs: $heartbeatMs
+  }
+}
+
+query wf_cas_writer_lease(
+  $name: String,
+  $expectedEpoch: I64,
+  $owner: String,
+  $nextEpoch: I64,
+  $heartbeatMs: I64
+) {
+  update WfWriterLease set {
+    owner: $owner,
+    leaseEpoch: $nextEpoch,
+    heartbeatMs: $heartbeatMs
+  } where name = $name and leaseEpoch = $expectedEpoch
+}
+
+query wf_refresh_writer_lease(
+  $name: String,
+  $owner: String,
+  $expectedEpoch: I64,
+  $heartbeatMs: I64
+) {
+  update WfWriterLease set {
+    heartbeatMs: $heartbeatMs
+  } where name = $name and owner = $owner and leaseEpoch = $expectedEpoch
+}

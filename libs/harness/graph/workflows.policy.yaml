@@ -1,0 +1,19 @@
+version: 1
+protected_branches: [main]
+groups:
+  admins: [harness-cli]
+rules:
+  - id: workflow-admins-read-export-change
+    allow:
+      actors: { group: admins }
+      actions: [read, export, change]
+      branch_scope: any
+  - id: workflow-admins-invoke-queries
+    allow:
+      actors: { group: admins }
+      actions: [invoke_query]
+  - id: workflow-admins-manage-branches-and-schema
+    allow:
+      actors: { group: admins }
+      actions: [branch_create, branch_delete, branch_merge, schema_apply]
+      target_branch_scope: any

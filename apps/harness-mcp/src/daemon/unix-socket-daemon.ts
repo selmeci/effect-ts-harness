@@ -1,39 +1,69 @@
 import * as path from "node:path"
 import { Cause, Effect, Exit, ManagedRuntime, Schema, Scope, SynchronizedRef } from "effect"
 import * as Graph from "effect/Graph"
-import * as Semaphore from "effect/Semaphore"
+import type * as Semaphore from "effect/Semaphore"
 import { match } from "ts-pattern"
 import {
-  OmnigraphBranchName,
-  OmnigraphChangeCursor,
+  type DaemonServerError,
+  type DaemonSocketPath,
+  isPureInterruptCause,
+  LeaseEpoch,
   toErrorReasonMessage,
   WorkspaceFilePath,
+  type WriterLeaseHeldError,
 } from "@harness/contract"
-import { AST_GATE_RULE_SOURCE_FILES, AST_GATE_TYPESCRIPT_VERSION } from "@harness/gates"
-import {
-  DatalogFilePath,
-  DatalogSession,
-  type DatalogSessionShape,
-  extractWorkspaceTypeAwareGraph,
-  makeOmnigraphSyncLayer,
-  pollOmnigraphChanges,
-  readGraphHeadMetaState,
-  updateGraphHeadCursor,
-} from "@harness/graph"
+import { type DatalogSessionShape, extractWorkspaceTypeAwareGraph } from "@harness/graph"
 import {
   type AstGateCacheRuleSourceConfig,
+  DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
   nodeSyncHostIo,
   resolveDiskGateRuleVersion,
   type ResolvedGateRuleVersion,
   resolveHarnessDaemonSocketPath,
+  resolveWorkflowRuntimePaths,
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
 } from "@harness/infra"
-import { isPathInsideRoot } from "../tools/mcp-helpers.js"
-import { type CachedDaemonAstPort, handleDaemonAstGatesRequest } from "./ast-gate-daemon-helper.js"
+import { UnixSocketDaemonPort } from "@harness/service"
+import {
+  type CachedDaemonAstPort,
+  computeGraphExtractorSourceDigest,
+  type GraphExtractorDigestResult,
+  handleDaemonAstGatesRequest,
+  resolveDaemonRuleSourceConfig,
+  verifyWorktreeExtractorConsistency,
+  verifyWorktreeRuleVersionConsistency,
+} from "./ast-gate-daemon-helper.js"
+import { handleDaemonPollChangesRequest } from "./poll-changes-daemon-helper.js"
+import {
+  type DaemonWorktreeScopeCache,
+  handleDaemonWorkflowHandshakeRequest,
+  handleDaemonWorkflowStatusRequest,
+  makeDaemonWorktreeScopeCache,
+  resolveDaemonRequestScope,
+  type WorktreeValidatorFn,
+} from "./workflow-daemon-helper.js"
+import {
+  acquireWorkflowEngineInScope,
+  buildAlreadyAliveLeaseError,
+  forkWorkflowLeaseWatchers,
+  type WorkflowEngineDaemonMode,
+  type WorkflowEngineDaemonOptions,
+} from "./workflow-engine-daemon-helper.js"
+
+export type { WorkflowEngineDaemonMode, WorkflowEngineDaemonOptions }
+
+export interface StartHarnessDaemonServerOptions {
+  readonly ruleSourceRoot?: WorkspaceFilePath | undefined
+  readonly writerLeaseEpoch?: LeaseEpoch | undefined
+  readonly workflowEngine?: WorkflowEngineDaemonOptions | undefined
+  readonly validateWorktree?: WorktreeValidatorFn | undefined
+  readonly linkedWorktreeCacheMaxEntries?: number | undefined
+}
 
 export interface HarnessDaemonServerHandle {
   readonly socketPath: string
+  readonly writerLeaseEpoch: LeaseEpoch
   readonly close: () => Promise<void>
 }
 
@@ -48,12 +78,16 @@ const DaemonRequestSchema = Schema.Struct({
     "verify",
     "bench",
     "poll-changes",
+    "workflow.handshake",
+    "workflow.status",
   ]),
   argv: Schema.optional(Schema.Array(Schema.String)),
   repoRoot: Schema.optional(Schema.String),
   files: Schema.optional(Schema.Array(Schema.String)),
   branch: Schema.optional(Schema.String),
   cursor: Schema.optional(Schema.String),
+  protocolVersion: Schema.optional(Schema.String),
+  commonGitDir: Schema.optional(Schema.String),
 })
 
 const decodeDaemonRequest = Schema.decodeOption(Schema.fromJsonString(DaemonRequestSchema))
@@ -61,448 +95,401 @@ const decodeDaemonRequest = Schema.decodeOption(Schema.fromJsonString(DaemonRequ
 export const resolveDaemonSocketPath = (repoRoot: string): string =>
   resolveHarnessDaemonSocketPath(repoRoot)
 
-const classifyImageFiles = (
-  image: { readonly properties: unknown } | null | undefined,
-  tsOut: Set<string>,
-): { readonly hasTs: boolean; readonly hasNonTs: boolean } => {
-  if (image === null || image === undefined) {
-    return { hasTs: false, hasNonTs: false }
-  }
-  const props = image.properties
-  if (typeof props !== "object" || props === null) {
-    return { hasTs: false, hasNonTs: false }
-  }
-  const record = props as {
-    readonly file?: unknown
-    readonly testFile?: unknown
-    readonly moduleFile?: unknown
-    readonly path?: unknown
-  }
-  let hasTs = false
-  let hasNonTs = false
-  for (const candidate of [record.file, record.testFile, record.moduleFile, record.path]) {
-    if (typeof candidate !== "string") continue
-    const trimmed = candidate.trim()
-    if (trimmed.length === 0) continue
-    if (trimmed.endsWith(".ts") || trimmed.endsWith(".tsx")) {
-      tsOut.add(trimmed)
-      hasTs = true
-    } else {
-      hasNonTs = true
-    }
-  }
-  return { hasTs, hasNonTs }
-}
-
 const createDaemonLineHandler =
-  (
-    repoRoot: string,
-    daemonScope: Scope.Scope,
-    cachePortsRef: SynchronizedRef.SynchronizedRef<ReadonlyMap<string, CachedDaemonAstPort>>,
-    datalogSessionsRef: SynchronizedRef.SynchronizedRef<ReadonlyMap<string, DatalogSessionShape>>,
-    pollSemaphoresRef: SynchronizedRef.SynchronizedRef<ReadonlyMap<string, Semaphore.Semaphore>>,
-    startupRuleVersion: ResolvedGateRuleVersion,
-    ruleSourceConfig: AstGateCacheRuleSourceConfig,
-  ) =>
+  (input: {
+    readonly baseRoot: string
+    readonly canonicalBaseRoot: string
+    readonly daemonScope: Scope.Scope
+    readonly scopeCache: DaemonWorktreeScopeCache
+    readonly cachePortsRef: SynchronizedRef.SynchronizedRef<
+      ReadonlyMap<string, CachedDaemonAstPort>
+    >
+    readonly datalogSessionsRef: SynchronizedRef.SynchronizedRef<
+      ReadonlyMap<string, DatalogSessionShape>
+    >
+    readonly pollSemaphoresRef: SynchronizedRef.SynchronizedRef<
+      ReadonlyMap<string, Semaphore.Semaphore>
+    >
+    readonly startupRuleVersion: ResolvedGateRuleVersion
+    readonly startupExtractorDigest: GraphExtractorDigestResult
+    readonly ruleSourceConfig: AstGateCacheRuleSourceConfig
+    readonly writerLeaseEpoch: LeaseEpoch
+    readonly socketPath?: DaemonSocketPath | undefined
+  }) =>
   (line: string): Effect.Effect<string> => {
     const reqOpt = decodeDaemonRequest(line.trim())
     return match(reqOpt)
       .with({ _tag: "None" }, () =>
         Effect.succeed(JSON.stringify({ ok: false, error: "Invalid daemon request payload" })),
       )
-      .with({ _tag: "Some" }, ({ value: req }) => {
-        const baseRoot = path.resolve(repoRoot)
-        const resolvedRoot =
-          req.repoRoot !== undefined
-            ? path.isAbsolute(req.repoRoot)
-              ? path.resolve(req.repoRoot)
-              : path.resolve(baseRoot, req.repoRoot)
-            : baseRoot
-        if (req.repoRoot !== undefined && !isPathInsideRoot(baseRoot, resolvedRoot)) {
-          return Effect.succeed(
-            JSON.stringify({
-              id: req.id,
-              ok: false,
-              error: `Requested repoRoot '${req.repoRoot}' escapes daemon root`,
-            }),
-          )
-        }
-        return match<typeof req.command, Effect.Effect<Record<string, unknown>>>(req.command)
-          .with("ping", () => Effect.succeed({ id: req.id, ok: true, status: "warm" }))
-          .with("extract-graph", () =>
-            Effect.gen(function* () {
-              const graph = yield* extractWorkspaceTypeAwareGraph(resolvedRoot, nodeSyncHostIo)
-              return {
-                id: req.id,
-                ok: true,
-                nodeCount: Graph.nodeCount(graph.graph),
-                edgeCount: Graph.edgeCount(graph.graph),
-                violationCount: (graph.branchingViolations ?? []).length,
-              }
-            }),
-          )
-          .with("ast-gates", () =>
-            handleDaemonAstGatesRequest({
-              requestId: req.id,
-              resolvedRoot,
-              requestedRelPaths: req.files ?? [],
-              daemonScope,
-              cachePortsRef,
-              startupRuleVersion,
-              ruleSourceConfig,
-            }),
-          )
-          .with("plan-check", "gc", "verify", "bench", () =>
-            Effect.succeed({ id: req.id, ok: false, fallbackToInProcess: true }),
-          )
-          .with("poll-changes", () =>
-            Effect.gen(function* () {
-              const pollSem = yield* SynchronizedRef.modifyEffect(pollSemaphoresRef, (sems) => {
-                const existing = sems.get(resolvedRoot)
-                if (existing !== undefined) {
-                  return Effect.succeed([existing, sems] as const)
-                }
-                return Semaphore.make(1).pipe(
-                  Effect.map((created) => {
-                    const next = new Map(sems)
-                    next.set(resolvedRoot, created)
-                    return [created, next] as const
+      .with({ _tag: "Some" }, ({ value: req }) =>
+        Effect.gen(function* () {
+          const scopeRes = yield* resolveDaemonRequestScope(input.baseRoot, req.repoRoot, {
+            scopeCache: input.scopeCache,
+          })
+          return yield* match(scopeRes)
+            .with({ _tag: "Rejected" }, ({ error }) =>
+              Effect.succeed<Record<string, unknown>>({ id: req.id, ok: false, error }),
+            )
+            .with({ _tag: "Allowed" }, (allowedScope) => {
+              const { resolvedRoot } = allowedScope
+              return match<typeof req.command, Effect.Effect<Record<string, unknown>>>(req.command)
+                .with("ping", () =>
+                  Effect.succeed({
+                    id: req.id,
+                    ok: true,
+                    status: "warm",
+                    cacheHit: allowedScope.cacheHit ?? false,
                   }),
                 )
-              })
-              return yield* pollSem.withPermits(1)(
-                Effect.gen(function* () {
-                  if (req.branch !== undefined && req.branch.trim().length === 0) {
-                    return { id: req.id, ok: false, error: "Invalid branch name" }
-                  }
-                  if (req.cursor !== undefined && req.cursor.trim().length === 0) {
-                    return { id: req.id, ok: false, error: "Invalid change cursor" }
-                  }
-                  const headMetaState = readGraphHeadMetaState(resolvedRoot, nodeSyncHostIo)
-                  const headMetaOrErr = match(headMetaState)
-                    .with({ _tag: "Present" }, ({ meta }) => ({ ok: true as const, meta }))
-                    .with({ _tag: "Missing" }, () => ({ ok: true as const, meta: null }))
-                    .with({ _tag: "Corrupt" }, ({ path: corruptPath, reason }) => ({
-                      ok: false as const,
-                      error: `Corrupt graph-head.json at ${corruptPath}: ${reason}`,
-                    }))
-                    .exhaustive()
-                  if (!headMetaOrErr.ok) {
-                    return { id: req.id, ok: false, error: headMetaOrErr.error }
-                  }
-                  const headMeta = headMetaOrErr.meta
-                  const rawReqCursor = req.cursor?.trim()
-                  const storedCursor =
-                    headMeta?.changeFeedCursor !== undefined && headMeta.changeFeedCursor !== null
-                      ? match(Schema.decodeOption(OmnigraphChangeCursor)(headMeta.changeFeedCursor))
-                          .with({ _tag: "Some" }, ({ value }) => value)
-                          .with({ _tag: "None" }, () => {
-                            process.stderr.write(
-                              "[harness-mcp] Warning: ignoring malformed stored changeFeedCursor in graph-head.json\n",
-                            )
-                            return undefined
-                          })
-                          .exhaustive()
-                      : undefined
-                  const rawBranch = req.branch?.trim()
-                  const branch =
-                    rawBranch === undefined
-                      ? undefined
-                      : match(Schema.decodeOption(OmnigraphBranchName)(rawBranch))
-                          .with({ _tag: "Some" }, ({ value }) => value)
-                          .with({ _tag: "None" }, () => null)
-                          .exhaustive()
-                  if (branch === null) {
-                    return { id: req.id, ok: false, error: `Invalid branch name: ${rawBranch}` }
-                  }
-                  const cursor =
-                    rawReqCursor === undefined
-                      ? storedCursor
-                      : match(Schema.decodeOption(OmnigraphChangeCursor)(rawReqCursor))
-                          .with({ _tag: "Some" }, ({ value }) => value)
-                          .with({ _tag: "None" }, () => null)
-                          .exhaustive()
-                  if (cursor === null) {
+                .with("workflow.handshake", () =>
+                  handleDaemonWorkflowHandshakeRequest({
+                    requestId: req.id,
+                    scope: allowedScope,
+                    writerLeaseEpoch: input.writerLeaseEpoch,
+                    protocolVersion: req.protocolVersion,
+                    commonGitDir: req.commonGitDir,
+                    ...(req.repoRoot !== undefined ? { requestedRepoRoot: req.repoRoot } : {}),
+                    ...(input.socketPath !== undefined ? { socketPath: input.socketPath } : {}),
+                  }),
+                )
+                .with("workflow.status", () =>
+                  Effect.succeed(
+                    handleDaemonWorkflowStatusRequest({
+                      requestId: req.id,
+                      scope: allowedScope,
+                      writerLeaseEpoch: input.writerLeaseEpoch,
+                    }),
+                  ),
+                )
+                .with("extract-graph", () =>
+                  Effect.gen(function* () {
+                    const versionCheck = yield* verifyWorktreeRuleVersionConsistency({
+                      baseRoot: input.canonicalBaseRoot,
+                      resolvedRoot,
+                      startupRuleVersion: input.startupRuleVersion,
+                      ruleSourceConfig: input.ruleSourceConfig,
+                      cachePortsRef: input.cachePortsRef,
+                    })
+                    const versionMismatchErr = match(versionCheck)
+                      .with({ _tag: "Mismatch" }, ({ error }) => error)
+                      .with({ _tag: "Match" }, () => undefined)
+                      .exhaustive()
+                    if (versionMismatchErr !== undefined) {
+                      return {
+                        id: req.id,
+                        ok: false,
+                        fallbackToInProcess: true,
+                        error: versionMismatchErr,
+                      }
+                    }
+                    const extractorMismatchErr = match(
+                      verifyWorktreeExtractorConsistency({
+                        baseRoot: input.canonicalBaseRoot,
+                        resolvedRoot,
+                        startupDigest: input.startupExtractorDigest,
+                      }),
+                    )
+                      .with({ _tag: "Mismatch" }, ({ error }) => error)
+                      .with({ _tag: "Match" }, () => undefined)
+                      .exhaustive()
+                    if (extractorMismatchErr !== undefined) {
+                      return {
+                        id: req.id,
+                        ok: false,
+                        fallbackToInProcess: true,
+                        error: extractorMismatchErr,
+                      }
+                    }
+                    const graph = yield* extractWorkspaceTypeAwareGraph(
+                      resolvedRoot,
+                      nodeSyncHostIo,
+                    )
                     return {
                       id: req.id,
-                      ok: false,
-                      error: `Invalid change cursor: ${rawReqCursor}`,
+                      ok: true,
+                      nodeCount: Graph.nodeCount(graph.graph),
+                      edgeCount: Graph.edgeCount(graph.graph),
+                      violationCount: (graph.branchingViolations ?? []).length,
                     }
-                  }
-
-                  const feedRes = yield* pollOmnigraphChanges({
-                    repoRoot: resolvedRoot,
-                    actor: "agent-mcp",
-                    ...(branch !== undefined ? { branch } : {}),
-                    ...(cursor !== undefined ? { cursor } : { start: "beginning" as const }),
-                  }).pipe(
-                    Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
-                    Effect.map((feed) => ({ _tag: "Ok" as const, feed })),
-                    Effect.catchTag("OmnigraphLoadError", (err) =>
-                      Effect.succeed({
-                        _tag: "Err" as const,
-                        error: toErrorReasonMessage(err.cause),
-                      }),
-                    ),
+                  }),
+                )
+                .with("ast-gates", () =>
+                  handleDaemonAstGatesRequest({
+                    requestId: req.id,
+                    baseRoot: input.canonicalBaseRoot,
+                    resolvedRoot,
+                    requestedRelPaths: req.files ?? [],
+                    daemonScope: input.daemonScope,
+                    cachePortsRef: input.cachePortsRef,
+                    startupRuleVersion: input.startupRuleVersion,
+                    ruleSourceConfig: input.ruleSourceConfig,
+                  }),
+                )
+                .with("plan-check", "gc", "verify", "bench", () =>
+                  Effect.succeed({ id: req.id, ok: false, fallbackToInProcess: true }),
+                )
+                .with("poll-changes", () => {
+                  const extractorMismatch = match(
+                    verifyWorktreeExtractorConsistency({
+                      baseRoot: input.canonicalBaseRoot,
+                      resolvedRoot,
+                      startupDigest: input.startupExtractorDigest,
+                    }),
                   )
-
-                  return yield* match(feedRes)
-                    .with({ _tag: "Err" }, ({ error }) =>
-                      Effect.succeed({ id: req.id, ok: false, error }),
-                    )
-                    .with({ _tag: "Ok" }, ({ feed }) =>
-                      Effect.gen(function* () {
-                        const changedTsFiles = new Set<string>()
-                        let hasNonTsChanges = false
-                        for (const block of feed.blocks) {
-                          for (const change of block.changes) {
-                            const beforeFiles = classifyImageFiles(change.before, changedTsFiles)
-                            const afterFiles = classifyImageFiles(change.after, changedTsFiles)
-                            if (
-                              beforeFiles.hasNonTs ||
-                              afterFiles.hasNonTs ||
-                              (!beforeFiles.hasTs && !afterFiles.hasTs)
-                            ) {
-                              hasNonTsChanges = true
-                            }
-                          }
-                        }
-                        for (const relPath of changedTsFiles) {
-                          const absPath = path.resolve(resolvedRoot, relPath)
-                          if (!isPathInsideRoot(resolvedRoot, absPath)) {
-                            return {
-                              id: req.id,
-                              ok: false,
-                              error: `Change-feed file path escapes workspace root: ${relPath}`,
-                            }
-                          }
-                        }
-
-                        if (feed.requiresBaseline || hasNonTsChanges || changedTsFiles.size > 0) {
-                          const nextGraph = yield* extractWorkspaceTypeAwareGraph(
-                            resolvedRoot,
-                            nodeSyncHostIo,
-                          )
-                          if (feed.requiresBaseline || hasNonTsChanges) {
-                            const rebuiltRes = yield* DatalogSession.make(nextGraph).pipe(
-                              Effect.flatMap((created) =>
-                                SynchronizedRef.update(datalogSessionsRef, (sessions) => {
-                                  const next = new Map(sessions)
-                                  next.set(resolvedRoot, created)
-                                  return next
-                                }),
-                              ),
-                              Effect.map(() => ({ ok: true as const })),
-                              Effect.catch((err) =>
-                                SynchronizedRef.update(datalogSessionsRef, (sessions) => {
-                                  const next = new Map(sessions)
-                                  next.delete(resolvedRoot)
-                                  return next
-                                }).pipe(
-                                  Effect.as({
-                                    ok: false as const,
-                                    error: toErrorReasonMessage(err),
-                                  }),
-                                ),
-                              ),
-                            )
-                            if (!rebuiltRes.ok) {
-                              return { id: req.id, ok: false, error: rebuiltRes.error }
-                            }
-                          } else {
-                            const sessionRes = yield* SynchronizedRef.modifyEffect(
-                              datalogSessionsRef,
-                              (sessions) => {
-                                const existing = sessions.get(resolvedRoot)
-                                if (existing !== undefined) {
-                                  return Effect.succeed([existing, sessions] as const)
-                                }
-                                return DatalogSession.make(nextGraph).pipe(
-                                  Effect.map((created) => {
-                                    const next = new Map(sessions)
-                                    next.set(resolvedRoot, created)
-                                    return [created, next] as const
-                                  }),
-                                )
-                              },
-                            ).pipe(
-                              Effect.map((s) => ({ _tag: "Ok" as const, session: s })),
-                              Effect.catch((err) =>
-                                Effect.succeed({
-                                  _tag: "Err" as const,
-                                  error: toErrorReasonMessage(err),
-                                }),
-                              ),
-                            )
-
-                            const stepOutcome = yield* match(sessionRes)
-                              .with({ _tag: "Err" }, ({ error }) =>
-                                Effect.succeed({ ok: false as const, error }),
-                              )
-                              .with({ _tag: "Ok" }, ({ session }) =>
-                                Effect.gen(function* () {
-                                  for (const filePath of changedTsFiles) {
-                                    const stepRes = yield* session
-                                      .stepFileDelta({
-                                        filePath: DatalogFilePath.make(filePath),
-                                        nextGraph,
-                                      })
-                                      .pipe(
-                                        Effect.map(() => ({ ok: true as const })),
-                                        Effect.catch((err) =>
-                                          SynchronizedRef.update(datalogSessionsRef, (sessions) => {
-                                            const next = new Map(sessions)
-                                            next.delete(resolvedRoot)
-                                            return next
-                                          }).pipe(
-                                            Effect.as({
-                                              ok: false as const,
-                                              error: toErrorReasonMessage(err),
-                                            }),
-                                          ),
-                                        ),
-                                      )
-                                    if (!stepRes.ok) {
-                                      return stepRes
-                                    }
-                                  }
-                                  return { ok: true as const }
-                                }),
-                              )
-                              .exhaustive()
-
-                            if (!stepOutcome.ok) {
-                              return { id: req.id, ok: false, error: stepOutcome.error }
-                            }
-                          }
-                        }
-
-                        if (feed.cursor !== null) {
-                          const persisted = updateGraphHeadCursor(
-                            resolvedRoot,
-                            nodeSyncHostIo,
-                            feed.cursor,
-                          )
-                          if (persisted === null) {
-                            return {
-                              id: req.id,
-                              ok: false,
-                              error: "Failed to persist graph-head.json",
-                            }
-                          }
-                        }
-
-                        return {
-                          id: req.id,
-                          ok: true,
-                          cursor: feed.cursor,
-                          caughtUp: feed.caughtUp,
-                          requiresBaseline: feed.requiresBaseline,
-                          blockCount: feed.blocks.length,
-                          updatedFiles: Array.from(changedTsFiles),
-                        }
-                      }),
-                    )
+                    .with({ _tag: "Mismatch" }, ({ error }) => error)
+                    .with({ _tag: "Match" }, () => undefined)
                     .exhaustive()
-                }),
-              )
+                  if (extractorMismatch !== undefined) {
+                    return Effect.succeed({
+                      id: req.id,
+                      ok: false,
+                      fallbackToInProcess: true,
+                      error: extractorMismatch,
+                    })
+                  }
+                  return handleDaemonPollChangesRequest({
+                    requestId: req.id,
+                    resolvedRoot,
+                    branch: req.branch,
+                    cursor: req.cursor,
+                    datalogSessionsRef: input.datalogSessionsRef,
+                    pollSemaphoresRef: input.pollSemaphoresRef,
+                  })
+                })
+                .exhaustive()
+            })
+            .exhaustive()
+        }).pipe(
+          Effect.map((res) => JSON.stringify(res)),
+          Effect.catchDefect((defect: unknown) =>
+            Effect.sync(() => {
+              const message = toErrorReasonMessage(defect)
+              process.stderr.write(`[harness-mcp] Daemon line handler defect: ${message}\n`)
+              return JSON.stringify({ id: req.id, ok: false, error: message })
             }),
-          )
-          .exhaustive()
-          .pipe(
-            Effect.map((res) => JSON.stringify(res)),
-            Effect.catchDefect((defect: unknown) =>
-              Effect.sync(() => {
-                const message = toErrorReasonMessage(defect)
-                process.stderr.write(`[harness-mcp] Daemon line handler defect: ${message}\n`)
-                return JSON.stringify({ id: req.id, ok: false, error: message })
-              }),
-            ),
-          )
-      })
+          ),
+        ),
+      )
       .exhaustive()
   }
 
 export const startHarnessDaemonServer = (
   repoRoot: string = process.cwd(),
-  options?: { readonly ruleSourceRoot?: WorkspaceFilePath },
+  options?: StartHarnessDaemonServerOptions,
 ): Promise<HarnessDaemonServerHandle> => {
+  const baseRoot = path.resolve(repoRoot)
+  const fallbackWriterLeaseEpoch = options?.writerLeaseEpoch ?? LeaseEpoch.make(0)
   const daemonRuntime = ManagedRuntime.make(UnixSocketDaemonLive)
+
   return daemonRuntime
     .runPromiseExit(
       Effect.gen(function* () {
         const scope = yield* Scope.make()
-        const ruleSourceConfig: AstGateCacheRuleSourceConfig = {
-          _tag: "HashedSources",
-          ruleSourceFiles: AST_GATE_RULE_SOURCE_FILES,
-          compilerVersion: AST_GATE_TYPESCRIPT_VERSION,
-          ...(options?.ruleSourceRoot !== undefined
-            ? { ruleSourceRoot: options.ruleSourceRoot }
-            : {}),
-        }
-        const startupRuleVersion = yield* resolveDiskGateRuleVersion(ruleSourceConfig)
-        const cachePortsRef = yield* SynchronizedRef.make<ReadonlyMap<string, CachedDaemonAstPort>>(
-          new Map(),
-        )
-        const datalogSessionsRef = yield* SynchronizedRef.make<
-          ReadonlyMap<string, DatalogSessionShape>
-        >(new Map())
-        const pollSemaphoresRef = yield* SynchronizedRef.make<
-          ReadonlyMap<string, Semaphore.Semaphore>
-        >(new Map())
-        return yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(repoRoot), {
-          lineHandler: createDaemonLineHandler(
-            repoRoot,
-            scope,
-            cachePortsRef,
-            datalogSessionsRef,
-            pollSemaphoresRef,
-            startupRuleVersion,
-            ruleSourceConfig,
-          ),
-        }).pipe(
-          Scope.provide(scope),
-          Effect.map((info): HarnessDaemonServerHandle => ({
-            socketPath: info.socketPath,
-            close: () =>
-              daemonRuntime
-                .runPromiseExit(Scope.close(scope, Exit.void))
-                .then((closeExit) =>
-                  Exit.match(closeExit, {
-                    onFailure: (cause) => Promise.reject(Cause.squash(cause)),
-                    onSuccess: () => undefined,
-                  }),
+        let closePromise: Promise<void> | undefined
+        const close = (): Promise<void> => {
+          if (closePromise !== undefined) {
+            return closePromise
+          }
+          closePromise = daemonRuntime
+            .runPromiseExit(Scope.close(scope, Exit.void))
+            .then((closeExit) =>
+              Exit.match(closeExit, {
+                onFailure: (cause) =>
+                  isPureInterruptCause(cause) ? undefined : Promise.reject(Cause.squash(cause)),
+                onSuccess: () => undefined,
+              }),
+            )
+            .finally(() =>
+              daemonRuntime.dispose().catch((disposeErr: unknown) => {
+                process.stderr.write(
+                  `[harness-mcp] Daemon runtime dispose error: ${disposeErr instanceof Error ? disposeErr.message : String(disposeErr)}\n`,
                 )
-                .finally(() =>
-                  daemonRuntime.dispose().catch((disposeErr: unknown) => {
-                    process.stderr.write(
-                      `[harness-mcp] Daemon runtime dispose error: ${disposeErr instanceof Error ? disposeErr.message : String(disposeErr)}\n`,
-                    )
-                  }),
-                ),
-          })),
-          Effect.catchTag("DaemonServerError", (err) =>
-            match(err.reasonKind)
-              .with("already-alive", () =>
-                Scope.close(scope, Exit.void).pipe(
-                  Effect.as<HarnessDaemonServerHandle>({
-                    socketPath: err.socketPath,
-                    close: () => daemonRuntime.dispose(),
-                  }),
-                ),
+              }),
+            )
+          return closePromise
+        }
+        const triggerShutdown = (): void => {
+          queueMicrotask(() => {
+            void close().catch((shutdownErr: unknown) => {
+              process.stderr.write(
+                `[harness-mcp] Daemon shutdown error: ${toErrorReasonMessage(shutdownErr)}\n`,
               )
-              .with(
-                "not-a-socket",
-                "probe-failed",
-                "bind-failed",
-                "chmod-failed",
-                "invalid-path",
-                () => Effect.fail(err),
-              )
-              .exhaustive(),
-          ),
-          Effect.onError(() => Scope.close(scope, Exit.void)),
-        )
+            })
+          })
+        }
+
+        const startResult = yield* Effect.gen(function* () {
+          const scopeCache = yield* makeDaemonWorktreeScopeCache(baseRoot, {
+            maxEntries: options?.linkedWorktreeCacheMaxEntries,
+            validateWorktree: options?.validateWorktree,
+          })
+          const unixSocketDaemon = yield* UnixSocketDaemonPort
+          const workflowState = yield* acquireWorkflowEngineInScope({
+            daemonScope: scope,
+            startupState: scopeCache.startupState,
+            fallbackWriterLeaseEpoch,
+            workflowEngineOptions: options?.workflowEngine,
+            unixSocketDaemon,
+          })
+
+          return yield* match(workflowState)
+            .with({ _tag: "AttachedAlreadyAlive" }, ({ socketPath }) =>
+              Scope.close(scope, Exit.void).pipe(
+                Effect.as<HarnessDaemonServerHandle>({
+                  socketPath,
+                  writerLeaseEpoch: LeaseEpoch.make(0),
+                  close: () => daemonRuntime.dispose(),
+                }),
+              ),
+            )
+            .with({ _tag: "Active" }, { _tag: "Inactive" }, (readyState) =>
+              Effect.gen(function* () {
+                const effectiveWriterLeaseEpoch = match(readyState)
+                  .with({ _tag: "Active" }, ({ lease }) => lease.leaseEpoch)
+                  .with({ _tag: "Inactive" }, ({ writerLeaseEpoch }) => writerLeaseEpoch)
+                  .exhaustive()
+
+                const canonicalBaseRoot = match(scopeCache.startupState)
+                  .with({ _tag: "Valid" }, ({ worktree }) => worktree.worktreeRoot)
+                  .with({ _tag: "NonGit" }, { _tag: "InvalidGit" }, () => baseRoot)
+                  .exhaustive()
+
+                const ruleSourceConfig = resolveDaemonRuleSourceConfig(
+                  canonicalBaseRoot,
+                  options?.ruleSourceRoot,
+                )
+                const startupRuleVersion = yield* resolveDiskGateRuleVersion(ruleSourceConfig)
+                const startupExtractorDigest = computeGraphExtractorSourceDigest(canonicalBaseRoot)
+                const canonicalSocketPath = match(scopeCache.startupState)
+                  .with(
+                    { _tag: "Valid" },
+                    ({ worktree }) => resolveWorkflowRuntimePaths(worktree.commonGitDir).socketPath,
+                  )
+                  .with({ _tag: "NonGit" }, { _tag: "InvalidGit" }, () => undefined)
+                  .exhaustive()
+                const cachePortsRef = yield* SynchronizedRef.make<
+                  ReadonlyMap<string, CachedDaemonAstPort>
+                >(new Map())
+                const datalogSessionsRef = yield* SynchronizedRef.make<
+                  ReadonlyMap<string, DatalogSessionShape>
+                >(new Map())
+                const pollSemaphoresRef = yield* SynchronizedRef.make<
+                  ReadonlyMap<string, Semaphore.Semaphore>
+                >(new Map())
+
+                type DaemonBindOutcome =
+                  | { readonly _tag: "Bound"; readonly socketPath: DaemonSocketPath }
+                  | { readonly _tag: "AlreadyAlive"; readonly socketPath: DaemonSocketPath }
+
+                const socketResult = yield* startScopedUnixSocketDaemon(
+                  WorkspaceFilePath.make(baseRoot),
+                  {
+                    socketTimeoutMs: DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
+                    ...(canonicalSocketPath !== undefined
+                      ? { socketPathOverride: canonicalSocketPath }
+                      : {}),
+                    lineHandler: createDaemonLineHandler({
+                      baseRoot,
+                      canonicalBaseRoot,
+                      daemonScope: scope,
+                      scopeCache,
+                      cachePortsRef,
+                      datalogSessionsRef,
+                      pollSemaphoresRef,
+                      startupRuleVersion,
+                      startupExtractorDigest,
+                      ruleSourceConfig,
+                      writerLeaseEpoch: effectiveWriterLeaseEpoch,
+                      ...(canonicalSocketPath !== undefined
+                        ? { socketPath: canonicalSocketPath }
+                        : {}),
+                    }),
+                  },
+                ).pipe(
+                  Scope.provide(scope),
+                  Effect.map((info): DaemonBindOutcome => ({
+                    _tag: "Bound",
+                    socketPath: info.socketPath,
+                  })),
+                  Effect.catchTag("DaemonServerError", (err) =>
+                    match<
+                      typeof err.reasonKind,
+                      Effect.Effect<DaemonBindOutcome, DaemonServerError | WriterLeaseHeldError>
+                    >(err.reasonKind)
+                      .with("already-alive", () => {
+                        if (options?.workflowEngine?.mode === "required") {
+                          const commonGitDir = match(scopeCache.startupState)
+                            .with({ _tag: "Valid" }, ({ worktree }) => worktree.commonGitDir)
+                            .with({ _tag: "NonGit" }, { _tag: "InvalidGit" }, () => undefined)
+                            .exhaustive()
+                          if (commonGitDir !== undefined) {
+                            return Scope.close(scope, Exit.void).pipe(
+                              Effect.andThen(
+                                Effect.fail(
+                                  buildAlreadyAliveLeaseError(
+                                    commonGitDir,
+                                    options.workflowEngine?.hostIo,
+                                  ),
+                                ),
+                              ),
+                            )
+                          }
+                        }
+                        return Scope.close(scope, Exit.void).pipe(
+                          Effect.as<DaemonBindOutcome>({
+                            _tag: "AlreadyAlive",
+                            socketPath: err.socketPath,
+                          }),
+                        )
+                      })
+                      .with(
+                        "not-a-socket",
+                        "probe-failed",
+                        "bind-failed",
+                        "chmod-failed",
+                        "invalid-path",
+                        () => Effect.fail(err),
+                      )
+                      .exhaustive(),
+                  ),
+                )
+
+                return yield* match(socketResult)
+                  .with({ _tag: "AlreadyAlive" }, ({ socketPath }) =>
+                    Effect.succeed<HarnessDaemonServerHandle>({
+                      socketPath,
+                      writerLeaseEpoch: LeaseEpoch.make(0),
+                      close: () => daemonRuntime.dispose(),
+                    }),
+                  )
+                  .with({ _tag: "Bound" }, ({ socketPath }) =>
+                    Effect.gen(function* () {
+                      yield* match(readyState)
+                        .with({ _tag: "Active" }, (activeState) =>
+                          forkWorkflowLeaseWatchers({
+                            daemonScope: scope,
+                            activeState,
+                            options: options?.workflowEngine,
+                            triggerShutdown,
+                          }),
+                        )
+                        .with({ _tag: "Inactive" }, () => Effect.void)
+                        .exhaustive()
+                      return {
+                        socketPath,
+                        writerLeaseEpoch: effectiveWriterLeaseEpoch,
+                        close,
+                      } satisfies HarnessDaemonServerHandle
+                    }),
+                  )
+                  .exhaustive()
+              }),
+            )
+            .exhaustive()
+        }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)))
+
+        return startResult
       }),
     )
     .then((exit) =>

@@ -1,0 +1,104 @@
+version: 1
+cases:
+  - id: harness-cli-can-read-main
+    actor: harness-cli
+    action: read
+    branch: main
+    expect: allow
+  - id: harness-cli-can-export-main
+    actor: harness-cli
+    action: export
+    branch: main
+    expect: allow
+  - id: harness-cli-can-change-main
+    actor: harness-cli
+    action: change
+    branch: main
+    expect: allow
+  - id: harness-cli-can-invoke-stored-queries
+    actor: harness-cli
+    action: invoke_query
+    expect: allow
+  - id: harness-cli-can-create-branch
+    actor: harness-cli
+    action: branch_create
+    target_branch: feat/wf-test
+    expect: allow
+  - id: harness-cli-can-delete-branch
+    actor: harness-cli
+    action: branch_delete
+    target_branch: feat/wf-test
+    expect: allow
+  - id: harness-cli-can-merge-into-main
+    actor: harness-cli
+    action: branch_merge
+    target_branch: main
+    expect: allow
+  - id: harness-cli-can-apply-schema-to-main
+    actor: harness-cli
+    action: schema_apply
+    target_branch: main
+    expect: allow
+  - id: agent-mcp-cannot-read-main
+    actor: agent-mcp
+    action: read
+    branch: main
+    expect: deny
+  - id: agent-mcp-cannot-export-main
+    actor: agent-mcp
+    action: export
+    branch: main
+    expect: deny
+  - id: agent-mcp-cannot-change-main
+    actor: agent-mcp
+    action: change
+    branch: main
+    expect: deny
+  - id: agent-mcp-cannot-invoke-stored-queries
+    actor: agent-mcp
+    action: invoke_query
+    expect: deny
+  - id: agent-mcp-cannot-create-branch
+    actor: agent-mcp
+    action: branch_create
+    target_branch: feat/wf-test
+    expect: deny
+  - id: agent-mcp-cannot-delete-main
+    actor: agent-mcp
+    action: branch_delete
+    target_branch: main
+    expect: deny
+  - id: agent-mcp-cannot-merge-into-main
+    actor: agent-mcp
+    action: branch_merge
+    target_branch: main
+    expect: deny
+  - id: agent-mcp-cannot-apply-schema-to-main
+    actor: agent-mcp
+    action: schema_apply
+    target_branch: main
+    expect: deny
+  - id: default-cannot-read-main
+    actor: default
+    action: read
+    branch: main
+    expect: deny
+  - id: default-cannot-change-main
+    actor: default
+    action: change
+    branch: main
+    expect: deny
+  - id: default-cannot-invoke-stored-queries
+    actor: default
+    action: invoke_query
+    expect: deny
+  - id: default-cannot-merge-into-main
+    actor: default
+    action: branch_merge
+    target_branch: main
+    expect: deny
+  - id: default-cannot-apply-schema-to-main
+    actor: default
+    action: schema_apply
+    target_branch: main
+    expect: deny
