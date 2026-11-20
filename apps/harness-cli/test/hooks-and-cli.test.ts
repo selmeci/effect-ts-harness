@@ -11,7 +11,7 @@ import { match } from "ts-pattern"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { DETERMINISTIC_TRIAGE_RULES, makeMockDecisionModelLayer } from "@harness/decision"
 import { CLEF_SYSTEMONE_ONLY_BANNED_REASON, DstSeed, writeVerifyStamp } from "@harness/gates"
-import { resolveOmnigraphClusterDir } from "@harness/graph"
+import { buildHarnessGraph, resolveOmnigraphClusterDir, saveGraphSnapshot } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 import { runWithTestTracer } from "@harness/ingest"
 import {
@@ -2204,5 +2204,105 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
     )
     expect(nonWorkerStartRes.exitCode).toBe(0)
     expect(JSON.parse(nonWorkerStartRes.stdout)).toEqual({ decision: "allow" })
+  })
+
+  it("SPEC-0024 idempotent done: persists treeHash in last-done.json, short-circuits repeated Stop hooks with alreadyDone=true, and fails closed on stale/corrupt/mutated state", async () => {
+    const { execFileSync } = await import("node:child_process")
+    const { symlinkSync, utimesSync } = await import("node:fs")
+    const { isAlreadyDoneForVerifiedTree, readLastDoneMarker } =
+      await import("../src/commands/session-fastpath.js")
+
+    const dir = mkdtempSync(join(tmpdir(), "harness-idempotent-done-"))
+    tempDirs.push(dir)
+    mkdirSync(join(dir, "libs", "demo", "src"), { recursive: true })
+    writeFileSync(join(dir, "libs", "demo", "src", "mod.ts"), "export const v = 1\n", "utf8")
+    execFileSync("git", ["init"], { cwd: dir })
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir })
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: dir })
+    execFileSync("git", ["add", "."], { cwd: dir })
+    execFileSync("git", ["commit", "-m", "init"], { cwd: dir })
+
+    const stamp = writeVerifyStamp(dir, nodeSyncHostIo, "impl/test", {
+      dstSeed: DstSeed.make(1),
+      dstSeedsRun: 1,
+    })
+    const emptyGraph = buildHarnessGraph({})
+    const planSnapshotPath = join(dir, ".harness", "plan-graph-snapshot.json")
+    const implSnapshotPath = join(dir, ".harness", "graph-snapshot.json")
+    saveGraphSnapshot(emptyGraph, planSnapshotPath, nodeSyncHostIo)
+    saveGraphSnapshot(emptyGraph, implSnapshotPath, nodeSyncHostIo)
+    const pastSeconds = (Date.now() - 10_000) / 1000
+    utimesSync(planSnapshotPath, pastSeconds, pastSeconds)
+
+    // 1. First done persists { completedAt, treeHash } in .harness/last-done.json
+    const firstDone = await Effect.runPromise(
+      runCliEffect(["done"], {
+        repoRoot: dir,
+        skipBackgroundDaemons: true,
+        stdin: JSON.stringify({ stop_hook_active: false }),
+      }),
+    )
+    expect(firstDone.exitCode).toBe(0)
+    const marker = readLastDoneMarker(dir, nodeSyncHostIo)
+    expect(marker).toBeDefined()
+    expect(marker?.treeHash).toBe(stamp.treeHash)
+
+    // 2. Second handleDone short-circuits BEFORE loadSnapshotPair / syncOmnigraphOnDone even if
+    //    plan-graph-snapshot.json remains on disk and graph-snapshot.json is corrupt
+    writeFileSync(implSnapshotPath, "{corrupt-snapshot-should-not-be-read", "utf8")
+    const secondDone = await Effect.runPromise(
+      handleDone(["done", "--format=antigravity"], {
+        repoRoot: dir,
+        skipBackgroundDaemons: true,
+        stdin: JSON.stringify({ stop_hook_active: false }),
+      }),
+    )
+    expect(secondDone.exitCode).toBe(0)
+    expect(JSON.parse(secondDone.stdout)).toEqual({ decision: "stop" })
+    expect(secondDone.telemetryDetail).toBe("alreadyDone=true")
+
+    // 3. Touching plan-graph-snapshot.json with a newer mtime invalidates alreadyDone=true
+    const futureMs = Date.parse(marker!.completedAt) + 5_000
+    utimesSync(planSnapshotPath, futureMs / 1000, futureMs / 1000)
+    expect(isAlreadyDoneForVerifiedTree(dir, stamp, undefined, nodeSyncHostIo)).toBe(false)
+    utimesSync(planSnapshotPath, pastSeconds, pastSeconds)
+    expect(isAlreadyDoneForVerifiedTree(dir, stamp, undefined, nodeSyncHostIo)).toBe(true)
+
+    // 4. Newer verify-stamp.json timestamp also invalidates alreadyDone=true
+    const newerStamp = {
+      ...stamp,
+      timestamp: new Date(Date.parse(marker!.completedAt) + 5_000).toISOString(),
+    }
+    expect(isAlreadyDoneForVerifiedTree(dir, newerStamp, undefined, nodeSyncHostIo)).toBe(false)
+
+    // 5. Editing a workspace file still blocks at checkVerifyStamp
+    writeFileSync(join(dir, "libs", "demo", "src", "mod.ts"), "export const v = 2\n", "utf8")
+    const dirtyDone = await Effect.runPromise(
+      handleDone(["done", "--format=antigravity"], {
+        repoRoot: dir,
+        skipBackgroundDaemons: true,
+        stdin: JSON.stringify({ stop_hook_active: false }),
+      }),
+    )
+    expect(dirtyDone.exitCode).toBe(0)
+    expect(JSON.parse(dirtyDone.stdout)).toMatchObject({
+      decision: "continue",
+      reason: expect.stringContaining("Workspace files changed since last verify"),
+    })
+
+    // 6. Corrupt or symlinked .harness/last-done.json fails closed
+    const markerPath = join(dir, ".harness", "last-done.json")
+    writeFileSync(markerPath, "{corrupt-json", "utf8")
+    expect(readLastDoneMarker(dir, nodeSyncHostIo)).toBeUndefined()
+
+    const outsideTarget = join(dir, "outside.json")
+    writeFileSync(
+      outsideTarget,
+      JSON.stringify({ completedAt: new Date().toISOString(), treeHash: stamp.treeHash }),
+      "utf8",
+    )
+    rmSync(markerPath)
+    symlinkSync(outsideTarget, markerPath)
+    expect(readLastDoneMarker(dir, nodeSyncHostIo)).toBeUndefined()
   })
 })

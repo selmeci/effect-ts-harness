@@ -42,6 +42,12 @@ export const PreInvocationCacheSchema = Schema.Struct({
 export type PreInvocationCacheEntry = typeof PreInvocationCacheSchema.Type
 export type PreInvocationCacheRecord = Omit<PreInvocationCacheEntry, "version">
 
+export const LastDoneMarkerSchema = Schema.Struct({
+  completedAt: Schema.NonEmptyString,
+  treeHash: Schema.optional(Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/))),
+})
+export type LastDoneMarker = typeof LastDoneMarkerSchema.Type
+
 export const resolveHarnessStateDirSafe = (
   repoRoot: string,
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -70,6 +76,7 @@ export const ensureHarnessDirSafe = (
     .exhaustive()
 
 const decodeCacheEntry = Schema.decodeOption(Schema.fromJsonString(PreInvocationCacheSchema))
+const decodeLastDoneMarker = Schema.decodeUnknownOption(Schema.fromJsonString(LastDoneMarkerSchema))
 
 const unwrapOption = <A>(opt: Option.Option<A>): A | undefined =>
   match(opt)
@@ -501,6 +508,7 @@ export const writePreInvocationSessionCache = (
 export const writeLastDoneMarker = (
   repoRoot: string,
   hostIo: SyncHostIo = nodeSyncHostIo,
+  treeHash?: string,
 ): void => {
   const env = hostIo.getEnv()
   if (shouldSuppressLiveRepoTestSideEffects(repoRoot, env)) return
@@ -515,7 +523,13 @@ export const writeLastDoneMarker = (
   )
   match(
     Result.try(() => {
-      hostIo.writeTextSync(tmpPath, JSON.stringify({ completedAt: new Date().toISOString() }))
+      hostIo.writeTextSync(
+        tmpPath,
+        JSON.stringify({
+          completedAt: new Date().toISOString(),
+          ...(treeHash !== undefined ? { treeHash } : {}),
+        }),
+      )
       if (!verifyTempFileContainment(harnessDir, tmpPath, hostIo)) {
         hostIo.unlinkSync(tmpPath)
         return false
@@ -537,6 +551,60 @@ export const writeLastDoneMarker = (
       })
     })
     .exhaustive()
+}
+
+export const readLastDoneMarker = (
+  repoRoot: string,
+  hostIo: SyncHostIo = nodeSyncHostIo,
+): LastDoneMarker | undefined => {
+  const env = hostIo.getEnv()
+  const harnessDir = unwrapOption(resolveHarnessStateDirSafe(repoRoot, env))
+  if (harnessDir === undefined) return undefined
+  const markerPath = join(harnessDir, "last-done.json")
+  if (!isSafeCacheDirAndPath(repoRoot, harnessDir, markerPath, hostIo, true)) return undefined
+  return match(Result.try(() => hostIo.readTextSync(markerPath)))
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      const msg = failure instanceof Error ? failure.message : String(failure)
+      process.stderr.write(`[harness:done] Warning: Failed to read last-done.json: ${msg}\n`)
+      return undefined
+    })
+    .with({ _tag: "Success" }, ({ success }) => unwrapOption(decodeLastDoneMarker(success)))
+    .exhaustive()
+}
+
+export const isAlreadyDoneForVerifiedTree = (
+  repoRoot: string,
+  stamp: { readonly treeHash: string; readonly timestamp: string },
+  options: CliEnv | undefined,
+  hostIo: SyncHostIo = nodeSyncHostIo,
+): boolean => {
+  if (
+    options?.planGraph !== undefined ||
+    options?.implGraph !== undefined ||
+    (options?.planSteps !== undefined && options.planSteps.length > 0)
+  ) {
+    return false
+  }
+  const lastDone = readLastDoneMarker(repoRoot, hostIo)
+  if (lastDone === undefined || lastDone.treeHash !== stamp.treeHash) return false
+  const completedAtMs = Date.parse(lastDone.completedAt)
+  const stampTsMs = Date.parse(stamp.timestamp)
+  if (!Number.isFinite(completedAtMs) || !Number.isFinite(stampTsMs) || stampTsMs > completedAtMs) {
+    return false
+  }
+  const harnessDir = unwrapOption(resolveHarnessStateDirSafe(repoRoot, hostIo.getEnv()))
+  if (harnessDir === undefined) return false
+  const planPath = join(harnessDir, "plan-graph-snapshot.json")
+  if (tryOr(() => hostIo.existsSync(planPath), true)) {
+    if (!isSafeCacheDirAndPath(repoRoot, harnessDir, planPath, hostIo, true)) return false
+    const planMtimeMs = hasStatMtimeMsSync(hostIo)
+      ? tryOr(() => hostIo.statMtimeMsSync(planPath), undefined)
+      : undefined
+    if (planMtimeMs === undefined || !Number.isFinite(planMtimeMs) || planMtimeMs > completedAtMs) {
+      return false
+    }
+  }
+  return true
 }
 
 export const tryCachePreInvocationResult = (

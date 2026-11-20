@@ -5,7 +5,6 @@ import { match } from "ts-pattern"
 import { isPureInterruptCause } from "@harness/contract"
 import { checkPlanStepCoverage, triageFailure } from "@harness/decision"
 import {
-  buildSessionReport,
   checkLoopThrashing,
   checkVerifyStamp,
   decideOntologyInvariants,
@@ -16,9 +15,7 @@ import {
   loadGovernanceDocsChecked,
   parseDstSeedEnv,
   readFrictionEvents,
-  readTelemetryEvents,
   runDstSeedSuite,
-  writeSessionReportFiles,
   writeVerifyStamp,
 } from "@harness/gates"
 import {
@@ -38,7 +35,6 @@ import {
   type CliEnv,
   type CliResult,
   ensureLocalOllamaReady,
-  shouldSuppressLiveRepoTestSideEffects,
   findWorkspaceRoot,
   formatSubprocessError,
   isIsolatedExternalWorkspace,
@@ -69,6 +65,8 @@ import {
 } from "./stop-hook-and-transcript.js"
 import {
   evaluateVerifyMutateStampGate,
+  finalizeDoneSuccess,
+  isAlreadyDoneForVerifiedTree,
   isVerifyMutateStampGateEnforced,
   loadSnapshotPair,
   parseDoneDeadlineMs,
@@ -547,6 +545,14 @@ export const handleDone = (
               stderr:
                 res.stderr.length > 0 ? `${res.stderr}\n${transcriptStderr}` : transcriptStderr,
             }
+      if (isAlreadyDoneForVerifiedTree(repoRoot, stampCheck.stamp, options, nodeSyncHostIo)) {
+        return withTranscriptStderr({
+          exitCode: 0,
+          stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
+          stderr: "",
+          telemetryDetail: "alreadyDone=true",
+        })
+      }
       const snapshotOutcome = yield* loadSnapshotPair(
         repoRoot,
         options?.planGraph,
@@ -596,17 +602,7 @@ export const handleDone = (
             )
             if (omnigraphFailure !== undefined) return withTranscriptStderr(omnigraphFailure)
 
-            if (
-              (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) &&
-              !shouldSuppressLiveRepoTestSideEffects(repoRoot)
-            ) {
-              const report = buildSessionReport({
-                events: readTelemetryEvents(repoRoot, nodeSyncHostIo),
-                frictionEvents: readFrictionEvents(repoRoot, nodeSyncHostIo),
-                stampValid: true,
-              })
-              writeSessionReportFiles(repoRoot, report, nodeSyncHostIo)
-            }
+            finalizeDoneSuccess(repoRoot, stampCheck.stamp.treeHash, options)
             runOmnigraphMaintenance(repoRoot, { includeCleanup: true })
             return {
               exitCode: 0,

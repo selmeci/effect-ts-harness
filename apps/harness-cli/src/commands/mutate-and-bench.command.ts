@@ -64,7 +64,11 @@ import {
   resolveVerifyStampMutateMeta,
 } from "./mutate-stamp-gate.js"
 import { extractRequiredFlagValue, shouldSuppressLiveRepoTestSideEffects } from "./repo-path.js"
-import { writeLastDoneMarker } from "./session-fastpath.js"
+import {
+  isAlreadyDoneForVerifiedTree,
+  readLastDoneMarker,
+  writeLastDoneMarker,
+} from "./session-fastpath.js"
 
 export {
   collectModifiedMutableFiles,
@@ -72,13 +76,12 @@ export {
   evaluateVerifyMutateStampGate,
   HarnessInfraLive,
   hasModifiedMutableFiles,
+  isAlreadyDoneForVerifiedTree,
   isVerifyMutateStampGateEnforced,
   resolveVerifyStampMutateMeta,
 }
 
-export const writeDoneSessionReport = (repoRoot: string): void => {
-  if (shouldSuppressLiveRepoTestSideEffects(repoRoot)) return
-  writeLastDoneMarker(repoRoot, nodeSyncHostIo)
+const persistDoneSessionReport = (repoRoot: string): void => {
   const finalEvents = readTelemetryEventsSafe(repoRoot, nodeSyncHostIo)
   const finalFriction = readFrictionEventsSafe(repoRoot, nodeSyncHostIo)
   const finalReport = buildSessionReport({
@@ -87,6 +90,27 @@ export const writeDoneSessionReport = (repoRoot: string): void => {
     stampValid: true,
   })
   writeSessionReportFilesSafe(repoRoot, finalReport, nodeSyncHostIo)
+}
+
+export const writeDoneSessionReport = (repoRoot: string, treeHash?: string): void => {
+  if (shouldSuppressLiveRepoTestSideEffects(repoRoot)) return
+  const effectiveTreeHash = treeHash ?? readLastDoneMarker(repoRoot, nodeSyncHostIo)?.treeHash
+  writeLastDoneMarker(repoRoot, nodeSyncHostIo, effectiveTreeHash)
+  persistDoneSessionReport(repoRoot)
+}
+
+export const finalizeDoneSuccess = (
+  repoRoot: string,
+  treeHash: string,
+  options: CliEnv | undefined,
+): void => {
+  writeLastDoneMarker(repoRoot, nodeSyncHostIo, treeHash)
+  if (
+    (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) &&
+    !shouldSuppressLiveRepoTestSideEffects(repoRoot)
+  ) {
+    persistDoneSessionReport(repoRoot)
+  }
 }
 
 export const handleMutate = (

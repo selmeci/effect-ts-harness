@@ -163,6 +163,7 @@ export const runCliEffect = (
       res.telemetryDetail !== "fullyIdle=false" &&
       res.telemetryDetail !== "subagent=true" &&
       res.telemetryDetail !== "readOnly=true" &&
+      res.telemetryDetail !== "alreadyDone=true" &&
       (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) &&
       !shouldSuppressLiveRepoTestSideEffects(repoRoot)
     ) {
