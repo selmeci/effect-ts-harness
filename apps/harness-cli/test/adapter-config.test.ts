@@ -567,7 +567,8 @@ describe("Antigravity adapter & plugin configuration", () => {
         true,
       )
     }
-    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(17)
+    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(18)
+    expect(CANONICAL_MCP_TOOL_NAMES).toContain("harness_workflow_plan")
 
     const skillExpectations: ReadonlyArray<{
       readonly relPath: string
@@ -707,6 +708,9 @@ describe("Antigravity adapter & plugin configuration", () => {
           "{path, path/posix, path/win32, crypto, url}",
           "Phase 5 Step 0",
           "ontology check --strict",
+          "workflow <compile|start|status|complete|resume|doctor|abort>",
+          "HARNESS_UNIT_WORKER=1",
+          "nondeterministic-workflow-body",
           ...CANONICAL_MCP_TOOL_NAMES,
         ],
         bannedTokens: [
@@ -942,11 +946,23 @@ describe("Antigravity adapter & plugin configuration", () => {
     expect(rootReadme).not.toContain("{ writeReport? }")
 
     for (const readme of [agyReadme, claudeReadme]) {
-      expect(readme).toContain("exposing 17 tools")
+      expect(readme).toContain("exposing 18 tools")
+      expect(readme).toContain("harness workflow")
+      expect(readme).toContain("HARNESS_UNIT_WORKER=1")
+      expect(readme).toContain("nondeterministic-workflow-body")
       for (const toolName of CANONICAL_MCP_TOOL_NAMES) {
         expect(readme).toContain(toolName)
       }
     }
+    expect(rootReadme).toContain(
+      "HARNESS_INFRA --> GATES & DECISION & GRAPH & HARNESS_SVC & HARNESS_CON",
+    )
+    expect(rootReadme).toContain("Exposes 18")
+    expect(rootReadme).toContain(
+      "workflow <compile\\|start\\|status\\|complete\\|resume\\|doctor\\|abort>",
+    )
+    expect(rootReadme).toContain("HARNESS_UNIT_WORKER=1")
+    expect(rootReadme).toContain("nondeterministic-workflow-body")
     for (const toolName of CANONICAL_MCP_TOOL_NAMES) {
       expect(rootReadme).toContain(toolName)
     }
@@ -1237,8 +1253,12 @@ describe("Antigravity adapter & plugin configuration", () => {
           detail: "should-write",
         },
       )
-      expect(existsSync(join(resolveHarnessStateDir(tempRepo), "telemetry-log.jsonl"))).toBe(true)
-      expect(existsSync(join(resolveHarnessStateDir(tempRepo), "friction-log.jsonl"))).toBe(true)
+      expect(
+        existsSync(join(resolveHarnessStateDir(tempRepo, process.env), "telemetry-log.jsonl")),
+      ).toBe(true)
+      expect(
+        existsSync(join(resolveHarnessStateDir(tempRepo, process.env), "friction-log.jsonl")),
+      ).toBe(true)
     } finally {
       rmSync(tempRepo, { recursive: true, force: true })
     }

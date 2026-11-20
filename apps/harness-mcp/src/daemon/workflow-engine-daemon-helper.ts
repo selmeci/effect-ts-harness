@@ -1,8 +1,21 @@
 import { randomUUID } from "node:crypto"
-import { Effect, Exit, Layer, Result, Schema, Scope } from "effect"
+import {
+  Context,
+  type Duration,
+  Effect,
+  Exit,
+  Layer,
+  Result,
+  Schema,
+  Scope,
+  type Semaphore,
+  SynchronizedRef,
+} from "effect"
+import { WorkflowEngine } from "effect/workflow"
 import { match } from "ts-pattern"
 import {
   type AbsoluteRepoRoot,
+  type CompiledPlan,
   type DaemonSocketPath,
   type GitCommonDirPath,
   LeaseEpoch,
@@ -10,20 +23,41 @@ import {
   LeaseHolderId,
   LeaseHolderPid,
   toBoundedReason,
+  type WorkflowRunId,
   WorkflowStoreOperation,
   WorkflowStoreUnavailableError,
   WriterLeaseHeldError,
 } from "@harness/contract"
+import { HarnessTaskWorkflowLayer } from "@harness/gates"
 import type { OmnigraphClient } from "@harness/graph"
 import {
   type ActiveWriterLease,
   acquireWriterLease,
   makeHarnessWorkflowEngineLayer,
+  makeUnitVerifierLayer,
+  makeWorkflowProjectionWriterLayer,
+  makeWorkflowReadModelQueryLayer,
+  makeWorkflowReviewRouterLayer,
+  makeWorkflowWorktreePortLayer,
   nodeSyncHostIo,
   refreshWriterLease,
   resolveWorkflowRuntimePaths,
+  UnitAgentDispatcherLive,
 } from "@harness/infra"
-import type { UnixSocketDaemonPortShape } from "@harness/service"
+import {
+  UnitAgentDispatcher,
+  UnitVerifier,
+  type UnitVerifierShape,
+  type UnixSocketDaemonPortShape,
+  WorkflowProjectionWriter,
+  type WorkflowProjectionWriterShape,
+  WorkflowReadModelQuery,
+  type WorkflowReadModelQueryShape,
+  WorkflowReviewRouter,
+  type WorkflowReviewRouterShape,
+  WorkflowWorktreePort,
+  type WorkflowWorktreePortShape,
+} from "@harness/service"
 import type { ExtendedHostIo } from "@harness/service/host-io"
 import type { StartupWorktreeState } from "./workflow-daemon-helper.js"
 
@@ -43,6 +77,35 @@ const decodeExistingLockMetaOption = Schema.decodeUnknownOption(ExistingLockMeta
 
 export type WorkflowEngineDaemonMode = "auto" | "required" | "disabled"
 
+export type WorkflowPortsServices =
+  | UnitVerifier
+  | UnitAgentDispatcher
+  | WorkflowWorktreePort
+  | WorkflowReviewRouter
+  | WorkflowProjectionWriter
+  | WorkflowReadModelQuery
+
+export type WorkflowDaemonServices = WorkflowEngine.WorkflowEngine | WorkflowPortsServices
+
+export interface WorkflowDaemonRuntime {
+  readonly workflowContext: Context.Context<WorkflowDaemonServices>
+  readonly engine: WorkflowEngine.WorkflowEngine["Service"]
+  readonly projectionWriter: WorkflowProjectionWriterShape
+  readonly readModelQuery: WorkflowReadModelQueryShape
+  readonly unitVerifier: UnitVerifierShape
+  readonly worktreePort: WorkflowWorktreePortShape
+  readonly reviewRouter: WorkflowReviewRouterShape
+  readonly plansRef: SynchronizedRef.SynchronizedRef<ReadonlyMap<WorkflowRunId, CompiledPlan>>
+  readonly runMutexesRef: SynchronizedRef.SynchronizedRef<
+    ReadonlyMap<WorkflowRunId, Semaphore.Semaphore>
+  >
+  readonly canonicalRepoRoot: AbsoluteRepoRoot
+  readonly commonGitDir: GitCommonDirPath
+  readonly hostIo: ExtendedHostIo
+  readonly client?: Omnigraph | undefined
+  readonly env?: Readonly<Record<string, string | undefined>> | undefined
+}
+
 export interface WorkflowEngineDaemonOptions {
   readonly mode: WorkflowEngineDaemonMode
   readonly client?: Omnigraph | undefined
@@ -56,6 +119,16 @@ export interface WorkflowEngineDaemonOptions {
   readonly heartbeatIntervalMs?: number | undefined
   readonly knownEntityTypes?: ReadonlyArray<string> | undefined
   readonly onLeaseLost?: ((reason: string) => void) | undefined
+  readonly shardsPerGroup?: number | undefined
+  readonly entityMessagePollInterval?: Duration.Input | undefined
+  readonly entityReplyPollInterval?: Duration.Input | undefined
+  readonly workflowPortsLayer?: Layer.Layer<WorkflowPortsServices> | undefined
+  readonly unitVerifierLayer?: Layer.Layer<UnitVerifier> | undefined
+  readonly worktreePortLayer?: Layer.Layer<WorkflowWorktreePort> | undefined
+  readonly agentDispatcherLayer?: Layer.Layer<UnitAgentDispatcher> | undefined
+  readonly reviewRouterLayer?: Layer.Layer<WorkflowReviewRouter> | undefined
+  readonly projectionWriterLayer?: Layer.Layer<WorkflowProjectionWriter> | undefined
+  readonly readModelQueryLayer?: Layer.Layer<WorkflowReadModelQuery> | undefined
 }
 
 export type StartedWorkflowEngineState =
@@ -67,6 +140,7 @@ export type StartedWorkflowEngineState =
       readonly lockFilePath: LeaseFilePath
       readonly commonGitDir: GitCommonDirPath
       readonly repoRoot: AbsoluteRepoRoot
+      readonly runtime: WorkflowDaemonRuntime
     }
 
 const resolveHolderId = (options?: WorkflowEngineDaemonOptions): LeaseHolderId =>
@@ -120,6 +194,57 @@ export const buildAlreadyAliveLeaseError = (
   })
 }
 
+const buildWorkflowPortsLayer = (
+  repoRoot: AbsoluteRepoRoot,
+  options: WorkflowEngineDaemonOptions,
+): Layer.Layer<WorkflowPortsServices> => {
+  const readModelOptions = {
+    repoRoot,
+    ...(options.client !== undefined ? { client: options.client } : {}),
+    ...(options.hostIo !== undefined ? { hostIo: options.hostIo } : {}),
+    ...(options.env !== undefined ? { env: options.env } : {}),
+    ...(options.nowMs !== undefined ? { nowMs: options.nowMs } : {}),
+  }
+  let resolved: Layer.Layer<WorkflowPortsServices> =
+    options.workflowPortsLayer ??
+    Layer.mergeAll(
+      makeUnitVerifierLayer({
+        ...(options.hostIo !== undefined ? { hostIo: options.hostIo } : {}),
+        ...(options.env !== undefined ? { env: options.env } : {}),
+        ...(options.nowMs !== undefined ? { nowMs: options.nowMs } : {}),
+      }),
+      makeWorkflowWorktreePortLayer({
+        repoRoot,
+        ...(options.hostIo !== undefined ? { hostIo: options.hostIo } : {}),
+      }),
+      UnitAgentDispatcherLive,
+      makeWorkflowReviewRouterLayer(
+        options.hostIo !== undefined ? { hostIo: options.hostIo } : undefined,
+      ),
+      makeWorkflowProjectionWriterLayer(readModelOptions),
+      makeWorkflowReadModelQueryLayer(readModelOptions),
+    )
+  if (options.unitVerifierLayer !== undefined) {
+    resolved = Layer.merge(resolved, options.unitVerifierLayer)
+  }
+  if (options.worktreePortLayer !== undefined) {
+    resolved = Layer.merge(resolved, options.worktreePortLayer)
+  }
+  if (options.agentDispatcherLayer !== undefined) {
+    resolved = Layer.merge(resolved, options.agentDispatcherLayer)
+  }
+  if (options.reviewRouterLayer !== undefined) {
+    resolved = Layer.merge(resolved, options.reviewRouterLayer)
+  }
+  if (options.projectionWriterLayer !== undefined) {
+    resolved = Layer.merge(resolved, options.projectionWriterLayer)
+  }
+  if (options.readModelQueryLayer !== undefined) {
+    resolved = Layer.merge(resolved, options.readModelQueryLayer)
+  }
+  return resolved
+}
+
 const acquireLeaseAndBuildEngineInScope = (input: {
   readonly targetScope: Scope.Scope
   readonly commonGitDir: GitCommonDirPath
@@ -158,9 +283,43 @@ const acquireLeaseAndBuildEngineInScope = (input: {
       ...(options.knownEntityTypes !== undefined
         ? { knownEntityTypes: options.knownEntityTypes }
         : {}),
+      ...(options.shardsPerGroup !== undefined ? { shardsPerGroup: options.shardsPerGroup } : {}),
+      ...(options.entityMessagePollInterval !== undefined
+        ? { entityMessagePollInterval: options.entityMessagePollInterval }
+        : {}),
+      ...(options.entityReplyPollInterval !== undefined
+        ? { entityReplyPollInterval: options.entityReplyPollInterval }
+        : {}),
     })
 
-    yield* Layer.buildWithScope(engineLayer, input.targetScope)
+    const portsLayer = buildWorkflowPortsLayer(input.repoRoot, options)
+    const workflowStackLayer = HarnessTaskWorkflowLayer.pipe(
+      Layer.provideMerge(Layer.merge(engineLayer, portsLayer)),
+    )
+    const workflowContext = yield* Layer.buildWithScope(workflowStackLayer, input.targetScope)
+    const plansRef = yield* SynchronizedRef.make<ReadonlyMap<WorkflowRunId, CompiledPlan>>(
+      new Map(),
+    )
+    const runMutexesRef = yield* SynchronizedRef.make<
+      ReadonlyMap<WorkflowRunId, Semaphore.Semaphore>
+    >(new Map())
+
+    const runtime: WorkflowDaemonRuntime = {
+      workflowContext,
+      engine: Context.get(workflowContext, WorkflowEngine.WorkflowEngine),
+      projectionWriter: Context.get(workflowContext, WorkflowProjectionWriter),
+      readModelQuery: Context.get(workflowContext, WorkflowReadModelQuery),
+      unitVerifier: Context.get(workflowContext, UnitVerifier),
+      worktreePort: Context.get(workflowContext, WorkflowWorktreePort),
+      reviewRouter: Context.get(workflowContext, WorkflowReviewRouter),
+      plansRef,
+      runMutexesRef,
+      canonicalRepoRoot: input.repoRoot,
+      commonGitDir: input.commonGitDir,
+      hostIo: options.hostIo ?? nodeSyncHostIo,
+      client: options.client,
+      env: options.env,
+    }
 
     return {
       _tag: "Active",
@@ -168,6 +327,7 @@ const acquireLeaseAndBuildEngineInScope = (input: {
       lockFilePath: input.lockFilePath,
       commonGitDir: input.commonGitDir,
       repoRoot: input.repoRoot,
+      runtime,
     } satisfies StartedWorkflowEngineState
   })
 

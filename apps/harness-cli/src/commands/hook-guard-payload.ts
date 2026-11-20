@@ -1,41 +1,25 @@
 import * as Schema from "effect/Schema"
 import { match } from "ts-pattern"
-import { classifyFileWrite, explainCommandDenyReason } from "@harness/gates/policy"
+import {
+  classifyFileWrite,
+  classifyWorkerFileAccess,
+  explainCommandDenyReason,
+  type PolicyGuardOptions,
+} from "@harness/gates/policy"
+import { resolveRealPathLite } from "@harness/infra/hook-io"
 import { type CliResult, detectAntigravityHookPayload, makeGuardDenyResult } from "./hook-format.js"
 
 const NullableOptionalString = Schema.optional(Schema.NullOr(Schema.String))
+const UnknownRecord = Schema.Record(Schema.String, Schema.Unknown)
 
 export const PreToolUseStdinSchema = Schema.Struct({
   tool_name: NullableOptionalString,
-  tool_input: Schema.optional(
-    Schema.NullOr(
-      Schema.Struct({
-        command: NullableOptionalString,
-        file_path: NullableOptionalString,
-        path: NullableOptionalString,
-        filePath: NullableOptionalString,
-        targetFile: NullableOptionalString,
-      }),
-    ),
-  ),
+  tool_input: Schema.optional(Schema.NullOr(UnknownRecord)),
   toolCall: Schema.optional(
     Schema.NullOr(
       Schema.Struct({
         name: NullableOptionalString,
-        args: Schema.optional(
-          Schema.NullOr(
-            Schema.Struct({
-              CommandLine: NullableOptionalString,
-              command: NullableOptionalString,
-              TargetFile: NullableOptionalString,
-              AbsolutePath: NullableOptionalString,
-              file_path: NullableOptionalString,
-              filePath: NullableOptionalString,
-              targetFile: NullableOptionalString,
-              path: NullableOptionalString,
-            }),
-          ),
-        ),
+        args: Schema.optional(Schema.NullOr(UnknownRecord)),
       }),
     ),
   ),
@@ -50,12 +34,19 @@ export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   "Glob",
   "Grep",
   "LS",
+  "Find",
   "view_file",
+  "view_file_outline",
+  "view_code_item",
   "grep_search",
   "find_by_name",
   "list_dir",
   "read_file",
 ])
+
+export const resolveUnitWorkerMode = (
+  env?: Readonly<Record<string, string | undefined>>,
+): boolean => (env?.["HARNESS_UNIT_WORKER"] ?? process.env["HARNESS_UNIT_WORKER"]) === "1"
 
 export type GuardVerdictDecision =
   | { readonly verdict: "deny"; readonly reason: string }
@@ -109,15 +100,18 @@ export const toGuardCliResult = (
     .with({ verdict: "allow" }, () => formatAllowResult(isAntigravity))
     .exhaustive()
 
-export const formatCommandDenyReason = (command: string): string => {
-  const detail = explainCommandDenyReason(command)
+export const formatCommandDenyReason = (command: string, options?: PolicyGuardOptions): string => {
+  const detail = explainCommandDenyReason(command, options)
   return detail !== undefined
     ? `Blocked by harness guard: ${command} (${detail})`
     : `Blocked by harness guard: ${command}`
 }
 
-export const evaluateFileWriteDecision = (filePath: string): GuardVerdictDecision => {
-  const fileGuard = classifyFileWrite(filePath)
+export const evaluateFileWriteDecision = (
+  filePath: string,
+  options?: PolicyGuardOptions,
+): GuardVerdictDecision => {
+  const fileGuard = classifyFileWrite(filePath, options)
   return match<typeof fileGuard.verdict, GuardVerdictDecision>(fileGuard.verdict)
     .with("deny", () => ({
       verdict: "deny",
@@ -129,6 +123,47 @@ export const evaluateFileWriteDecision = (filePath: string): GuardVerdictDecisio
     }))
     .with("allow", () => ({ verdict: "allow" }))
     .exhaustive()
+}
+
+export const evaluateFileReadDecision = (
+  filePath: string,
+  options?: PolicyGuardOptions,
+): GuardVerdictDecision => {
+  const access = classifyWorkerFileAccess(filePath, options?.unitWorkerMode === true)
+  return match<typeof access.verdict, GuardVerdictDecision>(access.verdict)
+    .with("deny", () => ({
+      verdict: "deny",
+      reason:
+        access.reason ??
+        `Worker isolation mode (HARNESS_UNIT_WORKER=1) denies access to daemon socket or auth tokens: ${filePath}`,
+    }))
+    .with("allow", () => ({ verdict: "allow" }))
+    .exhaustive()
+}
+
+const expandPathWithRealpath = (filePath: string): ReadonlyArray<string> =>
+  match(resolveRealPathLite(filePath))
+    .with({ _tag: "Some" }, ({ value: real }) =>
+      real === filePath ? [filePath] : [filePath, real],
+    )
+    .with({ _tag: "None" }, () => [filePath])
+    .exhaustive()
+
+export const evaluateCandidatePaths = (
+  candidatePaths: ReadonlyArray<string>,
+  isReadOnlyTool: boolean,
+  options?: PolicyGuardOptions,
+): GuardVerdictDecision | undefined => {
+  let combined: GuardVerdictDecision | undefined
+  for (const rawPath of candidatePaths) {
+    for (const filePath of expandPathWithRealpath(rawPath)) {
+      const d = isReadOnlyTool
+        ? evaluateFileReadDecision(filePath, options)
+        : evaluateFileWriteDecision(filePath, options)
+      combined = combined === undefined ? d : pickStrictestDecision(combined, d)
+    }
+  }
+  return combined
 }
 
 export type ParsedGuardCliArgs =
@@ -187,6 +222,7 @@ export type ExtractedGuardStdinPayload =
   | {
       readonly _tag: "Action"
       readonly isAntigravity: boolean
+      readonly isReadOnlyTool: boolean
       readonly candidateCmds: ReadonlyArray<string>
       readonly candidatePaths: ReadonlyArray<string>
     }
@@ -197,14 +233,57 @@ export type ExtractedGuardStdinPayload =
       readonly detail: string
     }
 
-const pushNonEmpty = (target: Array<string>, value: string | null | undefined): void => {
+const COMMAND_FIELD_KEYS = ["CommandLine", "command"] as const
+
+const PATH_FIELD_KEYS = [
+  "TargetFile",
+  "AbsolutePath",
+  "Path",
+  "TargetDirectory",
+  "file_path",
+  "path",
+  "filePath",
+  "targetFile",
+  "SearchPath",
+  "DirectoryPath",
+  "SearchDirectory",
+  "File",
+  "glob",
+  "pattern",
+] as const
+
+const pushNonEmpty = (target: Array<string>, value: unknown): void => {
   if (typeof value === "string") {
     const trimmed = value.trim()
-    if (trimmed.length > 0) {
+    if (trimmed.length > 0 && !target.includes(trimmed)) {
       target.push(trimmed)
     }
   }
 }
+
+const collectStringLeaves = (value: unknown, target: Array<string>, depth = 0): void => {
+  if (depth > 8 || value === null || value === undefined) return
+  if (typeof value === "string") {
+    pushNonEmpty(target, value)
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectStringLeaves(item, target, depth + 1)
+    }
+    return
+  }
+  if (typeof value === "object") {
+    for (const v of Object.values(value)) {
+      collectStringLeaves(v, target, depth + 1)
+    }
+  }
+}
+
+const isRecordEmpty = (rec: Readonly<Record<string, unknown>> | null | undefined): boolean =>
+  rec === undefined ||
+  rec === null ||
+  Object.values(rec).every((v) => v === null || v === undefined)
 
 export const extractGuardStdinPayload = (
   rawStdin: string,
@@ -223,37 +302,28 @@ export const extractGuardStdinPayload = (
       const isAntigravity = isAntigravityFlag || isAgStdin
       const candidateCmds: Array<string> = []
       const candidatePaths: Array<string> = []
+      const toolInput = value.tool_input
+      const toolCallArgs = value.toolCall?.args
 
-      pushNonEmpty(candidateCmds, value.toolCall?.args?.CommandLine)
-      pushNonEmpty(candidateCmds, value.toolCall?.args?.command)
-      pushNonEmpty(candidateCmds, value.tool_input?.command)
+      for (const key of COMMAND_FIELD_KEYS) {
+        pushNonEmpty(candidateCmds, toolCallArgs?.[key])
+        pushNonEmpty(candidateCmds, toolInput?.[key])
+      }
+      for (const key of PATH_FIELD_KEYS) {
+        pushNonEmpty(candidatePaths, toolCallArgs?.[key])
+        pushNonEmpty(candidatePaths, toolInput?.[key])
+      }
 
-      pushNonEmpty(candidatePaths, value.toolCall?.args?.TargetFile)
-      pushNonEmpty(candidatePaths, value.toolCall?.args?.AbsolutePath)
-      pushNonEmpty(candidatePaths, value.toolCall?.args?.file_path)
-      pushNonEmpty(candidatePaths, value.toolCall?.args?.filePath)
-      pushNonEmpty(candidatePaths, value.toolCall?.args?.targetFile)
-      pushNonEmpty(candidatePaths, value.toolCall?.args?.path)
-      pushNonEmpty(candidatePaths, value.tool_input?.file_path)
-      pushNonEmpty(candidatePaths, value.tool_input?.path)
-      pushNonEmpty(candidatePaths, value.tool_input?.filePath)
-      pushNonEmpty(candidatePaths, value.tool_input?.targetFile)
+      const toolName = isAgStdin ? value.toolCall?.name : value.tool_name
+      const isReadOnlyNamed = typeof toolName === "string" && READ_ONLY_TOOL_NAMES.has(toolName)
+      if (isReadOnlyNamed && candidateCmds.length === 0) {
+        collectStringLeaves(toolCallArgs, candidatePaths)
+        collectStringLeaves(toolInput, candidatePaths)
+      }
 
       if (candidateCmds.length === 0 && candidatePaths.length === 0) {
-        const toolName = isAgStdin ? value.toolCall?.name : value.tool_name
-        const toolInputEmpty =
-          value.tool_input === undefined ||
-          value.tool_input === null ||
-          (value.tool_input.command == null &&
-            value.tool_input.file_path == null &&
-            value.tool_input.path == null &&
-            value.tool_input.filePath == null &&
-            value.tool_input.targetFile == null)
-        const isReadOnlyToolCall =
-          typeof toolName === "string" &&
-          READ_ONLY_TOOL_NAMES.has(toolName) &&
-          (!isAgStdin || toolInputEmpty)
-        if (isReadOnlyToolCall) {
+        const bothInputsEmpty = isRecordEmpty(toolInput) && isRecordEmpty(toolCallArgs)
+        if (isReadOnlyNamed && bothInputsEmpty) {
           return {
             _tag: "ReadOnly" as const,
             isAntigravity,
@@ -270,6 +340,7 @@ export const extractGuardStdinPayload = (
       return {
         _tag: "Action" as const,
         isAntigravity,
+        isReadOnlyTool: isReadOnlyNamed && candidateCmds.length === 0,
         candidateCmds,
         candidatePaths,
       }

@@ -651,3 +651,235 @@ query wf_refresh_writer_lease(
     heartbeatMs: $heartbeatMs
   } where name = $name and owner = $owner and leaseEpoch = $expectedEpoch
 }
+
+// Read-model queries (RFC-0013 WF-3)
+
+query wf_get_run($runId: String) {
+  match {
+    $r: WfRun
+    $r.runId = $runId
+  }
+  return {
+    $r.runId as runId,
+    $r.executionId as executionId,
+    $r.level as level,
+    $r.planSha as planSha,
+    $r.baseSha as baseSha,
+    $r.state as state,
+    $r.planJson as planJson,
+    $r.updatedMs as updatedMs
+  }
+}
+
+query wf_list_runs() {
+  match {
+    $r: WfRun
+  }
+  return {
+    $r.runId as runId,
+    $r.executionId as executionId,
+    $r.level as level,
+    $r.planSha as planSha,
+    $r.baseSha as baseSha,
+    $r.state as state,
+    $r.planJson as planJson,
+    $r.updatedMs as updatedMs
+  }
+  order { $r.updatedMs desc, $r.runId asc }
+  limit 256
+}
+
+query wf_insert_run(
+  $runId: String,
+  $executionId: String,
+  $level: String,
+  $planSha: String,
+  $baseSha: String,
+  $state: String,
+  $planJson: String?,
+  $updatedMs: I64
+) {
+  insert WfRun {
+    runId: $runId,
+    executionId: $executionId,
+    level: $level,
+    planSha: $planSha,
+    baseSha: $baseSha,
+    state: $state,
+    planJson: $planJson,
+    updatedMs: $updatedMs
+  }
+}
+
+query wf_update_run(
+  $runId: String,
+  $state: String,
+  $updatedMs: I64
+) {
+  update WfRun set {
+    state: $state,
+    updatedMs: $updatedMs
+  } where runId = $runId
+}
+
+query wf_units_for_run($runId: String) {
+  match {
+    $u: WfUnit
+    $u.runId = $runId
+  }
+  return {
+    $u.unitKey as unitKey,
+    $u.runId as runId,
+    $u.unitId as unitId,
+    $u.kind as kind,
+    $u.waveIndex as waveIndex,
+    $u.status as status,
+    $u.ownedRelPaths as ownedRelPaths,
+    $u.updatedMs as updatedMs
+  }
+  order { $u.waveIndex asc, $u.unitId asc }
+}
+
+query wf_get_unit($unitKey: String) {
+  match {
+    $u: WfUnit
+    $u.unitKey = $unitKey
+  }
+  return {
+    $u.unitKey as unitKey,
+    $u.runId as runId,
+    $u.unitId as unitId,
+    $u.kind as kind,
+    $u.waveIndex as waveIndex,
+    $u.status as status,
+    $u.ownedRelPaths as ownedRelPaths,
+    $u.updatedMs as updatedMs
+  }
+}
+
+query wf_insert_unit(
+  $unitKey: String,
+  $runId: String,
+  $unitId: String,
+  $kind: String,
+  $waveIndex: I32,
+  $status: String,
+  $ownedRelPaths: [String],
+  $updatedMs: I64
+) {
+  insert WfUnit {
+    unitKey: $unitKey,
+    runId: $runId,
+    unitId: $unitId,
+    kind: $kind,
+    waveIndex: $waveIndex,
+    status: $status,
+    ownedRelPaths: $ownedRelPaths,
+    updatedMs: $updatedMs
+  }
+}
+
+query wf_update_unit(
+  $unitKey: String,
+  $status: String,
+  $updatedMs: I64
+) {
+  update WfUnit set {
+    status: $status,
+    updatedMs: $updatedMs
+  } where unitKey = $unitKey
+}
+
+query wf_attempts_for_run($runId: String) {
+  match {
+    $a: WfAttempt
+    $a.runId = $runId
+  }
+  return {
+    $a.attemptKey as attemptKey,
+    $a.runId as runId,
+    $a.unitId as unitId,
+    $a.attempt as attempt,
+    $a.verdict as verdict,
+    $a.runner as runner,
+    $a.rejection as rejection,
+    $a.packageStampHash as packageStampHash,
+    $a.updatedMs as updatedMs
+  }
+  order { $a.unitId asc, $a.attempt asc }
+}
+
+query wf_get_attempt($attemptKey: String) {
+  match {
+    $a: WfAttempt
+    $a.attemptKey = $attemptKey
+  }
+  return {
+    $a.attemptKey as attemptKey,
+    $a.runId as runId,
+    $a.unitId as unitId,
+    $a.attempt as attempt,
+    $a.verdict as verdict,
+    $a.runner as runner,
+    $a.rejection as rejection,
+    $a.packageStampHash as packageStampHash,
+    $a.updatedMs as updatedMs
+  }
+}
+
+query wf_insert_attempt(
+  $attemptKey: String,
+  $runId: String,
+  $unitId: String,
+  $attempt: I32,
+  $verdict: String,
+  $runner: String?,
+  $rejection: String?,
+  $packageStampHash: String?,
+  $updatedMs: I64
+) {
+  insert WfAttempt {
+    attemptKey: $attemptKey,
+    runId: $runId,
+    unitId: $unitId,
+    attempt: $attempt,
+    verdict: $verdict,
+    runner: $runner,
+    rejection: $rejection,
+    packageStampHash: $packageStampHash,
+    updatedMs: $updatedMs
+  }
+}
+
+query wf_update_attempt(
+  $attemptKey: String,
+  $verdict: String,
+  $runner: String?,
+  $rejection: String?,
+  $packageStampHash: String?,
+  $updatedMs: I64
+) {
+  update WfAttempt set {
+    verdict: $verdict,
+    runner: $runner,
+    rejection: $rejection,
+    packageStampHash: $packageStampHash,
+    updatedMs: $updatedMs
+  } where attemptKey = $attemptKey
+}
+
+query wf_delete_run_views($runId: String) {
+  delete WfAttempt where runId = $runId
+  delete WfUnit where runId = $runId
+  delete WfRun where runId = $runId
+}
+
+query wf_probe_runs() {
+  match {
+    $r: WfRun
+  }
+  return {
+    $r.runId as runId
+  }
+  limit 1
+}

@@ -374,6 +374,20 @@ export const WORKFLOW_GQ_QUERY_NAMES = [
   "wf_insert_writer_lease",
   "wf_cas_writer_lease",
   "wf_refresh_writer_lease",
+  "wf_get_run",
+  "wf_list_runs",
+  "wf_insert_run",
+  "wf_update_run",
+  "wf_units_for_run",
+  "wf_get_unit",
+  "wf_insert_unit",
+  "wf_update_unit",
+  "wf_attempts_for_run",
+  "wf_get_attempt",
+  "wf_insert_attempt",
+  "wf_update_attempt",
+  "wf_delete_run_views",
+  "wf_probe_runs",
 ] as const
 
 export const WorkflowGqQueryName = Schema.Literals(WORKFLOW_GQ_QUERY_NAMES)
@@ -535,6 +549,63 @@ export interface WorkflowGqParamsMap {
     readonly expectedEpoch: LeaseEpoch
     readonly heartbeatMs: number
   }
+  readonly wf_get_run: { readonly runId: string }
+  readonly wf_list_runs: EmptyWorkflowGqParams
+  readonly wf_insert_run: {
+    readonly runId: string
+    readonly executionId: string
+    readonly level: string
+    readonly planSha: string
+    readonly baseSha: string
+    readonly state: string
+    readonly planJson: string | null
+    readonly updatedMs: number
+  }
+  readonly wf_update_run: {
+    readonly runId: string
+    readonly state: string
+    readonly updatedMs: number
+  }
+  readonly wf_units_for_run: { readonly runId: string }
+  readonly wf_get_unit: { readonly unitKey: string }
+  readonly wf_insert_unit: {
+    readonly unitKey: string
+    readonly runId: string
+    readonly unitId: string
+    readonly kind: string
+    readonly waveIndex: number
+    readonly status: string
+    readonly ownedRelPaths: ReadonlyArray<string>
+    readonly updatedMs: number
+  }
+  readonly wf_update_unit: {
+    readonly unitKey: string
+    readonly status: string
+    readonly updatedMs: number
+  }
+  readonly wf_attempts_for_run: { readonly runId: string }
+  readonly wf_get_attempt: { readonly attemptKey: string }
+  readonly wf_insert_attempt: {
+    readonly attemptKey: string
+    readonly runId: string
+    readonly unitId: string
+    readonly attempt: number
+    readonly verdict: string
+    readonly runner: string | null
+    readonly rejection: string | null
+    readonly packageStampHash: string | null
+    readonly updatedMs: number
+  }
+  readonly wf_update_attempt: {
+    readonly attemptKey: string
+    readonly verdict: string
+    readonly runner: string | null
+    readonly rejection: string | null
+    readonly packageStampHash: string | null
+    readonly updatedMs: number
+  }
+  readonly wf_delete_run_views: { readonly runId: string }
+  readonly wf_probe_runs: EmptyWorkflowGqParams
 }
 
 export class WriterLeaseHeldError extends Schema.TaggedError<WriterLeaseHeldError>()(

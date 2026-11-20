@@ -15,6 +15,7 @@ export {
   SKIP_NX_CACHE_BANNED_REASON,
   classifyCommand,
   classifyFileWrite,
+  classifyWorkerFileAccess,
   explainCommandDenyReason,
   explainCommandDenyRule,
   isCdCommand,
@@ -23,13 +24,19 @@ export {
   isInvalidClefEndpointCommand,
   isSkipNxCacheCommand,
   isSkipNxCacheOverrideCommand,
+  isWorkerDaemonCredentialShellAccess,
+  isWorkerRecursiveWorkflowCommand,
   toCommandView,
   type CommandDenyExplanation,
   type CommandDenyRuleId,
   type CommandView,
+  type FileWriteDenyRuleId,
   type FileWriteGuardResult,
   type GuardPatternRule,
   type GuardVerdict,
+  type PolicyGuardOptions,
+  type WorkerFileAccessDenyRuleId,
+  type WorkerFileAccessResult,
 } from "./policy.js"
 export {
   DstSeedsRunCount,
@@ -491,6 +498,24 @@ export {
   assertDisjointWave,
   compileWorkflowWaves,
 } from "./plan-workflow-compiler.js"
+export {
+  HarnessTaskWorkflow,
+  HarnessTaskWorkflowError,
+  HarnessTaskWorkflowLayer,
+  HarnessTaskWorkflowPayload,
+  LlmPhaseDone,
+  driveSharedStep,
+  driveWorkUnit,
+  executeTaskWorkflow,
+  makeUnitCompletionDeferred,
+  makeUnitEscalationDeferred,
+  unitCompletionDeferredName,
+  unitEscalationDeferredName,
+} from "./harness-task-workflow.js"
+export {
+  collectWorkflowBodyViolations,
+  type WorkflowBodyViolation,
+} from "./plugins/workflow-body-ast.js"
 export {
   MAX_MUTATION_CACHE_AGE_MS,
   MAX_MUTATION_CACHE_ENTRIES,

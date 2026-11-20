@@ -23,6 +23,7 @@ import { readTelemetryEvents } from "@harness/gates"
 import { nodeSyncHostIo } from "@harness/infra"
 import { match } from "ts-pattern"
 import {
+  CANONICAL_MCP_TOOL_NAMES,
   createServer,
   dispatchMcpTool,
   isPathInsideRoot,
@@ -561,25 +562,7 @@ describe("harness-mcp tools", () => {
     try {
       await client.connect(transport)
       const toolsList = await client.listTools()
-      expect(toolsList.tools.map((t) => t.name)).toEqual(
-        expect.arrayContaining([
-          "harness_resolve",
-          "harness_callers",
-          "harness_callees",
-          "harness_tests_reaching",
-          "harness_structural_search",
-          "harness_route",
-          "harness_ontology_why",
-          "harness_ontology_impact",
-          "harness_ontology_check",
-          "harness_gq_query",
-          "harness_graph_infer",
-          "harness_graph_complete",
-          "harness_graph_rewrite",
-          "harness_lsp_diagnostics",
-          "harness_telemetry_report",
-        ]),
-      )
+      expect(toolsList.tools.map((t) => t.name)).toEqual([...CANONICAL_MCP_TOOL_NAMES])
     } finally {
       await client.close()
     }
@@ -1241,7 +1224,7 @@ describe("harness-mcp tools", () => {
     await client.connect(clientTransport)
     try {
       const listed = await client.listTools()
-      expect(listed.tools).toHaveLength(17)
+      expect(listed.tools).toHaveLength(18)
       for (const tool of listed.tools) {
         expect(tool.description?.length).toBeGreaterThan(0)
         expect(tool.inputSchema.type).toBe("object")
@@ -1265,6 +1248,28 @@ describe("harness-mcp tools", () => {
         statOnly: {},
         maxPatchChars: {},
       })
+      expect(byName.get("harness_workflow_plan")?.properties).toMatchObject({
+        repoRoot: {},
+        runId: {},
+      })
+
+      const wfPlanRes = await client.callTool({
+        name: "harness_workflow_plan",
+        arguments: {},
+      })
+      expect(wfPlanRes.isError).not.toBe(true)
+      const wfPlanBlock = Array.isArray(wfPlanRes.content) ? wfPlanRes.content[0] : undefined
+      expect(wfPlanBlock?.type).toBe("text")
+      if (wfPlanBlock?.type === "text") {
+        expect(JSON.parse(wfPlanBlock.text)).toMatchObject({
+          resolvedRepoRoot: expect.any(String),
+          commonGitDir: expect.any(String),
+          status: {
+            storeStatus: expect.any(String),
+            units: expect.any(Array),
+          },
+        })
+      }
 
       const okRes = await client.callTool({
         name: "harness_resolve",
@@ -1308,6 +1313,8 @@ describe("harness-mcp tools", () => {
         { name: "harness_graph_rewrite", arguments: { mode: "bogus" } },
         { name: "harness_ontology_why", arguments: { symbolOrSpan: "   " } },
         { name: "harness_ontology_why", arguments: { symbolOrSpan: " Sample.greet" } },
+        { name: "harness_workflow_plan", arguments: { runId: "BAD ID" } },
+        { name: "harness_workflow_plan", arguments: { repoRoot: "   " } },
         { name: "harness_ontology_impact", arguments: { symbolOrSpan: "x".repeat(513) } },
         { name: "harness_ontology_check", arguments: { scope: "x".repeat(129) } },
         { name: "harness_gq_query", arguments: { queryName: "bogus" } },

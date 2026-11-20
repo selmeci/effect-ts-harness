@@ -159,13 +159,55 @@ export {
   type OmnigraphClusterStartupLockOptions,
 } from "./workflow/cluster-startup-lock.js"
 export {
+  abortWorkflowViaDaemon,
+  completeWorkflowViaDaemon,
+  doctorWorkflowViaDaemon,
+  getWorkflowStatusViaDaemon,
   handshakeWorkflowDaemon,
   queryWorkflowDaemonCommand,
+  resumeWorkflowViaDaemon,
+  startWorkflowViaDaemon,
   WORKFLOW_DAEMON_IPC_TIMEOUT_MS,
   type WorkflowDaemonCommandInput,
   type WorkflowDaemonExpectedProtocol,
   type WorkflowDaemonHandshakeInput,
+  type WorkflowDaemonRpcOptions,
 } from "./workflow/daemon-client.js"
+export { UnitAgentDispatcherLive } from "./workflow/agent-dispatcher-live.js"
+export {
+  compileWorkflowPlanFromRepo,
+  type CompileWorkflowPlanError,
+  type CompileWorkflowPlanRequest,
+} from "./workflow/plan-compiler-extractor.js"
+export {
+  makeWorkflowProjectionWriterLayer,
+  makeWorkflowReadModelQueryLayer,
+  rebuildWorkflowReadModelViews,
+  type WorkflowReadModelOptions,
+  WorkflowProjectionWriterLive,
+  WorkflowReadModelQueryLive,
+} from "./workflow/read-model-live.js"
+export {
+  makeWorkflowReviewRouterLayer,
+  routeWorkflowReviewImpl,
+  type WorkflowReviewRouterOptions,
+  WorkflowReviewRouterLive,
+} from "./workflow/review-router-live.js"
+export {
+  completeSharedStepImpl,
+  completeUnitImpl,
+  makeUnitVerifierLayer,
+  type UnitVerifierOptions,
+  UnitVerifierLive,
+} from "./workflow/unit-verifier-live.js"
+export {
+  makeWorkflowWorktreePortLayer,
+  mergeSliceWaveImpl,
+  provisionWorkflowWorktreesImpl,
+  removeWorktreeCheckoutsImpl,
+  type WorkflowWorktreePortOptions,
+  WorkflowWorktreePortLive,
+} from "./workflow/worktree-port-live.js"
 
 export const TsCompilerOverlayServiceLive: Layer.Layer<TsCompilerOverlayService> =
   makeTsCompilerOverlayLayer(nodeSyncHostIo)

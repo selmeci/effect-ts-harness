@@ -2033,4 +2033,176 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it("REQ-4.1: handleGuard enforces HARNESS_UNIT_WORKER=1 via CliEnv.env across commands and file reads while allowing complete/status/verify", async () => {
+    const workerEnv = { HARNESS_UNIT_WORKER: "1" } as const
+    const nonWorkerEnv = { HARNESS_UNIT_WORKER: "0" } as const
+
+    for (const cmd of [
+      "pnpm harness workflow start --plan plan.json",
+      "pnpm harness workflow resume --run-id wf-12345678",
+      "pnpm harness workflow abort --run-id wf-12345678",
+      "pnpm harness workflow done",
+      "pnpm harness done",
+      "pnpm --filter harness-cli start workflow start",
+      "cat .git/harness/daemon.sock",
+      "cat .harness/omnigraph-cluster/auth-tokens.*",
+      "rg -u . .harness/omnigraph-cluster",
+    ]) {
+      const agyRes = await Effect.runPromise(
+        handleGuard(["guard", "--format=antigravity"], {
+          env: workerEnv,
+          stdin: JSON.stringify({ toolCall: { name: "run_command", args: { CommandLine: cmd } } }),
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(agyRes.exitCode, cmd).toBe(0)
+      expect(JSON.parse(agyRes.stdout)).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining("HARNESS_UNIT_WORKER=1"),
+      })
+
+      const ccRes = await Effect.runPromise(
+        handleGuard(["guard"], {
+          env: workerEnv,
+          stdin: JSON.stringify({ tool_name: "Bash", tool_input: { command: cmd } }),
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(ccRes.exitCode, cmd).toBe(2)
+      expect(ccRes.stderr).toContain("HARNESS_UNIT_WORKER=1")
+    }
+
+    for (const stdinPayload of [
+      JSON.stringify({
+        tool_name: "Read",
+        tool_input: { file_path: "/repo/.harness/omnigraph-cluster/auth-tokens.json" },
+      }),
+      JSON.stringify({
+        toolCall: {
+          name: "view_file",
+          args: { AbsolutePath: "/repo/.git/harness/daemon.sock" },
+        },
+      }),
+      JSON.stringify({
+        toolCall: {
+          name: "view_file_outline",
+          args: { AbsolutePath: "/repo/auth-tokens.json" },
+        },
+      }),
+      JSON.stringify({
+        toolCall: {
+          name: "view_code_item",
+          args: { File: "/repo/.git/harness/daemon.sock" },
+        },
+      }),
+      JSON.stringify({
+        toolCall: {
+          name: "find_by_name",
+          args: { SearchDirectory: "/repo/.git/harness/daemon.sock" },
+        },
+      }),
+      JSON.stringify({
+        toolCall: {
+          name: "read_file",
+          args: { Path: "/repo/.harness/omnigraph-cluster/auth-tokens.json" },
+        },
+      }),
+      JSON.stringify({
+        toolCall: {
+          name: "read_file",
+          args: { Path: "/repo/.git/harness/daemon.sock" },
+        },
+      }),
+      JSON.stringify({
+        tool_name: "Glob",
+        tool_input: { pattern: "**/*auth-tokens*" },
+      }),
+      JSON.stringify({
+        tool_name: "Grep",
+        tool_input: { pattern: ".", glob: "**/auth-tokens.json" },
+      }),
+    ]) {
+      const res = await Effect.runPromise(
+        handleGuard(["guard", "--format=antigravity"], {
+          env: workerEnv,
+          stdin: stdinPayload,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(res.exitCode).toBe(0)
+      expect(JSON.parse(res.stdout)).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining("HARNESS_UNIT_WORKER=1"),
+      })
+    }
+
+    for (const allowedCmd of [
+      "pnpm harness workflow complete --unit u1 --repo-root /tmp/repo",
+      "pnpm harness workflow status --json",
+      "nx run @harness/contract:verify",
+    ]) {
+      const res = await Effect.runPromise(
+        handleGuard(["guard", "--format=antigravity"], {
+          env: workerEnv,
+          stdin: JSON.stringify({
+            toolCall: { name: "run_command", args: { CommandLine: allowedCmd } },
+          }),
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(res.exitCode, allowedCmd).toBe(0)
+      expect(JSON.parse(res.stdout)).toEqual({ decision: "allow" })
+    }
+
+    const normalReadRes = await Effect.runPromise(
+      handleGuard(["guard"], {
+        env: workerEnv,
+        stdin: JSON.stringify({
+          tool_name: "Read",
+          tool_input: { file_path: "libs/harness/contract/src/workflow.ts" },
+        }),
+        skipBackgroundDaemons: true,
+      }),
+    )
+    expect(normalReadRes.exitCode).toBe(0)
+    expect(normalReadRes.stdout).toBe("")
+
+    const dir = mkdtempSync(join(tmpdir(), "harness-worker-guard-symlink-"))
+    tempDirs.push(dir)
+    const clusterDir = join(dir, ".harness", "omnigraph-cluster")
+    mkdirSync(clusterDir, { recursive: true })
+    const targetTokens = join(clusterDir, "auth-tokens.json")
+    writeFileSync(targetTokens, JSON.stringify({ token: "secret" }), "utf8")
+    const { symlinkSync } = await import("node:fs")
+    const symlinkPath = join(dir, "alias-tokens.json")
+    symlinkSync(targetTokens, symlinkPath)
+    const symlinkReadRes = await Effect.runPromise(
+      handleGuard(["guard", "--format=antigravity"], {
+        env: workerEnv,
+        stdin: JSON.stringify({ toolCall: { name: "read_file", args: { Path: symlinkPath } } }),
+        skipBackgroundDaemons: true,
+      }),
+    )
+    expect(symlinkReadRes.exitCode).toBe(0)
+    expect(JSON.parse(symlinkReadRes.stdout)).toMatchObject({
+      decision: "deny",
+      reason: expect.stringContaining("HARNESS_UNIT_WORKER=1"),
+    })
+
+    const nonWorkerStartRes = await Effect.runPromise(
+      handleGuard(["guard", "--format=antigravity"], {
+        env: nonWorkerEnv,
+        stdin: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm harness workflow start --plan plan.json" },
+          },
+        }),
+        skipBackgroundDaemons: true,
+      }),
+    )
+    expect(nonWorkerStartRes.exitCode).toBe(0)
+    expect(JSON.parse(nonWorkerStartRes.stdout)).toEqual({ decision: "allow" })
+  })
 })

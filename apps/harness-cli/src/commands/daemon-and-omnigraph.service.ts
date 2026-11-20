@@ -21,6 +21,17 @@ import {
   queryUnixSocketLineDetailed,
   resolveHarnessDaemonSocketPath,
 } from "@harness/infra/hook-fastpath"
+import type {
+  abortWorkflowViaDaemon,
+  compileWorkflowPlanFromRepo,
+  completeWorkflowViaDaemon,
+  doctorWorkflowViaDaemon,
+  getWorkflowStatusViaDaemon,
+  resumeWorkflowViaDaemon,
+  startWorkflowViaDaemon,
+  validateWorktreeRepoRoot,
+  WorkflowDaemonRpcOptions,
+} from "@harness/infra"
 import type { CliResult, HookStdinTracker } from "./hook-format.js"
 export type { CliResult } from "./hook-format.js"
 
@@ -84,6 +95,7 @@ export const COMMANDS = [
   "check-migrations",
   "check-event-schemas",
   "scenario",
+  "workflow",
   "help",
 ] as const
 
@@ -91,6 +103,18 @@ export type Command = (typeof COMMANDS)[number]
 
 export const isCommand = (value: string): value is Command =>
   (COMMANDS as readonly string[]).includes(value)
+
+export type WorkflowCliDeps = {
+  readonly compilePlan?: typeof compileWorkflowPlanFromRepo | undefined
+  readonly validateRepoRoot?: typeof validateWorktreeRepoRoot | undefined
+  readonly startWorkflow?: typeof startWorkflowViaDaemon | undefined
+  readonly getWorkflowStatus?: typeof getWorkflowStatusViaDaemon | undefined
+  readonly completeWorkflow?: typeof completeWorkflowViaDaemon | undefined
+  readonly resumeWorkflow?: typeof resumeWorkflowViaDaemon | undefined
+  readonly doctorWorkflow?: typeof doctorWorkflowViaDaemon | undefined
+  readonly abortWorkflow?: typeof abortWorkflowViaDaemon | undefined
+  readonly daemonOptions?: WorkflowDaemonRpcOptions | undefined
+}
 
 export interface CliEnv {
   readonly repoRoot?: string | undefined
@@ -115,6 +139,8 @@ export interface CliEnv {
   readonly governanceDocs?: ReadonlyArray<GovernanceDocReference> | undefined
   readonly hookStdinTracker?: HookStdinTracker | undefined
   readonly skipInitialSessionCacheRead?: boolean | undefined
+  readonly env?: Readonly<Record<string, string | undefined>> | undefined
+  readonly workflowDeps?: WorkflowCliDeps | undefined
 }
 
 export const resolveDecisionModelLayer = (

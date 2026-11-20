@@ -38,7 +38,6 @@ import { handleDaemonPollChangesRequest } from "./poll-changes-daemon-helper.js"
 import {
   type DaemonWorktreeScopeCache,
   handleDaemonWorkflowHandshakeRequest,
-  handleDaemonWorkflowStatusRequest,
   makeDaemonWorktreeScopeCache,
   resolveDaemonRequestScope,
   type WorktreeValidatorFn,
@@ -47,9 +46,18 @@ import {
   acquireWorkflowEngineInScope,
   buildAlreadyAliveLeaseError,
   forkWorkflowLeaseWatchers,
+  type WorkflowDaemonRuntime,
   type WorkflowEngineDaemonMode,
   type WorkflowEngineDaemonOptions,
 } from "./workflow-engine-daemon-helper.js"
+import {
+  handleDaemonWorkflowAbortRequest,
+  handleDaemonWorkflowCompleteRequest,
+  handleDaemonWorkflowDoctorRequest,
+  handleDaemonWorkflowResumeRequest,
+  handleDaemonWorkflowStartRequest,
+  handleDaemonWorkflowStatusRpcRequest,
+} from "./workflow-rpc-daemon-helper.js"
 
 export type { WorkflowEngineDaemonMode, WorkflowEngineDaemonOptions }
 
@@ -79,7 +87,12 @@ const DaemonRequestSchema = Schema.Struct({
     "bench",
     "poll-changes",
     "workflow.handshake",
+    "workflow.start",
     "workflow.status",
+    "workflow.complete",
+    "workflow.resume",
+    "workflow.abort",
+    "workflow.doctor",
   ]),
   argv: Schema.optional(Schema.Array(Schema.String)),
   repoRoot: Schema.optional(Schema.String),
@@ -91,6 +104,9 @@ const DaemonRequestSchema = Schema.Struct({
 })
 
 const decodeDaemonRequest = Schema.decodeOption(Schema.fromJsonString(DaemonRequestSchema))
+const decodeJsonRecordOption = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+)
 
 export const resolveDaemonSocketPath = (repoRoot: string): string =>
   resolveHarnessDaemonSocketPath(repoRoot)
@@ -115,9 +131,15 @@ const createDaemonLineHandler =
     readonly ruleSourceConfig: AstGateCacheRuleSourceConfig
     readonly writerLeaseEpoch: LeaseEpoch
     readonly socketPath?: DaemonSocketPath | undefined
+    readonly workflowRuntime?: WorkflowDaemonRuntime | undefined
   }) =>
   (line: string): Effect.Effect<string> => {
-    const reqOpt = decodeDaemonRequest(line.trim())
+    const trimmedLine = line.trim()
+    const reqOpt = decodeDaemonRequest(trimmedLine)
+    const rawPayload = match(decodeJsonRecordOption(trimmedLine))
+      .with({ _tag: "Some" }, ({ value }) => value)
+      .with({ _tag: "None" }, () => ({}))
+      .exhaustive()
     return match(reqOpt)
       .with({ _tag: "None" }, () =>
         Effect.succeed(JSON.stringify({ ok: false, error: "Invalid daemon request payload" })),
@@ -133,6 +155,13 @@ const createDaemonLineHandler =
             )
             .with({ _tag: "Allowed" }, (allowedScope) => {
               const { resolvedRoot } = allowedScope
+              const workflowInput = {
+                requestId: req.id,
+                rawPayload,
+                scope: allowedScope,
+                writerLeaseEpoch: input.writerLeaseEpoch,
+                ...(input.workflowRuntime !== undefined ? { runtime: input.workflowRuntime } : {}),
+              }
               return match<typeof req.command, Effect.Effect<Record<string, unknown>>>(req.command)
                 .with("ping", () =>
                   Effect.succeed({
@@ -153,15 +182,12 @@ const createDaemonLineHandler =
                     ...(input.socketPath !== undefined ? { socketPath: input.socketPath } : {}),
                   }),
                 )
-                .with("workflow.status", () =>
-                  Effect.succeed(
-                    handleDaemonWorkflowStatusRequest({
-                      requestId: req.id,
-                      scope: allowedScope,
-                      writerLeaseEpoch: input.writerLeaseEpoch,
-                    }),
-                  ),
-                )
+                .with("workflow.start", () => handleDaemonWorkflowStartRequest(workflowInput))
+                .with("workflow.status", () => handleDaemonWorkflowStatusRpcRequest(workflowInput))
+                .with("workflow.complete", () => handleDaemonWorkflowCompleteRequest(workflowInput))
+                .with("workflow.resume", () => handleDaemonWorkflowResumeRequest(workflowInput))
+                .with("workflow.abort", () => handleDaemonWorkflowAbortRequest(workflowInput))
+                .with("workflow.doctor", () => handleDaemonWorkflowDoctorRequest(workflowInput))
                 .with("extract-graph", () =>
                   Effect.gen(function* () {
                     const versionCheck = yield* verifyWorktreeRuleVersionConsistency({
@@ -404,6 +430,10 @@ export const startHarnessDaemonServer = (
                       ...(canonicalSocketPath !== undefined
                         ? { socketPath: canonicalSocketPath }
                         : {}),
+                      ...match(readyState)
+                        .with({ _tag: "Active" }, ({ runtime }) => ({ workflowRuntime: runtime }))
+                        .with({ _tag: "Inactive" }, () => ({}))
+                        .exhaustive(),
                     }),
                   },
                 ).pipe(

@@ -66,6 +66,7 @@ describe("harness cli baseline", () => {
       "check-migrations",
       "check-event-schemas",
       "scenario",
+      "workflow",
       "help",
     ])
   })

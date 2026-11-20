@@ -44,6 +44,7 @@ The plugin registers four lifecycle hooks to enforce safety constraints and inde
    - Blocks edits to read-only `repos/effect` and `repos/alchemy`.
    - Blocks direct writes to `.harness/verify-stamp.json` (stamp forgery prevention).
    - Blocks destructive shell commands (`git push --force`, `rm -rf`).
+   - Under `HARNESS_UNIT_WORKER=1` worker isolation, blocks recursive `harness workflow start|resume|abort|done` commands and direct access to `daemon.sock` or `auth-tokens.json`.
    - Requires explicit human approval for `alchemy deploy` and `alchemy destroy`.
 3. **`PostToolUse` (`harness ingest --format=antigravity`):**
    Executes immediately following file write or replacement operations. Incrementally parses modified TypeScript ASTs, EARS specifications, and ADR documents into `.harness/index.sqlite` and the resident Omnigraph property graph.
@@ -56,7 +57,7 @@ The plugin registers four lifecycle hooks to enforce safety constraints and inde
 
 The plugin registers three Model Context Protocol servers over stdio:
 
-- **`harness-mcp`:** In-process TypeScript server (`apps/harness-mcp/src/server.ts`) exposing 17 tools: symbol resolution (`harness_resolve`, `harness_callers`, `harness_callees`), test reachability (`harness_tests_reaching`), AST pattern searching (`harness_structural_search`), idiom & review routing (`harness_route`, `harness_review_route`), ArchiMate ontology tracing (`harness_ontology_why`, `harness_ontology_impact`, `harness_ontology_check`), graph queries & Datalog/DPO inference (`harness_gq_query`, `harness_graph_infer`, `harness_graph_complete`, `harness_graph_rewrite`), type diagnostics (`harness_lsp_diagnostics`), telemetry reporting (`harness_telemetry_report`), and read-only git diff inspection (`harness_git_diff`).
+- **`harness-mcp`:** In-process TypeScript server (`apps/harness-mcp/src/server.ts`) exposing 18 tools: symbol resolution (`harness_resolve`, `harness_callers`, `harness_callees`), test reachability (`harness_tests_reaching`), AST pattern searching (`harness_structural_search`), idiom & review routing (`harness_route`, `harness_review_route`), ArchiMate ontology tracing (`harness_ontology_why`, `harness_ontology_impact`, `harness_ontology_check`), graph queries & Datalog/DPO inference (`harness_gq_query`, `harness_graph_infer`, `harness_graph_complete`, `harness_graph_rewrite`), type diagnostics (`harness_lsp_diagnostics`), telemetry reporting (`harness_telemetry_report`), read-only git diff inspection (`harness_git_diff`), and read-only workflow status inspection (`harness_workflow_plan`).
 - **`omnigraph-mcp` (`@modernrelay/omnigraph-mcp@0.14.0`):** Graph database server managing the ArchiMate 3.2 property graph on port 8080. Governed by Cedar policy in `libs/harness/graph/policies.cedar`.
 - **`nx-mcp`:** Nx workspace graph server providing dependency and task target discovery.
 
@@ -170,3 +171,6 @@ Invoke specialist review subagents as read-only inspectors during implementation
    ```bash
    node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts doctor
    ```
+4. **Orchestrate Durable Task Workflows & Determinism Gates:**
+   - Control `HarnessTaskWorkflow` runs via `harness workflow` (`compile | start | status | complete | resume | doctor | abort`) over `<git-common-dir>/harness/daemon.sock`, and inspect status read-only with `harness_workflow_plan`.
+   - Workflow definition modules containing `Workflow.make(...)` are checked by the `nondeterministic-workflow-body` AST and `oxlint` rule (`harness/syntax-bans`), requiring side effects, clock/randomness, env, fs, git, Omnigraph, and network calls to run inside `Activity.make({ execute: ... })`.

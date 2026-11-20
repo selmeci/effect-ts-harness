@@ -5,9 +5,42 @@
 
 import * as path from "node:path"
 import {
+  ALLOWLIST,
+  ASKLIST,
+  CD_COMMAND_BANNED_REASON,
+  DENYLIST,
+  DESTRUCTIVE_ARGUMENT_PATTERNS,
+  FILE_REDIRECTION_PATTERN,
+  GIT_DISCARD_PATTERNS,
+  GIT_FORCE_PUSH_PATTERN,
+  GIT_PACK_EXEC_OVERRIDE_PATTERNS,
+  GUARD_SELF_INVOCATION_PATTERN,
+  INTERACTIVE_NX_BANNED_REASON,
+  MAX_CLASSIFY_COMMAND_LENGTH,
+  OBFUSCATION_PATTERNS,
+  SECRET_FILE_PATTERN,
+  SHELL_OPERATORS,
+  SKIP_NX_CACHE_BANNED_REASON,
+  containsToken,
+  hasUnquotedAdjacentBracketGlob,
+  isCommandAllowed,
+  matchesAny,
+  splitByUnquotedOperator,
+  stripSafeLeadingEnvVars,
+  type GuardPatternRule,
+  type GuardVerdict,
+} from "./policy-command-rules.js"
+import {
   PROTECTED_HARNESS_FILE_WRITE_PATTERN,
+  classifyWorkerFileAccess,
   isHarnessStateAccessCommand,
   isHarnessStateMutationCommand,
+  isWorkerDaemonCredentialFilePath,
+  isWorkerDaemonCredentialShellAccess,
+  isWorkerRecursiveWorkflowCommand,
+  type PolicyGuardOptions,
+  type WorkerFileAccessDenyRuleId,
+  type WorkerFileAccessResult,
 } from "./policy-harness-state.js"
 import {
   extractCommandSegments,
@@ -18,337 +51,36 @@ import {
   type UnwrappedSegment,
 } from "./policy-shell-parser.js"
 
-export { isHarnessStateMutationCommand, toCommandView, type CommandView }
-
-export type GuardVerdict = "allow" | "deny" | "ask" | "escalate"
-
-export const ALLOWLIST: ReadonlyArray<string> = [
-  "nx ",
-  "pnpm test",
-  "pnpm nx ",
-  "pnpm verify",
-  "pnpm harness",
-  "pnpm run harness",
-  "pnpm lint",
-  "pnpm oxlint",
-  "pnpm format",
-  "pnpm format:check",
-  "pnpm oxfmt",
-  "pnpm build",
-  "CI=true pnpm nx ",
-  "CI=true pnpm test",
-  "CI=true pnpm verify",
-  "CI=true pnpm harness",
-  "CI=true pnpm format",
-  "CI=true pnpm format:check",
-  "CI=true pnpm oxfmt",
-  "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts",
-  "node --import ./tools/node-ts-resolver.mjs apps/harness-mcp/src/server.ts",
-  "git status",
-  "git diff",
-  "git log",
-  "git branch",
-  "git rev-parse",
-  "git ls-files",
-  "git checkout",
-  "git switch",
-  "git add",
-  "git restore --staged",
-  "git commit",
-  "git merge",
-  "git fetch",
-  "git push",
-  "git show",
-  "git stash",
-  "git grep",
-  "gh pr view",
-  "gh pr list",
-  "gh pr status",
-  "gh pr diff",
-  "gh pr checks",
-  "gh pr create",
-  "gh pr edit",
-  "gh pr comment",
-  "gh repo view",
-  "gh auth status",
-  "gh api repos/",
-  "gh issue view",
-  "gh issue list",
-  "gh issue status",
-  "ls",
-  "dir",
-  "pwd",
-  "which",
-  "find",
-  "cat",
-  "head",
-  "tail",
-  "wc",
-  "tree",
-  "pnpm --filter ",
-  "pnpm install",
-  "pnpm vitest",
-  "vitest",
-  "git remote",
-  "grep",
-  "rg",
-  "diff",
-  "sort",
-  "omnigraph ",
-  "omnigraph-server",
-]
-
-export const DENYLIST: ReadonlyArray<{ readonly token: string; readonly reason: string }> = [
-  { token: "rm -rf", reason: "destructive delete" },
-  { token: "push --force", reason: "force push" },
-  { token: "push -f", reason: "force push" },
-]
-
-/** Human confirmation required, never auto-approved (mvp.md "Infrastructure as Effect",
- * safety guard row). Substring match, so `pnpm alchemy deploy` is covered too. */
-export const ASKLIST: ReadonlyArray<string> = [
-  "alchemy deploy",
-  "alchemy destroy",
-  "alchemy profile",
-]
-
-export const SHELL_OPERATORS: ReadonlyArray<string> = ["&&", "||", ";", "|", "\n"]
-
-/** A guard rule matched by regex instead of substring (harness:SPEC-0001). */
-export interface GuardPatternRule {
-  readonly pattern: RegExp
-  readonly reason: string
-}
-
-/** REQ-3.1: a dotenv file, mutation-hmac key, `.cache/effect-harness` state/key path, or
- * wildcard `*.key` token referenced as a path token, including multi-dot names
- * (`.env.development.local`), globs/character classes/braces (`.env*`, `mutation-hmac*.key`,
- * `mutation-hmac-v[0-9].key`, `mutation-hmac-{v1,v2}.key`, `*.key`). It does not match
- * identifiers (`process.env`, `import.meta.env`), plugin dirs (`plugins/effect-harness`),
- * or templates (`.env.example`, `.env.template`, `.env.sample`) — REQ-3.2.
- * Evaluated on `CommandView.argv`. */
-export const SECRET_FILE_PATTERN: RegExp =
-  /(?:^|[\s=:/<>(])(?:\.env(?:\.(?!(?:example|template|sample)(?:$|[\s/]))[\w*?-]+)*\*?|mutation-hmac[^\s;|&)<>]*(?:\.key|\*|\?|\]|\})|[^\s;|&)<>]*\.cache\/effect-harness(?:\/[^\s;|&)<>]*)?|[^\s=:/<>()]*(?:\*|\?|\[[^\]\s]+\]|\{[^}\s]+\})[^\s;|&)<>]*\.key|(?:[^\s;|&)<>]*\/)?auth-tokens\.json)(?=$|[\s/;|&)<>])/
-
-/** REQ-2.1: the agent must not use the guard as an oracle to test candidate commands.
- * Hooks invoke the guard directly from the IDE, never through an agent shell command.
- * Flags (and flag values such as `--cwd /tmp`) or `--` before `guard` are tolerated. */
-export const GUARD_SELF_INVOCATION_PATTERN: RegExp =
-  /(?:(?:^|\s)harness|harness-cli\/src\/(?:index|hook-entry)\.ts)(?:\s+(?:--(?=\s|$)|-\S+(?:\s+(?!guard\b)[^\s;|&)<>]+)?))*\s+guard\b/
-
-/** REQ-1.2: git commands that irreversibly discard work. Always a human decision —
- * clef rated `git checkout -- .` only destructive=0.26 (would auto-allow). */
-export const GIT_DISCARD_PATTERNS: ReadonlyArray<GuardPatternRule> = [
-  {
-    pattern: /\bgit\s+checkout\s+(?:\S+\s+)*(?:--|\.\/?|-f|--force)(?:\s|$)/,
-    reason: "git checkout discarding working-tree changes",
-  },
-  {
-    pattern: /\bgit\s+restore\s+(?!.*--staged\b)(?:\S+\s+)*(?:--|\.\/?|-f|--force)(?:\s|$)/,
-    reason: "git restore discarding changes",
-  },
-  { pattern: /\bgit\s+stash\s+(?:drop|clear)\b/, reason: "git stash drop/clear" },
-  {
-    pattern: /\bgit\s+branch\s+(?:\S+\s+)*(?:-[Dd]|--delete)(?:\s|$)/,
-    reason: "git branch deletion",
-  },
-  { pattern: /\bgit\s+clean\b/, reason: "git clean removing untracked files" },
-  {
-    pattern: /\bgit\s+switch\s+(?:\S+\s+)*(?:--discard-changes|-f|--force)(?:\s|$)/,
-    reason: "git switch discarding changes",
-  },
-  { pattern: /\bgit\s+reset\s+(?:\S+\s+)*--hard\b/, reason: "git reset --hard" },
-  {
-    pattern: /\bgit\s+push\s+(?:\S+\s+)*(?:--delete|-d)(?:\s|$)/,
-    reason: "git push deleting remote ref",
-  },
-]
-
-/** REQ-1.1 / REQ-1.4: find actions that delete or execute, and mutating flags on gh api.
- * Evaluated on `CommandView.argv`, so quoted flags (`'-delete'`, `'-X' 'DELETE'`) are caught.
- * Checked BEFORE the prefix allowlist. */
-export const DESTRUCTIVE_ARGUMENT_PATTERNS: ReadonlyArray<GuardPatternRule> = [
-  {
-    pattern: /\bfind\b.*\s-(?:delete|exec|execdir|ok|okdir)\b/,
-    reason: "find action that deletes or executes",
-  },
-  {
-    pattern:
-      /\bgh\s+api\b.*(?:\s-(?:X|f|F)[A-Za-z0-9_=-]*|\s--(?:method|field|raw-field|input)(?:=|\s|$))/,
-    reason: "gh api mutating request method or body field",
-  },
-  {
-    pattern: /\bomnigraph\s+cleanup\b.*--keep(?:=|\s+)0(?:\s|$)/,
-    reason: "omnigraph cleanup with --keep 0 deletes all history",
-  },
-  {
-    pattern: /\bomnigraph\s+branches\s+delete\s+main(?:\s|$)/,
-    reason: "omnigraph branches delete main destroys the main branch",
-  },
-  {
-    pattern: /\bomnigraph\s+cluster\s+(?:reset|destroy|rm)(?:\s|$)/,
-    reason: "omnigraph cluster reset/destroy/rm destroys cluster state",
-  },
-]
-
-/** REQ-1.3: `>`, `>>`, `N>`, `&>`, `&>>`, `>& file` into a file. Not stream duplication
- * (`2>&1`, `>&2`), not `/dev/null`, not `=>` / `->`. Evaluated on `CommandView.unquoted`. */
-export const FILE_REDIRECTION_PATTERN: RegExp =
-  /(?:&>>?|(?<![=&>-])\d*>>?(?![&>])|(?<![=&>-])\d*>&(?![\d-]))\s*(?!\/dev\/null(?:\s|$))\S/
-
-/** REQ-3.3: a word or path split by a character-class glob (`[e]nv`, `v[0-9]`, `[.]env`)
- * or by empty quotes (`r''m`, `.''env`) — the forms used to slip past substring rules.
- * Evaluated on the raw command. */
-export const OBFUSCATION_PATTERNS: ReadonlyArray<GuardPatternRule> = [
-  {
-    pattern: /\[[^\]\s]\](?=[\w./*'"-])|(?<=[\w./*'"-])\[[^\]\s]\]/,
-    reason: "character-class glob inside a word or path",
-  },
-  { pattern: /(?<=[\w./*\]-])(?:''|"")(?=[\w./*[-])/, reason: "empty quotes inside a word" },
-]
-
-const BRACKET_CLASS_GLOBAL_PATTERN: RegExp = /\[[^\]\s]+\]/g
-const BRACKET_ADJACENT_CHAR_PATTERN: RegExp = /[\w./*'"-]/
-
-const hasUnquotedAdjacentBracketGlob = (norm: string, unquoted: string): boolean => {
-  BRACKET_CLASS_GLOBAL_PATTERN.lastIndex = 0
-  let m = BRACKET_CLASS_GLOBAL_PATTERN.exec(unquoted)
-  while (m !== null) {
-    const start = m.index
-    const end = start + m[0].length
-    const prev = start > 0 ? norm[start - 1]! : ""
-    const next = end < norm.length ? norm[end]! : ""
-    if (BRACKET_ADJACENT_CHAR_PATTERN.test(prev) || BRACKET_ADJACENT_CHAR_PATTERN.test(next)) {
-      return true
-    }
-    m = BRACKET_CLASS_GLOBAL_PATTERN.exec(unquoted)
-  }
-  return false
-}
-
-const splitByUnquotedOperator = (
-  command: string,
-  unquoted: string,
-  op: string,
-): ReadonlyArray<{ readonly cmd: string; readonly unquoted: string }> => {
-  const parts: Array<{ readonly cmd: string; readonly unquoted: string }> = []
-  let start = 0
-  let idx = unquoted.indexOf(op, start)
-  while (idx !== -1) {
-    parts.push({
-      cmd: command.slice(start, idx).trim(),
-      unquoted: unquoted.slice(start, idx).trim(),
-    })
-    start = idx + op.length
-    idx = unquoted.indexOf(op, start)
-  }
-  parts.push({
-    cmd: command.slice(start).trim(),
-    unquoted: unquoted.slice(start).trim(),
-  })
-  return parts
-}
-
-const containsToken = (command: string, token: string): boolean =>
-  command.toLowerCase().includes(token.toLowerCase())
-
-const matchesAny = (command: string, rules: ReadonlyArray<GuardPatternRule>): boolean =>
-  rules.some((rule) => rule.pattern.test(command))
-
-const MAX_LEADING_ENV_VARS = 32
-const MAX_CLASSIFY_COMMAND_LENGTH = 65_536
-
-const SAFE_ENV_PATH_PATTERN = /^\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/
-const UNSAFE_ENV_PATH_PATTERN =
-  /\.\.|\/\.env|\/\.git(?:\/|$)|\/\.harness|secret|\/repos\/(?:effect|alchemy)(?:\/|$)|\/tools\/|\/adapters\//i
-const SAFE_TEMP_PATH_VALIDATOR = (value: string): boolean =>
-  SAFE_ENV_PATH_PATTERN.test(value) && !UNSAFE_ENV_PATH_PATTERN.test(value)
-
-const SAFE_LEADING_ENV_VALIDATORS: Readonly<Record<string, (value: string) => boolean>> = {
-  CI: (v) => /^(?:true|false|0|1)$/.test(v),
-  NX_INTERACTIVE: (v) => /^(?:true|false|0|1)$/.test(v),
-  NX_DAEMON: (v) => /^(?:true|false|0|1)$/.test(v),
-  FORCE_COLOR: (v) => /^[0-3]$/.test(v),
-  NO_COLOR: (v) => /^[01]$/.test(v),
-  HARNESS_PLAN_CHECK: (v) => /^(?:0|1|true|false)$/.test(v),
-  HARNESS_REQUIRE_OLLAMA: (v) => /^[01]$/.test(v),
-  HARNESS_LOG_LEVEL: (v) => /^(?:debug|info|warn|error)$/.test(v),
-  HARNESS_WORKTREE_ID: (v) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(v),
-  TMPDIR: SAFE_TEMP_PATH_VALIDATOR,
-  NX_SOCKET_DIR: SAFE_TEMP_PATH_VALIDATOR,
-  NODE_COMPILE_CACHE: SAFE_TEMP_PATH_VALIDATOR,
-}
-
-const isSafeLeadingEnvAssignment = (name: string, value: string): boolean => {
-  if (/[\s;|&]/.test(value)) return false
-  if (!Object.hasOwn(SAFE_LEADING_ENV_VALIDATORS, name)) return false
-  return SAFE_LEADING_ENV_VALIDATORS[name]!(value)
-}
-
-const LEADING_ENV_TOKEN_PATTERN = /([A-Za-z_][A-Za-z0-9_]*)=([^\s;|&]+)(?=\s|$)/y
-const WORKTREE_ID_BLOCKED_HARNESS_PATTERN =
-  /^pnpm\s+(?:run\s+)?harness\b|^CI=true\s+pnpm\s+harness\b|^node\b.*apps\/harness-cli\/src\//
-
-interface StripLeadingEnvResult {
-  readonly rest: string
-  readonly sawWorktreeId: boolean
-}
-
-const stripSafeLeadingEnvVarsDetailed = (command: string): StripLeadingEnvResult => {
-  const len = command.length
-  let pos = 0
-  let count = 0
-  let sawWorktreeId = false
-  while (count < MAX_LEADING_ENV_VARS) {
-    while (pos < len && /\s/.test(command[pos]!)) {
-      pos++
-    }
-    if (pos >= len) {
-      return { rest: "", sawWorktreeId }
-    }
-    LEADING_ENV_TOKEN_PATTERN.lastIndex = pos
-    const match = LEADING_ENV_TOKEN_PATTERN.exec(command)
-    if (match === null) {
-      break
-    }
-    const name = match[1]!
-    const value = match[2]!
-    if (!isSafeLeadingEnvAssignment(name, value)) {
-      break
-    }
-    if (name === "HARNESS_WORKTREE_ID") {
-      sawWorktreeId = true
-    }
-    pos = LEADING_ENV_TOKEN_PATTERN.lastIndex
-    count++
-  }
-  return { rest: command.slice(pos).trim(), sawWorktreeId }
-}
-
-const stripSafeLeadingEnvVars = (command: string): string =>
-  stripSafeLeadingEnvVarsDetailed(command).rest
-
-export const isCommandAllowed = (command: string): boolean => {
-  const { rest: trimmed, sawWorktreeId } = stripSafeLeadingEnvVarsDetailed(command)
-  if (trimmed === "") return false
-  if (sawWorktreeId && WORKTREE_ID_BLOCKED_HARNESS_PATTERN.test(trimmed)) {
-    return false
-  }
-  return ALLOWLIST.some((prefix) => {
-    if (trimmed === prefix) return true
-    if (prefix.endsWith(" ") || prefix.endsWith("/")) return trimmed.startsWith(prefix)
-    return trimmed.startsWith(prefix + " ")
-  })
+export {
+  ALLOWLIST,
+  ASKLIST,
+  CD_COMMAND_BANNED_REASON,
+  DENYLIST,
+  DESTRUCTIVE_ARGUMENT_PATTERNS,
+  FILE_REDIRECTION_PATTERN,
+  GIT_DISCARD_PATTERNS,
+  GUARD_SELF_INVOCATION_PATTERN,
+  INTERACTIVE_NX_BANNED_REASON,
+  OBFUSCATION_PATTERNS,
+  SECRET_FILE_PATTERN,
+  SHELL_OPERATORS,
+  SKIP_NX_CACHE_BANNED_REASON,
+  classifyWorkerFileAccess,
+  isCommandAllowed,
+  isHarnessStateMutationCommand,
+  isWorkerDaemonCredentialShellAccess,
+  isWorkerRecursiveWorkflowCommand,
+  toCommandView,
+  type CommandView,
+  type GuardPatternRule,
+  type GuardVerdict,
+  type PolicyGuardOptions,
+  type WorkerFileAccessDenyRuleId,
+  type WorkerFileAccessResult,
 }
 
 export const isCdCommand = (trimmed: string): boolean =>
   extractCommandSegments(trimmed).some((seg) => seg.commandWords[0] === "cd")
-
-export const INTERACTIVE_NX_BANNED_REASON =
-  "Running 'nx show' without 'CI=true' can hang on interactive prompts; prefix with 'CI=true' or use harness MCP tools."
-
-export const SKIP_NX_CACHE_BANNED_REASON =
-  "Bypassing Nx cache with '--skip-nx-cache', '--skipNxCache', or 'NX_SKIP_NX_CACHE'/'NX_DISABLE_NX_CACHE' is banned by harness policy; drop the cache-bypass flag/env and rely on Nx caching."
 
 const SKIP_NX_CACHE_ARG_PATTERN = /^--(?:skip-nx-cache|skipNxCache)(?:=(?!false$).*)?$/
 const SKIP_NX_CACHE_ENV_PATTERN = /^(?:NX_SKIP_NX_CACHE|NX_DISABLE_NX_CACHE)=(?:true|1)$/
@@ -439,9 +171,6 @@ export const isInteractiveNxCommand = (command: string): boolean =>
     return !hasNonInteractiveEnv
   })
 
-export const CD_COMMAND_BANNED_REASON =
-  "Shell 'cd' commands are banned by harness policy; use the tool Cwd parameter instead."
-
 export type CommandDenyRuleId =
   | "cd-command-banned"
   | "interactive-nx-banned"
@@ -450,6 +179,8 @@ export type CommandDenyRuleId =
   | "denylist-token"
   | "git-force-push"
   | "git-pack-exec-override"
+  | "worker-recursive-workflow-command"
+  | "worker-daemon-credential-access"
   | "harness-state-mutation"
   | "secret-file-access"
   | "guard-self-invocation"
@@ -459,17 +190,10 @@ export interface CommandDenyExplanation {
   readonly reason: string
 }
 
-const GIT_FORCE_PUSH_PATTERN = /\bgit\s+(?:\S+\s+)*push\b.*(?:\s|^)(?:--force|-f)(?:\s|$)/
-
-const GIT_PACK_EXEC_OVERRIDE_PATTERNS: ReadonlyArray<RegExp> = [
-  /\bgit\s+(?:\S+\s+)*(?:ls-remote|clone)\b.*(?:\s--u[a-z-]*(?:=|\s|$)|\s-u\S*|\s--exe(?:c)?(?:=|\s|$))/s,
-  /\bgit\s+(?:\S+\s+)*fetch\b.*(?:\s--upl[a-z-]*(?:=|\s|$)|\s--exe(?:c)?(?:=|\s|$))/s,
-  /\bgit\s+(?:\S+\s+)*push\b.*(?:\s--rece[a-z-]*(?:=|\s|$)|\s--ex(?:e(?:c)?)?(?:=|\s|$))/s,
-  /\bgit\s+(?:\S+\s+)*archive\b.*\s--ex(?:e(?:c)?)?(?:=|\s|$)/s,
-  /\bgit\b.*\bext::/s,
-]
-
-export const explainCommandDenyRule = (command: string): CommandDenyExplanation | undefined => {
+export const explainCommandDenyRule = (
+  command: string,
+  options?: PolicyGuardOptions,
+): CommandDenyExplanation | undefined => {
   const trimmed = normalizeShellLineContinuations(command).trim()
   if (trimmed === "") {
     return undefined
@@ -507,6 +231,22 @@ export const explainCommandDenyRule = (command: string): CommandDenyExplanation 
         "Git remote/transfer command with custom upload-pack/receive-pack/exec or ext:: helper is banned by harness policy.",
     }
   }
+  if (options?.unitWorkerMode === true) {
+    if (isWorkerRecursiveWorkflowCommand(trimmed)) {
+      return {
+        ruleId: "worker-recursive-workflow-command",
+        reason:
+          "Worker isolation mode (HARNESS_UNIT_WORKER=1) bans recursive 'harness workflow start|resume|abort|done' and 'harness done' invocations.",
+      }
+    }
+    if (isWorkerDaemonCredentialShellAccess(trimmed)) {
+      return {
+        ruleId: "worker-daemon-credential-access",
+        reason:
+          "Worker isolation mode (HARNESS_UNIT_WORKER=1) bans shell access to daemon.sock or auth-tokens.json.",
+      }
+    }
+  }
   if (isHarnessStateMutationCommand(trimmed)) {
     return {
       ruleId: "harness-state-mutation",
@@ -537,12 +277,14 @@ export const explainCommandDenyRule = (command: string): CommandDenyExplanation 
   return undefined
 }
 
-export const explainCommandDenyReason = (command: string): string | undefined =>
-  explainCommandDenyRule(command)?.reason
+export const explainCommandDenyReason = (
+  command: string,
+  options?: PolicyGuardOptions,
+): string | undefined => explainCommandDenyRule(command, options)?.reason
 
 /** Rule order is load-bearing (harness:ADR-0003): deny → ask → escalate → allow.
  * Every rule that removes the automatic `allow` must run before the prefix allowlist. */
-export const classifyCommand = (command: string): GuardVerdict => {
+export const classifyCommand = (command: string, options?: PolicyGuardOptions): GuardVerdict => {
   if (command.length > MAX_CLASSIFY_COMMAND_LENGTH) {
     return "ask"
   }
@@ -551,7 +293,7 @@ export const classifyCommand = (command: string): GuardVerdict => {
   if (trimmed === "") {
     return "escalate"
   }
-  if (explainCommandDenyRule(trimmed) !== undefined) {
+  if (explainCommandDenyRule(trimmed, options) !== undefined) {
     return "deny"
   }
   if (isSkipNxCacheOverrideCommand(trimmed)) {
@@ -646,6 +388,7 @@ export type FileWriteDenyRuleId =
   | "harness-cache"
   | "harness-common-dir-state"
   | "secret-file"
+  | "worker-daemon-credential-access"
 
 export interface FileWriteGuardResult {
   readonly verdict: "allow" | "deny" | "ask"
@@ -653,7 +396,13 @@ export interface FileWriteGuardResult {
   readonly reason?: string | undefined
 }
 
-export const classifyFileWrite = (filePath: string): FileWriteGuardResult => {
+export const classifyFileWrite = (
+  filePath: string,
+  options?: PolicyGuardOptions,
+): FileWriteGuardResult => {
+  if (options?.unitWorkerMode === true && isWorkerDaemonCredentialFilePath(filePath)) {
+    return classifyWorkerFileAccess(filePath, true)
+  }
   const rawNorm = filePath.replace(/\\/g, "/").trim()
   if (rawNorm === "") {
     return { verdict: "allow" }

@@ -1,5 +1,13 @@
 import { execFileSync, spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { Graph, Option } from "effect"
@@ -828,6 +836,259 @@ describe("hook-entry.ts fast-path", () => {
         `[bench] session warm hit: ${Math.round(hitMs)}ms (${hitInspect.loadedUrls.length} modules) vs cold miss: ${Math.round(missMs)}ms (${missInspect.loadedUrls.length} modules)`,
       )
       expect(hitInspect.loadedUrls.length).toBeLessThan(missInspect.loadedUrls.length)
+    })
+  })
+
+  describe("HARNESS_UNIT_WORKER=1 worker isolation fast-path and parity", () => {
+    it.each([
+      {
+        label: "workflow start",
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm harness workflow start --plan plan.json" },
+          },
+        }),
+      },
+      {
+        label: "workflow resume",
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm harness workflow resume --run-id wf-test-0001" },
+          },
+        }),
+      },
+      {
+        label: "workflow abort",
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm harness workflow abort --run-id wf-test-0001" },
+          },
+        }),
+      },
+      {
+        label: "workflow done",
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm harness workflow done" },
+          },
+        }),
+      },
+      {
+        label: "harness done",
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm harness done" },
+          },
+        }),
+      },
+      {
+        label: "cat daemon.sock",
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "cat .git/harness/daemon.sock" },
+          },
+        }),
+      },
+      {
+        label: "view_file daemon.sock",
+        input: JSON.stringify({
+          toolCall: {
+            name: "view_file",
+            args: { AbsolutePath: "/repo/.git/harness/daemon.sock" },
+          },
+        }),
+      },
+      {
+        label: "grep_search auth-tokens.json",
+        input: JSON.stringify({
+          toolCall: {
+            name: "grep_search",
+            args: { SearchPath: "/repo/.harness/omnigraph-cluster/auth-tokens.json" },
+          },
+        }),
+      },
+      {
+        label: "list_dir daemon.sock",
+        input: JSON.stringify({
+          toolCall: {
+            name: "list_dir",
+            args: { DirectoryPath: "/repo/.git/harness/daemon.sock" },
+          },
+        }),
+      },
+      {
+        label: "read_file Path auth-tokens.json",
+        input: JSON.stringify({
+          toolCall: {
+            name: "read_file",
+            args: { Path: "/repo/.harness/omnigraph-cluster/auth-tokens.json" },
+          },
+        }),
+      },
+      {
+        label: "read_file Path daemon.sock",
+        input: JSON.stringify({
+          toolCall: {
+            name: "read_file",
+            args: { Path: "/repo/.git/harness/daemon.sock" },
+          },
+        }),
+      },
+      {
+        label: "pnpm --filter harness-cli start workflow start",
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm --filter harness-cli start workflow start" },
+          },
+        }),
+      },
+      {
+        label: "cat auth-tokens.*",
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "cat .harness/omnigraph-cluster/auth-tokens.*" },
+          },
+        }),
+      },
+      {
+        label: "rg -u . .harness/omnigraph-cluster",
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "rg -u . .harness/omnigraph-cluster" },
+          },
+        }),
+      },
+    ])(
+      "blocks $label under HARNESS_UNIT_WORKER=1 without loading heavy modules and matches index.ts",
+      ({ input }) => {
+        const env = { HARNESS_UNIT_WORKER: "1" }
+        const inspect = inspectLoadedModulesForHookEntry(["guard", "--format=antigravity"], {
+          input,
+          env,
+        })
+        expect(inspect.status).toBe(0)
+        const parsed = JSON.parse(inspect.stdout.trim()) as { decision: string; reason: string }
+        expect(parsed.decision).toBe("deny")
+        expect(parsed.reason).toContain("HARNESS_UNIT_WORKER=1")
+        assertNoHeavyModulesLoaded(inspect.loadedUrls)
+
+        const fullRes = runEntry(INDEX_PATH, ["guard", "--format=antigravity"], { input, env })
+        expect(fullRes.status).toBe(inspect.status)
+        expect(fullRes.stdout.trim()).toBe(inspect.stdout.trim())
+      },
+    )
+
+    it("enforces Claude Code exit 2 parity for Read/Glob/Grep auth-tokens.json and workflow start under HARNESS_UNIT_WORKER=1", () => {
+      const env = { HARNESS_UNIT_WORKER: "1" }
+      for (const input of [
+        JSON.stringify({
+          tool_name: "Read",
+          tool_input: { file_path: ".harness/omnigraph-cluster/auth-tokens.json" },
+        }),
+        JSON.stringify({
+          tool_name: "Glob",
+          tool_input: { pattern: "**/*auth-tokens*" },
+        }),
+        JSON.stringify({
+          tool_name: "Grep",
+          tool_input: { pattern: ".", glob: "**/auth-tokens.json" },
+        }),
+        JSON.stringify({
+          tool_name: "Bash",
+          tool_input: { command: "pnpm harness workflow start --plan plan.json" },
+        }),
+        JSON.stringify({
+          tool_name: "Bash",
+          tool_input: { command: "pnpm --filter harness-cli start workflow start" },
+        }),
+      ]) {
+        const fastRes = runHookEntry(["guard"], { input, env })
+        const fullRes = runEntry(INDEX_PATH, ["guard"], { input, env })
+        expect(fastRes.status).toBe(2)
+        expect(fullRes.status).toBe(2)
+        expect(fastRes.stdout.trim()).toBe(fullRes.stdout.trim())
+        expect(fastRes.stderr).toContain("HARNESS_UNIT_WORKER=1")
+      }
+    })
+
+    it("resolves symlinks pointing to .harness/omnigraph-cluster/auth-tokens.json and denies with fast-path parity", () => {
+      const dir = mkdtempSync(join(tmpdir(), "harness-worker-symlink-"))
+      tempDirs.push(dir)
+      const clusterDir = join(dir, ".harness", "omnigraph-cluster")
+      mkdirSync(clusterDir, { recursive: true })
+      const targetTokens = join(clusterDir, "auth-tokens.json")
+      writeFileSync(targetTokens, JSON.stringify({ token: "secret" }), "utf8")
+      const symlinkPath = join(dir, "benign-alias.json")
+      symlinkSync(targetTokens, symlinkPath)
+
+      const env = { HARNESS_UNIT_WORKER: "1" }
+      const agyInput = JSON.stringify({
+        toolCall: { name: "read_file", args: { Path: symlinkPath } },
+      })
+      const fastAgy = runHookEntry(["guard", "--format=antigravity"], { input: agyInput, env })
+      const fullAgy = runEntry(INDEX_PATH, ["guard", "--format=antigravity"], {
+        input: agyInput,
+        env,
+      })
+      expect(fastAgy.status).toBe(0)
+      expect(fullAgy.status).toBe(0)
+      expect(JSON.parse(fastAgy.stdout.trim())).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining("HARNESS_UNIT_WORKER=1"),
+      })
+      expect(fullAgy.stdout.trim()).toBe(fastAgy.stdout.trim())
+
+      const ccInput = JSON.stringify({ tool_name: "Read", tool_input: { file_path: symlinkPath } })
+      const fastCc = runHookEntry(["guard"], { input: ccInput, env })
+      const fullCc = runEntry(INDEX_PATH, ["guard"], { input: ccInput, env })
+      expect(fastCc.status).toBe(2)
+      expect(fullCc.status).toBe(2)
+      expect(fastCc.stderr).toContain("HARNESS_UNIT_WORKER=1")
+    })
+
+    it("allows workflow complete, workflow status, nx run verify, and normal file reads under HARNESS_UNIT_WORKER=1", () => {
+      const env = { HARNESS_UNIT_WORKER: "1" }
+      for (const input of [
+        JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm harness workflow complete --unit u1 --repo-root /tmp/repo" },
+          },
+        }),
+        JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm harness workflow status --json" },
+          },
+        }),
+        JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "nx run @harness/contract:verify" },
+          },
+        }),
+        JSON.stringify({
+          toolCall: {
+            name: "view_file",
+            args: { AbsolutePath: "/repo/libs/harness/contract/src/workflow.ts" },
+          },
+        }),
+      ]) {
+        const fastRes = runHookEntry(["guard", "--format=antigravity"], { input, env })
+        const fullRes = runEntry(INDEX_PATH, ["guard", "--format=antigravity"], { input, env })
+        expect(fastRes.status).toBe(0)
+        expect(JSON.parse(fastRes.stdout.trim())).toEqual({ decision: "allow" })
+        expect(fullRes.stdout.trim()).toBe(fastRes.stdout.trim())
+      }
     })
   })
 })

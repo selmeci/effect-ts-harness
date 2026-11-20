@@ -293,3 +293,448 @@ export const isHarnessStateAccessCommand = (command: string): boolean => {
     isHarnessStateAccessSegment(seg, commonDirs, commandHasCommonDirSubst),
   )
 }
+
+export interface PolicyGuardOptions {
+  readonly unitWorkerMode?: boolean | undefined
+}
+
+export type WorkerFileAccessDenyRuleId = "worker-daemon-credential-access"
+
+export interface WorkerFileAccessResult {
+  readonly verdict: "allow" | "deny"
+  readonly ruleId?: WorkerFileAccessDenyRuleId | undefined
+  readonly reason?: string | undefined
+}
+
+const WORKER_DAEMON_CREDENTIAL_FILE_PATTERN: RegExp =
+  /(^|\/)(?:\.harness\/omnigraph-cluster(?:[*?[\]{}][^\s/]*)?(?:\/|$)|[^\s/]*auth-tokens(?:[*?[\]{}.][^\s/]*)?(?:\/|$)|(?:[^\s/]*[*?[\]{}][^\s/]*\.sock|daemon\.(?:sock|s?[*?[\]{}][^\s/]*|soc[*?[\]{}][^\s/]*))(?:\/|$))/
+
+const HARNESS_CLI_SCRIPT_PATTERN: RegExp =
+  /(?:^|[\\/])harness-cli(?:[\\/]|$)|(?:^|[\\/])harness(?:\.[cm]?[jt]s)?$/
+
+const LOCAL_HARNESS_CLI_ENTRY_PATTERN: RegExp =
+  /^(?:\.\/)?(?:src|dist)\/(?:index|hook-entry)\.[cm]?[jt]s$/
+
+const JS_RUNTIME_BINARIES: ReadonlySet<string> = new Set(
+  "node nodejs bun tsx ts-node deno".split(" "),
+)
+
+const JS_RUNTIME_VALUE_FLAGS: ReadonlySet<string> = new Set(
+  "--import -r --require --loader --experimental-loader --conditions -C --env-file --env-file-if-exists --preload --tsconfig --tsconfig-override --watch-path --diagnostic-dir --redirect-warnings --title --max-old-space-size --dns-result-order".split(
+    " ",
+  ),
+)
+
+const DENO_VALUE_FLAGS: ReadonlySet<string> = new Set(
+  "-c --config --import-map --lock --cert --location --seed --ext".split(" "),
+)
+const DENO_RUN_SUBCOMMANDS: ReadonlySet<string> = new Set(["run", "test", "bench", "serve"])
+const DENO_EVAL_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  "eval",
+  "repl",
+  "compile",
+  "fmt",
+  "lint",
+  "check",
+  "info",
+])
+
+const SHELL_EXEC_BINARIES: ReadonlySet<string> = new Set("sh bash zsh dash ksh ash".split(" "))
+
+const HARNESS_GLOBAL_VALUE_FLAGS: ReadonlySet<string> = new Set(
+  "--cwd --dir -C --repo-root --format --config -c".split(" "),
+)
+
+const HARNESS_WORKFLOW_VALUE_FLAGS: ReadonlySet<string> = new Set(
+  "--level --mode --runner --max-concurrency --input --plan --run-id --unit --phase --repo-root --decision --cwd --dir -C --format".split(
+    " ",
+  ),
+)
+
+const WORKER_BLOCKED_WORKFLOW_ACTIONS: ReadonlySet<string> = new Set([
+  "start",
+  "resume",
+  "abort",
+  "done",
+])
+
+const MAX_SUBSHELL_INSPECT_DEPTH = 4
+
+const findBalancedParenEnd = (text: string, openParenIdx: number): number => {
+  let depth = 1
+  let quote: "'" | '"' | undefined
+  for (let i = openParenIdx + 1; i < text.length; i++) {
+    const ch = text[i]!
+    if (quote === "'") {
+      if (ch === "'") quote = undefined
+      continue
+    }
+    if (quote === '"') {
+      if (ch === "\\") {
+        i++
+        continue
+      }
+      if (ch === '"') quote = undefined
+      continue
+    }
+    if (ch === "\\") {
+      i++
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    if (ch === "(") {
+      depth++
+      continue
+    }
+    if (ch === ")") {
+      depth--
+      if (depth === 0) return i
+    }
+  }
+  return text.length
+}
+
+const findClosingBacktick = (text: string, openIdx: number): number => {
+  for (let i = openIdx + 1; i < text.length; i++) {
+    const ch = text[i]!
+    if (ch === "\\") {
+      i++
+      continue
+    }
+    if (ch === "`") return i
+  }
+  return text.length
+}
+
+const extractExecutedShellSnippets = (command: string): ReadonlyArray<string> => {
+  const snippets: Array<string> = []
+  let quote: "'" | '"' | undefined
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!
+    if (quote === "'") {
+      if (ch === "'") quote = undefined
+      continue
+    }
+    if (ch === "\\") {
+      i++
+      continue
+    }
+    if (quote === undefined && (ch === "'" || ch === '"')) {
+      quote = ch
+      continue
+    }
+    if (quote === '"' && ch === '"') {
+      quote = undefined
+      continue
+    }
+    if (quote === undefined && ch === "#" && (i === 0 || /\s/.test(command[i - 1]!))) {
+      while (i < command.length && command[i] !== "\n") i++
+      continue
+    }
+    if (
+      (ch === "$" && command[i + 1] === "(") ||
+      (quote === undefined && (ch === "<" || ch === ">") && command[i + 1] === "(")
+    ) {
+      const end = findBalancedParenEnd(command, i + 1)
+      const inner = command.slice(i + 2, end).trim()
+      if (inner.length > 0) snippets.push(inner)
+      i = end
+      continue
+    }
+    if (ch === "`") {
+      const end = findClosingBacktick(command, i)
+      const inner = command.slice(i + 1, end).trim()
+      if (inner.length > 0) snippets.push(inner)
+      i = end
+    }
+  }
+  return snippets
+}
+
+const extractEmbeddedCommandPayloads = (seg: DetailedCommandSegment): ReadonlyArray<string> => {
+  const rawBin = seg.commandWords[0]
+  if (rawBin === undefined) return []
+  const bin = binaryBasename(rawBin)
+  if (bin === "eval") {
+    const joined = seg.commandWords.slice(1).join(" ").trim()
+    return joined.length > 0 ? [joined] : []
+  }
+  if (!SHELL_EXEC_BINARIES.has(bin)) return []
+  const payloads: Array<string> = []
+  for (let i = 1; i < seg.commandWords.length; i++) {
+    const arg = seg.commandWords[i]!
+    if (arg === "--") break
+    if (arg === "-c" || /^-[A-Za-z]*c[A-Za-z]*$/.test(arg)) {
+      let payloadIdx = i + 1
+      while (payloadIdx < seg.commandWords.length) {
+        const nextArg = seg.commandWords[payloadIdx]!
+        if (nextArg === "--") {
+          payloadIdx++
+          break
+        }
+        if (nextArg.startsWith("-")) {
+          payloadIdx++
+          continue
+        }
+        break
+      }
+      if (payloadIdx < seg.commandWords.length) {
+        const payload = seg.commandWords[payloadIdx]!.trim()
+        if (payload.length > 0) payloads.push(payload)
+      }
+      break
+    }
+  }
+  return payloads
+}
+
+const isHarnessCliTargetToken = (raw: string): boolean => {
+  const cleaned = raw
+    .replace(/\\/g, "/")
+    .trim()
+    .replace(/^\{|\}$/g, "")
+    .replace(/\.\.\.$/, "")
+    .replace(/\/+$/, "")
+  return /^(?:\.\/)?(?:apps\/)?(?:@harness\/)?harness-cli$/.test(cleaned)
+}
+
+const isHarnessCliPackageTarget = (seg: DetailedCommandSegment): boolean => {
+  if (!seg.sawPackageRunner) return false
+  if (seg.wrapperDirs.some(isHarnessCliTargetToken)) return true
+  const limit = Math.max(0, seg.rawWords.length - seg.commandWords.length)
+  for (let i = 0; i < limit; i++) {
+    const w = seg.rawWords[i]!
+    if ((w === "--filter" || w === "-F") && i + 1 < seg.rawWords.length) {
+      if (isHarnessCliTargetToken(seg.rawWords[i + 1]!)) return true
+      i++
+      continue
+    }
+    if (w.startsWith("--filter=") && isHarnessCliTargetToken(w.slice("--filter=".length))) {
+      return true
+    }
+    if (w.startsWith("-F") && w.length > 2 && isHarnessCliTargetToken(w.slice(2))) {
+      return true
+    }
+  }
+  return false
+}
+
+const matchesHarnessCliScriptPath = (script: string, allowLocalEntry: boolean): boolean =>
+  HARNESS_CLI_SCRIPT_PATTERN.test(script) ||
+  (allowLocalEntry && LOCAL_HARNESS_CLI_ENTRY_PATTERN.test(script.replace(/\\/g, "/")))
+
+const extractHarnessCliArgs = (
+  commandWords: ReadonlyArray<string>,
+  allowLocalEntry: boolean,
+): ReadonlyArray<string> | undefined => {
+  const rawBin = commandWords[0]
+  if (rawBin === undefined) return undefined
+  const bin = binaryBasename(rawBin)
+  if (bin === "harness") {
+    return commandWords.slice(1)
+  }
+  if (!JS_RUNTIME_BINARIES.has(bin)) {
+    return undefined
+  }
+  let skippedDenoSubcommand = false
+  for (let i = 1; i < commandWords.length; i++) {
+    const w = commandWords[i]!
+    if (
+      w === "-e" ||
+      w === "--eval" ||
+      w === "-p" ||
+      w === "--print" ||
+      w.startsWith("--eval=") ||
+      w.startsWith("--print=") ||
+      /^-e./.test(w) ||
+      /^-p./.test(w)
+    ) {
+      return undefined
+    }
+    if (w === "--") {
+      const script = commandWords[i + 1]
+      return script !== undefined && matchesHarnessCliScriptPath(script, allowLocalEntry)
+        ? commandWords.slice(i + 2)
+        : undefined
+    }
+    if (JS_RUNTIME_VALUE_FLAGS.has(w) || (bin === "deno" && DENO_VALUE_FLAGS.has(w))) {
+      i++
+      continue
+    }
+    if (w.startsWith("-")) {
+      continue
+    }
+    if (bin === "deno" && !skippedDenoSubcommand) {
+      if (DENO_EVAL_SUBCOMMANDS.has(w)) {
+        return undefined
+      }
+      if (DENO_RUN_SUBCOMMANDS.has(w)) {
+        skippedDenoSubcommand = true
+        continue
+      }
+    }
+    return matchesHarnessCliScriptPath(w, allowLocalEntry) ? commandWords.slice(i + 1) : undefined
+  }
+  return undefined
+}
+
+const extractSegmentHarnessCliArgs = (
+  seg: DetailedCommandSegment,
+): ReadonlyArray<string> | undefined => {
+  const isTargetPkg = isHarnessCliPackageTarget(seg)
+  const runtimeArgs = extractHarnessCliArgs(seg.commandWords, isTargetPkg)
+  if (runtimeArgs !== undefined) {
+    return runtimeArgs
+  }
+  if (isTargetPkg && seg.commandWords[0] === "start") {
+    return seg.commandWords.slice(1)
+  }
+  return undefined
+}
+
+const findFirstPositionalArg = (
+  args: ReadonlyArray<string>,
+  startIndex: number,
+  valueFlags: ReadonlySet<string>,
+): { readonly value: string; readonly index: number } | undefined => {
+  let afterDoubleDash = false
+  for (let i = startIndex; i < args.length; i++) {
+    const arg = args[i]!
+    if (afterDoubleDash) {
+      return { value: arg, index: i }
+    }
+    if (arg === "--") {
+      afterDoubleDash = true
+      continue
+    }
+    if (valueFlags.has(arg)) {
+      i++
+      continue
+    }
+    if (arg.startsWith("-")) {
+      continue
+    }
+    return { value: arg, index: i }
+  }
+  return undefined
+}
+
+const isDisallowedWorkerHarnessCliArgs = (cliArgs: ReadonlyArray<string>): boolean => {
+  const sub = findFirstPositionalArg(cliArgs, 0, HARNESS_GLOBAL_VALUE_FLAGS)
+  if (sub === undefined) return false
+  if (sub.value === "done") return true
+  if (sub.value !== "workflow") return false
+  const action = findFirstPositionalArg(cliArgs, sub.index + 1, HARNESS_WORKFLOW_VALUE_FLAGS)
+  return action !== undefined && WORKER_BLOCKED_WORKFLOW_ACTIONS.has(action.value)
+}
+
+const hasWorkerRecursiveWorkflowCommandAtDepth = (command: string, depth: number): boolean => {
+  if (depth > MAX_SUBSHELL_INSPECT_DEPTH) return false
+  const norm = normalizeShellLineContinuations(command)
+  if (norm.trim().length === 0) return false
+  const segments = extractDetailedCommandSegments(norm)
+  for (const seg of segments) {
+    const cliArgs = extractSegmentHarnessCliArgs(seg)
+    if (cliArgs !== undefined && isDisallowedWorkerHarnessCliArgs(cliArgs)) {
+      return true
+    }
+    if (
+      extractEmbeddedCommandPayloads(seg).some((payload) =>
+        hasWorkerRecursiveWorkflowCommandAtDepth(payload, depth + 1),
+      )
+    ) {
+      return true
+    }
+  }
+  return extractExecutedShellSnippets(norm).some((snippet) =>
+    hasWorkerRecursiveWorkflowCommandAtDepth(snippet, depth + 1),
+  )
+}
+
+export const isWorkerRecursiveWorkflowCommand = (command: string): boolean =>
+  hasWorkerRecursiveWorkflowCommandAtDepth(command, 0)
+
+const matchesWorkerDaemonCredentialToken = (tok: string): boolean => {
+  if (tok.length === 0) return false
+  const normTok = path.posix.normalize(tok)
+  return (
+    WORKER_DAEMON_CREDENTIAL_FILE_PATTERN.test(tok) ||
+    WORKER_DAEMON_CREDENTIAL_FILE_PATTERN.test(normTok)
+  )
+}
+
+const matchesWorkerDaemonCredentialText = (text: string): boolean => {
+  const cleanedText = text.replace(/\\/g, "/")
+  if (WORKER_DAEMON_CREDENTIAL_FILE_PATTERN.test(cleanedText)) {
+    return true
+  }
+  return (
+    cleanedText.split(/[\s=:'"`()<>;|&,]+/).some(matchesWorkerDaemonCredentialToken) ||
+    cleanedText.split(/[\s=:'"`(),{}[\]<>;|&]+/).some(matchesWorkerDaemonCredentialToken)
+  )
+}
+
+const matchesWorkerDaemonCredentialSegment = (seg: DetailedCommandSegment): boolean => {
+  const tokens = [...seg.envAssignments, ...seg.commandWords, ...seg.wrapperDirs]
+  if (tokens.some(matchesWorkerDaemonCredentialText)) {
+    return true
+  }
+  if (seg.wrapperDirs.length === 0) return false
+  return seg.wrapperDirs.some((dir) =>
+    seg.commandWords.some(
+      (tok) => !tok.startsWith("-") && matchesWorkerDaemonCredentialText(path.posix.join(dir, tok)),
+    ),
+  )
+}
+
+const hasWorkerDaemonCredentialShellAccessAtDepth = (command: string, depth: number): boolean => {
+  if (depth > MAX_SUBSHELL_INSPECT_DEPTH) return false
+  const norm = normalizeShellLineContinuations(command)
+  if (norm.trim().length === 0) return false
+  const segments = extractDetailedCommandSegments(norm)
+  for (const seg of segments) {
+    if (matchesWorkerDaemonCredentialSegment(seg)) {
+      return true
+    }
+    if (
+      extractEmbeddedCommandPayloads(seg).some((payload) =>
+        hasWorkerDaemonCredentialShellAccessAtDepth(payload, depth + 1),
+      )
+    ) {
+      return true
+    }
+  }
+  return extractExecutedShellSnippets(norm).some((snippet) =>
+    hasWorkerDaemonCredentialShellAccessAtDepth(snippet, depth + 1),
+  )
+}
+
+export const isWorkerDaemonCredentialShellAccess = (command: string): boolean =>
+  hasWorkerDaemonCredentialShellAccessAtDepth(command, 0)
+
+export const isWorkerDaemonCredentialFilePath = (filePath: string): boolean => {
+  const rawNorm = filePath.replace(/\\/g, "/").trim()
+  if (rawNorm === "") return false
+  const norm = path.posix.normalize(rawNorm)
+  return (
+    WORKER_DAEMON_CREDENTIAL_FILE_PATTERN.test(rawNorm) ||
+    WORKER_DAEMON_CREDENTIAL_FILE_PATTERN.test(norm)
+  )
+}
+
+export const classifyWorkerFileAccess = (
+  filePath: string,
+  unitWorkerMode = false,
+): WorkerFileAccessResult => {
+  if (!unitWorkerMode || !isWorkerDaemonCredentialFilePath(filePath)) {
+    return { verdict: "allow" }
+  }
+  return {
+    verdict: "deny",
+    ruleId: "worker-daemon-credential-access",
+    reason: `Worker isolation mode (HARNESS_UNIT_WORKER=1) denies access to daemon socket or auth tokens: ${filePath}`,
+  }
+}

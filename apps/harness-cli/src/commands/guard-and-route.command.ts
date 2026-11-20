@@ -22,13 +22,14 @@ import {
   makeGuardDenyResult,
 } from "./hook-format.js"
 import {
-  evaluateFileWriteDecision,
+  evaluateCandidatePaths,
   extractGuardStdinPayload,
   formatAllowResult,
   formatCommandDenyReason,
   type GuardVerdictDecision,
   parseGuardCliArgs,
   pickStrictestDecision,
+  resolveUnitWorkerMode,
   toGuardCliResult,
 } from "./hook-guard-payload.js"
 
@@ -38,12 +39,17 @@ const evaluateCommandDecision = (
   command: string,
   options: CliEnv | undefined,
   decisionLayer: Layer.Layer<DecisionModel.DecisionModel>,
+  unitWorkerMode: boolean,
 ): Effect.Effect<GuardVerdictDecision> =>
   Effect.gen(function* () {
-    const classification = classifyCommand(command)
+    const policyOptions = unitWorkerMode ? { unitWorkerMode: true } : undefined
+    const classification = classifyCommand(command, policyOptions)
     if (classification !== "escalate") {
       return match<typeof classification, GuardVerdictDecision>(classification)
-        .with("deny", () => ({ verdict: "deny", reason: formatCommandDenyReason(command) }))
+        .with("deny", () => ({
+          verdict: "deny",
+          reason: formatCommandDenyReason(command, policyOptions),
+        }))
         .with("allow", () => ({ verdict: "allow" }))
         .with("ask", () => {
           if (isSkipNxCacheOverrideCommand(command)) {
@@ -79,7 +85,9 @@ const evaluateCommandDecision = (
         })
         .exhaustive()
     }
-    const decision = yield* decideGuardCommand(command).pipe(Effect.provide(decisionLayer))
+    const decision = yield* decideGuardCommand({ command, unitWorkerMode }).pipe(
+      Effect.provide(decisionLayer),
+    )
     recordFriction(options, {
       kind: "guard_escalation",
       summary: command,
@@ -89,7 +97,7 @@ const evaluateCommandDecision = (
     return match<typeof decision.verdict, GuardVerdictDecision>(decision.verdict)
       .with("deny", () => ({
         verdict: "deny",
-        reason: formatCommandDenyReason(command),
+        reason: formatCommandDenyReason(command, policyOptions),
       }))
       .with("allow", () => ({ verdict: "allow" }))
       .with("ask", () => ({ verdict: "ask", reason: decision.reason }))
@@ -184,10 +192,13 @@ export const handleGuard = (
       return makeGuardDenyResult(isAntigravity, "guard: empty hook stdin payload")
     }
 
+    const unitWorkerMode = resolveUnitWorkerMode(options?.env)
+    const policyOptions = unitWorkerMode ? { unitWorkerMode: true } : undefined
     const candidateCmds: Array<string> = []
-    const candidatePaths: Array<string> = []
+    const candidateWritePaths: Array<string> = []
+    const candidateReadPaths: Array<string> = []
     if (cliFilePath !== undefined && cliFilePath.trim().length > 0) {
-      candidatePaths.push(cliFilePath.trim())
+      candidateWritePaths.push(cliFilePath.trim())
     }
     if (positionalArgs.length > 0) {
       candidateCmds.push(positionalArgs.join(" "))
@@ -218,7 +229,11 @@ export const handleGuard = (
             options?.hookStdinTracker?.markAntigravityDetected()
           }
           candidateCmds.push(...action.candidateCmds)
-          candidatePaths.push(...action.candidatePaths)
+          if (action.isReadOnlyTool) {
+            candidateReadPaths.push(...action.candidatePaths)
+          } else {
+            candidateWritePaths.push(...action.candidatePaths)
+          }
         })
         .with({ _tag: "Error" }, (err) => {
           if (
@@ -239,14 +254,16 @@ export const handleGuard = (
       return makeGuardDenyResult(isAntigravity, stdinDecodeFailureReason)
     }
 
-    let combinedDecision: GuardVerdictDecision | undefined
-    for (const filePath of candidatePaths) {
-      const d = evaluateFileWriteDecision(filePath)
+    let combinedDecision = evaluateCandidatePaths(candidateWritePaths, false, policyOptions)
+    const readDecision = evaluateCandidatePaths(candidateReadPaths, true, policyOptions)
+    if (readDecision !== undefined) {
       combinedDecision =
-        combinedDecision === undefined ? d : pickStrictestDecision(combinedDecision, d)
+        combinedDecision === undefined
+          ? readDecision
+          : pickStrictestDecision(combinedDecision, readDecision)
     }
     for (const cmd of candidateCmds) {
-      const d = yield* evaluateCommandDecision(cmd, options, decisionLayer)
+      const d = yield* evaluateCommandDecision(cmd, options, decisionLayer, unitWorkerMode)
       combinedDecision =
         combinedDecision === undefined ? d : pickStrictestDecision(combinedDecision, d)
     }

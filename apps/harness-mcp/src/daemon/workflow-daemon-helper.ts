@@ -13,6 +13,7 @@ import {
   WORKFLOW_DAEMON_PROTOCOL_VERSION,
   WorkflowDaemonCapability,
   WorkflowProtocolVersion,
+  type WorkflowStatusSummary,
 } from "@harness/contract"
 import { nodeSyncHostIo, resolveWorkflowRuntimePaths } from "@harness/infra"
 import {
@@ -43,7 +44,12 @@ export {
 
 export const WORKFLOW_DAEMON_CAPABILITIES: ReadonlyArray<WorkflowDaemonCapability> = [
   WorkflowDaemonCapability.make("workflow.handshake"),
+  WorkflowDaemonCapability.make("workflow.start"),
   WorkflowDaemonCapability.make("workflow.status"),
+  WorkflowDaemonCapability.make("workflow.complete"),
+  WorkflowDaemonCapability.make("workflow.resume"),
+  WorkflowDaemonCapability.make("workflow.abort"),
+  WorkflowDaemonCapability.make("workflow.doctor"),
 ]
 
 export interface WorkflowDaemonHandshakeContext {
@@ -292,6 +298,14 @@ export const handleDaemonWorkflowStatusRequest = (
   const { scope } = input
   const status =
     input.writerLeaseEpoch >= 1 && scope.validatedWorktree !== undefined ? "ready" : "inactive"
+  const summary: WorkflowStatusSummary = {
+    units: [],
+    attempts: [],
+    pendingDeferreds: [],
+    storeStatus: status,
+    projectionStatus: "not-projected",
+    writerLeaseEpoch: input.writerLeaseEpoch,
+  }
   if (scope.validatedWorktree !== undefined) {
     return {
       id: input.requestId,
@@ -304,6 +318,7 @@ export const handleDaemonWorkflowStatusRequest = (
       commonGitDir: scope.validatedWorktree.commonGitDir,
       worktreeKind: scope.validatedWorktree.kind,
       writerLeaseEpoch: input.writerLeaseEpoch,
+      result: summary,
     }
   }
   return {
@@ -315,5 +330,6 @@ export const handleDaemonWorkflowStatusRequest = (
     capabilities: [...WORKFLOW_DAEMON_CAPABILITIES],
     repoRoot: scope.resolvedRoot,
     writerLeaseEpoch: input.writerLeaseEpoch,
+    result: summary,
   }
 }

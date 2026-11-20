@@ -1,6 +1,6 @@
 import { Match, Schema } from "effect"
 import { compareCodeUnits } from "./ast-and-gate-primitives.js"
-import { GitCommitSha } from "./repo-identity.js"
+import { AbsoluteRepoRoot, GitCommitSha } from "./repo-identity.js"
 import { ReviewRoutingPlan } from "./review-routing.js"
 
 const SAFE_REL_SEGMENT =
@@ -25,6 +25,34 @@ export const WorkUnitId = Schema.String.pipe(
   Schema.brand("WorkUnitId"),
 )
 export type WorkUnitId = typeof WorkUnitId.Type
+
+/** Reserved work unit identifier for sequential `sharedStepPaths` execution (`REQ-1.4`). */
+export const SHARED_STEP_UNIT_ID: WorkUnitId = WorkUnitId.make("shared-step")
+
+/** Deterministic Effect workflow execution identifier (`Workflow.executionId` output). */
+export const WorkflowExecutionId = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(256)),
+  Schema.brand("WorkflowExecutionId"),
+)
+export type WorkflowExecutionId = typeof WorkflowExecutionId.Type
+
+/** 1-based escalation cycle ordinal (`>= 1`) scoped per `WorkUnitId`. */
+export const EscalationOrdinal = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(1)),
+  Schema.brand("EscalationOrdinal"),
+)
+export type EscalationOrdinal = typeof EscalationOrdinal.Type
+
+/** Operator resolution decision for an escalated workflow unit (`retry | abort`). */
+export const EscalationDecision = Schema.Literals(["retry", "abort"])
+export type EscalationDecision = typeof EscalationDecision.Type
+
+/** Payload carried on `escalation/<unitId>/<n>` `DurableDeferred` resolution. */
+export const EscalationResolution = Schema.Struct({
+  decision: EscalationDecision,
+})
+export type EscalationResolution = typeof EscalationResolution.Type
 
 /** Bounded 1-based execution attempt (`1..3`; max 3 attempts per unit before escalation). */
 export const AttemptNumber = Schema.Int.pipe(
@@ -441,6 +469,72 @@ export const ShipReceipt = Schema.Struct({
 })
 export type ShipReceipt = typeof ShipReceipt.Type
 
+/** Dispatch request sent by `HarnessTaskWorkflow` (`Automatic` mode) into `UnitAgentDispatcher`. */
+export const UnitAgentRequest = Schema.Struct({
+  runId: WorkflowRunId,
+  unit: CompiledWorkUnit,
+  attempt: AttemptNumber,
+  runner: RunnerId,
+  cwd: AbsoluteRepoRoot,
+})
+export type UnitAgentRequest = typeof UnitAgentRequest.Type
+
+/** Outcome returned by `UnitAgentDispatcher.runUnit` before `UnitVerifier.completeUnit` executes. */
+export const UnitAgentDispatchResult = Schema.TaggedUnion({
+  Completed: {},
+  Failed: { reason: AgentFailureReason },
+  AuthRequired: { runner: RunnerId },
+})
+export type UnitAgentDispatchResult = typeof UnitAgentDispatchResult.Type
+
+/** Verification request passed to `UnitVerifier.completeUnit` (shared across automatic and manual modes). */
+export const CompleteUnitInput = Schema.Struct({
+  runId: WorkflowRunId,
+  level: WorkflowLevel,
+  baseSha: GitCommitSha,
+  unit: CompiledWorkUnit,
+  attempt: AttemptNumber,
+  cwd: AbsoluteRepoRoot,
+  siblingInFlightOwnedPaths: Schema.Array(OwnedRelPath),
+})
+export type CompleteUnitInput = typeof CompleteUnitInput.Type
+
+/** Verification request passed to `UnitVerifier.completeSharedStep` for `plan.sharedStepPaths`. */
+export const CompleteSharedStepInput = Schema.Struct({
+  runId: WorkflowRunId,
+  baseSha: GitCommitSha,
+  sharedStepPaths: Schema.NonEmptyArray(OwnedRelPath),
+  priorUnitOwnedPaths: Schema.Array(OwnedRelPath),
+  attempt: AttemptNumber,
+  cwd: AbsoluteRepoRoot,
+})
+export type CompleteSharedStepInput = typeof CompleteSharedStepInput.Type
+
+/** Input to `WorkflowWorktreePort.mergeSliceWave` for L1 epic waves (`git merge --no-ff`). */
+export const MergeSliceWaveInput = Schema.Struct({
+  runId: WorkflowRunId,
+  waveIndex: WaveIndex,
+  baseSha: GitCommitSha,
+  canonicalRepoRoot: AbsoluteRepoRoot,
+  branches: Schema.Array(SliceBranchName),
+})
+export type MergeSliceWaveInput = typeof MergeSliceWaveInput.Type
+
+/** Result of merging an L1 epic wave's `slice/*` branches into the integration branch. */
+export const MergeSliceWaveOutcome = Schema.TaggedUnion({
+  Merged: { mergedBranches: Schema.Array(SliceBranchName) },
+  Conflict: { branch: SliceBranchName },
+})
+export type MergeSliceWaveOutcome = typeof MergeSliceWaveOutcome.Type
+
+/** Input to `WorkflowReviewRouter.routeReview` inside the memoised `RouteReview` activity. */
+export const WorkflowRouteReviewInput = Schema.Struct({
+  runId: WorkflowRunId,
+  baseSha: GitCommitSha,
+  canonicalRepoRoot: AbsoluteRepoRoot,
+})
+export type WorkflowRouteReviewInput = typeof WorkflowRouteReviewInput.Type
+
 export const PlanGraphIssue = Schema.TaggedUnion({
   DuplicateWorkUnitId: { unitId: WorkUnitId },
   DanglingUnitDependency: {
@@ -480,6 +574,35 @@ export class InvalidPlanWorkflowGraphError extends Schema.TaggedError<InvalidPla
         "DanglingUnitDependency",
         (i) =>
           `Dangling unit dependency ${i.from} -> ${i.to} (missing: ${i.missingUnitIds.join(", ")})`,
+      ),
+      Match.exhaustive,
+    )
+  }
+}
+
+/** Terminal failure of `HarnessTaskWorkflow` after an escalation or worktree setup cannot proceed. */
+export class TaskRunAbortedError extends Schema.TaggedError<TaskRunAbortedError>()(
+  "TaskRunAbortedError",
+  {
+    runId: WorkflowRunId,
+    escalation: UnitEscalation,
+  },
+) {
+  override get message(): string {
+    return Match.value(this.escalation).pipe(
+      Match.tag(
+        "AuthRequired",
+        (e) =>
+          `Workflow run '${this.runId}' aborted: authentication required for runner '${e.runner}'`,
+      ),
+      Match.tag(
+        "RetryBudgetExhausted",
+        (e) =>
+          `Workflow run '${this.runId}' aborted after retry budget exhausted (${e.lastRejection._tag})`,
+      ),
+      Match.tag(
+        "MergeConflict",
+        (e) => `Workflow run '${this.runId}' aborted due to merge conflict on '${e.branch}'`,
       ),
       Match.exhaustive,
     )

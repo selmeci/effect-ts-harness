@@ -17,13 +17,14 @@ import {
   makeGuardDenyResult,
 } from "./hook-format.js"
 import {
-  evaluateFileWriteDecision,
+  evaluateCandidatePaths,
   extractGuardStdinPayload,
   formatCommandDenyReason,
   type GuardVerdictDecision,
   type ParsedGuardCliArgs,
   parseGuardCliArgs,
   pickStrictestDecision,
+  resolveUnitWorkerMode,
   toGuardCliResult,
 } from "./hook-guard-payload.js"
 
@@ -120,48 +121,51 @@ const evaluateGuardPayload = (
       recordGuardTelemetry("ok", startMs, "fastpath=hit")
       writeResultAndExit(toGuardCliResult({ verdict: "allow" }, isAntigravity))
     })
-    .with({ _tag: "Action" }, ({ isAntigravity, candidateCmds, candidatePaths }) => {
-      let combinedDecision: GuardVerdictDecision | undefined
-      for (const filePath of candidatePaths) {
-        const d = evaluateFileWriteDecision(filePath)
-        combinedDecision =
-          combinedDecision === undefined ? d : pickStrictestDecision(combinedDecision, d)
-      }
-      for (const cmd of candidateCmds) {
-        if (isSkipNxCacheOverrideCommand(cmd)) {
-          delegateToFallback(argv, { stdin: rawStdin })
-          return
+    .with(
+      { _tag: "Action" },
+      ({ isAntigravity, isReadOnlyTool, candidateCmds, candidatePaths }) => {
+        const unitWorkerMode = resolveUnitWorkerMode()
+        const policyOptions = unitWorkerMode ? { unitWorkerMode: true } : undefined
+        let combinedDecision = evaluateCandidatePaths(candidatePaths, isReadOnlyTool, policyOptions)
+        for (const cmd of candidateCmds) {
+          if (isSkipNxCacheOverrideCommand(cmd)) {
+            delegateToFallback(argv, { stdin: rawStdin })
+            return
+          }
+          const classification = classifyCommand(cmd, policyOptions)
+          if (classification === "escalate") {
+            delegateToFallback(argv, { stdin: rawStdin })
+            return
+          }
+          const d = match<typeof classification, GuardVerdictDecision>(classification)
+            .with("deny", () => ({
+              verdict: "deny",
+              reason: formatCommandDenyReason(cmd, policyOptions),
+            }))
+            .with("allow", () => ({ verdict: "allow" }))
+            .with("ask", () => ({
+              verdict: "ask",
+              reason: `Command requires human confirmation: ${cmd}`,
+            }))
+            .exhaustive()
+          combinedDecision =
+            combinedDecision === undefined ? d : pickStrictestDecision(combinedDecision, d)
         }
-        const classification = classifyCommand(cmd)
-        if (classification === "escalate") {
-          delegateToFallback(argv, { stdin: rawStdin })
-          return
-        }
-        const d = match<typeof classification, GuardVerdictDecision>(classification)
-          .with("deny", () => ({ verdict: "deny", reason: formatCommandDenyReason(cmd) }))
-          .with("allow", () => ({ verdict: "allow" }))
-          .with("ask", () => ({
-            verdict: "ask",
-            reason: `Command requires human confirmation: ${cmd}`,
-          }))
+
+        const finalDecision: GuardVerdictDecision =
+          combinedDecision !== undefined
+            ? combinedDecision
+            : { verdict: "deny", reason: "guard: empty hook command payload" }
+
+        const outcome = match(finalDecision.verdict)
+          .with("allow", () => "ok" as const)
+          .with("deny", () => "deny" as const)
+          .with("ask", () => "ask" as const)
           .exhaustive()
-        combinedDecision =
-          combinedDecision === undefined ? d : pickStrictestDecision(combinedDecision, d)
-      }
-
-      const finalDecision: GuardVerdictDecision =
-        combinedDecision !== undefined
-          ? combinedDecision
-          : { verdict: "deny", reason: "guard: empty hook command payload" }
-
-      const outcome = match(finalDecision.verdict)
-        .with("allow", () => "ok" as const)
-        .with("deny", () => "deny" as const)
-        .with("ask", () => "ask" as const)
-        .exhaustive()
-      recordGuardTelemetry(outcome, startMs, "fastpath=hit")
-      writeResultAndExit(toGuardCliResult(finalDecision, isAntigravity))
-    })
+        recordGuardTelemetry(outcome, startMs, "fastpath=hit")
+        writeResultAndExit(toGuardCliResult(finalDecision, isAntigravity))
+      },
+    )
     .exhaustive()
 }
 

@@ -184,6 +184,8 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         },
       },
     )
+    serverProc.stdout?.resume()
+    serverProc.stderr?.resume()
     await waitForServerReady(serverBaseUrl, serverProc)
   }, 30_000)
 
@@ -201,6 +203,7 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       (match) => match[1] ?? "",
     )
     expect(declaredQueryNames).toEqual([...WORKFLOW_GQ_QUERY_NAMES])
+    expect(declaredQueryNames).toHaveLength(51)
 
     const out = execFileSync(
       omnigraphBin,
@@ -892,6 +895,487 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       }),
     )
     expect(repliesAfterClear).toEqual([])
+  })
+
+  it("executes all WF-3 read-model stored queries end-to-end against live Omnigraph 0.14.0", async () => {
+    const og = makeWorkflowOmnigraphClient({
+      baseUrl: serverBaseUrl,
+      token: cliToken,
+    })
+
+    const runId1 = "wf3-run-001"
+    const runId2 = "wf3-run-002"
+    const planSha1 = "1".repeat(64)
+    const planSha2 = "2".repeat(64)
+    const baseSha1 = "a".repeat(40)
+    const baseSha2 = "b".repeat(40)
+    const stampHash = "c".repeat(64)
+
+    // 1. Missing/empty lookups return empty rows
+    expect(
+      requireRows(
+        await og.queries.invoke("wf_probe_runs", {
+          branch: "main",
+          expectMutation: false,
+          params: {},
+        }),
+      ),
+    ).toEqual([])
+    expect(
+      requireRows(
+        await og.queries.invoke("wf_list_runs", {
+          branch: "main",
+          expectMutation: false,
+          params: {},
+        }),
+      ),
+    ).toEqual([])
+    expect(
+      requireRows(
+        await og.queries.invoke("wf_get_run", {
+          branch: "main",
+          expectMutation: false,
+          params: { runId: "wf3-missing-run" },
+        }),
+      ),
+    ).toEqual([])
+    expect(
+      requireRows(
+        await og.queries.invoke("wf_get_unit", {
+          branch: "main",
+          expectMutation: false,
+          params: { unitKey: "wf3-missing-run/unit-0" },
+        }),
+      ),
+    ).toEqual([])
+    expect(
+      requireRows(
+        await og.queries.invoke("wf_units_for_run", {
+          branch: "main",
+          expectMutation: false,
+          params: { runId: "wf3-missing-run" },
+        }),
+      ),
+    ).toEqual([])
+    expect(
+      requireRows(
+        await og.queries.invoke("wf_get_attempt", {
+          branch: "main",
+          expectMutation: false,
+          params: { attemptKey: "wf3-missing-run/unit-0#1" },
+        }),
+      ),
+    ).toEqual([])
+    expect(
+      requireRows(
+        await og.queries.invoke("wf_attempts_for_run", {
+          branch: "main",
+          expectMutation: false,
+          params: { runId: "wf3-missing-run" },
+        }),
+      ),
+    ).toEqual([])
+
+    // 2. WfRun lifecycle: wf_insert_run, wf_get_run, wf_list_runs, wf_update_run
+    const planJson1 = JSON.stringify({ runId: runId1, level: "epic" })
+    await og.queries.invoke("wf_insert_run", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        runId: runId1,
+        executionId: "exec-wf3-001",
+        level: "epic",
+        planSha: planSha1,
+        baseSha: baseSha1,
+        state: "running",
+        planJson: planJson1,
+        updatedMs: 1_000,
+      },
+    })
+    await og.queries.invoke("wf_insert_run", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        runId: runId2,
+        executionId: "exec-wf3-002",
+        level: "slice",
+        planSha: planSha2,
+        baseSha: baseSha2,
+        state: "waiting",
+        planJson: null,
+        updatedMs: 2_000,
+      },
+    })
+
+    const gotRun1 = requireRows(
+      await og.queries.invoke("wf_get_run", {
+        branch: "main",
+        expectMutation: false,
+        params: { runId: runId1 },
+      }),
+    )
+    expect(gotRun1).toHaveLength(1)
+    expect(gotRun1[0]).toMatchObject({
+      runId: runId1,
+      executionId: "exec-wf3-001",
+      level: "epic",
+      planSha: planSha1,
+      baseSha: baseSha1,
+      state: "running",
+      planJson: planJson1,
+      updatedMs: 1_000,
+    })
+
+    const gotRun2 = requireRows(
+      await og.queries.invoke("wf_get_run", {
+        branch: "main",
+        expectMutation: false,
+        params: { runId: runId2 },
+      }),
+    )
+    expect(gotRun2).toHaveLength(1)
+    expect(gotRun2[0]?.planJson ?? null).toBeNull()
+
+    const listedBeforeUpdate = requireRows(
+      await og.queries.invoke("wf_list_runs", {
+        branch: "main",
+        expectMutation: false,
+        params: {},
+      }),
+    )
+    expect(listedBeforeUpdate.map((r) => r.runId)).toEqual([runId2, runId1])
+
+    const probedPopulated = requireRows(
+      await og.queries.invoke("wf_probe_runs", {
+        branch: "main",
+        expectMutation: false,
+        params: {},
+      }),
+    )
+    expect(probedPopulated).toHaveLength(1)
+    expect(Object.keys(probedPopulated[0] ?? {})).toEqual(["runId"])
+    expect([runId1, runId2]).toContain(probedPopulated[0]?.runId)
+
+    await og.queries.invoke("wf_update_run", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        runId: runId1,
+        state: "completed",
+        updatedMs: 3_000,
+      },
+    })
+    const gotRun1Updated = requireRows(
+      await og.queries.invoke("wf_get_run", {
+        branch: "main",
+        expectMutation: false,
+        params: { runId: runId1 },
+      }),
+    )
+    expect(gotRun1Updated[0]).toMatchObject({
+      runId: runId1,
+      state: "completed",
+      updatedMs: 3_000,
+    })
+    const listedAfterUpdate = requireRows(
+      await og.queries.invoke("wf_list_runs", {
+        branch: "main",
+        expectMutation: false,
+        params: {},
+      }),
+    )
+    expect(listedAfterUpdate.map((r) => r.runId)).toEqual([runId1, runId2])
+
+    // 3. WfUnit lifecycle: wf_insert_unit, wf_get_unit, wf_units_for_run, wf_update_unit
+    const unitKey1b = `${runId1}/unit-b`
+    const unitKey1a = `${runId1}/unit-a`
+    const unitKey2a = `${runId2}/unit-other`
+    await og.queries.invoke("wf_insert_unit", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        unitKey: unitKey1b,
+        runId: runId1,
+        unitId: "unit-b",
+        kind: "package",
+        waveIndex: 1,
+        status: "pending",
+        ownedRelPaths: ["libs/harness/graph/src/index.ts", "libs/harness/graph/test"],
+        updatedMs: 1_100,
+      },
+    })
+    await og.queries.invoke("wf_insert_unit", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        unitKey: unitKey1a,
+        runId: runId1,
+        unitId: "unit-a",
+        kind: "slice",
+        waveIndex: 0,
+        status: "dispatched",
+        ownedRelPaths: ["libs/harness/contract/src"],
+        updatedMs: 1_200,
+      },
+    })
+    await og.queries.invoke("wf_insert_unit", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        unitKey: unitKey2a,
+        runId: runId2,
+        unitId: "unit-other",
+        kind: "package",
+        waveIndex: 0,
+        status: "pending",
+        ownedRelPaths: ["apps/harness-cli/src"],
+        updatedMs: 2_100,
+      },
+    })
+
+    const gotUnit1b = requireRows(
+      await og.queries.invoke("wf_get_unit", {
+        branch: "main",
+        expectMutation: false,
+        params: { unitKey: unitKey1b },
+      }),
+    )
+    expect(gotUnit1b).toHaveLength(1)
+    expect(gotUnit1b[0]).toMatchObject({
+      unitKey: unitKey1b,
+      runId: runId1,
+      unitId: "unit-b",
+      kind: "package",
+      waveIndex: 1,
+      status: "pending",
+      ownedRelPaths: ["libs/harness/graph/src/index.ts", "libs/harness/graph/test"],
+      updatedMs: 1_100,
+    })
+
+    await og.queries.invoke("wf_update_unit", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        unitKey: unitKey1a,
+        status: "completed",
+        updatedMs: 1_500,
+      },
+    })
+    const gotUnit1a = requireRows(
+      await og.queries.invoke("wf_get_unit", {
+        branch: "main",
+        expectMutation: false,
+        params: { unitKey: unitKey1a },
+      }),
+    )
+    expect(gotUnit1a[0]).toMatchObject({
+      unitKey: unitKey1a,
+      status: "completed",
+      updatedMs: 1_500,
+    })
+
+    const unitsForRun1 = requireRows(
+      await og.queries.invoke("wf_units_for_run", {
+        branch: "main",
+        expectMutation: false,
+        params: { runId: runId1 },
+      }),
+    )
+    expect(unitsForRun1.map((u) => u.unitKey)).toEqual([unitKey1a, unitKey1b])
+
+    // 4. WfAttempt lifecycle: wf_insert_attempt, wf_get_attempt, wf_attempts_for_run, wf_update_attempt
+    const attemptKey1a1 = `${runId1}/unit-a#1`
+    const attemptKey1a2 = `${runId1}/unit-a#2`
+    const attemptKey2a1 = `${runId2}/unit-other#1`
+    await og.queries.invoke("wf_insert_attempt", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        attemptKey: attemptKey1a2,
+        runId: runId1,
+        unitId: "unit-a",
+        attempt: 2,
+        verdict: "dispatched",
+        runner: "antigravity",
+        rejection: null,
+        packageStampHash: null,
+        updatedMs: 1_600,
+      },
+    })
+    await og.queries.invoke("wf_insert_attempt", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        attemptKey: attemptKey1a1,
+        runId: runId1,
+        unitId: "unit-a",
+        attempt: 1,
+        verdict: "rejected",
+        runner: "claude-code",
+        rejection: JSON.stringify({ _tag: "StampMissing" }),
+        packageStampHash: null,
+        updatedMs: 1_300,
+      },
+    })
+    await og.queries.invoke("wf_insert_attempt", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        attemptKey: attemptKey2a1,
+        runId: runId2,
+        unitId: "unit-other",
+        attempt: 1,
+        verdict: "dispatched",
+        runner: null,
+        rejection: null,
+        packageStampHash: null,
+        updatedMs: 2_200,
+      },
+    })
+
+    const gotAttempt1 = requireRows(
+      await og.queries.invoke("wf_get_attempt", {
+        branch: "main",
+        expectMutation: false,
+        params: { attemptKey: attemptKey1a1 },
+      }),
+    )
+    expect(gotAttempt1).toHaveLength(1)
+    expect(gotAttempt1[0]).toMatchObject({
+      attemptKey: attemptKey1a1,
+      runId: runId1,
+      unitId: "unit-a",
+      attempt: 1,
+      verdict: "rejected",
+      runner: "claude-code",
+      rejection: JSON.stringify({ _tag: "StampMissing" }),
+      updatedMs: 1_300,
+    })
+    expect(gotAttempt1[0]?.packageStampHash ?? null).toBeNull()
+
+    await og.queries.invoke("wf_update_attempt", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        attemptKey: attemptKey1a2,
+        verdict: "completed",
+        runner: "antigravity",
+        rejection: null,
+        packageStampHash: stampHash,
+        updatedMs: 1_900,
+      },
+    })
+    const gotAttempt2 = requireRows(
+      await og.queries.invoke("wf_get_attempt", {
+        branch: "main",
+        expectMutation: false,
+        params: { attemptKey: attemptKey1a2 },
+      }),
+    )
+    expect(gotAttempt2[0]).toMatchObject({
+      attemptKey: attemptKey1a2,
+      verdict: "completed",
+      runner: "antigravity",
+      packageStampHash: stampHash,
+      updatedMs: 1_900,
+    })
+    expect(gotAttempt2[0]?.rejection ?? null).toBeNull()
+
+    const attemptsForRun1 = requireRows(
+      await og.queries.invoke("wf_attempts_for_run", {
+        branch: "main",
+        expectMutation: false,
+        params: { runId: runId1 },
+      }),
+    )
+    expect(attemptsForRun1.map((a) => a.attemptKey)).toEqual([attemptKey1a1, attemptKey1a2])
+
+    // 5. wf_delete_run_views removes all WfAttempt, WfUnit, WfRun for runId1 while preserving runId2
+    await og.queries.invoke("wf_delete_run_views", {
+      branch: "main",
+      expectMutation: true,
+      params: { runId: runId1 },
+    })
+    expect(
+      requireRows(
+        await og.queries.invoke("wf_get_run", {
+          branch: "main",
+          expectMutation: false,
+          params: { runId: runId1 },
+        }),
+      ),
+    ).toEqual([])
+    expect(
+      requireRows(
+        await og.queries.invoke("wf_units_for_run", {
+          branch: "main",
+          expectMutation: false,
+          params: { runId: runId1 },
+        }),
+      ),
+    ).toEqual([])
+    expect(
+      requireRows(
+        await og.queries.invoke("wf_attempts_for_run", {
+          branch: "main",
+          expectMutation: false,
+          params: { runId: runId1 },
+        }),
+      ),
+    ).toEqual([])
+
+    expect(
+      requireRows(
+        await og.queries.invoke("wf_list_runs", {
+          branch: "main",
+          expectMutation: false,
+          params: {},
+        }),
+      ).map((r) => r.runId),
+    ).toEqual([runId2])
+    expect(
+      requireRows(
+        await og.queries.invoke("wf_units_for_run", {
+          branch: "main",
+          expectMutation: false,
+          params: { runId: runId2 },
+        }),
+      ).map((u) => u.unitKey),
+    ).toEqual([unitKey2a])
+    expect(
+      requireRows(
+        await og.queries.invoke("wf_attempts_for_run", {
+          branch: "main",
+          expectMutation: false,
+          params: { runId: runId2 },
+        }),
+      ).map((a) => a.attemptKey),
+    ).toEqual([attemptKey2a1])
+
+    // Clean up remaining runId2 views
+    await og.queries.invoke("wf_delete_run_views", {
+      branch: "main",
+      expectMutation: true,
+      params: { runId: runId2 },
+    })
+    expect(
+      requireRows(
+        await og.queries.invoke("wf_list_runs", {
+          branch: "main",
+          expectMutation: false,
+          params: {},
+        }),
+      ),
+    ).toEqual([])
+    expect(
+      requireRows(
+        await og.queries.invoke("wf_probe_runs", {
+          branch: "main",
+          expectMutation: false,
+          params: {},
+        }),
+      ),
+    ).toEqual([])
   })
 
   it("exports resolveGitCommonDir, error classifiers, and workflow client helpers", () => {

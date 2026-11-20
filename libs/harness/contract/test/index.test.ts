@@ -12,12 +12,14 @@ import {
   AstGateViolationContract,
   AstSourceContent,
   AstSourceFilePath,
+  AttemptNumber,
   CANONICAL_MCP_TOOL_NAMES,
   CompiledPlan,
   CompiledWaves,
   type CompiledWorkUnit,
   CompilerRepoRootPath,
   CompilerVersionTag,
+  CompleteSharedStepInput,
   ContentSha256,
   CyclicPlanWorkflowError,
   DaemonServerError,
@@ -33,12 +35,17 @@ import {
   EarsRequirementKey,
   EnclosingSymbolName,
   ErrorReasonMessage,
+  EscalationDecision,
+  EscalationOrdinal,
   EvaluatorId,
+  FrictionLogState,
   GateCategory,
+  GateExitCode,
   GateRuleId,
   GateRuleSourceSnapshot,
   GateRuleVersion,
   GateViolationMessage,
+  GitCommonDirPath,
   GitCommitSha,
   GitDiffErrorReason,
   GitDiffExecutionError,
@@ -49,6 +56,7 @@ import {
   HarnessTierTopologyReport,
   InvalidPlanWorkflowGraphError,
   InvalidReviewRouteInputError,
+  LeaseEpoch,
   McpToolName,
   NonNegativeCount,
   NxScopeTag,
@@ -57,14 +65,18 @@ import {
   PackageDependencyName,
   PackageManifestName,
   PackageManifestPath,
+  PackageStampHash,
   PackageUnitDraft,
+  PendingDeferredName,
   PersistedAstCacheEntry,
   PersistedAstCacheKey,
   PersistedAstCacheStore,
+  PlanJsonPayload,
   PlanSha256,
   PluginId,
   REVIEW_DEPTH_LEVELS,
   REVIEW_DEPTH_RANK,
+  RejectionJsonPayload,
   ReviewChangedLines,
   ReviewDepth,
   ReviewRawDiffInput,
@@ -76,6 +88,8 @@ import {
   ReviewTimeoutMillis,
   ReviewerId,
   ReviewerSelection,
+  RunnerId,
+  SHARED_STEP_UNIT_ID,
   SPECIALIST_REVIEWER_IDS,
   SelfDogfoodingMessage,
   SelfDogfoodingReport,
@@ -89,16 +103,37 @@ import {
   SubprocessCommand,
   SubprocessExitCode,
   SubprocessOutput,
+  TaskRunAbortedError,
   TierTopologyMessage,
   TierTopologyRuleId,
+  WORKFLOW_GQ_QUERY_NAMES,
   WaveIndex,
   WorkUnitDraft,
   WorkUnitId,
+  WorkflowAttemptKey,
+  WorkflowAttemptVerdict,
   WorkflowCompileReason,
+  WorkflowCompleteRequest,
+  WorkflowExecutionId,
+  WorkflowGqQueryName,
   WorkflowLevel,
+  WorkflowPlanToolOutput,
+  WorkflowProjectionStatus,
+  WorkflowRebuiltRunCount,
+  WorkflowResumeRequest,
   WorkflowRunId,
+  WorkflowRunState,
+  WorkflowStartRequest,
+  WorkflowStatusSummary,
+  WorkflowStoreAvailabilityState,
+  WorkflowStoreFailureReason,
+  WorkflowTimestampMs,
+  WorkflowUnitKey,
+  WorkflowUnitKind,
+  WorkflowUnitStatus,
   WorkspaceFilePath,
   WorkspaceFsOperation,
+  WorkspaceTreeHash,
   compareCodeUnits,
   computeContentSha256,
   computeGateRuleVersionFromSources,
@@ -828,10 +863,11 @@ describe("@harness/contract schemas", () => {
     expect(() => Schema.decodeUnknownSync(NxTierTag)("type:unknown")).toThrow()
   })
 
-  it("validates review routing contracts, branded literals, and 17 canonical MCP tool names", () => {
-    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(17)
+  it("validates review routing contracts, branded literals, and 18 canonical MCP tool names", () => {
+    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(18)
     expect(CANONICAL_MCP_TOOL_NAMES).toContain(McpToolName.make("harness_review_route"))
     expect(CANONICAL_MCP_TOOL_NAMES).toContain(McpToolName.make("harness_git_diff"))
+    expect(CANONICAL_MCP_TOOL_NAMES).toContain(McpToolName.make("harness_workflow_plan"))
     const gitDiffErr = new GitDiffExecutionError({
       reason: GitDiffErrorReason.make("Invalid base ref"),
     })
@@ -1095,5 +1131,319 @@ describe("@harness/contract schemas", () => {
     expect(disjointErr._tag).toBe("DisjointOwnershipViolationError")
     expect(invalidErr._tag).toBe("InvalidPlanWorkflowGraphError")
     expect(invalidErr.message).toContain("unit-a")
+  })
+
+  it("validates WF-3 workflow RPC contracts, read-model schemas, TaskRunAbortedError, and 14 new GQ query names", () => {
+    expect(SHARED_STEP_UNIT_ID).toBe("shared-step")
+    expect(Schema.decodeSync(WorkUnitId)(SHARED_STEP_UNIT_ID)).toBe("shared-step")
+
+    expect(Schema.decodeSync(WorkflowExecutionId)("exec-wf3-01")).toBe("exec-wf3-01")
+    for (const badExecId of ["", "   ", " untrimmed ", "x".repeat(257)]) {
+      expect(() => Schema.decodeSync(WorkflowExecutionId)(badExecId)).toThrow()
+    }
+
+    expect(Schema.decodeSync(EscalationOrdinal)(1)).toBe(1)
+    expect(Schema.decodeSync(EscalationOrdinal)(3)).toBe(3)
+    for (const badOrdinal of [0, -1, 1.5, Number.NaN, "1", null]) {
+      expect(() => Schema.decodeUnknownSync(EscalationOrdinal)(badOrdinal)).toThrow()
+    }
+
+    expect(Schema.decodeSync(WorkflowRebuiltRunCount)(0)).toBe(0)
+    expect(Schema.decodeSync(WorkflowRebuiltRunCount)(4)).toBe(4)
+    for (const badRebuiltCount of [-1, 1.5, Number.NaN, "2", null]) {
+      expect(() => Schema.decodeUnknownSync(WorkflowRebuiltRunCount)(badRebuiltCount)).toThrow()
+    }
+
+    const runId = WorkflowRunId.make("run-wf3-001")
+    const execId = WorkflowExecutionId.make("exec-wf3-001")
+    const unitId = WorkUnitId.make("unit-wf3-1")
+    const planSha = PlanSha256.make("a".repeat(64))
+    const baseSha = GitCommitSha.make("0123456789abcdef0123456789abcdef01234567")
+    const treeHash = WorkspaceTreeHash.make("b".repeat(64))
+    const stampHash = PackageStampHash.make("c".repeat(64))
+    const repoRoot = AbsoluteRepoRoot.make("/workspace/repo")
+    const commonGitDir = GitCommonDirPath.make("/workspace/repo/.git")
+
+    const authAbort = new TaskRunAbortedError({
+      runId,
+      escalation: { _tag: "AuthRequired", runner: RunnerId.make("claude-code") },
+    })
+    expect(authAbort._tag).toBe("TaskRunAbortedError")
+    expect(authAbort.message).toContain("claude-code")
+
+    const retryAbort = new TaskRunAbortedError({
+      runId,
+      escalation: {
+        _tag: "RetryBudgetExhausted",
+        lastRejection: { _tag: "PackageVerifyFailed", exitCode: GateExitCode.make(1) },
+      },
+    })
+    expect(retryAbort.message).toContain("PackageVerifyFailed")
+
+    const conflictAbort = new TaskRunAbortedError({
+      runId,
+      escalation: { _tag: "MergeConflict", branch: SliceBranchName.make("slice/wf3-a") },
+    })
+    expect(conflictAbort.message).toContain("slice/wf3-a")
+
+    expect(
+      Schema.decodeSync(TaskRunAbortedError)({
+        _tag: "TaskRunAbortedError",
+        runId,
+        escalation: { _tag: "AuthRequired", runner: "antigravity" },
+      }).escalation._tag,
+    ).toBe("AuthRequired")
+    expect(() =>
+      Schema.decodeUnknownSync(TaskRunAbortedError)({
+        _tag: "TaskRunAbortedError",
+        runId: "bad",
+        escalation: { _tag: "AuthRequired", runner: "unknown-runner" },
+      }),
+    ).toThrow()
+
+    const wf3QueryNames = [
+      "wf_get_run",
+      "wf_list_runs",
+      "wf_insert_run",
+      "wf_update_run",
+      "wf_units_for_run",
+      "wf_get_unit",
+      "wf_insert_unit",
+      "wf_update_unit",
+      "wf_attempts_for_run",
+      "wf_get_attempt",
+      "wf_insert_attempt",
+      "wf_update_attempt",
+      "wf_delete_run_views",
+      "wf_probe_runs",
+    ] as const
+    for (const qName of wf3QueryNames) {
+      expect(WORKFLOW_GQ_QUERY_NAMES).toContain(qName)
+      expect(Schema.decodeSync(WorkflowGqQueryName)(qName)).toBe(qName)
+    }
+    expect(() => Schema.decodeUnknownSync(WorkflowGqQueryName)("wf_nonexistent_query")).toThrow()
+
+    const sharedStepInput = Schema.decodeSync(CompleteSharedStepInput)({
+      runId,
+      baseSha,
+      sharedStepPaths: [OwnedRelPath.make("libs/shared/src")],
+      priorUnitOwnedPaths: [OwnedRelPath.make("libs/harness/contract/src")],
+      attempt: AttemptNumber.make(1),
+      cwd: repoRoot,
+    })
+    expect(sharedStepInput.priorUnitOwnedPaths).toEqual(["libs/harness/contract/src"])
+    expect(() =>
+      Schema.decodeUnknownSync(CompleteSharedStepInput)({
+        runId,
+        baseSha,
+        sharedStepPaths: [OwnedRelPath.make("libs/shared/src")],
+        attempt: AttemptNumber.make(1),
+        cwd: repoRoot,
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeSync(CompleteSharedStepInput)({
+        runId,
+        baseSha,
+        sharedStepPaths: [OwnedRelPath.make("libs/shared/src")],
+        priorUnitOwnedPaths: [".harness/secret"],
+        attempt: AttemptNumber.make(1),
+        cwd: repoRoot,
+      }),
+    ).toThrow()
+
+    const plan = Schema.decodeSync(CompiledPlan)({
+      runId,
+      level: WorkflowLevel.make("slice"),
+      planSha,
+      baseSha,
+      mode: { _tag: "Manual" },
+      units: [
+        {
+          _tag: "SliceUnit",
+          unitId,
+          branch: SliceBranchName.make("slice/wf3-unit"),
+          waveIndex: WaveIndex.make(0),
+          dependsOn: [],
+          ownedRelPaths: [OwnedRelPath.make("libs/harness/contract/src")],
+          earsKeys: [EarsRequirementKey.make("REQ-3.1")],
+        },
+      ],
+      sharedStepPaths: [],
+    })
+
+    const startReq = Schema.decodeSync(WorkflowStartRequest)({ repoRoot, plan })
+    expect(startReq.plan.runId).toBe(runId)
+    expect(() => Schema.decodeSync(WorkflowStartRequest)({ repoRoot: "/", plan })).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(WorkflowStartRequest)({ repoRoot, plan: { invalid: true } }),
+    ).toThrow()
+
+    const completeUnitReq = Schema.decodeSync(WorkflowCompleteRequest)({
+      _tag: "CompleteUnit",
+      repoRoot,
+      unitId,
+      runId,
+    })
+    const completeLlmReq = Schema.decodeSync(WorkflowCompleteRequest)({
+      _tag: "CompleteLlmPhase",
+      repoRoot,
+    })
+    expect(
+      match(completeUnitReq)
+        .with({ _tag: "CompleteUnit" }, (req) => req.unitId)
+        .with({ _tag: "CompleteLlmPhase" }, () => "llm")
+        .exhaustive(),
+    ).toBe(unitId)
+    expect(completeLlmReq._tag).toBe("CompleteLlmPhase")
+    expect(() =>
+      Schema.decodeSync(WorkflowCompleteRequest)({
+        _tag: "CompleteUnit",
+        repoRoot,
+        unitId: "INVALID_UNIT",
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(WorkflowCompleteRequest)({
+        _tag: "CompleteUnknown",
+        repoRoot,
+      }),
+    ).toThrow()
+
+    const resumeReq = Schema.decodeSync(WorkflowResumeRequest)({
+      repoRoot,
+      runId,
+      unitId,
+      decision: EscalationDecision.make("retry"),
+    })
+    expect(resumeReq.decision).toBe("retry")
+    expect(Schema.decodeSync(WorkflowResumeRequest)({ repoRoot, runId }).decision).toBeUndefined()
+    expect(() =>
+      Schema.decodeUnknownSync(WorkflowResumeRequest)({
+        repoRoot,
+        runId,
+        decision: "skip",
+      }),
+    ).toThrow()
+
+    const statusSummary = Schema.decodeSync(WorkflowStatusSummary)({
+      run: {
+        runId,
+        executionId: execId,
+        level: WorkflowLevel.make("slice"),
+        planSha,
+        baseSha,
+        state: WorkflowRunState.make("waiting"),
+        planJson: PlanJsonPayload.make("{}"),
+        updatedMs: WorkflowTimestampMs.make(1_000),
+      },
+      units: [
+        {
+          unitKey: WorkflowUnitKey.make(`${runId}/${unitId}`),
+          runId,
+          unitId,
+          kind: WorkflowUnitKind.make("slice"),
+          waveIndex: WaveIndex.make(0),
+          status: WorkflowUnitStatus.make("escalated"),
+          ownedRelPaths: [OwnedRelPath.make("libs/harness/contract/src")],
+          updatedMs: WorkflowTimestampMs.make(1_100),
+        },
+      ],
+      attempts: [
+        {
+          attemptKey: WorkflowAttemptKey.make(`${runId}/${unitId}#1`),
+          runId,
+          unitId,
+          attempt: AttemptNumber.make(1),
+          verdict: WorkflowAttemptVerdict.make("rejected"),
+          runner: RunnerId.make("antigravity"),
+          rejection: RejectionJsonPayload.make('{"_tag":"StampMissing"}'),
+          packageStampHash: stampHash,
+          updatedMs: WorkflowTimestampMs.make(1_200),
+        },
+      ],
+      pendingDeferreds: [
+        {
+          _tag: "UnitCompletion",
+          unitId,
+          attempt: AttemptNumber.make(1),
+          deferredName: PendingDeferredName.make(`unit/${unitId}/1`),
+        },
+        {
+          _tag: "Escalation",
+          unitId,
+          deferredName: PendingDeferredName.make(`escalation/${unitId}/1`),
+          escalation: { _tag: "AuthRequired", runner: RunnerId.make("claude-code") },
+        },
+        {
+          _tag: "LlmPhase",
+          deferredName: PendingDeferredName.make("llm-phase-done"),
+        },
+      ],
+      review: {
+        _tag: "SkipReviewPlan",
+        depth: ReviewDepth.make("skip"),
+        source: ReviewRoutingSource.make("deterministic"),
+        reason: ReviewRoutingReason.make("doc-only"),
+        selections: [],
+      },
+      terminalReceipt: {
+        runId,
+        planSha,
+        review: {
+          _tag: "SkipReviewPlan",
+          depth: ReviewDepth.make("skip"),
+          source: ReviewRoutingSource.make("deterministic"),
+          reason: ReviewRoutingReason.make("doc-only"),
+          selections: [],
+        },
+        completedUnits: [unitId],
+        llmPhase: {
+          workspaceHash: treeHash,
+          frictionLogCleared: FrictionLogState.make("cleared"),
+        },
+      },
+      terminalError: WorkflowStoreFailureReason.make("daemon stopped"),
+      storeStatus: WorkflowStoreAvailabilityState.make("ready"),
+      projectionStatus: WorkflowProjectionStatus.make("fresh"),
+      writerLeaseEpoch: LeaseEpoch.make(1),
+    })
+    expect(statusSummary.pendingDeferreds).toHaveLength(3)
+    expect(statusSummary.storeStatus).toBe("ready")
+    expect(() =>
+      Schema.decodeUnknownSync(WorkflowStatusSummary)({
+        units: [],
+        attempts: [],
+        pendingDeferreds: [],
+        storeStatus: "offline",
+        projectionStatus: "fresh",
+        writerLeaseEpoch: 0,
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(WorkflowStatusSummary)({
+        units: [],
+        attempts: [],
+        pendingDeferreds: [],
+        storeStatus: "inactive",
+        projectionStatus: "unknown",
+        writerLeaseEpoch: -1,
+      }),
+    ).toThrow()
+
+    const toolOutput = Schema.decodeSync(WorkflowPlanToolOutput)({
+      resolvedRepoRoot: repoRoot,
+      commonGitDir,
+      status: statusSummary,
+    })
+    expect(toolOutput.resolvedRepoRoot).toBe(repoRoot)
+    expect(toolOutput.commonGitDir).toBe(commonGitDir)
+    expect(() =>
+      Schema.decodeSync(WorkflowPlanToolOutput)({
+        resolvedRepoRoot: repoRoot,
+        commonGitDir: "relative/.git",
+        status: statusSummary,
+      }),
+    ).toThrow()
   })
 })

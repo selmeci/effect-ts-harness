@@ -43,8 +43,8 @@ Claude Code executes hooks defined in `adapters/claude-code/hooks.json` at key s
    Executes upon starting or resuming a session. Runs `SessionHandoff.decide` to evaluate uncommitted changes, active git branch, `.harness/verify-stamp.json` freshness, and environment health.
 2. **`PreToolUse` (`harness guard`):**
    Evaluates commands and file edits before execution:
-   - Matcher `Bash`: Blocks force pushes, unstaged checkouts, and destructive commands. Intercepts `alchemy deploy` and `alchemy destroy` to require interactive confirmation.
-   - Matcher `Edit|Write|MultiEdit`: Blocks writes to squashed subtree directories `repos/effect` and `repos/alchemy`. Blocks direct modification of `.harness/verify-stamp.json`.
+   - Matcher `Bash`: Blocks force pushes, unstaged checkouts, and destructive commands; when `HARNESS_UNIT_WORKER=1` is set on spawned unit workers, blocks recursive `harness workflow start|resume|abort|done` and shell access to `daemon.sock` or `auth-tokens.json`. Intercepts `alchemy deploy` and `alchemy destroy` to require interactive confirmation.
+   - Matcher `Edit|Write|MultiEdit`: Blocks writes to squashed subtree directories `repos/effect` and `repos/alchemy`, blocks direct modification of `.harness/verify-stamp.json`, and under `HARNESS_UNIT_WORKER=1` denies access to `daemon.sock` and `auth-tokens.json`.
 3. **`PostToolUse` (`harness ingest`):**
    Matcher `Edit|Write`: Triggers incremental AST indexing after file writes, updating `.harness/index.sqlite` and the resident Omnigraph property graph.
 4. **`Stop` (`harness done`):**
@@ -56,7 +56,7 @@ Claude Code executes hooks defined in `adapters/claude-code/hooks.json` at key s
 
 The adapter configures three Model Context Protocol servers over stdio:
 
-- **`harness-mcp`:** In-process TypeScript server (`apps/harness-mcp/src/server.ts`) exposing 17 tools: symbol resolution (`harness_resolve`, `harness_callers`, `harness_callees`), test reachability (`harness_tests_reaching`), AST pattern searching (`harness_structural_search`), idiom & review routing (`harness_route`, `harness_review_route`), ArchiMate ontology tracing (`harness_ontology_why`, `harness_ontology_impact`, `harness_ontology_check`), graph queries & Datalog/DPO inference (`harness_gq_query`, `harness_graph_infer`, `harness_graph_complete`, `harness_graph_rewrite`), type diagnostics (`harness_lsp_diagnostics`), telemetry reporting (`harness_telemetry_report`), and read-only git diff inspection (`harness_git_diff`).
+- **`harness-mcp`:** In-process TypeScript server (`apps/harness-mcp/src/server.ts`) exposing 18 tools: symbol resolution (`harness_resolve`, `harness_callers`, `harness_callees`), test reachability (`harness_tests_reaching`), AST pattern searching (`harness_structural_search`), idiom & review routing (`harness_route`, `harness_review_route`), ArchiMate ontology tracing (`harness_ontology_why`, `harness_ontology_impact`, `harness_ontology_check`), graph queries & Datalog/DPO inference (`harness_gq_query`, `harness_graph_infer`, `harness_graph_complete`, `harness_graph_rewrite`), type diagnostics (`harness_lsp_diagnostics`), telemetry reporting (`harness_telemetry_report`), read-only git diff inspection (`harness_git_diff`), and read-only workflow status inspection (`harness_workflow_plan`).
 - **`omnigraph-mcp` (`@modernrelay/omnigraph-mcp@0.14.0`):** Graph database server managing the ArchiMate 3.2 property graph on port 8080, governed by `libs/harness/graph/policies.cedar`.
 - **`nx-mcp`:** Workspace graph server for Nx target and project discovery.
 
@@ -164,3 +164,6 @@ Invoke specialist review subagents as read-only inspectors during implementation
    ```bash
    CI=true node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts verify
    ```
+4. **Orchestrate Durable Task Workflows & Determinism Gates:**
+   - Control `HarnessTaskWorkflow` runs via `harness workflow` (`compile | start | status | complete | resume | doctor | abort`) over `<git-common-dir>/harness/daemon.sock`, and inspect status read-only with `harness_workflow_plan`.
+   - Workflow definition modules containing `Workflow.make(...)` are checked by the `nondeterministic-workflow-body` AST and `oxlint` rule (`harness/syntax-bans`), requiring side effects, clock/randomness, env, fs, git, Omnigraph, and network calls to run inside `Activity.make({ execute: ... })`.

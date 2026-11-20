@@ -7,6 +7,7 @@ import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import {
   CANONICAL_MCP_TOOL_NAMES,
+  type DaemonProtocolMismatchError,
   GitDiffErrorReason,
   GitDiffExecutionError,
   InvalidReviewRouteInputError,
@@ -14,6 +15,8 @@ import {
   McpToolName,
   type ReviewTimeoutMillis,
   UnknownToolError,
+  type WorkflowStoreUnavailableError,
+  type WorkspaceFsError,
 } from "@harness/contract"
 import {
   appendTelemetryEvent,
@@ -68,6 +71,9 @@ export type McpToolExecutionError =
   | GraphRewriteError
   | GraphProjectorError
   | OmnigraphLoadError
+  | WorkflowStoreUnavailableError
+  | WorkspaceFsError
+  | DaemonProtocolMismatchError
 
 export type McpToolInputSchema = Schema.Decoder<Readonly<Record<string, unknown>>> & Schema.Top
 

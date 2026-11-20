@@ -747,6 +747,12 @@ const tryReadPreInvocationCacheLite = (
   return { _tag: "Miss", fingerprint: fp }
 }
 
+const resolveRealPathLite = (targetPath: string): Option.Option<string> =>
+  match(Result.try(() => realpathSync(targetPath)))
+    .with({ _tag: "Success" }, ({ success }) => Option.some(success))
+    .with({ _tag: "Failure" }, () => Option.none())
+    .exhaustive()
+
 export {
   GIT_FINGERPRINT_MAX_BUFFER_BYTES,
   GIT_IGNORED_LS_FILES_ARGS,
@@ -760,6 +766,7 @@ export {
   readHookStdinCallback,
   resolveGitHeadStateLite,
   resolveHarnessStateDirLite,
+  resolveRealPathLite,
   shouldSuppressLiveRepoTestSideEffectsLite,
   tryReadPreInvocationCacheLite,
 }
