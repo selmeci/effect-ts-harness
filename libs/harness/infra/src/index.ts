@@ -21,7 +21,7 @@ import {
 } from "./cache-helpers.js"
 import { DecisionCacheLive, makeDecisionCacheLayer } from "./decision-cache-live.js"
 import { LocalDecisionModel, makeLocalDecisionModelLayer } from "./local-decision-model-live.js"
-import { nodeSyncHostIo } from "./node-host-io.js"
+import { execFileAsyncEffect, nodeSyncHostIo } from "./node-host-io.js"
 import {
   HarnessSubprocessRunnerLive,
   makeHarnessSubprocessRunnerHostIoLayer,
@@ -49,7 +49,7 @@ import {
   WorkspaceFsLive,
 } from "./workspace-fs-live.js"
 
-export { nodeSyncHostIo }
+export { execFileAsyncEffect, nodeSyncHostIo }
 export { ActiveMutantContextLive }
 export { makeWorkspaceFsHostIoLayer, makeWorkspaceFsLayer, WorkspaceFsLive }
 export {

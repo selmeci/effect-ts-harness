@@ -215,6 +215,24 @@ describe("hook-entry.ts fast-path", () => {
       })
       expect(fileRes.status).toBe(0)
       expect(JSON.parse(fileRes.stdout.trim())).toEqual({ decision: "allow" })
+
+      for (const editTool of ["edit_file", "write_file"] as const) {
+        const allowEdit = runHookEntry(["guard", "--format=antigravity"], {
+          input: JSON.stringify({
+            toolCall: { name: editTool, args: { Path: "libs/sample/src/ok.ts" } },
+          }),
+        })
+        expect(allowEdit.status).toBe(0)
+        expect(JSON.parse(allowEdit.stdout.trim())).toEqual({ decision: "allow" })
+
+        const denyEdit = runHookEntry(["guard", "--format=antigravity"], {
+          input: JSON.stringify({
+            toolCall: { name: editTool, args: { Path: ".harness/verify-stamp.json" } },
+          }),
+        })
+        expect(denyEdit.status).toBe(0)
+        expect(JSON.parse(denyEdit.stdout.trim()).decision).toBe("deny")
+      }
     })
 
     it.each([
@@ -798,6 +816,15 @@ describe("hook-entry.ts fast-path", () => {
       writeFileSync(join(harnessDir, "verify-stamp.json"), JSON.stringify({ ok: true }), "utf8")
       const fpStateUpdated = assertParity(".harness/ state-file update")
       expect(fpStateUpdated).not.toBe(fpDemoIgnored)
+
+      mkdirSync(join(dir, "libs", "demo", "src", "nested"), { recursive: true })
+      writeFileSync(
+        join(dir, "libs", "demo", "src", "nested", "deep.ts"),
+        "export const d = 1\n",
+        "utf8",
+      )
+      const fpNestedIgnored = assertParity("nested ignored dir file")
+      expect(fpNestedIgnored).not.toBe(fpStateUpdated)
     })
 
     it("miss avoids @effect/ai-typesafe and warm hit loads fewer modules without fallback", () => {
@@ -1089,6 +1116,33 @@ describe("hook-entry.ts fast-path", () => {
         expect(JSON.parse(fastRes.stdout.trim())).toEqual({ decision: "allow" })
         expect(fullRes.stdout.trim()).toBe(fastRes.stdout.trim())
       }
+    })
+  })
+
+  describe("done --format=antigravity fast-path", () => {
+    it("exits fast on fullyIdle=false without loading heavy modules and delegates fullyIdle=true", () => {
+      const { dir } = createTempGitRepo("harness-done-fastpath-")
+      const idleInspect = inspectLoadedModulesForHookEntry(["done", "--format=antigravity"], {
+        cwd: dir,
+        input: JSON.stringify({ fullyIdle: false }),
+        env: { HARNESS_TEST_ISOLATION: undefined },
+      })
+      expect(idleInspect.status).toBe(0)
+      expect(idleInspect.stdout).toBe("")
+      assertNoHeavyModulesLoaded(idleInspect.loadedUrls)
+      const telemetryLines = readFileSync(join(dir, ".harness", "telemetry-log.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { toolName: string; detail?: string })
+      expect(telemetryLines.at(-1)).toMatchObject({ toolName: "done", detail: "fullyIdle=false" })
+
+      const fullInspect = inspectLoadedModulesForHookEntry(["done", "--format=antigravity"], {
+        cwd: dir,
+        input: JSON.stringify({ fullyIdle: true }),
+      })
+      expect(fullInspect.status).toBe(0)
+      expect(JSON.parse(fullInspect.stdout.trim())).toMatchObject({ decision: "continue" })
+      expect(fullInspect.loadedUrls.some((u) => u.includes("hook-fallback.ts"))).toBe(true)
     })
   })
 })

@@ -535,4 +535,34 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
       existsSpy.mockRestore()
     }
   })
+
+  it("SPEC-0024 REQ-1.1: resolveDefaultRepoRoot picks latest valid active-workspace.json across worktree and canonical root", () => {
+    const serverRepoRoot = path.resolve(import.meta.dirname, "../../..")
+    const localActivePath = path.join(serverRepoRoot, ".harness", "active-workspace.json")
+    const gitCommonSpy = vi.spyOn(nodeSyncHostIo, "readTextSync")
+    const tmpMain = fs.mkdtempSync(path.join(os.tmpdir(), "harness-active-main-"))
+    const tmpWt = fs.mkdtempSync(path.join(os.tmpdir(), "harness-active-wt-"))
+    const existsSpy = vi.spyOn(nodeSyncHostIo, "existsSync").mockImplementation((target) => {
+      if (target === localActivePath || target.endsWith("active-workspace.json")) return true
+      return fs.existsSync(target)
+    })
+    gitCommonSpy.mockImplementation((target) => {
+      if (target === localActivePath) {
+        return JSON.stringify({ repoRoot: tmpMain, updatedAt: "2026-11-20T10:00:00.000Z" })
+      }
+      if (target.endsWith("active-workspace.json")) {
+        return JSON.stringify({ repoRoot: tmpWt, updatedAt: "2026-11-20T12:00:00.000Z" })
+      }
+      return fs.readFileSync(target, "utf8")
+    })
+    try {
+      const resolved = resolveDefaultRepoRoot(undefined, {})
+      expect(resolved === tmpMain || resolved === tmpWt).toBe(true)
+    } finally {
+      gitCommonSpy.mockRestore()
+      existsSpy.mockRestore()
+      fs.rmSync(tmpMain, { recursive: true, force: true })
+      fs.rmSync(tmpWt, { recursive: true, force: true })
+    }
+  })
 })

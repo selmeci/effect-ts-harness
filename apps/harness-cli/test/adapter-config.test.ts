@@ -52,7 +52,7 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
 
     const stopHook = hooks.hooks.Stop[0].hooks[0]
     expect(stopHook.command).toBe(
-      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done || exit 2",
+      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts done || exit 2",
     )
   })
 
@@ -240,13 +240,16 @@ describe("Antigravity adapter & plugin configuration", () => {
     expect(spec.PreToolUse[0].hooks[0].command).toContain(
       "hook-entry.ts guard --format=antigravity",
     )
+    expect(spec.PreToolUse[1].matcher).toBe(
+      "edit_file|write_file|replace_file_content|multi_replace_file_content|write_to_file",
+    )
     expect(spec.PostToolUse[0].matcher).toBe(
-      "replace_file_content|multi_replace_file_content|write_to_file",
+      "edit_file|write_file|replace_file_content|multi_replace_file_content|write_to_file",
     )
     expect(spec.PostToolUse[0].hooks[0].command).toContain(
       "hook-entry.ts ingest --format=antigravity",
     )
-    expect(spec.Stop[0].command).toContain("index.ts done --format=antigravity")
+    expect(spec.Stop[0].command).toContain("hook-entry.ts done --format=antigravity")
   })
 
   it("executes Antigravity PreToolUse guard hook from plugin directory with toolCall stdin", () => {
@@ -1280,6 +1283,13 @@ describe("Antigravity adapter & plugin configuration", () => {
         HARNESS_STATE_DIR: "/tmp/custom-state",
       }),
     ).toBe(false)
+    expect(shouldSuppressLiveRepoTestSideEffects(CLI_REPO_ROOT, { VITEST: "true" })).toBe(true)
+    expect(
+      shouldSuppressLiveRepoTestSideEffects(join(CLI_REPO_ROOT, "apps", "harness-mcp"), {
+        VITEST: "true",
+      }),
+    ).toBe(true)
+    expect(shouldSuppressLiveRepoTestSideEffects(CLI_REPO_ROOT, { NODE_ENV: "test" })).toBe(true)
     expect(shouldSuppressLiveRepoTestSideEffects(CLI_REPO_ROOT, {})).toBe(false)
 
     const tempRepo = mkdtempSync(join(tmpdir(), "harness-test-isolation-"))

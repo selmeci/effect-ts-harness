@@ -40,7 +40,7 @@ The plugin registers four lifecycle hooks to enforce safety constraints and inde
 1. **`PreInvocation` (`harness session --format=antigravity`):**
    Executes before each agent invocation. Runs `SessionHandoff.decide` to evaluate dirty working tree files, inspect git branch state, check `.harness/verify-stamp.json` freshness, and surface environment readiness.
 2. **`PreToolUse` (`harness guard --format=antigravity`):**
-   Intercepts tool calls (`run_command`, `replace_file_content`, `multi_replace_file_content`, `write_to_file`).
+   Intercepts tool calls (`run_command`, `edit_file`, `write_file`, `replace_file_content`, `multi_replace_file_content`, `write_to_file`).
    - Blocks edits to read-only `repos/effect` and `repos/alchemy`.
    - Blocks direct writes to `.harness/verify-stamp.json` (stamp forgery prevention).
    - Blocks destructive shell commands (`git push --force`, `rm -rf`).

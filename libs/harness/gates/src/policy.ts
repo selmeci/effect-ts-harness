@@ -324,9 +324,11 @@ export const classifyCommand = (command: string, options?: PolicyGuardOptions): 
   if (hasBgOp || SHELL_OPERATORS.some((op) => view.unquoted.includes(op))) {
     const isAllowedFilter = (p: string): boolean =>
       p.startsWith("grep ") ||
+      p.startsWith("rg ") ||
       p.startsWith("head ") ||
       p.startsWith("tail ") ||
       p.startsWith("wc ") ||
+      p === "wc" ||
       p.startsWith("cat ") ||
       p === "cat" ||
       p.startsWith("sort ") ||

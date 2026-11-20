@@ -5,6 +5,7 @@ import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import { isPureInterruptCause } from "@harness/contract"
 import { type TelemetryCategory, type TelemetrySurface } from "@harness/gates/hook-fastpath"
+import { resolveCanonicalRepoRoot } from "@harness/graph/cluster-resolver"
 import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
 import { toLazyImportError } from "./command-registry.js"
 import {
@@ -16,6 +17,7 @@ import {
   recordTelemetry,
   resolveCommandTelemetryOutcome,
   shouldSuppressLiveRepoTestSideEffects,
+  stripAnsiCodes,
 } from "./daemon-and-omnigraph.service.js"
 import { runDeclarativeCli } from "./declarative-cli.js"
 import {
@@ -71,6 +73,22 @@ export const teardownCliMain = (
     .exhaustive()
 }
 
+const extractCompactFailureDetail = (res: CliResult): string | undefined => {
+  const clean = stripAnsiCodes(res.stderr || res.stdout)
+  for (const line of clean.split(/\r?\n/)) {
+    const collapsed = line.replace(/\s+/g, " ").trim()
+    if (collapsed.length === 0) continue
+    return collapsed.length <= 160 ? collapsed : `${collapsed.slice(0, 157)}...`
+  }
+  return undefined
+}
+
+const persistActiveWorkspaceFile = (targetRoot: string, payload: string): void => {
+  const harnessDir = join(targetRoot, ".harness")
+  nodeSyncHostIo.mkdirRecursiveSync(harnessDir)
+  nodeSyncHostIo.writeTextSync(join(harnessDir, "active-workspace.json"), payload)
+}
+
 export const runCliEffect = (
   argv: ReadonlyArray<string>,
   options?: CliEnv,
@@ -88,12 +106,16 @@ export const runCliEffect = (
       !shouldSuppressLiveRepoTestSideEffects(CLI_REPO_ROOT)
     ) {
       yield* Effect.try(() => {
-        const harnessDir = join(CLI_REPO_ROOT, ".harness")
-        nodeSyncHostIo.mkdirRecursiveSync(harnessDir)
-        nodeSyncHostIo.writeTextSync(
-          join(harnessDir, "active-workspace.json"),
-          JSON.stringify({ repoRoot, updatedAt: new Date().toISOString() }, null, 2),
-        )
+        const payload = JSON.stringify({ repoRoot, updatedAt: new Date().toISOString() }, null, 2)
+        persistActiveWorkspaceFile(CLI_REPO_ROOT, payload)
+        const canonicalRoot = resolveCanonicalRepoRoot(repoRoot, nodeSyncHostIo)
+        if (
+          canonicalRoot !== CLI_REPO_ROOT &&
+          nodeSyncHostIo.existsSync(join(canonicalRoot, "pnpm-workspace.yaml")) &&
+          !shouldSuppressLiveRepoTestSideEffects(canonicalRoot)
+        ) {
+          persistActiveWorkspaceFile(canonicalRoot, payload)
+        }
       }).pipe(
         Effect.catch((err) =>
           Effect.sync(() => {
@@ -121,6 +143,8 @@ export const runCliEffect = (
       .otherwise(() => "lifecycle" as const)
 
     const outcome = resolveCommandTelemetryOutcome(requested, res)
+    const derivedDetail =
+      res.telemetryDetail ?? (outcome === "fail" ? extractCompactFailureDetail(res) : undefined)
 
     yield* Effect.try(() => {
       recordTelemetry(options, {
@@ -129,7 +153,7 @@ export const runCliEffect = (
         toolName: requested === "ontology" ? `ontology:${argv[1] ?? "layers"}` : requested,
         outcome,
         durationMs,
-        ...(res.telemetryDetail !== undefined ? { detail: res.telemetryDetail } : {}),
+        ...(derivedDetail !== undefined ? { detail: derivedDetail } : {}),
       })
     }).pipe(Effect.ignore)
 

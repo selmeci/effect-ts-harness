@@ -459,7 +459,8 @@ const evaluateOverlaysDiagnostics = (
     path
       .relative(root, path.isAbsolute(p) ? path.resolve(p) : path.resolve(root, p))
       .replace(/\\/g, "/")
-  const targetRelFile = file !== undefined && file.trim().length > 0 ? toRootRelPosix(file) : undefined
+  const targetRelFile =
+    file !== undefined && file.trim().length > 0 ? toRootRelPosix(file) : undefined
   const matchesTargetFile = (candidate: string): boolean => {
     if (targetRelFile === undefined) return true
     return toRootRelPosix(candidate) === targetRelFile
@@ -505,7 +506,9 @@ export const buildLspAndTelemetryToolDescriptors = (
         const overlays = typedArgs.overlays
         const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
         if (overlays !== undefined && Object.keys(overlays).length > 0) {
-          return yield* runSyncLspBranch(() => evaluateOverlaysDiagnostics(root, overlays, file, project))
+          return yield* runSyncLspBranch(() =>
+            evaluateOverlaysDiagnostics(root, overlays, file, project),
+          )
         }
         if (options?.lspDiagnosticsRunner !== undefined) {
           const runner = options.lspDiagnosticsRunner
@@ -531,9 +534,9 @@ export const buildLspAndTelemetryToolDescriptors = (
           ...(cumulative === true ? { cumulative: true } : {}),
         })
         if (format === "markdown") {
-          return { markdown: renderSessionReportMarkdown(report), report }
+          return { markdown: renderSessionReportMarkdown(report), report, resolvedRepoRoot: root }
         }
-        return report
+        return { ...report, resolvedRepoRoot: root }
       }),
   },
 ]

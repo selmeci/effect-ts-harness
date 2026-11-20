@@ -48,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done || exit 2",
+            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts done || exit 2",
             "timeout": 30
           }
         ]

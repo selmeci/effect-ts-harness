@@ -1,5 +1,6 @@
 import { dirname } from "node:path"
 import { fileURLToPath } from "node:url"
+import * as Schema from "effect/Schema"
 import { match } from "ts-pattern"
 import { classifyCommand, isSkipNxCacheOverrideCommand } from "@harness/gates/policy"
 import {
@@ -162,7 +163,14 @@ const evaluateGuardPayload = (
           .with("deny", () => "deny" as const)
           .with("ask", () => "ask" as const)
           .exhaustive()
-        recordGuardTelemetry(outcome, startMs, "fastpath=hit")
+        const detail = match(finalDecision)
+          .with({ verdict: "allow" }, () => "fastpath=hit")
+          .with({ verdict: "deny" }, { verdict: "ask" }, ({ verdict, reason }) => {
+            const compactReason = reason.replace(/\s+/g, " ").trim().slice(0, 120)
+            return `fastpath=hit;verdict=${verdict};reason=${compactReason}`
+          })
+          .exhaustive()
+        recordGuardTelemetry(outcome, startMs, detail)
         writeResultAndExit(toGuardCliResult(finalDecision, isAntigravity))
       },
     )
@@ -287,6 +295,64 @@ const runSessionFastPath = (argv: ReadonlyArray<string>, startMs: number): void 
     .exhaustive()
 }
 
+const decodeDoneIdleCheck = Schema.decodeOption(
+  Schema.fromJsonString(Schema.Struct({ fullyIdle: Schema.optional(Schema.Boolean) })),
+)
+
+const runDoneFastPath = (argv: ReadonlyArray<string>, startMs: number): void => {
+  if (!isPlainFormatOnlyFlags(parseGuardCliArgs(argv.slice(1))) || process.stdin.isTTY === true) {
+    delegateToFallback(argv)
+    return
+  }
+  const repoRoot = findWorkspaceRootLite(process.cwd(), CLI_REPO_ROOT)
+  readHookStdinCallback({ timeoutMs: STDIN_TIMEOUT_MS, maxBytes: STDIN_MAX_BYTES }, (res) => {
+    match(res)
+      .with({ _tag: "Failed" }, ({ reason }) => {
+        appendHookTelemetryLite({
+          repoRoot,
+          cliRepoRoot: CLI_REPO_ROOT,
+          surface: "hook",
+          category: "lifecycle",
+          toolName: "done",
+          outcome: "fail",
+          durationMs: performance.now() - startMs,
+          detail: "fastpath=stdin-error",
+        })
+        writeResultAndExit(
+          makeDoneBlockResult(
+            hasAntigravityFormat(argv),
+            `done: failed or timed out reading Stop hook stdin (${reason})`,
+          ),
+        )
+      })
+      .with({ _tag: "Ok" }, ({ text }) => {
+        const trimmed = text.trim()
+        if (trimmed.length > 0) {
+          const isFullyIdleFalse = match(decodeDoneIdleCheck(trimmed))
+            .with({ _tag: "Some" }, ({ value }) => value.fullyIdle === false)
+            .with({ _tag: "None" }, () => false)
+            .exhaustive()
+          if (isFullyIdleFalse) {
+            appendHookTelemetryLite({
+              repoRoot,
+              cliRepoRoot: CLI_REPO_ROOT,
+              surface: "hook",
+              category: "lifecycle",
+              toolName: "done",
+              outcome: "ok",
+              durationMs: performance.now() - startMs,
+              detail: "fullyIdle=false",
+            })
+            writeResultAndExit({ exitCode: 0, stdout: "", stderr: "" })
+            return
+          }
+        }
+        delegateToFallback(argv, { stdin: text })
+      })
+      .exhaustive()
+  })
+}
+
 export const runHookEntryFastPath = (argv: ReadonlyArray<string>): void => {
   const startMs = performance.now()
   const subcommand = argv[0]
@@ -300,6 +366,10 @@ export const runHookEntryFastPath = (argv: ReadonlyArray<string>): void => {
   }
   if (subcommand === "session") {
     runSessionFastPath(argv, startMs)
+    return
+  }
+  if (subcommand === "done") {
+    runDoneFastPath(argv, startMs)
     return
   }
   delegateToFallback(argv)

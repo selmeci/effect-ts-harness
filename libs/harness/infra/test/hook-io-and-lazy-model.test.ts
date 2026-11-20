@@ -22,7 +22,7 @@ import { match } from "ts-pattern"
 import { LocalDecisionModel, makeLocalDecisionModelLayer } from "../src/hook-fastpath.js"
 import {
   GIT_FINGERPRINT_MAX_BUFFER_BYTES,
-  GIT_IGNORED_LS_FILES_ARGS,
+  GIT_FINGERPRINT_STATUS_ARGS,
   appendHookTelemetryLite,
   findWorkspaceRootLite,
   type HookStdinReadResult,
@@ -30,6 +30,7 @@ import {
   readHookStdinCallback,
   resolveGitHeadStateLite,
   resolveHarnessStateDirLite,
+  shouldSuppressLiveRepoTestSideEffectsLite,
   tryReadPreInvocationCacheLite,
 } from "../src/hook-io.js"
 
@@ -969,7 +970,7 @@ describe("hook-io lite helpers and lazy LocalDecisionModel", () => {
       withTempDir("hook-io-nx-", (dir) =>
         Effect.sync(() => {
           expect(GIT_FINGERPRINT_MAX_BUFFER_BYTES).toBeGreaterThanOrEqual(16 * 1024 * 1024)
-          expect(GIT_IGNORED_LS_FILES_ARGS).toContain(":(exclude,top).nx")
+          expect(GIT_FINGERPRINT_STATUS_ARGS).toContain("--ignored=matching")
 
           initGitRepo(dir)
           writeFile(join(dir, ".gitignore"), ".nx/\nlibs/demo/src/ignored.ts\n")
@@ -1039,6 +1040,62 @@ describe("hook-io lite helpers and lazy LocalDecisionModel", () => {
               .exhaustive(),
           )
           expect(nextFp).not.toBe(cleanFp)
+
+          // Degraded cache entry hits within 30s and expires after 30s
+          writeFile(
+            cachePath,
+            JSON.stringify({
+              version: "session-preinvocation-v1",
+              fingerprint: nextFp,
+              recordedAtMs: Date.now() - 10_000,
+              ollamaReady: true,
+              ollamaProbed: true,
+              degraded: true,
+              injectSteps: ["degraded-step"],
+              stderr: "",
+            }),
+          )
+          expect(
+            tryReadPreInvocationCacheLite({ repoRoot: dir, cliRepoRoot: dir, env: {} })._tag,
+          ).toBe("Hit")
+
+          writeFile(
+            cachePath,
+            JSON.stringify({
+              version: "session-preinvocation-v1",
+              fingerprint: nextFp,
+              recordedAtMs: Date.now() - 35_000,
+              ollamaReady: true,
+              ollamaProbed: true,
+              degraded: true,
+              injectSteps: ["degraded-step"],
+              stderr: "",
+            }),
+          )
+          expect(
+            tryReadPreInvocationCacheLite({ repoRoot: dir, cliRepoRoot: dir, env: {} })._tag,
+          ).toBe("Miss")
+
+          // VITEST / NODE_ENV=test live-repo suppression covers subdirectories while allowing temp repos or explicit HARNESS_STATE_DIR
+          expect(
+            shouldSuppressLiveRepoTestSideEffectsLite(
+              join(repoRoot, "apps", "harness-mcp"),
+              repoRoot,
+              { VITEST: "true" },
+            ),
+          ).toBe(true)
+          expect(
+            shouldSuppressLiveRepoTestSideEffectsLite(repoRoot, repoRoot, { NODE_ENV: "test" }),
+          ).toBe(true)
+          expect(shouldSuppressLiveRepoTestSideEffectsLite(dir, repoRoot, { VITEST: "true" })).toBe(
+            false,
+          )
+          expect(
+            shouldSuppressLiveRepoTestSideEffectsLite(repoRoot, repoRoot, {
+              VITEST: "true",
+              HARNESS_STATE_DIR: "/tmp/custom-state",
+            }),
+          ).toBe(false)
         }),
       ),
   )

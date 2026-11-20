@@ -6,6 +6,7 @@ import {
   normalizeShellLineContinuations,
   unwrapCommandSegment,
 } from "../src/policy-shell-parser.js"
+import { stripSafeLeadingEnvVarsDetailed } from "../src/policy-command-rules.js"
 import {
   CD_COMMAND_BANNED_REASON,
   classifyCommand,
@@ -1684,5 +1685,92 @@ describe("guard policy", () => {
     expect(
       classifyFileWrite("libs/order/domain/src/order.ts", { unitWorkerMode: true }).verdict,
     ).toBe("allow")
+  })
+
+  it("harness:SPEC-0024 strips validated env -u / --unset wrappers and allows read-only df, git worktree list, and wc/rg filters", () => {
+    expect(
+      stripSafeLeadingEnvVarsDetailed("env -u HARNESS_WORKTREE_ID pnpm harness verify"),
+    ).toEqual({ rest: "pnpm harness verify", sawWorktreeId: false })
+    expect(
+      stripSafeLeadingEnvVarsDetailed("CI=true env -u HARNESS_WORKTREE_ID -u NX_DAEMON pnpm test"),
+    ).toEqual({ rest: "pnpm test", sawWorktreeId: false })
+    expect(stripSafeLeadingEnvVarsDetailed("env --unset=HARNESS_WORKTREE_ID pnpm test")).toEqual({
+      rest: "pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env CI=true pnpm test")).toEqual({
+      rest: "pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env HARNESS_WORKTREE_ID=wt1 pnpm test")).toEqual({
+      rest: "pnpm test",
+      sawWorktreeId: true,
+    })
+    expect(
+      stripSafeLeadingEnvVarsDetailed(
+        "HARNESS_WORKTREE_ID=wt1 env -u HARNESS_WORKTREE_ID pnpm harness verify",
+      ),
+    ).toEqual({ rest: "pnpm harness verify", sawWorktreeId: true })
+    expect(stripSafeLeadingEnvVarsDetailed("env -u HARNESS_WORKTREE_ID")).toEqual({
+      rest: "",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env pnpm test")).toEqual({
+      rest: "env pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env -u PATH pnpm test")).toEqual({
+      rest: "env -u PATH pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env --unset=PATH pnpm test")).toEqual({
+      rest: "env --unset=PATH pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env -i pnpm test")).toEqual({
+      rest: "env -i pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env PATH=/tmp pnpm test")).toEqual({
+      rest: "env PATH=/tmp pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env -u")).toEqual({
+      rest: "env -u",
+      sawWorktreeId: false,
+    })
+
+    for (const allowedCmd of [
+      "env -u HARNESS_WORKTREE_ID pnpm harness verify",
+      "env -u HARNESS_WORKTREE_ID CI=true pnpm harness verify && env -u HARNESS_WORKTREE_ID CI=true pnpm harness done",
+      "env -u HARNESS_WORKTREE_ID -u NX_DAEMON pnpm test",
+      "env --unset=HARNESS_WORKTREE_ID pnpm --filter @harness/gates run test",
+      "df -ih /tmp",
+      "df",
+      "git worktree list",
+      "git worktree list --porcelain",
+      "git status | rg policy | wc",
+      "ls -la libs/harness | rg -n telemetry",
+    ]) {
+      expect(classifyCommand(allowedCmd), allowedCmd).toBe("allow")
+    }
+
+    for (const nonAllowed of [
+      { cmd: "env -u PATH pnpm test", verdict: "escalate" },
+      { cmd: "env --unset=PATH pnpm test", verdict: "escalate" },
+      { cmd: "env -i pnpm test", verdict: "escalate" },
+      { cmd: "env pnpm test", verdict: "escalate" },
+      { cmd: "env -u HARNESS_WORKTREE_ID", verdict: "escalate" },
+      { cmd: "env HARNESS_WORKTREE_ID=wt1 pnpm harness verify", verdict: "escalate" },
+      {
+        cmd: "HARNESS_WORKTREE_ID=wt1 env -u HARNESS_WORKTREE_ID pnpm harness verify",
+        verdict: "escalate",
+      },
+      { cmd: "env -u HARNESS_WORKTREE_ID git push --force", verdict: "deny" },
+      { cmd: "git worktree remove /tmp/wt-1", verdict: "escalate" },
+      { cmd: "dfx build", verdict: "escalate" },
+    ] as const) {
+      expect(classifyCommand(nonAllowed.cmd), nonAllowed.cmd).toBe(nonAllowed.verdict)
+    }
   })
 })

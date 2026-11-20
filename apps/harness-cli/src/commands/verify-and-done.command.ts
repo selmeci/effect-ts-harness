@@ -462,9 +462,7 @@ export const handleDone = (
           return makeDoneBlockResult(isAntigravity, reason)
         })
         .exhaustive()
-      if (stdinErrResult !== undefined) {
-        return stdinErrResult
-      }
+      if (stdinErrResult !== undefined) return stdinErrResult
     }
     if (rawStdin !== undefined && rawStdin.trim().length === 0) {
       return makeDoneBlockResult(isAntigravity, "done: empty Stop hook stdin payload")
@@ -489,15 +487,16 @@ export const handleDone = (
           makeDoneBlockResult(isAntigravity, "done: malformed Stop hook stdin JSON payload"),
         )
         .exhaustive()
-      if (earlyResult !== undefined) {
-        return earlyResult
-      }
+      if (earlyResult !== undefined) return earlyResult
     }
 
     const blockDecision = isAntigravity ? "continue" : "block"
     const verificationEffect = Effect.gen(function* () {
       // 1. Subagent bypass
-      if (isSubagentStopContext(repoRoot, decodedStdin)) {
+      if (
+        (isAntigravity || rawStdin !== undefined) &&
+        isSubagentStopContext(repoRoot, decodedStdin)
+      ) {
         return {
           exitCode: 0,
           stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",

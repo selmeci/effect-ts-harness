@@ -7,7 +7,10 @@ import {
   resolveHarnessStateDir,
 } from "@harness/gates/hook-fastpath"
 import { resolveGitHeadState } from "@harness/graph/cluster-resolver"
-import { GIT_FINGERPRINT_MAX_BUFFER_BYTES, GIT_IGNORED_LS_FILES_ARGS } from "@harness/infra/hook-io"
+import {
+  GIT_FINGERPRINT_MAX_BUFFER_BYTES,
+  GIT_FINGERPRINT_STATUS_ARGS,
+} from "@harness/infra/hook-io"
 import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
 import type { ExtendedHostIo, SyncHostIo } from "@harness/service/host-io"
 import type { CliEnv, CliResult } from "./daemon-and-omnigraph.service.js"
@@ -21,6 +24,7 @@ import {
 } from "./repo-path.js"
 
 export const PRE_INVOCATION_CACHE_TTL_MS = 300_000
+export const DEGRADED_PRE_INVOCATION_CACHE_TTL_MS = 30_000
 const PRE_INVOCATION_CACHE_FILE = "session-preinvocation-cache.json"
 
 export const PreInvocationCacheSchema = Schema.Struct({
@@ -29,6 +33,7 @@ export const PreInvocationCacheSchema = Schema.Struct({
   recordedAtMs: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
   ollamaReady: Schema.Boolean,
   ollamaProbed: Schema.Boolean,
+  degraded: Schema.optional(Schema.Boolean),
   injectSteps: Schema.Array(Schema.String.check(Schema.isMaxLength(4096))).check(
     Schema.isMaxLength(32),
   ),
@@ -156,11 +161,11 @@ export const computePreInvocationFingerprint = (
 ): Option.Option<string> => {
   if (!tryOr(() => hostIo.existsSync(join(repoRoot, ".git")), false)) return Option.none()
   const statusStdout = tryOr(() => {
-    const res = hostIo.execFileSync(
-      "git",
-      ["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
-      { cwd: repoRoot, timeoutMs: 2_000, maxBufferBytes: GIT_FINGERPRINT_MAX_BUFFER_BYTES },
-    )
+    const res = hostIo.execFileSync("git", GIT_FINGERPRINT_STATUS_ARGS, {
+      cwd: repoRoot,
+      timeoutMs: 2_000,
+      maxBufferBytes: GIT_FINGERPRINT_MAX_BUFFER_BYTES,
+    })
     return match(res)
       .with({ _tag: "Exited" }, ({ exitCode, stdout }) => (exitCode === 0 ? stdout : undefined))
       .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => undefined)
@@ -183,15 +188,57 @@ export const computePreInvocationFingerprint = (
     relPath.startsWith(".harness/") ||
     (customHarnessRel !== undefined &&
       (relPath === customHarnessRel || relPath.startsWith(`${customHarnessRel}/`)))
+  const isExcludedIgnoredRelPath = (relPath: string): boolean =>
+    relPath.length === 0 ||
+    isHarnessStateRelPath(relPath) ||
+    relPath === ".env" ||
+    relPath === ".dev.vars" ||
+    !isWorkspaceRelPathIncludedInStamp(relPath)
   const hash = createHash("sha256")
   hash.update(`branch:${headState.gitBranch ?? ""}\nsha:${headState.headSha ?? ""}\n`)
   const seenPaths = new Set<string>()
+  const ignoredFiles: Array<string> = []
+  const collectIgnoredDir = (dirRel: string, absDir: string): boolean => {
+    if (
+      tryOr(() => hostIo.isSymbolicLinkSync(absDir), true) ||
+      tryOr(() => hostIo.existsSync(join(absDir, ".git")), true)
+    ) {
+      return false
+    }
+    const dirEntries = tryOr(() => hostIo.readdirSync(absDir), undefined)
+    if (dirEntries === undefined) return false
+    const sorted = [...dirEntries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    for (const entry of sorted) {
+      const childRel = `${dirRel}/${entry.name}`
+      if (isExcludedIgnoredRelPath(childRel)) continue
+      const childAbs = join(absDir, entry.name)
+      if (tryOr(() => hostIo.isSymbolicLinkSync(childAbs), true) || entry.name === ".git") {
+        return false
+      }
+      if (entry.isDirectory) {
+        if (!collectIgnoredDir(childRel, childAbs)) return false
+        continue
+      }
+      ignoredFiles.push(childRel)
+    }
+    return true
+  }
   const entries = statusStdout.split("\0")
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i]
     if (entry === undefined || entry.length < 4) continue
     const xy = entry.slice(0, 2)
     const relPath = entry.slice(3)
+    if (xy === "!!") {
+      const trimmedRel = relPath.endsWith("/") ? relPath.slice(0, -1) : relPath
+      if (isExcludedIgnoredRelPath(trimmedRel)) continue
+      if (relPath.endsWith("/")) {
+        if (!collectIgnoredDir(trimmedRel, join(repoRoot, trimmedRel))) return Option.none()
+      } else {
+        ignoredFiles.push(trimmedRel)
+      }
+      continue
+    }
     if (xy[0] === "R" || xy[1] === "R" || xy[0] === "C" || xy[1] === "C") {
       const origPath = entries[i + 1] ?? ""
       i += 1
@@ -205,44 +252,26 @@ export const computePreInvocationFingerprint = (
     if (dirtyDigest === undefined) return Option.none()
     hash.update(`dirty:${xy}:${relPath}:${dirtyDigest}\n`)
   }
-  const ignoredStdout = tryOr(() => {
-    const res = hostIo.execFileSync("git", GIT_IGNORED_LS_FILES_ARGS, {
-      cwd: repoRoot,
-      timeoutMs: 2_000,
-      maxBufferBytes: GIT_FINGERPRINT_MAX_BUFFER_BYTES,
-    })
-    return match(res)
-      .with({ _tag: "Exited" }, ({ exitCode, stdout }) => (exitCode === 0 ? stdout : undefined))
-      .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => undefined)
-      .exhaustive()
-  }, undefined)
-  if (ignoredStdout === undefined) return Option.none()
-  for (const relPath of ignoredStdout.split("\0")) {
-    if (
-      relPath.length === 0 ||
-      seenPaths.has(relPath) ||
-      isHarnessStateRelPath(relPath) ||
-      relPath === ".env" ||
-      relPath === ".dev.vars" ||
-      !isWorkspaceRelPathIncludedInStamp(relPath)
-    ) {
-      continue
-    }
+  ignoredFiles.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+  let prevIgnored = ""
+  for (const relPath of ignoredFiles) {
+    if (relPath === prevIgnored || seenPaths.has(relPath)) continue
+    prevIgnored = relPath
     const ignoredDigest = unwrapOption(hashDirtyPathContent(repoRoot, relPath, hostIo))
     if (ignoredDigest === undefined) return Option.none()
     hash.update(`ignored:${relPath}:${ignoredDigest}\n`)
   }
-  for (const f of [
-    "friction-log.jsonl",
-    "telemetry.jsonl",
-    "verify-stamp.json",
-    "mutate-stamp.json",
-    "plan-graph-snapshot.json",
-    "graph-head.json",
-    "graph-snapshot.json",
-    "last-done.json",
-  ]) {
-    const d = unwrapOption(digestFile(join(harnessDir, f), hostIo, true))
+  const stateInputs: ReadonlyArray<readonly [string, boolean]> = [
+    ["friction-log.jsonl", true],
+    ["verify-stamp.json", true],
+    ["mutate-stamp.json", true],
+    ["plan-graph-snapshot.json", false],
+    ["graph-head.json", true],
+    ["graph-snapshot.json", false],
+    ["last-done.json", true],
+  ]
+  for (const [f, contentHash] of stateInputs) {
+    const d = unwrapOption(digestFile(join(harnessDir, f), hostIo, contentHash))
     if (d === undefined) return Option.none()
     hash.update(`state:${f}:${d}\n`)
   }
@@ -379,8 +408,10 @@ export const tryReadPreInvocationSessionCache = (
   if (raw === undefined) return Option.none()
   const cached = unwrapOption(decodeCacheEntry(raw))
   if (cached === undefined) return Option.none()
+  const effectiveTtlMs =
+    cached.degraded === true ? DEGRADED_PRE_INVOCATION_CACHE_TTL_MS : PRE_INVOCATION_CACHE_TTL_MS
   const ageMs = Date.now() - cached.recordedAtMs
-  if (ageMs < 0 || ageMs > PRE_INVOCATION_CACHE_TTL_MS) return Option.none()
+  if (ageMs < 0 || ageMs > effectiveTtlMs) return Option.none()
   const requireOllama = shouldRequireLiveOllama(options, hostIo)
   if (requireOllama && (!cached.ollamaProbed || !cached.ollamaReady)) return Option.none()
   const fp = unwrapOption(computePreInvocationFingerprint(repoRoot, harnessDir, hostIo, options))
@@ -517,13 +548,22 @@ export const tryCachePreInvocationResult = (
   stderr: string,
   options: CliEnv | undefined,
   hostIo: SyncHostIo = nodeSyncHostIo,
+  degraded?: boolean,
 ): void => {
   const fp = unwrapOption(computePreInvocationFingerprint(repoRoot, harnessDir, hostIo, options))
   if (fp !== undefined) {
     writePreInvocationSessionCache(
       repoRoot,
       harnessDir,
-      { fingerprint: fp, recordedAtMs: Date.now(), ollamaReady, ollamaProbed, injectSteps, stderr },
+      {
+        fingerprint: fp,
+        recordedAtMs: Date.now(),
+        ollamaReady,
+        ollamaProbed,
+        ...(degraded === true ? { degraded: true } : {}),
+        injectSteps,
+        stderr,
+      },
       hostIo,
     )
   }

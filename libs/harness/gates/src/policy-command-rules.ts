@@ -36,6 +36,7 @@ export const ALLOWLIST: ReadonlyArray<string> = [
   "git log",
   "git branch",
   "git rev-parse",
+  "git worktree list",
   "git ls-files",
   "git checkout",
   "git switch",
@@ -71,6 +72,7 @@ export const ALLOWLIST: ReadonlyArray<string> = [
   "head",
   "tail",
   "wc",
+  "df",
   "tree",
   "pnpm --filter ",
   "pnpm install",
@@ -287,12 +289,107 @@ const isSafeLeadingEnvAssignment = (name: string, value: string): boolean => {
 }
 
 const LEADING_ENV_TOKEN_PATTERN = /([A-Za-z_][A-Za-z0-9_]*)=([^\s;|&]+)(?=\s|$)/y
+const LEADING_ENV_CMD_PATTERN = /env(?=\s|$)/y
+const ENV_WORD_PATTERN = /([^\s;|&]+)/y
 const WORKTREE_ID_BLOCKED_HARNESS_PATTERN =
   /^pnpm\s+(?:run\s+)?harness\b|^CI=true\s+pnpm\s+harness\b|^node\b.*apps\/harness-cli\/src\//
 
 export interface StripLeadingEnvResult {
   readonly rest: string
   readonly sawWorktreeId: boolean
+}
+
+const isSafeLeadingEnvVarName = (name: string): boolean =>
+  Object.hasOwn(SAFE_LEADING_ENV_VALIDATORS, name)
+
+const consumeSafeEnvWrapper = (
+  command: string,
+  envStartPos: number,
+  initialSawWorktreeId: boolean,
+  startCount: number,
+): {
+  readonly accepted: boolean
+  readonly nextPos: number
+  readonly sawWorktreeId: boolean
+  readonly nextCount: number
+} => {
+  const len = command.length
+  let pos = envStartPos + 3
+  let count = startCount
+  let sawWorktreeId = initialSawWorktreeId
+  let consumedSafeArg = false
+  const abort = () => ({
+    accepted: false,
+    nextPos: envStartPos,
+    sawWorktreeId: initialSawWorktreeId,
+    nextCount: startCount,
+  })
+
+  while (count < MAX_LEADING_ENV_VARS) {
+    while (pos < len && /\s/.test(command[pos]!)) {
+      pos++
+    }
+    if (pos >= len) {
+      return consumedSafeArg
+        ? { accepted: true, nextPos: pos, sawWorktreeId, nextCount: count }
+        : abort()
+    }
+    ENV_WORD_PATTERN.lastIndex = pos
+    const wordMatch = ENV_WORD_PATTERN.exec(command)
+    if (wordMatch === null) {
+      return abort()
+    }
+    const token = wordMatch[1]!
+    if (token === "-u") {
+      pos = ENV_WORD_PATTERN.lastIndex
+      while (pos < len && /\s/.test(command[pos]!)) {
+        pos++
+      }
+      ENV_WORD_PATTERN.lastIndex = pos
+      const nameMatch = ENV_WORD_PATTERN.exec(command)
+      if (nameMatch === null || !isSafeLeadingEnvVarName(nameMatch[1]!)) {
+        return abort()
+      }
+      pos = ENV_WORD_PATTERN.lastIndex
+      consumedSafeArg = true
+      count++
+      continue
+    }
+    if (token.startsWith("--unset=")) {
+      const varName = token.slice("--unset=".length)
+      if (!isSafeLeadingEnvVarName(varName)) {
+        return abort()
+      }
+      pos = ENV_WORD_PATTERN.lastIndex
+      consumedSafeArg = true
+      count++
+      continue
+    }
+    if (token.startsWith("-")) {
+      return abort()
+    }
+    LEADING_ENV_TOKEN_PATTERN.lastIndex = pos
+    const assignMatch = LEADING_ENV_TOKEN_PATTERN.exec(command)
+    if (assignMatch !== null && assignMatch.index === pos) {
+      const name = assignMatch[1]!
+      const value = assignMatch[2]!
+      if (!isSafeLeadingEnvAssignment(name, value)) {
+        return abort()
+      }
+      if (name === "HARNESS_WORKTREE_ID") {
+        sawWorktreeId = true
+      }
+      pos = LEADING_ENV_TOKEN_PATTERN.lastIndex
+      consumedSafeArg = true
+      count++
+      continue
+    }
+    break
+  }
+
+  return consumedSafeArg
+    ? { accepted: true, nextPos: pos, sawWorktreeId, nextCount: count }
+    : abort()
 }
 
 export const stripSafeLeadingEnvVarsDetailed = (command: string): StripLeadingEnvResult => {
@@ -306,6 +403,18 @@ export const stripSafeLeadingEnvVarsDetailed = (command: string): StripLeadingEn
     }
     if (pos >= len) {
       return { rest: "", sawWorktreeId }
+    }
+    LEADING_ENV_CMD_PATTERN.lastIndex = pos
+    const envMatch = LEADING_ENV_CMD_PATTERN.exec(command)
+    if (envMatch !== null) {
+      const envRes = consumeSafeEnvWrapper(command, pos, sawWorktreeId, count)
+      if (!envRes.accepted) {
+        break
+      }
+      pos = envRes.nextPos
+      sawWorktreeId = envRes.sawWorktreeId
+      count = envRes.nextCount + 1
+      continue
     }
     LEADING_ENV_TOKEN_PATTERN.lastIndex = pos
     const match = LEADING_ENV_TOKEN_PATTERN.exec(command)
