@@ -41,7 +41,8 @@ import {
   shouldRequireLiveOllama,
   tryCachePreInvocationResult,
 } from "./session-fastpath.js"
-import { buildWorkspaceFnIndex } from "@harness/ingest"
+import { buildWorkspaceFnIndex, findActiveWorkspaceStubs } from "@harness/ingest"
+import { tryFastPathIngest } from "./ingest-fastpath.js"
 import {
   type CliEnv,
   type CliResult,
@@ -165,6 +166,7 @@ export const handleDoctorOrSession = (
         : yield* DecisionModel.decide(IdiomRouterV1, {
             input: { planStep: "Initialize session" },
           }).pipe(
+            Effect.provide(decisionLayer),
             Effect.timeoutOption("10 seconds"),
             Effect.catchCause((cause) => {
               if (isPureInterruptCause(cause)) return Effect.interrupt
@@ -174,7 +176,6 @@ export const handleDoctorOrSession = (
                 )
               }).pipe(Effect.as(Option.none()))
             }),
-            Effect.provide(decisionLayer),
           )
     const modelWarm = isAntigravity
       ? ollamaReady
@@ -184,10 +185,11 @@ export const handleDoctorOrSession = (
           .with({ _tag: "None" }, () => false)
           .exhaustive()
 
-    const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)
-    const activeStubs = Array.from(fnIndex.bySpanName.values())
-      .filter((fn) => fn.isStub)
-      .map((fn) => fn.spanName)
+    const activeStubs = isAntigravity
+      ? yield* findActiveWorkspaceStubs(repoRoot, nodeSyncHostIo)
+      : Array.from((yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)).bySpanName.values())
+          .filter((fn) => fn.isStub)
+          .map((fn) => fn.spanName)
 
     let missingPlannedFns: ReadonlyArray<string> = []
     let snapshotOk = true
@@ -395,133 +397,147 @@ export const handleIngest = Effect.fn("Harness.ingestWorkspace")(function* (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
 ): Effect.fn.Return<CliResult> {
-  const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-  const isAntigravity = hasAntigravityFormat(argv)
-  const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)
-  const harnessDir = Option.getOrUndefined(resolveHarnessStateDirSafe(repoRoot))
-  if (harnessDir === undefined)
-    return {
-      exitCode: 1,
-      stdout: JSON.stringify({ error: "Invalid HARNESS_STATE_DIR" }),
-      stderr: "Invalid HARNESS_STATE_DIR\n",
-    }
-  const snapshotPath = join(harnessDir, "graph-snapshot.json")
-  const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
-  const recordedMeta = readGraphHeadMeta(repoRoot, nodeSyncHostIo)
-  const reconcileDecision = yield* decideOmnigraphReconcile({
-    snapshotExists: nodeSyncHostIo.existsSync(snapshotPath),
-    recordedHeadSha: recordedMeta?.headSha ?? null,
-    currentHeadSha: headState.headSha,
-    recordedGitBranch: recordedMeta?.gitBranch ?? null,
-    currentGitBranch: headState.gitBranch,
-  })
-
-  if (!isAntigravity || reconcileDecision.needsReconcile) {
-    const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo)
-    const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
-    const targetBranch =
-      headState.gitBranch === null ||
-      headState.gitBranch === "main" ||
-      headState.gitBranch === "master"
-        ? taskBranches.mainBranch
-        : taskBranches.implBranch
-
-    if (isIsolatedExternalWorkspace(repoRoot)) {
-      saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
-      const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
-      if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {
-        process.stderr.write(
-          "[harness:ingest] Warning: failed to persist .harness/graph-head.json\n",
-        )
-      }
-      return {
-        exitCode: 0,
-        stdout: isAntigravity
-          ? JSON.stringify({})
-          : JSON.stringify({
-              indexedFns: fnIndex.bySpanName.size,
-              syncedToOmnigraph: false,
-              branch: targetBranch,
-              headSha: headState.headSha,
-              reconcileReason: reconcileDecision.reason,
-            }),
-        stderr: "",
-      }
-    }
-
-    const omnigraphReady = yield* ensureLocalOmnigraphReady(repoRoot)
-    if (!omnigraphReady) {
-      const msg = "Omnigraph server is not ready"
-      return {
-        exitCode: !isAntigravity ? 1 : 0,
-        stdout: isAntigravity
-          ? JSON.stringify({ error: msg })
-          : JSON.stringify({
-              indexedFns: fnIndex.bySpanName.size,
-              syncedToOmnigraph: false,
-              branch: targetBranch,
-              headSha: headState.headSha,
-              error: msg,
-            }),
-        stderr: `[harness:ingest] Omnigraph sync failed: ${msg}`,
-      }
-    }
-    const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
-      repoRoot: resolveClusterRepoRoot(repoRoot),
-      branch: targetBranch,
-      from: taskBranches.mainBranch,
-      snapshotPath,
-    }).pipe(
-      Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
-      Effect.catchCause((cause) => {
-        if (isPureInterruptCause(cause)) return Effect.interrupt
-        return Effect.succeed({
-          syncedToOmnigraph: false,
-          snapshotPath,
-          error: Cause.pretty(cause),
+  const fastHit = tryFastPathIngest(argv, options)
+  return yield* match(fastHit)
+    .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+    .with({ _tag: "None" }, () =>
+      Effect.gen(function* () {
+        const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
+        const isAntigravity = hasAntigravityFormat(argv)
+        const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)
+        const harnessDir = Option.getOrUndefined(resolveHarnessStateDirSafe(repoRoot))
+        if (harnessDir === undefined)
+          return {
+            exitCode: 1,
+            stdout: JSON.stringify({ error: "Invalid HARNESS_STATE_DIR" }),
+            stderr: "Invalid HARNESS_STATE_DIR\n",
+          }
+        const snapshotPath = join(harnessDir, "graph-snapshot.json")
+        const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
+        const recordedMeta = readGraphHeadMeta(repoRoot, nodeSyncHostIo)
+        const reconcileDecision = yield* decideOmnigraphReconcile({
+          snapshotExists: nodeSyncHostIo.existsSync(snapshotPath),
+          recordedHeadSha: recordedMeta?.headSha ?? null,
+          currentHeadSha: headState.headSha,
+          recordedGitBranch: recordedMeta?.gitBranch ?? null,
+          currentGitBranch: headState.gitBranch,
         })
+
+        if (!isAntigravity || reconcileDecision.needsReconcile) {
+          const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo)
+          const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
+          const targetBranch =
+            headState.gitBranch === null ||
+            headState.gitBranch === "main" ||
+            headState.gitBranch === "master"
+              ? taskBranches.mainBranch
+              : taskBranches.implBranch
+
+          if (isIsolatedExternalWorkspace(repoRoot)) {
+            saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
+            const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+            if (
+              (headState.headSha !== null || headState.gitBranch !== null) &&
+              savedMeta === null
+            ) {
+              process.stderr.write(
+                "[harness:ingest] Warning: failed to persist .harness/graph-head.json\n",
+              )
+            }
+            return {
+              exitCode: 0,
+              stdout: isAntigravity
+                ? JSON.stringify({})
+                : JSON.stringify({
+                    indexedFns: fnIndex.bySpanName.size,
+                    syncedToOmnigraph: false,
+                    branch: targetBranch,
+                    headSha: headState.headSha,
+                    reconcileReason: reconcileDecision.reason,
+                  }),
+              stderr: "",
+            }
+          }
+
+          const omnigraphReady = yield* ensureLocalOmnigraphReady(repoRoot)
+          if (!omnigraphReady) {
+            const msg = "Omnigraph server is not ready"
+            return {
+              exitCode: !isAntigravity ? 1 : 0,
+              stdout: isAntigravity
+                ? JSON.stringify({ error: msg })
+                : JSON.stringify({
+                    indexedFns: fnIndex.bySpanName.size,
+                    syncedToOmnigraph: false,
+                    branch: targetBranch,
+                    headSha: headState.headSha,
+                    error: msg,
+                  }),
+              stderr: `[harness:ingest] Omnigraph sync failed: ${msg}`,
+            }
+          }
+          const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
+            repoRoot: resolveClusterRepoRoot(repoRoot),
+            branch: targetBranch,
+            from: taskBranches.mainBranch,
+            snapshotPath,
+          }).pipe(
+            Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
+            Effect.catchCause((cause) => {
+              if (isPureInterruptCause(cause)) return Effect.interrupt
+              return Effect.succeed({
+                syncedToOmnigraph: false,
+                snapshotPath,
+                error: Cause.pretty(cause),
+              })
+            }),
+          )
+          if (syncRes.syncedToOmnigraph) {
+            const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
+            if (
+              (headState.headSha !== null || headState.gitBranch !== null) &&
+              savedMeta === null
+            ) {
+              process.stderr.write(
+                "[harness:ingest] Warning: failed to persist .harness/graph-head.json\n",
+              )
+            }
+          }
+          const syncError = syncRes.syncedToOmnigraph
+            ? undefined
+            : (syncRes.error ?? "unknown Omnigraph sync error")
+          const stderr =
+            syncError !== undefined ? `[harness:ingest] Omnigraph sync failed: ${syncError}` : ""
+          return {
+            exitCode: syncError !== undefined && !isAntigravity ? 1 : 0,
+            stdout: isAntigravity
+              ? JSON.stringify(syncError !== undefined ? { error: syncError } : {})
+              : JSON.stringify({
+                  indexedFns: fnIndex.bySpanName.size,
+                  syncedToOmnigraph: syncRes.syncedToOmnigraph,
+                  branch: targetBranch,
+                  headSha: headState.headSha,
+                  reconcileReason: reconcileDecision.reason,
+                  ...(syncError !== undefined ? { error: syncError } : {}),
+                }),
+            stderr,
+          }
+        }
+
+        return {
+          exitCode: 0,
+          stdout: isAntigravity
+            ? JSON.stringify({})
+            : JSON.stringify({
+                indexedFns: fnIndex.bySpanName.size,
+                syncedToOmnigraph: true,
+                branch: reconcileDecision.targetOmnigraphBranch,
+                headSha: headState.headSha,
+                reconcileReason: reconcileDecision.reason,
+              }),
+          stderr: "",
+        }
       }),
     )
-    if (syncRes.syncedToOmnigraph) {
-      const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
-      if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {
-        process.stderr.write(
-          "[harness:ingest] Warning: failed to persist .harness/graph-head.json\n",
-        )
-      }
-    }
-    const syncError = syncRes.syncedToOmnigraph
-      ? undefined
-      : (syncRes.error ?? "unknown Omnigraph sync error")
-    const stderr =
-      syncError !== undefined ? `[harness:ingest] Omnigraph sync failed: ${syncError}` : ""
-    return {
-      exitCode: syncError !== undefined && !isAntigravity ? 1 : 0,
-      stdout: isAntigravity
-        ? JSON.stringify(syncError !== undefined ? { error: syncError } : {})
-        : JSON.stringify({
-            indexedFns: fnIndex.bySpanName.size,
-            syncedToOmnigraph: syncRes.syncedToOmnigraph,
-            branch: targetBranch,
-            headSha: headState.headSha,
-            reconcileReason: reconcileDecision.reason,
-            ...(syncError !== undefined ? { error: syncError } : {}),
-          }),
-      stderr,
-    }
-  }
-
-  return {
-    exitCode: 0,
-    stdout: isAntigravity
-      ? JSON.stringify({})
-      : JSON.stringify({
-          indexedFns: fnIndex.bySpanName.size,
-          syncedToOmnigraph: true,
-          branch: reconcileDecision.targetOmnigraphBranch,
-          headSha: headState.headSha,
-          reconcileReason: reconcileDecision.reason,
-        }),
-    stderr: "",
-  }
+    .exhaustive()
 })

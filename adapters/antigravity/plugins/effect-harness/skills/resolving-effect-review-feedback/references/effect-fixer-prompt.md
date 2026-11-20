@@ -6,7 +6,7 @@ This document specifies the exact dispatch prompt and completion contract used b
 
 ## 1. Orchestrator Dispatch Protocol
 
-The orchestrator groups approved `fix` and `class-fix` `Atomic IDs` (`F-n.k` / `S-n.k`) by disjoint package/file boundaries across the 5 hexagonal Nx tiers (`type:contract`, `type:service`, `type:core` / `type:domain`, `type:infra`, `type:app` / `scope:web`). Two fixer subagents MUST NEVER be assigned overlapping files.
+The orchestrator groups approved `fix` and `class-fix` `Atomic IDs` (`F-n.k` / `S-n.k`) by disjoint package/file boundaries across the 5 hexagonal Nx tiers (`type:contract`, `type:service`, `type:core` / `type:domain`, `type:infra`, `type:app` / `scope:web`). Two fixer subagents MUST NEVER be assigned overlapping files. If a single package accumulates `> 15` adjudicated review findings, split it into `2+` disjoint sub-units by subdirectory/file concern instead of overloading 1 worker. When post-fix or follow-up review findings span `>= 2` packages (or disjoint modules) while swarm workers or subagents are available, ALWAYS dispatch fixes in parallel back to warm workers/subagents rather than executing sequential solo edits in the coordinator.
 
 For each unit, the orchestrator constructs the subagent prompt using the 5 mandatory input blocks below, listing **every assigned `Atomic ID` individually** (never collapse multiple `F-n.k` rows into a parent `F-n` summary):
 
@@ -80,7 +80,7 @@ Retrieved from `harness_tests_reaching`:
 4. **State-Stack & Lifecycle Completeness:** Whenever fixing a state collection, transaction stack (`txStack`), event listener, timer, or spawned child worker (`child_process`, socket), trace EVERY mutation/cleanup site (`push`, `pop`, `shift`, `splice`, `clear`, `Ref.update`, `on`, `once`, `off`, `removeListener`, `removeAllListeners`, `kill`, `terminate`, `close`, `onExit`, `acquireUseRelease`) **across the ENTIRE owning module, class, service, and all caller/callee functions** so fixes never introduce double-pops, unhandled `'error'` events, or leaks on happy, inner-error, outer-error, or interrupt paths.
 5. **Pure Deciders:** In event sourcing and gate deciders, ensure `evolve: (state, event) => State` and `*.decide` are pure mathematical functions (`R = never`).
 6. **Local Diagnostics:** Run `harness_lsp_diagnostics` on every modified file until diagnostics are clean (0 errors).
-7. **Scoped Verification:** Verify changes using `CI=true pnpm nx run <project>:verify` (or targeted `CI=true pnpm vitest run <test-file>`).
+7. **Scoped Verification:** Verify changes using package-scoped `pnpm --filter <pkg> run typecheck && lint && test` (with explicit `TMPDIR`/`NX_SOCKET_DIR` when needed) to avoid `NX_DAEMON=false` hangs, or targeted `CI=true pnpm vitest run <test-file>` / `CI=true pnpm nx run <project>:verify`.
 8. **STRICT BANS:**
    - NEVER run any whole-repo harness CLI lifecycle or gate command concurrently in a shared checkout — whether via `pnpm harness <cmd>` OR `node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts <cmd>` (`verify`, `done`, `gc`, `mutate --strict`, `plan-check`, `ontology check`, `learn`). Whole-monorepo gates and sequential `pnpm harness mutate --file <changed-lib-src-csv> --diff` are reserved exclusively for the orchestrator.
    - NEVER call `@modernrelay/omnigraph-mcp` write tools (`mutate`, `branches_merge`, `branches_delete`).

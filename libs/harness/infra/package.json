@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./hook-fastpath": "./src/hook-fastpath.ts"
+    "./hook-fastpath": "./src/hook-fastpath.ts",
+    "./hook-io": "./src/hook-io.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit && effect-tsgo diagnostics --strict --project tsconfig.json",

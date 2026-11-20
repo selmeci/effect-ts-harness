@@ -72,7 +72,7 @@ Stage 6: Git Commit, Optional Push/PR & <promise>DONE</promise>
    - If in the primary checkout and the user requested a new worktree (or unrelated dirty files exist), create a sibling worktree `git worktree add -b feat/<slug> .harness/worktrees/feat-<slug> main` (never run `cd` in shell commands, which is blocked by `harness guard`).
    - If in a clean primary checkout on `main`, switch to `feat/<slug>` (`git switch -c feat/<slug>`).
    - For **Route D**, `feat/<epic-slug>` serves as the Epic Controller integration branch; slice workers operate in sibling worktrees anchored to the common `.git` directory (with `HARNESS_WORKTREE_ID` unset).
-2. Run `pnpm harness session` to inspect active stubs, branch state, and environment readiness.
+2. Run `pnpm harness session` to inspect active stubs, branch state, and environment readiness, and verify `/tmp` inode availability before spawning parallel test workers (`df -ih /tmp`, passing explicit `TMPDIR`/`NX_SOCKET_DIR` cleanly when needed).
 
 ### Stage 1 — Route Intake & Autonomous EARS Specification
 
@@ -105,14 +105,14 @@ Stage 6: Git Commit, Optional Push/PR & <promise>DONE</promise>
 **REQUIRED SUB-SKILL:** Use `executing-effect-stubs` (executed across downstream packages after Stage 2 on Routes A/C, or inside each slice worktree on Route D):
 
 1. Partition implementation by Nx package boundaries (`type:domain` / `type:core`, `type:infra`, `scope:web`).
-2. When 2+ downstream packages have stubs, dispatch parallel `haiku` / `sonnet` implementer subagents (using `HARNESS_WORKTREE_ID=<unit>` when sharing a single checkout for package-scoped `CI=true pnpm nx run <project>:verify` checks — package implementers never run monorepo `plan-check`, `verify`, or `done`) with the 4-part prompt (Target Stubs, EARS Clauses, Pattern Reference, Package Gate `CI=true pnpm nx run <project>:verify`). When only a single downstream package has stubs, implement it inline under the same package gate.
+2. When 2+ downstream packages have stubs, dispatch parallel `haiku` / `sonnet` implementer subagents (using `HARNESS_WORKTREE_ID=<unit>` when sharing a single checkout for package-scoped `pnpm --filter <pkg> run typecheck && lint && test` or `CI=true pnpm nx run <project>:verify` checks to avoid `NX_DAEMON=false` hangs — package implementers never run monorepo `plan-check`, `verify`, or `done`) with the 4-part prompt (Target Stubs, EARS Clauses, Pattern Reference, Package Gate `pnpm --filter <pkg> run typecheck && lint && test` / `CI=true pnpm nx run <project>:verify`). Omit monitoring workers for focused single-wave runs and terminate any active monitor immediately once implementation/remediation waves settle. When only a single downstream package has stubs, implement it inline under the same package gate.
 3. Ensure every EARS clause is verified by `@effect/vitest` (`it.effect` + `runWithTestTracer` + `checkSpanBudgets`), negative tests assert exact error instances via `Cause.findErrorOption(exit.cause)`, and every pure `*.decide` / reducer has `it.effect.prop` / `it.prop` property-based tests over `Schema.Array(EventUnionSchema)`.
 
 ### Stage 4 — Signal-Routed 7-Lens Specialist Review & Autonomous Fix Loop
 
 **REQUIRED SUB-SKILL:** Use `resolving-effect-review-feedback` per [references/review-and-shipping.md](references/review-and-shipping.md) (executed once on the controller workspace after Stage 3 on Routes A/C, or after all Waves are integrated in Step D5 on Route D):
 
-1. Route via `harness_review_route` and dispatch parallel read-only `haiku` specialist reviewers across `git diff main...HEAD` based on touched signals:
+1. Route via `harness_review_route` and dispatch parallel read-only `haiku` specialist reviewers across `git diff main...HEAD` based on touched signals, passing the exact list of domain-owned changed files + `baseRef` and instructing each reviewer to start with `harness_git_diff` (`statOnly: true`, then targeted `paths`) instead of re-reading all unchanged files in the PR:
    - `effect-ears-test-reviewer` (Always)
    - `effect-security-reviewer` (Contracts, `HttpApi`, `Rpc`, auth, SQL, `Config`)
    - `effect-reliability-reviewer` (`type:infra`, DO SQLite, D1, Queues, `Schedule`, `Scope`)
@@ -121,7 +121,7 @@ Stage 6: Git Commit, Optional Push/PR & <promise>DONE</promise>
    - `effect-migration-contract-reviewer` (`migrations/*.sql`, `SqliteMigrator`, `alchemy.run.ts`, `type:contract` evolution)
    - `effect-architecture-reviewer` (`type:service`, framework/adapter surfaces, or `changedLineCount >= 180`)
 2. Centrally adjudicate findings via Graph MCP (`harness_resolve`, `harness_ontology_why`, `harness_structural_search`, `harness_tests_reaching`).
-3. Synchronize specs/ADRs first if needed, apply all valid `fix`, `class-fix`, and `doc-sync-fix` items, re-run `pnpm harness plan-check` if any public signature or frontmatter symbol changed, and record any non-blocking declined/residual items for the closeout report.
+3. Synchronize specs/ADRs first if needed, shard any single package with `> 15` adjudicated findings into `2+` disjoint sub-units by subdirectory/file concern, dispatch post-fix or follow-up remediation spanning `>= 2` packages (or disjoint modules) in parallel via the `Agent` tool rather than sequential solo edits, tear down any active monitoring workers immediately once active implementation/remediation waves settle, re-run `pnpm harness plan-check` if any public signature or frontmatter symbol changed, and record any non-blocking declined/residual items for the closeout report.
 
 ### Stage 5 — Compounding Learnings & Final Deterministic Gate Sequence
 
@@ -129,7 +129,7 @@ Stage 6: Git Commit, Optional Push/PR & <promise>DONE</promise>
 
 1. Update the EARS specification frontmatter from `status: proposed` to `status: accepted`.
 2. Run `pnpm harness learn`. If recurring friction clusters (`route_miss`, `verify_failure`, `guard_escalation`) or review gate escapes exist, promote them into `agent-patterns/*.md`, `DETERMINISTIC_TRIAGE_RULES`, `ALLOWLIST`, AST/graph gates, or an ADR, then run `pnpm harness learn --clear`. If zero friction clusters exist, proceed directly to step 3.
-3. Run the **Final Deterministic Gate Sequence** (max 3 repair attempts per gate before escalating) after all file edits are complete:
+3. Run the **Final Deterministic Gate Sequence** (max 3 repair attempts per gate before escalating) **once** after all review/post-fix and learning edits have landed (do NOT run `harness mutate --strict` or `--diff` earlier while remediation edits are still in flight):
    ```bash
    pnpm harness gc --strict
    pnpm harness ontology check --strict

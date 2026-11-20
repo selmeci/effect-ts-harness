@@ -243,7 +243,7 @@ const checkHookTimeouts = (
               })
             }
             if (h.type === "command" && h.command !== undefined) {
-              const cmdMatch = /index\.ts\s+(guard|done)\b/.exec(h.command)
+              const cmdMatch = /(?:index|hook-entry)\.ts\b[\s\S]*?\b(guard|done)\b/.exec(h.command)
               if (cmdMatch !== null) {
                 const subcommand = cmdMatch[1]!
                 const hasFailClosedExit = h.command.includes("||") && /\bexit\s+2\b/.test(h.command)
@@ -485,6 +485,20 @@ const checkDocBannedOrPhantomTech = (
           location: relPath,
           message: `Claude Code skill "${relPath}" specifies invalid Agent model "flash" — use "haiku" or "sonnet" for Claude Code Agent tool dispatches.`,
           action: `Replace model: "flash" with model: "haiku" or "sonnet" in "${relPath}".`,
+        })
+        break
+      }
+      if (
+        relPath.startsWith("adapters/claude-code/skills/resolving-effect-review-feedback/") &&
+        /\b(?:swarm\s+workers|invoke_subagent)\b/.test(line) &&
+        !negationRe.test(line)
+      ) {
+        findings.push({
+          kind: "doc-banned-or-phantom-tech",
+          nodeId: `${relPath}:claude-antigravity-terminology`,
+          location: relPath,
+          message: `Claude Code skill "${relPath}" leaks Antigravity terminology ("swarm workers" / "invoke_subagent") — use Claude Code Agent tool terminology.`,
+          action: `Replace "swarm workers" / "invoke_subagent" with Claude Code Agent tool terminology in "${relPath}".`,
         })
         break
       }

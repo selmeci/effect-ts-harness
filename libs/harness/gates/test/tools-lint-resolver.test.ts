@@ -452,4 +452,44 @@ describe("tools/oxlint/syntax-bans.js & tools/node-ts-resolver.mjs (S-4.1, S-6.1
     )
     expect(out).toContain("CLOSURE_OK")
   })
+
+  it("SPEC-0022: @harness/gates/policy and @harness/infra/hook-io resolve cleanly without loading effect barrel or typescript", () => {
+    const repoRoot = dirname(dirname(fileURLToPath(resolverUrl)))
+    const resolverRelPath = "./tools/node-ts-resolver.mjs"
+    const loaderSrc = `
+      export async function resolve(specifier, context, nextResolve) {
+        if (specifier === "effect" || specifier === "typescript") {
+          throw new Error(
+            "FORBIDDEN_IMPORT: " + specifier + " (from " + (context.parentURL ?? "") + ")"
+          );
+        }
+        const res = await nextResolve(specifier, context);
+        if (
+          res.url.includes("/node_modules/typescript/") ||
+          res.url.endsWith("/effect/dist/index.js")
+        ) {
+          throw new Error(
+            "FORBIDDEN_RESOLVED_IMPORT: " + specifier + " -> " + res.url + " (from " + (context.parentURL ?? "") + ")"
+          );
+        }
+        return res;
+      }
+    `
+    const script = `
+      import { register } from "node:module";
+      register("data:text/javascript," + encodeURIComponent(${JSON.stringify(loaderSrc)}));
+      const policy = await import("@harness/gates/policy");
+      const hookIo = await import("@harness/infra/hook-io");
+      if (typeof policy.classifyCommand !== "function" || typeof hookIo.findWorkspaceRootLite !== "function") {
+        throw new Error("MISSING_EXPORTS");
+      }
+      process.stdout.write("LIGHTWEIGHT_CLOSURE_OK");
+    `
+    const out = execFileSync(
+      process.execPath,
+      ["--import", join(repoRoot, resolverRelPath), "--input-type=module", "-e", script],
+      { cwd: repoRoot, encoding: "utf8" },
+    )
+    expect(out).toContain("LIGHTWEIGHT_CLOSURE_OK")
+  })
 })

@@ -1,9 +1,27 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import * as path from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
+import { vi } from "vitest"
+
+const astGrepParseSpy = vi.hoisted(() => ({
+  calls: [] as Array<string>,
+}))
+
+vi.mock("@ast-grep/napi", () =>
+  vi.importActual<typeof import("@ast-grep/napi")>("@ast-grep/napi").then((actual) => ({
+    ...actual,
+    parse: (lang: Parameters<typeof actual.parse>[0], src: string) => {
+      astGrepParseSpy.calls.push(src)
+      return actual.parse(lang, src)
+    },
+  })),
+)
 import {
   buildWorkspaceFnIndex,
+  findActiveWorkspaceStubs,
   indexEffectFnsInFile,
   validateUniqueSpanNames,
 } from "../src/fn-index.js"
@@ -626,7 +644,9 @@ describe("Effect.fn syntactic index", () => {
         type: "ImportDeclaration",
         importKind: "value",
         source: { type: "Literal", value: "effect" },
-        specifiers: [{ type: "ImportNamespaceSpecifier", local: { type: "Identifier", name: "Fx" } }],
+        specifiers: [
+          { type: "ImportNamespaceSpecifier", local: { type: "Identifier", name: "Fx" } },
+        ],
       })
 
       // Fx.Effect.runSync(...)
@@ -679,4 +699,154 @@ describe("Effect.fn syntactic index", () => {
       expect(reports[2]?.message).toContain("unscoped-effect-run")
     }
   })
+
+  it.effect(
+    "findActiveWorkspaceStubs matches buildWorkspaceFnIndex active-stub extraction across stub, comment-only, Effect.fn-without-stub, and non-Effect files",
+    () =>
+      Effect.acquireUseRelease(
+        Effect.sync(() => mkdtempSync(path.join(tmpdir(), "fn-index-stubs-"))),
+        (tempRoot) =>
+          Effect.gen(function* () {
+            const write = (relPath: string, content: string) => {
+              const abs = path.join(tempRoot, relPath)
+              mkdirSync(path.dirname(abs), { recursive: true })
+              writeFileSync(abs, content, "utf8")
+            }
+
+            // 1. Active stub via stub<A, E, R>() and Contract.stub() alongside non-stub Effect.fn
+            write(
+              "libs/alpha/domain/package.json",
+              JSON.stringify({ name: "@test/alpha-domain", nx: { tags: ["type:domain"] } }),
+            )
+            write(
+              "libs/alpha/domain/src/stubbed.ts",
+              `
+                // FN_INDEX_PARITY_TEST_MARKER
+                import { Effect } from "effect"
+                import * as Contract from "@harness/contract"
+                import { stub } from "@harness/contract"
+                export const pendingOne = Effect.fn("Alpha.pendingOne")(function* (id: string) {
+                  return yield* stub<string, never, never>(id)
+                })
+                export const pendingTwo = Effect.fn("Alpha.pendingTwo")(function* () {
+                  return yield* Contract.stub<number, never, never>()
+                })
+                export const implemented = Effect.fn("Alpha.implemented")(function* () {
+                  return "ok"
+                })
+              `,
+            )
+
+            // 2. Effect.fn with comments/strings mentioning "stub" but no stub() call
+            write(
+              "libs/beta/domain/package.json",
+              JSON.stringify({ name: "@test/beta-domain", nx: { tags: ["type:domain"] } }),
+            )
+            write(
+              "libs/beta/domain/src/comment-only.ts",
+              `
+                // FN_INDEX_PARITY_TEST_MARKER
+                import { Effect } from "effect"
+                // This used to be a stub, now implemented
+                export const ready = Effect.fn("Beta.ready")(function* () {
+                  const note = "not a stub anymore"
+                  return note
+                })
+              `,
+            )
+
+            // 3. Effect.fn without any mention of "stub"
+            write(
+              "libs/gamma/infra/package.json",
+              JSON.stringify({ name: "@test/gamma-infra", nx: { tags: ["type:infra"] } }),
+            )
+            write(
+              "libs/gamma/infra/src/no-stub.ts",
+              `
+                // FN_INDEX_PARITY_TEST_MARKER
+                import { Effect } from "effect"
+                export const run = Effect.fn("Gamma.run")(function* () {
+                  return 42
+                })
+              `,
+            )
+
+            // 4. Non-Effect file mentioning "stub" in comment/identifier
+            write(
+              "libs/delta/contract/package.json",
+              JSON.stringify({ name: "@test/delta-contract", nx: { tags: ["type:contract"] } }),
+            )
+            write(
+              "libs/delta/contract/src/non-effect.ts",
+              `
+                // FN_INDEX_PARITY_TEST_MARKER
+                // stub helper type only, plain constant export
+                export const stubLabel = "stub"
+              `,
+            )
+
+            // 5. App file with active stub
+            write(
+              "apps/sample-app/src/main.ts",
+              `
+                // FN_INDEX_PARITY_TEST_MARKER
+                import { Effect } from "effect"
+                import { stub } from "@harness/contract"
+                export const boot = Effect.fn("App.boot")(function* () {
+                  return yield* stub<void, never, never>()
+                })
+              `,
+            )
+
+            astGrepParseSpy.calls = []
+            const activeStubs = yield* findActiveWorkspaceStubs(tempRoot, testHostIo)
+            // REQ-2.2: AST parse is called ONLY for files containing both "Effect.fn" and "stub"
+            // (stubbed.ts, comment-only.ts, and main.ts = 3 calls; no-stub.ts and non-effect.ts = 0 calls)
+            const parsedInTemp = astGrepParseSpy.calls.filter((s) =>
+              s.includes("FN_INDEX_PARITY_TEST_MARKER"),
+            )
+            expect(parsedInTemp).toHaveLength(3)
+            expect(parsedInTemp.every((s) => s.includes("Effect.fn") && s.includes("stub"))).toBe(
+              true,
+            )
+            expect(parsedInTemp.some((s) => s.includes("Gamma.run"))).toBe(false)
+            expect(parsedInTemp.some((s) => s.includes("stubLabel"))).toBe(false)
+
+            const fullIndex = yield* buildWorkspaceFnIndex(tempRoot, testHostIo)
+            const expectedFromIndex = Array.from(fullIndex.bySpanName.values())
+              .filter((fn) => fn.isStub)
+              .map((fn) => fn.spanName)
+
+            expect(activeStubs).toEqual(["Alpha.pendingOne", "Alpha.pendingTwo", "App.boot"])
+            expect(activeStubs).toEqual(expectedFromIndex)
+
+            // Verify indexEffectFnsInFile early-return on non-Effect files
+            expect(
+              indexEffectFnsInFile(
+                "libs/delta/contract/src/non-effect.ts",
+                `export const stubLabel = "stub"`,
+                "contract",
+              ),
+            ).toEqual([])
+          }),
+        (tempRoot) =>
+          Effect.sync(() => {
+            rmSync(tempRoot, { recursive: true, force: true })
+          }),
+      ),
+  )
+
+  it.effect(
+    "findActiveWorkspaceStubs matches buildWorkspaceFnIndex active stubs on the live workspace",
+    () =>
+      Effect.gen(function* () {
+        const activeStubs = yield* findActiveWorkspaceStubs(repoRoot, testHostIo)
+        const fullIndex = yield* buildWorkspaceFnIndex(repoRoot, testHostIo)
+        const expectedFromIndex = Array.from(fullIndex.bySpanName.values())
+          .filter((fn) => fn.isStub)
+          .map((fn) => fn.spanName)
+
+        expect(activeStubs).toEqual(expectedFromIndex)
+      }),
+  )
 })

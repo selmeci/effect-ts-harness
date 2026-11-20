@@ -165,9 +165,8 @@ export const isIsolatedExternalWorkspace = (
   if (hostIo.existsSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"))) {
     return false
   }
-  const explicitEnvUrl =
-    process.env.OMNIGRAPH_URL && process.env.OMNIGRAPH_URL !== "http://127.0.0.1:8080"
-  if (explicitEnvUrl) {
+  const explicitEnvUrl = process.env.OMNIGRAPH_URL?.trim()
+  if (explicitEnvUrl && explicitEnvUrl !== "http://127.0.0.1:8080") {
     return false
   }
   return (

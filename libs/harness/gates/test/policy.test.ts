@@ -1384,9 +1384,74 @@ describe("guard policy", () => {
       "rg --files libs/",
       "rg -f tsconfig.json libs/",
       "git grep '\\.env' -- libs",
+      "git ls-files",
+      "git ls-files libs/harness/gates",
+      "git ls-remote origin main",
       "pnpm --filter @harness/gates -C libs/harness/gates exec vitest",
+      "TMPDIR=/home/roan/.cache/tmp NX_SOCKET_DIR=/home/roan/.cache/tmp/nx NODE_COMPILE_CACHE=/home/roan/.cache/node NX_DAEMON=false FORCE_COLOR=0 NO_COLOR=1 CI=true pnpm nx run @harness/gates:test",
+      "NX_DAEMON=true FORCE_COLOR=3 NO_COLOR=0 pnpm nx test",
+      "HARNESS_REQUIRE_OLLAMA=1 pnpm test",
     ]) {
       expect(classifyCommand(allowedCmd), allowedCmd).toBe("allow")
     }
+
+    expect(classifyCommand("git ls-files-evil")).toBe("escalate")
+    expect(classifyCommand("git ls-remote-evil")).toBe("escalate")
+    expect(classifyCommand("git ls-remote origin main ; rm -rf /")).toBe("deny")
+    expect(
+      classifyCommand(
+        "TMPDIR=/home/roan/.cache/tmp git status && TMPDIR=/home/roan/.cache/tmp git push origin main",
+      ),
+    ).toBe("escalate")
+    expect(
+      classifyCommand("node ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard"),
+    ).toBe("deny")
+    expect(
+      explainCommandDenyRule(
+        "node ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard",
+      )?.ruleId,
+    ).toBe("guard-self-invocation")
+
+    for (const escalatedCmd of [
+      "git ls-remote --upload-pack=bash .",
+      "git ls-remote --upload-pack='sh -c id' .",
+      "git ls-remote -u bash .",
+      "git ls-remote 'ext::sh -c id'",
+    ]) {
+      expect(classifyCommand(escalatedCmd), escalatedCmd).toBe("escalate")
+    }
+
+    for (const nonAllowedEnvCmd of [
+      "TMPDIR=/tmp/../etc pnpm nx test",
+      "TMPDIR=relative/path pnpm nx test",
+      "NX_SOCKET_DIR=nx/sock pnpm nx test",
+      "TMPDIR=/tmp/$(whoami) pnpm nx test",
+      'TMPDIR="/tmp/ok" pnpm nx test',
+      "TMPDIR='/tmp/ok' pnpm nx test",
+      "NODE_OPTIONS=--inspect pnpm nx test",
+      "GIT_COMMON_DIR=/tmp/g pnpm nx test",
+      "GIT_DIR=/tmp/g pnpm nx test",
+      "HARNESS_STATE_DIR=/tmp/h pnpm nx test",
+      "HARNESS_SUBAGENT=1 pnpm harness done",
+      "HARNESS_WORKTREE_ID=fake pnpm harness done",
+      "HARNESS_GIT_BRANCH=main pnpm harness done",
+      "CI=${HARNESS_STATE_DIR:=/tmp/evil} pnpm test",
+      "TMPDIR=/repo/.git/hooks pnpm test",
+      "NODE_COMPILE_CACHE=/repo/repos/effect pnpm test",
+      "TMPDIR=/tmp/.harness pnpm nx test",
+      "TMPDIR=/tmp/.env pnpm nx test",
+      "TMPDIR=/tmp/.git/harness pnpm nx test",
+      "TMPDIR=/tmp/secret pnpm nx test",
+      "TMPDIR=/tmp/ok ",
+      "NX_DAEMON=maybe pnpm nx test",
+      "FORCE_COLOR=9 pnpm nx test",
+      "NO_COLOR=2 pnpm nx test",
+    ]) {
+      expect(isCommandAllowed(nonAllowedEnvCmd), nonAllowedEnvCmd).toBe(false)
+      expect(classifyCommand(nonAllowedEnvCmd), nonAllowedEnvCmd).not.toBe("allow")
+    }
+
+    expect(classifyCommand("NX_SKIP_NX_CACHE=1 pnpm nx test")).toBe("deny")
+    expect(classifyCommand("TMPDIR=/home/roan/.cache/tmp rm -rf /")).toBe("deny")
   })
 })

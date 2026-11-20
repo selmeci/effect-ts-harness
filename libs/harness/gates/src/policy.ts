@@ -49,6 +49,8 @@ export const ALLOWLIST: ReadonlyArray<string> = [
   "git log",
   "git branch",
   "git rev-parse",
+  "git ls-files",
+  "git ls-remote",
   "git checkout",
   "git switch",
   "git add",
@@ -133,7 +135,7 @@ export const SECRET_FILE_PATTERN: RegExp =
  * Hooks invoke the guard directly from the IDE, never through an agent shell command.
  * Flags (and flag values such as `--cwd /tmp`) or `--` before `guard` are tolerated. */
 export const GUARD_SELF_INVOCATION_PATTERN: RegExp =
-  /(?:(?:^|\s)harness|harness-cli\/src\/index\.ts)(?:\s+(?:--(?=\s|$)|-\S+(?:\s+(?!guard\b)[^\s;|&)<>]+)?))*\s+guard\b/
+  /(?:(?:^|\s)harness|harness-cli\/src\/(?:index|hook-entry)\.ts)(?:\s+(?:--(?=\s|$)|-\S+(?:\s+(?!guard\b)[^\s;|&)<>]+)?))*\s+guard\b/
 
 /** REQ-1.2: git commands that irreversibly discard work. Always a human decision —
  * clef rated `git checkout -- .` only destructive=0.26 (would auto-allow). */
@@ -187,6 +189,15 @@ export const DESTRUCTIVE_ARGUMENT_PATTERNS: ReadonlyArray<GuardPatternRule> = [
   {
     pattern: /\bomnigraph\s+cluster\s+(?:reset|destroy|rm)(?:\s|$)/,
     reason: "omnigraph cluster reset/destroy/rm destroys cluster state",
+  },
+  {
+    pattern:
+      /\bgit\s+(?:\S+\s+)*(?:ls-remote|fetch|clone|archive|push)\b.*(?:\s(?:--upload-pack|--receive-pack|--exec)(?:=|\s|$)|\bext::)/,
+    reason: "git remote inspection/transfer with custom upload-pack/receive-pack/exec/ext:: binary",
+  },
+  {
+    pattern: /\bgit\s+(?:\S+\s+)*ls-remote\b.*\s-u(?:=|\s|$)/,
+    reason: "git ls-remote with -u (--upload-pack) custom binary",
   },
 ]
 
@@ -254,14 +265,45 @@ const containsToken = (command: string, token: string): boolean =>
 const matchesAny = (command: string, rules: ReadonlyArray<GuardPatternRule>): boolean =>
   rules.some((rule) => rule.pattern.test(command))
 
+const SAFE_HARNESS_ENV_VALIDATORS: Readonly<Record<string, RegExp>> = {
+  HARNESS_PLAN_CHECK: /^(?:0|1|true|false)$/,
+  HARNESS_REQUIRE_OLLAMA: /^[01]$/,
+  HARNESS_LOG_LEVEL: /^(?:debug|info|warn|error)$/,
+}
+
+const SAFE_ENV_PATH_PATTERN = /^\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/
+const UNSAFE_ENV_PATH_PATTERN =
+  /\.\.|\/\.env|\/\.git(?:\/|$)|\/\.harness|secret|\/repos\/(?:effect|alchemy)(?:\/|$)|\/tools\/|\/adapters\//i
+
+const isSafeLeadingEnvAssignment = (name: string, value: string): boolean => {
+  if (/[\s;|&]/.test(value)) return false
+  if (name === "CI" || name === "NX_INTERACTIVE") return /^(?:true|false|0|1)$/.test(value)
+  if (Object.hasOwn(SAFE_HARNESS_ENV_VALIDATORS, name)) {
+    return SAFE_HARNESS_ENV_VALIDATORS[name]!.test(value)
+  }
+  if (name === "NX_DAEMON") return /^(?:true|false|0|1)$/.test(value)
+  if (name === "FORCE_COLOR") return /^[0-3]$/.test(value)
+  if (name === "NO_COLOR") return /^[01]$/.test(value)
+  if (name === "TMPDIR" || name === "NX_SOCKET_DIR" || name === "NODE_COMPILE_CACHE") {
+    return SAFE_ENV_PATH_PATTERN.test(value) && !UNSAFE_ENV_PATH_PATTERN.test(value)
+  }
+  return false
+}
+
+const stripSafeLeadingEnvVars = (command: string): string => {
+  let rest = command.trim()
+  while (true) {
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)=([^\s;|&]+)\s+([\s\S]*)$/.exec(rest)
+    if (match === null) break
+    const [, name, value, tail] = match
+    if (!isSafeLeadingEnvAssignment(name!, value!)) break
+    rest = tail!.trim()
+  }
+  return rest
+}
+
 export const isCommandAllowed = (command: string): boolean => {
-  const stripped = command
-    .trim()
-    .replace(
-      /^(?:(?:CI|NX_INTERACTIVE|(?!HARNESS_STATE_DIR=|HARNESS_DISABLE_LIVE_TELEMETRY=|HARNESS_TEST_ISOLATION=|HARNESS_ALLOW_SKIP_NX_CACHE=)HARNESS_[A-Z0-9_]+)=[^\s;|&]+\s+)+/,
-      "",
-    )
-  const trimmed = stripped.trim()
+  const trimmed = stripSafeLeadingEnvVars(command)
   if (trimmed === "") return false
   return ALLOWLIST.some((prefix) => {
     if (trimmed === prefix) return true
@@ -538,7 +580,7 @@ export const classifyCommand = (command: string): GuardVerdict => {
           (p) =>
             p.cmd.length > 0 &&
             (isCommandAllowed(p.cmd) || isAllowedPipedSegment(p.cmd, p.unquoted)) &&
-            !/^\s*git\s+(?:add|commit|push)\b/.test(p.cmd),
+            !/^\s*git\s+(?:add|commit|push)\b/.test(stripSafeLeadingEnvVars(p.cmd)),
         )
       ) {
         return "allow"

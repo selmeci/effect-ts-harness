@@ -35,19 +35,19 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
 
     const sessionHook = hooks.hooks.SessionStart[0].hooks[0]
     expect(sessionHook.command).toBe(
-      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts session",
+      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts session",
     )
 
     const preHook = hooks.hooks.PreToolUse[0]
     expect(preHook.matcher).toBe("Bash")
     expect(preHook.hooks[0].command).toBe(
-      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts guard || exit 2",
+      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard || exit 2",
     )
 
     const postHook = hooks.hooks.PostToolUse[0]
     expect(postHook.matcher).toBe("Edit|Write|MultiEdit")
     expect(postHook.hooks[0].command).toBe(
-      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts ingest",
+      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts ingest",
     )
 
     const stopHook = hooks.hooks.Stop[0].hooks[0]
@@ -73,7 +73,7 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
       )
 
       const claudeGuardCmd = (claudeHooks.hooks.PreToolUse[0].hooks[0].command as string).replace(
-        "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts",
+        "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts",
         `node ${JSON.stringify(brokenEntry)}`,
       )
       const claudeGuardRes = spawnSync("/bin/sh", ["-c", claudeGuardCmd], { encoding: "utf8" })
@@ -89,7 +89,7 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
       const agyGuardCmd = (
         agyHooks["effect-harness"].PreToolUse[0].hooks[0].command as string
       ).replace(
-        "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts",
+        "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/hook-entry.ts",
         `node ${JSON.stringify(brokenEntry)}`,
       )
       const agyGuardRes = spawnSync("/bin/sh", ["-c", agyGuardCmd], { encoding: "utf8" })
@@ -235,14 +235,18 @@ describe("Antigravity adapter & plugin configuration", () => {
     const hooks = JSON.parse(readFileSync(resolve(pluginDir, "hooks.json"), "utf8"))
     const spec = hooks["effect-harness"]
     expect(Object.keys(spec)).toEqual(["PreInvocation", "PreToolUse", "PostToolUse", "Stop"])
-    expect(spec.PreInvocation[0].command).toContain("session --format=antigravity")
+    expect(spec.PreInvocation[0].command).toContain("hook-entry.ts session --format=antigravity")
     expect(spec.PreToolUse[0].matcher).toBe("run_command")
-    expect(spec.PreToolUse[0].hooks[0].command).toContain("guard --format=antigravity")
+    expect(spec.PreToolUse[0].hooks[0].command).toContain(
+      "hook-entry.ts guard --format=antigravity",
+    )
     expect(spec.PostToolUse[0].matcher).toBe(
       "replace_file_content|multi_replace_file_content|write_to_file",
     )
-    expect(spec.PostToolUse[0].hooks[0].command).toContain("ingest --format=antigravity")
-    expect(spec.Stop[0].command).toContain("done --format=antigravity")
+    expect(spec.PostToolUse[0].hooks[0].command).toContain(
+      "hook-entry.ts ingest --format=antigravity",
+    )
+    expect(spec.Stop[0].command).toContain("index.ts done --format=antigravity")
   })
 
   it("executes Antigravity PreToolUse guard hook from plugin directory with toolCall stdin", () => {
@@ -835,6 +839,72 @@ describe("Antigravity adapter & plugin configuration", () => {
     }
 
     expect(failures).toEqual([])
+  })
+
+  it("enforces SPEC-0022 REQ-4.1 and REQ-4.2 swarm and review orchestration speedups across both adapters", () => {
+    const adapterRoots = [
+      { name: "antigravity", dir: resolve(pluginDir, "skills"), monitorToken: "swarm-monitor" },
+      {
+        name: "claude-code",
+        dir: resolve(repoRoot, "adapters/claude-code/skills"),
+        monitorToken: "monitoring workers",
+      },
+    ] as const
+
+    for (const adapter of adapterRoots) {
+      const codeReview = readFileSync(resolve(adapter.dir, "effect-code-review/SKILL.md"), "utf8")
+      expect(codeReview, `${adapter.name} effect-code-review`).toContain("harness_git_diff")
+      expect(codeReview, `${adapter.name} effect-code-review`).toContain("statOnly: true")
+      expect(codeReview, `${adapter.name} effect-code-review`).toContain("baseRef")
+      expect(codeReview, `${adapter.name} effect-code-review`).not.toContain("[P0\n")
+      expect(codeReview, `${adapter.name} effect-code-review`).not.toMatch(/^\|[^\n]*`\[P0\s*\|/m)
+
+      const dispatchReviewers = readFileSync(
+        resolve(adapter.dir, "executing-effect-stubs/references/dispatch-reviewers.md"),
+        "utf8",
+      )
+      expect(dispatchReviewers, `${adapter.name} dispatch-reviewers`).toContain("harness_git_diff")
+      expect(dispatchReviewers, `${adapter.name} dispatch-reviewers`).toContain("statOnly: true")
+      expect(dispatchReviewers, `${adapter.name} dispatch-reviewers`).toContain(
+        "Domain-Owned Changed Files",
+      )
+      expect(dispatchReviewers, `${adapter.name} dispatch-reviewers`).toContain(
+        "Base Ref: <baseRef>",
+      )
+
+      const resolvingFeedback = readFileSync(
+        resolve(adapter.dir, "resolving-effect-review-feedback/SKILL.md"),
+        "utf8",
+      )
+      for (const token of [
+        "> 15",
+        "2+",
+        "df -ih /tmp",
+        "NX_SOCKET_DIR",
+        "pnpm --filter <pkg> run typecheck && lint && test",
+      ]) {
+        expect(
+          resolvingFeedback,
+          `${adapter.name} resolving-effect-review-feedback missing ${token}`,
+        ).toContain(token)
+      }
+      if (adapter.name === "claude-code") {
+        expect(resolvingFeedback).not.toContain("swarm workers")
+        expect(resolvingFeedback).not.toContain("invoke_subagent")
+      }
+
+      for (const rel of ["effect-lfg/SKILL.md", "executing-effect-stubs/SKILL.md"] as const) {
+        const content = readFileSync(resolve(adapter.dir, rel), "utf8")
+        for (const token of [
+          "df -ih /tmp",
+          "NX_SOCKET_DIR",
+          "pnpm --filter <pkg> run typecheck && lint && test",
+          adapter.monitorToken,
+        ]) {
+          expect(content, `${adapter.name} ${rel} missing ${token}`).toContain(token)
+        }
+      }
+    }
   })
 
   it("enforces Phase 5 Step 0 metric sync, stamp-safe ordering, and CANONICAL_MCP_TOOL_NAMES MCP catalog across README.md and adapter READMEs", () => {

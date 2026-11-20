@@ -3,6 +3,7 @@ import { match } from "ts-pattern"
 import { CliCommandInput, CliCommandName, CliCommandNotFoundError } from "@harness/contract"
 import { COMMANDS, type CliEnv, type CliResult } from "./daemon-and-omnigraph.service.js"
 import { handleGuard, handleRoute } from "./guard-and-route.command.js"
+import { tryFastPathIngest } from "./ingest-fastpath.js"
 import { tryReadPreInvocationSessionCache } from "./session-fastpath.js"
 
 export { CliCommandInput, CliCommandName, CliCommandNotFoundError }
@@ -205,11 +206,16 @@ export const makeLiveCliCommandDescriptors = (
     name: CliCommandName.make("ingest"),
     summary: "Ingest runtime trace NDJSON events into Omnigraph.",
     execute: (args) =>
-      lazyImportCliHandler(
-        "ingest",
-        () => import("./session-learn-report.command.js"),
-        (m) => m.handleIngest(args, options),
-      ),
+      match(tryFastPathIngest(args, options))
+        .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+        .with({ _tag: "None" }, () =>
+          lazyImportCliHandler(
+            "ingest",
+            () => import("./session-learn-report.command.js"),
+            (m) => m.handleIngest(args, options),
+          ),
+        )
+        .exhaustive(),
   },
   {
     name: CliCommandName.make("session"),

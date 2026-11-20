@@ -302,10 +302,11 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       }
       collect(JSON.parse(rawJson))
       return commands.map((cmd) => {
-        const idx = cmd.indexOf("index.ts ")
+        const marker = cmd.includes("hook-entry.ts ") ? "hook-entry.ts " : "index.ts "
+        const idx = cmd.indexOf(marker)
         expect(idx).toBeGreaterThan(-1)
         return cmd
-          .slice(idx + "index.ts ".length)
+          .slice(idx + marker.length)
           .replace(/\s+\|\|\s+[\s\S]*$/, "")
           .trim()
           .split(/\s+/)

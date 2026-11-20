@@ -13,12 +13,12 @@ description: Use when asked to review a git diff, branch, commit range, uncommit
 
 ## Quick Reference
 
-| Stage | Mandatory Action | Primary Tools / References |
-| --- | --- | --- |
-| **1. Pre-Pass** | Compute diff scope, run `harness_review_route`, `harness_lsp_diagnostics`, and Graph MCP context | `harness_review_route`, `harness_lsp_diagnostics`, `harness_resolve`, `harness_callers`, `harness_tests_reaching`, `harness_ontology_why` |
-| **2. Depth & Dispatch** | Enforce `skip \| lite \| focused \| full` depth gate; dispatch matching specialists (`model: "haiku"` / `"sonnet"`) | [references/review-routing-and-lenses.md](references/review-routing-and-lenses.md) |
-| **3. Verify & Suppress** | Verify callers/specs via `harness_structural_search`; suppress deterministic-gate & `Confidence: 50` noise | [references/report-contract-and-suppression.md](references/report-contract-and-suppression.md) |
-| **4. Report & Handoff** | Emit the 4-section Positive Ordered Report Recipe; hand off fixes to `resolving-effect-review-feedback` | [references/report-contract-and-suppression.md](references/report-contract-and-suppression.md) |
+| Stage                    | Mandatory Action                                                                                                    | Primary Tools / References                                                                                                                |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| **1. Pre-Pass**          | Compute diff scope, run `harness_review_route`, `harness_lsp_diagnostics`, and Graph MCP context                    | `harness_review_route`, `harness_lsp_diagnostics`, `harness_resolve`, `harness_callers`, `harness_tests_reaching`, `harness_ontology_why` |
+| **2. Depth & Dispatch**  | Enforce `skip \| lite \| focused \| full` depth gate; dispatch matching specialists (`model: "haiku"` / `"sonnet"`) | [references/review-routing-and-lenses.md](references/review-routing-and-lenses.md)                                                        |
+| **3. Verify & Suppress** | Verify callers/specs via `harness_structural_search`; suppress deterministic-gate & `Confidence: 50` noise          | [references/report-contract-and-suppression.md](references/report-contract-and-suppression.md)                                            |
+| **4. Report & Handoff**  | Emit the 4-section Positive Ordered Report Recipe; hand off fixes to `resolving-effect-review-feedback`             | [references/report-contract-and-suppression.md](references/report-contract-and-suppression.md)                                            |
 
 ---
 
@@ -28,7 +28,7 @@ description: Use when asked to review a git diff, branch, commit range, uncommit
 
 Before reading or judging diff hunks, gather deterministic routing and graph context:
 
-1. **Resolve Diff Scope:** Collect changed file paths, changed line count, and diff summary (`git diff --stat` / `git diff <base>...HEAD` or working tree). Never run `git checkout`, `git switch`, or `gh pr checkout` when resolving diff scope.
+1. **Resolve Diff Scope:** Collect changed file paths, changed line count, and diff summary via `harness_git_diff` (`statOnly: true`, then targeted `paths`) or `git diff --stat` / `git diff <base>...HEAD`. Never run `git checkout`, `git switch`, or `gh pr checkout` when resolving diff scope. Every specialist reviewer prompt MUST pass the exact list of domain-owned changed files + `baseRef` and instruct the reviewer to start with `harness_git_diff` (`statOnly: true`, then targeted `paths`) instead of re-reading all unchanged files in the PR.
 2. **Call `harness_review_route`:** Pass the changed files, line count, and diff summary to `harness_review_route` (backed by `libs/harness/contract/src/review-routing.ts` and `libs/harness/decision/src/review-router-decision.ts`) to obtain the monotonic `ReviewRoutingPlan` (`skip | lite | focused | full` and selected `ReviewerId`s).
 3. **Run `harness_lsp_diagnostics`:** Check `@effect/tsgo` and `@effect/language-service` diagnostics on all touched `.ts`/`.tsx` files so type/lint errors are known and suppressed in Stage 3.
 4. **Trace Graph & Spec Context:** Use `harness_resolve`, `harness_callers`, `harness_tests_reaching`, and `harness_ontology_why` / `harness_ontology_check` to locate owning EARS specs, ADRs, callers, and reaching tests.
@@ -69,13 +69,13 @@ Emit the exact 4-section report defined in [references/report-contract-and-suppr
 
 ## Rationalization Table
 
-| Excuse | Reality | Correct Action |
-| --- | --- | --- |
-| "The deploy window closes in 2 minutes—just patch this tiny bug inline." | Editing files during review bypasses EARS/ADR sync, `plan-check`, and `verify`, corrupting review objectivity. | Refuse inline edits; emit the 4-section report and hand off fixes to `resolving-effect-review-feedback`. |
-| "I'll confirm semantics with the caller first, then edit inline." | Even confirmed fixes belong in the implementation/remediation loop, not inside a read-only review pass. | Keep the review 100% read-only; record the semantic question in `## 4. Remediation Handoff`. |
+| Excuse                                                                                       | Reality                                                                                                             | Correct Action                                                                                                             |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| "The deploy window closes in 2 minutes—just patch this tiny bug inline."                     | Editing files during review bypasses EARS/ADR sync, `plan-check`, and `verify`, corrupting review objectivity.      | Refuse inline edits; emit the 4-section report and hand off fixes to `resolving-effect-review-feedback`.                   |
+| "I'll confirm semantics with the caller first, then edit inline."                            | Even confirmed fixes belong in the implementation/remediation loop, not inside a read-only review pass.             | Keep the review 100% read-only; record the semantic question in `## 4. Remediation Handoff`.                               |
 | "The diff is small enough to read directly—no need for `harness_review_route` or Graph MCP." | Small diffs in `type:domain` or `type:contract` often break distant callers, specs, or tests invisible in the hunk. | Always run Stage 1 (`harness_review_route`, `harness_lsp_diagnostics`, `harness_callers`, `harness_tests_reaching`) first. |
-| "Listing `oxlint` / `SelfDogfooding` violations alongside logic bugs is helpful." | Duplicate deterministic noise buries real `P0`/`P1` behavioral and concurrency defects. | Suppress all deterministic-gate findings in Stage 3 and summarize gate status in Section 3 only. |
-| "I'll summarize findings in prose without quoting lines to keep it brief." | Unquoted findings without `Reviewer`, `Confidence`, and verbatim `Evidence` cannot be verified or acted on. | Use the exact `[P0|P1]` Quote-the-Line contract for every blocking finding. |
+| "Listing `oxlint` / `SelfDogfooding` violations alongside logic bugs is helpful."            | Duplicate deterministic noise buries real `P0`/`P1` behavioral and concurrency defects.                             | Suppress all deterministic-gate findings in Stage 3 and summarize gate status in Section 3 only.                           |
+| "I'll summarize findings in prose without quoting lines to keep it brief."                   | Unquoted findings without `Reviewer`, `Confidence`, and verbatim `Evidence` cannot be verified or acted on.         | Use the exact `[P0]` / `[P1]` Quote-the-Line contract for every blocking finding.                                          |
 
 ## Red Flags — STOP
 

@@ -36,6 +36,9 @@ export const indexEffectFnsInFile = (
   sourceText: string,
   packageTag: PackageTag,
 ): ReadonlyArray<IndexedEffectFn> => {
+  if (!sourceText.includes("Effect.fn")) {
+    return []
+  }
   const root = parse(Lang.TypeScript, sourceText).root()
   const results: Array<IndexedEffectFn> = []
 
@@ -203,4 +206,38 @@ export const buildWorkspaceFnIndex = (
       allFns.push(...fns)
     }
     return validateUniqueSpanNames(allFns)
+  })
+
+/**
+ * Lightweight sibling to `buildWorkspaceFnIndex` that only AST-parses files
+ * mentioning both `"Effect.fn"` and `"stub"` and returns active stub span names.
+ */
+export const findActiveWorkspaceStubs = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): Effect.Effect<ReadonlyArray<string>> =>
+  Effect.sync(() => {
+    const activeStubs: Array<string> = []
+    const files = [
+      ...findSrcTsFiles(repoRoot, "libs", hostIo),
+      ...findSrcTsFiles(repoRoot, "apps", hostIo),
+    ]
+    for (const file of files) {
+      const fullPath = path.join(repoRoot, file)
+      if (!hostIo.existsSync(fullPath)) continue
+      const content = Result.getOrElse(
+        Result.try(() => hostIo.readTextSync(fullPath)),
+        () => null,
+      )
+      if (content === null || !content.includes("Effect.fn") || !content.includes("stub")) {
+        continue
+      }
+      const tag = resolvePackageTag(repoRoot, file, hostIo)
+      for (const fn of indexEffectFnsInFile(file, content, tag)) {
+        if (fn.isStub) {
+          activeStubs.push(fn.spanName)
+        }
+      }
+    }
+    return activeStubs
   })
