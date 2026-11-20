@@ -47,6 +47,9 @@ describe("Harness decision definitions & fallbacks", () => {
           Effect.provide(makeFailingDecisionModelLayer()),
         )
         expect(guardRes.verdict).toBe("ask")
+        expect(guardRes.reason).toContain("DecisionModel unavailable (")
+        expect(guardRes.reason).toContain("Ollama unreachable")
+        expect(guardRes.reason).toContain("requires human confirmation.")
 
         const routeRes = yield* routeStepWithStatus(
           "Retry failed HTTP requests with exponential backoff",

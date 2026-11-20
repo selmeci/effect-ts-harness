@@ -45,7 +45,7 @@ export const decodePreToolUseStdin = Schema.decodeOption(
   Schema.fromJsonString(PreToolUseStdinSchema),
 )
 
-export const READ_ONLY_TOOL_NAMES = new Set([
+export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   "Read",
   "Glob",
   "Grep",
@@ -59,7 +59,7 @@ export const READ_ONLY_TOOL_NAMES = new Set([
 
 export type GuardVerdictDecision =
   | { readonly verdict: "deny"; readonly reason: string }
-  | { readonly verdict: "ask"; readonly reason: string | undefined }
+  | { readonly verdict: "ask"; readonly reason: string }
   | { readonly verdict: "allow" }
 
 export const verdictRank = (v: GuardVerdictDecision["verdict"]): number =>
@@ -80,7 +80,7 @@ export const formatAllowResult = (isAntigravity: boolean): CliResult => ({
   stderr: "",
 })
 
-export const formatAskResult = (isAntigravity: boolean, reason: string | undefined): CliResult =>
+export const formatAskResult = (isAntigravity: boolean, reason: string): CliResult =>
   isAntigravity
     ? {
         exitCode: 0,
@@ -123,18 +123,72 @@ export const evaluateFileWriteDecision = (filePath: string): GuardVerdictDecisio
       verdict: "deny",
       reason: fileGuard.reason ?? `Blocked file write: ${filePath}`,
     }))
-    .with("ask", () => ({ verdict: "ask", reason: fileGuard.reason }))
+    .with("ask", () => ({
+      verdict: "ask",
+      reason: fileGuard.reason ?? `File write requires human confirmation: ${filePath}`,
+    }))
     .with("allow", () => ({ verdict: "allow" }))
     .exhaustive()
 }
 
-export type ExtractedGuardStdinPayload =
+export type ParsedGuardCliArgs =
+  | { readonly _tag: "Help" }
+  | { readonly _tag: "UnknownFlag"; readonly flag: string }
+  | { readonly _tag: "MissingFlagValue"; readonly flag: string }
   | {
       readonly _tag: "Ok"
+      readonly positionalArgs: ReadonlyArray<string>
+      readonly fileFlag: string | undefined
+    }
+
+export const parseGuardCliArgs = (argsAfterCmd: ReadonlyArray<string>): ParsedGuardCliArgs => {
+  const positionalArgs: Array<string> = []
+  let fileFlag: string | undefined
+  for (let i = 0; i < argsAfterCmd.length; i += 1) {
+    const arg = argsAfterCmd[i]!
+    if (arg === "--help" || arg === "-h") {
+      return { _tag: "Help" }
+    }
+    if (arg === "--format") {
+      if (i + 1 >= argsAfterCmd.length) {
+        return { _tag: "MissingFlagValue", flag: "--format" }
+      }
+      i += 1
+      continue
+    }
+    if (arg.startsWith("--format=")) {
+      continue
+    }
+    if (arg === "--file") {
+      if (i + 1 >= argsAfterCmd.length) {
+        return { _tag: "MissingFlagValue", flag: "--file" }
+      }
+      fileFlag = argsAfterCmd[i + 1]
+      i += 1
+      continue
+    }
+    if (arg.startsWith("--file=")) {
+      fileFlag = arg.slice("--file=".length)
+      continue
+    }
+    if (arg.startsWith("-")) {
+      return { _tag: "UnknownFlag", flag: arg }
+    }
+    positionalArgs.push(arg)
+  }
+  return { _tag: "Ok", positionalArgs, fileFlag }
+}
+
+export type ExtractedGuardStdinPayload =
+  | {
+      readonly _tag: "ReadOnly"
+      readonly isAntigravity: boolean
+    }
+  | {
+      readonly _tag: "Action"
       readonly isAntigravity: boolean
       readonly candidateCmds: ReadonlyArray<string>
       readonly candidatePaths: ReadonlyArray<string>
-      readonly isReadOnlyToolCall: boolean
     }
   | {
       readonly _tag: "Error"
@@ -201,11 +255,8 @@ export const extractGuardStdinPayload = (
           (!isAgStdin || toolInputEmpty)
         if (isReadOnlyToolCall) {
           return {
-            _tag: "Ok" as const,
+            _tag: "ReadOnly" as const,
             isAntigravity,
-            candidateCmds,
-            candidatePaths,
-            isReadOnlyToolCall: true,
           }
         }
         return {
@@ -217,11 +268,10 @@ export const extractGuardStdinPayload = (
       }
 
       return {
-        _tag: "Ok" as const,
+        _tag: "Action" as const,
         isAntigravity,
         candidateCmds,
         candidatePaths,
-        isReadOnlyToolCall: false,
       }
     })
     .exhaustive()

@@ -27,14 +27,14 @@ Choose the dispatch mechanism dynamically based on task topology:
 - **Default — Hub-and-Spoke `invoke_subagent` (1–2 downstream packages or one-shot units):**
   Use `invoke_subagent` (`TypeName: "self"`, `Workspace: "share"`, and `Model: "gemini-4-hydrogen-medium"` if present in the tool's `Model` enum, otherwise `Model: "flash"` or `"inherit"` when the session is already running on Gemini 4 Hydrogen; keep `HARNESS_WORKTREE_ID` unset inside `Workspace: "share"`). It has zero message-board overhead and returns results directly in one turn.
 - **Escalation — Multi-Worker `swarm` (`3+` parallel packages, cross-package author <-> verifier loops, or explicit model pinning):**
-  Verify `/tmp` inode availability before spawning parallel test workers (`df -ih /tmp`), pass explicit `TMPDIR`/`NX_SOCKET_DIR` cleanly when needed, and use `swarm` (`action: "add"`, `name: "<unit>"`, `model: "gemini-4-hydrogen-medium"`, `workspace: "inherit"` with disjoint file ownership and `HARNESS_WORKTREE_ID=<unit>` for package-scoped `pnpm --filter <pkg> run typecheck && lint && test` or `CI=true pnpm nx run <project>:verify` test commands — package workers in `workspace: "inherit"` never run monorepo `plan-check`, `verify`, or `done`). Omit `swarm-monitor` for focused single-wave swarms, and terminate `swarm-monitor` immediately once active implementation/remediation waves settle. Using `workspace: "inherit"` with strict disjoint package ownership ensures edits land directly in the working tree without requiring subagents to run `git commit` before `swarm kill`.
+  Verify `/tmp` inode availability before spawning parallel test workers (`df -ih /tmp`), pass explicit `TMPDIR`/`NX_SOCKET_DIR` cleanly when needed, and use `swarm` (`action: "add"`, `name: "<unit>"`, `model: "gemini-4-hydrogen-medium"`, `workspace: "inherit"` with disjoint file ownership and `HARNESS_WORKTREE_ID=<unit>` for package-scoped `pnpm --filter <pkg> run typecheck && pnpm --filter <pkg> run lint && pnpm --filter <pkg> run test` or `CI=true pnpm nx run <project>:verify` test commands — package workers in `workspace: "inherit"` never run monorepo `plan-check`, `verify`, or `done`). Omit `swarm-monitor` for focused single-wave swarms, and terminate `swarm-monitor` immediately once active implementation/remediation waves settle. Using `workspace: "inherit"` with strict disjoint package ownership ensures edits land directly in the working tree without requiring subagents to run `git commit` before `swarm kill`.
 
 When delegating a unit to an implementer subagent, provide this exact 4-part prompt/brief:
 
 1. **Target Stubs & Files:** Exact file paths and `Effect.fn("SpanName")` stubs to replace.
 2. **EARS Acceptance Clauses:** The `WHEN`, `IF/THEN`, and `WHILE` clauses that must each have a matching `it.effect(...)` test.
 3. **Pattern Reference:** Path to the relevant `agent-patterns/*.md` file (e.g., `agent-patterns/d1-repository.md`, `agent-patterns/durable-object-state.md`, `agent-patterns/event-sourcing.md`).
-4. **Package Gate:** Package-scoped `pnpm --filter <pkg> run typecheck && lint && test` (with explicit `TMPDIR`/`NX_SOCKET_DIR` when needed) to avoid `NX_DAEMON=false` hangs, or `CI=true pnpm nx run <project>:verify` (must pass with 0 active `stub()` calls in that package).
+4. **Package Gate:** Package-scoped `pnpm --filter <pkg> run typecheck && pnpm --filter <pkg> run lint && pnpm --filter <pkg> run test` (with explicit `TMPDIR`/`NX_SOCKET_DIR` when needed) to avoid concurrent Nx daemon/cache lock contention in shared checkouts, or `CI=true pnpm nx run <project>:verify` (must pass with 0 active `stub()` calls in that package).
 
 ### 2. Implement & Write `@effect/vitest` Trace Tests
 
@@ -46,6 +46,8 @@ Implement the production code and tests within each package boundary:
 - Keep `*.decide` deciders strictly pure (`R = never`), confining side effects and cloud bindings to `type:infra`.
 
 ### 3. Final Verification & Closeout (Controller Only)
+
+- **Acceptance Gate (Phase 5 & `swarm kill` Blocker):** Before proceeding to Phase 5 closeout (`gc --strict`, `mutate --strict`, `verify`, `done`) or calling `swarm kill` (`swarm action: "kill"`), verify every implementer/fixer returned a complete `Sub-Bullet Verification Matrix` and passed its package verification gate; a failed or missing `Sub-Bullet Verification Matrix` or verification gate MUST block Phase 5 and `swarm kill`.
 
 1. **Signal-Routed Multi-Lens Review (Parallel Specialist Subagents):** Before running `harness gc --strict` and `harness verify`, the controller selects and dispatches parallel read-only review lenses using the [Reviewer Dispatch Guide](references/dispatch-reviewers.md) (preferring `invoke_subagent` with defined specialist `TypeName`s and `Workspace: "share"`, or `swarm` with `model: "gemini-4-hydrogen-medium"` when running an active swarm) based on the packages and capabilities touched by the task:
    - **Mandatory Reviewers for Core / Domain / Event Sourcing:** For ANY task touching `type:core`, `type:domain`, deciders, or event sourcing, dispatching **BOTH** `@effect-ears-test-reviewer` AND `@effect-adversarial-reviewer` is strictly mandatory.

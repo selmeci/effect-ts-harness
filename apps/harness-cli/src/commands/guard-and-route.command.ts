@@ -27,6 +27,7 @@ import {
   formatAllowResult,
   formatCommandDenyReason,
   type GuardVerdictDecision,
+  parseGuardCliArgs,
   pickStrictestDecision,
   toGuardCliResult,
 } from "./hook-guard-payload.js"
@@ -106,11 +107,32 @@ export const handleGuard = (
 
   return Effect.gen(function* () {
     const decisionLayer = yield* resolveDecisionModelLayer(options?.decisionLayer)
-    const fileFlag = argv.find((arg) => arg.startsWith("--file="))
-    const cliFilePath = fileFlag ? fileFlag.slice("--file=".length) : undefined
-    const positionalArgs = argv
-      .slice(1)
-      .filter((arg) => !arg.startsWith("--format=") && !arg.startsWith("--file="))
+    const parsedArgs = parseGuardCliArgs(argv.slice(1))
+    const argFailure = match(parsedArgs)
+      .with({ _tag: "Help" }, () =>
+        makeGuardDenyResult(
+          isAntigravity,
+          "guard: CLI parse failure (--help is not allowed in hook mode)",
+        ),
+      )
+      .with({ _tag: "UnknownFlag" }, ({ flag }) =>
+        makeGuardDenyResult(isAntigravity, `guard: CLI parse failure (Unrecognized flag: ${flag})`),
+      )
+      .with({ _tag: "MissingFlagValue" }, ({ flag }) =>
+        makeGuardDenyResult(isAntigravity, `guard: CLI parse failure (Missing value for ${flag})`),
+      )
+      .with({ _tag: "Ok" }, () => undefined)
+      .exhaustive()
+    if (argFailure !== undefined) {
+      return argFailure
+    }
+    const { positionalArgs, fileFlag: cliFilePath } = match(parsedArgs)
+      .with({ _tag: "Ok" }, (ok) => ok)
+      .with({ _tag: "Help" }, { _tag: "UnknownFlag" }, { _tag: "MissingFlagValue" }, () => ({
+        positionalArgs: [] as ReadonlyArray<string>,
+        fileFlag: undefined as string | undefined,
+      }))
+      .exhaustive()
 
     const invokedAsHook =
       isAntigravityFlag ||
@@ -183,14 +205,20 @@ export const handleGuard = (
       const stdinText = rawStdin
       const extracted = extractGuardStdinPayload(stdinText, isAntigravityFlag)
       match(extracted)
-        .with({ _tag: "Ok" }, (ok) => {
-          isAntigravity = isAntigravity || ok.isAntigravity
-          if (ok.isAntigravity) {
+        .with({ _tag: "ReadOnly" }, (ro) => {
+          isAntigravity = isAntigravity || ro.isAntigravity
+          if (ro.isAntigravity) {
             options?.hookStdinTracker?.markAntigravityDetected()
           }
-          candidateCmds.push(...ok.candidateCmds)
-          candidatePaths.push(...ok.candidatePaths)
-          isReadOnlyToolCall = ok.isReadOnlyToolCall
+          isReadOnlyToolCall = true
+        })
+        .with({ _tag: "Action" }, (action) => {
+          isAntigravity = isAntigravity || action.isAntigravity
+          if (action.isAntigravity) {
+            options?.hookStdinTracker?.markAntigravityDetected()
+          }
+          candidateCmds.push(...action.candidateCmds)
+          candidatePaths.push(...action.candidatePaths)
         })
         .with({ _tag: "Error" }, (err) => {
           if (

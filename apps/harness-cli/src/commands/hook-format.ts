@@ -89,19 +89,28 @@ const decodeTopLevelJsonRecord = Schema.decodeOption(
   Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
 )
 
+const hasAntigravityTopLevelKeys = (value: Readonly<Record<string, unknown>>): boolean =>
+  (value["toolCall"] !== undefined && value["toolCall"] !== null) ||
+  "fullyIdle" in value ||
+  "workspacePaths" in value ||
+  "conversationId" in value
+
 /**
- * Returns true when raw stdin JSON contains an Antigravity PreToolUse or Stop hook payload.
+ * Returns true when raw stdin is valid JSON containing an Antigravity PreToolUse or Stop hook payload.
+ */
+export const isParsedAntigravityHookPayload = (rawStdin: string): boolean =>
+  match(decodeTopLevelJsonRecord(rawStdin))
+    .with({ _tag: "Some" }, ({ value }) => hasAntigravityTopLevelKeys(value))
+    .with({ _tag: "None" }, () => false)
+    .exhaustive()
+
+/**
+ * Returns true when raw stdin JSON contains an Antigravity PreToolUse or Stop hook payload,
+ * falling back to regex detection only when stdin is malformed JSON.
  */
 export const detectAntigravityHookPayload = (rawStdin: string): boolean =>
   match(decodeTopLevelJsonRecord(rawStdin))
-    .with(
-      { _tag: "Some" },
-      ({ value }) =>
-        (value["toolCall"] !== undefined && value["toolCall"] !== null) ||
-        "fullyIdle" in value ||
-        "workspacePaths" in value ||
-        "conversationId" in value,
-    )
+    .with({ _tag: "Some" }, ({ value }) => hasAntigravityTopLevelKeys(value))
     .with({ _tag: "None" }, () =>
       /"(?:toolCall|fullyIdle|workspacePaths|conversationId)"\s*:/.test(rawStdin),
     )

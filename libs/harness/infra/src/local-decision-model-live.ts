@@ -1,13 +1,15 @@
-import { Context, Effect, Layer } from "effect"
+import { Context, Effect, Layer, Option, Ref, Semaphore } from "effect"
 import * as AiError from "effect/ai/AiError"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import * as FetchHttpClient from "effect/http/FetchHttpClient"
 import * as HttpClient from "effect/http/HttpClient"
+import { match } from "ts-pattern"
 
 /** Configurable Clef-flash (9B) DecisionModel Layer requiring an explicit HttpClient. */
 const makeLocalDecisionModelLayer = (options?: {
   readonly apiUrl?: string
   readonly model?: string
+  readonly loadModule?: () => Promise<typeof import("@effect/ai-typesafe")>
 }): Layer.Layer<DecisionModel.DecisionModel, never, HttpClient.HttpClient> =>
   Layer.effect(
     DecisionModel.DecisionModel,
@@ -25,26 +27,52 @@ const makeLocalDecisionModelLayer = (options?: {
       const withScheme = /^https?:\/\//i.test(rawUrl) ? rawUrl : `http://${rawUrl}`
       const apiUrl = withScheme.endsWith("/v1") ? withScheme : `${withScheme}/v1`
       const model = options?.model ?? process.env.HARNESS_CLEF_MODEL ?? "clef-flash"
+      const loadModule = options?.loadModule ?? (() => import("@effect/ai-typesafe"))
+      const semaphore = yield* Semaphore.make(1)
+      const cachedRef = yield* Ref.make<Option.Option<DecisionModel.DecisionModel>>(Option.none())
 
-      const loadDelegate = yield* Effect.cached(
-        Effect.gen(function* () {
-          const { TypeSafeClient, TypeSafeDecisionModel } = yield* Effect.tryPromise({
-            try: () => import("@effect/ai-typesafe"),
-            catch: (cause) =>
-              AiError.make({
-                module: "DecisionModel",
-                method: "decide",
-                reason: new AiError.UnknownError({ description: String(cause) }),
-              }),
-          })
-          const innerLayer = TypeSafeDecisionModel.layer({ model }).pipe(
-            Layer.provide(TypeSafeClient.layer({ apiUrl })),
-            Layer.provide(Layer.succeed(HttpClient.HttpClient, httpClient)),
-          )
-          const ctx = yield* Layer.buildWithScope(innerLayer, scope)
-          return Context.get(ctx, DecisionModel.DecisionModel)
-        }),
-      )
+      const loadDelegate: Effect.Effect<DecisionModel.DecisionModel, AiError.AiError> =
+        semaphore.withPermits(1)(
+          Effect.gen(function* () {
+            const existing = yield* Ref.get(cachedRef)
+            return yield* match(existing)
+              .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+              .with({ _tag: "None" }, () =>
+                Effect.gen(function* () {
+                  const { TypeSafeClient, TypeSafeDecisionModel } = yield* Effect.tryPromise({
+                    try: () => loadModule(),
+                    catch: (cause) =>
+                      AiError.make({
+                        module: "DecisionModel",
+                        method: "decide",
+                        reason: new AiError.UnknownError({ description: String(cause) }),
+                      }),
+                  })
+                  const innerLayer = TypeSafeDecisionModel.layer({ model }).pipe(
+                    Layer.provide(TypeSafeClient.layer({ apiUrl })),
+                    Layer.provide(Layer.succeed(HttpClient.HttpClient, httpClient)),
+                  )
+                  const ctx = yield* Layer.buildWithScope(innerLayer, scope).pipe(
+                    Effect.mapError((cause) =>
+                      AiError.make({
+                        module: "DecisionModel",
+                        method: "decide",
+                        reason: new AiError.UnknownError({ description: String(cause) }),
+                      }),
+                    ),
+                  )
+                  const dm = Context.get(ctx, DecisionModel.DecisionModel)
+                  yield* Ref.set(cachedRef, Option.some(dm))
+                  return dm
+                }).pipe(
+                  Effect.tapError((err) =>
+                    Effect.logWarning(`Failed to load LocalDecisionModel: ${err.message}`),
+                  ),
+                ),
+              )
+              .exhaustive()
+          }),
+        )
 
       return {
         [DecisionModel.TypeId]: DecisionModel.TypeId,

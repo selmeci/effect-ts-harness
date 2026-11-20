@@ -379,8 +379,13 @@ const resolveWorkspaceImportTarget = (
 }
 
 /**
- * Verifies that zero-`typescript` hook fast-path entrypoints never pull `"typescript"`,
- * `"ts-morph"`, or non-fastpath `"@harness/graph"` modules into their runtime import closure.
+ * Verifies hook fast-path import closures across all three closure profiles:
+ * - `"standard"`: forbids `"typescript"`, `"ts-morph"`, and non-cluster-resolver `"@harness/graph"` modules.
+ * - `"policy-zero-dep"`: forbids `"effect"`, `"@effect/*"`, `"typescript"`, `"ts-morph"`, and any `"@harness/*"`
+ *   module outside `libs/harness/gates/src/policy*`.
+ * - `"hook-entry-lightweight"`: forbids `"effect"` root, heavy `"effect/*"` subpaths, `"@effect/platform-node"`,
+ *   `"@effect/ai-typesafe"`, `"typescript"`, `"ts-morph"`, and heavy `"@harness/*"` modules (allowing only
+ *   lightweight `effect/*` subpaths, `@harness/gates/policy`, and `@harness/infra/hook-io`).
  */
 export const evaluateHookFastpathImportClosure = (
   repoRoot: string,

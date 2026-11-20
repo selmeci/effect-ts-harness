@@ -22,14 +22,14 @@ Because `type:contract` and `type:service` are already compiled and locked by `p
 - **Unit B (`type:infra`):** Implement live `Layer`s, native `@effect/sql-d1` / `@effect/sql-sqlite-do` repositories (`D1Client.layer`, `SqlClient`, `SqliteMigrator`; `drizzle-orm` / `drizzle-kit` banned) decoding rows into contract Schemas, synchronous DO SQLite transactions, and W3C `traceparent` headers, and test with `@effect/vitest`.
 - **Unit C (`type:app` / `scope:web`):** Compose runtime Layers (`NodeRuntime.runMain`, `ManagedRuntime`, `runFork`) in `type:app`, or derive `AtomHttpApi` query/mutation atoms from `type:contract` in `scope:web` (zero raw `fetch`).
 
-Before spawning parallel test workers, verify `/tmp` inode availability (`df -ih /tmp`) and pass explicit `TMPDIR`/`NX_SOCKET_DIR` cleanly when needed. When launching parallel subagents that run CLI or build commands concurrently, isolate their workspaces using an isolated git worktree (`isolation: "worktree"` or `git worktree add` with `HARNESS_WORKTREE_ID` unset when running a full `plan-check -> verify` slice, or `HARNESS_WORKTREE_ID=<unit>` in a shared checkout when running package-scoped `pnpm --filter <pkg> run typecheck && lint && test` or `CI=true pnpm nx run <project>:verify` checks) so `.harness/` snapshots and stamps never collide. Omit monitoring workers for focused single-wave runs and terminate any active monitor immediately once implementation/remediation waves settle.
+Before spawning parallel test workers, verify `/tmp` inode availability (`df -ih /tmp`) and pass explicit `TMPDIR`/`NX_SOCKET_DIR` cleanly when needed. When launching parallel subagents that run CLI or build commands concurrently, isolate their workspaces using an isolated git worktree (`isolation: "worktree"` or `git worktree add` with `HARNESS_WORKTREE_ID` unset when running a full `plan-check -> verify` slice, or `HARNESS_WORKTREE_ID=<unit>` in a shared checkout when running package-scoped `pnpm --filter <pkg> run typecheck && pnpm --filter <pkg> run lint && pnpm --filter <pkg> run test` or `CI=true pnpm nx run <project>:verify` checks) so `.harness/` snapshots and stamps never collide. Omit monitoring workers for focused single-wave runs and terminate any active monitor immediately once implementation/remediation waves settle.
 
 When delegating a unit to an implementer subagent, provide this exact 4-part prompt:
 
 1. **Target Stubs & Files:** Exact file paths and `Effect.fn("SpanName")` stubs to replace.
 2. **EARS Acceptance Clauses:** The `WHEN`, `IF/THEN`, and `WHILE` clauses that must each have a matching `it.effect(...)` test.
 3. **Pattern Reference:** Path to the relevant `agent-patterns/*.md` file (e.g., `agent-patterns/d1-repository.md`, `agent-patterns/durable-object-state.md`, `agent-patterns/event-sourcing.md`).
-4. **Package Gate:** Package-scoped `pnpm --filter <pkg> run typecheck && lint && test` (with explicit `TMPDIR`/`NX_SOCKET_DIR` when needed) to avoid `NX_DAEMON=false` hangs, or `CI=true pnpm nx run <project>:verify` (must pass with 0 active `stub()` calls in that package).
+4. **Package Gate:** Package-scoped `pnpm --filter <pkg> run typecheck && pnpm --filter <pkg> run lint && pnpm --filter <pkg> run test` (with explicit `TMPDIR`/`NX_SOCKET_DIR` when needed) to avoid concurrent Nx daemon/cache lock contention in shared checkouts, or `CI=true pnpm nx run <project>:verify` (must pass with 0 active `stub()` calls in that package).
 
 ### 2. Implement & Write `@effect/vitest` Trace Tests
 
@@ -41,6 +41,8 @@ Implement the production code and tests within each package boundary:
 - Keep `*.decide` deciders strictly pure (`R = never`), confining side effects and cloud bindings to `type:infra`.
 
 ### 3. Final Verification & Closeout (Controller Only)
+
+- **Acceptance Gate (Phase 5 & `swarm kill` Blocker):** Before proceeding to Phase 5 closeout (`gc --strict`, `mutate --strict`, `verify`, `done`) or `swarm kill`, verify every implementer/fixer returned a complete `Sub-Bullet Verification Matrix` and passed its package verification gate; a failed or missing `Sub-Bullet Verification Matrix` or verification gate MUST block Phase 5 and `swarm kill`.
 
 1. **Signal-Routed Multi-Lens `haiku` Review (Parallel Specialist Subagents):** Before running `harness gc --strict` and `harness verify`, the controller selects and dispatches parallel read-only review lenses using the [Reviewer Dispatch Guide](references/dispatch-reviewers.md) (`Agent` dispatches using Claude Code's `"haiku"` or `"sonnet"` runtime model names; the Antigravity adapter pairs with `gemini-4-hydrogen-medium` / `"flash"`) based on the packages and capabilities touched by the task:
    - **Mandatory Reviewers for Core / Domain / Event Sourcing:** For ANY task touching `type:core`, `type:domain`, deciders, or event sourcing, dispatching **BOTH** `@effect-ears-test-reviewer` AND `@effect-adversarial-reviewer` is strictly mandatory.

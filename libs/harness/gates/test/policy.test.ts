@@ -834,6 +834,8 @@ describe("guard policy", () => {
       { path: ".harness/verify-stamp.json", ruleId: "verify-stamp" },
       { path: ".harness/mutate-stamp.json", ruleId: "mutate-stamp" },
       { path: ".harness/last-done.json", ruleId: "harness-cache" },
+      { path: ".harness/graph-snapshot.json", ruleId: "harness-cache" },
+      { path: ".harness/graph-head.json", ruleId: "harness-cache" },
       { path: ".git/harness/daemon.lock", ruleId: "harness-common-dir-state" },
       { path: ".env", ruleId: "secret-file" },
     ]
@@ -1374,6 +1376,23 @@ describe("guard policy", () => {
       },
       { cmd: "time --output=.git/harness/custom.log ls", ruleId: "harness-state-mutation" },
       { cmd: "time -o.git/harness/custom.log ls", ruleId: "harness-state-mutation" },
+      { cmd: "git ls-remote --upl=touch .", ruleId: "git-pack-exec-override" },
+      { cmd: "git ls-remote --upload=touch .", ruleId: "git-pack-exec-override" },
+      { cmd: "git ls-remote --upload-pac touch .", ruleId: "git-pack-exec-override" },
+      { cmd: "git ls-remote -ubash .", ruleId: "git-pack-exec-override" },
+      { cmd: "git ls-remote -u'touch f' .", ruleId: "git-pack-exec-override" },
+      { cmd: "git ls-remote --upload-pack=bash .", ruleId: "git-pack-exec-override" },
+      { cmd: "git ls-remote --upload-pack='sh -c id' .", ruleId: "git-pack-exec-override" },
+      { cmd: "git ls-remote -u bash .", ruleId: "git-pack-exec-override" },
+      { cmd: "git fetch --upl=bash", ruleId: "git-pack-exec-override" },
+      { cmd: "git clone -u bash repo", ruleId: "git-pack-exec-override" },
+      { cmd: "git push --rece=bash origin main", ruleId: "git-pack-exec-override" },
+      { cmd: "git archive --exec=bash HEAD", ruleId: "git-pack-exec-override" },
+      { cmd: "git ls-remote 'ext::sh -c id'", ruleId: "git-pack-exec-override" },
+      { cmd: 'git fetch origin "a\nb" --upload-pack=bash', ruleId: "git-pack-exec-override" },
+      { cmd: 'git push origin "a\nb" --exec=bash', ruleId: "git-pack-exec-override" },
+      { cmd: 'git push origin "a\nb" --receive-pack=bash', ruleId: "git-pack-exec-override" },
+      { cmd: 'git fetch origin "a\nb" "ext::sh -c id"', ruleId: "git-pack-exec-override" },
     ]
     for (const c of deniedCases) {
       expect(classifyCommand(c.cmd), c.cmd).toBe("deny")
@@ -1386,15 +1405,21 @@ describe("guard policy", () => {
       "git grep '\\.env' -- libs",
       "git ls-files",
       "git ls-files libs/harness/gates",
-      "git ls-remote origin main",
+      "git push -u origin feat",
+      "git fetch -u",
+      "git fetch --update-head-ok",
+      "git fetch --unshallow",
+      "git push --recurse-submodules=check",
       "pnpm --filter @harness/gates -C libs/harness/gates exec vitest",
       "TMPDIR=/home/roan/.cache/tmp NX_SOCKET_DIR=/home/roan/.cache/tmp/nx NODE_COMPILE_CACHE=/home/roan/.cache/node NX_DAEMON=false FORCE_COLOR=0 NO_COLOR=1 CI=true pnpm nx run @harness/gates:test",
       "NX_DAEMON=true FORCE_COLOR=3 NO_COLOR=0 pnpm nx test",
       "HARNESS_REQUIRE_OLLAMA=1 pnpm test",
+      "HARNESS_WORKTREE_ID=unit-a pnpm nx run @harness/gates:verify",
     ]) {
       expect(classifyCommand(allowedCmd), allowedCmd).toBe("allow")
     }
 
+    expect(classifyCommand("git ls-remote origin main")).toBe("escalate")
     expect(classifyCommand("git ls-files-evil")).toBe("escalate")
     expect(classifyCommand("git ls-remote-evil")).toBe("escalate")
     expect(classifyCommand("git ls-remote origin main ; rm -rf /")).toBe("deny")
@@ -1412,15 +1437,6 @@ describe("guard policy", () => {
       )?.ruleId,
     ).toBe("guard-self-invocation")
 
-    for (const escalatedCmd of [
-      "git ls-remote --upload-pack=bash .",
-      "git ls-remote --upload-pack='sh -c id' .",
-      "git ls-remote -u bash .",
-      "git ls-remote 'ext::sh -c id'",
-    ]) {
-      expect(classifyCommand(escalatedCmd), escalatedCmd).toBe("escalate")
-    }
-
     for (const nonAllowedEnvCmd of [
       "TMPDIR=/tmp/../etc pnpm nx test",
       "TMPDIR=relative/path pnpm nx test",
@@ -1434,8 +1450,17 @@ describe("guard policy", () => {
       "HARNESS_STATE_DIR=/tmp/h pnpm nx test",
       "HARNESS_SUBAGENT=1 pnpm harness done",
       "HARNESS_WORKTREE_ID=fake pnpm harness done",
+      "HARNESS_WORKTREE_ID=unit-a pnpm harness done",
       "HARNESS_GIT_BRANCH=main pnpm harness done",
       "CI=${HARNESS_STATE_DIR:=/tmp/evil} pnpm test",
+      "CI=yes pnpm nx test",
+      "NX_INTERACTIVE=maybe pnpm nx test",
+      "HARNESS_PLAN_CHECK=2 pnpm nx test",
+      "HARNESS_REQUIRE_OLLAMA=true pnpm nx test",
+      "HARNESS_LOG_LEVEL=verbose pnpm nx test",
+      "HARNESS_WORKTREE_ID=../bad pnpm nx test",
+      "HARNESS_WORKTREE_ID=a/b pnpm nx test",
+      "HARNESS_WORKTREE_ID=.hidden pnpm nx test",
       "TMPDIR=/repo/.git/hooks pnpm test",
       "NODE_COMPILE_CACHE=/repo/repos/effect pnpm test",
       "TMPDIR=/tmp/.harness pnpm nx test",
@@ -1450,6 +1475,11 @@ describe("guard policy", () => {
       expect(isCommandAllowed(nonAllowedEnvCmd), nonAllowedEnvCmd).toBe(false)
       expect(classifyCommand(nonAllowedEnvCmd), nonAllowedEnvCmd).not.toBe("allow")
     }
+
+    const longStart = performance.now()
+    expect(classifyCommand("CI=1 ".repeat(50_000) + "curl x")).toBe("ask")
+    expect(performance.now() - longStart).toBeLessThan(200)
+    expect(classifyCommand("CI=1 ".repeat(33) + "pnpm test")).toBe("escalate")
 
     expect(classifyCommand("NX_SKIP_NX_CACHE=1 pnpm nx test")).toBe("deny")
     expect(classifyCommand("TMPDIR=/home/roan/.cache/tmp rm -rf /")).toBe("deny")

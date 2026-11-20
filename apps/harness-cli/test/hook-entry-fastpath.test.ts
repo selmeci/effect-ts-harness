@@ -2,7 +2,13 @@ import { execFileSync, spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { Graph, Option } from "effect"
+import { match } from "ts-pattern"
 import { afterEach, describe, expect, it } from "vitest"
+import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
+import { computePreInvocationFingerprintLite } from "@harness/infra/hook-io"
+import { tryFastPathIngest } from "../src/commands/ingest-fastpath.js"
+import { computePreInvocationFingerprint } from "../src/commands/session-fastpath.js"
 
 const REPO_ROOT = resolve(import.meta.dirname, "../../..")
 const RESOLVER_PATH = join(REPO_ROOT, "tools", "node-ts-resolver.mjs")
@@ -77,7 +83,8 @@ const buildChildEnv = (extra?: Readonly<Record<string, string | undefined>>): No
   return env
 }
 
-const runHookEntry = (
+const runEntry = (
+  entryPath: string,
   args: ReadonlyArray<string>,
   options?: {
     readonly input?: string | undefined
@@ -85,7 +92,7 @@ const runHookEntry = (
     readonly env?: Readonly<Record<string, string | undefined>> | undefined
   },
 ) =>
-  spawnSync(process.execPath, ["--import", RESOLVER_PATH, HOOK_ENTRY_PATH, ...args], {
+  spawnSync(process.execPath, ["--import", RESOLVER_PATH, entryPath, ...args], {
     cwd: options?.cwd ?? REPO_ROOT,
     input: options?.input,
     encoding: "utf8",
@@ -93,7 +100,17 @@ const runHookEntry = (
     env: buildChildEnv(options?.env),
   })
 
-const inspectLoadedModulesForHookEntry = (
+const runHookEntry = (
+  args: ReadonlyArray<string>,
+  options?: {
+    readonly input?: string | undefined
+    readonly cwd?: string | undefined
+    readonly env?: Readonly<Record<string, string | undefined>> | undefined
+  },
+) => runEntry(HOOK_ENTRY_PATH, args, options)
+
+const inspectLoadedModulesForEntry = (
+  entryPath: string,
   args: ReadonlyArray<string>,
   options?: {
     readonly input?: string | undefined
@@ -137,7 +154,7 @@ const inspectLoadedModulesForHookEntry = (
       encoding: "utf8",
       timeout: 15_000,
       env: buildChildEnv({
-        HARNESS_TEST_HOOK_ENTRY: HOOK_ENTRY_PATH,
+        HARNESS_TEST_HOOK_ENTRY: entryPath,
         HARNESS_TEST_HOOK_ARGS: JSON.stringify(args),
         HARNESS_TEST_MOD_OUT: outFile,
         ...options?.env,
@@ -151,6 +168,15 @@ const inspectLoadedModulesForHookEntry = (
     loadedUrls,
   }
 }
+
+const inspectLoadedModulesForHookEntry = (
+  args: ReadonlyArray<string>,
+  options?: {
+    readonly input?: string | undefined
+    readonly cwd?: string | undefined
+    readonly env?: Readonly<Record<string, string | undefined>> | undefined
+  },
+) => inspectLoadedModulesForEntry(HOOK_ENTRY_PATH, args, options)
 
 const assertNoHeavyModulesLoaded = (loadedUrls: ReadonlyArray<string>): void => {
   for (const forbidden of FORBIDDEN_FASTPATH_MODULES) {
@@ -183,76 +209,73 @@ describe("hook-entry.ts fast-path", () => {
       expect(JSON.parse(fileRes.stdout.trim())).toEqual({ decision: "allow" })
     })
 
-    it("denies destructive commands, protected state files, secrets, flags, and bad stdin", () => {
-      const denyCases: ReadonlyArray<{
-        readonly label: string
-        readonly args: ReadonlyArray<string>
-        readonly input?: string
-        readonly reasonPart: string
-      }> = [
-        {
-          label: "rm -rf /",
-          args: ["guard", "--format=antigravity"],
-          input: JSON.stringify({
-            toolCall: { name: "run_command", args: { CommandLine: "rm -rf /" } },
-          }),
-          reasonPart: "rm -rf",
-        },
-        {
-          label: "protected .harness/verify-stamp.json",
-          args: ["guard", "--format=antigravity"],
-          input: JSON.stringify({
-            toolCall: { name: "write_to_file", args: { TargetFile: ".harness/verify-stamp.json" } },
-          }),
-          reasonPart: ".harness",
-        },
-        {
-          label: "secret .env",
-          args: ["guard", "--format=antigravity"],
-          input: JSON.stringify({
-            toolCall: { name: "write_to_file", args: { TargetFile: ".env" } },
-          }),
-          reasonPart: ".env",
-        },
-        {
-          label: "--help flag",
-          args: ["guard", "--format=antigravity", "--help"],
-          input: "",
-          reasonPart: "CLI parse failure",
-        },
-        {
-          label: "--unknown-flag",
-          args: ["guard", "--format=antigravity", "--unknown-flag"],
-          input: "",
-          reasonPart: "Unrecognized flag",
-        },
-        {
-          label: "empty stdin",
-          args: ["guard", "--format=antigravity"],
-          input: "   ",
-          reasonPart: "empty hook stdin payload",
-        },
-        {
-          label: "malformed JSON",
-          args: ["guard", "--format=antigravity"],
-          input: "{not valid json",
-          reasonPart: "malformed or unrecognized hook stdin JSON payload",
-        },
-        {
-          label: "unrecognized JSON",
-          args: ["guard", "--format=antigravity"],
-          input: JSON.stringify({ unexpected: true }),
-          reasonPart: "missing command or file path",
-        },
-      ]
-
-      for (const tc of denyCases) {
-        const res = runHookEntry(tc.args, { input: tc.input })
-        expect(res.status, tc.label).toBe(0)
-        const parsed = JSON.parse(res.stdout.trim()) as { decision: string; reason: string }
-        expect(parsed.decision, tc.label).toBe("deny")
-        expect(parsed.reason, tc.label).toContain(tc.reasonPart)
-      }
+    it.each([
+      {
+        label: "rm -rf /",
+        args: ["guard", "--format=antigravity"],
+        input: JSON.stringify({
+          toolCall: { name: "run_command", args: { CommandLine: "rm -rf /" } },
+        }),
+        reasonPart: "rm -rf",
+      },
+      {
+        label: "protected .harness/verify-stamp.json",
+        args: ["guard", "--format=antigravity"],
+        input: JSON.stringify({
+          toolCall: { name: "write_to_file", args: { TargetFile: ".harness/verify-stamp.json" } },
+        }),
+        reasonPart: ".harness",
+      },
+      {
+        label: "secret .env",
+        args: ["guard", "--format=antigravity"],
+        input: JSON.stringify({
+          toolCall: { name: "write_to_file", args: { TargetFile: ".env" } },
+        }),
+        reasonPart: ".env",
+      },
+      {
+        label: "--help flag",
+        args: ["guard", "--format=antigravity", "--help"],
+        input: "",
+        reasonPart: "CLI parse failure",
+      },
+      {
+        label: "--unknown-flag",
+        args: ["guard", "--format=antigravity", "--unknown-flag"],
+        input: "",
+        reasonPart: "Unrecognized flag",
+      },
+      {
+        label: "missing --format value",
+        args: ["guard", "--format=antigravity", "--format"],
+        input: "",
+        reasonPart: "Missing value for --format",
+      },
+      {
+        label: "empty stdin",
+        args: ["guard", "--format=antigravity"],
+        input: "   ",
+        reasonPart: "empty hook stdin payload",
+      },
+      {
+        label: "malformed JSON",
+        args: ["guard", "--format=antigravity"],
+        input: "{not valid json",
+        reasonPart: "malformed or unrecognized hook stdin JSON payload",
+      },
+      {
+        label: "unrecognized JSON",
+        args: ["guard", "--format=antigravity"],
+        input: JSON.stringify({ unexpected: true }),
+        reasonPart: "missing command or file path",
+      },
+    ])("denies $label", ({ args, input, reasonPart }) => {
+      const res = runHookEntry(args, { input })
+      expect(res.status).toBe(0)
+      const parsed = JSON.parse(res.stdout.trim()) as { decision: string; reason: string }
+      expect(parsed.decision).toBe("deny")
+      expect(parsed.reason).toContain(reasonPart)
     })
 
     it("asks for alchemy deploy without loading heavy modules", () => {
@@ -281,21 +304,52 @@ describe("hook-entry.ts fast-path", () => {
       expect(inspect.status).toBe(0)
       expect(JSON.parse(inspect.stdout.trim())).toEqual({
         decision: "ask",
-        reason: "DecisionModel unavailable or timed out; requires human confirmation.",
+        reason: expect.stringContaining("DecisionModel unavailable"),
       })
       expect(inspect.loadedUrls.some((u) => u.includes("hook-fallback.ts"))).toBe(true)
     })
 
-    it("enforces Claude Code exit 2 fail-closed, mixed/masked fields, read-only tools, and override ask", () => {
-      const ccSpoofRes = runHookEntry(["guard"], {
+    it("enforces Claude Code exit 2 fail-closed when command spoofs Antigravity keys", () => {
+      const res = runHookEntry(["guard"], {
         input: JSON.stringify({
           tool_name: "Bash",
           tool_input: { command: 'rm -rf / # "conversationId":1' },
         }),
       })
-      expect(ccSpoofRes.status).toBe(2)
-      expect(ccSpoofRes.stdout.trim()).toBe("")
+      expect(res.status).toBe(2)
+      expect(res.stdout.trim()).toBe("")
+    })
 
+    it("enforces Claude Code output shapes for allow and ask", () => {
+      const allowRes = runHookEntry(["guard"], {
+        input: JSON.stringify({
+          tool_name: "Bash",
+          tool_input: { command: "pnpm test" },
+        }),
+      })
+      expect(allowRes.status).toBe(0)
+      expect(allowRes.stdout).toBe("")
+
+      const askRes = runHookEntry(["guard"], {
+        input: JSON.stringify({
+          tool_name: "Bash",
+          tool_input: { command: "alchemy deploy" },
+        }),
+      })
+      expect(askRes.status).toBe(0)
+      const parsed = JSON.parse(askRes.stdout.trim()) as {
+        hookSpecificOutput: {
+          hookEventName: string
+          permissionDecision: string
+          permissionDecisionReason: string
+        }
+      }
+      expect(parsed.hookSpecificOutput.hookEventName).toBe("PreToolUse")
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("ask")
+      expect(parsed.hookSpecificOutput.permissionDecisionReason.length).toBeGreaterThan(0)
+    })
+
+    it("denies mixed/masked fields, whitespace-only file_path, and dual/combined risky fields", () => {
       const mixedRes = runHookEntry(["guard", "--format=antigravity"], {
         input: JSON.stringify({
           tool_name: "Read",
@@ -336,6 +390,19 @@ describe("hook-entry.ts fast-path", () => {
       expect(dualPathRes.status).toBe(0)
       expect((JSON.parse(dualPathRes.stdout.trim()) as { decision: string }).decision).toBe("deny")
 
+      const combinedRes = runHookEntry(["guard", "--format=antigravity"], {
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm test", TargetFile: ".env" },
+          },
+        }),
+      })
+      expect(combinedRes.status).toBe(0)
+      expect((JSON.parse(combinedRes.stdout.trim()) as { decision: string }).decision).toBe("deny")
+    })
+
+    it("allows Antigravity and Claude Code read-only tools without loading heavy modules", () => {
       const readOnlyInspect = inspectLoadedModulesForHookEntry(["guard", "--format=antigravity"], {
         input: JSON.stringify({ toolCall: { name: "read_file", args: {} } }),
       })
@@ -347,7 +414,10 @@ describe("hook-entry.ts fast-path", () => {
         input: JSON.stringify({ tool_name: "Read", tool_input: {} }),
       })
       expect(ccReadRes.status).toBe(0)
+      expect(ccReadRes.stdout).toBe("")
+    })
 
+    it("asks for HARNESS_ALLOW_SKIP_NX_CACHE=1 override and .oxlintrc.json writes", () => {
       const skipNxRes = runHookEntry(["guard", "--format=antigravity"], {
         input: JSON.stringify({
           toolCall: {
@@ -359,17 +429,6 @@ describe("hook-entry.ts fast-path", () => {
       expect(skipNxRes.status).toBe(0)
       expect((JSON.parse(skipNxRes.stdout.trim()) as { decision: string }).decision).toBe("ask")
 
-      const combinedRes = runHookEntry(["guard", "--format=antigravity"], {
-        input: JSON.stringify({
-          toolCall: {
-            name: "run_command",
-            args: { CommandLine: "pnpm test", TargetFile: ".env" },
-          },
-        }),
-      })
-      expect(combinedRes.status).toBe(0)
-      expect((JSON.parse(combinedRes.stdout.trim()) as { decision: string }).decision).toBe("deny")
-
       const oxlintRes = runHookEntry(["guard", "--format=antigravity"], {
         input: JSON.stringify({
           toolCall: { name: "write_to_file", args: { TargetFile: ".oxlintrc.json" } },
@@ -377,14 +436,47 @@ describe("hook-entry.ts fast-path", () => {
       })
       expect(oxlintRes.status).toBe(0)
       expect((JSON.parse(oxlintRes.stdout.trim()) as { decision: string }).decision).toBe("ask")
+    })
 
-      const missingFlagRes = runHookEntry(["guard", "--format=antigravity", "--format"], {
-        input: "",
+    it("fails closed when stdin exceeds 2 MiB maxBytes limit", () => {
+      const oversized = "x".repeat(2 * 1024 * 1024 + 1024)
+
+      const agRes = runHookEntry(["guard", "--format=antigravity"], { input: oversized })
+      expect(agRes.status).toBe(0)
+      const agParsed = JSON.parse(agRes.stdout.trim()) as { decision: string; reason: string }
+      expect(agParsed.decision).toBe("deny")
+      expect(agParsed.reason).toContain("exceeded")
+
+      const ccRes = runHookEntry(["guard"], { input: oversized })
+      expect(ccRes.status).toBe(2)
+      expect(ccRes.stdout).toBe("")
+      expect(ccRes.stderr).toContain("exceeded")
+    })
+
+    it("writes valid JSONL telemetry entry to .harness/telemetry-log.jsonl when HARNESS_TEST_ISOLATION is unset", () => {
+      const { dir } = createTempGitRepo("harness-hook-guard-telemetry-")
+      const res = runHookEntry(["guard", "--format=antigravity"], {
+        cwd: dir,
+        input: JSON.stringify({
+          toolCall: { name: "run_command", args: { CommandLine: "pnpm test" } },
+        }),
+        env: { HARNESS_TEST_ISOLATION: undefined },
       })
-      expect(missingFlagRes.status).toBe(0)
-      expect((JSON.parse(missingFlagRes.stdout.trim()) as { decision: string }).decision).toBe(
-        "deny",
-      )
+      expect(res.status).toBe(0)
+      const logPath = join(dir, ".harness", "telemetry-log.jsonl")
+      expect(existsSync(logPath)).toBe(true)
+      const lines = readFileSync(logPath, "utf8").trim().split("\n")
+      expect(lines.length).toBeGreaterThanOrEqual(1)
+      const entry = JSON.parse(lines[lines.length - 1]!) as {
+        surface: string
+        category: string
+        toolName: string
+        outcome: string
+      }
+      expect(entry.surface).toBe("hook")
+      expect(entry.category).toBe("guard")
+      expect(entry.toolName).toBe("guard")
+      expect(entry.outcome).toBe("ok")
     })
 
     it("fails closed with exit 2 and deny JSON when dynamic fallback import fails", () => {
@@ -422,39 +514,158 @@ describe("hook-entry.ts fast-path", () => {
       expect(parsed.reason).toContain("failed to load CLI fallback")
     })
 
-    it("cold-start latency is substantially faster than legacy index.ts", () => {
+    it("loads substantially fewer modules than legacy index.ts", () => {
       const stdinPayload = JSON.stringify({
         toolCall: { name: "run_command", args: { CommandLine: "pnpm test" } },
       })
 
       const t0 = performance.now()
-      const fastRes = runHookEntry(["guard", "--format=antigravity"], { input: stdinPayload })
+      const fastInspect = inspectLoadedModulesForEntry(
+        HOOK_ENTRY_PATH,
+        ["guard", "--format=antigravity"],
+        { input: stdinPayload },
+      )
       const fastMs = performance.now() - t0
-      expect(fastRes.status).toBe(0)
+      expect(fastInspect.status).toBe(0)
 
       const t1 = performance.now()
-      const legacyRes = spawnSync(
-        process.execPath,
-        ["--import", RESOLVER_PATH, INDEX_PATH, "guard", "--format=antigravity"],
-        {
-          cwd: REPO_ROOT,
-          input: stdinPayload,
-          encoding: "utf8",
-          timeout: 15_000,
-          env: { ...process.env, HARNESS_TEST_ISOLATION: "1" },
-        },
+      const legacyInspect = inspectLoadedModulesForEntry(
+        INDEX_PATH,
+        ["guard", "--format=antigravity"],
+        { input: stdinPayload },
       )
       const legacyMs = performance.now() - t1
-      expect(legacyRes.status).toBe(0)
+      expect(legacyInspect.status).toBe(0)
 
       console.info(
-        `[bench] hook-entry guard fast-path: ${Math.round(fastMs)}ms vs index.ts: ${Math.round(legacyMs)}ms`,
+        `[bench] hook-entry guard fast-path: ${Math.round(fastMs)}ms (${fastInspect.loadedUrls.length} modules) vs index.ts: ${Math.round(legacyMs)}ms (${legacyInspect.loadedUrls.length} modules)`,
       )
-      expect(fastMs).toBeLessThan(legacyMs)
+      expect(fastInspect.loadedUrls.length).toBeLessThan(legacyInspect.loadedUrls.length)
+    })
+  })
+
+  describe("fast-path vs full-path guard parity matrix", () => {
+    it.each([
+      {
+        label: "--format antigravity (space form) allow",
+        args: ["guard", "--format", "antigravity"],
+        input: JSON.stringify({
+          toolCall: { name: "run_command", args: { CommandLine: "pnpm test" } },
+        }),
+        expectedDecision: "allow",
+      },
+      {
+        label: "--format=antigravity allow",
+        args: ["guard", "--format=antigravity"],
+        input: JSON.stringify({
+          toolCall: { name: "run_command", args: { CommandLine: "pnpm test" } },
+        }),
+        expectedDecision: "allow",
+      },
+      {
+        label: "--format=antigravity deny",
+        args: ["guard", "--format=antigravity"],
+        input: JSON.stringify({
+          toolCall: { name: "run_command", args: { CommandLine: "rm -rf /" } },
+        }),
+        expectedDecision: "deny",
+      },
+      {
+        label: "--format=antigravity ask",
+        args: ["guard", "--format=antigravity"],
+        input: JSON.stringify({
+          toolCall: { name: "run_command", args: { CommandLine: "alchemy deploy" } },
+        }),
+        expectedDecision: "ask",
+      },
+      {
+        label: "--format=antigravity escalate",
+        args: ["guard", "--format=antigravity"],
+        input: JSON.stringify({
+          toolCall: { name: "run_command", args: { CommandLine: "echo $(whoami)" } },
+        }),
+        expectedDecision: "ask",
+      },
+      {
+        label: "Claude Code mode allow",
+        args: ["guard"],
+        input: JSON.stringify({
+          tool_name: "Bash",
+          tool_input: { command: "pnpm test" },
+        }),
+        expectedDecision: undefined,
+      },
+      {
+        label: "Claude Code mode deny",
+        args: ["guard"],
+        input: JSON.stringify({
+          tool_name: "Bash",
+          tool_input: { command: "rm -rf /" },
+        }),
+        expectedDecision: undefined,
+      },
+      {
+        label: "malformed JSON",
+        args: ["guard", "--format=antigravity"],
+        input: "{not valid json",
+        expectedDecision: "deny",
+      },
+      {
+        label: "empty stdin",
+        args: ["guard", "--format=antigravity"],
+        input: "   ",
+        expectedDecision: "deny",
+      },
+    ])("$label matches between hook-entry.ts and index.ts", ({ args, input, expectedDecision }) => {
+      const env = {
+        HARNESS_OLLAMA_URL: "http://127.0.0.1:1",
+        OLLAMA_HOST: "http://127.0.0.1:1",
+      }
+      const fastRes = runEntry(HOOK_ENTRY_PATH, args, { input, env })
+      const fullRes = runEntry(INDEX_PATH, args, { input, env })
+      expect(fastRes.status).toBe(fullRes.status)
+      expect(fastRes.stdout.trim()).toBe(fullRes.stdout.trim())
+      if (expectedDecision !== undefined) {
+        expect((JSON.parse(fastRes.stdout.trim()) as { decision: string }).decision).toBe(
+          expectedDecision,
+        )
+      }
     })
   })
 
   describe("ingest --format=antigravity", () => {
+    it("tryFastPathIngest unit behavior covers hit, non-antigravity miss, corrupt snapshot miss, and planGraph override miss", () => {
+      const { dir, headSha } = createTempGitRepo("harness-tryfastpath-ingest-")
+      const harnessDir = join(dir, ".harness")
+      mkdirSync(harnessDir, { recursive: true })
+      writeFileSync(
+        join(harnessDir, "graph-snapshot.json"),
+        JSON.stringify({ nodes: [], edges: [] }),
+        "utf8",
+      )
+      writeFileSync(
+        join(harnessDir, "graph-head.json"),
+        JSON.stringify({ headSha, gitBranch: "main" }),
+        "utf8",
+      )
+
+      const hit = tryFastPathIngest(["ingest", "--format=antigravity"], { repoRoot: dir })
+      expect(Option.isSome(hit)).toBe(true)
+
+      const nonAg = tryFastPathIngest(["ingest"], { repoRoot: dir })
+      expect(Option.isNone(nonAg)).toBe(true)
+
+      const planOverride = tryFastPathIngest(["ingest", "--format=antigravity"], {
+        repoRoot: dir,
+        planGraph: { graph: Graph.directed(), nodeIndexByKey: new Map() },
+      })
+      expect(Option.isNone(planOverride)).toBe(true)
+
+      writeFileSync(join(harnessDir, "graph-snapshot.json"), "{corrupt json", "utf8")
+      const corruptSnap = tryFastPathIngest(["ingest", "--format=antigravity"], { repoRoot: dir })
+      expect(Option.isNone(corruptSnap)).toBe(true)
+    })
+
     it("returns {} quickly without heavy modules when snapshot and head match", () => {
       const { dir, headSha } = createTempGitRepo("harness-hook-ingest-hit-")
       const harnessDir = join(dir, ".harness")
@@ -494,6 +705,7 @@ describe("hook-entry.ts fast-path", () => {
       }
       expect(headMeta.headSha).toBe(headSha)
     })
+
     it("delegates non-Antigravity ingest to fallback even when snapshot and head match", () => {
       const { dir, headSha } = createTempGitRepo("harness-hook-ingest-cc-")
       const harnessDir = join(dir, ".harness")
@@ -522,7 +734,65 @@ describe("hook-entry.ts fast-path", () => {
   })
 
   describe("session --format=antigravity", () => {
-    it("miss avoids @effect/ai-typesafe and warm hit avoids fallback with lower latency", () => {
+    it("computePreInvocationFingerprint matches computePreInvocationFingerprintLite across repo states", () => {
+      const { dir } = createTempGitRepo("harness-fp-parity-")
+      const harnessDir = join(dir, ".harness")
+      mkdirSync(harnessDir, { recursive: true })
+      writeFileSync(join(dir, ".gitignore"), ".nx/\nlibs/demo/src/\n", "utf8")
+      mkdirSync(join(dir, "libs", "demo", "src"), { recursive: true })
+      writeFileSync(join(dir, "src-tracked.ts"), "export const v = 1\n", "utf8")
+      execFileSync("git", ["add", ".gitignore", "src-tracked.ts"], { cwd: dir, encoding: "utf8" })
+      execFileSync("git", ["commit", "-m", "add tracked"], { cwd: dir, encoding: "utf8" })
+
+      const assertParity = (label: string): string => {
+        const fullOpt = computePreInvocationFingerprint(dir, harnessDir, nodeSyncHostIo)
+        const liteOpt = computePreInvocationFingerprintLite(dir, REPO_ROOT, harnessDir, process.env)
+        expect(Option.isSome(fullOpt), `${label} full`).toBe(true)
+        expect(Option.isSome(liteOpt), `${label} lite`).toBe(true)
+        const fullVal = match(fullOpt)
+          .with({ _tag: "Some" }, ({ value }) => value)
+          .with({ _tag: "None" }, () => expect.unreachable())
+          .exhaustive()
+        const liteVal = match(liteOpt)
+          .with({ _tag: "Some" }, ({ value }) => value)
+          .with({ _tag: "None" }, () => expect.unreachable())
+          .exhaustive()
+        expect(fullVal, label).toBe(liteVal)
+        return fullVal
+      }
+
+      const fpClean = assertParity("clean repo")
+
+      writeFileSync(join(dir, "src-tracked.ts"), "export const v = 2\n", "utf8")
+      const fpEdited = assertParity("tracked edit")
+      expect(fpEdited).not.toBe(fpClean)
+
+      execFileSync("git", ["mv", "src-tracked.ts", "src-renamed.ts"], {
+        cwd: dir,
+        encoding: "utf8",
+      })
+      const fpRenamed = assertParity("renamed file")
+      expect(fpRenamed).not.toBe(fpEdited)
+
+      writeFileSync(join(dir, "untracked.ts"), "export const u = 1\n", "utf8")
+      const fpUntracked = assertParity("untracked file")
+      expect(fpUntracked).not.toBe(fpRenamed)
+
+      mkdirSync(join(dir, ".nx"), { recursive: true })
+      writeFileSync(join(dir, ".nx", "cache.bin"), "ignored-nx", "utf8")
+      const fpNxIgnored = assertParity(".nx/ ignored file")
+      expect(fpNxIgnored).toBe(fpUntracked)
+
+      writeFileSync(join(dir, "libs", "demo", "src", "ignored.ts"), "export const i = 1\n", "utf8")
+      const fpDemoIgnored = assertParity("libs/demo/src/ ignored file")
+      expect(fpDemoIgnored).not.toBe(fpNxIgnored)
+
+      writeFileSync(join(harnessDir, "verify-stamp.json"), JSON.stringify({ ok: true }), "utf8")
+      const fpStateUpdated = assertParity(".harness/ state-file update")
+      expect(fpStateUpdated).not.toBe(fpDemoIgnored)
+    })
+
+    it("miss avoids @effect/ai-typesafe and warm hit loads fewer modules without fallback", () => {
       const { dir } = createTempGitRepo("harness-hook-session-")
       const env = {
         HARNESS_TEST_ISOLATION: undefined,
@@ -555,9 +825,9 @@ describe("hook-entry.ts fast-path", () => {
       expect(hitPayload).toEqual(missPayload)
       assertNoHeavyModulesLoaded(hitInspect.loadedUrls)
       console.info(
-        `[bench] session warm hit: ${Math.round(hitMs)}ms vs cold miss: ${Math.round(missMs)}ms`,
+        `[bench] session warm hit: ${Math.round(hitMs)}ms (${hitInspect.loadedUrls.length} modules) vs cold miss: ${Math.round(missMs)}ms (${missInspect.loadedUrls.length} modules)`,
       )
-      expect(hitMs).toBeLessThan(missMs)
+      expect(hitInspect.loadedUrls.length).toBeLessThan(missInspect.loadedUrls.length)
     })
   })
 })

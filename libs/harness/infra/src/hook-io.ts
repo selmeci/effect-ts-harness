@@ -48,17 +48,19 @@ const GIT_IGNORED_LS_FILES_ARGS: ReadonlyArray<string> = [
   ":(exclude,glob)tools/*/node_modules/**",
 ]
 
-export interface GitHeadStateLite {
-  readonly gitBranch: string | null
-  readonly headSha: string | null
-}
-
 const GraphHeadMetaLiteSchema = Schema.Struct({
   headSha: Schema.NullOr(Schema.String),
   gitBranch: Schema.NullOr(Schema.String),
 })
 export type GraphHeadMetaLite = typeof GraphHeadMetaLiteSchema.Type
+export type GitHeadStateLite = typeof GraphHeadMetaLiteSchema.Type
 const decodeGraphHeadMetaLite = Schema.decodeOption(Schema.fromJsonString(GraphHeadMetaLiteSchema))
+
+const GraphSnapshotLiteSchema = Schema.Struct({
+  nodes: Schema.Array(Schema.Unknown),
+  edges: Schema.Array(Schema.Unknown),
+})
+const decodeGraphSnapshotLite = Schema.decodeOption(Schema.fromJsonString(GraphSnapshotLiteSchema))
 
 export interface HookStdinOk {
   readonly _tag: "Ok"
@@ -72,14 +74,18 @@ export interface HookStdinFailed {
 
 export type HookStdinReadResult = HookStdinOk | HookStdinFailed
 
+const HookTelemetrySurfaceSchema = Schema.Literals(["hook", "cli"])
+const HookTelemetryCategorySchema = Schema.Literals(["guard", "lifecycle"])
+const HookTelemetryOutcomeSchema = Schema.Literals(["ok", "deny", "ask", "fail"])
+
 export interface HookTelemetryLiteInput {
   readonly repoRoot: string
   readonly cliRepoRoot: string
   readonly env?: Readonly<Record<string, string | undefined>>
-  readonly surface: "hook" | "cli"
-  readonly category: "guard" | "lifecycle"
+  readonly surface: typeof HookTelemetrySurfaceSchema.Type
+  readonly category: typeof HookTelemetryCategorySchema.Type
   readonly toolName: string
-  readonly outcome: "ok" | "deny" | "ask" | "fail"
+  readonly outcome: typeof HookTelemetryOutcomeSchema.Type
   readonly durationMs: number
   readonly detail?: string | undefined
 }
@@ -252,28 +258,39 @@ const resolveGitHeadStateLite = (
     gitBranch: envBranch && envBranch.length > 0 ? envBranch : null,
     headSha: envSha && envSha.length > 0 ? envSha : null,
   }
-  return tryOr((): GitHeadStateLite => {
-    const dirs = resolveGitDirsLite(repoRoot)
-    if (dirs === null) return fallback
-    const headFile = join(dirs.gitDir, "HEAD")
-    if (!existsRegularFileLite(headFile)) return fallback
-    const headContent = readFileSync(headFile, "utf8").trim()
-    if (headContent.startsWith("ref:")) {
-      const refPath = headContent.slice("ref:".length).trim()
-      const detectedBranch = refPath.startsWith("refs/heads/")
-        ? refPath.slice("refs/heads/".length)
-        : null
-      const detectedSha = resolveRefShaLite(dirs.gitDir, dirs.commonGitDir, refPath)
-      return {
-        gitBranch: envBranch && envBranch.length > 0 ? envBranch : detectedBranch,
-        headSha: envSha && envSha.length > 0 ? envSha : detectedSha,
+  const dotGit = join(resolve(repoRoot), ".git")
+  if (!existsSync(dotGit)) return fallback
+  return match(
+    Result.try((): GitHeadStateLite => {
+      const dirs = resolveGitDirsLite(repoRoot)
+      if (dirs === null) return fallback
+      const headFile = join(dirs.gitDir, "HEAD")
+      if (!existsSync(headFile)) return fallback
+      const headContent = readFileSync(headFile, "utf8").trim()
+      if (headContent.startsWith("ref:")) {
+        const refPath = headContent.slice("ref:".length).trim()
+        const detectedBranch = refPath.startsWith("refs/heads/")
+          ? refPath.slice("refs/heads/".length)
+          : null
+        const detectedSha = resolveRefShaLite(dirs.gitDir, dirs.commonGitDir, refPath)
+        return {
+          gitBranch: envBranch && envBranch.length > 0 ? envBranch : detectedBranch,
+          headSha: envSha && envSha.length > 0 ? envSha : detectedSha,
+        }
       }
-    }
-    return {
-      gitBranch: envBranch && envBranch.length > 0 ? envBranch : null,
-      headSha: envSha && envSha.length > 0 ? envSha : headContent.length > 0 ? headContent : null,
-    }
-  }, fallback)
+      return {
+        gitBranch: envBranch && envBranch.length > 0 ? envBranch : null,
+        headSha: envSha && envSha.length > 0 ? envSha : headContent.length > 0 ? headContent : null,
+      }
+    }),
+  )
+    .with({ _tag: "Success" }, ({ success }) => success)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      const msg = failure instanceof Error ? failure.message : String(failure)
+      process.stderr.write(`[harness:hook-io] Warning: failed to read git HEAD state: ${msg}\n`)
+      return fallback
+    })
+    .exhaustive()
 }
 
 const readGraphHeadMetaLite = (harnessDir: string): Option.Option<GraphHeadMetaLite> => {
@@ -293,6 +310,10 @@ const isIngestSnapshotUpToDateLite = (
   const metaPath = join(harnessDir, "graph-head.json")
   if (!isSafeHarnessLeafPath(repoRoot, harnessDir, snapshotPath, env)) return false
   if (!isSafeHarnessLeafPath(repoRoot, harnessDir, metaPath, env)) return false
+  const rawSnapshot = tryOr(() => readFileSync(snapshotPath, "utf8"), undefined)
+  if (rawSnapshot === undefined || unwrapOpt(decodeGraphSnapshotLite(rawSnapshot)) === undefined) {
+    return false
+  }
   const meta = unwrapOpt(readGraphHeadMetaLite(harnessDir))
   if (meta === undefined) return false
   const head = resolveGitHeadStateLite(repoRoot, env)
@@ -314,6 +335,7 @@ const readHookStdinCallback = (
   const chunks: Array<Buffer> = []
   let totalBytes = 0
   let settled = false
+  let ended = false
   let timer: ReturnType<typeof setTimeout> | undefined = undefined
   const noopError = (): void => {}
   const finish = (res: HookStdinReadResult, destroyStream: boolean = false): void => {
@@ -356,10 +378,18 @@ const readHookStdinCallback = (
     chunks.push(buf)
   }
   const onEnd = (): void => {
+    ended = true
     finish({ _tag: "Ok", text: Buffer.concat(chunks).toString("utf8") })
   }
   const onClose = (): void => {
-    finish({ _tag: "Ok", text: Buffer.concat(chunks).toString("utf8") })
+    if (ended || process.stdin.readableEnded) {
+      finish({ _tag: "Ok", text: Buffer.concat(chunks).toString("utf8") })
+      return
+    }
+    finish({
+      _tag: "Failed",
+      reason: "Stdin stream closed prematurely before end",
+    })
   }
   const onError = (err: unknown): void => {
     finish({
@@ -382,19 +412,27 @@ const appendHookTelemetryLite = (input: HookTelemetryLiteInput): void => {
   if (shouldSuppressLiveRepoTestSideEffectsLite(input.repoRoot, input.cliRepoRoot, env)) return
   const harnessDir = unwrapOpt(resolveHarnessStateDirLite(input.repoRoot, env))
   if (harnessDir === undefined) return
-  tryOr(() => {
-    if (!existsSync(harnessDir)) mkdirSync(harnessDir, { recursive: true })
-    const entry = {
-      timestamp: new Date().toISOString(),
-      surface: input.surface,
-      category: input.category,
-      toolName: input.toolName,
-      outcome: input.outcome,
-      durationMs: Math.max(0, Math.round(input.durationMs)),
-      ...(input.detail !== undefined ? { detail: input.detail } : {}),
-    }
-    appendFileSync(join(harnessDir, "telemetry-log.jsonl"), `${JSON.stringify(entry)}\n`, "utf8")
-  }, undefined)
+  match(
+    Result.try(() => {
+      if (!existsSync(harnessDir)) mkdirSync(harnessDir, { recursive: true })
+      const entry = {
+        timestamp: new Date().toISOString(),
+        surface: input.surface,
+        category: input.category,
+        toolName: input.toolName,
+        outcome: input.outcome,
+        durationMs: Math.max(0, Math.round(input.durationMs)),
+        ...(input.detail !== undefined ? { detail: input.detail } : {}),
+      }
+      appendFileSync(join(harnessDir, "telemetry-log.jsonl"), `${JSON.stringify(entry)}\n`, "utf8")
+    }),
+  )
+    .with({ _tag: "Success" }, () => undefined)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      const msg = failure instanceof Error ? failure.message : String(failure)
+      process.stderr.write(`[harness:hook-io] Warning: failed to append hook telemetry: ${msg}\n`)
+    })
+    .exhaustive()
 }
 
 const ROOT_IGNORED = new Set([
@@ -713,6 +751,7 @@ export {
   GIT_FINGERPRINT_MAX_BUFFER_BYTES,
   GIT_IGNORED_LS_FILES_ARGS,
   appendHookTelemetryLite,
+  computeFingerprintLite as computePreInvocationFingerprintLite,
   existsRegularFileLite,
   findWorkspaceRootLite,
   isIngestSnapshotUpToDateLite,

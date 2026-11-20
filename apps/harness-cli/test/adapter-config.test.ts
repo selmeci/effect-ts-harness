@@ -881,28 +881,51 @@ describe("Antigravity adapter & plugin configuration", () => {
         "2+",
         "df -ih /tmp",
         "NX_SOCKET_DIR",
-        "pnpm --filter <pkg> run typecheck && lint && test",
+        "pnpm --filter <pkg> run typecheck && pnpm --filter <pkg> run lint && pnpm --filter <pkg> run test",
+        "Sub-Bullet Verification Matrix",
+        "block Phase 5",
+        "swarm kill",
       ]) {
         expect(
           resolvingFeedback,
           `${adapter.name} resolving-effect-review-feedback missing ${token}`,
         ).toContain(token)
       }
+      expect(resolvingFeedback).not.toContain("&& lint && test")
+      expect(resolvingFeedback).not.toContain("NX_DAEMON=false` hangs")
+      expect(resolvingFeedback).not.toContain("NX_DAEMON=false hangs")
+      expect(resolvingFeedback).not.toContain("except targeted --file")
       if (adapter.name === "claude-code") {
         expect(resolvingFeedback).not.toContain("swarm workers")
         expect(resolvingFeedback).not.toContain("invoke_subagent")
       }
+
+      const fixerPrompt = readFileSync(
+        resolve(adapter.dir, "resolving-effect-review-feedback/references/effect-fixer-prompt.md"),
+        "utf8",
+      )
+      expect(fixerPrompt).toContain(
+        "pnpm --filter <pkg> run typecheck && pnpm --filter <pkg> run lint && pnpm --filter <pkg> run test",
+      )
+      expect(fixerPrompt).not.toContain("&& lint && test")
+      expect(fixerPrompt).not.toContain("NX_DAEMON=false` hangs")
+      expect(fixerPrompt).not.toContain("NX_DAEMON=false hangs")
 
       for (const rel of ["effect-lfg/SKILL.md", "executing-effect-stubs/SKILL.md"] as const) {
         const content = readFileSync(resolve(adapter.dir, rel), "utf8")
         for (const token of [
           "df -ih /tmp",
           "NX_SOCKET_DIR",
-          "pnpm --filter <pkg> run typecheck && lint && test",
+          "pnpm --filter <pkg> run typecheck && pnpm --filter <pkg> run lint && pnpm --filter <pkg> run test",
+          "Sub-Bullet Verification Matrix",
+          "swarm kill",
           adapter.monitorToken,
         ]) {
           expect(content, `${adapter.name} ${rel} missing ${token}`).toContain(token)
         }
+        expect(content).not.toContain("&& lint && test")
+        expect(content).not.toContain("NX_DAEMON=false` hangs")
+        expect(content).not.toContain("NX_DAEMON=false hangs")
       }
     }
   })

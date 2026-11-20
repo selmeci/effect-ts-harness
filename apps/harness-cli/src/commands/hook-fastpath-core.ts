@@ -21,6 +21,8 @@ import {
   extractGuardStdinPayload,
   formatCommandDenyReason,
   type GuardVerdictDecision,
+  type ParsedGuardCliArgs,
+  parseGuardCliArgs,
   pickStrictestDecision,
   toGuardCliResult,
 } from "./hook-guard-payload.js"
@@ -79,54 +81,6 @@ const delegateToFallback = (
     })
 }
 
-type ParsedHookFlags =
-  | { readonly _tag: "Help" }
-  | { readonly _tag: "UnknownFlag"; readonly flag: string }
-  | { readonly _tag: "MissingFlagValue"; readonly flag: string }
-  | {
-      readonly _tag: "Ok"
-      readonly positionalArgs: ReadonlyArray<string>
-      readonly fileFlag: string | undefined
-    }
-
-const parseHookFlags = (argsAfterCmd: ReadonlyArray<string>): ParsedHookFlags => {
-  const positionalArgs: Array<string> = []
-  let fileFlag: string | undefined
-  for (let i = 0; i < argsAfterCmd.length; i += 1) {
-    const arg = argsAfterCmd[i]!
-    if (arg === "--help" || arg === "-h") {
-      return { _tag: "Help" }
-    }
-    if (arg === "--format") {
-      if (i + 1 >= argsAfterCmd.length) {
-        return { _tag: "MissingFlagValue", flag: "--format" }
-      }
-      i += 1
-      continue
-    }
-    if (arg.startsWith("--format=")) {
-      continue
-    }
-    if (arg === "--file") {
-      if (i + 1 >= argsAfterCmd.length) {
-        return { _tag: "MissingFlagValue", flag: "--file" }
-      }
-      fileFlag = argsAfterCmd[i + 1]
-      i += 1
-      continue
-    }
-    if (arg.startsWith("--file=")) {
-      fileFlag = arg.slice("--file=".length)
-      continue
-    }
-    if (arg.startsWith("-")) {
-      return { _tag: "UnknownFlag", flag: arg }
-    }
-    positionalArgs.push(arg)
-  }
-  return { _tag: "Ok", positionalArgs, fileFlag }
-}
-
 const recordGuardTelemetry = (
   outcome: "ok" | "deny" | "ask",
   startMs: number,
@@ -162,59 +116,58 @@ const evaluateGuardPayload = (
       recordGuardTelemetry("deny", startMs, detail)
       writeResultAndExit(makeGuardDenyResult(isAntigravity, reason))
     })
-    .with(
-      { _tag: "Ok" },
-      ({ isAntigravity, candidateCmds, candidatePaths, isReadOnlyToolCall }) => {
-        let combinedDecision: GuardVerdictDecision | undefined
-        for (const filePath of candidatePaths) {
-          const d = evaluateFileWriteDecision(filePath)
-          combinedDecision =
-            combinedDecision === undefined ? d : pickStrictestDecision(combinedDecision, d)
+    .with({ _tag: "ReadOnly" }, ({ isAntigravity }) => {
+      recordGuardTelemetry("ok", startMs, "fastpath=hit")
+      writeResultAndExit(toGuardCliResult({ verdict: "allow" }, isAntigravity))
+    })
+    .with({ _tag: "Action" }, ({ isAntigravity, candidateCmds, candidatePaths }) => {
+      let combinedDecision: GuardVerdictDecision | undefined
+      for (const filePath of candidatePaths) {
+        const d = evaluateFileWriteDecision(filePath)
+        combinedDecision =
+          combinedDecision === undefined ? d : pickStrictestDecision(combinedDecision, d)
+      }
+      for (const cmd of candidateCmds) {
+        if (isSkipNxCacheOverrideCommand(cmd)) {
+          delegateToFallback(argv, { stdin: rawStdin })
+          return
         }
-        for (const cmd of candidateCmds) {
-          if (isSkipNxCacheOverrideCommand(cmd)) {
-            delegateToFallback(argv, { stdin: rawStdin })
-            return
-          }
-          const classification = classifyCommand(cmd)
-          if (classification === "escalate") {
-            delegateToFallback(argv, { stdin: rawStdin })
-            return
-          }
-          const d = match<typeof classification, GuardVerdictDecision>(classification)
-            .with("deny", () => ({ verdict: "deny", reason: formatCommandDenyReason(cmd) }))
-            .with("allow", () => ({ verdict: "allow" }))
-            .with("ask", () => ({
-              verdict: "ask",
-              reason: `Command requires human confirmation: ${cmd}`,
-            }))
-            .exhaustive()
-          combinedDecision =
-            combinedDecision === undefined ? d : pickStrictestDecision(combinedDecision, d)
+        const classification = classifyCommand(cmd)
+        if (classification === "escalate") {
+          delegateToFallback(argv, { stdin: rawStdin })
+          return
         }
-
-        const finalDecision: GuardVerdictDecision =
-          combinedDecision !== undefined
-            ? combinedDecision
-            : isReadOnlyToolCall
-              ? { verdict: "allow" }
-              : { verdict: "deny", reason: "guard: empty hook command payload" }
-
-        const outcome = match(finalDecision.verdict)
-          .with("allow", () => "ok" as const)
-          .with("deny", () => "deny" as const)
-          .with("ask", () => "ask" as const)
+        const d = match<typeof classification, GuardVerdictDecision>(classification)
+          .with("deny", () => ({ verdict: "deny", reason: formatCommandDenyReason(cmd) }))
+          .with("allow", () => ({ verdict: "allow" }))
+          .with("ask", () => ({
+            verdict: "ask",
+            reason: `Command requires human confirmation: ${cmd}`,
+          }))
           .exhaustive()
-        recordGuardTelemetry(outcome, startMs, "fastpath=hit")
-        writeResultAndExit(toGuardCliResult(finalDecision, isAntigravity))
-      },
-    )
+        combinedDecision =
+          combinedDecision === undefined ? d : pickStrictestDecision(combinedDecision, d)
+      }
+
+      const finalDecision: GuardVerdictDecision =
+        combinedDecision !== undefined
+          ? combinedDecision
+          : { verdict: "deny", reason: "guard: empty hook command payload" }
+
+      const outcome = match(finalDecision.verdict)
+        .with("allow", () => "ok" as const)
+        .with("deny", () => "deny" as const)
+        .with("ask", () => "ask" as const)
+        .exhaustive()
+      recordGuardTelemetry(outcome, startMs, "fastpath=hit")
+      writeResultAndExit(toGuardCliResult(finalDecision, isAntigravity))
+    })
     .exhaustive()
 }
 
 const runGuardFastPath = (argv: ReadonlyArray<string>, startMs: number): void => {
   const isAntigravity = hasAntigravityFormat(argv)
-  const parsed = parseHookFlags(argv.slice(1))
+  const parsed = parseGuardCliArgs(argv.slice(1))
   match(parsed)
     .with({ _tag: "Help" }, () => {
       recordGuardTelemetry("deny", startMs, "fastpath=help-flag")
@@ -262,7 +215,7 @@ const runGuardFastPath = (argv: ReadonlyArray<string>, startMs: number): void =>
     .exhaustive()
 }
 
-const isPlainFormatOnlyFlags = (parsed: ParsedHookFlags): boolean =>
+const isPlainFormatOnlyFlags = (parsed: ParsedGuardCliArgs): boolean =>
   match(parsed)
     .with(
       { _tag: "Ok" },
@@ -272,7 +225,7 @@ const isPlainFormatOnlyFlags = (parsed: ParsedHookFlags): boolean =>
     .exhaustive()
 
 const runIngestFastPath = (argv: ReadonlyArray<string>, startMs: number): void => {
-  if (!isPlainFormatOnlyFlags(parseHookFlags(argv.slice(1))) || !hasAntigravityFormat(argv)) {
+  if (!isPlainFormatOnlyFlags(parseGuardCliArgs(argv.slice(1))) || !hasAntigravityFormat(argv)) {
     delegateToFallback(argv)
     return
   }
@@ -296,7 +249,7 @@ const runIngestFastPath = (argv: ReadonlyArray<string>, startMs: number): void =
 
 const runSessionFastPath = (argv: ReadonlyArray<string>, startMs: number): void => {
   if (
-    !isPlainFormatOnlyFlags(parseHookFlags(argv.slice(1))) ||
+    !isPlainFormatOnlyFlags(parseGuardCliArgs(argv.slice(1))) ||
     !hasAntigravityFormat(argv) ||
     process.env["HARNESS_REQUIRE_OLLAMA"] === "1"
   ) {

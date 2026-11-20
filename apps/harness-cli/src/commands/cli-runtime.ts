@@ -2,7 +2,6 @@ import { join } from "node:path"
 import { NodeRuntime } from "@effect/platform-node"
 import { Cause, Effect, Exit, Layer, Logger } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
-import * as Schema from "effect/Schema"
 import { match } from "ts-pattern"
 import { isPureInterruptCause } from "@harness/contract"
 import { type TelemetryCategory, type TelemetrySurface } from "@harness/gates/hook-fastpath"
@@ -22,39 +21,35 @@ import { runDeclarativeCli } from "./declarative-cli.js"
 import {
   createHookStdinTracker,
   hasAntigravityFormat,
+  isParsedAntigravityHookPayload,
   normalizeProcessArgv,
   resolveTeardownFailure,
 } from "./hook-format.js"
 
-const decodeJsonRecord = Schema.decodeOption(
-  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
-)
-
-const isParsedAntigravityStdin = (rawStdin: string): boolean =>
-  match(decodeJsonRecord(rawStdin))
-    .with(
-      { _tag: "Some" },
-      ({ value }) =>
-        (value["toolCall"] !== undefined && value["toolCall"] !== null) ||
-        "fullyIdle" in value ||
-        "workspacePaths" in value ||
-        "conversationId" in value,
-    )
-    .with({ _tag: "None" }, () => false)
-    .exhaustive()
+export interface TeardownCliMainOptions {
+  readonly writeStderr?: ((s: string) => void) | undefined
+  readonly argv?: ReadonlyArray<string> | undefined
+  readonly writeStdout?: ((s: string) => void) | undefined
+  readonly isAntigravityStdinDetected?: boolean | undefined
+}
 
 export const teardownCliMain = (
   exit: Exit.Exit<unknown, unknown>,
   onExit: (code: number) => void,
-  writeStderr: (s: string) => void = (s) => {
-    process.stderr.write(s)
-  },
-  argv: ReadonlyArray<string> = process.argv,
-  writeStdout: (s: string) => void = (s) => {
-    process.stdout.write(s)
-  },
-  isAntigravityStdinDetected = false,
+  options?: TeardownCliMainOptions,
 ): void => {
+  const writeStderr =
+    options?.writeStderr ??
+    ((s: string) => {
+      process.stderr.write(s)
+    })
+  const argv = options?.argv ?? process.argv
+  const writeStdout =
+    options?.writeStdout ??
+    ((s: string) => {
+      process.stdout.write(s)
+    })
+  const isAntigravityStdinDetected = options?.isAntigravityStdinDetected ?? false
   match(exit)
     .with({ _tag: "Success" }, () => {
       const code = typeof process.exitCode === "number" ? process.exitCode : 0
@@ -169,7 +164,7 @@ export const runCliEffect = (
 
 export const runCliProgram = (argv: ReadonlyArray<string>, extraOptions?: CliEnv): void => {
   const hookStdinTracker = createHookStdinTracker()
-  if (extraOptions?.stdin !== undefined && isParsedAntigravityStdin(extraOptions.stdin)) {
+  if (extraOptions?.stdin !== undefined && isParsedAntigravityHookPayload(extraOptions.stdin)) {
     hookStdinTracker.markAntigravityDetected()
   }
   runCliEffect(argv, { hookStdinTracker, ...extraOptions }).pipe(
@@ -187,14 +182,10 @@ export const runCliProgram = (argv: ReadonlyArray<string>, extraOptions?: CliEnv
     NodeRuntime.runMain({
       disableErrorReporting: true,
       teardown: (exit, onExit) =>
-        teardownCliMain(
-          exit,
-          onExit,
-          undefined,
+        teardownCliMain(exit, onExit, {
           argv,
-          undefined,
-          hookStdinTracker.isAntigravityDetected(),
-        ),
+          isAntigravityStdinDetected: hookStdinTracker.isAntigravityDetected(),
+        }),
     }),
   )
 }

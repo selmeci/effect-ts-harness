@@ -94,6 +94,27 @@ const writeFile = (filePath: string, content: string): void => {
   writeFileSync(filePath, content, "utf8")
 }
 
+const withCapturedStderr = <A, E, R>(
+  use: (chunks: Array<string>) => Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> => {
+  const originalWrite = process.stderr.write.bind(process.stderr)
+  return Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const chunks: Array<string> = []
+      process.stderr.write = (chunk: string | Uint8Array): boolean => {
+        chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+        return true
+      }
+      return chunks
+    }),
+    use,
+    () =>
+      Effect.sync(() => {
+        process.stderr.write = originalWrite
+      }),
+  )
+}
+
 const initGitRepo = (dir: string): void => {
   execFileSync("git", ["init", "-b", "main"], { cwd: dir, stdio: "ignore" })
   execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir, stdio: "ignore" })
@@ -235,8 +256,23 @@ describe("hook-io lite helpers and lazy LocalDecisionModel", () => {
           expect(isIngestSnapshotUpToDateLite(tempDir, {})).toBe(false)
 
           // Matching snapshot + meta
-          writeFile(join(tempDir, ".harness", "graph-snapshot.json"), "{}")
+          writeFile(
+            join(tempDir, ".harness", "graph-snapshot.json"),
+            JSON.stringify({ nodes: [], edges: [] }),
+          )
           expect(isIngestSnapshotUpToDateLite(tempDir, {})).toBe(true)
+
+          // Invalid / empty / non-schema graph-snapshot.json returns false (F-8.1a)
+          writeFile(join(tempDir, ".harness", "graph-snapshot.json"), "")
+          expect(isIngestSnapshotUpToDateLite(tempDir, {})).toBe(false)
+          writeFile(join(tempDir, ".harness", "graph-snapshot.json"), "{}")
+          expect(isIngestSnapshotUpToDateLite(tempDir, {})).toBe(false)
+          writeFile(join(tempDir, ".harness", "graph-snapshot.json"), "{not-json")
+          expect(isIngestSnapshotUpToDateLite(tempDir, {})).toBe(false)
+          writeFile(
+            join(tempDir, ".harness", "graph-snapshot.json"),
+            JSON.stringify({ nodes: [], edges: [] }),
+          )
 
           // Stale SHA
           writeFile(
@@ -475,7 +511,7 @@ describe("hook-io lite helpers and lazy LocalDecisionModel", () => {
           }),
         )
 
-        // 8. premature close settles Ok with buffered chunks
+        // 8. premature close settles Failed before end (F-9.3)
         yield* withMockStdin((stream) =>
           Effect.gen(function* () {
             const res = yield* runStdinCallback(
@@ -486,7 +522,10 @@ describe("hook-io lite helpers and lazy LocalDecisionModel", () => {
               },
               stream,
             )
-            expect(res).toEqual({ _tag: "Ok", text: "partial" })
+            expect(res).toEqual({
+              _tag: "Failed",
+              reason: "Stdin stream closed prematurely before end",
+            })
             expect(stream.listenerCount("close")).toBe(0)
           }),
         )
@@ -802,6 +841,126 @@ describe("hook-io lite helpers and lazy LocalDecisionModel", () => {
         expect(requests[0]?.method).toBe("POST")
         expect(requests[0]?.body).toContain("clef-flash")
       }),
+  )
+
+  it.effect(
+    "makeLocalDecisionModelLayer single-flights concurrent decide calls and retries after transient loadModule failure (F-7.1a)",
+    () =>
+      Effect.gen(function* () {
+        const makeMockClient = () =>
+          HttpClient.make((req) =>
+            Effect.succeed(
+              HttpClientResponse.fromWeb(
+                req,
+                new Response(
+                  JSON.stringify({
+                    model: "clef-flash",
+                    answers: {
+                      check: { type: "noul", noul: 0.75 },
+                    },
+                  }),
+                  { status: 200, headers: { "content-type": "application/json" } },
+                ),
+              ),
+            ),
+          )
+
+        const TestDecision = Decision.make({
+          input: Schema.Struct({ ok: Schema.Boolean }),
+          decisions: {
+            check: Decision.probability({ instructions: "Check?" }),
+          },
+        })
+
+        // (a) 3 concurrent calls invoke loadModule only once
+        let concurrentLoadCount = 0
+        const concurrentLayer = makeLocalDecisionModelLayer({
+          apiUrl: "http://127.0.0.1:11434/v1",
+          model: "clef-flash",
+          loadModule: () => {
+            concurrentLoadCount += 1
+            return import("@effect/ai-typesafe")
+          },
+        }).pipe(Layer.provide(Layer.succeed(HttpClient.HttpClient, makeMockClient())))
+
+        const concurrentResults = yield* Effect.all(
+          [
+            DecisionModel.decide(TestDecision, { input: { ok: true } }),
+            DecisionModel.decide(TestDecision, { input: { ok: true } }),
+            DecisionModel.decide(TestDecision, { input: { ok: true } }),
+          ],
+          { concurrency: "unbounded" },
+        ).pipe(Effect.provide(concurrentLayer))
+        expect(concurrentLoadCount).toBe(1)
+        expect(concurrentResults).toHaveLength(3)
+
+        // (b) First call failing returns AiError, second call retries and succeeds
+        let attempt = 0
+        const retryLayer = makeLocalDecisionModelLayer({
+          apiUrl: "http://127.0.0.1:11434/v1",
+          model: "clef-flash",
+          loadModule: () => {
+            attempt += 1
+            return attempt === 1
+              ? Promise.reject(new Error("transient"))
+              : import("@effect/ai-typesafe")
+          },
+        }).pipe(Layer.provide(Layer.succeed(HttpClient.HttpClient, makeMockClient())))
+
+        const firstRes = yield* Effect.result(
+          DecisionModel.decide(TestDecision, { input: { ok: true } }),
+        ).pipe(Effect.provide(retryLayer))
+        match(firstRes)
+          .with({ _tag: "Failure" }, ({ failure }) => {
+            expect(failure._tag).toBe("AiError")
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected first call to fail")
+          })
+          .exhaustive()
+
+        const secondRes = yield* Effect.result(
+          DecisionModel.decide(TestDecision, { input: { ok: true } }),
+        ).pipe(Effect.provide(retryLayer))
+        expect(secondRes._tag).toBe("Success")
+        expect(attempt).toBe(2)
+      }),
+  )
+
+  it.effect(
+    "logs stderr warnings on telemetry write failure (F-9.1) and unexpected git HEAD read failure (F-9.2)",
+    () =>
+      withTempDir("hook-io-warnings-", (tempDir) =>
+        withCapturedStderr((stderrChunks) =>
+          Effect.sync(() => {
+            // F-9.1: blocked telemetry target (.harness is a regular file)
+            const blockedRepo = join(tempDir, "blocked-telemetry")
+            writeFile(join(blockedRepo, ".harness"), "blocking-file")
+            appendHookTelemetryLite({
+              repoRoot: blockedRepo,
+              cliRepoRoot: join(tempDir, "other-cli"),
+              env: {},
+              surface: "hook",
+              category: "guard",
+              toolName: "Bash",
+              outcome: "ok",
+              durationMs: 1,
+            })
+            expect(stderrChunks.join("")).toContain(
+              "[harness:hook-io] Warning: failed to append hook telemetry:",
+            )
+
+            // F-9.2: .git exists and .git/HEAD is a directory (EISDIR)
+            const brokenGitRepo = join(tempDir, "broken-git")
+            mkdirSync(join(brokenGitRepo, ".git", "HEAD"), { recursive: true })
+            const headRes = resolveGitHeadStateLite(brokenGitRepo, {})
+            expect(headRes).toEqual({ gitBranch: null, headSha: null })
+            expect(stderrChunks.join("")).toContain(
+              "[harness:hook-io] Warning: failed to read git HEAD state:",
+            )
+          }),
+        ),
+      ),
   )
 
   it.effect(
