@@ -3,10 +3,10 @@ import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   AbsoluteRepoRoot,
-  LeaseEpoch,
   type WorkflowPlanToolOutput,
   WorkflowRunId,
-  type WorkflowStatusSummary,
+  WorkflowRunOutcome,
+  WorkflowStatusSummary,
 } from "@harness/contract"
 import {
   UnixSocketDaemonLive,
@@ -56,14 +56,10 @@ const toCanonicalPathOrRaw = (rawPath: string): string =>
     .with({ _tag: "Failure" }, () => rawPath)
     .exhaustive()
 
-const makeOfflineWorkflowSummary = (): WorkflowStatusSummary => ({
-  units: [],
-  attempts: [],
-  pendingDeferreds: [],
-  storeStatus: "inactive",
-  projectionStatus: "not-projected",
-  writerLeaseEpoch: LeaseEpoch.make(0),
-})
+const makeOfflineWorkflowSummary = (): WorkflowStatusSummary =>
+  WorkflowStatusSummary.cases.DaemonOffline.make({
+    outcome: WorkflowRunOutcome.cases.NotFound.make({}),
+  })
 
 const isSocketTransportUnavailableReason = (reason: string): boolean =>
   reason.startsWith("Daemon socket unavailable") ||

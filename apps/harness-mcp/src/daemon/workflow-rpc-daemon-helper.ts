@@ -3,12 +3,14 @@ import { DurableDeferred } from "effect/workflow"
 import { match } from "ts-pattern"
 import {
   type CompiledPlan,
+  type LeaseEpoch,
   SHARED_STEP_UNIT_ID,
   WorkflowAbortRequest,
   type WorkflowAbortResponse,
-  WorkflowExecutionId,
+  WorkflowDaemonCapability,
   WorkflowResumeRequest,
   WorkflowResumeResponse,
+  type WorkflowRpcEnvelope,
   type WorkflowRunId,
   WorkflowStartRequest,
   type WorkflowStartResponse,
@@ -17,7 +19,7 @@ import {
   WorkflowTimestampMs,
   toBoundedReason,
 } from "@harness/contract"
-import { HarnessTaskWorkflow, makeUnitEscalationDeferred } from "@harness/gates"
+import { HarnessTaskWorkflow, executionIdOf, makeUnitEscalationDeferred } from "@harness/gates"
 import {
   assertWorkflowNonTerminal,
   handleDaemonWorkflowCompleteRequest,
@@ -27,7 +29,7 @@ import {
 } from "./workflow-rpc-complete-helper.js"
 import {
   type WorkflowRpcHandlerInput,
-  decodePlanFromRun,
+  decodePlanFromRunStrict,
   inspectActiveUnitCycle,
   isOptionPresent,
   isRunTerminalState,
@@ -35,6 +37,7 @@ import {
   resolveRunTarget,
   rpcError,
   rpcSuccess,
+  storeOrLeaseToBoundedReason,
   validateRpcRepoRoot,
   withRunLock,
 } from "./workflow-rpc-shared.js"
@@ -52,6 +55,9 @@ export {
 
 const ABORT_SETTLE_MAX_ATTEMPTS = 200
 const ABORT_SETTLE_INTERVAL_MS = 50
+const START_COMMAND = WorkflowDaemonCapability.make("workflow.start")
+const RESUME_COMMAND = WorkflowDaemonCapability.make("workflow.resume")
+const ABORT_COMMAND = WorkflowDaemonCapability.make("workflow.abort")
 
 const decodeWorkflowStartRequest = Schema.decodeUnknownEffect(WorkflowStartRequest)
 const decodeWorkflowResumeRequest = Schema.decodeUnknownEffect(WorkflowResumeRequest)
@@ -59,12 +65,12 @@ const decodeWorkflowAbortRequest = Schema.decodeUnknownEffect(WorkflowAbortReque
 
 /** Processes `workflow.start` over daemon Unix socket IPC. */
 export const handleDaemonWorkflowStartRequest = Effect.fn("WorkflowRpcDaemon.handleStartRequest")(
-  function* (input: WorkflowRpcHandlerInput): Effect.fn.Return<Record<string, unknown>> {
+  function* (input: WorkflowRpcHandlerInput): Effect.fn.Return<WorkflowRpcEnvelope> {
     const runtime = input.runtime
     if (runtime === undefined) {
       return rpcError(
         input.requestId,
-        "workflow.start",
+        START_COMMAND,
         "Workflow engine runtime is inactive (no active writer lease)",
       )
     }
@@ -74,8 +80,20 @@ export const handleDaemonWorkflowStartRequest = Effect.fn("WorkflowRpcDaemon.han
       Effect.flatMap((req) =>
         Effect.gen(function* () {
           yield* validateRpcRepoRoot(req.repoRoot, input.scope)
-          const executionIdStr = yield* HarnessTaskWorkflow.executionId({ plan: req.plan })
-          const executionId = WorkflowExecutionId.make(executionIdStr)
+          yield* match(req.plan.mode)
+            .with({ _tag: "Manual" }, () => Effect.void)
+            .with({ _tag: "Automatic" }, () =>
+              runtime.unitAgentDispatcher.runnerKind === "placeholder"
+                ? Effect.fail(
+                    toBoundedReason(
+                      "Automatic workflow mode is unavailable: WF-5 live agent runners are not yet available (manual mode only in WF-3)",
+                    ),
+                  )
+                : Effect.void,
+            )
+            .exhaustive()
+
+          const executionId = yield* executionIdOf(req.plan)
 
           return yield* withRunLock(
             runtime,
@@ -83,7 +101,7 @@ export const handleDaemonWorkflowStartRequest = Effect.fn("WorkflowRpcDaemon.han
             Effect.gen(function* () {
               const existingRunOpt = yield* runtime.readModelQuery
                 .getRun(req.plan.runId)
-                .pipe(Effect.mapError((err) => err.reason))
+                .pipe(Effect.mapError(storeOrLeaseToBoundedReason))
               const polledOpt = yield* pollExecution(runtime, executionId)
 
               const atomicDisposition = yield* SynchronizedRef.modifyEffect(
@@ -119,20 +137,29 @@ export const handleDaemonWorkflowStartRequest = Effect.fn("WorkflowRpcDaemon.han
                         ),
                       )
                     }
-                    const decodedExistingPlan = decodePlanFromRun(existingRunMatch) ?? req.plan
-                    const nextMap: ReadonlyMap<WorkflowRunId, CompiledPlan> = new Map(plansMap).set(
-                      req.plan.runId,
-                      decodedExistingPlan,
+                    return decodePlanFromRunStrict(existingRunMatch).pipe(
+                      Effect.flatMap((decodedExistingPlan) => {
+                        if (decodedExistingPlan.planSha !== req.plan.planSha) {
+                          return Effect.fail(
+                            toBoundedReason(
+                              `Workflow run '${req.plan.runId}' stored planJson planSha '${decodedExistingPlan.planSha}' mismatches requested '${req.plan.planSha}'`,
+                            ),
+                          )
+                        }
+                        const nextMap: ReadonlyMap<WorkflowRunId, CompiledPlan> = new Map(
+                          plansMap,
+                        ).set(req.plan.runId, decodedExistingPlan)
+                        return Effect.succeed(["existing", nextMap] as const)
+                      }),
                     )
-                    return Effect.succeed(["existing", nextMap] as const)
                   }
 
                   if (isOptionPresent(polledOpt)) {
-                    const nextMap: ReadonlyMap<WorkflowRunId, CompiledPlan> = new Map(plansMap).set(
-                      req.plan.runId,
-                      req.plan,
+                    return Effect.fail(
+                      toBoundedReason(
+                        `WorkflowDaemonError: Workflow execution '${executionId}' already exists in Omnigraph engine without a verifiable stored plan; run 'workflow doctor --rebuild-views' before retrying`,
+                      ),
                     )
-                    return Effect.succeed(["existing", nextMap] as const)
                   }
 
                   const nextMap: ReadonlyMap<WorkflowRunId, CompiledPlan> = new Map(plansMap).set(
@@ -188,11 +215,9 @@ export const handleDaemonWorkflowStartRequest = Effect.fn("WorkflowRpcDaemon.han
     )
 
     return match(res)
-      .with({ _tag: "Failure" }, ({ failure }) =>
-        rpcError(input.requestId, "workflow.start", failure),
-      )
+      .with({ _tag: "Failure" }, ({ failure }) => rpcError(input.requestId, START_COMMAND, failure))
       .with({ _tag: "Success" }, ({ success: response }) =>
-        rpcSuccess(input.requestId, "workflow.start", response),
+        rpcSuccess(input.requestId, START_COMMAND, response),
       )
       .exhaustive()
   },
@@ -200,12 +225,12 @@ export const handleDaemonWorkflowStartRequest = Effect.fn("WorkflowRpcDaemon.han
 
 /** Processes `workflow.resume` (unit escalation resolution or workflow resume) over daemon IPC. */
 export const handleDaemonWorkflowResumeRequest = Effect.fn("WorkflowRpcDaemon.handleResumeRequest")(
-  function* (input: WorkflowRpcHandlerInput): Effect.fn.Return<Record<string, unknown>> {
+  function* (input: WorkflowRpcHandlerInput): Effect.fn.Return<WorkflowRpcEnvelope> {
     const runtime = input.runtime
     if (runtime === undefined) {
       return rpcError(
         input.requestId,
-        "workflow.resume",
+        RESUME_COMMAND,
         "Workflow engine runtime is inactive (no active writer lease)",
       )
     }
@@ -215,126 +240,126 @@ export const handleDaemonWorkflowResumeRequest = Effect.fn("WorkflowRpcDaemon.ha
       Effect.flatMap((req) =>
         Effect.gen(function* () {
           yield* validateRpcRepoRoot(req.repoRoot, input.scope)
-          if ((req.unitId !== undefined) !== (req.decision !== undefined)) {
-            return yield* Effect.fail(
-              toBoundedReason("Both unitId and decision are required when resolving an escalation"),
-            )
-          }
 
           return yield* withRunLock(
             runtime,
             req.runId,
             Effect.gen(function* () {
               const target = yield* resolveRunTarget(runtime, req.runId)
-              if (req.unitId !== undefined && req.decision !== undefined) {
-                const targetUnitId = req.unitId
-                const decision = req.decision
-                yield* assertWorkflowNonTerminal(runtime, target.executionId, target.runId)
+              return yield* match(req)
+                .with({ _tag: "ResolveEscalation" }, (resolveReq) =>
+                  Effect.gen(function* () {
+                    const targetUnitId = resolveReq.unitId
+                    const decision = resolveReq.decision
+                    yield* assertWorkflowNonTerminal(runtime, target.executionId, target.runId)
 
-                if (target.plan !== undefined) {
-                  const existsInPlan =
-                    targetUnitId === SHARED_STEP_UNIT_ID
-                      ? target.plan.sharedStepPaths.length > 0
-                      : target.plan.units.some((u) => u.unitId === targetUnitId)
-                  if (!existsInPlan) {
-                    return yield* Effect.fail(
-                      toBoundedReason(
-                        `Unit '${targetUnitId}' does not belong to workflow run '${target.runId}'`,
-                      ),
-                    )
-                  }
-                }
+                    if (target.plan !== undefined) {
+                      const existsInPlan =
+                        targetUnitId === SHARED_STEP_UNIT_ID
+                          ? target.plan.sharedStepPaths.length > 0
+                          : target.plan.units.some((u) => u.unitId === targetUnitId)
+                      if (!existsInPlan) {
+                        return yield* Effect.fail(
+                          toBoundedReason(
+                            `Unit '${targetUnitId}' does not belong to workflow run '${target.runId}'`,
+                          ),
+                        )
+                      }
+                    }
 
-                const units = yield* runtime.readModelQuery
-                  .listUnits(target.runId)
-                  .pipe(Effect.mapError((err) => err.reason))
-                const unitRecord = units.find((u) => u.unitId === targetUnitId)
-                if (!isUnitStatus(unitRecord, "escalated")) {
-                  return yield* Effect.fail(
-                    toBoundedReason(
-                      `Unit '${targetUnitId}' is not in 'escalated' state (current: '${unitRecord?.status ?? "missing"}')`,
-                    ),
-                  )
-                }
+                    const units = yield* runtime.readModelQuery
+                      .listUnits(target.runId)
+                      .pipe(Effect.mapError(storeOrLeaseToBoundedReason))
+                    const unitRecord = units.find((u) => u.unitId === targetUnitId)
+                    if (!isUnitStatus(unitRecord, "escalated")) {
+                      return yield* Effect.fail(
+                        toBoundedReason(
+                          `Unit '${targetUnitId}' is not in 'escalated' state (current: '${unitRecord?.status ?? "missing"}')`,
+                        ),
+                      )
+                    }
 
-                const cycleState = yield* inspectActiveUnitCycle(
-                  runtime.engine,
-                  target.executionId,
-                  targetUnitId,
-                )
-                const escalationOrdinal = yield* match(cycleState)
-                  .with({ _tag: "Aborted" }, () =>
-                    Effect.fail(toBoundedReason(`Unit '${targetUnitId}' is already aborted`)),
-                  )
-                  .with({ _tag: "Active" }, (active) => Effect.succeed(active.escalationOrdinal))
-                  .exhaustive()
-
-                const deferred = makeUnitEscalationDeferred(targetUnitId, escalationOrdinal)
-                const token = DurableDeferred.tokenFromExecutionId(deferred, {
-                  workflow: HarnessTaskWorkflow,
-                  executionId: target.executionId,
-                })
-                yield* DurableDeferred.succeed(deferred, { token, value: { decision } }).pipe(
-                  Effect.provideContext(runtime.workflowContext),
-                )
-
-                yield* match(decision)
-                  .with("abort", () =>
-                    waitForWorkflowCompletion(
-                      runtime,
+                    const cycleState = yield* inspectActiveUnitCycle(
+                      runtime.engine,
                       target.executionId,
-                      `Timed out waiting for aborted workflow run '${target.runId}' to settle`,
-                      ABORT_SETTLE_MAX_ATTEMPTS,
-                      ABORT_SETTLE_INTERVAL_MS,
-                    ),
-                  )
-                  .with("retry", () =>
-                    waitBoundedUntil(
-                      Effect.gen(function* () {
-                        const updatedUnits = yield* runtime.readModelQuery
-                          .listUnits(target.runId)
-                          .pipe(
-                            Effect.catchTag("WorkflowStoreUnavailableError", () =>
-                              Effect.succeed([]),
-                            ),
-                          )
-                        const u = updatedUnits.find((item) => item.unitId === targetUnitId)
-                        return u !== undefined && !isUnitStatus(u, "escalated")
-                          ? Option.some(true as const)
-                          : Option.none<true>()
-                      }),
-                    ).pipe(
-                      Effect.flatMap((settled) =>
-                        match(settled)
-                          .with({ _tag: "Some" }, () => Effect.void)
-                          .with({ _tag: "None" }, () =>
-                            Effect.fail(
-                              toBoundedReason(
-                                `Timed out waiting for retried unit '${targetUnitId}' to leave escalated state`,
-                              ),
-                            ),
-                          )
-                          .exhaustive(),
-                      ),
-                    ),
-                  )
-                  .exhaustive()
+                      targetUnitId,
+                    )
+                    const escalationOrdinal = yield* match(cycleState)
+                      .with({ _tag: "Aborted" }, () =>
+                        Effect.fail(toBoundedReason(`Unit '${targetUnitId}' is already aborted`)),
+                      )
+                      .with({ _tag: "Active" }, (active) =>
+                        Effect.succeed(active.escalationOrdinal),
+                      )
+                      .exhaustive()
 
-                return WorkflowResumeResponse.cases.EscalationResolved.make({
-                  runId: target.runId,
-                  executionId: target.executionId,
-                  unitId: targetUnitId,
-                  decision,
-                })
-              }
+                    const deferred = makeUnitEscalationDeferred(targetUnitId, escalationOrdinal)
+                    const token = DurableDeferred.tokenFromExecutionId(deferred, {
+                      workflow: HarnessTaskWorkflow,
+                      executionId: target.executionId,
+                    })
+                    yield* DurableDeferred.succeed(deferred, { token, value: { decision } }).pipe(
+                      Effect.provideContext(runtime.workflowContext),
+                    )
 
-              yield* HarnessTaskWorkflow.resume(target.executionId).pipe(
-                Effect.provideContext(runtime.workflowContext),
-              )
-              return WorkflowResumeResponse.cases.WorkflowResumed.make({
-                runId: target.runId,
-                executionId: target.executionId,
-              })
+                    yield* match(decision)
+                      .with("abort", () =>
+                        waitForWorkflowCompletion(
+                          runtime,
+                          target.executionId,
+                          `Timed out waiting for aborted workflow run '${target.runId}' to settle`,
+                          ABORT_SETTLE_MAX_ATTEMPTS,
+                          ABORT_SETTLE_INTERVAL_MS,
+                        ),
+                      )
+                      .with("retry", () =>
+                        waitBoundedUntil(
+                          Effect.gen(function* () {
+                            const updatedUnits = yield* runtime.readModelQuery
+                              .listUnits(target.runId)
+                              .pipe(Effect.mapError(storeOrLeaseToBoundedReason))
+                            const u = updatedUnits.find((item) => item.unitId === targetUnitId)
+                            return u !== undefined && !isUnitStatus(u, "escalated")
+                              ? Option.some(true as const)
+                              : Option.none<true>()
+                          }),
+                        ).pipe(
+                          Effect.flatMap((settled) =>
+                            match(settled)
+                              .with({ _tag: "Some" }, () => Effect.void)
+                              .with({ _tag: "None" }, () =>
+                                Effect.fail(
+                                  toBoundedReason(
+                                    `Timed out waiting for retried unit '${targetUnitId}' to leave escalated state`,
+                                  ),
+                                ),
+                              )
+                              .exhaustive(),
+                          ),
+                        ),
+                      )
+                      .exhaustive()
+
+                    return WorkflowResumeResponse.cases.EscalationResolved.make({
+                      runId: target.runId,
+                      executionId: target.executionId,
+                      unitId: targetUnitId,
+                      decision,
+                    })
+                  }),
+                )
+                .with({ _tag: "ResumeRun" }, () =>
+                  Effect.gen(function* () {
+                    yield* HarnessTaskWorkflow.resume(target.executionId).pipe(
+                      Effect.provideContext(runtime.workflowContext),
+                    )
+                    return WorkflowResumeResponse.cases.WorkflowResumed.make({
+                      runId: target.runId,
+                      executionId: target.executionId,
+                    })
+                  }),
+                )
+                .exhaustive()
             }),
           )
         }),
@@ -344,10 +369,10 @@ export const handleDaemonWorkflowResumeRequest = Effect.fn("WorkflowRpcDaemon.ha
 
     return match(res)
       .with({ _tag: "Failure" }, ({ failure }) =>
-        rpcError(input.requestId, "workflow.resume", failure),
+        rpcError(input.requestId, RESUME_COMMAND, failure),
       )
       .with({ _tag: "Success" }, ({ success: response }) =>
-        rpcSuccess(input.requestId, "workflow.resume", response),
+        rpcSuccess(input.requestId, RESUME_COMMAND, response),
       )
       .exhaustive()
   },
@@ -355,12 +380,12 @@ export const handleDaemonWorkflowResumeRequest = Effect.fn("WorkflowRpcDaemon.ha
 
 /** Processes `workflow.abort` over daemon Unix socket IPC. */
 export const handleDaemonWorkflowAbortRequest = Effect.fn("WorkflowRpcDaemon.handleAbortRequest")(
-  function* (input: WorkflowRpcHandlerInput): Effect.fn.Return<Record<string, unknown>> {
+  function* (input: WorkflowRpcHandlerInput): Effect.fn.Return<WorkflowRpcEnvelope> {
     const runtime = input.runtime
     if (runtime === undefined) {
       return rpcError(
         input.requestId,
-        "workflow.abort",
+        ABORT_COMMAND,
         "Workflow engine runtime is inactive (no active writer lease)",
       )
     }
@@ -441,7 +466,7 @@ export const handleDaemonWorkflowAbortRequest = Effect.fn("WorkflowRpcDaemon.han
                   Effect.gen(function* () {
                     const runOpt = yield* runtime.readModelQuery
                       .getRun(target.runId)
-                      .pipe(Effect.mapError((err) => err.reason))
+                      .pipe(Effect.mapError(storeOrLeaseToBoundedReason))
                     yield* match(runOpt)
                       .with({ _tag: "None" }, () => Effect.void)
                       .with({ _tag: "Some" }, ({ value: run }) =>
@@ -457,7 +482,7 @@ export const handleDaemonWorkflowAbortRequest = Effect.fn("WorkflowRpcDaemon.han
                                       Math.max(0, Math.floor(millis)),
                                     ),
                                   })
-                                  .pipe(Effect.mapError((err) => err.reason)),
+                                  .pipe(Effect.mapError(storeOrLeaseToBoundedReason)),
                               ),
                             ),
                       )
@@ -479,11 +504,9 @@ export const handleDaemonWorkflowAbortRequest = Effect.fn("WorkflowRpcDaemon.han
     )
 
     return match(res)
-      .with({ _tag: "Failure" }, ({ failure }) =>
-        rpcError(input.requestId, "workflow.abort", failure),
-      )
+      .with({ _tag: "Failure" }, ({ failure }) => rpcError(input.requestId, ABORT_COMMAND, failure))
       .with({ _tag: "Success" }, ({ success: response }) =>
-        rpcSuccess(input.requestId, "workflow.abort", response),
+        rpcSuccess(input.requestId, ABORT_COMMAND, response),
       )
       .exhaustive()
   },
@@ -491,5 +514,6 @@ export const handleDaemonWorkflowAbortRequest = Effect.fn("WorkflowRpcDaemon.han
 
 /** Summarizes current store connectivity for MCP/RPC diagnostics. */
 export const summarizeWorkflowStoreState = (
-  writerLeaseEpoch: number,
-): WorkflowStoreAvailabilityState => (writerLeaseEpoch >= 1 ? "ready" : "inactive")
+  writerLeaseEpoch: LeaseEpoch | undefined,
+): WorkflowStoreAvailabilityState =>
+  writerLeaseEpoch !== undefined && writerLeaseEpoch >= 1 ? "ready" : "inactive"

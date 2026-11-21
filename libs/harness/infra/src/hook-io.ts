@@ -15,6 +15,10 @@ import * as Option from "effect/Option"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import { match } from "ts-pattern"
+import {
+  type RealPathWithAncestorWalkResult,
+  resolveRealPathWithAncestorWalkLite,
+} from "./hook-io-realpath.js"
 
 const GIT_FINGERPRINT_MAX_BUFFER_BYTES = 16 * 1024 * 1024
 
@@ -772,6 +776,8 @@ export {
   resolveGitHeadStateLite,
   resolveHarnessStateDirLite,
   resolveRealPathLite,
+  resolveRealPathWithAncestorWalkLite,
+  type RealPathWithAncestorWalkResult,
   shouldSuppressLiveRepoTestSideEffectsLite,
   tryReadPreInvocationCacheLite,
 }

@@ -255,8 +255,17 @@ export {
   WorkflowLevel,
   WorkflowRouteReviewInput,
   WorkflowRunId,
+  NxAffectedTargetFlag,
+  PackageVerifyCommandArgv,
+  PackageVerifyExecutable,
+  PackageVerifyFailureDetail,
+  PackageVerifyFailureKind,
+  PackageVerifyTarget,
+  ParsedPackageVerifyCommand,
   WorkspaceTreeHash,
+  parsePackageVerifyCommand,
   pathsOverlap,
+  toPackageVerifyCommandArgv,
   wavesOf,
 } from "./workflow.js"
 export {
@@ -298,6 +307,16 @@ export {
   WorkflowUnitRecord,
   WorkflowUnitStatus,
   WorktreeProvisionReceipt,
+  CompletedWorkflowAttemptRecord,
+  DispatchedWorkflowAttemptRecord,
+  RejectedWorkflowAttemptRecord,
+  WorkflowRpcEnvelope,
+  WorkflowRpcErrorEnvelope,
+  WorkflowRpcRequestId,
+  WorkflowRpcResult,
+  WorkflowRpcSuccessEnvelope,
+  WorkflowRunOutcome,
+  WorkflowTerminalError,
   WorktreeUnitMapping,
 } from "./workflow-rpc.js"
 export {
@@ -342,6 +361,8 @@ export {
   WriterLeaseHeldError,
   decodeSeqKey,
   encodeSeqKey,
+  makeWorkflowAttemptKey,
+  makeWorkflowUnitKey,
   toBoundedReason,
 } from "./workflow-storage.js"
 export {

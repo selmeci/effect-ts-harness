@@ -1,12 +1,12 @@
 import * as Schema from "effect/Schema"
 import { match } from "ts-pattern"
 import {
+  classifyFileRead,
   classifyFileWrite,
-  classifyWorkerFileAccess,
   explainCommandDenyReason,
   type PolicyGuardOptions,
 } from "@harness/gates/policy"
-import { resolveRealPathLite } from "@harness/infra/hook-io"
+import { resolveRealPathWithAncestorWalkLite } from "@harness/infra/hook-io"
 import { type CliResult, detectAntigravityHookPayload, makeGuardDenyResult } from "./hook-format.js"
 
 const NullableOptionalString = Schema.optional(Schema.NullOr(Schema.String))
@@ -129,25 +129,15 @@ export const evaluateFileReadDecision = (
   filePath: string,
   options?: PolicyGuardOptions,
 ): GuardVerdictDecision => {
-  const access = classifyWorkerFileAccess(filePath, options?.unitWorkerMode === true)
+  const access = classifyFileRead(filePath, options)
   return match<typeof access.verdict, GuardVerdictDecision>(access.verdict)
     .with("deny", () => ({
       verdict: "deny",
-      reason:
-        access.reason ??
-        `Worker isolation mode (HARNESS_UNIT_WORKER=1) denies access to daemon socket or auth tokens: ${filePath}`,
+      reason: access.reason ?? `Blocked file read: ${filePath}`,
     }))
     .with("allow", () => ({ verdict: "allow" }))
     .exhaustive()
 }
-
-const expandPathWithRealpath = (filePath: string): ReadonlyArray<string> =>
-  match(resolveRealPathLite(filePath))
-    .with({ _tag: "Some" }, ({ value: real }) =>
-      real === filePath ? [filePath] : [filePath, real],
-    )
-    .with({ _tag: "None" }, () => [filePath])
-    .exhaustive()
 
 export const evaluateCandidatePaths = (
   candidatePaths: ReadonlyArray<string>,
@@ -156,12 +146,22 @@ export const evaluateCandidatePaths = (
 ): GuardVerdictDecision | undefined => {
   let combined: GuardVerdictDecision | undefined
   for (const rawPath of candidatePaths) {
-    for (const filePath of expandPathWithRealpath(rawPath)) {
-      const d = isReadOnlyTool
-        ? evaluateFileReadDecision(filePath, options)
-        : evaluateFileWriteDecision(filePath, options)
-      combined = combined === undefined ? d : pickStrictestDecision(combined, d)
-    }
+    const expanded = resolveRealPathWithAncestorWalkLite(rawPath)
+    const d = match(expanded)
+      .with({ _tag: "Deny" }, ({ reason }) => ({ verdict: "deny" as const, reason }))
+      .with({ _tag: "Ok" }, ({ paths }) => {
+        let pathDecision: GuardVerdictDecision | undefined
+        for (const filePath of paths) {
+          const next = isReadOnlyTool
+            ? evaluateFileReadDecision(filePath, options)
+            : evaluateFileWriteDecision(filePath, options)
+          pathDecision =
+            pathDecision === undefined ? next : pickStrictestDecision(pathDecision, next)
+        }
+        return pathDecision ?? { verdict: "allow" as const }
+      })
+      .exhaustive()
+    combined = combined === undefined ? d : pickStrictestDecision(combined, d)
   }
   return combined
 }
@@ -233,9 +233,11 @@ export type ExtractedGuardStdinPayload =
       readonly detail: string
     }
 
+export const MAX_PAYLOAD_STRING_DEPTH = 8
+
 const COMMAND_FIELD_KEYS = ["CommandLine", "command"] as const
 
-const PATH_FIELD_KEYS = [
+const BASE_PATH_FIELD_KEYS = [
   "TargetFile",
   "AbsolutePath",
   "Path",
@@ -248,9 +250,24 @@ const PATH_FIELD_KEYS = [
   "DirectoryPath",
   "SearchDirectory",
   "File",
-  "glob",
-  "pattern",
 ] as const
+
+const FILE_FINDER_TOOL_NAMES: ReadonlySet<string> = new Set(["Glob", "find_by_name", "Find"])
+const GREP_TOOL_NAMES: ReadonlySet<string> = new Set(["Grep", "grep_search"])
+
+const SEARCH_QUERY_EXCLUDED_KEYS: ReadonlySet<string> = new Set([
+  "Query",
+  "query",
+  "TargetContent",
+  "targetContent",
+  "OutputMode",
+  "output_mode",
+])
+const GREP_EXCLUDED_KEYS: ReadonlySet<string> = new Set([
+  ...SEARCH_QUERY_EXCLUDED_KEYS,
+  "pattern",
+  "Pattern",
+])
 
 const pushNonEmpty = (target: Array<string>, value: unknown): void => {
   if (typeof value === "string") {
@@ -261,29 +278,67 @@ const pushNonEmpty = (target: Array<string>, value: unknown): void => {
   }
 }
 
-const collectStringLeaves = (value: unknown, target: Array<string>, depth = 0): void => {
-  if (depth > 8 || value === null || value === undefined) return
+const pushStringOrArray = (target: Array<string>, value: unknown): void => {
   if (typeof value === "string") {
     pushNonEmpty(target, value)
     return
   }
   if (Array.isArray(value)) {
     for (const item of value) {
-      collectStringLeaves(item, target, depth + 1)
-    }
-    return
-  }
-  if (typeof value === "object") {
-    for (const v of Object.values(value)) {
-      collectStringLeaves(v, target, depth + 1)
+      pushNonEmpty(target, item)
     }
   }
 }
 
-const isRecordEmpty = (rec: Readonly<Record<string, unknown>> | null | undefined): boolean =>
-  rec === undefined ||
-  rec === null ||
-  Object.values(rec).every((v) => v === null || v === undefined)
+const joinPosixPair = (base: string, child: string): string => {
+  const b = base.replace(/\/+$/, "")
+  const c = child.replace(/^\/+/, "")
+  if (b.length === 0) return c
+  if (c.length === 0) return b
+  return `${b}/${c}`
+}
+
+const exceedsPayloadDepth = (value: unknown, depth: number): boolean => {
+  if (value === null || value === undefined) return false
+  if (depth > MAX_PAYLOAD_STRING_DEPTH) return true
+  if (Array.isArray(value)) {
+    return value.some((item) => exceedsPayloadDepth(item, depth + 1))
+  }
+  if (typeof value === "object") {
+    return Object.values(value).some((v) => exceedsPayloadDepth(v, depth + 1))
+  }
+  return false
+}
+
+const collectStringLeaves = (
+  value: unknown,
+  target: Array<string>,
+  depth = 0,
+  excludedKeys?: ReadonlySet<string>,
+): boolean => {
+  if (value === null || value === undefined) return false
+  if (depth > MAX_PAYLOAD_STRING_DEPTH) return true
+  if (typeof value === "string") {
+    pushNonEmpty(target, value)
+    return false
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (collectStringLeaves(item, target, depth + 1, excludedKeys)) return true
+    }
+    return false
+  }
+  if (typeof value === "object") {
+    for (const [k, v] of Object.entries(value)) {
+      if (excludedKeys?.has(k) === true) {
+        if (exceedsPayloadDepth(v, depth + 1)) return true
+        continue
+      }
+      if (collectStringLeaves(v, target, depth + 1, excludedKeys)) return true
+    }
+  }
+  return false
+}
 
 export const extractGuardStdinPayload = (
   rawStdin: string,
@@ -305,25 +360,67 @@ export const extractGuardStdinPayload = (
       const toolInput = value.tool_input
       const toolCallArgs = value.toolCall?.args
 
+      const toolName = isAgStdin ? value.toolCall?.name : value.tool_name
+      const isReadOnlyNamed = typeof toolName === "string" && READ_ONLY_TOOL_NAMES.has(toolName)
+      const isFileFinderTool = typeof toolName === "string" && FILE_FINDER_TOOL_NAMES.has(toolName)
+      const isGrepTool = typeof toolName === "string" && GREP_TOOL_NAMES.has(toolName)
+
       for (const key of COMMAND_FIELD_KEYS) {
         pushNonEmpty(candidateCmds, toolCallArgs?.[key])
         pushNonEmpty(candidateCmds, toolInput?.[key])
       }
-      for (const key of PATH_FIELD_KEYS) {
-        pushNonEmpty(candidatePaths, toolCallArgs?.[key])
-        pushNonEmpty(candidatePaths, toolInput?.[key])
+      const baseDirs: Array<string> = []
+      const childGlobs: Array<string> = []
+      for (const key of BASE_PATH_FIELD_KEYS) {
+        pushNonEmpty(baseDirs, toolCallArgs?.[key])
+        pushNonEmpty(baseDirs, toolInput?.[key])
+      }
+      for (const baseDir of baseDirs) {
+        pushNonEmpty(candidatePaths, baseDir)
+      }
+      if (isFileFinderTool) {
+        for (const key of ["glob", "pattern", "Pattern", "Includes", "includes"] as const) {
+          pushStringOrArray(childGlobs, toolCallArgs?.[key])
+          pushStringOrArray(childGlobs, toolInput?.[key])
+        }
+      }
+      if (isGrepTool) {
+        for (const key of ["glob", "Includes", "includes"] as const) {
+          pushStringOrArray(childGlobs, toolCallArgs?.[key])
+          pushStringOrArray(childGlobs, toolInput?.[key])
+        }
+      }
+      for (const childGlob of childGlobs) {
+        pushNonEmpty(candidatePaths, childGlob)
+      }
+      let combinedCount = 0
+      for (const baseDir of baseDirs) {
+        for (const childGlob of childGlobs) {
+          if (combinedCount >= 64) break
+          if (!childGlob.startsWith("/")) {
+            pushNonEmpty(candidatePaths, joinPosixPair(baseDir, childGlob))
+            combinedCount += 1
+          }
+        }
       }
 
-      const toolName = isAgStdin ? value.toolCall?.name : value.tool_name
-      const isReadOnlyNamed = typeof toolName === "string" && READ_ONLY_TOOL_NAMES.has(toolName)
       if (isReadOnlyNamed && candidateCmds.length === 0) {
-        collectStringLeaves(toolCallArgs, candidatePaths)
-        collectStringLeaves(toolInput, candidatePaths)
+        const excluded = isGrepTool ? GREP_EXCLUDED_KEYS : SEARCH_QUERY_EXCLUDED_KEYS
+        const overflowed =
+          collectStringLeaves(toolCallArgs, candidatePaths, 0, excluded) ||
+          collectStringLeaves(toolInput, candidatePaths, 0, excluded)
+        if (overflowed) {
+          return {
+            _tag: "Error" as const,
+            isAntigravity,
+            reason: "guard: hook stdin payload exceeded maximum inspection depth",
+            detail: "fastpath=payload-depth-overflow",
+          }
+        }
       }
 
       if (candidateCmds.length === 0 && candidatePaths.length === 0) {
-        const bothInputsEmpty = isRecordEmpty(toolInput) && isRecordEmpty(toolCallArgs)
-        if (isReadOnlyNamed && bothInputsEmpty) {
+        if (isReadOnlyNamed) {
           return {
             _tag: "ReadOnly" as const,
             isAntigravity,

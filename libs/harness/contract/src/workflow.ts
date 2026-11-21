@@ -1,16 +1,36 @@
-import { Match, Schema } from "effect"
+import { Match, Option, Schema } from "effect"
 import { compareCodeUnits } from "./ast-and-gate-primitives.js"
 import { AbsoluteRepoRoot, GitCommitSha } from "./repo-identity.js"
 import { ReviewRoutingPlan } from "./review-routing.js"
+import {
+  NxAffectedTargetFlag,
+  NxProjectName,
+  PackageVerifyCommand,
+  PackageVerifyCommandArgv,
+  PackageVerifyExecutable,
+  PackageVerifyTarget,
+  ParsedPackageVerifyCommand,
+  parsePackageVerifyCommand,
+  toPackageVerifyCommandArgv,
+} from "./workflow-verify-command.js"
+
+export {
+  NxAffectedTargetFlag,
+  NxProjectName,
+  PackageVerifyCommand,
+  PackageVerifyCommandArgv,
+  PackageVerifyExecutable,
+  PackageVerifyTarget,
+  ParsedPackageVerifyCommand,
+  parsePackageVerifyCommand,
+  toPackageVerifyCommandArgv,
+}
 
 const SAFE_REL_SEGMENT =
   "(?!\\.\\.?(?:\\/|$))[^\\x00-\\x1f\\x7f\\\\/\\s:.](?:[^\\x00-\\x1f\\x7f\\\\/:]*[^\\x00-\\x1f\\x7f\\\\/\\s:.])?"
 const SAFE_OWNED_REL_PATH_RE = new RegExp(`^${SAFE_REL_SEGMENT}(?:\\/${SAFE_REL_SEGMENT})*$`)
 const PROTECTED_OWNED_PATH_RE =
   /^(?:\.git|\.harness|repos\/(?:effect|alchemy)|tools\/oxlint)(?:\/|$)/i
-const NX_PROJECT_NAME_RE = /^(?:@[a-z0-9-]+\/)?[a-z0-9][a-z0-9._-]*$/
-const SAFE_PACKAGE_VERIFY_COMMAND_RE =
-  /^(?:(?:pnpm )?nx run (?:@[a-z0-9-]+\/)?[a-z0-9][a-z0-9._-]*:(?:verify|test|typecheck|lint)|(?:pnpm )?nx affected (?:-t|--target) (?:verify|test|typecheck|lint)|pnpm --filter (?:@[a-z0-9-]+\/)?[a-z0-9][a-z0-9._-]* (?:verify|test|typecheck|lint))$/
 
 /** Lowercase alphanumeric + hyphen workflow run identifier (`8..64` chars). */
 export const WorkflowRunId = Schema.String.pipe(
@@ -75,12 +95,6 @@ export const WaveIndex = Schema.Int.pipe(
 )
 export type WaveIndex = typeof WaveIndex.Type
 
-export const NxProjectName = Schema.String.pipe(
-  Schema.check(Schema.isPattern(NX_PROJECT_NAME_RE)),
-  Schema.brand("NxProjectName"),
-)
-export type NxProjectName = typeof NxProjectName.Type
-
 /**
  * Normalized repo-relative file path or directory subtree prefix (`1..512` chars).
  * Rejects leading/trailing `/`, `.` or `..` segments, trailing `.` on segments, `\\`, `//`, `:`,
@@ -141,18 +155,6 @@ export const EarsRequirementKey = Schema.NonEmptyString.pipe(
   Schema.brand("EarsRequirementKey"),
 )
 export type EarsRequirementKey = typeof EarsRequirementKey.Type
-
-/**
- * Safe package verification command (`1..512` chars): restricted to `nx run <project>:<target>`,
- * `nx affected -t|--target <target>`, or `pnpm --filter <project> <target>` for
- * `verify | test | typecheck | lint` without shell metacharacters or control characters.
- */
-export const PackageVerifyCommand = Schema.String.pipe(
-  Schema.check(Schema.isMaxLength(512)),
-  Schema.check(Schema.isPattern(SAFE_PACKAGE_VERIFY_COMMAND_RE)),
-  Schema.brand("PackageVerifyCommand"),
-)
-export type PackageVerifyCommand = typeof PackageVerifyCommand.Type
 
 export const AgentFailureReason = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),
@@ -215,22 +217,43 @@ export const UnitMode = Schema.TaggedUnion({
 })
 export type UnitMode = typeof UnitMode.Type
 
+const isNonReservedWorkUnitId = (unitId: WorkUnitId): boolean => unitId !== SHARED_STEP_UNIT_ID
+
 const verifyCommandTargetsProject = (
   projectName: NxProjectName,
   command: PackageVerifyCommand,
 ): boolean =>
-  command.startsWith(`pnpm nx run ${projectName}:`) ||
-  command.startsWith(`nx run ${projectName}:`) ||
-  command.startsWith(`pnpm --filter ${projectName} `) ||
-  command.startsWith("pnpm nx affected ") ||
-  command.startsWith("nx affected ")
+  Option.match(parsePackageVerifyCommand(command), {
+    onNone: () => false,
+    onSome: (parsed) =>
+      Match.value(parsed).pipe(
+        Match.tag("NxRun", (c) => c.projectName === projectName),
+        Match.tag("PnpmFilter", (c) => c.projectName === projectName),
+        Match.tag("NxAffected", () => true),
+        Match.exhaustive,
+      ),
+  })
+
+const hasValidPackageUnitVerifyTarget = (unit: {
+  readonly unitId: WorkUnitId
+  readonly projectName: NxProjectName
+  readonly packageVerifyCommand: PackageVerifyCommand
+}): boolean =>
+  isNonReservedWorkUnitId(unit.unitId) &&
+  verifyCommandTargetsProject(unit.projectName, unit.packageVerifyCommand)
 
 export const SliceUnitDraft = Schema.TaggedStruct("SliceUnit", {
   unitId: WorkUnitId,
   branch: SliceBranchName,
   ownedRelPaths: Schema.Array(OwnedRelPath),
   earsKeys: Schema.Array(EarsRequirementKey),
-})
+}).pipe(
+  Schema.check(
+    Schema.makeFilter((unit) => isNonReservedWorkUnitId(unit.unitId), {
+      message: "SliceUnitDraft unitId must not equal reserved SHARED_STEP_UNIT_ID ('shared-step')",
+    }),
+  ),
+)
 export type SliceUnitDraft = typeof SliceUnitDraft.Type
 
 export const PackageUnitDraft = Schema.TaggedStruct("PackageUnit", {
@@ -242,12 +265,10 @@ export const PackageUnitDraft = Schema.TaggedStruct("PackageUnit", {
   packageVerifyCommand: PackageVerifyCommand,
 }).pipe(
   Schema.check(
-    Schema.makeFilter(
-      (unit) => verifyCommandTargetsProject(unit.projectName, unit.packageVerifyCommand),
-      {
-        message: "PackageUnitDraft packageVerifyCommand must target its projectName or nx affected",
-      },
-    ),
+    Schema.makeFilter((unit) => hasValidPackageUnitVerifyTarget(unit), {
+      message:
+        "PackageUnitDraft must use non-reserved unitId and packageVerifyCommand targeting its projectName or nx affected",
+    }),
   ),
 )
 export type PackageUnitDraft = typeof PackageUnitDraft.Type
@@ -262,7 +283,14 @@ const CompiledSliceUnit = Schema.TaggedStruct("SliceUnit", {
   dependsOn: Schema.Array(WorkUnitId),
   ownedRelPaths: Schema.Array(OwnedRelPath),
   earsKeys: Schema.Array(EarsRequirementKey),
-})
+}).pipe(
+  Schema.check(
+    Schema.makeFilter((unit) => isNonReservedWorkUnitId(unit.unitId), {
+      message:
+        "CompiledSliceUnit unitId must not equal reserved SHARED_STEP_UNIT_ID ('shared-step')",
+    }),
+  ),
+)
 
 const CompiledPackageUnit = Schema.TaggedStruct("PackageUnit", {
   unitId: WorkUnitId,
@@ -275,12 +303,10 @@ const CompiledPackageUnit = Schema.TaggedStruct("PackageUnit", {
   packageVerifyCommand: PackageVerifyCommand,
 }).pipe(
   Schema.check(
-    Schema.makeFilter(
-      (unit) => verifyCommandTargetsProject(unit.projectName, unit.packageVerifyCommand),
-      {
-        message: "PackageUnit packageVerifyCommand must target its projectName or nx affected",
-      },
-    ),
+    Schema.makeFilter((unit) => hasValidPackageUnitVerifyTarget(unit), {
+      message:
+        "CompiledPackageUnit must use non-reserved unitId and packageVerifyCommand targeting its projectName or nx affected",
+    }),
   ),
 )
 
@@ -418,9 +444,23 @@ export type CompiledPlan = typeof CompiledPlan.Type
 export const wavesOf = (source: CompiledPlan | CompiledWaves): ReadonlyArray<CompiledWave> =>
   groupWaves(source.units)
 
+export const PackageVerifyFailureKind = Schema.Literals(["non-zero-exit", "timed-out", "signaled"])
+export type PackageVerifyFailureKind = typeof PackageVerifyFailureKind.Type
+
+export const PackageVerifyFailureDetail = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(2048)),
+  Schema.brand("PackageVerifyFailureDetail"),
+)
+export type PackageVerifyFailureDetail = typeof PackageVerifyFailureDetail.Type
+
 export const UnitRejection = Schema.TaggedUnion({
   WriteSetViolation: { offendingPaths: Schema.NonEmptyArray(OwnedRelPath) },
-  PackageVerifyFailed: { exitCode: GateExitCode },
+  PackageVerifyFailed: {
+    exitCode: GateExitCode,
+    failureKind: PackageVerifyFailureKind,
+    detail: Schema.optional(PackageVerifyFailureDetail),
+  },
   StampMissing: {},
   AgentFailed: { reason: AgentFailureReason },
 })
@@ -479,7 +519,7 @@ export const UnitAgentRequest = Schema.Struct({
 })
 export type UnitAgentRequest = typeof UnitAgentRequest.Type
 
-/** Outcome returned by `UnitAgentDispatcher.runUnit` before `UnitVerifier.completeUnit` executes. */
+/** Outcome returned by `UnitAgentDispatcher.dispatchUnit` before `UnitVerifier.completeUnit` executes. */
 export const UnitAgentDispatchResult = Schema.TaggedUnion({
   Completed: {},
   Failed: { reason: AgentFailureReason },
@@ -520,7 +560,7 @@ export const MergeSliceWaveInput = Schema.Struct({
 })
 export type MergeSliceWaveInput = typeof MergeSliceWaveInput.Type
 
-/** Result of merging an L1 epic wave's `slice/*` branches into the integration branch. */
+/** Result of merging an L1 epic wave's `slice/*` branches into the checkout's current `HEAD`. */
 export const MergeSliceWaveOutcome = Schema.TaggedUnion({
   Merged: { mergedBranches: Schema.Array(SliceBranchName) },
   Conflict: { branch: SliceBranchName },
@@ -580,7 +620,7 @@ export class InvalidPlanWorkflowGraphError extends Schema.TaggedError<InvalidPla
   }
 }
 
-/** Terminal failure of `HarnessTaskWorkflow` after an escalation or worktree setup cannot proceed. */
+/** Terminal failure of `HarnessTaskWorkflow` after an escalation resolves to `"abort"` (worktree setup failures raise `WorkspaceFsError`). */
 export class TaskRunAbortedError extends Schema.TaggedError<TaskRunAbortedError>()(
   "TaskRunAbortedError",
   {

@@ -1,4 +1,4 @@
-import { Clock, Effect, Schema } from "effect"
+import { Clock, Effect, Schedule, Schema } from "effect"
 import { Activity, type WorkflowEngine } from "effect/workflow"
 import { match } from "ts-pattern"
 import {
@@ -7,31 +7,33 @@ import {
   type AttemptNumber,
   CompiledPlan,
   type CompiledWorkUnit,
+  ErrorReasonMessage,
   type EscalationOrdinal,
   NxProjectName,
   type OwnedRelPath,
   PackageVerifyCommand,
   PlanJsonPayload,
-  RejectionJsonPayload,
   type RunnerId,
   SHARED_STEP_UNIT_ID,
   SliceBranchName,
   UnitMode,
   type UnitOutcome,
-  UnitRejection,
+  type UnitRejection,
   WaveIndex,
   type WorkUnitId,
-  WorkflowAttemptKey,
   type WorkflowExecutionId,
   type WorkflowLevel,
-  type WorkflowRunId,
   WorkflowStoreUnavailableError,
   WorkflowTimestampMs,
-  WorkflowUnitKey,
   type WorkflowUnitKind,
   type WorkflowUnitStatus,
   type WorktreeProvisionReceipt,
-  type WorkspaceFsError,
+  WorkspaceFilePath,
+  WorkspaceFsError,
+  WorkspaceFsOperation,
+  WriterLeaseHeldError,
+  makeWorkflowAttemptKey,
+  makeWorkflowUnitKey,
   wavesOf,
 } from "@harness/contract"
 import { type UnitVerifier, WorkflowProjectionWriter } from "@harness/service"
@@ -42,7 +44,34 @@ const SHARED_STEP_VERIFY_COMMAND: PackageVerifyCommand =
   PackageVerifyCommand.make("nx affected -t verify")
 
 const encodePlanJson = Schema.encodeSync(Schema.fromJsonString(CompiledPlan))
-const encodeUnitRejectionJson = Schema.encodeSync(Schema.fromJsonString(UnitRejection))
+
+/** Typed failure union emitted by workflow read-model projection activities. */
+export const WorkflowProjectionError = Schema.Union([
+  WorkflowStoreUnavailableError,
+  WriterLeaseHeldError,
+])
+export type WorkflowProjectionError = typeof WorkflowProjectionError.Type
+
+const PROJECTION_RETRY_SCHEDULE = Schedule.exponential("50 millis").pipe(
+  Schedule.upTo({ times: 3 }),
+  Schedule.jittered,
+)
+
+const isTransientProjectionError = (err: WorkflowProjectionError): boolean =>
+  match(err)
+    .with({ _tag: "WorkflowStoreUnavailableError" }, () => true)
+    .with({ _tag: "WriterLeaseHeldError" }, () => false)
+    .exhaustive()
+
+const withProjectionRetry = <A, R>(
+  effect: Effect.Effect<A, WorkflowProjectionError, R>,
+): Effect.Effect<A, WorkflowProjectionError, R> =>
+  effect.pipe(
+    Effect.retry({
+      schedule: PROJECTION_RETRY_SCHEDULE,
+      while: isTransientProjectionError,
+    }),
+  )
 
 const currentTimestampMs = Effect.gen(function* () {
   const millis = yield* Clock.currentTimeMillis
@@ -51,17 +80,6 @@ const currentTimestampMs = Effect.gen(function* () {
 
 export const cycleSuffixFor = (escalationOrdinal: EscalationOrdinal): string =>
   escalationOrdinal === 1 ? "" : `/r${escalationOrdinal}`
-
-const makeUnitKey = (runId: WorkflowRunId, unitId: WorkUnitId): WorkflowUnitKey =>
-  WorkflowUnitKey.make(`${runId}/${unitId}`)
-
-const makeAttemptKey = (
-  runId: WorkflowRunId,
-  unitId: WorkUnitId,
-  attempt: AttemptNumber,
-  escalationOrdinal: EscalationOrdinal,
-): WorkflowAttemptKey =>
-  WorkflowAttemptKey.make(`${runId}/${unitId}#${attempt}${cycleSuffixFor(escalationOrdinal)}`)
 
 export const unitKindOf = (unit: CompiledWorkUnit): WorkflowUnitKind =>
   match(unit)
@@ -125,8 +143,21 @@ export const siblingOwnedPathsForUnit = (
 export const resolveUnitCwd = (
   worktrees: WorktreeProvisionReceipt,
   unitId: WorkUnitId,
-): AbsoluteRepoRoot =>
-  worktrees.entries.find((entry) => entry.unitId === unitId)?.cwd ?? worktrees.canonicalRepoRoot
+): Effect.Effect<AbsoluteRepoRoot, WorkspaceFsError> => {
+  const entry = worktrees.entries.find((candidate) => candidate.unitId === unitId)
+  if (entry === undefined) {
+    return Effect.fail(
+      new WorkspaceFsError({
+        filePath: WorkspaceFilePath.make(worktrees.canonicalRepoRoot),
+        operation: WorkspaceFsOperation.make("stat"),
+        reason: ErrorReasonMessage.make(
+          `Missing provisioned worktree entry for unit '${unitId}' in run '${worktrees.runId}'`,
+        ),
+      }),
+    )
+  }
+  return Effect.succeed(entry.cwd)
+}
 
 export const findConflictUnitId = (
   units: readonly [CompiledWorkUnit, ...Array<CompiledWorkUnit>],
@@ -171,66 +202,70 @@ export const projectRunStateActivity = (
 ) =>
   Activity.make({
     name: activityName,
-    error: WorkflowStoreUnavailableError,
-    execute: Effect.gen(function* () {
-      const readModel = yield* WorkflowProjectionWriter
-      const updatedMs = yield* currentTimestampMs
-      yield* readModel.upsertRun({
-        runId: plan.runId,
-        executionId,
-        level: plan.level,
-        planSha: plan.planSha,
-        baseSha: plan.baseSha,
-        state,
-        ...(includePlanJson ? { planJson: PlanJsonPayload.make(encodePlanJson(plan)) } : {}),
-        updatedMs,
-      })
-    }),
+    error: WorkflowProjectionError,
+    execute: withProjectionRetry(
+      Effect.gen(function* () {
+        const readModel = yield* WorkflowProjectionWriter
+        const updatedMs = yield* currentTimestampMs
+        yield* readModel.upsertRun({
+          runId: plan.runId,
+          executionId,
+          level: plan.level,
+          planSha: plan.planSha,
+          baseSha: plan.baseSha,
+          state,
+          ...(includePlanJson ? { planJson: PlanJsonPayload.make(encodePlanJson(plan)) } : {}),
+          updatedMs,
+        })
+      }),
+    ),
   })
 
 export const projectInitialViewsActivity = (plan: CompiledPlan, executionId: WorkflowExecutionId) =>
   Activity.make({
     name: "ProjectRunStarted",
-    error: WorkflowStoreUnavailableError,
-    execute: Effect.gen(function* () {
-      const readModel = yield* WorkflowProjectionWriter
-      const updatedMs = yield* currentTimestampMs
-      yield* readModel.upsertRun({
-        runId: plan.runId,
-        executionId,
-        level: plan.level,
-        planSha: plan.planSha,
-        baseSha: plan.baseSha,
-        state: "running",
-        planJson: PlanJsonPayload.make(encodePlanJson(plan)),
-        updatedMs,
-      })
-      for (const unit of plan.units) {
-        yield* readModel.upsertUnit({
-          unitKey: makeUnitKey(plan.runId, unit.unitId),
+    error: WorkflowProjectionError,
+    execute: withProjectionRetry(
+      Effect.gen(function* () {
+        const readModel = yield* WorkflowProjectionWriter
+        const updatedMs = yield* currentTimestampMs
+        yield* readModel.upsertRun({
           runId: plan.runId,
-          unitId: unit.unitId,
-          kind: unitKindOf(unit),
-          waveIndex: unit.waveIndex,
-          status: "pending",
-          ownedRelPaths: unit.ownedRelPaths,
+          executionId,
+          level: plan.level,
+          planSha: plan.planSha,
+          baseSha: plan.baseSha,
+          state: "running",
+          planJson: PlanJsonPayload.make(encodePlanJson(plan)),
           updatedMs,
         })
-      }
-      if (plan.sharedStepPaths.length > 0) {
-        const sharedWaveIndex = WaveIndex.make(wavesOf(plan).length)
-        yield* readModel.upsertUnit({
-          unitKey: makeUnitKey(plan.runId, SHARED_STEP_UNIT_ID),
-          runId: plan.runId,
-          unitId: SHARED_STEP_UNIT_ID,
-          kind: unitKindForLevel(plan.level),
-          waveIndex: sharedWaveIndex,
-          status: "pending",
-          ownedRelPaths: plan.sharedStepPaths,
-          updatedMs,
-        })
-      }
-    }),
+        for (const unit of plan.units) {
+          yield* readModel.upsertUnit({
+            unitKey: makeWorkflowUnitKey(plan.runId, unit.unitId),
+            runId: plan.runId,
+            unitId: unit.unitId,
+            kind: unitKindOf(unit),
+            waveIndex: unit.waveIndex,
+            status: "pending",
+            ownedRelPaths: unit.ownedRelPaths,
+            updatedMs,
+          })
+        }
+        if (plan.sharedStepPaths.length > 0) {
+          const sharedWaveIndex = WaveIndex.make(wavesOf(plan).length)
+          yield* readModel.upsertUnit({
+            unitKey: makeWorkflowUnitKey(plan.runId, SHARED_STEP_UNIT_ID),
+            runId: plan.runId,
+            unitId: SHARED_STEP_UNIT_ID,
+            kind: unitKindForLevel(plan.level),
+            waveIndex: sharedWaveIndex,
+            status: "pending",
+            ownedRelPaths: plan.sharedStepPaths,
+            updatedMs,
+          })
+        }
+      }),
+    ),
   })
 
 export const projectUnitAttemptDispatched = (
@@ -241,31 +276,38 @@ export const projectUnitAttemptDispatched = (
 ) =>
   Activity.make({
     name: `ProjectUnitDispatched/${descriptor.unitId}/${attempt}${cycleSuffixFor(escalationOrdinal)}`,
-    error: WorkflowStoreUnavailableError,
-    execute: Effect.gen(function* () {
-      const readModel = yield* WorkflowProjectionWriter
-      const updatedMs = yield* currentTimestampMs
-      const runner = runnerOfMode(plan.mode)
-      yield* readModel.upsertUnit({
-        unitKey: makeUnitKey(plan.runId, descriptor.unitId),
-        runId: plan.runId,
-        unitId: descriptor.unitId,
-        kind: descriptor.kind,
-        waveIndex: descriptor.waveIndex,
-        status: "dispatched",
-        ownedRelPaths: descriptor.ownedRelPaths,
-        updatedMs,
-      })
-      yield* readModel.upsertAttempt({
-        attemptKey: makeAttemptKey(plan.runId, descriptor.unitId, attempt, escalationOrdinal),
-        runId: plan.runId,
-        unitId: descriptor.unitId,
-        attempt,
-        verdict: "dispatched",
-        ...(runner !== undefined ? { runner } : {}),
-        updatedMs,
-      })
-    }),
+    error: WorkflowProjectionError,
+    execute: withProjectionRetry(
+      Effect.gen(function* () {
+        const readModel = yield* WorkflowProjectionWriter
+        const updatedMs = yield* currentTimestampMs
+        const runner = runnerOfMode(plan.mode)
+        yield* readModel.upsertUnit({
+          unitKey: makeWorkflowUnitKey(plan.runId, descriptor.unitId),
+          runId: plan.runId,
+          unitId: descriptor.unitId,
+          kind: descriptor.kind,
+          waveIndex: descriptor.waveIndex,
+          status: "dispatched",
+          ownedRelPaths: descriptor.ownedRelPaths,
+          updatedMs,
+        })
+        yield* readModel.upsertAttempt({
+          attemptKey: makeWorkflowAttemptKey(
+            plan.runId,
+            descriptor.unitId,
+            attempt,
+            escalationOrdinal,
+          ),
+          runId: plan.runId,
+          unitId: descriptor.unitId,
+          attempt,
+          verdict: "dispatched",
+          ...(runner !== undefined ? { runner } : {}),
+          updatedMs,
+        })
+      }),
+    ),
   })
 
 export const projectUnitOutcome = (
@@ -281,84 +323,103 @@ export const projectUnitOutcome = (
     .with({ _tag: "Completed" }, (completed) =>
       Activity.make({
         name: `ProjectUnitCompleted/${descriptor.unitId}/${attempt}${cycleSuffix}`,
-        error: WorkflowStoreUnavailableError,
-        execute: Effect.gen(function* () {
-          const readModel = yield* WorkflowProjectionWriter
-          const updatedMs = yield* currentTimestampMs
-          yield* readModel.upsertAttempt({
-            attemptKey: makeAttemptKey(plan.runId, descriptor.unitId, attempt, escalationOrdinal),
-            runId: plan.runId,
-            unitId: descriptor.unitId,
-            attempt,
-            verdict: "completed",
-            ...(runner !== undefined ? { runner } : {}),
-            packageStampHash: completed.packageStampHash,
-            updatedMs,
-          })
-          yield* readModel.upsertUnit({
-            unitKey: makeUnitKey(plan.runId, descriptor.unitId),
-            runId: plan.runId,
-            unitId: descriptor.unitId,
-            kind: descriptor.kind,
-            waveIndex: descriptor.waveIndex,
-            status: "completed",
-            ownedRelPaths: descriptor.ownedRelPaths,
-            updatedMs,
-          })
-        }),
+        error: WorkflowProjectionError,
+        execute: withProjectionRetry(
+          Effect.gen(function* () {
+            const readModel = yield* WorkflowProjectionWriter
+            const updatedMs = yield* currentTimestampMs
+            yield* readModel.upsertAttempt({
+              attemptKey: makeWorkflowAttemptKey(
+                plan.runId,
+                descriptor.unitId,
+                attempt,
+                escalationOrdinal,
+              ),
+              runId: plan.runId,
+              unitId: descriptor.unitId,
+              attempt,
+              verdict: "completed",
+              ...(runner !== undefined ? { runner } : {}),
+              packageStampHash: completed.packageStampHash,
+              updatedMs,
+            })
+            yield* readModel.upsertUnit({
+              unitKey: makeWorkflowUnitKey(plan.runId, descriptor.unitId),
+              runId: plan.runId,
+              unitId: descriptor.unitId,
+              kind: descriptor.kind,
+              waveIndex: descriptor.waveIndex,
+              status: "completed",
+              ownedRelPaths: descriptor.ownedRelPaths,
+              updatedMs,
+            })
+          }),
+        ),
       }),
     )
     .with({ _tag: "Rejected" }, (rejected) =>
       Activity.make({
         name: `ProjectUnitRejected/${descriptor.unitId}/${attempt}${cycleSuffix}`,
-        error: WorkflowStoreUnavailableError,
-        execute: Effect.gen(function* () {
-          const readModel = yield* WorkflowProjectionWriter
-          const updatedMs = yield* currentTimestampMs
-          yield* readModel.upsertAttempt({
-            attemptKey: makeAttemptKey(plan.runId, descriptor.unitId, attempt, escalationOrdinal),
-            runId: plan.runId,
-            unitId: descriptor.unitId,
-            attempt,
-            verdict: "rejected",
-            ...(runner !== undefined ? { runner } : {}),
-            rejection: RejectionJsonPayload.make(encodeUnitRejectionJson(rejected.rejection)),
-            updatedMs,
-          })
-        }),
+        error: WorkflowProjectionError,
+        execute: withProjectionRetry(
+          Effect.gen(function* () {
+            const readModel = yield* WorkflowProjectionWriter
+            const updatedMs = yield* currentTimestampMs
+            yield* readModel.upsertAttempt({
+              attemptKey: makeWorkflowAttemptKey(
+                plan.runId,
+                descriptor.unitId,
+                attempt,
+                escalationOrdinal,
+              ),
+              runId: plan.runId,
+              unitId: descriptor.unitId,
+              attempt,
+              verdict: "rejected",
+              ...(runner !== undefined ? { runner } : {}),
+              rejection: rejected.rejection,
+              updatedMs,
+            })
+          }),
+        ),
       }),
     )
     .with({ _tag: "Escalated" }, (escalated) =>
       Activity.make({
         name: `ProjectUnitAttemptEscalated/${descriptor.unitId}/${attempt}${cycleSuffix}`,
-        error: WorkflowStoreUnavailableError,
-        execute: Effect.gen(function* () {
-          const readModel = yield* WorkflowProjectionWriter
-          const updatedMs = yield* currentTimestampMs
-          const reason = match(escalated.escalation)
-            .with({ _tag: "AuthRequired" }, (e) =>
-              AgentFailureReason.make(`Authentication required for runner '${e.runner}'`),
-            )
-            .with({ _tag: "RetryBudgetExhausted" }, () =>
-              AgentFailureReason.make("Unit retry budget exhausted"),
-            )
-            .with({ _tag: "MergeConflict" }, (e) =>
-              AgentFailureReason.make(`Merge conflict on branch '${e.branch}'`),
-            )
-            .exhaustive()
-          yield* readModel.upsertAttempt({
-            attemptKey: makeAttemptKey(plan.runId, descriptor.unitId, attempt, escalationOrdinal),
-            runId: plan.runId,
-            unitId: descriptor.unitId,
-            attempt,
-            verdict: "rejected",
-            ...(runner !== undefined ? { runner } : {}),
-            rejection: RejectionJsonPayload.make(
-              encodeUnitRejectionJson({ _tag: "AgentFailed", reason }),
-            ),
-            updatedMs,
-          })
-        }),
+        error: WorkflowProjectionError,
+        execute: withProjectionRetry(
+          Effect.gen(function* () {
+            const readModel = yield* WorkflowProjectionWriter
+            const updatedMs = yield* currentTimestampMs
+            const rejection: UnitRejection = match(escalated.escalation)
+              .with({ _tag: "AuthRequired" }, (e) => ({
+                _tag: "AgentFailed" as const,
+                reason: AgentFailureReason.make(`Authentication required for runner '${e.runner}'`),
+              }))
+              .with({ _tag: "RetryBudgetExhausted" }, (e) => e.lastRejection)
+              .with({ _tag: "MergeConflict" }, (e) => ({
+                _tag: "AgentFailed" as const,
+                reason: AgentFailureReason.make(`Merge conflict on branch '${e.branch}'`),
+              }))
+              .exhaustive()
+            yield* readModel.upsertAttempt({
+              attemptKey: makeWorkflowAttemptKey(
+                plan.runId,
+                descriptor.unitId,
+                attempt,
+                escalationOrdinal,
+              ),
+              runId: plan.runId,
+              unitId: descriptor.unitId,
+              attempt,
+              verdict: "rejected",
+              ...(runner !== undefined ? { runner } : {}),
+              rejection,
+              updatedMs,
+            })
+          }),
+        ),
       }),
     )
     .exhaustive()
@@ -377,28 +438,30 @@ export const projectUnitEscalated = (
 ) =>
   Activity.make({
     name: activityName,
-    error: WorkflowStoreUnavailableError,
-    execute: Effect.gen(function* () {
-      const readModel = yield* WorkflowProjectionWriter
-      const updatedMs = yield* currentTimestampMs
-      yield* readModel.upsertRun({
-        runId: plan.runId,
-        executionId,
-        level: plan.level,
-        planSha: plan.planSha,
-        baseSha: plan.baseSha,
-        state: runState,
-        updatedMs,
-      })
-      yield* readModel.upsertUnit({
-        unitKey: makeUnitKey(plan.runId, unitId),
-        runId: plan.runId,
-        unitId,
-        kind,
-        waveIndex,
-        status,
-        ownedRelPaths,
-        updatedMs,
-      })
-    }),
+    error: WorkflowProjectionError,
+    execute: withProjectionRetry(
+      Effect.gen(function* () {
+        const readModel = yield* WorkflowProjectionWriter
+        const updatedMs = yield* currentTimestampMs
+        yield* readModel.upsertRun({
+          runId: plan.runId,
+          executionId,
+          level: plan.level,
+          planSha: plan.planSha,
+          baseSha: plan.baseSha,
+          state: runState,
+          updatedMs,
+        })
+        yield* readModel.upsertUnit({
+          unitKey: makeWorkflowUnitKey(plan.runId, unitId),
+          runId: plan.runId,
+          unitId,
+          kind,
+          waveIndex,
+          status,
+          ownedRelPaths,
+          updatedMs,
+        })
+      }),
+    ),
   })

@@ -138,24 +138,47 @@ describe("nondeterministic-workflow-body AST & oxlint gates", () => {
   })
 
   it.effect(
-    "produces zero violations on real libs/harness/gates/src/harness-task-workflow.ts via AST & syntax-bans gates",
+    "produces zero violations on real harness-task-workflow.ts and harness-task-workflow-projections.ts via AST & syntax-bans gates",
     () =>
       Effect.gen(function* () {
-        const realPath = resolve(import.meta.dirname, "../src/harness-task-workflow.ts")
-        const realContent = readFileSync(realPath, "utf8")
-        const normPath = "libs/harness/gates/src/harness-task-workflow.ts"
+        // workflow-body-ast.ts inspects modules declaring Workflow.make(...) (toLayer/register
+        // handlers and same-module helpers); harness-task-workflow-projections.ts houses all
+        // Activity.make projection handlers cleanly without Workflow.make.
+        const workflowPath = resolve(import.meta.dirname, "../src/harness-task-workflow.ts")
+        const workflowContent = readFileSync(workflowPath, "utf8")
+        const normWorkflowPath = "libs/harness/gates/src/harness-task-workflow.ts"
 
-        const astViolations = collectWorkflowBodyViolations(
-          parseTs(realContent, normPath),
-          normPath,
+        const projectionsPath = resolve(
+          import.meta.dirname,
+          "../src/harness-task-workflow-projections.ts",
         )
-        expect(astViolations).toEqual([])
+        const projectionsContent = readFileSync(projectionsPath, "utf8")
+        const normProjectionsPath = "libs/harness/gates/src/harness-task-workflow-projections.ts"
+
+        expect(projectionsContent).not.toContain("Workflow.make")
+        expect(projectionsContent).toContain("Activity.make")
+
+        const workflowAstViolations = collectWorkflowBodyViolations(
+          parseTs(workflowContent, normWorkflowPath),
+          normWorkflowPath,
+        )
+        expect(workflowAstViolations).toEqual([])
+
+        const projectionsAstViolations = collectWorkflowBodyViolations(
+          parseTs(projectionsContent, normProjectionsPath),
+          normProjectionsPath,
+        )
+        expect(projectionsAstViolations).toEqual([])
 
         const report = yield* decideSyntaxBansGate({
           files: [
             {
-              filePath: AstSourceFilePath.make(normPath),
-              content: AstSourceContent.make(realContent),
+              filePath: AstSourceFilePath.make(normWorkflowPath),
+              content: AstSourceContent.make(workflowContent),
+            },
+            {
+              filePath: AstSourceFilePath.make(normProjectionsPath),
+              content: AstSourceContent.make(projectionsContent),
             },
           ],
         })

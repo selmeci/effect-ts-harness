@@ -32,16 +32,19 @@ import {
 } from "./policy-command-rules.js"
 import {
   PROTECTED_HARNESS_FILE_WRITE_PATTERN,
-  classifyWorkerFileAccess,
   isHarnessStateAccessCommand,
   isHarnessStateMutationCommand,
+} from "./policy-harness-state.js"
+import {
+  MAX_SUBSHELL_INSPECT_DEPTH,
+  classifyWorkerFileAccess,
   isWorkerDaemonCredentialFilePath,
   isWorkerDaemonCredentialShellAccess,
   isWorkerRecursiveWorkflowCommand,
   type PolicyGuardOptions,
   type WorkerFileAccessDenyRuleId,
   type WorkerFileAccessResult,
-} from "./policy-harness-state.js"
+} from "./policy-worker-isolation.js"
 import {
   extractCommandSegments,
   hasUnquotedBackgroundOperator,
@@ -61,6 +64,7 @@ export {
   GIT_DISCARD_PATTERNS,
   GUARD_SELF_INVOCATION_PATTERN,
   INTERACTIVE_NX_BANNED_REASON,
+  MAX_SUBSHELL_INSPECT_DEPTH,
   OBFUSCATION_PATTERNS,
   SECRET_FILE_PATTERN,
   SHELL_OPERATORS,
@@ -236,7 +240,7 @@ export const explainCommandDenyRule = (
       return {
         ruleId: "worker-recursive-workflow-command",
         reason:
-          "Worker isolation mode (HARNESS_UNIT_WORKER=1) bans recursive 'harness workflow start|resume|abort|done' and 'harness done' invocations.",
+          "Worker isolation mode (HARNESS_UNIT_WORKER=1) bans recursive 'harness workflow start|resume|abort|doctor|complete --phase llm' and 'harness done' invocations.",
       }
     }
     if (isWorkerDaemonCredentialShellAccess(trimmed)) {
@@ -398,6 +402,111 @@ export interface FileWriteGuardResult {
   readonly reason?: string | undefined
 }
 
+export type FileReadDenyRuleId =
+  | "harness-common-dir-state"
+  | "secret-file"
+  | "worker-daemon-credential-access"
+
+export interface FileReadGuardResult {
+  readonly verdict: "allow" | "deny"
+  readonly ruleId?: FileReadDenyRuleId | undefined
+  readonly reason?: string | undefined
+}
+
+const stripGlobCharClasses = (p: string): string =>
+  p.replace(/\\(.)/g, "$1").replace(/\[([^\]!^-])\]/g, "$1")
+
+const expandGlobObfuscationCandidates = (raw: string): ReadonlyArray<string> => {
+  const out: Array<string> = []
+  const pushUnique = (val: string): void => {
+    if (val.length > 0 && !out.includes(val)) out.push(val)
+  }
+  const queue: Array<string> = [raw]
+  for (let pass = 0; pass < 2; pass++) {
+    const nextQueue: Array<string> = []
+    for (const item of queue) {
+      const brace = /\{([^{}]{1,128})\}/.exec(item)
+      if (brace === null || !brace[1]!.includes(",")) {
+        nextQueue.push(item)
+        continue
+      }
+      const alts = brace[1]!.split(",").slice(0, 8)
+      const prefix = item.slice(0, brace.index)
+      const suffix = item.slice(brace.index + brace[0].length)
+      for (const alt of alts) {
+        if (nextQueue.length >= 16) break
+        nextQueue.push(`${prefix}${alt}${suffix}`)
+      }
+    }
+    queue.splice(0, queue.length, ...nextQueue)
+  }
+  for (const item of queue) {
+    pushUnique(item)
+    const stripped = stripGlobCharClasses(item)
+    pushUnique(stripped)
+    pushUnique(path.posix.normalize(stripped))
+  }
+  return out
+}
+
+const normalizeFilePathCandidates = (filePath: string): ReadonlyArray<string> => {
+  const rawNorm = filePath.replace(/\\/g, "/").trim()
+  if (rawNorm === "") {
+    return []
+  }
+  const norm = path.posix.normalize(rawNorm)
+  const out: Array<string> = []
+  for (const base of rawNorm === norm ? [norm] : [rawNorm, norm]) {
+    for (const variant of expandGlobObfuscationCandidates(base)) {
+      if (!out.includes(variant)) out.push(variant)
+    }
+  }
+  return out
+}
+
+const isSecretFileWritePath = (p: string): boolean =>
+  /(^|\/)(\.env(\.[a-zA-Z0-9_-]+)*|\.dev\.vars|mutation-hmac[^/]*\.key|.*\.(pem|key))$/.test(p) &&
+  !/\.(example|template|sample)$/i.test(p)
+
+const isSecretFileReadPath = (p: string): boolean =>
+  (/(^|\/)(\.env(?:\.[a-zA-Z0-9_*?-]+)*\*?|\.dev\.vars(?:\.[a-zA-Z0-9_*?-]+)*\*?|mutation-hmac[^/]*(?:\.key|\*|\?|\]|\})|.*\.(?:pem|key))$/.test(
+    p,
+  ) ||
+    /(^|\/)\.cache\/effect-harness(\/|$)/.test(p)) &&
+  !/\.(example|template|sample)$/i.test(p)
+
+export const classifyFileRead = (
+  filePath: string,
+  options?: PolicyGuardOptions,
+): FileReadGuardResult => {
+  const candidates = normalizeFilePathCandidates(filePath)
+  if (candidates.length === 0) {
+    return { verdict: "allow" }
+  }
+  if (
+    options?.unitWorkerMode === true &&
+    (isWorkerDaemonCredentialFilePath(filePath) ||
+      candidates.some(isWorkerDaemonCredentialFilePath))
+  ) {
+    return classifyWorkerFileAccess(filePath, true)
+  }
+  if (candidates.some((p) => PROTECTED_HARNESS_FILE_WRITE_PATTERN.test(p))) {
+    return {
+      verdict: "deny",
+      ruleId: "harness-common-dir-state",
+      reason: `Direct read/inspection of protected harness runtime state is forbidden: ${filePath}`,
+    }
+  }
+  if (candidates.some(isSecretFileReadPath)) {
+    return {
+      verdict: "deny",
+      ruleId: "secret-file",
+      reason: `Secret or credential file read is forbidden by harness guard: ${filePath}`,
+    }
+  }
+  return { verdict: "allow" }
+}
+
 export const classifyFileWrite = (
   filePath: string,
   options?: PolicyGuardOptions,
@@ -405,12 +514,10 @@ export const classifyFileWrite = (
   if (options?.unitWorkerMode === true && isWorkerDaemonCredentialFilePath(filePath)) {
     return classifyWorkerFileAccess(filePath, true)
   }
-  const rawNorm = filePath.replace(/\\/g, "/").trim()
-  if (rawNorm === "") {
+  const candidates = normalizeFilePathCandidates(filePath)
+  if (candidates.length === 0) {
     return { verdict: "allow" }
   }
-  const norm = path.posix.normalize(rawNorm)
-  const candidates = rawNorm === norm ? [norm] : [rawNorm, norm]
 
   if (candidates.some((p) => /(^|\/)repos\/(effect|alchemy)(\/|$)/.test(p))) {
     return {
@@ -458,14 +565,7 @@ export const classifyFileWrite = (
     }
   }
 
-  if (
-    candidates.some(
-      (p) =>
-        /(^|\/)(\.env(\.[a-zA-Z0-9_-]+)*|\.dev\.vars|mutation-hmac[^/]*\.key|.*\.(pem|key))$/.test(
-          p,
-        ) && !/\.(example|template|sample)$/i.test(p),
-    )
-  ) {
+  if (candidates.some(isSecretFileWritePath)) {
     return {
       verdict: "deny",
       ruleId: "secret-file",

@@ -14,6 +14,7 @@ import {
   TaskRunReceipt,
   UnitEscalation,
   UnitOutcome,
+  UnitRejection,
   WaveIndex,
   WorkUnitId,
   WorkflowExecutionId,
@@ -23,9 +24,39 @@ import {
 import {
   GitCommonDirPath,
   LeaseEpoch,
+  LeaseFilePath,
+  LeaseHolderId,
+  PlanJsonPayload,
+  RejectionJsonPayload,
+  WorkflowAttemptKey,
+  WorkflowAttemptVerdict,
+  WorkflowDaemonCapability,
+  WorkflowRunState,
   WorkflowStoreFailureReason,
+  WorkflowStoreOperation,
+  WorkflowTimestampMs,
+  WorkflowUnitKey,
+  WorkflowUnitKind,
+  WorkflowUnitStatus,
   WorktreePathKind,
+  makeWorkflowAttemptKey,
+  makeWorkflowUnitKey,
 } from "./workflow-storage.js"
+import { WorkspaceFsOperation } from "./workspace-and-process.js"
+
+export {
+  PlanJsonPayload,
+  RejectionJsonPayload,
+  WorkflowAttemptKey,
+  WorkflowAttemptVerdict,
+  WorkflowRunState,
+  WorkflowTimestampMs,
+  WorkflowUnitKey,
+  WorkflowUnitKind,
+  WorkflowUnitStatus,
+  makeWorkflowAttemptKey,
+  makeWorkflowUnitKey,
+}
 
 /** Non-negative count of workflow runs reconstructed by `workflow doctor --rebuild-views`. */
 export const WorkflowRebuiltRunCount = Schema.Int.pipe(
@@ -33,43 +64,6 @@ export const WorkflowRebuiltRunCount = Schema.Int.pipe(
   Schema.brand("WorkflowRebuiltRunCount"),
 )
 export type WorkflowRebuiltRunCount = typeof WorkflowRebuiltRunCount.Type
-
-/** Non-negative epoch millisecond timestamp recorded in workflow read-model records. */
-export const WorkflowTimestampMs = Schema.Int.pipe(
-  Schema.check(Schema.isGreaterThanOrEqualTo(0)),
-  Schema.brand("WorkflowTimestampMs"),
-)
-export type WorkflowTimestampMs = typeof WorkflowTimestampMs.Type
-
-/** Composite key `<runId>/<unitId>` identifying a `WfUnit` read-model node. */
-export const WorkflowUnitKey = Schema.NonEmptyString.pipe(
-  Schema.check(Schema.isTrimmed()),
-  Schema.check(Schema.isMaxLength(256)),
-  Schema.brand("WorkflowUnitKey"),
-)
-export type WorkflowUnitKey = typeof WorkflowUnitKey.Type
-
-/** Composite key `<runId>/<unitId>#...` identifying a `WfAttempt` read-model node. */
-export const WorkflowAttemptKey = Schema.NonEmptyString.pipe(
-  Schema.check(Schema.isTrimmed()),
-  Schema.check(Schema.isMaxLength(256)),
-  Schema.brand("WorkflowAttemptKey"),
-)
-export type WorkflowAttemptKey = typeof WorkflowAttemptKey.Type
-
-/** Serialized `CompiledPlan` JSON stored on `WfRun.planJson`. */
-export const PlanJsonPayload = Schema.NonEmptyString.pipe(
-  Schema.check(Schema.isTrimmed()),
-  Schema.brand("PlanJsonPayload"),
-)
-export type PlanJsonPayload = typeof PlanJsonPayload.Type
-
-/** Serialized `UnitRejection` / escalation JSON stored on `WfAttempt.rejection`. */
-export const RejectionJsonPayload = Schema.NonEmptyString.pipe(
-  Schema.check(Schema.isTrimmed()),
-  Schema.brand("RejectionJsonPayload"),
-)
-export type RejectionJsonPayload = typeof RejectionJsonPayload.Type
 
 /** Durable deferred name awaiting external completion (e.g. `unit/<id>/<attempt>`, `llm-phase-done`). */
 export const PendingDeferredName = Schema.NonEmptyString.pipe(
@@ -86,27 +80,6 @@ export const WorkflowDoctorCheckName = Schema.NonEmptyString.pipe(
   Schema.brand("WorkflowDoctorCheckName"),
 )
 export type WorkflowDoctorCheckName = typeof WorkflowDoctorCheckName.Type
-
-/** Lifecycle states persisted in `WfRun.state`. */
-export const WorkflowRunState = Schema.Literals(["running", "waiting", "completed", "aborted"])
-export type WorkflowRunState = typeof WorkflowRunState.Type
-
-/** Unit kinds persisted in `WfUnit.kind`. */
-export const WorkflowUnitKind = Schema.Literals(["slice", "package"])
-export type WorkflowUnitKind = typeof WorkflowUnitKind.Type
-
-/** Unit status values persisted in `WfUnit.status`. */
-export const WorkflowUnitStatus = Schema.Literals([
-  "pending",
-  "dispatched",
-  "completed",
-  "escalated",
-])
-export type WorkflowUnitStatus = typeof WorkflowUnitStatus.Type
-
-/** Attempt verdicts persisted in `WfAttempt.verdict`. */
-export const WorkflowAttemptVerdict = Schema.Literals(["dispatched", "completed", "rejected"])
-export type WorkflowAttemptVerdict = typeof WorkflowAttemptVerdict.Type
 
 /** Workflow store connectivity state surfaced by `workflow status` / `harness_workflow_plan`. */
 export const WorkflowStoreAvailabilityState = Schema.Literals(["ready", "paused", "inactive"])
@@ -171,18 +144,41 @@ export const WorkflowUnitRecord = Schema.Struct({
 })
 export type WorkflowUnitRecord = typeof WorkflowUnitRecord.Type
 
-/** Read-model summary of a `WfAttempt` node in `harness-workflows`. */
-export const WorkflowAttemptRecord = Schema.Struct({
+const WorkflowAttemptRecordBase = {
   attemptKey: WorkflowAttemptKey,
   runId: WorkflowRunId,
   unitId: WorkUnitId,
   attempt: AttemptNumber,
-  verdict: WorkflowAttemptVerdict,
   runner: Schema.optional(RunnerId),
-  rejection: Schema.optional(RejectionJsonPayload),
   packageStampHash: Schema.optional(PackageStampHash),
   updatedMs: WorkflowTimestampMs,
+} as const
+
+export const DispatchedWorkflowAttemptRecord = Schema.Struct({
+  ...WorkflowAttemptRecordBase,
+  verdict: Schema.Literal("dispatched"),
 })
+export type DispatchedWorkflowAttemptRecord = typeof DispatchedWorkflowAttemptRecord.Type
+
+export const CompletedWorkflowAttemptRecord = Schema.Struct({
+  ...WorkflowAttemptRecordBase,
+  verdict: Schema.Literal("completed"),
+})
+export type CompletedWorkflowAttemptRecord = typeof CompletedWorkflowAttemptRecord.Type
+
+export const RejectedWorkflowAttemptRecord = Schema.Struct({
+  ...WorkflowAttemptRecordBase,
+  verdict: Schema.Literal("rejected"),
+  rejection: UnitRejection,
+})
+export type RejectedWorkflowAttemptRecord = typeof RejectedWorkflowAttemptRecord.Type
+
+/** Read-model summary of a `WfAttempt` node in `harness-workflows` (`rejected` requires typed `rejection`). */
+export const WorkflowAttemptRecord = Schema.Union([
+  DispatchedWorkflowAttemptRecord,
+  CompletedWorkflowAttemptRecord,
+  RejectedWorkflowAttemptRecord,
+])
 export type WorkflowAttemptRecord = typeof WorkflowAttemptRecord.Type
 
 /** Active `DurableDeferred` entry reported in `WorkflowStatusSummary`. */
@@ -203,18 +199,65 @@ export const WorkflowPendingDeferred = Schema.TaggedUnion({
 })
 export type WorkflowPendingDeferred = typeof WorkflowPendingDeferred.Type
 
-/** Complete status snapshot returned by `workflow status`, `workflow.status`, and `harness_workflow_plan`. */
-export const WorkflowStatusSummary = Schema.Struct({
-  run: Schema.optional(WorkflowRunRecord),
-  units: Schema.Array(WorkflowUnitRecord),
-  attempts: Schema.Array(WorkflowAttemptRecord),
-  pendingDeferreds: Schema.Array(WorkflowPendingDeferred),
-  review: Schema.optional(ReviewRoutingPlan),
-  terminalReceipt: Schema.optional(TaskRunReceipt),
-  terminalError: Schema.optional(WorkflowStoreFailureReason),
-  storeStatus: WorkflowStoreAvailabilityState,
-  projectionStatus: WorkflowProjectionStatus,
-  writerLeaseEpoch: LeaseEpoch,
+/** Typed terminal error classification surfaced in `WorkflowRunOutcome.Failed`. */
+export const WorkflowTerminalError = Schema.TaggedUnion({
+  Aborted: { runId: WorkflowRunId, escalation: UnitEscalation },
+  OperatorAborted: { runId: WorkflowRunId, reason: WorkflowStoreFailureReason },
+  WorkspaceFs: { operation: WorkspaceFsOperation, reason: WorkflowStoreFailureReason },
+  StoreUnavailable: { operation: WorkflowStoreOperation, reason: WorkflowStoreFailureReason },
+  LeaseHeld: {
+    holderId: LeaseHolderId,
+    leaseEpoch: Schema.optional(LeaseEpoch),
+    lockFilePath: LeaseFilePath,
+  },
+  Interrupted: { reason: WorkflowStoreFailureReason },
+  Defect: { reason: WorkflowStoreFailureReason },
+})
+export type WorkflowTerminalError = typeof WorkflowTerminalError.Type
+
+/** Closed discriminated union of workflow run projection outcomes surfaced by `workflow status`. */
+export const WorkflowRunOutcome = Schema.TaggedUnion({
+  NotFound: {},
+  Active: {
+    run: WorkflowRunRecord,
+    units: Schema.Array(WorkflowUnitRecord),
+    attempts: Schema.Array(WorkflowAttemptRecord),
+    pendingDeferreds: Schema.Array(WorkflowPendingDeferred),
+    projectionStatus: WorkflowProjectionStatus,
+  },
+  Completed: {
+    run: WorkflowRunRecord,
+    units: Schema.Array(WorkflowUnitRecord),
+    attempts: Schema.Array(WorkflowAttemptRecord),
+    pendingDeferreds: Schema.Array(WorkflowPendingDeferred),
+    review: ReviewRoutingPlan,
+    terminalReceipt: TaskRunReceipt,
+    projectionStatus: WorkflowProjectionStatus,
+  },
+  Failed: {
+    run: WorkflowRunRecord,
+    units: Schema.Array(WorkflowUnitRecord),
+    attempts: Schema.Array(WorkflowAttemptRecord),
+    pendingDeferreds: Schema.Array(WorkflowPendingDeferred),
+    terminalError: WorkflowTerminalError,
+    projectionStatus: WorkflowProjectionStatus,
+  },
+})
+export type WorkflowRunOutcome = typeof WorkflowRunOutcome.Type
+
+/** Closed status snapshot union returned by `workflow status`, `workflow.status`, and `harness_workflow_plan`. */
+export const WorkflowStatusSummary = Schema.TaggedUnion({
+  DaemonOffline: {
+    outcome: WorkflowRunOutcome,
+  },
+  StorePaused: {
+    writerLeaseEpoch: LeaseEpoch,
+    outcome: WorkflowRunOutcome,
+  },
+  Ready: {
+    writerLeaseEpoch: LeaseEpoch,
+    outcome: WorkflowRunOutcome,
+  },
 })
 export type WorkflowStatusSummary = typeof WorkflowStatusSummary.Type
 
@@ -277,12 +320,18 @@ export const WorkflowCompleteResponse = Schema.TaggedUnion({
 })
 export type WorkflowCompleteResponse = typeof WorkflowCompleteResponse.Type
 
-/** Daemon RPC request for `workflow.resume`. */
-export const WorkflowResumeRequest = Schema.Struct({
-  repoRoot: AbsoluteRepoRoot,
-  runId: WorkflowRunId,
-  unitId: Schema.optional(WorkUnitId),
-  decision: Schema.optional(EscalationDecision),
+/** Daemon RPC request union for `workflow.resume` (`ResumeRun` vs `ResolveEscalation`). */
+export const WorkflowResumeRequest = Schema.TaggedUnion({
+  ResumeRun: {
+    repoRoot: AbsoluteRepoRoot,
+    runId: WorkflowRunId,
+  },
+  ResolveEscalation: {
+    repoRoot: AbsoluteRepoRoot,
+    runId: WorkflowRunId,
+    unitId: WorkUnitId,
+    decision: EscalationDecision,
+  },
 })
 export type WorkflowResumeRequest = typeof WorkflowResumeRequest.Type
 
@@ -335,7 +384,7 @@ export type WorkflowDoctorCheckItem = typeof WorkflowDoctorCheckItem.Type
 export const WorkflowDoctorResponse = Schema.Struct({
   repoRoot: AbsoluteRepoRoot,
   commonGitDir: GitCommonDirPath,
-  writerLeaseEpoch: LeaseEpoch,
+  writerLeaseEpoch: Schema.optional(LeaseEpoch),
   rebuiltRunCount: WorkflowRebuiltRunCount,
   checks: Schema.Array(WorkflowDoctorCheckItem),
 })
@@ -348,3 +397,48 @@ export const WorkflowPlanToolOutput = Schema.Struct({
   status: WorkflowStatusSummary,
 })
 export type WorkflowPlanToolOutput = typeof WorkflowPlanToolOutput.Type
+
+/** Request correlation identifier carried on Unix-socket daemon RPC envelopes. */
+export const WorkflowRpcRequestId = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(256)),
+  Schema.brand("WorkflowRpcRequestId"),
+)
+export type WorkflowRpcRequestId = typeof WorkflowRpcRequestId.Type
+
+/** Union of typed result payloads returned by workflow daemon RPC handlers. */
+export const WorkflowRpcResult = Schema.Union([
+  WorkflowStartResponse,
+  WorkflowStatusSummary,
+  WorkflowCompleteResponse,
+  WorkflowResumeResponse,
+  WorkflowAbortResponse,
+  WorkflowDoctorResponse,
+])
+export type WorkflowRpcResult = typeof WorkflowRpcResult.Type
+
+/** Typed success envelope returned over `<git-common-dir>/harness/daemon.sock`. */
+export const WorkflowRpcSuccessEnvelope = Schema.Struct({
+  id: WorkflowRpcRequestId,
+  ok: Schema.Literal(true),
+  command: WorkflowDaemonCapability,
+  result: WorkflowRpcResult,
+})
+export type WorkflowRpcSuccessEnvelope = typeof WorkflowRpcSuccessEnvelope.Type
+
+/** Typed error envelope returned over `<git-common-dir>/harness/daemon.sock`. */
+export const WorkflowRpcErrorEnvelope = Schema.Struct({
+  id: WorkflowRpcRequestId,
+  ok: Schema.Literal(false),
+  command: WorkflowDaemonCapability,
+  error: WorkflowStoreFailureReason,
+  detail: WorkflowStoreFailureReason,
+})
+export type WorkflowRpcErrorEnvelope = typeof WorkflowRpcErrorEnvelope.Type
+
+/** Closed RPC response envelope union exchanged over the Unix socket daemon. */
+export const WorkflowRpcEnvelope = Schema.Union([
+  WorkflowRpcSuccessEnvelope,
+  WorkflowRpcErrorEnvelope,
+])
+export type WorkflowRpcEnvelope = typeof WorkflowRpcEnvelope.Type

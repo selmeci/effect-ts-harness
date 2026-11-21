@@ -3,7 +3,6 @@ import { Activity, DurableDeferred, Workflow, WorkflowEngine } from "effect/work
 import { match } from "ts-pattern"
 import {
   type AbsoluteRepoRoot,
-  AgentFailureReason,
   AttemptNumber,
   CompiledPlan,
   type CompiledWorkUnit,
@@ -22,12 +21,14 @@ import {
   UnitAgentDispatchResult,
   type UnitEscalation,
   UnitOutcome,
+  type UnitRejection,
   WaveIndex,
   type WorkUnitId,
   WorkflowExecutionId,
   WorkflowStoreUnavailableError,
   WorktreeProvisionReceipt,
   WorkspaceFsError,
+  WriterLeaseHeldError,
   wavesOf,
 } from "@harness/contract"
 import {
@@ -64,6 +65,7 @@ export const HarnessTaskWorkflowError = Schema.Union([
   TaskRunAbortedError,
   WorkspaceFsError,
   WorkflowStoreUnavailableError,
+  WriterLeaseHeldError,
 ])
 export type HarnessTaskWorkflowError = typeof HarnessTaskWorkflowError.Type
 
@@ -74,6 +76,10 @@ export const HarnessTaskWorkflow = Workflow.make("HarnessTaskWorkflow", {
   error: HarnessTaskWorkflowError,
   idempotencyKey: ({ plan }) => plan.runId,
 })
+
+/** Computes the deterministic `WorkflowExecutionId` for a `CompiledPlan` via `HarnessTaskWorkflow.executionId`. */
+export const executionIdOf = (plan: CompiledPlan): Effect.Effect<WorkflowExecutionId> =>
+  Effect.map(HarnessTaskWorkflow.executionId({ plan }), (id) => WorkflowExecutionId.make(id))
 
 /** Durable deferred marking operator completion of the post-unit LLM verification phase. */
 export const LlmPhaseDone = DurableDeferred.make("llm-phase-done", {
@@ -176,6 +182,83 @@ type UnitCycleOutcome =
   | { readonly _tag: "Completed"; readonly unitId: WorkUnitId }
   | { readonly _tag: "NeedsEscalation"; readonly escalation: UnitEscalation }
 
+const runAttemptCycle = Effect.fnUntraced(function* (
+  plan: CompiledPlan,
+  descriptor: UnitCycleDescriptor,
+  cwd: AbsoluteRepoRoot,
+  escalationOrdinal: EscalationOrdinal,
+): Effect.fn.Return<
+  UnitCycleOutcome,
+  HarnessTaskWorkflowError,
+  | WorkflowEngine.WorkflowEngine
+  | WorkflowEngine.WorkflowInstance
+  | UnitVerifier
+  | UnitAgentDispatcher
+  | WorkflowProjectionWriter
+> {
+  let lastRejection: UnitRejection | undefined = undefined
+
+  for (const attempt of ATTEMPT_NUMBERS) {
+    yield* projectUnitAttemptDispatched(plan, descriptor, attempt, escalationOrdinal)
+
+    const outcome: UnitOutcome = yield* match(plan.mode)
+      .with({ _tag: "Manual" }, () =>
+        DurableDeferred.await(
+          makeUnitCompletionDeferred(descriptor.unitId, attempt, escalationOrdinal),
+        ),
+      )
+      .with({ _tag: "Automatic" }, (automatic) =>
+        dispatchAutomaticUnit(plan, descriptor, cwd, attempt, automatic.runner, escalationOrdinal),
+      )
+      .exhaustive()
+
+    yield* projectUnitOutcome(plan, descriptor, attempt, escalationOrdinal, outcome)
+
+    const stepResult: UnitCycleOutcome | undefined = match(outcome)
+      .with({ _tag: "Completed" }, (completed): UnitCycleOutcome => ({
+        _tag: "Completed",
+        unitId: completed.unitId,
+      }))
+      .with({ _tag: "Rejected" }, (rejected): UnitCycleOutcome | undefined => {
+        lastRejection = rejected.rejection
+        return attempt >= 3
+          ? {
+              _tag: "NeedsEscalation",
+              escalation: {
+                _tag: "RetryBudgetExhausted",
+                lastRejection: rejected.rejection,
+              },
+            }
+          : undefined
+      })
+      .with({ _tag: "Escalated" }, (escalated): UnitCycleOutcome => ({
+        _tag: "NeedsEscalation",
+        escalation: escalated.escalation,
+      }))
+      .exhaustive()
+
+    if (stepResult !== undefined) {
+      return stepResult
+    }
+  }
+
+  if (lastRejection !== undefined) {
+    return {
+      _tag: "NeedsEscalation",
+      escalation: {
+        _tag: "RetryBudgetExhausted",
+        lastRejection,
+      },
+    }
+  }
+
+  return yield* Effect.die(
+    new Error(
+      `Invariant violation: attempt loop for unit '${descriptor.unitId}' exited without outcome or rejection`,
+    ),
+  )
+})
+
 const driveUnitLoop = Effect.fnUntraced(function* (
   plan: CompiledPlan,
   descriptor: UnitCycleDescriptor,
@@ -194,69 +277,7 @@ const driveUnitLoop = Effect.fnUntraced(function* (
   let escalationOrdinal = EscalationOrdinal.make(1)
 
   while (true) {
-    let cycleOutcome: UnitCycleOutcome | undefined
-
-    for (const attempt of ATTEMPT_NUMBERS) {
-      yield* projectUnitAttemptDispatched(plan, descriptor, attempt, escalationOrdinal)
-
-      const outcome: UnitOutcome = yield* match(plan.mode)
-        .with({ _tag: "Manual" }, () =>
-          DurableDeferred.await(
-            makeUnitCompletionDeferred(descriptor.unitId, attempt, escalationOrdinal),
-          ),
-        )
-        .with({ _tag: "Automatic" }, (automatic) =>
-          dispatchAutomaticUnit(
-            plan,
-            descriptor,
-            cwd,
-            attempt,
-            automatic.runner,
-            escalationOrdinal,
-          ),
-        )
-        .exhaustive()
-
-      yield* projectUnitOutcome(plan, descriptor, attempt, escalationOrdinal, outcome)
-
-      const stepResult: UnitCycleOutcome | undefined = match(outcome)
-        .with({ _tag: "Completed" }, (completed): UnitCycleOutcome => ({
-          _tag: "Completed",
-          unitId: completed.unitId,
-        }))
-        .with({ _tag: "Rejected" }, (rejected): UnitCycleOutcome | undefined =>
-          attempt >= 3
-            ? {
-                _tag: "NeedsEscalation",
-                escalation: {
-                  _tag: "RetryBudgetExhausted",
-                  lastRejection: rejected.rejection,
-                },
-              }
-            : undefined,
-        )
-        .with({ _tag: "Escalated" }, (escalated): UnitCycleOutcome => ({
-          _tag: "NeedsEscalation",
-          escalation: escalated.escalation,
-        }))
-        .exhaustive()
-
-      if (stepResult !== undefined) {
-        cycleOutcome = stepResult
-        break
-      }
-    }
-
-    const resolvedCycle: UnitCycleOutcome = cycleOutcome ?? {
-      _tag: "NeedsEscalation",
-      escalation: {
-        _tag: "RetryBudgetExhausted",
-        lastRejection: {
-          _tag: "AgentFailed",
-          reason: AgentFailureReason.make("Unit retry budget exhausted"),
-        },
-      },
-    }
+    const resolvedCycle = yield* runAttemptCycle(plan, descriptor, cwd, escalationOrdinal)
 
     const completedUnitId = yield* match(resolvedCycle)
       .with({ _tag: "Completed" }, (done) => Effect.succeed(done.unitId))
@@ -593,11 +614,10 @@ export const executeTaskWorkflow = Effect.fn("Harness.executeTaskWorkflow")(func
     const waveResults = yield* Effect.forEach(
       wave.units,
       (unit) =>
-        driveUnitLoop(
-          plan,
-          makeUnitCycleDescriptor(plan, unit, resolveUnitCwd(worktrees, unit.unitId)),
-          resolveUnitCwd(worktrees, unit.unitId),
-        ),
+        Effect.gen(function* () {
+          const unitCwd = yield* resolveUnitCwd(worktrees, unit.unitId)
+          return yield* driveUnitLoop(plan, makeUnitCycleDescriptor(plan, unit, unitCwd), unitCwd)
+        }),
       { concurrency: waveConcurrency },
     )
     const nextEscalationByUnit = new Map<WorkUnitId, EscalationOrdinal>()

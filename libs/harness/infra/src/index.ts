@@ -30,6 +30,7 @@ import {
 import {
   DAEMON_SOCKET_TIMEOUT_MS,
   DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
+  WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
   makeUnixSocketDaemonLayer,
   queryUnixSocketLine,
   queryUnixSocketLineDetailed,
@@ -74,6 +75,7 @@ export {
 export {
   DAEMON_SOCKET_TIMEOUT_MS,
   DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
+  WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
   makeUnixSocketDaemonLayer,
   queryUnixSocketLine,
   queryUnixSocketLineDetailed,
@@ -89,6 +91,7 @@ export {
 }
 export {
   resolveWorkflowRuntimePaths,
+  resolveWorkflowWorktreeDir,
   validateWorktreeRepoRoot,
   type ResolvedWorktreeKind,
   type WorkflowRuntimePaths,
@@ -167,6 +170,7 @@ export {
   queryWorkflowDaemonCommand,
   resumeWorkflowViaDaemon,
   startWorkflowViaDaemon,
+  WORKFLOW_COMPLETE_IPC_TIMEOUT_MS,
   WORKFLOW_DAEMON_IPC_TIMEOUT_MS,
   type WorkflowDaemonCommandInput,
   type WorkflowDaemonExpectedProtocol,
@@ -183,6 +187,7 @@ export {
   makeWorkflowProjectionWriterLayer,
   makeWorkflowReadModelQueryLayer,
   rebuildWorkflowReadModelViews,
+  type WorkflowReadModelLeaseFence,
   type WorkflowReadModelOptions,
   WorkflowProjectionWriterLive,
   WorkflowReadModelQueryLive,

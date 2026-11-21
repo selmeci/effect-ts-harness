@@ -12,8 +12,10 @@ import {
   LeaseFilePath,
   toBoundedReason,
   ValidatedWorktreeRoot,
+  WorkflowRunId,
   WorkflowStoreOperation,
   WorkflowStoreUnavailableError,
+  WorkUnitId,
   type WorktreePathKind,
 } from "@harness/contract"
 import { resolveGitCommonDir } from "@harness/graph/cluster-resolver"
@@ -119,7 +121,20 @@ const resolveWorkflowRuntimePaths = (commonGitDir: GitCommonDirPath): WorkflowRu
   backupDirPath: BackupDirPath.make(join(commonGitDir, "harness", "workflow-backups")),
 })
 
-export { resolveWorkflowRuntimePaths }
+/**
+ * Derives the canonical linked workflow worktree checkout directory inside
+ * `<canonicalRepoRoot>/.harness/workflow-worktrees/<runId>/<unitId>`, keeping
+ * worktree checkouts outside `.git/harness/**` runtime state and separate from
+ * shared-checkout `HARNESS_WORKTREE_ID` state under `.harness/worktrees/**`.
+ */
+const resolveWorkflowWorktreeDir = (
+  canonicalRepoRoot: AbsoluteRepoRoot,
+  runId: WorkflowRunId,
+  unitId: WorkUnitId,
+): AbsoluteRepoRoot =>
+  AbsoluteRepoRoot.make(join(canonicalRepoRoot, ".harness", "workflow-worktrees", runId, unitId))
+
+export { resolveWorkflowRuntimePaths, resolveWorkflowWorktreeDir }
 
 const decodeAbsoluteRepoRoot = Schema.decodeUnknownEffect(AbsoluteRepoRoot)
 const decodeGitCommonDirPath = Schema.decodeUnknownEffect(GitCommonDirPath)

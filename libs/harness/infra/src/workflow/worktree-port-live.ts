@@ -1,4 +1,4 @@
-import { basename, dirname, isAbsolute, join } from "node:path"
+import { dirname, isAbsolute, join, basename } from "node:path"
 import { Cause, Effect, Layer, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
@@ -12,12 +12,13 @@ import {
   WorkspaceFsOperation,
   type WorktreeProvisionReceipt,
   type WorktreeUnitMapping,
+  isPureInterruptCause,
   toErrorReasonMessage,
 } from "@harness/contract"
 import { WorkflowWorktreePort, type WorkflowWorktreePortShape } from "@harness/service"
 import type { ExtendedHostIo, SyncHostExecResult } from "@harness/service/host-io"
 import { nodeSyncHostIo } from "../node-host-io.js"
-import { validateWorktreeRepoRoot } from "../worktree-repo-root.js"
+import { resolveWorkflowWorktreeDir, validateWorktreeRepoRoot } from "../worktree-repo-root.js"
 
 /** Optional host I/O and repository root overrides for `WorkflowWorktreePortLive`. */
 export interface WorkflowWorktreePortOptions {
@@ -103,25 +104,52 @@ const cleanupStaleWorktreeDir = (
     if (!hostIo.existsSync(worktreeDir)) {
       return
     }
-    const removeRes = yield* runGitCommand(hostIo, canonicalRepoRoot, [
-      "worktree",
-      "remove",
-      "--force",
-      worktreeDir,
-    ])
-    match(removeRes)
-      .with({ _tag: "Exited" }, ({ exitCode, stderr }) => {
-        if (exitCode !== 0 && stderr.trim().length > 0) {
-          process.stderr.write(
-            `[harness/infra] Warning: pre-provision git worktree remove '${worktreeDir}' exited with ${exitCode}: ${stderr.trim()}\n`,
-          )
+    const removeArgs = ["worktree", "remove", "--force", worktreeDir]
+    const removeRes = yield* runGitCommand(hostIo, canonicalRepoRoot, removeArgs)
+    yield* match(removeRes)
+      .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {
+        if (exitCode === 0) {
+          return Effect.void
         }
-      })
-      .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, (err) => {
-        process.stderr.write(
-          `[harness/infra] Warning: pre-provision git worktree remove '${worktreeDir}' failed (${err._tag})\n`,
+        const detail = stderr.trim() || stdout.trim()
+        if (detail.includes("not a working tree")) {
+          return Effect.void
+        }
+        return Effect.fail(
+          toWorktreeFsError(
+            worktreeDir,
+            "write",
+            `git ${removeArgs.join(" ")} exited with ${exitCode}: ${detail}`,
+          ),
         )
       })
+      .with({ _tag: "TimedOut" }, ({ stderr }) =>
+        Effect.fail(
+          toWorktreeFsError(
+            worktreeDir,
+            "write",
+            `git ${removeArgs.join(" ")} timed out: ${stderr.trim()}`,
+          ),
+        ),
+      )
+      .with({ _tag: "Signaled" }, ({ signal }) =>
+        Effect.fail(
+          toWorktreeFsError(
+            worktreeDir,
+            "write",
+            `git ${removeArgs.join(" ")} signaled (${signal})`,
+          ),
+        ),
+      )
+      .with({ _tag: "SpawnFailed" }, ({ spawnError }) =>
+        Effect.fail(
+          toWorktreeFsError(
+            worktreeDir,
+            "write",
+            `git ${removeArgs.join(" ")} spawn failed: ${spawnError}`,
+          ),
+        ),
+      )
       .exhaustive()
 
     if (hostIo.existsSync(worktreeDir)) {
@@ -132,6 +160,119 @@ const cleanupStaleWorktreeDir = (
         catch: (cause) => toWorktreeFsError(worktreeDir, "write", cause),
       })
     }
+  })
+
+const resolveWorktreeAddArgs = (
+  hostIo: ExtendedHostIo,
+  canonicalRepoRoot: string,
+  branch: SliceBranchName,
+  worktreeDir: string,
+  baseSha: string,
+): Effect.Effect<ReadonlyArray<string>, WorkspaceFsError> =>
+  Effect.gen(function* () {
+    const showRefArgs = ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]
+    const showRefRes = yield* runGitCommand(hostIo, canonicalRepoRoot, showRefArgs)
+    const branchExists = yield* match(showRefRes)
+      .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {
+        if (exitCode === 0) {
+          return Effect.succeed(true)
+        }
+        if (exitCode === 1) {
+          return Effect.succeed(false)
+        }
+        return Effect.fail(
+          toWorktreeFsError(
+            canonicalRepoRoot,
+            "read",
+            `git ${showRefArgs.join(" ")} exited with ${exitCode}: ${stderr.trim() || stdout.trim()}`,
+          ),
+        )
+      })
+      .with({ _tag: "TimedOut" }, ({ stderr }) =>
+        Effect.fail(
+          toWorktreeFsError(
+            canonicalRepoRoot,
+            "read",
+            `git ${showRefArgs.join(" ")} timed out: ${stderr.trim()}`,
+          ),
+        ),
+      )
+      .with({ _tag: "Signaled" }, ({ signal }) =>
+        Effect.fail(
+          toWorktreeFsError(
+            canonicalRepoRoot,
+            "read",
+            `git ${showRefArgs.join(" ")} signaled (${signal})`,
+          ),
+        ),
+      )
+      .with({ _tag: "SpawnFailed" }, ({ spawnError }) =>
+        Effect.fail(
+          toWorktreeFsError(
+            canonicalRepoRoot,
+            "read",
+            `git ${showRefArgs.join(" ")} spawn failed: ${spawnError}`,
+          ),
+        ),
+      )
+      .exhaustive()
+
+    if (!branchExists) {
+      return ["worktree", "add", "-b", branch, worktreeDir, baseSha] as const
+    }
+
+    const ancestorArgs = ["merge-base", "--is-ancestor", baseSha, branch]
+    const ancestorRes = yield* runGitCommand(hostIo, canonicalRepoRoot, ancestorArgs)
+    return yield* match(ancestorRes)
+      .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {
+        if (exitCode === 0) {
+          return Effect.succeed(["worktree", "add", worktreeDir, branch] as const)
+        }
+        if (exitCode === 1) {
+          return Effect.fail(
+            toWorktreeFsError(
+              canonicalRepoRoot,
+              "write",
+              `Existing slice branch '${branch}' has diverged from baseSha '${baseSha}'`,
+            ),
+          )
+        }
+        return Effect.fail(
+          toWorktreeFsError(
+            canonicalRepoRoot,
+            "read",
+            `git ${ancestorArgs.join(" ")} exited with ${exitCode}: ${stderr.trim() || stdout.trim()}`,
+          ),
+        )
+      })
+      .with({ _tag: "TimedOut" }, ({ stderr }) =>
+        Effect.fail(
+          toWorktreeFsError(
+            canonicalRepoRoot,
+            "read",
+            `git ${ancestorArgs.join(" ")} timed out: ${stderr.trim()}`,
+          ),
+        ),
+      )
+      .with({ _tag: "Signaled" }, ({ signal }) =>
+        Effect.fail(
+          toWorktreeFsError(
+            canonicalRepoRoot,
+            "read",
+            `git ${ancestorArgs.join(" ")} signaled (${signal})`,
+          ),
+        ),
+      )
+      .with({ _tag: "SpawnFailed" }, ({ spawnError }) =>
+        Effect.fail(
+          toWorktreeFsError(
+            canonicalRepoRoot,
+            "read",
+            `git ${ancestorArgs.join(" ")} spawn failed: ${spawnError}`,
+          ),
+        ),
+      )
+      .exhaustive()
   })
 
 /** Provisions L1 linked slice worktrees or L2 canonical mappings for a `CompiledPlan`. */
@@ -171,24 +312,65 @@ export const provisionWorkflowWorktreesImpl = Effect.fn("Harness.provisionWorkfl
           })),
         }),
       )
-      .with("epic", () =>
-        Effect.gen(function* () {
-          const entries: Array<WorktreeUnitMapping> = []
-          const runWorktreeBase = join(validated.commonGitDir, "harness", "worktrees", plan.runId)
+      .with("epic", () => {
+        const entries: Array<WorktreeUnitMapping> = []
+        let activeWorktreeDir: string | undefined = undefined
 
+        const rollbackProvisioned = (): Effect.Effect<void, WorkspaceFsError> =>
+          Effect.gen(function* () {
+            const parentDirs = new Set<string>()
+            if (activeWorktreeDir !== undefined) {
+              parentDirs.add(dirname(activeWorktreeDir))
+              yield* cleanupStaleWorktreeDir(hostIo, canonicalRepoRoot, activeWorktreeDir)
+              activeWorktreeDir = undefined
+            }
+            for (const entry of [...entries].reverse()) {
+              if (entry.worktreeKind !== "linked") {
+                continue
+              }
+              parentDirs.add(dirname(entry.cwd))
+              if (hostIo.existsSync(entry.cwd)) {
+                const removeArgs = ["worktree", "remove", "--force", entry.cwd]
+                const removeRes = yield* runGitCommand(hostIo, canonicalRepoRoot, removeArgs)
+                yield* assertGitSuccess(canonicalRepoRoot, removeArgs, removeRes)
+              }
+            }
+            for (const parentDir of parentDirs) {
+              yield* Effect.try({
+                try: () => {
+                  if (
+                    hostIo.existsSync(parentDir) &&
+                    hostIo.isDirectorySync(parentDir) &&
+                    hostIo.readdirSync(parentDir).length === 0
+                  ) {
+                    hostIo.rmRecursiveSync(parentDir)
+                  }
+                },
+                catch: (cause) => toWorktreeFsError(parentDir, "write", cause),
+              })
+            }
+          })
+
+        return Effect.gen(function* () {
           const pruneArgs = ["worktree", "prune"]
           yield* runGitCommand(hostIo, canonicalRepoRoot, pruneArgs).pipe(
             Effect.flatMap((res) => assertGitSuccess(canonicalRepoRoot, pruneArgs, res)),
           )
 
           for (const unit of plan.units) {
+            yield* Effect.yieldNow
             const branch = match(unit)
               .with({ _tag: "SliceUnit" }, (s) => s.branch)
               .with({ _tag: "PackageUnit" }, (p) => toFallbackSliceBranch(plan.runId, p.unitId))
               .exhaustive()
 
-            const worktreeDir = join(runWorktreeBase, unit.unitId)
+            const worktreeDir = resolveWorkflowWorktreeDir(
+              canonicalRepoRoot,
+              plan.runId,
+              unit.unitId,
+            )
             yield* cleanupStaleWorktreeDir(hostIo, canonicalRepoRoot, worktreeDir)
+            activeWorktreeDir = worktreeDir
             yield* Effect.try({
               try: () => {
                 hostIo.mkdirRecursiveSync(dirname(worktreeDir))
@@ -196,31 +378,16 @@ export const provisionWorkflowWorktreesImpl = Effect.fn("Harness.provisionWorkfl
               catch: (cause) => toWorktreeFsError(worktreeDir, "write", cause),
             })
 
-            const cleanupAddedAndEntries = (): Effect.Effect<void, never> =>
-              Effect.gen(function* () {
-                yield* cleanupStaleWorktreeDir(hostIo, canonicalRepoRoot, worktreeDir).pipe(
-                  Effect.catchCause((cause) =>
-                    Effect.sync(() => {
-                      process.stderr.write(
-                        `[harness/infra] Warning: cleanup of '${worktreeDir}' failed: ${Cause.pretty(cause)}\n`,
-                      )
-                    }),
-                  ),
-                )
-                if (entries.length > 0) {
-                  yield* removeWorktreeCheckoutsImpl(
-                    { runId: plan.runId, canonicalRepoRoot, entries },
-                    options,
-                  )
-                }
-              })
-
-            const addArgs = ["worktree", "add", "-B", branch, worktreeDir, plan.baseSha]
-            const addResult = yield* runGitCommand(hostIo, canonicalRepoRoot, addArgs).pipe(
-              Effect.flatMap((res) => assertGitSuccess(canonicalRepoRoot, addArgs, res)),
-              Effect.tapError(() => cleanupAddedAndEntries()),
+            const addArgs = yield* resolveWorktreeAddArgs(
+              hostIo,
+              canonicalRepoRoot,
+              branch,
+              worktreeDir,
+              plan.baseSha,
             )
-            void addResult
+            yield* runGitCommand(hostIo, canonicalRepoRoot, addArgs).pipe(
+              Effect.flatMap((res) => assertGitSuccess(canonicalRepoRoot, addArgs, res)),
+            )
 
             const cwd = yield* Effect.try({
               try: () => hostIo.realpathSync(worktreeDir),
@@ -231,7 +398,6 @@ export const provisionWorkflowWorktreesImpl = Effect.fn("Harness.provisionWorkfl
                   Effect.mapError((err) => toWorktreeFsError(resolvedPath, "stat", err)),
                 ),
               ),
-              Effect.tapError(() => cleanupAddedAndEntries()),
             )
 
             entries.push({
@@ -240,6 +406,7 @@ export const provisionWorkflowWorktreesImpl = Effect.fn("Harness.provisionWorkfl
               worktreeKind: "linked" as const,
               branch,
             })
+            activeWorktreeDir = undefined
           }
 
           return {
@@ -247,8 +414,15 @@ export const provisionWorkflowWorktreesImpl = Effect.fn("Harness.provisionWorkfl
             canonicalRepoRoot,
             entries,
           } satisfies WorktreeProvisionReceipt
-        }),
-      )
+        }).pipe(
+          Effect.onExit((exit) =>
+            match(exit)
+              .with({ _tag: "Success" }, () => Effect.void)
+              .with({ _tag: "Failure" }, () => rollbackProvisioned())
+              .exhaustive(),
+          ),
+        )
+      })
       .exhaustive()
   },
 )
@@ -309,7 +483,7 @@ export const removeWorktreeCheckoutsImpl = Effect.fn("Harness.removeWorktreeChec
     }
 
     for (const parentDir of parentDirs) {
-      yield* Effect.try({
+      const cleanRes = yield* Effect.try({
         try: () => {
           if (
             hostIo.existsSync(parentDir) &&
@@ -320,23 +494,25 @@ export const removeWorktreeCheckoutsImpl = Effect.fn("Harness.removeWorktreeChec
           }
         },
         catch: (cause) => toErrorReasonMessage(cause),
-      }).pipe(
-        Effect.catchCause((cause) =>
-          Effect.sync(() => {
-            process.stderr.write(
-              `[harness/infra] Warning: failed to clean empty worktree parent '${parentDir}': ${Cause.pretty(cause)}\n`,
-            )
-          }),
-        ),
-      )
+      }).pipe(Effect.result)
+      match(cleanRes)
+        .with({ _tag: "Success" }, () => undefined)
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          process.stderr.write(
+            `[harness/infra] Warning: failed to clean empty worktree parent '${parentDir}': ${failure}\n`,
+          )
+        })
+        .exhaustive()
     }
   }).pipe(
-    Effect.catchCause((cause) =>
-      Effect.sync(() => {
-        process.stderr.write(
-          `[harness/infra] Warning: removeWorktreeCheckouts failed for run '${receipt.runId}': ${Cause.pretty(cause)}\n`,
-        )
-      }),
+    Effect.catchCauseIf(
+      (cause) => !isPureInterruptCause(cause),
+      (cause) =>
+        Effect.sync(() => {
+          process.stderr.write(
+            `[harness/infra] Warning: removeWorktreeCheckouts failed for run '${receipt.runId}': ${Cause.pretty(cause)}\n`,
+          )
+        }),
     ),
   )
 })
@@ -368,35 +544,6 @@ const hasUnmergedPaths = (
     return stdout.trim().length > 0
   })
 
-const abortMergeBestEffort = (hostIo: ExtendedHostIo, cwd: string): Effect.Effect<void> =>
-  Effect.gen(function* () {
-    const res = yield* runGitCommand(hostIo, cwd, ["merge", "--abort"]).pipe(
-      Effect.catchCause((cause) =>
-        Effect.sync(() => {
-          process.stderr.write(
-            `[harness/infra] Warning: git merge --abort failed in '${cwd}': ${Cause.pretty(cause)}\n`,
-          )
-          return undefined
-        }),
-      ),
-    )
-    if (res === undefined) {
-      return
-    }
-    match(res)
-      .with({ _tag: "Exited" }, ({ exitCode, stderr }) => {
-        if (exitCode !== 0) {
-          process.stderr.write(
-            `[harness/infra] Warning: git merge --abort exited with ${exitCode}: ${stderr.trim()}\n`,
-          )
-        }
-      })
-      .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, (err) => {
-        process.stderr.write(`[harness/infra] Warning: git merge --abort failed (${err._tag})\n`)
-      })
-      .exhaustive()
-  })
-
 const abortMergeStrict = (
   hostIo: ExtendedHostIo,
   cwd: string,
@@ -407,15 +554,30 @@ const abortMergeStrict = (
     yield* assertGitSuccess(cwd, args, res)
   })
 
+const cleanupActiveMergeStrict = (
+  hostIo: ExtendedHostIo,
+  cwd: string,
+): Effect.Effect<void, WorkspaceFsError> =>
+  Effect.gen(function* () {
+    if (yield* hasActiveMergeHead(hostIo, cwd)) {
+      yield* abortMergeStrict(hostIo, cwd)
+    }
+    if (yield* hasUnmergedPaths(hostIo, cwd)) {
+      return yield* toWorktreeFsError(
+        cwd,
+        "write",
+        "Repository index contains unmerged paths without an active MERGE_HEAD",
+      )
+    }
+  })
+
 /** Performs an idempotent `git merge --no-ff` wave merge for L1 slice branches. */
 export const mergeSliceWaveImpl = Effect.fn("Harness.mergeSliceWave")(function* (
   input: MergeSliceWaveInput,
   options?: WorkflowWorktreePortOptions,
 ): Effect.fn.Return<MergeSliceWaveOutcome, WorkspaceFsError> {
   const hostIo = options?.hostIo ?? nodeSyncHostIo
-  if (yield* hasActiveMergeHead(hostIo, input.canonicalRepoRoot)) {
-    yield* abortMergeBestEffort(hostIo, input.canonicalRepoRoot)
-  }
+  yield* cleanupActiveMergeStrict(hostIo, input.canonicalRepoRoot)
 
   const mergedBranches: Array<SliceBranchName> = []
 
@@ -482,11 +644,23 @@ export const mergeSliceWaveImpl = Effect.fn("Harness.mergeSliceWave")(function* 
         return Effect.gen(function* () {
           const mergeHeadActive = yield* hasActiveMergeHead(hostIo, input.canonicalRepoRoot)
           const unmergedActive = yield* hasUnmergedPaths(hostIo, input.canonicalRepoRoot)
-          if (mergeHeadActive || unmergedActive) {
-            if (mergeHeadActive) {
-              yield* abortMergeStrict(hostIo, input.canonicalRepoRoot)
+          if (mergeHeadActive) {
+            yield* abortMergeStrict(hostIo, input.canonicalRepoRoot)
+            if (yield* hasUnmergedPaths(hostIo, input.canonicalRepoRoot)) {
+              return yield* toWorktreeFsError(
+                input.canonicalRepoRoot,
+                "write",
+                `git merge --abort left unmerged paths in '${input.canonicalRepoRoot}'`,
+              )
             }
             return "conflict" as const
+          }
+          if (unmergedActive) {
+            return yield* toWorktreeFsError(
+              input.canonicalRepoRoot,
+              "write",
+              `git ${mergeArgs.join(" ")} left unmerged index entries without MERGE_HEAD`,
+            )
           }
           return yield* toWorktreeFsError(
             input.canonicalRepoRoot,
@@ -497,9 +671,7 @@ export const mergeSliceWaveImpl = Effect.fn("Harness.mergeSliceWave")(function* 
       })
       .with({ _tag: "TimedOut" }, ({ stderr }) =>
         Effect.gen(function* () {
-          if (yield* hasActiveMergeHead(hostIo, input.canonicalRepoRoot)) {
-            yield* abortMergeBestEffort(hostIo, input.canonicalRepoRoot)
-          }
+          yield* cleanupActiveMergeStrict(hostIo, input.canonicalRepoRoot)
           return yield* toWorktreeFsError(
             input.canonicalRepoRoot,
             "write",
@@ -509,9 +681,7 @@ export const mergeSliceWaveImpl = Effect.fn("Harness.mergeSliceWave")(function* 
       )
       .with({ _tag: "Signaled" }, ({ signal }) =>
         Effect.gen(function* () {
-          if (yield* hasActiveMergeHead(hostIo, input.canonicalRepoRoot)) {
-            yield* abortMergeBestEffort(hostIo, input.canonicalRepoRoot)
-          }
+          yield* cleanupActiveMergeStrict(hostIo, input.canonicalRepoRoot)
           return yield* toWorktreeFsError(
             input.canonicalRepoRoot,
             "write",
@@ -521,9 +691,7 @@ export const mergeSliceWaveImpl = Effect.fn("Harness.mergeSliceWave")(function* 
       )
       .with({ _tag: "SpawnFailed" }, ({ spawnError }) =>
         Effect.gen(function* () {
-          if (yield* hasActiveMergeHead(hostIo, input.canonicalRepoRoot)) {
-            yield* abortMergeBestEffort(hostIo, input.canonicalRepoRoot)
-          }
+          yield* cleanupActiveMergeStrict(hostIo, input.canonicalRepoRoot)
           return yield* toWorktreeFsError(
             input.canonicalRepoRoot,
             "write",

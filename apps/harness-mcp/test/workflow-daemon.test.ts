@@ -540,7 +540,7 @@ describe("harness-mcp workflow daemon & linked worktrees", () => {
   )
 
   it.live(
-    "F-1.2 & F-1.3: workflow.status reports 'inactive' when writerLeaseEpoch === 0 or non-git, and handshakeWorkflowDaemon rejects epoch 0 unless requireActiveLease: false",
+    "F-1.2 & F-1.3: workflow.status reports 'inactive' when writerLeaseEpoch is omitted or non-git, and handshakeWorkflowDaemon rejects missing lease unless requireActiveLease: false",
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
@@ -564,46 +564,44 @@ describe("harness-mcp workflow daemon & linked worktrees", () => {
           })
           expect(nonGitEpochOneStatus.status).toBe("inactive")
 
-          yield* withStartedDaemon(
-            canonicalDir,
-            { writerLeaseEpoch: LeaseEpoch.make(0) },
-            (socketPath) =>
-              Effect.gen(function* () {
-                const statusReply = yield* queryWorkflowDaemonCommand({
-                  socketPath,
-                  command: "workflow.status",
-                  payload: { repoRoot: canonicalDir },
-                })
-                expect(statusReply).toMatchObject({
-                  ok: true,
-                  command: "workflow.status",
-                  status: "inactive",
-                  writerLeaseEpoch: 0,
-                })
+          yield* withStartedDaemon(canonicalDir, {}, (socketPath) =>
+            Effect.gen(function* () {
+              const statusReply = yield* queryWorkflowDaemonCommand({
+                socketPath,
+                command: "workflow.status",
+                payload: { repoRoot: canonicalDir },
+              })
+              expect(statusReply).toMatchObject({
+                ok: true,
+                command: "workflow.status",
+                status: "inactive",
+                result: { _tag: "DaemonOffline", outcome: { _tag: "NotFound" } },
+              })
+              expect(statusReply.writerLeaseEpoch).toBeUndefined()
 
-                const activeReqErr = yield* handshakeWorkflowDaemon({
-                  socketPath,
-                  request: {
-                    protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
-                    repoRoot: validatedCanonical.worktreeRoot,
-                    commonGitDir: validatedCanonical.commonGitDir,
-                  },
-                  requiredCapabilities: [WorkflowDaemonCapability.make("workflow.handshake")],
-                }).pipe(Effect.flip)
-                expect(activeReqErr._tag).toBe("DaemonProtocolMismatchError")
+              const activeReqErr = yield* handshakeWorkflowDaemon({
+                socketPath,
+                request: {
+                  protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                  repoRoot: validatedCanonical.worktreeRoot,
+                  commonGitDir: validatedCanonical.commonGitDir,
+                },
+                requiredCapabilities: [WorkflowDaemonCapability.make("workflow.handshake")],
+              }).pipe(Effect.flip)
+              expect(activeReqErr._tag).toBe("DaemonProtocolMismatchError")
 
-                const passiveRes = yield* handshakeWorkflowDaemon({
-                  socketPath,
-                  request: {
-                    protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
-                    repoRoot: validatedCanonical.worktreeRoot,
-                    commonGitDir: validatedCanonical.commonGitDir,
-                  },
-                  requiredCapabilities: [WorkflowDaemonCapability.make("workflow.handshake")],
-                  requireActiveLease: false,
-                })
-                expect(passiveRes.writerLeaseEpoch).toBe(0)
-              }),
+              const passiveRes = yield* handshakeWorkflowDaemon({
+                socketPath,
+                request: {
+                  protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                  repoRoot: validatedCanonical.worktreeRoot,
+                  commonGitDir: validatedCanonical.commonGitDir,
+                },
+                requiredCapabilities: [WorkflowDaemonCapability.make("workflow.handshake")],
+                requireActiveLease: false,
+              })
+              expect(passiveRes.writerLeaseEpoch).toBeUndefined()
+            }),
           ).pipe(Effect.provide(UnixSocketDaemonLive))
         }),
       ),
@@ -783,18 +781,15 @@ describe("harness-mcp workflow daemon & linked worktrees", () => {
           expect(scopeRejectedDir._tag).toBe("Rejected")
 
           // Live daemon bound to corruptGitDir rejects requests instead of running as non-git
-          yield* withStartedDaemon(
-            corruptGitDir,
-            { writerLeaseEpoch: LeaseEpoch.make(0) },
-            (socketPath) =>
-              Effect.gen(function* () {
-                const pingRes = yield* queryWorkflowDaemonCommand({
-                  socketPath,
-                  command: "ping",
-                })
-                expect(pingRes.ok).toBe(false)
-                expect(String(pingRes.error)).toContain("failed git worktree validation")
-              }),
+          yield* withStartedDaemon(corruptGitDir, {}, (socketPath) =>
+            Effect.gen(function* () {
+              const pingRes = yield* queryWorkflowDaemonCommand({
+                socketPath,
+                command: "ping",
+              })
+              expect(pingRes.ok).toBe(false)
+              expect(String(pingRes.error)).toContain("failed git worktree validation")
+            }),
           ).pipe(Effect.provide(UnixSocketDaemonLive))
         }),
       ),

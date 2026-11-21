@@ -1117,6 +1117,160 @@ describe("hook-entry.ts fast-path", () => {
         expect(fullRes.stdout.trim()).toBe(fastRes.stdout.trim())
       }
     })
+
+    it("F-4.1: denies Read .env and <commonGitDir>/harness/** reads in non-worker mode with fast-path parity", () => {
+      const env = { HARNESS_UNIT_WORKER: "0" }
+      for (const input of [
+        JSON.stringify({ tool_name: "Read", tool_input: { file_path: ".env" } }),
+        JSON.stringify({
+          tool_name: "Read",
+          tool_input: { file_path: ".git/harness/daemon.sock" },
+        }),
+        JSON.stringify({
+          tool_name: "Read",
+          tool_input: { file_path: ".git/harness/daemon.lock" },
+        }),
+        JSON.stringify({
+          tool_name: "Read",
+          tool_input: { file_path: ".git/harness/workflow-backups/2026-11-20.ndjson" },
+        }),
+        JSON.stringify({
+          tool_name: "Read",
+          tool_input: { file_path: ".git/harness/auth-tokens.json" },
+        }),
+      ]) {
+        const fastRes = runHookEntry(["guard"], { input, env })
+        const fullRes = runEntry(INDEX_PATH, ["guard"], { input, env })
+        expect(fastRes.status, input).toBe(2)
+        expect(fullRes.status, input).toBe(2)
+      }
+
+      const agyEnvRes = runHookEntry(["guard", "--format=antigravity"], {
+        input: JSON.stringify({ toolCall: { name: "view_file", args: { AbsolutePath: ".env" } } }),
+        env,
+      })
+      expect(agyEnvRes.status).toBe(0)
+      expect(JSON.parse(agyEnvRes.stdout.trim())).toMatchObject({ decision: "deny" })
+    })
+
+    it("F-3.6: walks ancestors to resolve non-existent files under symlinked dirs and fails closed on symlink loops", () => {
+      const dir = mkdtempSync(join(tmpdir(), "harness-f36-ancestor-"))
+      tempDirs.push(dir)
+      const harnessDir = join(dir, ".git", "harness")
+      mkdirSync(harnessDir, { recursive: true })
+      const symDir = join(dir, "alias-harness")
+      symlinkSync(harnessDir, symDir)
+
+      const nonExistentWrite = JSON.stringify({
+        toolCall: { name: "write_to_file", args: { TargetFile: join(symDir, "new-daemon.sock") } },
+      })
+      const writeFast = runHookEntry(["guard", "--format=antigravity"], { input: nonExistentWrite })
+      const writeFull = runEntry(INDEX_PATH, ["guard", "--format=antigravity"], {
+        input: nonExistentWrite,
+      })
+      expect(writeFast.status).toBe(0)
+      expect(JSON.parse(writeFast.stdout.trim())).toMatchObject({ decision: "deny" })
+      expect(writeFull.stdout.trim()).toBe(writeFast.stdout.trim())
+
+      const loopA = join(dir, "loop-a")
+      const loopB = join(dir, "loop-b")
+      symlinkSync(loopB, loopA)
+      symlinkSync(loopA, loopB)
+      const loopRead = JSON.stringify({
+        toolCall: { name: "read_file", args: { Path: join(loopA, "secret.txt") } },
+      })
+      const loopFast = runHookEntry(["guard", "--format=antigravity"], { input: loopRead })
+      expect(loopFast.status).toBe(0)
+      expect(JSON.parse(loopFast.stdout.trim())).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining("ELOOP"),
+      })
+    })
+
+    it("F-16.1 & F-16.2: denies depth > 8 read payloads, allows Grep/grep_search regexes like process\\.env, and denies Glob/SearchPath secret targets", () => {
+      let deepObj: Record<string, unknown> = { secret: ".env" }
+      for (let i = 0; i < 10; i++) {
+        deepObj = { nested: deepObj }
+      }
+      const deepRes = runHookEntry(["guard", "--format=antigravity"], {
+        input: JSON.stringify({
+          tool_name: "Read",
+          tool_input: { file_path: "libs/a.ts", extra: deepObj },
+        }),
+      })
+      expect(deepRes.status).toBe(0)
+      expect(JSON.parse(deepRes.stdout.trim())).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining("maximum inspection depth"),
+      })
+
+      for (const allowedInput of [
+        JSON.stringify({
+          tool_name: "Grep",
+          tool_input: { pattern: "process\\.env", path: "libs/" },
+        }),
+        JSON.stringify({
+          tool_name: "Grep",
+          tool_input: { pattern: "process\\.env" },
+        }),
+        JSON.stringify({
+          toolCall: {
+            name: "grep_search",
+            args: { Query: "process.env", TargetContent: ".env", SearchPath: "libs/" },
+          },
+        }),
+      ]) {
+        const res = runHookEntry(["guard", "--format=antigravity"], { input: allowedInput })
+        expect(res.status, allowedInput).toBe(0)
+        expect(JSON.parse(res.stdout.trim()), allowedInput).toEqual({ decision: "allow" })
+      }
+
+      for (const deniedInput of [
+        JSON.stringify({
+          tool_name: "Glob",
+          tool_input: { pattern: "**/.env*" },
+        }),
+        JSON.stringify({
+          tool_name: "Grep",
+          tool_input: { pattern: ".", path: ".git", glob: "harness/**" },
+        }),
+        JSON.stringify({
+          tool_name: "Glob",
+          tool_input: { path: ".harness", pattern: "omnigraph-cluster/**" },
+        }),
+        JSON.stringify({
+          toolCall: {
+            name: "grep_search",
+            args: { Query: ".", SearchPath: ".harness", Includes: ["omnigraph-cluster/**"] },
+          },
+        }),
+        JSON.stringify({
+          toolCall: {
+            name: "grep_search",
+            args: { Query: "foo", SearchPath: ".git/harness/daemon.sock" },
+          },
+        }),
+        JSON.stringify({
+          toolCall: {
+            name: "read_file",
+            args: { file_path: ".harness/omnigraph-cluster/auth-tokens.json" },
+          },
+        }),
+      ]) {
+        const res = runHookEntry(["guard", "--format=antigravity"], {
+          input: deniedInput,
+          env: { HARNESS_UNIT_WORKER: "1" },
+        })
+        expect(res.status, deniedInput).toBe(0)
+        expect(JSON.parse(res.stdout.trim()), deniedInput).toMatchObject({ decision: "deny" })
+        const fullRes = runEntry(INDEX_PATH, ["guard", "--format=antigravity"], {
+          input: deniedInput,
+          env: { HARNESS_UNIT_WORKER: "1" },
+        })
+        expect(fullRes.status, deniedInput).toBe(0)
+        expect(JSON.parse(fullRes.stdout.trim()), deniedInput).toMatchObject({ decision: "deny" })
+      }
+    })
   })
 
   describe("done --format=antigravity fast-path", () => {

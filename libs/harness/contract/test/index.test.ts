@@ -20,6 +20,7 @@ import {
   CompilerRepoRootPath,
   CompilerVersionTag,
   CompleteSharedStepInput,
+  CompletedWorkflowAttemptRecord,
   ContentSha256,
   CyclicPlanWorkflowError,
   DaemonServerError,
@@ -32,6 +33,7 @@ import {
   DecisionCacheTtlMillis,
   DEFAULT_IN_MEMORY_GATE_RULE_VERSION,
   DisjointOwnershipViolationError,
+  DispatchedWorkflowAttemptRecord,
   EarsRequirementKey,
   EnclosingSymbolName,
   ErrorReasonMessage,
@@ -67,6 +69,7 @@ import {
   PackageManifestPath,
   PackageStampHash,
   PackageUnitDraft,
+  PackageVerifyFailureKind,
   PendingDeferredName,
   PersistedAstCacheEntry,
   PersistedAstCacheKey,
@@ -76,6 +79,7 @@ import {
   PluginId,
   REVIEW_DEPTH_LEVELS,
   REVIEW_DEPTH_RANK,
+  RejectedWorkflowAttemptRecord,
   RejectionJsonPayload,
   ReviewChangedLines,
   ReviewDepth,
@@ -121,12 +125,19 @@ import {
   WorkflowProjectionStatus,
   WorkflowRebuiltRunCount,
   WorkflowResumeRequest,
+  WorkflowRpcEnvelope,
+  WorkflowRpcErrorEnvelope,
+  WorkflowRpcRequestId,
+  WorkflowRpcSuccessEnvelope,
   WorkflowRunId,
+  WorkflowRunOutcome,
   WorkflowRunState,
   WorkflowStartRequest,
   WorkflowStatusSummary,
   WorkflowStoreAvailabilityState,
   WorkflowStoreFailureReason,
+  WorkflowStoreOperation,
+  WorkflowTerminalError,
   WorkflowTimestampMs,
   WorkflowUnitKey,
   WorkflowUnitKind,
@@ -146,6 +157,8 @@ import {
   makePersistedAstCacheKey,
   makeSelfDogfoodingReport,
   makeVerdictReport,
+  makeWorkflowAttemptKey,
+  makeWorkflowUnitKey,
   normalizeNonRootWorkspacePath,
   parseManifestTags,
   pathsOverlap,
@@ -1175,7 +1188,11 @@ describe("@harness/contract schemas", () => {
       runId,
       escalation: {
         _tag: "RetryBudgetExhausted",
-        lastRejection: { _tag: "PackageVerifyFailed", exitCode: GateExitCode.make(1) },
+        lastRejection: {
+          _tag: "PackageVerifyFailed",
+          exitCode: GateExitCode.make(1),
+          failureKind: PackageVerifyFailureKind.make("non-zero-exit"),
+        },
       },
     })
     expect(retryAbort.message).toContain("PackageVerifyFailed")
@@ -1310,126 +1327,254 @@ describe("@harness/contract schemas", () => {
       }),
     ).toThrow()
 
-    const resumeReq = Schema.decodeSync(WorkflowResumeRequest)({
+    const resumeEscalationReq = Schema.decodeSync(WorkflowResumeRequest)({
+      _tag: "ResolveEscalation",
       repoRoot,
       runId,
       unitId,
       decision: EscalationDecision.make("retry"),
     })
-    expect(resumeReq.decision).toBe("retry")
-    expect(Schema.decodeSync(WorkflowResumeRequest)({ repoRoot, runId }).decision).toBeUndefined()
+    const resumeRunReq = Schema.decodeSync(WorkflowResumeRequest)({
+      _tag: "ResumeRun",
+      repoRoot,
+      runId,
+    })
+    expect(
+      match(resumeEscalationReq)
+        .with({ _tag: "ResolveEscalation" }, (r) => r.decision)
+        .with({ _tag: "ResumeRun" }, () => "run")
+        .exhaustive(),
+    ).toBe("retry")
+    expect(resumeRunReq._tag).toBe("ResumeRun")
+    expect(() =>
+      Schema.decodeUnknownSync(WorkflowResumeRequest)({
+        _tag: "ResolveEscalation",
+        repoRoot,
+        runId,
+        unitId,
+        decision: "skip",
+      }),
+    ).toThrow()
     expect(() =>
       Schema.decodeUnknownSync(WorkflowResumeRequest)({
         repoRoot,
         runId,
-        decision: "skip",
       }),
     ).toThrow()
 
-    const statusSummary = Schema.decodeSync(WorkflowStatusSummary)({
-      run: {
+    const expectedUnitKey = makeWorkflowUnitKey(runId, unitId)
+    const expectedAttemptKey = makeWorkflowAttemptKey(runId, unitId, AttemptNumber.make(1))
+    const retryEscalationAttemptKey = makeWorkflowAttemptKey(
+      runId,
+      unitId,
+      AttemptNumber.make(1),
+      EscalationOrdinal.make(2),
+    )
+    expect(retryEscalationAttemptKey).toBe(`${runId}/${unitId}#1/r2`)
+    expect(Schema.decodeSync(WorkflowAttemptKey)(expectedAttemptKey)).toBe(expectedAttemptKey)
+    expect(Schema.decodeSync(WorkflowAttemptVerdict)("rejected")).toBe("rejected")
+
+    const dispatchedAttempt = Schema.decodeSync(DispatchedWorkflowAttemptRecord)({
+      attemptKey: expectedAttemptKey,
+      runId,
+      unitId,
+      attempt: AttemptNumber.make(1),
+      verdict: "dispatched",
+      runner: RunnerId.make("antigravity"),
+      updatedMs: WorkflowTimestampMs.make(1_150),
+    })
+    const completedAttempt = Schema.decodeSync(CompletedWorkflowAttemptRecord)({
+      attemptKey: expectedAttemptKey,
+      runId,
+      unitId,
+      attempt: AttemptNumber.make(1),
+      verdict: "completed",
+      packageStampHash: stampHash,
+      updatedMs: WorkflowTimestampMs.make(1_180),
+    })
+    const rejectedAttempt = Schema.decodeSync(RejectedWorkflowAttemptRecord)({
+      attemptKey: expectedAttemptKey,
+      runId,
+      unitId,
+      attempt: AttemptNumber.make(1),
+      verdict: "rejected",
+      runner: RunnerId.make("antigravity"),
+      rejection: { _tag: "StampMissing" },
+      packageStampHash: stampHash,
+      updatedMs: WorkflowTimestampMs.make(1_200),
+    })
+    expect(dispatchedAttempt.verdict).toBe("dispatched")
+    expect(completedAttempt.verdict).toBe("completed")
+    expect(rejectedAttempt.rejection._tag).toBe("StampMissing")
+    expect(Schema.decodeSync(RejectionJsonPayload)('{"_tag":"StampMissing"}')).toContain(
+      "StampMissing",
+    )
+    expect(Schema.decodeSync(WorkflowStoreAvailabilityState)("ready")).toBe("ready")
+    expect(() =>
+      Schema.decodeUnknownSync(RejectedWorkflowAttemptRecord)({
+        attemptKey: expectedAttemptKey,
         runId,
-        executionId: execId,
-        level: WorkflowLevel.make("slice"),
-        planSha,
-        baseSha,
-        state: WorkflowRunState.make("waiting"),
-        planJson: PlanJsonPayload.make("{}"),
-        updatedMs: WorkflowTimestampMs.make(1_000),
+        unitId,
+        attempt: AttemptNumber.make(1),
+        verdict: "rejected",
+        updatedMs: WorkflowTimestampMs.make(1_200),
+      }),
+    ).toThrow()
+
+    const pendingDeferreds = [
+      {
+        _tag: "UnitCompletion" as const,
+        unitId,
+        attempt: AttemptNumber.make(1),
+        deferredName: PendingDeferredName.make(`unit/${unitId}/1`),
       },
-      units: [
-        {
-          unitKey: WorkflowUnitKey.make(`${runId}/${unitId}`),
-          runId,
-          unitId,
-          kind: WorkflowUnitKind.make("slice"),
-          waveIndex: WaveIndex.make(0),
-          status: WorkflowUnitStatus.make("escalated"),
-          ownedRelPaths: [OwnedRelPath.make("libs/harness/contract/src")],
-          updatedMs: WorkflowTimestampMs.make(1_100),
-        },
-      ],
-      attempts: [
-        {
-          attemptKey: WorkflowAttemptKey.make(`${runId}/${unitId}#1`),
-          runId,
-          unitId,
-          attempt: AttemptNumber.make(1),
-          verdict: WorkflowAttemptVerdict.make("rejected"),
-          runner: RunnerId.make("antigravity"),
-          rejection: RejectionJsonPayload.make('{"_tag":"StampMissing"}'),
-          packageStampHash: stampHash,
-          updatedMs: WorkflowTimestampMs.make(1_200),
-        },
-      ],
-      pendingDeferreds: [
-        {
-          _tag: "UnitCompletion",
-          unitId,
-          attempt: AttemptNumber.make(1),
-          deferredName: PendingDeferredName.make(`unit/${unitId}/1`),
-        },
-        {
-          _tag: "Escalation",
-          unitId,
-          deferredName: PendingDeferredName.make(`escalation/${unitId}/1`),
-          escalation: { _tag: "AuthRequired", runner: RunnerId.make("claude-code") },
-        },
-        {
-          _tag: "LlmPhase",
-          deferredName: PendingDeferredName.make("llm-phase-done"),
-        },
-      ],
-      review: {
-        _tag: "SkipReviewPlan",
-        depth: ReviewDepth.make("skip"),
-        source: ReviewRoutingSource.make("deterministic"),
-        reason: ReviewRoutingReason.make("doc-only"),
-        selections: [],
+      {
+        _tag: "Escalation" as const,
+        unitId,
+        deferredName: PendingDeferredName.make(`escalation/${unitId}/1`),
+        escalation: { _tag: "AuthRequired" as const, runner: RunnerId.make("claude-code") },
       },
+      {
+        _tag: "LlmPhase" as const,
+        deferredName: PendingDeferredName.make("llm-phase-done"),
+      },
+    ]
+
+    const skipReview = {
+      _tag: "SkipReviewPlan" as const,
+      depth: ReviewDepth.make("skip"),
+      source: ReviewRoutingSource.make("deterministic"),
+      reason: ReviewRoutingReason.make("doc-only"),
+      selections: [] as const,
+    }
+
+    const runRecord = {
+      runId,
+      executionId: execId,
+      level: WorkflowLevel.make("slice"),
+      planSha,
+      baseSha,
+      state: WorkflowRunState.make("waiting"),
+      planJson: PlanJsonPayload.make("{}"),
+      updatedMs: WorkflowTimestampMs.make(1_000),
+    }
+
+    const unitRecord = {
+      unitKey: WorkflowUnitKey.make(expectedUnitKey),
+      runId,
+      unitId,
+      kind: WorkflowUnitKind.make("slice"),
+      waveIndex: WaveIndex.make(0),
+      status: WorkflowUnitStatus.make("escalated"),
+      ownedRelPaths: [OwnedRelPath.make("libs/harness/contract/src")],
+      updatedMs: WorkflowTimestampMs.make(1_100),
+    }
+
+    const failedOutcome = Schema.decodeSync(WorkflowRunOutcome)({
+      _tag: "Failed",
+      run: runRecord,
+      units: [unitRecord],
+      attempts: [rejectedAttempt],
+      pendingDeferreds,
+      terminalError: {
+        _tag: "StoreUnavailable",
+        operation: WorkflowStoreOperation.make("WorkflowRun.status"),
+        reason: WorkflowStoreFailureReason.make("daemon stopped"),
+      },
+      projectionStatus: WorkflowProjectionStatus.make("fresh"),
+    })
+    expect(failedOutcome._tag).toBe("Failed")
+    expect(
+      Schema.decodeSync(WorkflowTerminalError)({
+        _tag: "LeaseHeld",
+        holderId: "daemon-1",
+        lockFilePath: "/repo/.git/harness/daemon.lock",
+      })._tag,
+    ).toBe("LeaseHeld")
+
+    const completedOutcome = Schema.decodeSync(WorkflowRunOutcome)({
+      _tag: "Completed",
+      run: { ...runRecord, state: WorkflowRunState.make("completed") },
+      units: [unitRecord],
+      attempts: [completedAttempt],
+      pendingDeferreds: [],
+      review: skipReview,
       terminalReceipt: {
         runId,
         planSha,
-        review: {
-          _tag: "SkipReviewPlan",
-          depth: ReviewDepth.make("skip"),
-          source: ReviewRoutingSource.make("deterministic"),
-          reason: ReviewRoutingReason.make("doc-only"),
-          selections: [],
-        },
+        review: skipReview,
         completedUnits: [unitId],
         llmPhase: {
           workspaceHash: treeHash,
           frictionLogCleared: FrictionLogState.make("cleared"),
         },
       },
-      terminalError: WorkflowStoreFailureReason.make("daemon stopped"),
-      storeStatus: WorkflowStoreAvailabilityState.make("ready"),
       projectionStatus: WorkflowProjectionStatus.make("fresh"),
-      writerLeaseEpoch: LeaseEpoch.make(1),
     })
-    expect(statusSummary.pendingDeferreds).toHaveLength(3)
-    expect(statusSummary.storeStatus).toBe("ready")
+    expect(completedOutcome._tag).toBe("Completed")
+
+    const offlineStatus = Schema.decodeSync(WorkflowStatusSummary)({
+      _tag: "DaemonOffline",
+      outcome: { _tag: "NotFound" },
+    })
+    expect(offlineStatus._tag).toBe("DaemonOffline")
+
+    const pausedStatus = Schema.decodeSync(WorkflowStatusSummary)({
+      _tag: "StorePaused",
+      writerLeaseEpoch: LeaseEpoch.make(2),
+      outcome: {
+        _tag: "Active",
+        run: runRecord,
+        units: [unitRecord],
+        attempts: [dispatchedAttempt],
+        pendingDeferreds,
+        projectionStatus: WorkflowProjectionStatus.make("stale"),
+      },
+    })
+    expect(pausedStatus._tag).toBe("StorePaused")
+
+    const statusSummary = Schema.decodeSync(WorkflowStatusSummary)({
+      _tag: "Ready",
+      writerLeaseEpoch: LeaseEpoch.make(1),
+      outcome: failedOutcome,
+    })
+    expect(statusSummary._tag).toBe("Ready")
+    expect(statusSummary.outcome._tag).toBe("Failed")
     expect(() =>
       Schema.decodeUnknownSync(WorkflowStatusSummary)({
-        units: [],
-        attempts: [],
-        pendingDeferreds: [],
-        storeStatus: "offline",
-        projectionStatus: "fresh",
+        _tag: "Offline",
+        outcome: { _tag: "NotFound" },
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(WorkflowStatusSummary)({
+        _tag: "Ready",
+        outcome: { _tag: "NotFound" },
+      }),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeSync(WorkflowStatusSummary)({
+        _tag: "Ready",
         writerLeaseEpoch: 0,
+        outcome: { _tag: "NotFound" },
       }),
     ).toThrow()
-    expect(() =>
-      Schema.decodeUnknownSync(WorkflowStatusSummary)({
-        units: [],
-        attempts: [],
-        pendingDeferreds: [],
-        storeStatus: "inactive",
-        projectionStatus: "unknown",
-        writerLeaseEpoch: -1,
-      }),
-    ).toThrow()
+
+    const rpcSuccess = Schema.decodeSync(WorkflowRpcSuccessEnvelope)({
+      id: WorkflowRpcRequestId.make("req-1"),
+      ok: true,
+      command: "workflow.status",
+      result: statusSummary,
+    })
+    const rpcErr = Schema.decodeSync(WorkflowRpcErrorEnvelope)({
+      id: WorkflowRpcRequestId.make("req-2"),
+      ok: false,
+      command: "workflow.start",
+      error: WorkflowStoreFailureReason.make("WorkflowDaemonError"),
+      detail: WorkflowStoreFailureReason.make("failed"),
+    })
+    expect(Schema.decodeSync(WorkflowRpcEnvelope)(rpcSuccess).ok).toBe(true)
+    expect(Schema.decodeSync(WorkflowRpcEnvelope)(rpcErr).ok).toBe(false)
 
     const toolOutput = Schema.decodeSync(WorkflowPlanToolOutput)({
       resolvedRepoRoot: repoRoot,

@@ -3,6 +3,7 @@ import { match } from "ts-pattern"
 import { describe, expect, it } from "vitest"
 import {
   AbsoluteRepoRoot,
+  AttemptNumber,
   BackupDirPath,
   BackupFileHash,
   DaemonHandshakeRequest,
@@ -11,18 +12,27 @@ import {
   DaemonProtocolMismatchError,
   DaemonSocketPath,
   EmptyWorkflowGqParams,
+  EscalationOrdinal,
   GitCommonDirPath,
   LeaseEpoch,
   LeaseFilePath,
   LeaseHolderId,
   LeaseHolderPid,
   MessageKey,
+  OwnedRelPath,
+  PlanJsonPayload,
+  PlanSha256,
   PrimaryKeyHash,
+  RejectionJsonPayload,
   ReplyKey,
+  RunnerId,
   SeqKey,
   ValidatedWorktreeRoot,
   WORKFLOW_DAEMON_PROTOCOL_VERSION,
   WORKFLOW_GQ_QUERY_NAMES,
+  WaveIndex,
+  WorkUnitId,
+  WorkflowAttemptVerdict,
   WorkflowBackupCount,
   WorkflowCleanupKeepVersions,
   WorkflowBackupFilePath,
@@ -31,19 +41,28 @@ import {
   WorkflowBackupSummary,
   WorkflowBackupTimestampMs,
   WorkflowDaemonCapability,
+  WorkflowExecutionId,
   type WorkflowGqParamsMap,
   WorkflowGqQueryName,
+  WorkflowLevel,
   WorkflowProtocolVersion,
   WorkflowRestoreRequest,
   WorkflowRestoreSummary,
   WorkflowRunId,
+  WorkflowRunState,
   WorkflowStoreFailureReason,
   WorkflowStoreOperation,
   WorkflowStoreUnavailableError,
+  WorkflowTimestampMs,
+  WorkflowUnitKind,
+  WorkflowUnitStatus,
   WorktreePathKind,
   WriterLeaseHeldError,
   decodeSeqKey,
   encodeSeqKey,
+  GitCommitSha,
+  makeWorkflowAttemptKey,
+  makeWorkflowUnitKey,
   toBoundedReason,
 } from "../src/index.js"
 
@@ -177,8 +196,8 @@ describe("@harness/contract WF-2 workflow storage, lease, handshake, and backup 
 
     expectCases(
       LeaseEpoch,
-      [0, 1, 99],
-      [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "0", null, undefined],
+      [1, 2, 99],
+      [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "0", null, undefined],
     )
     expectCases(
       LeaseHolderId,
@@ -331,6 +350,19 @@ describe("@harness/contract WF-2 workflow storage, lease, handshake, and backup 
       commonGitDir: GitCommonDirPath.make("/repo/.git"),
       writerLeaseEpoch: LeaseEpoch.make(3),
     })
+    roundtrip(DaemonHandshakeResponse, {
+      protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+      capabilities: [WorkflowDaemonCapability.make("workflow.handshake")],
+      repoRoot: AbsoluteRepoRoot.make("/repo"),
+      commonGitDir: GitCommonDirPath.make("/repo/.git"),
+    })
+    expectDecodeFailure(DaemonHandshakeResponse, {
+      protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+      capabilities: ["workflow.handshake"],
+      repoRoot: "/repo",
+      commonGitDir: "/repo/.git",
+      writerLeaseEpoch: 0,
+    })
 
     const backupFile = WorkflowBackupFilePath.make("/repo/.git/harness/workflow-backups/b1.ndjson")
     expect(Object.keys(WorkflowBackupReceiptFields)).toEqual([
@@ -427,16 +459,65 @@ describe("@harness/contract WF-2 workflow storage, lease, handshake, and backup 
     const emptyParams = expectDecodeSuccess(EmptyWorkflowGqParams, {})
     expect(emptyParams).toEqual({})
 
+    const runIdSample = WorkflowRunId.make("run-wf3-01")
+    const unitIdSample = WorkUnitId.make("unit-a")
+    const unitKeySample = makeWorkflowUnitKey(runIdSample, unitIdSample)
+    const attemptKeySample = makeWorkflowAttemptKey(
+      runIdSample,
+      unitIdSample,
+      AttemptNumber.make(1),
+      EscalationOrdinal.make(2),
+    )
+    expect(unitKeySample).toBe("run-wf3-01/unit-a")
+    expect(attemptKeySample).toBe("run-wf3-01/unit-a#1/r2")
+
     const typedQuerySample: {
       readonly wf_count_all: WorkflowGqParamsMap["wf_count_all"]
       readonly wf_count_replies: WorkflowGqParamsMap["wf_count_replies"]
       readonly wf_message_by_pk: WorkflowGqParamsMap["wf_message_by_pk"]
+      readonly wf_insert_run: WorkflowGqParamsMap["wf_insert_run"]
+      readonly wf_insert_unit: WorkflowGqParamsMap["wf_insert_unit"]
+      readonly wf_insert_attempt: WorkflowGqParamsMap["wf_insert_attempt"]
+      readonly wf_delete_run_views: WorkflowGqParamsMap["wf_delete_run_views"]
     } = {
       wf_count_all: emptyParams,
       wf_count_replies: emptyParams,
       wf_message_by_pk: { primaryKeyHash: PrimaryKeyHash.make("pk-1") },
+      wf_insert_run: {
+        runId: runIdSample,
+        executionId: WorkflowExecutionId.make("exec-1"),
+        level: WorkflowLevel.make("slice"),
+        planSha: PlanSha256.make(SHA_64_A),
+        baseSha: GitCommitSha.make("a".repeat(40)),
+        state: WorkflowRunState.make("running"),
+        planJson: PlanJsonPayload.make("{}"),
+        updatedMs: WorkflowTimestampMs.make(1_000),
+      },
+      wf_insert_unit: {
+        unitKey: unitKeySample,
+        runId: runIdSample,
+        unitId: unitIdSample,
+        kind: WorkflowUnitKind.make("slice"),
+        waveIndex: WaveIndex.make(0),
+        status: WorkflowUnitStatus.make("dispatched"),
+        ownedRelPaths: [OwnedRelPath.make("libs/harness/contract/src")],
+        updatedMs: WorkflowTimestampMs.make(1_000),
+      },
+      wf_insert_attempt: {
+        attemptKey: attemptKeySample,
+        runId: runIdSample,
+        unitId: unitIdSample,
+        attempt: AttemptNumber.make(1),
+        verdict: WorkflowAttemptVerdict.make("rejected"),
+        runner: RunnerId.make("antigravity"),
+        rejection: RejectionJsonPayload.make('{"_tag":"StampMissing"}'),
+        packageStampHash: null,
+        updatedMs: WorkflowTimestampMs.make(1_000),
+      },
+      wf_delete_run_views: { runId: runIdSample },
     }
     expect(typedQuerySample.wf_message_by_pk.primaryKeyHash).toBe("pk-1")
+    expect(typedQuerySample.wf_insert_run.runId).toBe(runIdSample)
 
     expect(toBoundedReason(new Error("  boom  "))).toBe("boom")
     expect(toBoundedReason("   ", "  custom fallback  ")).toBe("custom fallback")
@@ -462,12 +543,18 @@ describe("@harness/contract WF-2 workflow storage, lease, handshake, and backup 
 
     const leaseWithoutPid = new WriterLeaseHeldError({
       holderId: LeaseHolderId.make("daemon-abc"),
-      leaseEpoch: LeaseEpoch.make(0),
       lockFilePath: LeaseFilePath.make("/repo/.git/harness/daemon.lock"),
     })
     expect(leaseWithoutPid.message).toBe(
-      "Workflow writer lease held by daemon-abc (epoch 0) at /repo/.git/harness/daemon.lock",
+      "Workflow writer lease held by daemon-abc (epoch unknown) at /repo/.git/harness/daemon.lock",
     )
+    expectDecodeSuccess(WriterLeaseHeldError, leaseWithoutPid)
+    expectDecodeFailure(WriterLeaseHeldError, {
+      _tag: "WriterLeaseHeldError",
+      holderId: "daemon-abc",
+      leaseEpoch: 0,
+      lockFilePath: "/repo/.git/harness/daemon.lock",
+    })
     expectDecodeSuccess(WriterLeaseHeldError, leaseWithPid)
     expectDecodeFailure(WriterLeaseHeldError, {
       _tag: "WriterLeaseHeldError",

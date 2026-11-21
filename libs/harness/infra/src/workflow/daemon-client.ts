@@ -45,6 +45,9 @@ const canonicalPathOrRaw = (filePath: string): string =>
 /** Dedicated workflow daemon IPC timeout (decoupled from the 5 s LSP query socket timeout). */
 export const WORKFLOW_DAEMON_IPC_TIMEOUT_MS = 30_000
 
+/** Extended workflow daemon IPC timeout for `workflow.complete` (exceeds 120 s package verify timeout). */
+export const WORKFLOW_COMPLETE_IPC_TIMEOUT_MS = 150_000
+
 const HANDSHAKE_OPERATION = WorkflowStoreOperation.make("HarnessDaemonClient.handshake")
 const QUERY_COMMAND_OPERATION = WorkflowStoreOperation.make("HarnessDaemonClient.queryCommand")
 
@@ -344,13 +347,13 @@ export const handshakeWorkflowDaemon = Effect.fn("HarnessDaemonClient.handshake"
     })
   }
 
-  if (requireActiveLease && response.writerLeaseEpoch < 1) {
+  if (requireActiveLease && response.writerLeaseEpoch === undefined) {
     return yield* new DaemonProtocolMismatchError({
       expectedVersion,
       actualVersion: response.protocolVersion,
       socketPath: input.socketPath,
       detail: toMismatchDetail(
-        `Daemon has no active writer lease (writerLeaseEpoch=${response.writerLeaseEpoch}, expected >= 1)`,
+        "Daemon has no active writer lease (writerLeaseEpoch omitted, expected >= 1)",
       ),
     })
   }
@@ -550,7 +553,10 @@ export const completeWorkflowViaDaemon = Effect.fn("HarnessDaemonClient.complete
       requestSchema: WorkflowCompleteRequest,
       responseSchema: WorkflowCompleteResponse,
       defaultRequireActiveLease: true,
-      options,
+      options: {
+        ...options,
+        timeoutMs: options?.timeoutMs ?? WORKFLOW_COMPLETE_IPC_TIMEOUT_MS,
+      },
     })
   },
 )

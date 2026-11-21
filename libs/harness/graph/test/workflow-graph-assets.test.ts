@@ -133,12 +133,37 @@ const stopChildProcess = async (proc: ChildProcess | undefined): Promise<void> =
   })
 }
 
+const clearAddressRows = async (
+  og: InstanceType<typeof Omnigraph>,
+  entityType: string,
+  entityId: string,
+): Promise<void> => {
+  const keysRows = requireRows(
+    await og.queries.invoke("wf_message_keys_for_address", {
+      branch: "main",
+      expectMutation: false,
+      params: { entityType, entityId },
+    }),
+  )
+  const reqIds = Array.from(new Set(keysRows.map((r) => String(r.requestId))))
+  if (keysRows.length > 0) {
+    await og.queries.invoke("wf_clear_address", {
+      branch: "main",
+      expectMutation: true,
+      params: { requestIds: reqIds, entityType, entityId },
+    })
+  }
+}
+
 describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.14.0 verification", () => {
   const tempDirs: Array<string> = []
   let serverProc: ChildProcess | undefined
   let serverBaseUrl = ""
   const cliToken = "wf2-test-cli-token"
   const mcpToken = "wf2-test-mcp-token"
+
+  const createCliClient = () =>
+    makeWorkflowOmnigraphClient({ baseUrl: serverBaseUrl, token: cliToken })
 
   beforeAll(async () => {
     expect(existsSync(omnigraphBin)).toBe(true)
@@ -231,7 +256,7 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
     expect(parsed.results.every((r) => r.status === "ok")).toBe(true)
   })
 
-  it("validates disjoint policies per graph and confirms policy test without --graph requires --graph on multi-graph clusters", () => {
+  it("validates disjoint policies per graph and requires --graph on multi-graph clusters", () => {
     const tempRoot = mkdtempSync(join(tmpdir(), "wf2-policy-validate-"))
     tempDirs.push(tempRoot)
     const clusterDir = join(tempRoot, "cluster")
@@ -382,22 +407,13 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
     )
   })
 
-  it("executes all harness-workflows stored queries end-to-end as harness-cli", async () => {
-    const og = makeWorkflowOmnigraphClient({
-      baseUrl: serverBaseUrl,
-      token: cliToken,
-    })
-
+  it("inserts WfMessage requests and queries by primaryKeyHash and unprocessed candidates", async () => {
+    const og = createCliClient()
     const msg1 = "248476693641609216"
     const msg2 = "248476693641609220"
     const msg3 = "248476693641609230"
-    const chunk1 = "248476693641609240"
-    const ack1 = "248476693641609250"
-    const exit1 = "248476693641609260"
-    const int1 = "248476693641609270"
-    const orphan1 = "248476693641609280"
+    const crossTypeMsg = "248476693641609225"
 
-    // 1. Insert requests (null optional params + primaryKeyHash)
     await og.queries.invoke("wf_insert_request_message", {
       branch: "main",
       expectMutation: true,
@@ -407,7 +423,7 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         primaryKeyHash: "pk-1",
         shardId: "shard-0",
         entityType: "HarnessTask",
-        entityId: "run-1",
+        entityId: "run-cand-1",
         tag: "Run",
         payload: JSON.stringify({ step: 1 }),
         headers: "{}",
@@ -418,7 +434,6 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         deliverAtMs: null,
       },
     })
-
     await og.queries.invoke("wf_insert_request_message", {
       branch: "main",
       expectMutation: true,
@@ -428,7 +443,7 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         primaryKeyHash: null,
         shardId: "shard-0",
         entityType: "OtherEntity",
-        entityId: "other-1",
+        entityId: "other-cand-1",
         tag: "Ping",
         payload: "{}",
         headers: "{}",
@@ -439,7 +454,6 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         deliverAtMs: 1_000,
       },
     })
-
     await og.queries.invoke("wf_insert_request_message", {
       branch: "main",
       expectMutation: true,
@@ -449,7 +463,7 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         primaryKeyHash: null,
         shardId: "shard-0",
         entityType: "HarnessTask",
-        entityId: "run-1",
+        entityId: "run-cand-1",
         tag: "Delayed",
         payload: "{}",
         headers: "{}",
@@ -460,41 +474,6 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         deliverAtMs: 9_999_999_999_999,
       },
     })
-
-    // 2. Primary key lookup & message batch lookup
-    const pkRes = await og.queries.invoke("wf_message_by_pk", {
-      branch: "main",
-      expectMutation: false,
-      params: { primaryKeyHash: "pk-1" },
-    })
-    const pkRows = requireRows(pkRes)
-    expect(pkRows).toHaveLength(1)
-    expect(pkRows[0]?.messageKey).toBe(msg1)
-    expect(pkRows[0]?.seqKey).toBe(padSeqKey(msg1))
-
-    // 3. Unprocessed candidate queries (unfiltered vs address-filtered before limit 1024)
-    const candAll = await og.queries.invoke("wf_unprocessed_candidate_messages", {
-      branch: "main",
-      expectMutation: false,
-      params: { shardIds: ["shard-0"], claimCutoffMs: 500, nowMs: 2_000 },
-    })
-    expect(requireRows(candAll).map((r) => r.messageKey)).toEqual([msg1, msg2])
-
-    const candAddr = await og.queries.invoke("wf_unprocessed_candidate_messages_for_addresses", {
-      branch: "main",
-      expectMutation: false,
-      params: {
-        shardIds: ["shard-0"],
-        entityType: "HarnessTask",
-        entityIds: ["run-1"],
-        claimCutoffMs: 500,
-        nowMs: 2_000,
-      },
-    })
-    expect(requireRows(candAddr).map((r) => r.messageKey)).toEqual([msg1])
-
-    // Single-entityType filter rejects another entityType even when entityId matches
-    const crossTypeMsg = "248476693641609225"
     await og.queries.invoke("wf_insert_request_message", {
       branch: "main",
       expectMutation: true,
@@ -504,7 +483,7 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         primaryKeyHash: null,
         shardId: "shard-0",
         entityType: "OtherEntity",
-        entityId: "run-1",
+        entityId: "run-cand-1",
         tag: "Ping",
         payload: "{}",
         headers: "{}",
@@ -515,23 +494,76 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         deliverAtMs: null,
       },
     })
-    const candAddrSingleType = await og.queries.invoke(
-      "wf_unprocessed_candidate_messages_for_addresses",
-      {
+
+    const pkRows = requireRows(
+      await og.queries.invoke("wf_message_by_pk", {
         branch: "main",
         expectMutation: false,
-        params: {
-          shardIds: ["shard-0"],
-          entityType: "HarnessTask",
-          entityIds: ["run-1"],
-          claimCutoffMs: 500,
-          nowMs: 2_000,
-        },
-      },
+        params: { primaryKeyHash: "pk-1" },
+      }),
     )
-    expect(requireRows(candAddrSingleType).map((r) => r.messageKey)).toEqual([msg1])
+    expect(pkRows).toHaveLength(1)
+    expect(pkRows[0]?.messageKey).toBe(msg1)
+    expect(pkRows[0]?.seqKey).toBe(padSeqKey(msg1))
 
-    // 4. Claim & resets
+    const candAll = await og.queries.invoke("wf_unprocessed_candidate_messages", {
+      branch: "main",
+      expectMutation: false,
+      params: { shardIds: ["shard-0"], claimCutoffMs: 500, nowMs: 2_000 },
+    })
+    expect(requireRows(candAll).map((r) => r.messageKey)).toEqual([msg1, msg2, crossTypeMsg])
+
+    const candAddr = await og.queries.invoke("wf_unprocessed_candidate_messages_for_addresses", {
+      branch: "main",
+      expectMutation: false,
+      params: {
+        shardIds: ["shard-0"],
+        entityType: "HarnessTask",
+        entityIds: ["run-cand-1"],
+        claimCutoffMs: 500,
+        nowMs: 2_000,
+      },
+    })
+    expect(requireRows(candAddr).map((r) => r.messageKey)).toEqual([msg1])
+
+    await clearAddressRows(og, "HarnessTask", "run-cand-1")
+    await clearAddressRows(og, "OtherEntity", "other-cand-1")
+    await clearAddressRows(og, "OtherEntity", "run-cand-1")
+  })
+
+  it("claims and resets unprocessed WfMessage rows across requests, addresses, groups, and shards", async () => {
+    const og = createCliClient()
+    const msg1 = "248476693641619216"
+    const msg2 = "248476693641619220"
+    const msg3 = "248476693641619230"
+
+    for (const [key, entityType, entityId, deliverAtMs] of [
+      [msg1, "HarnessTask", "run-claim-1", null],
+      [msg2, "OtherEntity", "other-claim-1", 1_000],
+      [msg3, "HarnessTask", "run-claim-1", 9_999_999_999_999],
+    ] as const) {
+      await og.queries.invoke("wf_insert_request_message", {
+        branch: "main",
+        expectMutation: true,
+        params: {
+          messageKey: key,
+          seqKey: padSeqKey(key),
+          primaryKeyHash: null,
+          shardId: "shard-1",
+          entityType,
+          entityId,
+          tag: "Run",
+          payload: "{}",
+          headers: "{}",
+          traceId: null,
+          spanId: null,
+          sampled: null,
+          requestId: key,
+          deliverAtMs,
+        },
+      })
+    }
+
     await og.queries.invoke("wf_claim_messages", {
       branch: "main",
       expectMutation: true,
@@ -540,9 +572,9 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
     const candAfterClaim = await og.queries.invoke("wf_unprocessed_candidate_messages", {
       branch: "main",
       expectMutation: false,
-      params: { shardIds: ["shard-0"], claimCutoffMs: 500, nowMs: 2_000 },
+      params: { shardIds: ["shard-1"], claimCutoffMs: 500, nowMs: 2_000 },
     })
-    expect(requireRows(candAfterClaim).map((r) => r.messageKey)).toEqual([msg2, crossTypeMsg])
+    expect(requireRows(candAfterClaim).map((r) => r.messageKey)).toEqual([msg2])
 
     const byId = await og.queries.invoke("wf_unprocessed_messages_by_id", {
       branch: "main",
@@ -560,9 +592,9 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       branch: "main",
       expectMutation: true,
       params: {
-        shardId: "shard-0",
+        shardId: "shard-1",
         entityType: "HarnessTask",
-        entityIds: ["run-1"],
+        entityIds: ["run-claim-1"],
         clearReadMs: null,
       },
     })
@@ -570,19 +602,58 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       branch: "main",
       expectMutation: true,
       params: {
-        shardId: "shard-0",
+        shardId: "shard-1",
         entityType: "OtherEntity",
-        entityId: "other-1",
+        entityId: "other-claim-1",
         clearReadMs: null,
       },
     })
     await og.queries.invoke("wf_reset_shards", {
       branch: "main",
       expectMutation: true,
-      params: { shardIds: ["shard-0"], clearReadMs: null },
+      params: { shardIds: ["shard-1"], clearReadMs: null },
     })
 
-    // 5. Chunk + AckChunk + Interrupt + WithExit + replies queries
+    const candAfterReset = await og.queries.invoke("wf_unprocessed_candidate_messages", {
+      branch: "main",
+      expectMutation: false,
+      params: { shardIds: ["shard-1"], claimCutoffMs: 500, nowMs: 2_000 },
+    })
+    expect(requireRows(candAfterReset).map((r) => r.messageKey)).toEqual([msg1, msg2])
+
+    await clearAddressRows(og, "HarnessTask", "run-claim-1")
+    await clearAddressRows(og, "OtherEntity", "other-claim-1")
+  })
+
+  it("handles reply chunks, ack chunks, interrupts, CAS reply clear, dangling repair, and unconditional clear", async () => {
+    const og = createCliClient()
+    const msg1 = "248476693641629216"
+    const chunk1 = "248476693641629240"
+    const ack1 = "248476693641629250"
+    const exit1 = "248476693641629260"
+    const exit2 = "248476693641629265"
+    const int1 = "248476693641629270"
+
+    await og.queries.invoke("wf_insert_request_message", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        messageKey: msg1,
+        seqKey: padSeqKey(msg1),
+        primaryKeyHash: null,
+        shardId: "shard-2",
+        entityType: "HarnessTask",
+        entityId: "run-reply-1",
+        tag: "Run",
+        payload: "{}",
+        headers: "{}",
+        traceId: null,
+        spanId: null,
+        sampled: null,
+        requestId: msg1,
+        deliverAtMs: null,
+      },
+    })
     await og.queries.invoke("wf_save_reply_chunk", {
       branch: "main",
       expectMutation: true,
@@ -601,9 +672,9 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         messageKey: ack1,
         seqKey: padSeqKey(ack1),
         primaryKeyHash: null,
-        shardId: "shard-0",
+        shardId: "shard-2",
         entityType: "HarnessTask",
-        entityId: "run-1",
+        entityId: "run-reply-1",
         requestId: msg1,
         replyId: chunk1,
         deliverAtMs: null,
@@ -616,9 +687,9 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         messageKey: int1,
         seqKey: padSeqKey(int1),
         primaryKeyHash: null,
-        shardId: "shard-0",
+        shardId: "shard-2",
         entityType: "HarnessTask",
-        entityId: "run-1",
+        entityId: "run-reply-1",
         requestId: msg1,
         deliverAtMs: null,
       },
@@ -633,12 +704,14 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         payload: JSON.stringify({ ok: true }),
       },
     })
+
     const repliesFiltered = await og.queries.invoke("wf_replies_for", {
       branch: "main",
       expectMutation: false,
       params: { requestIds: [msg1] },
     })
     expect(requireRows(repliesFiltered).map((r) => r.replyKey)).toEqual([exit1])
+
     const repliesUnfiltered = await og.queries.invoke("wf_replies_for_unfiltered", {
       branch: "main",
       expectMutation: false,
@@ -646,7 +719,6 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
     })
     expect(requireRows(repliesUnfiltered).map((r) => r.replyKey)).toEqual([chunk1, exit1])
 
-    // 6. clearReplies CAS delete (preserves Interrupt) + dangling repair + CAS reset on BOTH request & interrupt + unconditional clear
     await og.queries.invoke("wf_clear_replies_cas_delete", {
       branch: "main",
       expectMutation: true,
@@ -657,6 +729,7 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       expectMutation: false,
     })
     expect(requireRows(dangling).map((r) => r.messageKey)).toEqual([msg1])
+
     await og.queries.invoke("wf_repair_dangling_requests", {
       branch: "main",
       expectMutation: true,
@@ -676,8 +749,6 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       expect(row.lastReadMs ?? null).toBeNull()
     }
 
-    // Re-save exit so BOTH msg1 and int1 get lastReplyId = exit1 & processed = true, then test CAS reset
-    const exit2 = "248476693641609265"
     await og.queries.invoke("wf_save_reply_exit", {
       branch: "main",
       expectMutation: true,
@@ -727,7 +798,6 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       expectMutation: true,
       params: { requestId: msg1, clearReplyId: null, clearReadMs: null },
     })
-
     const msg1AfterClearList = requireRows(
       await og.queries.invoke("wf_messages_by_keys", {
         branch: "main",
@@ -737,11 +807,48 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
     )
     expect(msg1AfterClearList).toHaveLength(1)
     expect(msg1AfterClearList[0]?.messageKey).toBe(msg1)
-    expect(msg1AfterClearList[0]?.lastReplyId ?? null).toBeNull()
-    expect(msg1AfterClearList[0]?.lastReadMs ?? null).toBeNull()
     expect(msg1AfterClearList[0]?.processed).toBe(false)
 
-    // 7. Orphan entityType scan + quarantine + pagination + count
+    await clearAddressRows(og, "HarnessTask", "run-reply-1")
+  })
+
+  it("scans and quarantines orphan entity messages, counts rows, and paginates entities and replies", async () => {
+    const og = createCliClient()
+    const msg1 = "248476693641639216"
+    const orphan1 = "248476693641639280"
+    const chunk1 = "248476693641639240"
+
+    await og.queries.invoke("wf_insert_request_message", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        messageKey: msg1,
+        seqKey: padSeqKey(msg1),
+        primaryKeyHash: null,
+        shardId: "shard-3",
+        entityType: "HarnessTask",
+        entityId: "run-orphan-1",
+        tag: "Run",
+        payload: "{}",
+        headers: "{}",
+        traceId: null,
+        spanId: null,
+        sampled: null,
+        requestId: msg1,
+        deliverAtMs: null,
+      },
+    })
+    await og.queries.invoke("wf_save_reply_chunk", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        replyKey: chunk1,
+        seqKey: padSeqKey(chunk1),
+        requestId: msg1,
+        payload: JSON.stringify({ part: 1 }),
+        sequence: 0,
+      },
+    })
     await og.queries.invoke("wf_insert_request_message", {
       branch: "main",
       expectMutation: true,
@@ -749,7 +856,7 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         messageKey: orphan1,
         seqKey: padSeqKey(orphan1),
         primaryKeyHash: null,
-        shardId: "shard-0",
+        shardId: "shard-3",
         entityType: "UnknownLegacyEntity",
         entityId: "legacy-1",
         tag: "Run",
@@ -762,6 +869,7 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         deliverAtMs: null,
       },
     })
+
     const orphans = await og.queries.invoke("wf_orphan_entity_messages", {
       branch: "main",
       expectMutation: false,
@@ -775,18 +883,12 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
     })
 
     const countRows = requireRows(
-      await og.queries.invoke("wf_count_all", {
-        branch: "main",
-        expectMutation: false,
-      }),
+      await og.queries.invoke("wf_count_all", { branch: "main", expectMutation: false }),
     )
-    expect(countRows[0]?.totalMessages).toBe(6)
+    expect(countRows[0]?.totalMessages).toBe(2)
 
     const replyCountRows = requireRows(
-      await og.queries.invoke("wf_count_replies", {
-        branch: "main",
-        expectMutation: false,
-      }),
+      await og.queries.invoke("wf_count_replies", { branch: "main", expectMutation: false }),
     )
     expect(replyCountRows[0]?.totalReplies).toBe(1)
 
@@ -797,7 +899,8 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         params: { afterSeqKey: "" },
       }),
     )
-    expect(pageRows).toHaveLength(6)
+    expect(pageRows).toHaveLength(2)
+
     const repliesPageRows = requireRows(
       await og.queries.invoke("wf_all_replies", {
         branch: "main",
@@ -807,7 +910,37 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
     )
     expect(repliesPageRows.map((r) => r.replyKey)).toEqual([chunk1])
 
-    // 8. WfWriterLease CAS lifecycle
+    const singleReplyRows = requireRows(
+      await og.queries.invoke("wf_reply_by_key", {
+        branch: "main",
+        expectMutation: false,
+        params: { replyKey: chunk1 },
+      }),
+    )
+    expect(singleReplyRows).toHaveLength(1)
+    const batchRepliesRows = requireRows(
+      await og.queries.invoke("wf_replies_by_keys", {
+        branch: "main",
+        expectMutation: false,
+        params: { replyKeys: [chunk1] },
+      }),
+    )
+    expect(batchRepliesRows).toHaveLength(1)
+
+    await clearAddressRows(og, "HarnessTask", "run-orphan-1")
+    await clearAddressRows(og, "UnknownLegacyEntity", "legacy-1")
+    const repliesAfterClear = requireRows(
+      await og.queries.invoke("wf_replies_for_unfiltered", {
+        branch: "main",
+        expectMutation: false,
+        params: { requestIds: [msg1] },
+      }),
+    )
+    expect(repliesAfterClear).toEqual([])
+  })
+
+  it("executes WfWriterLease insert, CAS takeover, refresh, and lookup", async () => {
+    const og = createCliClient()
     await og.queries.invoke("wf_insert_writer_lease", {
       branch: "main",
       expectMutation: true,
@@ -842,76 +975,10 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       leaseEpoch: 2,
       heartbeatMs: 3000,
     })
-
-    // 9. clearAddress + replies_by_keys + reply_by_key
-    const singleReplyRows = requireRows(
-      await og.queries.invoke("wf_reply_by_key", {
-        branch: "main",
-        expectMutation: false,
-        params: { replyKey: chunk1 },
-      }),
-    )
-    expect(singleReplyRows).toHaveLength(1)
-    const batchRepliesRows = requireRows(
-      await og.queries.invoke("wf_replies_by_keys", {
-        branch: "main",
-        expectMutation: false,
-        params: { replyKeys: [chunk1] },
-      }),
-    )
-    expect(batchRepliesRows).toHaveLength(1)
-
-    const keysRows = requireRows(
-      await og.queries.invoke("wf_message_keys_for_address", {
-        branch: "main",
-        expectMutation: false,
-        params: { entityType: "HarnessTask", entityId: "run-1" },
-      }),
-    )
-    const reqIds = Array.from(new Set(keysRows.map((r) => String(r.requestId))))
-    expect(reqIds.length).toBeGreaterThan(0)
-    await og.queries.invoke("wf_clear_address", {
-      branch: "main",
-      expectMutation: true,
-      params: {
-        requestIds: reqIds,
-        entityType: "HarnessTask",
-        entityId: "run-1",
-      },
-    })
-    const keysAfterClear = requireRows(
-      await og.queries.invoke("wf_message_keys_for_address", {
-        branch: "main",
-        expectMutation: false,
-        params: { entityType: "HarnessTask", entityId: "run-1" },
-      }),
-    )
-    expect(keysAfterClear).toEqual([])
-    const repliesAfterClear = requireRows(
-      await og.queries.invoke("wf_replies_for_unfiltered", {
-        branch: "main",
-        expectMutation: false,
-        params: { requestIds: reqIds },
-      }),
-    )
-    expect(repliesAfterClear).toEqual([])
   })
 
-  it("executes all WF-3 read-model stored queries end-to-end against live Omnigraph 0.14.0", async () => {
-    const og = makeWorkflowOmnigraphClient({
-      baseUrl: serverBaseUrl,
-      token: cliToken,
-    })
-
-    const runId1 = "wf3-run-001"
-    const runId2 = "wf3-run-002"
-    const planSha1 = "1".repeat(64)
-    const planSha2 = "2".repeat(64)
-    const baseSha1 = "a".repeat(40)
-    const baseSha2 = "b".repeat(40)
-    const stampHash = "c".repeat(64)
-
-    // 1. Missing/empty lookups return empty rows
+  it("returns empty rows for missing WF-3 read-model lookups", async () => {
+    const og = createCliClient()
     expect(
       requireRows(
         await og.queries.invoke("wf_probe_runs", {
@@ -975,9 +1042,14 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         }),
       ),
     ).toEqual([])
+  })
 
-    // 2. WfRun lifecycle: wf_insert_run, wf_get_run, wf_list_runs, wf_update_run
+  it("executes WfRun lifecycle (wf_insert_run, wf_get_run, wf_list_runs, wf_probe_runs, wf_update_run)", async () => {
+    const og = createCliClient()
+    const runId1 = "wf3-run-001"
+    const runId2 = "wf3-run-002"
     const planJson1 = JSON.stringify({ runId: runId1, level: "epic" })
+
     await og.queries.invoke("wf_insert_run", {
       branch: "main",
       expectMutation: true,
@@ -985,8 +1057,8 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         runId: runId1,
         executionId: "exec-wf3-001",
         level: "epic",
-        planSha: planSha1,
-        baseSha: baseSha1,
+        planSha: "1".repeat(64),
+        baseSha: "a".repeat(40),
         state: "running",
         planJson: planJson1,
         updatedMs: 1_000,
@@ -999,8 +1071,8 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         runId: runId2,
         executionId: "exec-wf3-002",
         level: "slice",
-        planSha: planSha2,
-        baseSha: baseSha2,
+        planSha: "2".repeat(64),
+        baseSha: "b".repeat(40),
         state: "waiting",
         planJson: null,
         updatedMs: 2_000,
@@ -1019,8 +1091,6 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       runId: runId1,
       executionId: "exec-wf3-001",
       level: "epic",
-      planSha: planSha1,
-      baseSha: baseSha1,
       state: "running",
       planJson: planJson1,
       updatedMs: 1_000,
@@ -1033,69 +1103,65 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         params: { runId: runId2 },
       }),
     )
-    expect(gotRun2).toHaveLength(1)
     expect(gotRun2[0]?.planJson ?? null).toBeNull()
 
-    const listedBeforeUpdate = requireRows(
+    const listedBefore = requireRows(
       await og.queries.invoke("wf_list_runs", {
         branch: "main",
         expectMutation: false,
         params: {},
       }),
     )
-    expect(listedBeforeUpdate.map((r) => r.runId)).toEqual([runId2, runId1])
+    expect(listedBefore.map((r) => r.runId)).toEqual([runId2, runId1])
 
-    const probedPopulated = requireRows(
+    const probed = requireRows(
       await og.queries.invoke("wf_probe_runs", {
         branch: "main",
         expectMutation: false,
         params: {},
       }),
     )
-    expect(probedPopulated).toHaveLength(1)
-    expect(Object.keys(probedPopulated[0] ?? {})).toEqual(["runId"])
-    expect([runId1, runId2]).toContain(probedPopulated[0]?.runId)
+    expect(probed).toHaveLength(1)
+    expect(Object.keys(probed[0] ?? {})).toEqual(["runId"])
 
     await og.queries.invoke("wf_update_run", {
       branch: "main",
       expectMutation: true,
-      params: {
-        runId: runId1,
-        state: "completed",
-        updatedMs: 3_000,
-      },
+      params: { runId: runId1, state: "completed", updatedMs: 3_000 },
     })
-    const gotRun1Updated = requireRows(
-      await og.queries.invoke("wf_get_run", {
-        branch: "main",
-        expectMutation: false,
-        params: { runId: runId1 },
-      }),
-    )
-    expect(gotRun1Updated[0]).toMatchObject({
-      runId: runId1,
-      state: "completed",
-      updatedMs: 3_000,
-    })
-    const listedAfterUpdate = requireRows(
+    const listedAfter = requireRows(
       await og.queries.invoke("wf_list_runs", {
         branch: "main",
         expectMutation: false,
         params: {},
       }),
     )
-    expect(listedAfterUpdate.map((r) => r.runId)).toEqual([runId1, runId2])
+    expect(listedAfter.map((r) => r.runId)).toEqual([runId1, runId2])
 
-    // 3. WfUnit lifecycle: wf_insert_unit, wf_get_unit, wf_units_for_run, wf_update_unit
-    const unitKey1b = `${runId1}/unit-b`
-    const unitKey1a = `${runId1}/unit-a`
-    const unitKey2a = `${runId2}/unit-other`
+    await og.queries.invoke("wf_delete_run_views", {
+      branch: "main",
+      expectMutation: true,
+      params: { runId: runId1 },
+    })
+    await og.queries.invoke("wf_delete_run_views", {
+      branch: "main",
+      expectMutation: true,
+      params: { runId: runId2 },
+    })
+  })
+
+  it("executes WfUnit lifecycle (wf_insert_unit, wf_get_unit, wf_update_unit, wf_units_for_run)", async () => {
+    const og = createCliClient()
+    const runId = "wf3-unit-run-1"
+    const unitKey1b = `${runId}/unit-b`
+    const unitKey1a = `${runId}/unit-a`
+
     await og.queries.invoke("wf_insert_unit", {
       branch: "main",
       expectMutation: true,
       params: {
         unitKey: unitKey1b,
-        runId: runId1,
+        runId,
         unitId: "unit-b",
         kind: "package",
         waveIndex: 1,
@@ -1109,13 +1175,174 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       expectMutation: true,
       params: {
         unitKey: unitKey1a,
-        runId: runId1,
+        runId,
         unitId: "unit-a",
         kind: "slice",
         waveIndex: 0,
         status: "dispatched",
         ownedRelPaths: ["libs/harness/contract/src"],
         updatedMs: 1_200,
+      },
+    })
+
+    const gotUnit1b = requireRows(
+      await og.queries.invoke("wf_get_unit", {
+        branch: "main",
+        expectMutation: false,
+        params: { unitKey: unitKey1b },
+      }),
+    )
+    expect(gotUnit1b[0]).toMatchObject({
+      unitKey: unitKey1b,
+      kind: "package",
+      waveIndex: 1,
+      status: "pending",
+      ownedRelPaths: ["libs/harness/graph/src/index.ts", "libs/harness/graph/test"],
+    })
+
+    await og.queries.invoke("wf_update_unit", {
+      branch: "main",
+      expectMutation: true,
+      params: { unitKey: unitKey1a, status: "completed", updatedMs: 1_500 },
+    })
+    const unitsForRun = requireRows(
+      await og.queries.invoke("wf_units_for_run", {
+        branch: "main",
+        expectMutation: false,
+        params: { runId },
+      }),
+    )
+    expect(unitsForRun.map((u) => u.unitKey)).toEqual([unitKey1a, unitKey1b])
+    expect(unitsForRun[0]?.status).toBe("completed")
+
+    await og.queries.invoke("wf_delete_run_views", {
+      branch: "main",
+      expectMutation: true,
+      params: { runId },
+    })
+  })
+
+  it("executes WfAttempt lifecycle (wf_insert_attempt, wf_get_attempt, wf_update_attempt, wf_attempts_for_run)", async () => {
+    const og = createCliClient()
+    const runId = "wf3-attempt-run-1"
+    const stampHash = "c".repeat(64)
+    const attemptKey1a1 = `${runId}/unit-a#1`
+    const attemptKey1a2 = `${runId}/unit-a#2`
+
+    await og.queries.invoke("wf_insert_attempt", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        attemptKey: attemptKey1a2,
+        runId,
+        unitId: "unit-a",
+        attempt: 2,
+        verdict: "dispatched",
+        runner: "antigravity",
+        rejection: null,
+        packageStampHash: null,
+        updatedMs: 1_600,
+      },
+    })
+    await og.queries.invoke("wf_insert_attempt", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        attemptKey: attemptKey1a1,
+        runId,
+        unitId: "unit-a",
+        attempt: 1,
+        verdict: "rejected",
+        runner: "claude-code",
+        rejection: JSON.stringify({ _tag: "StampMissing" }),
+        packageStampHash: null,
+        updatedMs: 1_300,
+      },
+    })
+
+    const gotAttempt1 = requireRows(
+      await og.queries.invoke("wf_get_attempt", {
+        branch: "main",
+        expectMutation: false,
+        params: { attemptKey: attemptKey1a1 },
+      }),
+    )
+    expect(gotAttempt1[0]).toMatchObject({
+      attemptKey: attemptKey1a1,
+      verdict: "rejected",
+      runner: "claude-code",
+      rejection: JSON.stringify({ _tag: "StampMissing" }),
+    })
+    expect(gotAttempt1[0]?.packageStampHash ?? null).toBeNull()
+
+    await og.queries.invoke("wf_update_attempt", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        attemptKey: attemptKey1a2,
+        verdict: "completed",
+        runner: "antigravity",
+        rejection: null,
+        packageStampHash: stampHash,
+        updatedMs: 1_900,
+      },
+    })
+    const attemptsForRun = requireRows(
+      await og.queries.invoke("wf_attempts_for_run", {
+        branch: "main",
+        expectMutation: false,
+        params: { runId },
+      }),
+    )
+    expect(attemptsForRun.map((a) => a.attemptKey)).toEqual([attemptKey1a1, attemptKey1a2])
+    expect(attemptsForRun[1]?.verdict).toBe("completed")
+    expect(attemptsForRun[1]?.packageStampHash).toBe(stampHash)
+
+    await og.queries.invoke("wf_delete_run_views", {
+      branch: "main",
+      expectMutation: true,
+      params: { runId },
+    })
+  })
+
+  it("deletes target run views via wf_delete_run_views while preserving sibling runs", async () => {
+    const og = createCliClient()
+    const runId1 = "wf3-del-run-1"
+    const runId2 = "wf3-del-run-2"
+    const unitKey2a = `${runId2}/unit-other`
+    const attemptKey2a1 = `${runId2}/unit-other#1`
+
+    for (const [runId, updatedMs] of [
+      [runId1, 1_000],
+      [runId2, 2_000],
+    ] as const) {
+      await og.queries.invoke("wf_insert_run", {
+        branch: "main",
+        expectMutation: true,
+        params: {
+          runId,
+          executionId: `exec-${runId}`,
+          level: "slice",
+          planSha: "1".repeat(64),
+          baseSha: "a".repeat(40),
+          state: "running",
+          planJson: null,
+          updatedMs,
+        },
+      })
+    }
+    await og.queries.invoke("wf_insert_unit", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        unitKey: `${runId1}/unit-a`,
+        runId: runId1,
+        unitId: "unit-a",
+        kind: "slice",
+        waveIndex: 0,
+        status: "pending",
+        ownedRelPaths: ["libs/a"],
+        updatedMs: 1_100,
       },
     })
     await og.queries.invoke("wf_insert_unit", {
@@ -1132,89 +1359,19 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         updatedMs: 2_100,
       },
     })
-
-    const gotUnit1b = requireRows(
-      await og.queries.invoke("wf_get_unit", {
-        branch: "main",
-        expectMutation: false,
-        params: { unitKey: unitKey1b },
-      }),
-    )
-    expect(gotUnit1b).toHaveLength(1)
-    expect(gotUnit1b[0]).toMatchObject({
-      unitKey: unitKey1b,
-      runId: runId1,
-      unitId: "unit-b",
-      kind: "package",
-      waveIndex: 1,
-      status: "pending",
-      ownedRelPaths: ["libs/harness/graph/src/index.ts", "libs/harness/graph/test"],
-      updatedMs: 1_100,
-    })
-
-    await og.queries.invoke("wf_update_unit", {
-      branch: "main",
-      expectMutation: true,
-      params: {
-        unitKey: unitKey1a,
-        status: "completed",
-        updatedMs: 1_500,
-      },
-    })
-    const gotUnit1a = requireRows(
-      await og.queries.invoke("wf_get_unit", {
-        branch: "main",
-        expectMutation: false,
-        params: { unitKey: unitKey1a },
-      }),
-    )
-    expect(gotUnit1a[0]).toMatchObject({
-      unitKey: unitKey1a,
-      status: "completed",
-      updatedMs: 1_500,
-    })
-
-    const unitsForRun1 = requireRows(
-      await og.queries.invoke("wf_units_for_run", {
-        branch: "main",
-        expectMutation: false,
-        params: { runId: runId1 },
-      }),
-    )
-    expect(unitsForRun1.map((u) => u.unitKey)).toEqual([unitKey1a, unitKey1b])
-
-    // 4. WfAttempt lifecycle: wf_insert_attempt, wf_get_attempt, wf_attempts_for_run, wf_update_attempt
-    const attemptKey1a1 = `${runId1}/unit-a#1`
-    const attemptKey1a2 = `${runId1}/unit-a#2`
-    const attemptKey2a1 = `${runId2}/unit-other#1`
     await og.queries.invoke("wf_insert_attempt", {
       branch: "main",
       expectMutation: true,
       params: {
-        attemptKey: attemptKey1a2,
-        runId: runId1,
-        unitId: "unit-a",
-        attempt: 2,
-        verdict: "dispatched",
-        runner: "antigravity",
-        rejection: null,
-        packageStampHash: null,
-        updatedMs: 1_600,
-      },
-    })
-    await og.queries.invoke("wf_insert_attempt", {
-      branch: "main",
-      expectMutation: true,
-      params: {
-        attemptKey: attemptKey1a1,
+        attemptKey: `${runId1}/unit-a#1`,
         runId: runId1,
         unitId: "unit-a",
         attempt: 1,
-        verdict: "rejected",
-        runner: "claude-code",
-        rejection: JSON.stringify({ _tag: "StampMissing" }),
+        verdict: "dispatched",
+        runner: null,
+        rejection: null,
         packageStampHash: null,
-        updatedMs: 1_300,
+        updatedMs: 1_200,
       },
     })
     await og.queries.invoke("wf_insert_attempt", {
@@ -1233,69 +1390,12 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       },
     })
 
-    const gotAttempt1 = requireRows(
-      await og.queries.invoke("wf_get_attempt", {
-        branch: "main",
-        expectMutation: false,
-        params: { attemptKey: attemptKey1a1 },
-      }),
-    )
-    expect(gotAttempt1).toHaveLength(1)
-    expect(gotAttempt1[0]).toMatchObject({
-      attemptKey: attemptKey1a1,
-      runId: runId1,
-      unitId: "unit-a",
-      attempt: 1,
-      verdict: "rejected",
-      runner: "claude-code",
-      rejection: JSON.stringify({ _tag: "StampMissing" }),
-      updatedMs: 1_300,
-    })
-    expect(gotAttempt1[0]?.packageStampHash ?? null).toBeNull()
-
-    await og.queries.invoke("wf_update_attempt", {
-      branch: "main",
-      expectMutation: true,
-      params: {
-        attemptKey: attemptKey1a2,
-        verdict: "completed",
-        runner: "antigravity",
-        rejection: null,
-        packageStampHash: stampHash,
-        updatedMs: 1_900,
-      },
-    })
-    const gotAttempt2 = requireRows(
-      await og.queries.invoke("wf_get_attempt", {
-        branch: "main",
-        expectMutation: false,
-        params: { attemptKey: attemptKey1a2 },
-      }),
-    )
-    expect(gotAttempt2[0]).toMatchObject({
-      attemptKey: attemptKey1a2,
-      verdict: "completed",
-      runner: "antigravity",
-      packageStampHash: stampHash,
-      updatedMs: 1_900,
-    })
-    expect(gotAttempt2[0]?.rejection ?? null).toBeNull()
-
-    const attemptsForRun1 = requireRows(
-      await og.queries.invoke("wf_attempts_for_run", {
-        branch: "main",
-        expectMutation: false,
-        params: { runId: runId1 },
-      }),
-    )
-    expect(attemptsForRun1.map((a) => a.attemptKey)).toEqual([attemptKey1a1, attemptKey1a2])
-
-    // 5. wf_delete_run_views removes all WfAttempt, WfUnit, WfRun for runId1 while preserving runId2
     await og.queries.invoke("wf_delete_run_views", {
       branch: "main",
       expectMutation: true,
       params: { runId: runId1 },
     })
+
     expect(
       requireRows(
         await og.queries.invoke("wf_get_run", {
@@ -1323,7 +1423,6 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
         }),
       ),
     ).toEqual([])
-
     expect(
       requireRows(
         await og.queries.invoke("wf_list_runs", {
@@ -1352,33 +1451,14 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       ).map((a) => a.attemptKey),
     ).toEqual([attemptKey2a1])
 
-    // Clean up remaining runId2 views
     await og.queries.invoke("wf_delete_run_views", {
       branch: "main",
       expectMutation: true,
       params: { runId: runId2 },
     })
-    expect(
-      requireRows(
-        await og.queries.invoke("wf_list_runs", {
-          branch: "main",
-          expectMutation: false,
-          params: {},
-        }),
-      ),
-    ).toEqual([])
-    expect(
-      requireRows(
-        await og.queries.invoke("wf_probe_runs", {
-          branch: "main",
-          expectMutation: false,
-          params: {},
-        }),
-      ),
-    ).toEqual([])
   })
 
-  it("exports resolveGitCommonDir, error classifiers, and workflow client helpers", () => {
+  it("exports resolveGitCommonDir across primary, linked, and invalid directories", () => {
     const tmpRoot = mkdtempSync(join(tmpdir(), "wf2-git-common-"))
     tempDirs.push(tmpRoot)
 
@@ -1411,7 +1491,9 @@ describe("Workflow graph assets, disjoint Cedar policies, and live Omnigraph 0.1
       },
     })
     expect(resolveGitCommonDir(primary, throwingIo)).toBeNull()
+  })
 
+  it("exports Omnigraph error classifiers and workflow client config resolvers", () => {
     const tooMany = new TooManyRequestsError({
       status: 429,
       message: "rate limited",

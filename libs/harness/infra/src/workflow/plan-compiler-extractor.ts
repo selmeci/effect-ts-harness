@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto"
 import { dirname, join, relative, resolve } from "node:path"
-import { Effect, Option, Result, Schema } from "effect"
+import { Effect, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   type AbsoluteRepoRoot,
@@ -34,8 +34,8 @@ import { nodeSyncHostIo } from "../node-host-io.js"
 /** Input options for extracting and compiling a `CompiledPlan` from a repository workspace. */
 export interface CompileWorkflowPlanRequest {
   readonly repoRoot: AbsoluteRepoRoot
-  readonly level: WorkflowLevel
-  readonly mode: UnitMode
+  readonly level?: WorkflowLevel | undefined
+  readonly mode?: UnitMode | undefined
   readonly inputJsonPath?: WorkspaceFilePath | undefined
   readonly hostIo?: ExtendedHostIo | undefined
 }
@@ -66,7 +66,12 @@ const PackageManifestNameSchema = Schema.fromJsonString(
     name: Schema.optional(Schema.NonEmptyString),
   }),
 )
-const decodePackageManifestNameOption = Schema.decodeUnknownOption(PackageManifestNameSchema)
+const decodePackageManifestName = Schema.decodeUnknownEffect(PackageManifestNameSchema)
+
+const getErrnoCode = (err: unknown): string | undefined =>
+  typeof err === "object" && err !== null && "code" in err && typeof err.code === "string"
+    ? err.code
+    : undefined
 
 const toPlanFsError = (
   filePath: string,
@@ -180,47 +185,84 @@ const findNearestPackageForFile = (
   repoRoot: string,
   absFilePath: string,
   hostIo: ExtendedHostIo,
-): { readonly relDir: OwnedRelPath; readonly projectName: NxProjectName } | undefined => {
-  let current = dirname(absFilePath)
-  while (current.length > repoRoot.length) {
-    const pkgPath = join(current, "package.json")
-    if (hostIo.existsSync(pkgPath) && hostIo.isFileSync(pkgPath)) {
-      const readRes = Result.try(() => hostIo.readTextSync(pkgPath))
-      const pkgName = match(readRes)
-        .with({ _tag: "Success" }, ({ success: raw }) =>
-          match(decodePackageManifestNameOption(raw))
-            .with({ _tag: "Some" }, ({ value }) => value.name)
-            .with({ _tag: "None" }, () => undefined)
-            .exhaustive(),
+): Effect.Effect<
+  { readonly relDir: OwnedRelPath; readonly projectName: NxProjectName } | undefined,
+  WorkspaceFsError
+> =>
+  Effect.gen(function* () {
+    let current = dirname(absFilePath)
+    while (current.length > repoRoot.length) {
+      const pkgPath = join(current, "package.json")
+      if (hostIo.existsSync(pkgPath) && hostIo.isFileSync(pkgPath)) {
+        const rawOpt = yield* Effect.try({
+          try: () => Option.some(hostIo.readTextSync(pkgPath)),
+          catch: (cause) =>
+            getErrnoCode(cause) === "ENOENT"
+              ? ("ENOENT" as const)
+              : toPlanFsError(pkgPath, "read", cause),
+        }).pipe(
+          Effect.catchIf(
+            (err) => err === "ENOENT",
+            () => Effect.succeedNone,
+          ),
         )
-        .with({ _tag: "Failure" }, () => undefined)
-        .exhaustive()
+        const resolved = yield* match(rawOpt)
+          .with({ _tag: "None" }, () =>
+            Effect.succeed<
+              Option.Option<
+                { readonly relDir: OwnedRelPath; readonly projectName: NxProjectName } | undefined
+              >
+            >(Option.none()),
+          )
+          .with({ _tag: "Some" }, ({ value: raw }) =>
+            Effect.gen(function* () {
+              const decoded = yield* decodePackageManifestName(raw).pipe(
+                Effect.mapError((err) => toPlanFsError(pkgPath, "read", err)),
+              )
+              const pkgName = decoded.name
+              const relDirRaw = relative(repoRoot, current).replaceAll("\\", "/")
+              const relDirOpt = Schema.decodeOption(OwnedRelPath)(relDirRaw)
+              const projectNameOpt =
+                pkgName !== undefined
+                  ? Schema.decodeOption(NxProjectName)(pkgName)
+                  : Option.none<NxProjectName>()
 
-      const relDirRaw = relative(repoRoot, current).replaceAll("\\", "/")
-      const relDirOpt = Schema.decodeOption(OwnedRelPath)(relDirRaw)
-      const projectNameOpt =
-        pkgName !== undefined
-          ? Schema.decodeOption(NxProjectName)(pkgName)
-          : Option.none<NxProjectName>()
-
-      return match([relDirOpt, projectNameOpt] as const)
-        .with(
-          [{ _tag: "Some" }, { _tag: "Some" }],
-          ([{ value: relDir }, { value: projectName }]) => ({
-            relDir,
-            projectName,
-          }),
-        )
-        .otherwise(() => undefined)
+              return Option.some(
+                match([relDirOpt, projectNameOpt] as const)
+                  .with(
+                    [{ _tag: "Some" }, { _tag: "Some" }],
+                    ([{ value: relDir }, { value: projectName }]) => ({
+                      relDir,
+                      projectName,
+                    }),
+                  )
+                  .with(
+                    [{ _tag: "None" }, { _tag: "Some" }],
+                    [{ _tag: "Some" }, { _tag: "None" }],
+                    [{ _tag: "None" }, { _tag: "None" }],
+                    () => undefined,
+                  )
+                  .exhaustive(),
+              )
+            }),
+          )
+          .exhaustive()
+        const matched = match(resolved)
+          .with({ _tag: "Some" }, ({ value }) => ({ done: true as const, value }))
+          .with({ _tag: "None" }, () => ({ done: false as const, value: undefined }))
+          .exhaustive()
+        if (matched.done) {
+          return matched.value
+        }
+      }
+      const parent = dirname(current)
+      if (parent === current) {
+        break
+      }
+      current = parent
     }
-    const parent = dirname(current)
-    if (parent === current) {
-      break
-    }
-    current = parent
-  }
-  return undefined
-}
+    return undefined
+  })
 
 const extractDraftUnitsFromWorkspaceStubs = (
   repoRoot: AbsoluteRepoRoot,
@@ -248,19 +290,18 @@ const extractDraftUnitsFromWorkspaceStubs = (
       ) {
         continue
       }
-      const contentRes = Result.try(() => hostIo.readTextSync(absFile))
-      const content = match(contentRes)
-        .with({ _tag: "Success" }, ({ success }) => success)
-        .with({ _tag: "Failure" }, () => undefined)
-        .exhaustive()
-      if (content === undefined || !content.includes("stub")) {
+      const content = yield* Effect.try({
+        try: () => hostIo.readTextSync(absFile),
+        catch: (cause) => toPlanFsError(absFile, "read", cause),
+      })
+      if (!content.includes("stub")) {
         continue
       }
       const stubKeys = extractActiveStubSpansFromSource(content)
       if (stubKeys.length === 0) {
         continue
       }
-      const pkg = findNearestPackageForFile(repoRoot, absFile, hostIo)
+      const pkg = yield* findNearestPackageForFile(repoRoot, absFile, hostIo)
       if (pkg === undefined) {
         continue
       }
@@ -319,17 +360,15 @@ export const compileWorkflowPlanFromRepo = Effect.fn("Harness.compileWorkflowPla
     const extracted = yield* match(request.inputJsonPath)
       .with(undefined, () =>
         Effect.gen(function* () {
+          const level: WorkflowLevel = request.level ?? "slice"
+          const mode: UnitMode = request.mode ?? { _tag: "Manual" }
           const baseSha = yield* resolveGitHeadSha(request.repoRoot, hostIo)
-          const units = yield* extractDraftUnitsFromWorkspaceStubs(
-            request.repoRoot,
-            request.level,
-            hostIo,
-          )
+          const units = yield* extractDraftUnitsFromWorkspaceStubs(request.repoRoot, level, hostIo)
           return {
             runId: undefined as WorkflowRunId | undefined,
-            level: request.level,
+            level,
             baseSha,
-            mode: request.mode,
+            mode,
             units,
             dependencies: [] as ReadonlyArray<UnitDependency>,
             sharedStepPaths: [] as ReadonlyArray<OwnedRelPath>,
@@ -348,11 +387,13 @@ export const compileWorkflowPlanFromRepo = Effect.fn("Harness.compileWorkflowPla
             parsed.baseSha !== undefined
               ? parsed.baseSha
               : yield* resolveGitHeadSha(request.repoRoot, hostIo)
+          const level: WorkflowLevel = request.level ?? parsed.level ?? "slice"
+          const mode: UnitMode = request.mode ?? parsed.mode ?? { _tag: "Manual" }
           return {
             runId: parsed.runId,
-            level: parsed.level ?? request.level,
+            level,
             baseSha,
-            mode: parsed.mode ?? request.mode,
+            mode,
             units: parsed.units,
             dependencies: parsed.dependencies ?? [],
             sharedStepPaths: parsed.sharedStepPaths ?? [],

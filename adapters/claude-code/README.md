@@ -43,10 +43,11 @@ Claude Code executes hooks defined in `adapters/claude-code/hooks.json` at key s
    Executes upon starting or resuming a session. Runs `SessionHandoff.decide` to evaluate uncommitted changes, active git branch, `.harness/verify-stamp.json` freshness, and environment health.
 2. **`PreToolUse` (`harness guard`):**
    Evaluates commands and file edits before execution:
-   - Matcher `Bash`: Blocks force pushes, unstaged checkouts, and destructive commands; when `HARNESS_UNIT_WORKER=1` is set on spawned unit workers, blocks recursive `harness workflow start|resume|abort|done` and shell access to `daemon.sock` or `auth-tokens.json`. Intercepts `alchemy deploy` and `alchemy destroy` to require interactive confirmation.
+   - Matcher `Bash`: Blocks force pushes, unstaged checkouts, and destructive commands; when `HARNESS_UNIT_WORKER=1` is set on unit worker invocations (automatic runner spawning lands in WF-5), blocks recursive `harness workflow start|resume|abort|doctor|complete --phase llm`, `harness done`, and shell access to `daemon.sock` or `auth-tokens.json`. Intercepts `alchemy deploy` and `alchemy destroy` to require interactive confirmation.
    - Matcher `Edit|Write|MultiEdit`: Blocks writes to squashed subtree directories `repos/effect` and `repos/alchemy`, blocks direct modification of `.harness/verify-stamp.json`, and under `HARNESS_UNIT_WORKER=1` denies access to `daemon.sock` and `auth-tokens.json`.
+   - Matcher `Read|Grep|Glob|LS|Find`: Enforces secret-file and protected harness-state deny rules (`daemon.sock`, `auth-tokens.json`, `<git-common-dir>/harness/**`) across read/search tools in all modes.
 3. **`PostToolUse` (`harness ingest`):**
-   Matcher `Edit|Write`: Triggers incremental AST indexing after file writes, updating `.harness/index.sqlite` and the resident Omnigraph property graph.
+   Matcher `Edit|Write|MultiEdit`: Triggers incremental AST indexing after file writes, updating `.harness/index.sqlite` and the resident Omnigraph property graph.
 4. **`Stop` (`harness done`):**
    Executes before the session concludes. Validates that `.harness/verify-stamp.json` exists, matches the current `HEAD` commit, and matches the working tree hash. Blocks exit if unverified.
 
@@ -166,4 +167,4 @@ Invoke specialist review subagents as read-only inspectors during implementation
    ```
 4. **Orchestrate Durable Task Workflows & Determinism Gates:**
    - Control `HarnessTaskWorkflow` runs via `harness workflow` (`compile | start | status | complete | resume | doctor | abort`) over `<git-common-dir>/harness/daemon.sock`, and inspect status read-only with `harness_workflow_plan`.
-   - Workflow definition modules containing `Workflow.make(...)` are checked by the `nondeterministic-workflow-body` AST and `oxlint` rule (`harness/syntax-bans`), requiring side effects, clock/randomness, env, fs, git, Omnigraph, and network calls to run inside `Activity.make({ execute: ... })`.
+   - Workflow definition modules containing `Workflow.make(...)` are checked across `toLayer`/`register` handlers and same-module helper functions by the `nondeterministic-workflow-body` AST and `oxlint` rule (`harness/syntax-bans`), requiring side effects, clock/randomness, env, fs, git, Omnigraph, and network calls to run inside `Activity.make({ execute: ... })`.

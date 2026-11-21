@@ -10,6 +10,7 @@ import { UnitAgentDispatcher, type UnitAgentDispatcherShape } from "@harness/ser
 export const UnitAgentDispatcherLive: Layer.Layer<UnitAgentDispatcher> = Layer.succeed(
   UnitAgentDispatcher,
   {
+    runnerKind: "placeholder" as const,
     dispatchUnit: (_request: UnitAgentRequest) =>
       Effect.succeed(
         UnitAgentDispatchResult.cases.Failed.make({

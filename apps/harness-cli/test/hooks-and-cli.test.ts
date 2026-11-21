@@ -2204,6 +2204,128 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
     )
     expect(nonWorkerStartRes.exitCode).toBe(0)
     expect(JSON.parse(nonWorkerStartRes.stdout)).toEqual({ decision: "allow" })
+
+    // F-4.1: secret & harness-state reads denied even in non-worker mode
+    for (const readInput of [
+      JSON.stringify({ tool_name: "Read", tool_input: { file_path: ".env" } }),
+      JSON.stringify({ tool_name: "Read", tool_input: { file_path: ".git/harness/daemon.sock" } }),
+      JSON.stringify({
+        tool_name: "Read",
+        tool_input: { file_path: ".git/harness/auth-tokens.json" },
+      }),
+      JSON.stringify({
+        tool_name: "Read",
+        tool_input: { file_path: ".git/harness/workflow-backups/2026-11-20.ndjson" },
+      }),
+    ]) {
+      const readDeny = await Effect.runPromise(
+        handleGuard(["guard", "--format=antigravity"], {
+          env: nonWorkerEnv,
+          stdin: readInput,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(readDeny.exitCode).toBe(0)
+      expect(JSON.parse(readDeny.stdout)).toMatchObject({ decision: "deny" })
+    }
+
+    // F-16.2: Grep/grep_search pattern/Query regexes allowed; Glob/SearchPath secret/harness paths denied
+    const grepEnvPatternAllow = await Effect.runPromise(
+      handleGuard(["guard", "--format=antigravity"], {
+        env: nonWorkerEnv,
+        stdin: JSON.stringify({
+          tool_name: "Grep",
+          tool_input: { pattern: "process\\.env", path: "libs/" },
+        }),
+        skipBackgroundDaemons: true,
+      }),
+    )
+    expect(JSON.parse(grepEnvPatternAllow.stdout)).toEqual({ decision: "allow" })
+
+    const agyGrepAllow = await Effect.runPromise(
+      handleGuard(["guard", "--format=antigravity"], {
+        env: nonWorkerEnv,
+        stdin: JSON.stringify({
+          toolCall: {
+            name: "grep_search",
+            args: { Query: "process.env", SearchPath: "libs/" },
+          },
+        }),
+        skipBackgroundDaemons: true,
+      }),
+    )
+    expect(JSON.parse(agyGrepAllow.stdout)).toEqual({ decision: "allow" })
+
+    const globEnvDeny = await Effect.runPromise(
+      handleGuard(["guard", "--format=antigravity"], {
+        env: nonWorkerEnv,
+        stdin: JSON.stringify({
+          tool_name: "Glob",
+          tool_input: { pattern: "**/.env*" },
+        }),
+        skipBackgroundDaemons: true,
+      }),
+    )
+    expect(JSON.parse(globEnvDeny.stdout)).toMatchObject({ decision: "deny" })
+
+    // F-16.1: deep nesting > 8 fails closed
+    let deepPayload: Record<string, unknown> = { leaf: ".env" }
+    for (let i = 0; i < 10; i++) {
+      deepPayload = { child: deepPayload }
+    }
+    const deepDeny = await Effect.runPromise(
+      handleGuard(["guard", "--format=antigravity"], {
+        env: nonWorkerEnv,
+        stdin: JSON.stringify({
+          tool_name: "Read",
+          tool_input: { file_path: "libs/a.ts", extra: deepPayload },
+        }),
+        skipBackgroundDaemons: true,
+      }),
+    )
+    expect(JSON.parse(deepDeny.stdout)).toMatchObject({
+      decision: "deny",
+      reason: expect.stringContaining("maximum inspection depth"),
+    })
+
+    // F-3.6: non-existent file inside symlinked .git/harness dir fails closed
+    const symHarnessAlias = join(dir, "sym-harness-dir")
+    mkdirSync(join(dir, ".git", "harness"), { recursive: true })
+    symlinkSync(join(dir, ".git", "harness"), symHarnessAlias)
+    const symNewFileDeny = await Effect.runPromise(
+      handleGuard(["guard", "--format=antigravity"], {
+        env: nonWorkerEnv,
+        stdin: JSON.stringify({
+          toolCall: {
+            name: "write_to_file",
+            args: { TargetFile: join(symHarnessAlias, "new.sock") },
+          },
+        }),
+        skipBackgroundDaemons: true,
+      }),
+    )
+    expect(JSON.parse(symNewFileDeny.stdout)).toMatchObject({ decision: "deny" })
+
+    // F-3.3 & F-3.4: worker mode blocks doctor, complete --phase llm, and nx run harness-cli:start
+    for (const workerCmd of [
+      "pnpm harness workflow doctor",
+      "pnpm harness workflow complete --phase llm",
+      "nx run harness-cli:start -- workflow abort",
+    ]) {
+      const workerDeny = await Effect.runPromise(
+        handleGuard(["guard", "--format=antigravity"], {
+          env: workerEnv,
+          stdin: JSON.stringify({
+            toolCall: { name: "run_command", args: { CommandLine: workerCmd } },
+          }),
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(JSON.parse(workerDeny.stdout), workerCmd).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining("HARNESS_UNIT_WORKER=1"),
+      })
+    }
   })
 
   it("SPEC-0024 idempotent done: persists treeHash in last-done.json, short-circuits repeated Stop hooks with alreadyDone=true, and fails closed on stale/corrupt/mutated state", async () => {

@@ -1,9 +1,8 @@
-import { Effect, Exit, Option, Schema, Semaphore, SynchronizedRef } from "effect"
+import { Cause, Effect, Exit, Option, Schema, Semaphore, SynchronizedRef } from "effect"
 import { WorkflowEngine } from "effect/workflow"
 import { match } from "ts-pattern"
 import {
   type AbsoluteRepoRoot,
-  AgentFailureReason,
   AttemptNumber,
   CompiledPlan,
   EscalationOrdinal,
@@ -11,28 +10,39 @@ import {
   type LeaseEpoch,
   type UnitEscalation,
   UnitOutcome,
-  UnitRejection,
+  type UnitRejection,
   type ValidatedWorktreeRoot,
   type WorkUnitId,
   type WorkflowAttemptRecord,
-  WorkflowExecutionId,
-  WorkflowRunId,
+  type WorkflowDaemonCapability,
+  type WorkflowExecutionId,
+  type WorkflowRpcErrorEnvelope,
+  WorkflowRpcRequestId,
+  type WorkflowRpcResult,
+  type WorkflowRpcSuccessEnvelope,
+  type WorkflowRunId,
   type WorkflowRunRecord,
   type WorkflowRunState,
   type WorkflowStoreFailureReason,
+  type WorkflowStoreUnavailableError,
   type WorkflowUnitRecord,
   type WorkflowUnitStatus,
+  type WriterLeaseHeldError,
   compareCodeUnits,
   toBoundedReason,
 } from "@harness/contract"
 import {
   HarnessTaskWorkflow,
+  executionIdOf,
   makeUnitCompletionDeferred,
   makeUnitEscalationDeferred,
 } from "@harness/gates"
 import { validateWorktreeRepoRoot } from "@harness/infra"
 import type { DaemonRequestScopeAllowed } from "./workflow-daemon-helper.js"
-import type { WorkflowDaemonRuntime } from "./workflow-engine-daemon-helper.js"
+import {
+  MAX_CONCURRENT_RUN_LOCKS,
+  type WorkflowDaemonRuntime,
+} from "./workflow-engine-daemon-helper.js"
 
 const MAX_ESCALATION_CYCLES = 100
 const ATTEMPTS: readonly [AttemptNumber, AttemptNumber, AttemptNumber] = [
@@ -42,13 +52,14 @@ const ATTEMPTS: readonly [AttemptNumber, AttemptNumber, AttemptNumber] = [
 ]
 
 const PlanJsonCodec = Schema.fromJsonString(CompiledPlan)
-const RejectionJsonCodec = Schema.fromJsonString(UnitRejection)
 const decodePlanJsonOption = Schema.decodeUnknownOption(PlanJsonCodec)
-const decodeRejectionJsonOption = Schema.decodeUnknownOption(RejectionJsonCodec)
 const decodeUnitOutcomeOption = Schema.decodeUnknownOption(UnitOutcome)
 const decodeEscalationResolutionOption = Schema.decodeUnknownOption(EscalationResolution)
 
-export const hasOutcomeTag = (opt: Option.Option<UnitOutcome>, tag: UnitOutcome["_tag"]): boolean =>
+export const hasOutcomeTag = <T extends UnitOutcome["_tag"]>(
+  opt: Option.Option<UnitOutcome>,
+  tag: T,
+): opt is Option.Some<Extract<UnitOutcome, { readonly _tag: T }>> =>
   match(opt)
     .with({ _tag: "None" }, () => false)
     .with({ _tag: "Some" }, ({ value }) =>
@@ -60,10 +71,10 @@ export const hasOutcomeTag = (opt: Option.Option<UnitOutcome>, tag: UnitOutcome[
     )
     .exhaustive()
 
-export const hasAttemptVerdict = (
+export const hasAttemptVerdict = <V extends WorkflowAttemptRecord["verdict"]>(
   record: WorkflowAttemptRecord,
-  expected: WorkflowAttemptRecord["verdict"],
-): boolean =>
+  expected: V,
+): record is Extract<WorkflowAttemptRecord, { readonly verdict: V }> =>
   match(record.verdict)
     .with("dispatched", (v) => v === expected)
     .with("completed", (v) => v === expected)
@@ -77,7 +88,7 @@ export const extractLastRejection = (
   }>,
   attemptsFromReadModel: ReadonlyArray<WorkflowAttemptRecord>,
   unitId: WorkUnitId,
-): UnitRejection => {
+): Effect.Effect<UnitRejection, WorkflowStoreFailureReason> => {
   for (let i = attemptOutcomes.length - 1; i >= 0; i -= 1) {
     const rejected = match(attemptOutcomes[i]!.outcome)
       .with({ _tag: "None" }, () => undefined)
@@ -89,27 +100,22 @@ export const extractLastRejection = (
       )
       .exhaustive()
     if (rejected !== undefined) {
-      return rejected
+      return Effect.succeed(rejected)
     }
   }
   const unitAttempts = attemptsFromReadModel
     .filter(
-      (a) => a.unitId === unitId && a.rejection !== undefined && hasAttemptVerdict(a, "rejected"),
+      (a): a is Extract<WorkflowAttemptRecord, { readonly verdict: "rejected" }> =>
+        a.unitId === unitId && hasAttemptVerdict(a, "rejected"),
     )
     .sort((a, b) => b.attempt - a.attempt)
   const latestReadAttempt = unitAttempts[0]
-  if (latestReadAttempt?.rejection !== undefined) {
-    const decoded = match(decodeRejectionJsonOption(latestReadAttempt.rejection))
-      .with({ _tag: "Some" }, ({ value }) => value)
-      .with({ _tag: "None" }, () => undefined)
-      .exhaustive()
-    if (decoded !== undefined) {
-      return decoded
-    }
+  if (latestReadAttempt !== undefined) {
+    return Effect.succeed(latestReadAttempt.rejection)
   }
-  return UnitRejection.cases.AgentFailed.make({
-    reason: AgentFailureReason.make("Unit retry budget exhausted"),
-  })
+  return Effect.fail(
+    toBoundedReason(`No recorded UnitRejection found for escalated unit '${unitId}'`),
+  )
 }
 
 export const findExplicitEscalation = (
@@ -135,11 +141,19 @@ export const findExplicitEscalation = (
   return undefined
 }
 
+export const storeOrLeaseToBoundedReason = (
+  err: WorkflowStoreUnavailableError | WriterLeaseHeldError,
+): WorkflowStoreFailureReason =>
+  match(err)
+    .with({ _tag: "WorkflowStoreUnavailableError" }, (e) => e.reason)
+    .with({ _tag: "WriterLeaseHeldError" }, (e) => toBoundedReason(e.message))
+    .exhaustive()
+
 export interface WorkflowRpcHandlerInput {
   readonly requestId: string
   readonly rawPayload: Readonly<Record<string, unknown>>
   readonly scope: DaemonRequestScopeAllowed
-  readonly writerLeaseEpoch: LeaseEpoch
+  readonly writerLeaseEpoch?: LeaseEpoch | undefined
   readonly runtime?: WorkflowDaemonRuntime | undefined
 }
 
@@ -148,19 +162,33 @@ export const withRunLock = <A, E>(
   runId: WorkflowRunId,
   effect: Effect.Effect<A, E>,
 ): Effect.Effect<A, E> =>
-  SynchronizedRef.modifyEffect(runtime.runMutexesRef, (map) => {
-    const existing = map.get(runId)
-    if (existing !== undefined) {
-      return Effect.succeed([existing, map] as const)
-    }
-    const sem = Semaphore.makeUnsafe(1)
-    return Effect.succeed([sem, new Map(map).set(runId, sem)] as const)
-  }).pipe(Effect.flatMap((sem) => sem.withPermit(effect)))
+  runtime.rebuildRpcGateSemaphore.withPermits(1)(
+    SynchronizedRef.modifyEffect(runtime.runMutexesRef, (map) => {
+      const existing = map.get(runId)
+      if (existing !== undefined) {
+        return Effect.succeed([existing, map] as const)
+      }
+      const sem = Semaphore.makeUnsafe(1)
+      return Effect.succeed([sem, new Map(map).set(runId, sem)] as const)
+    }).pipe(Effect.flatMap((sem) => sem.withPermit(effect))),
+  )
 
-export const isUnitStatus = (
+export const withRebuildLock = <A, E>(
+  runtime: WorkflowDaemonRuntime,
+  effect: Effect.Effect<A, E>,
+): Effect.Effect<A, E> =>
+  runtime.rebuildMutex.withPermit(
+    runtime.rebuildRpcGateSemaphore.withPermits(MAX_CONCURRENT_RUN_LOCKS)(
+      runtime.rebuildProjectionGateSemaphore.withPermits(MAX_CONCURRENT_RUN_LOCKS)(
+        runtime.journalWriteMutex.withPermit(effect),
+      ),
+    ),
+  )
+
+export const isUnitStatus = <S extends WorkflowUnitStatus>(
   record: WorkflowUnitRecord | undefined,
-  expected: WorkflowUnitStatus,
-): boolean =>
+  expected: S,
+): record is WorkflowUnitRecord & { readonly status: S } =>
   record !== undefined &&
   match(record.status)
     .with("pending", (s) => s === expected)
@@ -175,18 +203,23 @@ export const isRunTerminalState = (state: WorkflowRunState): boolean =>
     .with("running", "waiting", () => false)
     .exhaustive()
 
-export const isOptionPresent = <A>(opt: Option.Option<A>): boolean =>
+export const isOptionPresent = <A>(opt: Option.Option<A>): opt is Option.Some<A> =>
   match(opt)
     .with({ _tag: "Some" }, () => true)
     .with({ _tag: "None" }, () => false)
     .exhaustive()
 
+export const toWorkflowRpcRequestId = (raw: string): WorkflowRpcRequestId => {
+  const trimmed = raw.trim().slice(0, 256).trim()
+  return WorkflowRpcRequestId.make(trimmed.length > 0 ? trimmed : "unknown-request")
+}
+
 export const rpcSuccess = (
   requestId: string,
-  command: string,
-  result: unknown,
-): Record<string, unknown> => ({
-  id: requestId,
+  command: WorkflowDaemonCapability,
+  result: WorkflowRpcResult,
+): WorkflowRpcSuccessEnvelope => ({
+  id: toWorkflowRpcRequestId(requestId),
   ok: true,
   command,
   result,
@@ -194,15 +227,15 @@ export const rpcSuccess = (
 
 export const rpcError = (
   requestId: string,
-  command: string,
+  command: WorkflowDaemonCapability,
   detail: string,
   error?: string,
-): Record<string, unknown> => ({
-  id: requestId,
+): WorkflowRpcErrorEnvelope => ({
+  id: toWorkflowRpcRequestId(requestId),
   ok: false,
   command,
-  error: error ?? detail,
-  detail,
+  error: toBoundedReason(error ?? detail, "Workflow daemon RPC error"),
+  detail: toBoundedReason(detail, "Workflow daemon RPC error"),
 })
 
 export const validateRpcRepoRoot = Effect.fn("WorkflowRpcDaemon.validateRepoRoot")(function* (
@@ -233,14 +266,15 @@ export const checkDeferredResult = <S extends Schema.Constraint, E extends Schem
     readonly errorSchema: E
   },
 ) =>
-  engine
-    .deferredResult(deferred)
-    .pipe(
-      Effect.provideService(
-        WorkflowEngine.WorkflowInstance,
-        WorkflowEngine.WorkflowInstance.initial(HarnessTaskWorkflow, executionId),
-      ),
-    )
+  engine.deferredResult(deferred).pipe(
+    Effect.provideService(
+      WorkflowEngine.WorkflowInstance,
+      WorkflowEngine.WorkflowInstance.initial(HarnessTaskWorkflow, executionId),
+    ),
+    Effect.catchDefect((defect) =>
+      Effect.fail(toBoundedReason(defect, `Corrupt deferred payload on '${deferred.name}'`)),
+    ),
+  )
 
 export type UnitCycleState =
   | { readonly _tag: "Aborted"; readonly escalationOrdinal: EscalationOrdinal }
@@ -263,20 +297,31 @@ export const inspectActiveUnitCycle = Effect.fn("WorkflowRpcDaemon.inspectActive
       const escalationOrdinal = EscalationOrdinal.make(escNum)
       const escDeferred = makeUnitEscalationDeferred(unitId, escalationOrdinal)
       const escRes = yield* checkDeferredResult(engine, executionId, escDeferred)
-      const step = match(escRes)
-        .with({ _tag: "None" }, () => "active" as const)
+      const step = yield* match(escRes)
+        .with({ _tag: "None" }, () => Effect.succeed("active" as const))
         .with({ _tag: "Some" }, ({ value: exit }) =>
           Exit.match(exit, {
-            onFailure: () => "aborted" as const,
+            onFailure: (cause) =>
+              Effect.fail(
+                toBoundedReason(
+                  `Escalation deferred '${escDeferred.name}' failed: ${Cause.pretty(cause)}`,
+                ),
+              ),
             onSuccess: (rawVal) =>
               match(decodeEscalationResolutionOption(rawVal))
                 .with({ _tag: "Some" }, ({ value: res }) =>
                   match(res.decision)
-                    .with("retry", () => "retry" as const)
-                    .with("abort", () => "aborted" as const)
+                    .with("retry", () => Effect.succeed("retry" as const))
+                    .with("abort", () => Effect.succeed("aborted" as const))
                     .exhaustive(),
                 )
-                .with({ _tag: "None" }, () => "aborted" as const)
+                .with({ _tag: "None" }, () =>
+                  Effect.fail(
+                    toBoundedReason(
+                      `Corrupt EscalationResolution payload on deferred '${escDeferred.name}'`,
+                    ),
+                  ),
+                )
                 .exhaustive(),
           }),
         )
@@ -293,12 +338,27 @@ export const inspectActiveUnitCycle = Effect.fn("WorkflowRpcDaemon.inspectActive
         for (const attempt of ATTEMPTS) {
           const unitDef = makeUnitCompletionDeferred(unitId, attempt, escalationOrdinal)
           const unitRes = yield* checkDeferredResult(engine, executionId, unitDef)
-          const decodedOutcome = match(unitRes)
-            .with({ _tag: "None" }, () => Option.none<UnitOutcome>())
+          const decodedOutcome = yield* match(unitRes)
+            .with({ _tag: "None" }, () => Effect.succeedNone)
             .with({ _tag: "Some" }, ({ value: exit }) =>
               Exit.match(exit, {
-                onFailure: () => Option.none<UnitOutcome>(),
-                onSuccess: (raw) => decodeUnitOutcomeOption(raw),
+                onFailure: (cause) =>
+                  Effect.fail(
+                    toBoundedReason(
+                      `Unit completion deferred '${unitDef.name}' failed: ${Cause.pretty(cause)}`,
+                    ),
+                  ),
+                onSuccess: (raw) =>
+                  match(decodeUnitOutcomeOption(raw))
+                    .with({ _tag: "Some" }, ({ value }) => Effect.succeedSome(value))
+                    .with({ _tag: "None" }, () =>
+                      Effect.fail(
+                        toBoundedReason(
+                          `Corrupt UnitOutcome payload on deferred '${unitDef.name}'`,
+                        ),
+                      ),
+                    )
+                    .exhaustive(),
               }),
             )
             .exhaustive()
@@ -320,8 +380,35 @@ export interface ResolvedRunTarget {
   readonly runRecord?: WorkflowRunRecord | undefined
 }
 
-export const decodePlanFromRun = (run: WorkflowRunRecord): CompiledPlan | undefined =>
-  run.planJson !== undefined ? Option.getOrUndefined(decodePlanJsonOption(run.planJson)) : undefined
+export const decodePlanFromRunStrict = (
+  run: WorkflowRunRecord,
+): Effect.Effect<CompiledPlan, WorkflowStoreFailureReason> => {
+  if (run.planJson === undefined) {
+    return Effect.fail(
+      toBoundedReason(
+        `WorkflowDaemonError: Existing workflow run '${run.runId}' is missing stored planJson`,
+      ),
+    )
+  }
+  return match(decodePlanJsonOption(run.planJson))
+    .with({ _tag: "None" }, () =>
+      Effect.fail(
+        toBoundedReason(
+          `WorkflowDaemonError: Existing workflow run '${run.runId}' has corrupt stored planJson`,
+        ),
+      ),
+    )
+    .with({ _tag: "Some" }, ({ value: plan }) =>
+      plan.planSha === run.planSha && plan.runId === run.runId
+        ? Effect.succeed(plan)
+        : Effect.fail(
+            toBoundedReason(
+              `WorkflowDaemonError: Stored planJson for run '${run.runId}' does not match recorded runId/planSha`,
+            ),
+          ),
+    )
+    .exhaustive()
+}
 
 export const resolveRunTarget = Effect.fn("WorkflowRpcDaemon.resolveRunTarget")(function* (
   runtime: WorkflowDaemonRuntime,
@@ -331,23 +418,21 @@ export const resolveRunTarget = Effect.fn("WorkflowRpcDaemon.resolveRunTarget")(
   if (requestedRunId !== undefined) {
     const runOpt = yield* runtime.readModelQuery
       .getRun(requestedRunId)
-      .pipe(Effect.mapError((err) => err.reason))
+      .pipe(Effect.mapError(storeOrLeaseToBoundedReason))
     const runRecord = Option.getOrUndefined(runOpt)
     let plan = plansMap.get(requestedRunId)
-    if (plan === undefined && runRecord !== undefined) {
-      plan = decodePlanFromRun(runRecord)
-      if (plan !== undefined) {
-        const decodedPlan = plan
-        yield* SynchronizedRef.update(runtime.plansRef, (m) =>
-          new Map(m).set(decodedPlan.runId, decodedPlan),
-        )
-      }
+    if (plan === undefined && runRecord !== undefined && runRecord.planJson !== undefined) {
+      plan = yield* decodePlanFromRunStrict(runRecord)
+      const decodedPlan = plan
+      yield* SynchronizedRef.update(runtime.plansRef, (m) =>
+        new Map(m).set(decodedPlan.runId, decodedPlan),
+      )
     }
     if (plan !== undefined) {
-      const execIdStr = yield* HarnessTaskWorkflow.executionId({ plan })
+      const executionId = yield* executionIdOf(plan)
       return {
         runId: requestedRunId,
-        executionId: WorkflowExecutionId.make(execIdStr),
+        executionId,
         plan,
         runRecord,
       }
@@ -362,26 +447,23 @@ export const resolveRunTarget = Effect.fn("WorkflowRpcDaemon.resolveRunTarget")(
     return yield* Effect.fail(toBoundedReason(`Workflow run '${requestedRunId}' not found`))
   }
 
-  const runs = yield* runtime.readModelQuery.listRuns.pipe(Effect.mapError((err) => err.reason))
+  const runs = yield* runtime.readModelQuery.listRuns.pipe(
+    Effect.mapError(storeOrLeaseToBoundedReason),
+  )
   if (runs.length > 0) {
     const sorted = [...runs].sort((a, b) =>
       b.updatedMs !== a.updatedMs ? b.updatedMs - a.updatedMs : compareCodeUnits(b.runId, a.runId),
     )
     const latest = sorted[0]!
     let plan = plansMap.get(latest.runId)
-    if (plan === undefined) {
-      plan = decodePlanFromRun(latest)
-      if (plan !== undefined) {
-        const decodedPlan = plan
-        yield* SynchronizedRef.update(runtime.plansRef, (m) =>
-          new Map(m).set(decodedPlan.runId, decodedPlan),
-        )
-      }
+    if (plan === undefined && latest.planJson !== undefined) {
+      plan = yield* decodePlanFromRunStrict(latest)
+      const decodedPlan = plan
+      yield* SynchronizedRef.update(runtime.plansRef, (m) =>
+        new Map(m).set(decodedPlan.runId, decodedPlan),
+      )
     }
-    const executionId =
-      plan !== undefined
-        ? WorkflowExecutionId.make(yield* HarnessTaskWorkflow.executionId({ plan }))
-        : latest.executionId
+    const executionId = plan !== undefined ? yield* executionIdOf(plan) : latest.executionId
     return {
       runId: latest.runId,
       executionId,
@@ -393,10 +475,10 @@ export const resolveRunTarget = Effect.fn("WorkflowRpcDaemon.resolveRunTarget")(
   const cachedPlans = Array.from(plansMap.values())
   const latestCached = cachedPlans[cachedPlans.length - 1]
   if (latestCached !== undefined) {
-    const execIdStr = yield* HarnessTaskWorkflow.executionId({ plan: latestCached })
+    const executionId = yield* executionIdOf(latestCached)
     return {
       runId: latestCached.runId,
-      executionId: WorkflowExecutionId.make(execIdStr),
+      executionId,
       plan: latestCached,
     }
   }

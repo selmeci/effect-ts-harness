@@ -1,5 +1,5 @@
 import { dirname, join } from "node:path"
-import { Effect, Layer, Result, Schema } from "effect"
+import { Effect, Layer, Option, Schema } from "effect"
 import type * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import {
@@ -49,13 +49,43 @@ const PackageTagsManifestSchema = Schema.fromJsonString(
     ),
   }),
 )
-const decodePackageTagsOption = Schema.decodeUnknownOption(PackageTagsManifestSchema)
+const decodePackageTags = Schema.decodeUnknownEffect(PackageTagsManifestSchema)
 
-const toReviewFsError = (cwd: string, reason: unknown): WorkspaceFsError =>
-  new WorkspaceFsError({
-    filePath: WorkspaceFilePath.make(cwd),
+const getErrnoCode = (err: unknown): string | undefined =>
+  typeof err === "object" && err !== null && "code" in err && typeof err.code === "string"
+    ? err.code
+    : undefined
+
+const toReviewFsError = (filePath: string, reason: unknown): WorkspaceFsError => {
+  const safePath = match(Schema.decodeOption(WorkspaceFilePath)(filePath))
+    .with({ _tag: "Some" }, ({ value }) => value)
+    .with({ _tag: "None" }, () => WorkspaceFilePath.make("/invalid-review-path"))
+    .exhaustive()
+  return new WorkspaceFsError({
+    filePath: safePath,
     operation: WorkspaceFsOperation.make("read"),
     reason: toErrorReasonMessage(reason, "Workflow review routing failed"),
+  })
+}
+
+const readExistingFileTextOrFail = (
+  filePath: string,
+  hostIo: ExtendedHostIo,
+): Effect.Effect<Option.Option<string>, WorkspaceFsError> =>
+  Effect.gen(function* () {
+    if (!hostIo.existsSync(filePath) || !hostIo.isFileSync(filePath)) {
+      return Option.none()
+    }
+    return yield* Effect.try({
+      try: () => Option.some(hostIo.readTextSync(filePath)),
+      catch: (cause) =>
+        getErrnoCode(cause) === "ENOENT" ? ("ENOENT" as const) : toReviewFsError(filePath, cause),
+    }).pipe(
+      Effect.catchIf(
+        (err) => err === "ENOENT",
+        () => Effect.succeedNone,
+      ),
+    )
   })
 
 const normalizeRelPath = (raw: string): string => {
@@ -130,54 +160,59 @@ const collectManifestTags = (
   repoRoot: string,
   changedFiles: ReadonlyArray<string>,
   hostIo: ExtendedHostIo,
-): { readonly tiers: ReadonlyArray<NxTierTag>; readonly scopes: ReadonlyArray<NxScopeTag> } => {
-  const tiers = new Set<NxTierTag>()
-  const scopes = new Set<NxScopeTag>()
-  const visitedDirs = new Set<string>()
+): Effect.Effect<
+  { readonly tiers: ReadonlyArray<NxTierTag>; readonly scopes: ReadonlyArray<NxScopeTag> },
+  WorkspaceFsError
+> =>
+  Effect.gen(function* () {
+    const tiers = new Set<NxTierTag>()
+    const scopes = new Set<NxScopeTag>()
+    const visitedDirs = new Set<string>()
 
-  for (const relFile of changedFiles) {
-    let dir = dirname(join(repoRoot, relFile))
-    while (dir.length >= repoRoot.length) {
-      if (visitedDirs.has(dir)) {
-        break
-      }
-      visitedDirs.add(dir)
-      const pkgPath = join(dir, "package.json")
-      if (hostIo.existsSync(pkgPath) && hostIo.isFileSync(pkgPath)) {
-        const contentRes = Result.try(() => hostIo.readTextSync(pkgPath))
-        match(contentRes)
-          .with({ _tag: "Success" }, ({ success: raw }) => {
-            match(decodePackageTagsOption(raw))
-              .with({ _tag: "Some" }, ({ value }) => {
-                const rawTags = value.nx?.tags ?? value.tags ?? []
-                const parsed = parseManifestTags(rawTags)
-                for (const t of parsed.nxTags) {
-                  tiers.add(t)
-                }
-                for (const s of parsed.scopeTags) {
-                  scopes.add(s)
-                }
-              })
-              .with({ _tag: "None" }, () => undefined)
-              .exhaustive()
-          })
-          .with({ _tag: "Failure" }, () => undefined)
+    for (const relFile of changedFiles) {
+      let dir = dirname(join(repoRoot, relFile))
+      while (dir.length >= repoRoot.length) {
+        if (visitedDirs.has(dir)) {
+          break
+        }
+        visitedDirs.add(dir)
+        const pkgPath = join(dir, "package.json")
+        const rawOpt = yield* readExistingFileTextOrFail(pkgPath, hostIo)
+        const didMatchPkg = yield* match(rawOpt)
+          .with({ _tag: "None" }, () => Effect.succeed(false))
+          .with({ _tag: "Some" }, ({ value: raw }) =>
+            Effect.gen(function* () {
+              const decoded = yield* decodePackageTags(raw).pipe(
+                Effect.mapError((err) => toReviewFsError(pkgPath, err)),
+              )
+              const rawTags = decoded.nx?.tags ?? decoded.tags ?? []
+              const parsed = parseManifestTags(rawTags)
+              for (const t of parsed.nxTags) {
+                tiers.add(t)
+              }
+              for (const s of parsed.scopeTags) {
+                scopes.add(s)
+              }
+              return true
+            }),
+          )
           .exhaustive()
-        break
+        if (didMatchPkg) {
+          break
+        }
+        const parent = dirname(dir)
+        if (parent === dir) {
+          break
+        }
+        dir = parent
       }
-      const parent = dirname(dir)
-      if (parent === dir) {
-        break
-      }
-      dir = parent
     }
-  }
 
-  return {
-    tiers: Array.from(tiers).slice(0, 16),
-    scopes: Array.from(scopes).slice(0, 16),
-  }
-}
+    return {
+      tiers: Array.from(tiers).slice(0, 16),
+      scopes: Array.from(scopes).slice(0, 16),
+    }
+  })
 
 /** Routes changed paths at the end of a workflow run via `Harness.routeReviewDiff`. */
 export const routeWorkflowReviewImpl = Effect.fn("Harness.routeWorkflowReview")(function* (
@@ -232,15 +267,13 @@ export const routeWorkflowReviewImpl = Effect.fn("Harness.routeWorkflowReview")(
   let untrackedLineCount = 0
   for (const rel of untracked) {
     const absPath = join(input.canonicalRepoRoot, rel)
-    if (hostIo.existsSync(absPath) && hostIo.isFileSync(absPath)) {
-      const readRes = Result.try(() => hostIo.readTextSync(absPath))
-      match(readRes)
-        .with({ _tag: "Success" }, ({ success: content }) => {
-          untrackedLineCount += content.length === 0 ? 0 : content.split(/\r?\n/).length
-        })
-        .with({ _tag: "Failure" }, () => undefined)
-        .exhaustive()
-    }
+    const contentOpt = yield* readExistingFileTextOrFail(absPath, hostIo)
+    match(contentOpt)
+      .with({ _tag: "None" }, () => undefined)
+      .with({ _tag: "Some" }, ({ value: content }) => {
+        untrackedLineCount += content.length === 0 ? 0 : content.split(/\r?\n/).length
+      })
+      .exhaustive()
   }
 
   const changedLineCount = ReviewChangedLines.make(
@@ -251,7 +284,7 @@ export const routeWorkflowReviewImpl = Effect.fn("Harness.routeWorkflowReview")(
     `${statOut.trim()}${untrackedSummary}`.trim().slice(0, 4096),
   )
 
-  const manifestTags = collectManifestTags(input.canonicalRepoRoot, changedFiles, hostIo)
+  const manifestTags = yield* collectManifestTags(input.canonicalRepoRoot, changedFiles, hostIo)
   const boundedChangedFiles = changedFiles
     .slice(0, 200)
     .map((file) => ReviewRawFileInput.make(file.slice(0, 512)))

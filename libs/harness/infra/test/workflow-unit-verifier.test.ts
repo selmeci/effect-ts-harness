@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect, Option, Schema, Tracer } from "effect"
+import { Cause, Deferred, Effect, type Exit, Fiber, Option, Schema, Tracer } from "effect"
 import { match } from "ts-pattern"
 import {
   AbsoluteRepoRoot,
@@ -41,6 +41,9 @@ import {
   WorkflowRunId,
   WorkspaceFilePath,
   WorkspaceTreeHash,
+  isPureInterruptCause,
+  parsePackageVerifyCommand,
+  toPackageVerifyCommandArgv,
 } from "@harness/contract"
 import { makeMockDecisionModelLayer } from "@harness/decision"
 import { type SpanSample, decideSpanBudgets, writeVerifyStamp } from "@harness/gates"
@@ -73,7 +76,10 @@ import {
   startScopedUnixSocketDaemon,
   startWorkflowViaDaemon,
 } from "../src/index.js"
-import { resolveWorkflowRuntimePaths } from "../src/worktree-repo-root.js"
+import {
+  resolveWorkflowRuntimePaths,
+  resolveWorkflowWorktreeDir,
+} from "../src/worktree-repo-root.js"
 
 const runWithTestTracer = <A, E, R>(
   testId: string,
@@ -189,6 +195,81 @@ const makeStampHostIo = (baseEnv: Readonly<Record<string, string | undefined>>):
   getEnv: () => baseEnv,
 })
 
+const makeSliceUnit = (
+  unitId = "alpha-slice",
+  branch = "slice/alpha-unit",
+  ownedRelPaths: ReadonlyArray<string> = ["libs/alpha"],
+) => ({
+  _tag: "SliceUnit" as const,
+  unitId: WorkUnitId.make(unitId),
+  branch: SliceBranchName.make(branch),
+  waveIndex: WaveIndex.make(0),
+  dependsOn: [],
+  ownedRelPaths: ownedRelPaths.map((p) => OwnedRelPath.make(p)),
+  earsKeys: [EarsRequirementKey.make("REQ-2.1")],
+})
+
+const makePackageUnit = (overrides?: {
+  readonly unitId?: string
+  readonly ownedRelPaths?: ReadonlyArray<string>
+  readonly command?: string
+}) => ({
+  _tag: "PackageUnit" as const,
+  unitId: WorkUnitId.make(overrides?.unitId ?? "pkg-alpha"),
+  projectName: NxProjectName.make("@harness/alpha"),
+  waveIndex: WaveIndex.make(0),
+  dependsOn: [],
+  ownedRelPaths: (overrides?.ownedRelPaths ?? ["libs/alpha"]).map((p) => OwnedRelPath.make(p)),
+  stubKeys: [StubSymbolKey.make("Alpha.run")],
+  earsKeys: [EarsRequirementKey.make("REQ-2.1")],
+  packageVerifyCommand: PackageVerifyCommand.make(
+    overrides?.command ?? "pnpm nx run @harness/alpha:verify",
+  ),
+})
+
+const makeEpicPlan = (
+  baseSha: GitCommitSha,
+  runId = "run-l1-wt-1",
+  units = [
+    makeSliceUnit("s-alpha", "slice/wf3-alpha", ["libs/alpha"]),
+    makeSliceUnit("s-beta", "slice/wf3-beta", ["libs/beta"]),
+  ],
+): CompiledPlan => ({
+  runId: WorkflowRunId.make(runId),
+  level: "epic",
+  planSha: PlanSha256.make("b".repeat(64)),
+  baseSha,
+  mode: { _tag: "Manual" },
+  units,
+  sharedStepPaths: [],
+})
+
+const writeExecutableScript = (binDir: string, name: string, jsBody: string): void => {
+  mkdirSync(binDir, { recursive: true })
+  const scriptPath = join(binDir, name)
+  writeFileSync(scriptPath, `#!/usr/bin/env node\n${jsBody}\n`, "utf8")
+  chmodSync(scriptPath, 0o755)
+}
+
+const expectWorkspaceFsErrorExit = <A, E extends { readonly _tag: string }>(
+  exit: Exit.Exit<A, E>,
+  label: string,
+): void => {
+  match(exit)
+    .with({ _tag: "Failure" }, ({ cause }) => {
+      expect(
+        Option.match(Cause.findErrorOption(cause), {
+          onNone: () => undefined,
+          onSome: (e) => e._tag,
+        }),
+      ).toBe("WorkspaceFsError")
+    })
+    .with({ _tag: "Success" }, () => {
+      expect.unreachable(label)
+    })
+    .exhaustive()
+}
+
 const decodeJsonLine = Schema.decodeSync(
   Schema.fromJsonString(
     Schema.Struct({
@@ -198,156 +279,160 @@ const decodeJsonLine = Schema.decodeSync(
   ),
 )
 
-describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, and DaemonClient", () => {
+describe("UnitVerifier (L1 epic, L2 slice, shared-step)", () => {
   it.live(
-    "L1 epic unit verification checks .harness/verify-stamp.json with HARNESS_WORKTREE_ID unset and rejects missing/stale stamps",
+    "L1 epic rejects uncommitted edits with AgentFailed even when HARNESS_WORKTREE_ID is set",
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
           const { repoRoot, baseSha } = initGitRepo(dir)
-          const sliceUnit = {
-            _tag: "SliceUnit" as const,
-            unitId: WorkUnitId.make("alpha-slice"),
-            branch: SliceBranchName.make("slice/alpha-unit"),
-            waveIndex: WaveIndex.make(0),
-            dependsOn: [],
-            ownedRelPaths: [OwnedRelPath.make("libs/alpha")],
-            earsKeys: [EarsRequirementKey.make("REQ-2.1")],
-          }
-
           writeFileSync(
             join(repoRoot, "libs", "alpha", "src", "index.ts"),
             "export const alpha = 2\n",
             "utf8",
           )
-
-          const envWithWorktreeId: Readonly<Record<string, string | undefined>> = {
-            ...process.env,
-            HARNESS_WORKTREE_ID: "must-be-ignored-in-l1",
-          }
-
-          // Uncommitted edits on L1 epic must be rejected (AgentFailed)
-          const uncommittedOutcome = yield* completeUnitImpl(
+          const outcome = yield* completeUnitImpl(
             {
               runId: WorkflowRunId.make("run-l1-0001"),
               level: "epic",
               baseSha,
-              unit: sliceUnit,
+              unit: makeSliceUnit(),
               attempt: AttemptNumber.make(1),
               cwd: repoRoot,
               siblingInFlightOwnedPaths: [],
             },
-            { env: envWithWorktreeId },
+            { env: { ...process.env, HARNESS_WORKTREE_ID: "must-be-ignored-in-l1" } },
           )
-          match(uncommittedOutcome)
+          match(outcome)
             .with({ _tag: "Rejected" }, (r) => {
               expect(r.rejection._tag).toBe("AgentFailed")
             })
             .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
-              expect.unreachable("Expected Rejected(AgentFailed) on uncommitted L1 edit")
-            })
-            .exhaustive()
-
-          // Commit L1 work before checking stamp
-          execFileSync("git", ["add", "libs/alpha/src/index.ts"], { cwd: repoRoot })
-          execFileSync("git", ["commit", "-m", "alpha slice work"], {
-            cwd: repoRoot,
-            stdio: "ignore",
-          })
-
-          // Missing stamp -> StampMissing
-          const missingOutcome = yield* completeUnitImpl(
-            {
-              runId: WorkflowRunId.make("run-l1-0001"),
-              level: "epic",
-              baseSha,
-              unit: sliceUnit,
-              attempt: AttemptNumber.make(1),
-              cwd: repoRoot,
-              siblingInFlightOwnedPaths: [],
-            },
-            { env: envWithWorktreeId },
-          )
-          expect(missingOutcome._tag).toBe("Rejected")
-          match(missingOutcome)
-            .with({ _tag: "Rejected" }, (r) => {
-              expect(r.rejection._tag).toBe("StampMissing")
-            })
-            .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
-              expect.unreachable("Expected Rejected(StampMissing)")
-            })
-            .exhaustive()
-
-          // Write valid L1 repo-level verify stamp (without HARNESS_WORKTREE_ID)
-          const cleanEnv: Record<string, string | undefined> = { ...process.env }
-          Reflect.deleteProperty(cleanEnv, "HARNESS_WORKTREE_ID")
-          Reflect.deleteProperty(cleanEnv, "HARNESS_STATE_DIR")
-          const stamp = writeVerifyStamp(repoRoot, makeStampHostIo(cleanEnv), "slice/alpha-unit")
-
-          const okOutcome = yield* completeUnitImpl(
-            {
-              runId: WorkflowRunId.make("run-l1-0001"),
-              level: "epic",
-              baseSha,
-              unit: sliceUnit,
-              attempt: AttemptNumber.make(1),
-              cwd: repoRoot,
-              siblingInFlightOwnedPaths: [],
-            },
-            { env: envWithWorktreeId },
-          )
-          match(okOutcome)
-            .with({ _tag: "Completed" }, (completed) => {
-              expect(completed.unitId).toBe("alpha-slice")
-              expect(completed.changedPaths).toEqual([OwnedRelPath.make("libs/alpha/src/index.ts")])
-              expect(completed.packageStampHash).toBe(stamp.treeHash)
-            })
-            .with({ _tag: "Rejected" }, { _tag: "Escalated" }, () => {
-              expect.unreachable("Expected Completed after valid verify stamp")
+              expect.unreachable("Expected Rejected(AgentFailed)")
             })
             .exhaustive()
         }),
       ),
   )
 
+  it.live("L1 epic rejects missing verify stamp with StampMissing", () =>
+    withTempDir((dir) =>
+      Effect.gen(function* () {
+        const { repoRoot, baseSha } = initGitRepo(dir)
+        writeFileSync(
+          join(repoRoot, "libs", "alpha", "src", "index.ts"),
+          "export const alpha = 2\n",
+          "utf8",
+        )
+        execFileSync("git", ["add", "libs/alpha/src/index.ts"], { cwd: repoRoot })
+        execFileSync("git", ["commit", "-m", "alpha slice work"], {
+          cwd: repoRoot,
+          stdio: "ignore",
+        })
+
+        const outcome = yield* completeUnitImpl(
+          {
+            runId: WorkflowRunId.make("run-l1-0001"),
+            level: "epic",
+            baseSha,
+            unit: makeSliceUnit(),
+            attempt: AttemptNumber.make(1),
+            cwd: repoRoot,
+            siblingInFlightOwnedPaths: [],
+          },
+          { env: { ...process.env, HARNESS_WORKTREE_ID: "must-be-ignored-in-l1" } },
+        )
+        match(outcome)
+          .with({ _tag: "Rejected" }, (r) => {
+            expect(r.rejection._tag).toBe("StampMissing")
+          })
+          .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
+            expect.unreachable("Expected Rejected(StampMissing)")
+          })
+          .exhaustive()
+      }),
+    ),
+  )
+
   it.live(
-    "L2 slice unit verification runs packageVerifyCommand with HARNESS_WORKTREE_ID, excludes sibling paths, and rejects write-set violations & empty diffs",
+    "L1 epic completes after valid repo-level verify stamp ignoring HARNESS_WORKTREE_ID",
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
           const { repoRoot, baseSha } = initGitRepo(dir)
-          const pkgUnit = {
-            _tag: "PackageUnit" as const,
-            unitId: WorkUnitId.make("pkg-alpha"),
-            projectName: NxProjectName.make("@harness/alpha"),
-            waveIndex: WaveIndex.make(0),
-            dependsOn: [],
-            ownedRelPaths: [OwnedRelPath.make("libs/alpha")],
-            stubKeys: [StubSymbolKey.make("Alpha.run")],
-            earsKeys: [EarsRequirementKey.make("REQ-2.1")],
-            packageVerifyCommand: PackageVerifyCommand.make("pnpm nx run @harness/alpha:verify"),
-          }
-
-          // Empty diff -> Rejected(AgentFailed)
-          const emptyOutcome = yield* completeUnitImpl({
-            runId: WorkflowRunId.make("run-l2-0001"),
-            level: "slice",
-            baseSha,
-            unit: pkgUnit,
-            attempt: AttemptNumber.make(1),
+          writeFileSync(
+            join(repoRoot, "libs", "alpha", "src", "index.ts"),
+            "export const alpha = 2\n",
+            "utf8",
+          )
+          execFileSync("git", ["add", "libs/alpha/src/index.ts"], { cwd: repoRoot })
+          execFileSync("git", ["commit", "-m", "alpha slice work"], {
             cwd: repoRoot,
-            siblingInFlightOwnedPaths: [],
+            stdio: "ignore",
           })
-          match(emptyOutcome)
-            .with({ _tag: "Rejected" }, (r) => {
-              expect(r.rejection._tag).toBe("AgentFailed")
+
+          const cleanEnv: Record<string, string | undefined> = { ...process.env }
+          Reflect.deleteProperty(cleanEnv, "HARNESS_WORKTREE_ID")
+          Reflect.deleteProperty(cleanEnv, "HARNESS_STATE_DIR")
+          const stamp = writeVerifyStamp(repoRoot, makeStampHostIo(cleanEnv), "slice/alpha-unit")
+
+          const outcome = yield* completeUnitImpl(
+            {
+              runId: WorkflowRunId.make("run-l1-0001"),
+              level: "epic",
+              baseSha,
+              unit: makeSliceUnit(),
+              attempt: AttemptNumber.make(1),
+              cwd: repoRoot,
+              siblingInFlightOwnedPaths: [],
+            },
+            { env: { ...process.env, HARNESS_WORKTREE_ID: "must-be-ignored-in-l1" } },
+          )
+          match(outcome)
+            .with({ _tag: "Completed" }, (c) => {
+              expect(c.unitId).toBe("alpha-slice")
+              expect(c.changedPaths).toEqual([OwnedRelPath.make("libs/alpha/src/index.ts")])
+              expect(c.packageStampHash).toBe(stamp.treeHash)
             })
-            .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
-              expect.unreachable("Expected Rejected(AgentFailed) on empty diff")
+            .with({ _tag: "Rejected" }, { _tag: "Escalated" }, () => {
+              expect.unreachable("Expected Completed")
             })
             .exhaustive()
+        }),
+      ),
+  )
 
-          // Edit inside owned path + edit inside sibling in-flight path
+  it.live("L2 slice rejects empty diff with AgentFailed", () =>
+    withTempDir((dir) =>
+      Effect.gen(function* () {
+        const { repoRoot, baseSha } = initGitRepo(dir)
+        const outcome = yield* completeUnitImpl({
+          runId: WorkflowRunId.make("run-l2-0001"),
+          level: "slice",
+          baseSha,
+          unit: makePackageUnit(),
+          attempt: AttemptNumber.make(1),
+          cwd: repoRoot,
+          siblingInFlightOwnedPaths: [],
+        })
+        match(outcome)
+          .with({ _tag: "Rejected" }, (r) => {
+            expect(r.rejection._tag).toBe("AgentFailed")
+          })
+          .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
+            expect.unreachable("Expected Rejected(AgentFailed)")
+          })
+          .exhaustive()
+      }),
+    ),
+  )
+
+  it.live(
+    "L2 slice rejects unowned changes with WriteSetViolation and completes when excluded via siblingInFlightOwnedPaths",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
           writeFileSync(
             join(repoRoot, "libs", "alpha", "src", "index.ts"),
             "export const alpha = 42\n",
@@ -364,8 +449,7 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
             readonly args: ReadonlyArray<string>
             readonly worktreeId: string | undefined
           }> = []
-
-          const makeMockHostIo = (verifyExitCode: number): ExtendedHostIo => ({
+          const mockHostIo: ExtendedHostIo = {
             ...nodeSyncHostIo,
             execFileSync: (
               cmd: string,
@@ -375,32 +459,22 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
               if (cmd === "git") {
                 return nodeSyncHostIo.execFileSync(cmd, args, opts)
               }
-              recordedCalls.push({
-                cmd,
-                args,
-                worktreeId: opts?.env?.HARNESS_WORKTREE_ID,
-              })
-              return {
-                _tag: "Exited",
-                exitCode: verifyExitCode,
-                stdout: "",
-                stderr: verifyExitCode === 0 ? "" : "failed",
-              }
+              recordedCalls.push({ cmd, args, worktreeId: opts?.env?.HARNESS_WORKTREE_ID })
+              return { _tag: "Exited", exitCode: 0, stdout: "", stderr: "" }
             },
-          })
+          }
 
-          // Without sibling exclusion -> WriteSetViolation on libs/beta/src/index.ts
           const violationOutcome = yield* completeUnitImpl(
             {
               runId: WorkflowRunId.make("run-l2-0001"),
               level: "slice",
               baseSha,
-              unit: pkgUnit,
+              unit: makePackageUnit(),
               attempt: AttemptNumber.make(1),
               cwd: repoRoot,
               siblingInFlightOwnedPaths: [],
             },
-            { hostIo: makeMockHostIo(0) },
+            { hostIo: mockHostIo },
           )
           match(violationOutcome)
             .with({ _tag: "Rejected" }, (r) => {
@@ -423,15 +497,14 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
             })
             .exhaustive()
 
-          // With sibling exclusion for libs/beta -> runs package verify command with HARNESS_WORKTREE_ID and succeeds
-          const layer = makeUnitVerifierLayer({ hostIo: makeMockHostIo(0) })
+          const layer = makeUnitVerifierLayer({ hostIo: mockHostIo })
           const passOutcome = yield* Effect.gen(function* () {
             const verifier = yield* UnitVerifier
             return yield* verifier.completeUnit({
               runId: WorkflowRunId.make("run-l2-0001"),
               level: "slice",
               baseSha,
-              unit: pkgUnit,
+              unit: makePackageUnit(),
               attempt: AttemptNumber.make(2),
               cwd: repoRoot,
               siblingInFlightOwnedPaths: [OwnedRelPath.make("libs/beta")],
@@ -449,31 +522,55 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
             .exhaustive()
 
           expect(recordedCalls).toEqual([
-            {
-              cmd: "pnpm",
-              args: ["nx", "run", "@harness/alpha:verify"],
-              worktreeId: "pkg-alpha",
-            },
+            { cmd: "pnpm", args: ["nx", "run", "@harness/alpha:verify"], worktreeId: "pkg-alpha" },
           ])
+        }),
+      ),
+  )
 
-          // Non-zero exit code -> PackageVerifyFailed clamped to 1..255
-          const failOutcome = yield* completeUnitImpl(
+  it.live(
+    "L2 slice rejects non-zero exit with PackageVerifyFailed(non-zero-exit), clamped exitCode 1..255, and detail",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
+          writeFileSync(
+            join(repoRoot, "libs", "alpha", "src", "index.ts"),
+            "export const alpha = 42\n",
+            "utf8",
+          )
+          const mockHostIo: ExtendedHostIo = {
+            ...nodeSyncHostIo,
+            execFileSync: (cmd, args, opts) =>
+              cmd === "git"
+                ? nodeSyncHostIo.execFileSync(cmd, args, opts)
+                : {
+                    _tag: "Exited",
+                    exitCode: 300,
+                    stdout: "",
+                    stderr: "  lint failed at line 9  \n",
+                  },
+          }
+
+          const outcome = yield* completeUnitImpl(
             {
               runId: WorkflowRunId.make("run-l2-0001"),
               level: "slice",
               baseSha,
-              unit: pkgUnit,
+              unit: makePackageUnit(),
               attempt: AttemptNumber.make(3),
               cwd: repoRoot,
-              siblingInFlightOwnedPaths: [OwnedRelPath.make("libs/beta")],
+              siblingInFlightOwnedPaths: [],
             },
-            { hostIo: makeMockHostIo(300) },
+            { hostIo: mockHostIo },
           )
-          match(failOutcome)
+          match(outcome)
             .with({ _tag: "Rejected" }, (r) => {
               match(r.rejection)
                 .with({ _tag: "PackageVerifyFailed" }, (p) => {
                   expect(p.exitCode).toBe(255)
+                  expect(p.failureKind).toBe("non-zero-exit")
+                  expect(p.detail).toBe("lint failed at line 9")
                 })
                 .with(
                   { _tag: "AgentFailed" },
@@ -489,29 +586,97 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
               expect.unreachable("Expected Rejected(PackageVerifyFailed)")
             })
             .exhaustive()
+        }),
+      ),
+  )
 
-          // One-way ownership edge case: owning libs/alpha/src must NOT cover libs/alpha-extra/file.ts
-          // and owning libs/alpha/src/index.ts must NOT cover libs/alpha/src/other.ts
+  it.live(
+    "L2 slice enforces case-sensitive NFC ownership and exact boundary matching (F-13.2 / F-23.6)",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
+          mkdirSync(join(repoRoot, "Src"), { recursive: true })
+          mkdirSync(join(repoRoot, "libs", "alpha-extra"), { recursive: true })
+          writeFileSync(join(repoRoot, "Src", "A.ts"), "export const upper = 1\n", "utf8")
           writeFileSync(
             join(repoRoot, "libs", "alpha", "src", "other.ts"),
             "export const o = 1\n",
             "utf8",
           )
-          const narrowUnit = {
-            ...pkgUnit,
-            ownedRelPaths: [OwnedRelPath.make("libs/alpha/src/index.ts")],
+          writeFileSync(
+            join(repoRoot, "libs", "alpha-extra", "file.ts"),
+            "export const extra = 1\n",
+            "utf8",
+          )
+
+          const mockHostIo: ExtendedHostIo = {
+            ...nodeSyncHostIo,
+            execFileSync: (cmd, args, opts) =>
+              cmd === "git"
+                ? nodeSyncHostIo.execFileSync(cmd, args, opts)
+                : { _tag: "Exited", exitCode: 0, stdout: "", stderr: "" },
           }
-          const narrowOutcome = yield* completeUnitImpl(
+
+          // Case mismatch + sibling-prefix ("libs/alpha" vs "libs/alpha-extra")
+          const caseMismatchOutcome = yield* completeUnitImpl(
             {
-              runId: WorkflowRunId.make("run-l2-0001"),
+              runId: WorkflowRunId.make("run-case-1"),
               level: "slice",
               baseSha,
-              unit: narrowUnit,
+              unit: makePackageUnit({ ownedRelPaths: ["src", "libs/alpha"] }),
               attempt: AttemptNumber.make(1),
               cwd: repoRoot,
-              siblingInFlightOwnedPaths: [OwnedRelPath.make("libs/beta")],
+              siblingInFlightOwnedPaths: [],
             },
-            { hostIo: makeMockHostIo(0) },
+            { hostIo: mockHostIo },
+          )
+          match(caseMismatchOutcome)
+            .with({ _tag: "Rejected" }, (r) => {
+              match(r.rejection)
+                .with({ _tag: "WriteSetViolation" }, (v) => {
+                  expect(v.offendingPaths).toEqual([
+                    OwnedRelPath.make("Src/A.ts"),
+                    OwnedRelPath.make("libs/alpha-extra/file.ts"),
+                  ])
+                })
+                .with(
+                  { _tag: "AgentFailed" },
+                  { _tag: "PackageVerifyFailed" },
+                  { _tag: "StampMissing" },
+                  () => {
+                    expect.unreachable(
+                      "Expected WriteSetViolation on Src/A.ts and libs/alpha-extra/file.ts",
+                    )
+                  },
+                )
+                .exhaustive()
+            })
+            .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
+              expect.unreachable("Expected Rejected(WriteSetViolation)")
+            })
+            .exhaustive()
+
+          // Exact-file boundary: owning "libs/alpha/src/index.ts" rejects "libs/alpha/src/other.ts"
+          const narrowFileDir = join(dir, "narrow-repo")
+          mkdirSync(narrowFileDir, { recursive: true })
+          const { repoRoot: narrowRoot, baseSha: narrowBase } = initGitRepo(narrowFileDir)
+          writeFileSync(
+            join(narrowRoot, "libs", "alpha", "src", "other.ts"),
+            "export const o = 2\n",
+            "utf8",
+          )
+          const narrowOutcome = yield* completeUnitImpl(
+            {
+              runId: WorkflowRunId.make("run-narrow-1"),
+              level: "slice",
+              baseSha: narrowBase,
+              unit: makePackageUnit({ ownedRelPaths: ["libs/alpha/src/index.ts"] }),
+              attempt: AttemptNumber.make(1),
+              cwd: narrowRoot,
+              siblingInFlightOwnedPaths: [],
+            },
+            { hostIo: mockHostIo },
           )
           match(narrowOutcome)
             .with({ _tag: "Rejected" }, (r) => {
@@ -524,7 +689,7 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
                   { _tag: "PackageVerifyFailed" },
                   { _tag: "StampMissing" },
                   () => {
-                    expect.unreachable("Expected WriteSetViolation on narrow ownership")
+                    expect.unreachable("Expected WriteSetViolation for non-owned other.ts")
                   },
                 )
                 .exhaustive()
@@ -533,12 +698,509 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
               expect.unreachable("Expected Rejected(WriteSetViolation)")
             })
             .exhaustive()
+
+          // Unicode NFC/NFD normalization: owner NFC "Café.ts" matches NFD "Cafe\u0301.ts" on disk
+          const unicodeDir = join(dir, "unicode-repo")
+          mkdirSync(unicodeDir, { recursive: true })
+          const { repoRoot: unicodeRoot, baseSha: unicodeBase } = initGitRepo(unicodeDir)
+          writeFileSync(
+            join(unicodeRoot, "libs", "alpha", "src", "Cafe\u0301.ts"),
+            "export const cafe = 1\n",
+            "utf8",
+          )
+          const unicodeOutcome = yield* completeUnitImpl(
+            {
+              runId: WorkflowRunId.make("run-unicode-1"),
+              level: "slice",
+              baseSha: unicodeBase,
+              unit: makePackageUnit({ ownedRelPaths: ["libs/alpha/src/Caf\u00e9.ts"] }),
+              attempt: AttemptNumber.make(1),
+              cwd: unicodeRoot,
+              siblingInFlightOwnedPaths: [],
+            },
+            { hostIo: mockHostIo },
+          )
+          expect(unicodeOutcome._tag).toBe("Completed")
+        }),
+      ),
+  )
+
+  it("parsePackageVerifyCommand and toPackageVerifyCommandArgv parse supported command variants canonically (F-13.3 / S-3.1)", () => {
+    const pnpmNxRun = parsePackageVerifyCommand(
+      PackageVerifyCommand.make("pnpm nx run @harness/alpha:verify"),
+    )
+    expect(Option.isOption(pnpmNxRun)).toBe(true)
+    match(pnpmNxRun)
+      .with({ _tag: "Some" }, ({ value }) => {
+        expect(value._tag).toBe("NxRun")
+        expect(toPackageVerifyCommandArgv(value)).toEqual({
+          executable: "pnpm",
+          args: ["nx", "run", "@harness/alpha:verify"],
+        })
+      })
+      .with({ _tag: "None" }, () => {
+        expect.unreachable("Expected Some")
+      })
+      .exhaustive()
+
+    const nxAffected = parsePackageVerifyCommand(
+      PackageVerifyCommand.make("nx affected -t typecheck"),
+    )
+    match(nxAffected)
+      .with({ _tag: "Some" }, ({ value }) => {
+        expect(value._tag).toBe("NxAffected")
+        expect(toPackageVerifyCommandArgv(value)).toEqual({
+          executable: "nx",
+          args: ["affected", "-t", "typecheck"],
+        })
+      })
+      .with({ _tag: "None" }, () => {
+        expect.unreachable("Expected Some")
+      })
+      .exhaustive()
+
+    const pnpmFilter = parsePackageVerifyCommand(
+      PackageVerifyCommand.make("pnpm --filter @harness/infra lint"),
+    )
+    match(pnpmFilter)
+      .with({ _tag: "Some" }, ({ value }) => {
+        expect(value._tag).toBe("PnpmFilter")
+        expect(toPackageVerifyCommandArgv(value)).toEqual({
+          executable: "pnpm",
+          args: ["--filter", "@harness/infra", "lint"],
+        })
+      })
+      .with({ _tag: "None" }, () => {
+        expect.unreachable("Expected Some")
+      })
+      .exhaustive()
+  })
+
+  it.live("empty or invalid packageVerifyCommand fails closed with WorkspaceFsError (F-13.1)", () =>
+    withTempDir((dir) =>
+      Effect.gen(function* () {
+        const { repoRoot, baseSha } = initGitRepo(dir)
+        writeFileSync(
+          join(repoRoot, "libs", "alpha", "src", "index.ts"),
+          "export const alpha = 55\n",
+          "utf8",
+        )
+        const invalidCmdUnit = {
+          ...makePackageUnit(),
+          packageVerifyCommand: "" as PackageVerifyCommand,
+        }
+        const exit = yield* Effect.exit(
+          completeUnitImpl({
+            runId: WorkflowRunId.make("run-empty-cmd"),
+            level: "slice",
+            baseSha,
+            unit: invalidCmdUnit,
+            attempt: AttemptNumber.make(1),
+            cwd: repoRoot,
+            siblingInFlightOwnedPaths: [],
+          }),
+        )
+        match(exit)
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            expect(
+              Option.match(Cause.findErrorOption(cause), {
+                onNone: () => undefined,
+                onSome: (e) => e._tag,
+              }),
+            ).toBe("WorkspaceFsError")
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected WorkspaceFsError for empty packageVerifyCommand")
+          })
+          .exhaustive()
+      }),
+    ),
+  )
+
+  it.live(
+    "real subprocess strips HARNESS_STATE_DIR, sets HARNESS_WORKTREE_ID, and meets SpanBudget (F-23.4)",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
+          const binDir = join(dir, "bin")
+          const envCapturePath = join(dir, "captured-env.json")
+          writeExecutableScript(
+            binDir,
+            "nx",
+            `const fs = require("node:fs")
+fs.writeFileSync(${JSON.stringify(envCapturePath)}, JSON.stringify({ wid: process.env.HARNESS_WORKTREE_ID || null, sdir: process.env.HARNESS_STATE_DIR || null }))
+process.exit(0)`,
+          )
+          writeFileSync(
+            join(repoRoot, "libs", "alpha", "src", "index.ts"),
+            "export const alpha = 55\n",
+            "utf8",
+          )
+          const { result: outcome, spans } = yield* runWithTestTracer(
+            "completeUnit.async",
+            completeUnitImpl(
+              {
+                runId: WorkflowRunId.make("run-async-1"),
+                level: "slice",
+                baseSha,
+                unit: makePackageUnit({
+                  unitId: "pkg-async",
+                  command: "nx run @harness/alpha:verify",
+                }),
+                attempt: AttemptNumber.make(1),
+                cwd: repoRoot,
+                siblingInFlightOwnedPaths: [],
+              },
+              {
+                env: {
+                  ...process.env,
+                  PATH: `${binDir}:${process.env.PATH ?? ""}`,
+                  HARNESS_STATE_DIR: "/tmp/inherited-state-dir-must-be-stripped",
+                  HARNESS_WORKTREE_ID: "parent-worktree-id",
+                },
+              },
+            ),
+          )
+          expect(spans.some((s) => s.name === "Harness.completeUnit")).toBe(true)
+          expect(yield* decideSpanBudgets({ spans })).toEqual([])
+          expect(outcome._tag).toBe("Completed")
+          const captured = yield* Schema.decodeEffect(
+            Schema.fromJsonString(
+              Schema.Struct({
+                wid: Schema.NullOr(Schema.String),
+                sdir: Schema.NullOr(Schema.String),
+              }),
+            ),
+          )(readFileSync(envCapturePath, "utf8"))
+          expect(captured).toEqual({ wid: "pkg-async", sdir: null })
         }),
       ),
   )
 
   it.live(
-    "completeSharedStepImpl validates sharedStepPaths, excludes priorUnitOwnedPaths, and rejects empty or out-of-scope changes",
+    "real subprocess timeout returns PackageVerifyFailed(timed-out) with stderr tail and does not hang on detached grandchild stdio (F-13.1 / F-23.4)",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
+          const binDir = join(dir, "bin")
+          writeExecutableScript(
+            binDir,
+            "nx",
+            `const { spawn } = require("node:child_process")
+process.stderr.write("timeout-diagnostic-tail\\n")
+const grandchild = spawn(process.execPath, ["-e", "setTimeout(() => {}, 15000)"], { detached: true, stdio: ["ignore", process.stdout, process.stderr] })
+grandchild.unref()
+setTimeout(() => {}, 15000)`,
+          )
+          writeFileSync(
+            join(repoRoot, "libs", "alpha", "src", "index.ts"),
+            "export const alpha = 55\n",
+            "utf8",
+          )
+          const outcome = yield* completeUnitImpl(
+            {
+              runId: WorkflowRunId.make("run-timeout-real"),
+              level: "slice",
+              baseSha,
+              unit: makePackageUnit({
+                unitId: "pkg-timeout",
+                command: "nx run @harness/alpha:verify",
+              }),
+              attempt: AttemptNumber.make(1),
+              cwd: repoRoot,
+              siblingInFlightOwnedPaths: [],
+            },
+            {
+              verifyTimeoutMs: 120,
+              env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` },
+            },
+          )
+          match(outcome)
+            .with({ _tag: "Rejected" }, (r) => {
+              match(r.rejection)
+                .with({ _tag: "PackageVerifyFailed" }, (p) => {
+                  expect(p.failureKind).toBe("timed-out")
+                  expect(p.exitCode).toBe(1)
+                  expect(p.detail).toContain("timeout-diagnostic-tail")
+                })
+                .with(
+                  { _tag: "AgentFailed" },
+                  { _tag: "WriteSetViolation" },
+                  { _tag: "StampMissing" },
+                  () => {
+                    expect.unreachable("Expected PackageVerifyFailed(timed-out)")
+                  },
+                )
+                .exhaustive()
+            })
+            .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
+              expect.unreachable("Expected Rejected(PackageVerifyFailed)")
+            })
+            .exhaustive()
+        }),
+      ),
+  )
+
+  it.live(
+    "real subprocess signal termination returns PackageVerifyFailed(signaled) with signal exitCode and stderr tail (F-13.1 / F-23.4)",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
+          const binDir = join(dir, "bin")
+          writeExecutableScript(
+            binDir,
+            "nx",
+            `process.stderr.write("killed-by-sigterm-tail\\n", () => {
+  process.kill(process.pid, "SIGTERM")
+})`,
+          )
+          writeFileSync(
+            join(repoRoot, "libs", "alpha", "src", "index.ts"),
+            "export const alpha = 55\n",
+            "utf8",
+          )
+          const outcome = yield* completeUnitImpl(
+            {
+              runId: WorkflowRunId.make("run-signal-real"),
+              level: "slice",
+              baseSha,
+              unit: makePackageUnit({
+                unitId: "pkg-signal",
+                command: "nx run @harness/alpha:verify",
+              }),
+              attempt: AttemptNumber.make(1),
+              cwd: repoRoot,
+              siblingInFlightOwnedPaths: [],
+            },
+            { env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` } },
+          )
+          match(outcome)
+            .with({ _tag: "Rejected" }, (r) => {
+              match(r.rejection)
+                .with({ _tag: "PackageVerifyFailed" }, (p) => {
+                  expect(p.failureKind).toBe("signaled")
+                  expect(p.exitCode).toBe(143)
+                  expect(p.detail).toContain("killed-by-sigterm-tail")
+                })
+                .with(
+                  { _tag: "AgentFailed" },
+                  { _tag: "WriteSetViolation" },
+                  { _tag: "StampMissing" },
+                  () => {
+                    expect.unreachable("Expected PackageVerifyFailed(signaled)")
+                  },
+                )
+                .exhaustive()
+            })
+            .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
+              expect.unreachable("Expected Rejected(PackageVerifyFailed)")
+            })
+            .exhaustive()
+        }),
+      ),
+  )
+
+  it.live(
+    "real subprocess spawn failure (ENOENT) fails closed with WorkspaceFsError instead of PackageVerifyFailed (F-13.1 / F-23.4)",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
+          writeFileSync(
+            join(repoRoot, "libs", "alpha", "src", "index.ts"),
+            "export const alpha = 55\n",
+            "utf8",
+          )
+          const exit = yield* Effect.exit(
+            completeUnitImpl(
+              {
+                runId: WorkflowRunId.make("run-enoent-real"),
+                level: "slice",
+                baseSha,
+                unit: makePackageUnit({ command: "nx run @harness/alpha:verify" }),
+                attempt: AttemptNumber.make(1),
+                cwd: repoRoot,
+                siblingInFlightOwnedPaths: [],
+              },
+              { env: { ...process.env, PATH: join(dir, "empty-bin") } },
+            ),
+          )
+          match(exit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(
+                Option.match(Cause.findErrorOption(cause), {
+                  onNone: () => undefined,
+                  onSome: (e) => e._tag,
+                }),
+              ).toBe("WorkspaceFsError")
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected WorkspaceFsError on ENOENT spawn failure")
+            })
+            .exhaustive()
+        }),
+      ),
+  )
+
+  it.live(
+    "real subprocess caps stderr buffer at 64 KiB and truncates PackageVerifyFailed.detail to <= 2048 trimmed chars preserving tail (F-13.1 / S-2.1 / F-23.4)",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
+          const binDir = join(dir, "bin")
+          writeExecutableScript(
+            binDir,
+            "nx",
+            `const flood = "X".repeat(140 * 1024)
+process.stdout.write(flood)
+process.stderr.write(flood + "\\n  FINAL_TAIL_MARKER  \\n")
+process.exit(2)`,
+          )
+          writeFileSync(
+            join(repoRoot, "libs", "alpha", "src", "index.ts"),
+            "export const alpha = 55\n",
+            "utf8",
+          )
+          const outcome = yield* completeUnitImpl(
+            {
+              runId: WorkflowRunId.make("run-cap-real"),
+              level: "slice",
+              baseSha,
+              unit: makePackageUnit({ command: "nx run @harness/alpha:verify" }),
+              attempt: AttemptNumber.make(1),
+              cwd: repoRoot,
+              siblingInFlightOwnedPaths: [],
+            },
+            { env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` } },
+          )
+          match(outcome)
+            .with({ _tag: "Rejected" }, (r) => {
+              match(r.rejection)
+                .with({ _tag: "PackageVerifyFailed" }, (p) => {
+                  expect(p.failureKind).toBe("non-zero-exit")
+                  expect(p.exitCode).toBe(2)
+                  expect(p.detail).toBeDefined()
+                  expect(p.detail?.length).toBeLessThanOrEqual(2048)
+                  expect(p.detail?.endsWith("FINAL_TAIL_MARKER")).toBe(true)
+                })
+                .with(
+                  { _tag: "AgentFailed" },
+                  { _tag: "WriteSetViolation" },
+                  { _tag: "StampMissing" },
+                  () => {
+                    expect.unreachable("Expected PackageVerifyFailed")
+                  },
+                )
+                .exhaustive()
+            })
+            .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
+              expect.unreachable("Expected Rejected(PackageVerifyFailed)")
+            })
+            .exhaustive()
+        }),
+      ),
+  )
+
+  it.live(
+    "rejects protected .harness paths with AgentFailed, git mv renames with WriteSetViolation, and invalid baseSha with WorkspaceFsError",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
+          const pkgUnit = makePackageUnit()
+
+          mkdirSync(join(repoRoot, ".harness"), { recursive: true })
+          writeFileSync(join(repoRoot, ".harness", "custom-policy.json"), "{}\n", "utf8")
+          const protectedOutcome = yield* completeUnitImpl({
+            runId: WorkflowRunId.make("run-async-1"),
+            level: "slice",
+            baseSha,
+            unit: pkgUnit,
+            attempt: AttemptNumber.make(1),
+            cwd: repoRoot,
+            siblingInFlightOwnedPaths: [],
+          })
+          match(protectedOutcome)
+            .with({ _tag: "Rejected" }, (r) => {
+              expect(r.rejection._tag).toBe("AgentFailed")
+            })
+            .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
+              expect.unreachable("Expected Rejected(AgentFailed)")
+            })
+            .exhaustive()
+          rmSync(join(repoRoot, ".harness"), { recursive: true, force: true })
+
+          execFileSync("git", ["mv", "libs/alpha/src/index.ts", "libs/beta/src/moved.ts"], {
+            cwd: repoRoot,
+          })
+          execFileSync("git", ["commit", "-m", "rename outside ownership"], {
+            cwd: repoRoot,
+            stdio: "ignore",
+          })
+          const renameOutcome = yield* completeUnitImpl({
+            runId: WorkflowRunId.make("run-async-1"),
+            level: "slice",
+            baseSha,
+            unit: pkgUnit,
+            attempt: AttemptNumber.make(1),
+            cwd: repoRoot,
+            siblingInFlightOwnedPaths: [],
+          })
+          match(renameOutcome)
+            .with({ _tag: "Rejected" }, (r) => {
+              match(r.rejection)
+                .with({ _tag: "WriteSetViolation" }, (v) => {
+                  expect(v.offendingPaths).toContain(OwnedRelPath.make("libs/beta/src/moved.ts"))
+                })
+                .with(
+                  { _tag: "AgentFailed" },
+                  { _tag: "PackageVerifyFailed" },
+                  { _tag: "StampMissing" },
+                  () => {
+                    expect.unreachable("Expected WriteSetViolation on git mv")
+                  },
+                )
+                .exhaustive()
+            })
+            .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
+              expect.unreachable("Expected Rejected(WriteSetViolation)")
+            })
+            .exhaustive()
+
+          const badShaExit = yield* Effect.exit(
+            completeUnitImpl({
+              runId: WorkflowRunId.make("run-async-1"),
+              level: "slice",
+              baseSha: GitCommitSha.make("0".repeat(40)),
+              unit: pkgUnit,
+              attempt: AttemptNumber.make(1),
+              cwd: repoRoot,
+              siblingInFlightOwnedPaths: [],
+            }),
+          )
+          match(badShaExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(
+                Option.match(Cause.findErrorOption(cause), {
+                  onNone: () => undefined,
+                  onSome: (e) => e._tag,
+                }),
+              ).toBe("WorkspaceFsError")
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected WorkspaceFsError for invalid baseSha")
+            })
+            .exhaustive()
+        }),
+      ),
+  )
+
+  it.live(
+    "completeSharedStepImpl rejects empty or out-of-scope edits and completes when priorUnitOwnedPaths excludes prior units",
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
@@ -571,17 +1233,16 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
               expect(r.rejection._tag).toBe("WriteSetViolation")
             })
             .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
-              expect.unreachable("Expected WriteSetViolation for shared step")
+              expect.unreachable("Expected WriteSetViolation")
             })
             .exhaustive()
 
-          // With priorUnitOwnedPaths covering libs/alpha AND shared edit in libs/shared -> Completed!
           writeFileSync(
             join(repoRoot, "libs", "shared", "barrel.ts"),
             "export const shared = 2\n",
             "utf8",
           )
-          const okWithPriorRes = yield* completeSharedStepImpl({
+          const okRes = yield* completeSharedStepImpl({
             runId: WorkflowRunId.make("run-shared-01"),
             baseSha,
             sharedStepPaths: [OwnedRelPath.make("libs/shared")],
@@ -589,112 +1250,302 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
             attempt: AttemptNumber.make(2),
             cwd: repoRoot,
           })
-          match(okWithPriorRes)
+          match(okRes)
             .with({ _tag: "Completed" }, (c) => {
               expect(c.unitId).toBe(SHARED_STEP_UNIT_ID)
               expect(c.changedPaths).toEqual([OwnedRelPath.make("libs/shared/barrel.ts")])
             })
             .with({ _tag: "Rejected" }, { _tag: "Escalated" }, () => {
-              expect.unreachable("Expected Completed for shared step with priorUnitOwnedPaths")
+              expect.unreachable("Expected Completed")
             })
             .exhaustive()
         }),
       ),
   )
+})
+
+describe("WorkflowWorktreePort", () => {
+  it.live("provisions L2 canonical mappings", () =>
+    withTempDir((dir) =>
+      Effect.gen(function* () {
+        const { repoRoot, baseSha } = initGitRepo(dir)
+        const l2Plan: CompiledPlan = {
+          runId: WorkflowRunId.make("run-l2-wt-1"),
+          level: "slice",
+          planSha: PlanSha256.make("a".repeat(64)),
+          baseSha,
+          mode: { _tag: "Manual" },
+          units: [makePackageUnit({ unitId: "u-alpha" })],
+          sharedStepPaths: [],
+        }
+        const receipt = yield* provisionWorkflowWorktreesImpl(l2Plan, { repoRoot })
+        expect(receipt.entries).toEqual([
+          { unitId: WorkUnitId.make("u-alpha"), cwd: repoRoot, worktreeKind: "canonical" },
+        ])
+      }),
+    ),
+  )
 
   it.live(
-    "WorkflowWorktreePortLive provisions L2 canonical, L1 linked worktrees, removes checkouts preserving slice/* branches, and merges idempotently with conflict abort",
+    "provisions L1 linked worktrees at .harness/workflow-worktrees/<runId>/<unitId> and cleans stale dirs (F-1.1)",
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
           const { repoRoot, baseSha } = initGitRepo(dir)
-          const portLayer = makeWorkflowWorktreePortLayer({ repoRoot })
-
-          const l2Plan: CompiledPlan = {
-            runId: WorkflowRunId.make("run-l2-wt-1"),
-            level: "slice",
-            planSha: PlanSha256.make("a".repeat(64)),
-            baseSha,
-            mode: { _tag: "Manual" },
-            units: [
-              {
-                _tag: "PackageUnit",
-                unitId: WorkUnitId.make("u-alpha"),
-                projectName: NxProjectName.make("@harness/alpha"),
-                waveIndex: WaveIndex.make(0),
-                dependsOn: [],
-                ownedRelPaths: [OwnedRelPath.make("libs/alpha")],
-                stubKeys: [],
-                earsKeys: [],
-                packageVerifyCommand: PackageVerifyCommand.make(
-                  "pnpm nx run @harness/alpha:verify",
-                ),
-              },
-            ],
-            sharedStepPaths: [],
-          }
-
-          const l2Receipt = yield* provisionWorkflowWorktreesImpl(l2Plan, { repoRoot })
-          expect(l2Receipt.entries).toEqual([
-            { unitId: WorkUnitId.make("u-alpha"), cwd: repoRoot, worktreeKind: "canonical" },
-          ])
-
-          const l1Plan: CompiledPlan = {
-            runId: WorkflowRunId.make("run-l1-wt-1"),
-            level: "epic",
-            planSha: PlanSha256.make("b".repeat(64)),
-            baseSha,
-            mode: { _tag: "Manual" },
-            units: [
-              {
-                _tag: "SliceUnit",
-                unitId: WorkUnitId.make("s-alpha"),
-                branch: SliceBranchName.make("slice/wf3-alpha"),
-                waveIndex: WaveIndex.make(0),
-                dependsOn: [],
-                ownedRelPaths: [OwnedRelPath.make("libs/alpha")],
-                earsKeys: [],
-              },
-              {
-                _tag: "SliceUnit",
-                unitId: WorkUnitId.make("s-beta"),
-                branch: SliceBranchName.make("slice/wf3-beta"),
-                waveIndex: WaveIndex.make(0),
-                dependsOn: [],
-                ownedRelPaths: [OwnedRelPath.make("libs/beta")],
-                earsKeys: [],
-              },
-            ],
-            sharedStepPaths: [],
-          }
-
-          // Pre-existing leftover worktree directory on crash replay is cleaned idempotently
-          const staleWorktreeDir = join(
+          const l1Plan = makeEpicPlan(baseSha)
+          const expectedAlphaDir = resolveWorkflowWorktreeDir(
             repoRoot,
-            ".git",
-            "harness",
-            "worktrees",
             l1Plan.runId,
-            "s-alpha",
+            WorkUnitId.make("s-alpha"),
           )
-          mkdirSync(staleWorktreeDir, { recursive: true })
-          writeFileSync(join(staleWorktreeDir, "stale.txt"), "leftover\n", "utf8")
+          mkdirSync(expectedAlphaDir, { recursive: true })
+          writeFileSync(join(expectedAlphaDir, "stale.txt"), "leftover\n", "utf8")
 
           const receipt = yield* Effect.gen(function* () {
             const wt = yield* WorkflowWorktreePort
             return yield* wt.provisionWorktrees(l1Plan)
-          }).pipe(Effect.provide(portLayer))
+          }).pipe(Effect.provide(makeWorkflowWorktreePortLayer({ repoRoot })))
 
-          expect(existsSync(join(staleWorktreeDir, "stale.txt"))).toBe(false)
+          expect(existsSync(join(expectedAlphaDir, "stale.txt"))).toBe(false)
+          expect(existsSync(join(repoRoot, ".git", "harness", "worktrees"))).toBe(false)
           expect(receipt.entries.length).toBe(2)
+          expect(receipt.entries[0]?.cwd).toBe(realpathSync.native(expectedAlphaDir))
+          expect(receipt.entries[0]?.worktreeKind).toBe("linked")
+          expect(existsSync(receipt.entries[0]!.cwd)).toBe(true)
+          expect(existsSync(receipt.entries[1]!.cwd)).toBe(true)
+        }),
+      ),
+  )
+
+  it.live(
+    "re-provisioning existing slice/* branch attaches non-destructively preserving commits when baseSha is ancestor (F-5.1 / F-23.3)",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
+          const plan = makeEpicPlan(baseSha, "run-reattach-1", [
+            makeSliceUnit("s-alpha", "slice/reattach-alpha", ["libs/alpha"]),
+          ])
+          const receipt1 = yield* provisionWorkflowWorktreesImpl(plan, { repoRoot })
+          const alphaCwd = receipt1.entries[0]!.cwd
+          writeFileSync(
+            join(alphaCwd, "libs", "alpha", "src", "index.ts"),
+            "export const alpha = 77\n",
+            "utf8",
+          )
+          execFileSync("git", ["add", "."], { cwd: alphaCwd })
+          execFileSync("git", ["commit", "-m", "slice commit preserved"], {
+            cwd: alphaCwd,
+            stdio: "ignore",
+          })
+          const sliceSha = execFileSync("git", ["rev-parse", "HEAD"], {
+            cwd: alphaCwd,
+            encoding: "utf8",
+          }).trim()
+
+          yield* removeWorktreeCheckoutsImpl(receipt1)
+          const receipt2 = yield* provisionWorkflowWorktreesImpl(plan, { repoRoot })
+          const reattachedSha = execFileSync("git", ["rev-parse", "HEAD"], {
+            cwd: receipt2.entries[0]!.cwd,
+            encoding: "utf8",
+          }).trim()
+          expect(reattachedSha).toBe(sliceSha)
+          expect(
+            readFileSync(
+              join(receipt2.entries[0]!.cwd, "libs", "alpha", "src", "index.ts"),
+              "utf8",
+            ),
+          ).toBe("export const alpha = 77\n")
+        }),
+      ),
+  )
+
+  it.live(
+    "re-provisioning diverged slice/* branch fails closed with WorkspaceFsError without resetting it (F-5.1 / F-23.3)",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot } = initGitRepo(dir)
+          execFileSync("git", ["checkout", "-b", "slice/diverged-alpha"], {
+            cwd: repoRoot,
+            stdio: "ignore",
+          })
+          writeFileSync(
+            join(repoRoot, "libs", "alpha", "src", "index.ts"),
+            "export const alpha = 101\n",
+            "utf8",
+          )
+          execFileSync("git", ["add", "."], { cwd: repoRoot })
+          execFileSync("git", ["commit", "-m", "diverged slice commit"], {
+            cwd: repoRoot,
+            stdio: "ignore",
+          })
+          const divergedSliceSha = execFileSync("git", ["rev-parse", "HEAD"], {
+            cwd: repoRoot,
+            encoding: "utf8",
+          }).trim()
+
+          execFileSync("git", ["checkout", "-"], { cwd: repoRoot, stdio: "ignore" })
+          writeFileSync(
+            join(repoRoot, "libs", "beta", "src", "index.ts"),
+            "export const beta = 202\n",
+            "utf8",
+          )
+          execFileSync("git", ["add", "."], { cwd: repoRoot })
+          execFileSync("git", ["commit", "-m", "advance main past slice"], {
+            cwd: repoRoot,
+            stdio: "ignore",
+          })
+          const advancedBaseSha = GitCommitSha.make(
+            execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim(),
+          )
+
+          const plan = makeEpicPlan(advancedBaseSha, "run-diverged-1", [
+            makeSliceUnit("s-alpha", "slice/diverged-alpha", ["libs/alpha"]),
+          ])
+          const exit = yield* Effect.exit(provisionWorkflowWorktreesImpl(plan, { repoRoot }))
+          match(exit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(
+                Option.match(Cause.findErrorOption(cause), {
+                  onNone: () => undefined,
+                  onSome: (e) => e._tag,
+                }),
+              ).toBe("WorkspaceFsError")
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected WorkspaceFsError for diverged slice branch")
+            })
+            .exhaustive()
+
+          const preservedSha = execFileSync(
+            "git",
+            ["rev-parse", "refs/heads/slice/diverged-alpha"],
+            {
+              cwd: repoRoot,
+              encoding: "utf8",
+            },
+          ).trim()
+          expect(preservedSha).toBe(divergedSliceSha)
+        }),
+      ),
+  )
+
+  it.live(
+    "rolls back earlier worktrees cleanly when Nth worktree add fails (F-11.1 / F-23.3)",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot } = initGitRepo(dir)
+          execFileSync("git", ["checkout", "-b", "slice/diverged-beta"], {
+            cwd: repoRoot,
+            stdio: "ignore",
+          })
+          writeFileSync(
+            join(repoRoot, "libs", "beta", "src", "index.ts"),
+            "export const beta = 50\n",
+            "utf8",
+          )
+          execFileSync("git", ["add", "."], { cwd: repoRoot })
+          execFileSync("git", ["commit", "-m", "beta diverged"], { cwd: repoRoot, stdio: "ignore" })
+          execFileSync("git", ["checkout", "-"], { cwd: repoRoot, stdio: "ignore" })
+          writeFileSync(
+            join(repoRoot, "libs", "shared", "barrel.ts"),
+            "export const shared = 50\n",
+            "utf8",
+          )
+          execFileSync("git", ["add", "."], { cwd: repoRoot })
+          execFileSync("git", ["commit", "-m", "advance base"], { cwd: repoRoot, stdio: "ignore" })
+          const advancedBaseSha = GitCommitSha.make(
+            execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim(),
+          )
+
+          const plan = makeEpicPlan(advancedBaseSha, "run-rollback-1", [
+            makeSliceUnit("s-alpha", "slice/ok-alpha", ["libs/alpha"]),
+            makeSliceUnit("s-beta", "slice/diverged-beta", ["libs/beta"]),
+          ])
+          const alphaWtDir = resolveWorkflowWorktreeDir(
+            repoRoot,
+            plan.runId,
+            WorkUnitId.make("s-alpha"),
+          )
+
+          const exit = yield* Effect.exit(provisionWorkflowWorktreesImpl(plan, { repoRoot }))
+          expectWorkspaceFsErrorExit(exit, "Expected WorkspaceFsError on Nth worktree add failure")
+          expect(existsSync(alphaWtDir)).toBe(false)
+          const wtList = execFileSync("git", ["worktree", "list", "--porcelain"], {
+            cwd: repoRoot,
+            encoding: "utf8",
+          })
+          expect(wtList).not.toContain("s-alpha")
+        }),
+      ),
+  )
+
+  it.live(
+    "fiber interruption during Nth worktree creation triggers Effect.onExit rollback and preserves pure interrupt (F-11.1 / F-23.3)",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
+          const plan = makeEpicPlan(baseSha, "run-interrupt-1")
+          const alphaWtDir = resolveWorkflowWorktreeDir(
+            repoRoot,
+            plan.runId,
+            WorkUnitId.make("s-alpha"),
+          )
+          const betaWtDir = resolveWorkflowWorktreeDir(
+            repoRoot,
+            plan.runId,
+            WorkUnitId.make("s-beta"),
+          )
+          const firstProvisioned = yield* Deferred.make<void>()
+
+          const spyHostIo: ExtendedHostIo = {
+            ...nodeSyncHostIo,
+            realpathSync: (filePath: string) => {
+              const resolved = nodeSyncHostIo.realpathSync(filePath)
+              if (filePath === alphaWtDir) {
+                Deferred.doneUnsafe(firstProvisioned, Effect.void)
+              }
+              return resolved
+            },
+          }
+
+          const fiber = yield* provisionWorkflowWorktreesImpl(plan, {
+            repoRoot,
+            hostIo: spyHostIo,
+          }).pipe(Effect.forkChild)
+
+          yield* Deferred.await(firstProvisioned)
+          yield* Fiber.interrupt(fiber)
+          const exit = yield* Fiber.await(fiber)
+          match(exit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(isPureInterruptCause(cause)).toBe(true)
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected pure interrupt failure")
+            })
+            .exhaustive()
+
+          expect(existsSync(alphaWtDir)).toBe(false)
+          expect(existsSync(betaWtDir)).toBe(false)
+        }),
+      ),
+  )
+
+  it.live(
+    "removeWorktreeCheckoutsImpl detaches linked checkouts while preserving slice/* branches and is idempotent",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
+          const l1Plan = makeEpicPlan(baseSha)
+          const receipt = yield* provisionWorkflowWorktreesImpl(l1Plan, { repoRoot })
           const alphaWt = receipt.entries[0]!
           const betaWt = receipt.entries[1]!
-          expect(alphaWt.worktreeKind).toBe("linked")
-          expect(betaWt.worktreeKind).toBe("linked")
-          expect(existsSync(alphaWt.cwd)).toBe(true)
-          expect(existsSync(betaWt.cwd)).toBe(true)
 
-          // Commit non-conflicting work on both slice branches
           writeFileSync(
             join(alphaWt.cwd, "libs", "alpha", "src", "index.ts"),
             "export const alpha = 10\n",
@@ -711,15 +1562,15 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
           execFileSync("git", ["add", "."], { cwd: betaWt.cwd })
           execFileSync("git", ["commit", "-m", "beta work"], { cwd: betaWt.cwd, stdio: "ignore" })
 
-          // Remove linked checkouts (compensation) -> directories gone, slice/* branches preserved!
-          const { spans: removeSpans } = yield* runWithTestTracer(
+          const { spans } = yield* runWithTestTracer(
             "removeWorktreeCheckouts",
             removeWorktreeCheckoutsImpl(receipt),
           )
-          expect(removeSpans.some((s) => s.name === "Harness.removeWorktreeCheckouts")).toBe(true)
-          expect(yield* decideSpanBudgets({ spans: removeSpans })).toEqual([])
+          expect(spans.some((s) => s.name === "Harness.removeWorktreeCheckouts")).toBe(true)
+          expect(yield* decideSpanBudgets({ spans })).toEqual([])
           expect(existsSync(alphaWt.cwd)).toBe(false)
           expect(existsSync(betaWt.cwd)).toBe(false)
+
           const branches = execFileSync("git", ["branch", "--list", "slice/*"], {
             cwd: repoRoot,
             encoding: "utf8",
@@ -727,10 +1578,40 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
           expect(branches).toContain("slice/wf3-alpha")
           expect(branches).toContain("slice/wf3-beta")
 
-          // Calling removeWorktreeCheckoutsImpl again on already-removed checkouts logs warning and returns void (E = never)
+          yield* removeWorktreeCheckoutsImpl(receipt)
+        }),
+      ),
+  )
+
+  it.live(
+    "mergeSliceWaveImpl merges idempotently, rejects missing branch and dirty collision, and aborts conflicts strictly",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
+          const l1Plan = makeEpicPlan(baseSha)
+          const receipt = yield* provisionWorkflowWorktreesImpl(l1Plan, { repoRoot })
+          const alphaWt = receipt.entries[0]!
+          const betaWt = receipt.entries[1]!
+
+          writeFileSync(
+            join(alphaWt.cwd, "libs", "alpha", "src", "index.ts"),
+            "export const alpha = 10\n",
+            "utf8",
+          )
+          execFileSync("git", ["add", "."], { cwd: alphaWt.cwd })
+          execFileSync("git", ["commit", "-m", "alpha work"], { cwd: alphaWt.cwd, stdio: "ignore" })
+
+          writeFileSync(
+            join(betaWt.cwd, "libs", "beta", "src", "index.ts"),
+            "export const beta = 20\n",
+            "utf8",
+          )
+          execFileSync("git", ["add", "."], { cwd: betaWt.cwd })
+          execFileSync("git", ["commit", "-m", "beta work"], { cwd: betaWt.cwd, stdio: "ignore" })
+
           yield* removeWorktreeCheckoutsImpl(receipt)
 
-          // Merge wave idempotently
           const merge1 = yield* mergeSliceWaveImpl({
             runId: l1Plan.runId,
             waveIndex: WaveIndex.make(0),
@@ -749,7 +1630,6 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
             ],
           })
 
-          // Re-running mergeSliceWave on already-merged branches is idempotent!
           const merge2 = yield* mergeSliceWaveImpl({
             runId: l1Plan.runId,
             waveIndex: WaveIndex.make(0),
@@ -762,8 +1642,7 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
           })
           expect(merge2).toEqual(merge1)
 
-          // Missing branch (exit 128) -> WorkspaceFsError, NOT Conflict!
-          const missingBranchExit = yield* Effect.exit(
+          const missingExit = yield* Effect.exit(
             mergeSliceWaveImpl({
               runId: l1Plan.runId,
               waveIndex: WaveIndex.make(1),
@@ -772,14 +1651,8 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
               branches: [SliceBranchName.make("slice/does-not-exist")],
             }),
           )
-          match(missingBranchExit)
-            .with({ _tag: "Failure" }, () => undefined)
-            .with({ _tag: "Success" }, () => {
-              expect.unreachable("Expected WorkspaceFsError for missing branch")
-            })
-            .exhaustive()
+          expectWorkspaceFsErrorExit(missingExit, "Expected WorkspaceFsError for missing branch")
 
-          // Conflict case: create conflicting branch slice/wf3-conflict touching libs/alpha/src/index.ts
           execFileSync("git", ["checkout", "-b", "slice/wf3-conflict", baseSha], {
             cwd: repoRoot,
             stdio: "ignore",
@@ -793,13 +1666,12 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
           execFileSync("git", ["commit", "-m", "conflict work"], { cwd: repoRoot, stdio: "ignore" })
           execFileSync("git", ["checkout", "-"], { cwd: repoRoot, stdio: "ignore" })
 
-          // Dirty working tree colliding with incoming branch -> exit 128 WorkspaceFsError, NOT Conflict!
           writeFileSync(
             join(repoRoot, "libs", "alpha", "src", "index.ts"),
             "export const alpha = 777\n",
             "utf8",
           )
-          const dirtyMergeExit = yield* Effect.exit(
+          const dirtyExit = yield* Effect.exit(
             mergeSliceWaveImpl({
               runId: l1Plan.runId,
               waveIndex: WaveIndex.make(1),
@@ -808,12 +1680,7 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
               branches: [SliceBranchName.make("slice/wf3-conflict")],
             }),
           )
-          match(dirtyMergeExit)
-            .with({ _tag: "Failure" }, () => undefined)
-            .with({ _tag: "Success" }, () => {
-              expect.unreachable("Expected WorkspaceFsError for dirty merge")
-            })
-            .exhaustive()
+          expectWorkspaceFsErrorExit(dirtyExit, "Expected WorkspaceFsError for dirty merge")
           execFileSync("git", ["checkout", "--", "libs/alpha/src/index.ts"], { cwd: repoRoot })
 
           const conflictMerge = yield* mergeSliceWaveImpl({
@@ -827,45 +1694,140 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
             _tag: "Conflict",
             branch: SliceBranchName.make("slice/wf3-conflict"),
           })
-          // git merge --abort left repo clean without MERGE_HEAD
           expect(existsSync(join(repoRoot, ".git", "MERGE_HEAD"))).toBe(false)
         }),
       ),
   )
 
   it.live(
-    "WorkflowReviewRouterLive, UnitAgentDispatcherLive, and compileWorkflowPlanFromRepo work end-to-end",
+    "mergeSliceWaveImpl fails closed with WorkspaceFsError when abortMergeStrict fails or unmerged paths exist without MERGE_HEAD (F-11.2)",
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
           const { repoRoot, baseSha } = initGitRepo(dir)
-
-          // UnitAgentDispatcherLive returns Failed
-          const dispatchExit = yield* Effect.gen(function* () {
-            const dispatcher = yield* UnitAgentDispatcher
-            return yield* dispatcher.dispatchUnit({
-              runId: WorkflowRunId.make("run-dispatch-1"),
-              unit: {
-                _tag: "PackageUnit",
-                unitId: WorkUnitId.make("u-1"),
-                projectName: NxProjectName.make("@harness/alpha"),
+          const unmergedWithoutHeadHostIo: ExtendedHostIo = {
+            ...nodeSyncHostIo,
+            execFileSync: (cmd, args, opts) => {
+              if (cmd === "git" && args[0] === "diff" && args.includes("--diff-filter=U")) {
+                return {
+                  _tag: "Exited",
+                  exitCode: 0,
+                  stdout: "libs/alpha/src/index.ts\n",
+                  stderr: "",
+                }
+              }
+              return nodeSyncHostIo.execFileSync(cmd, args, opts)
+            },
+          }
+          const unmergedExit = yield* Effect.exit(
+            mergeSliceWaveImpl(
+              {
+                runId: WorkflowRunId.make("run-unmerged-1"),
                 waveIndex: WaveIndex.make(0),
-                dependsOn: [],
-                ownedRelPaths: [OwnedRelPath.make("libs/alpha")],
-                stubKeys: [],
-                earsKeys: [],
-                packageVerifyCommand: PackageVerifyCommand.make(
-                  "pnpm nx run @harness/alpha:verify",
-                ),
+                baseSha,
+                canonicalRepoRoot: repoRoot,
+                branches: [],
               },
-              attempt: AttemptNumber.make(1),
-              runner: RunnerId.make("claude-code"),
-              cwd: repoRoot,
+              { hostIo: unmergedWithoutHeadHostIo },
+            ),
+          )
+          match(unmergedExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(
+                Option.match(Cause.findErrorOption(cause), {
+                  onNone: () => undefined,
+                  onSome: (e) => e._tag,
+                }),
+              ).toBe("WorkspaceFsError")
             })
-          }).pipe(Effect.provide(UnitAgentDispatcherLive))
-          expect(dispatchExit._tag).toBe("Failed")
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected WorkspaceFsError for unmerged paths without MERGE_HEAD")
+            })
+            .exhaustive()
 
-          // Review router on empty diff -> SkipReviewPlan
+          execFileSync("git", ["checkout", "-b", "slice/abort-fail", baseSha], {
+            cwd: repoRoot,
+            stdio: "ignore",
+          })
+          writeFileSync(
+            join(repoRoot, "libs", "alpha", "src", "index.ts"),
+            "export const alpha = 5\n",
+            "utf8",
+          )
+          execFileSync("git", ["add", "."], { cwd: repoRoot })
+          execFileSync("git", ["commit", "-m", "branch edit"], { cwd: repoRoot, stdio: "ignore" })
+          execFileSync("git", ["checkout", "-"], { cwd: repoRoot, stdio: "ignore" })
+
+          const abortFailHostIo: ExtendedHostIo = {
+            ...nodeSyncHostIo,
+            execFileSync: (cmd, args, opts) => {
+              if (cmd === "git" && args[0] === "merge" && args[1] === "--no-ff") {
+                return { _tag: "TimedOut", stdout: "", stderr: "merge timed out" }
+              }
+              if (cmd === "git" && args[0] === "rev-parse" && args[2] === "MERGE_HEAD") {
+                return { _tag: "Exited", exitCode: 0, stdout: ".git/HEAD\n", stderr: "" }
+              }
+              if (cmd === "git" && args[0] === "merge" && args[1] === "--abort") {
+                return { _tag: "Exited", exitCode: 128, stdout: "", stderr: "abort refused" }
+              }
+              return nodeSyncHostIo.execFileSync(cmd, args, opts)
+            },
+          }
+
+          const abortFailExit = yield* Effect.exit(
+            mergeSliceWaveImpl(
+              {
+                runId: WorkflowRunId.make("run-abort-fail"),
+                waveIndex: WaveIndex.make(0),
+                baseSha,
+                canonicalRepoRoot: repoRoot,
+                branches: [SliceBranchName.make("slice/abort-fail")],
+              },
+              { hostIo: abortFailHostIo },
+            ),
+          )
+          match(abortFailExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              const err = Option.getOrUndefined(Cause.findErrorOption(cause))
+              expect(err?._tag).toBe("WorkspaceFsError")
+              expect(err?.reason).toContain("abort refused")
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected WorkspaceFsError when abortMergeStrict fails")
+            })
+            .exhaustive()
+        }),
+      ),
+  )
+})
+
+describe("WorkflowReviewRouter & UnitAgentDispatcher", () => {
+  it.live("UnitAgentDispatcherLive exposes placeholder runnerKind and returns Failed", () =>
+    withTempDir((dir) =>
+      Effect.gen(function* () {
+        const { repoRoot } = initGitRepo(dir)
+        const res = yield* Effect.gen(function* () {
+          const dispatcher = yield* UnitAgentDispatcher
+          expect(dispatcher.runnerKind).toBe("placeholder")
+          return yield* dispatcher.dispatchUnit({
+            runId: WorkflowRunId.make("run-dispatch-1"),
+            unit: makePackageUnit({ unitId: "u-1" }),
+            attempt: AttemptNumber.make(1),
+            runner: RunnerId.make("claude-code"),
+            cwd: repoRoot,
+          })
+        }).pipe(Effect.provide(UnitAgentDispatcherLive))
+        expect(res._tag).toBe("Failed")
+      }),
+    ),
+  )
+
+  it.live(
+    "routeWorkflowReviewImpl returns SkipReviewPlan on empty diff and ActiveReviewPlan on modified package",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
           const emptyReview = yield* routeWorkflowReviewImpl({
             runId: WorkflowRunId.make("run-rev-1"),
             baseSha,
@@ -873,7 +1835,6 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
           })
           expect(emptyReview._tag).toBe("SkipReviewPlan")
 
-          // Add stub file & package.json for compileWorkflowPlanFromRepo auto-extraction + review routing
           writeFileSync(
             join(repoRoot, "libs", "alpha", "package.json"),
             JSON.stringify({ name: "@harness/alpha", nx: { tags: ["type:domain"] } }),
@@ -881,15 +1842,11 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
           )
           writeFileSync(
             join(repoRoot, "libs", "alpha", "src", "index.ts"),
-            `import { Effect } from "effect"\nimport { stub } from "@harness/contract"\nexport const runAlpha = Effect.fn("Alpha.run")(function* () {\n  return yield* stub<void>("harness:SPEC-1", "REQ-1")\n})\n`,
+            "export const alpha = 2\n",
             "utf8",
           )
-
           const mockDmLayer = makeMockDecisionModelLayer({
             reviewDepthLabel: ReviewDepth.make("focused"),
-          })
-          const reviewLayer = makeWorkflowReviewRouterLayer({
-            decisionModelLayer: mockDmLayer,
           })
           const activeReview = yield* Effect.gen(function* () {
             const router = yield* WorkflowReviewRouter
@@ -898,34 +1855,136 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
               baseSha,
               canonicalRepoRoot: repoRoot,
             })
-          }).pipe(Effect.provide(reviewLayer))
+          }).pipe(
+            Effect.provide(makeWorkflowReviewRouterLayer({ decisionModelLayer: mockDmLayer })),
+          )
           expect(activeReview._tag).toBe("ActiveReviewPlan")
+        }),
+      ),
+  )
 
-          const { result: autoCompiled, spans: compileSpans } = yield* runWithTestTracer(
-            "compileWorkflowPlanFromRepo",
-            compileWorkflowPlanFromRepo({
-              repoRoot,
-              level: "slice",
-              mode: {
-                _tag: "Automatic",
-                runner: RunnerId.make("claude-code"),
-                maxConcurrency: MaxConcurrency.make(2),
-              },
+  it.live(
+    "routeWorkflowReviewImpl fails closed with WorkspaceFsError on corrupt/unreadable package.json or unreadable untracked file (F-14.1)",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
+          const pkgPath = join(repoRoot, "libs", "alpha", "package.json")
+          writeFileSync(pkgPath, "{not-valid-json", "utf8")
+          writeFileSync(
+            join(repoRoot, "libs", "alpha", "src", "index.ts"),
+            "export const alpha = 9\n",
+            "utf8",
+          )
+
+          const corruptPkgExit = yield* Effect.exit(
+            routeWorkflowReviewImpl({
+              runId: WorkflowRunId.make("run-rev-corrupt"),
+              baseSha,
+              canonicalRepoRoot: repoRoot,
             }),
           )
-          expect(compileSpans.some((s) => s.name === "Harness.compileWorkflowPlanFromRepo")).toBe(
-            true,
-          )
-          expect(yield* decideSpanBudgets({ spans: compileSpans })).toEqual([])
-          expect(autoCompiled.units.length).toBe(1)
-          expect(autoCompiled.units[0]?.ownedRelPaths).toEqual([OwnedRelPath.make("libs/alpha")])
+          match(corruptPkgExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(
+                Option.match(Cause.findErrorOption(cause), {
+                  onNone: () => undefined,
+                  onSome: (e) => e._tag,
+                }),
+              ).toBe("WorkspaceFsError")
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected WorkspaceFsError for corrupt package.json")
+            })
+            .exhaustive()
 
-          // Explicit inputJsonPath compilation
+          writeFileSync(
+            pkgPath,
+            JSON.stringify({ name: "@harness/alpha", nx: { tags: ["type:domain"] } }),
+            "utf8",
+          )
+          const untrackedPath = join(repoRoot, "libs", "alpha", "src", "secret.ts")
+          writeFileSync(untrackedPath, "export const secret = 1\n", "utf8")
+          chmodSync(untrackedPath, 0o000)
+
+          const unreadableUntrackedExit = yield* Effect.exit(
+            routeWorkflowReviewImpl({
+              runId: WorkflowRunId.make("run-rev-unreadable"),
+              baseSha,
+              canonicalRepoRoot: repoRoot,
+            }),
+          )
+          chmodSync(untrackedPath, 0o644)
+          match(unreadableUntrackedExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(
+                Option.match(Cause.findErrorOption(cause), {
+                  onNone: () => undefined,
+                  onSome: (e) => e._tag,
+                }),
+              ).toBe("WorkspaceFsError")
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected WorkspaceFsError for unreadable untracked file")
+            })
+            .exhaustive()
+        }),
+      ),
+  )
+})
+
+describe("PlanWorkflowCompiler Extractor (compileWorkflowPlanFromRepo)", () => {
+  it.live("extracts workspace stubs into CompiledPlan with SpanBudget compliance", () =>
+    withTempDir((dir) =>
+      Effect.gen(function* () {
+        const { repoRoot } = initGitRepo(dir)
+        writeFileSync(
+          join(repoRoot, "libs", "alpha", "package.json"),
+          JSON.stringify({ name: "@harness/alpha", nx: { tags: ["type:domain"] } }),
+          "utf8",
+        )
+        writeFileSync(
+          join(repoRoot, "libs", "alpha", "src", "index.ts"),
+          `import { Effect } from "effect"\nimport { stub } from "@harness/contract"\nexport const runAlpha = Effect.fn("Alpha.run")(function* () {\n  return yield* stub<void>("harness:SPEC-1", "REQ-1")\n})\n`,
+          "utf8",
+        )
+        const { result: compiled, spans } = yield* runWithTestTracer(
+          "compileWorkflowPlanFromRepo",
+          compileWorkflowPlanFromRepo({
+            repoRoot,
+            level: "slice",
+            mode: {
+              _tag: "Automatic",
+              runner: RunnerId.make("claude-code"),
+              maxConcurrency: MaxConcurrency.make(2),
+            },
+          }),
+        )
+        expect(spans.some((s) => s.name === "Harness.compileWorkflowPlanFromRepo")).toBe(true)
+        expect(yield* decideSpanBudgets({ spans })).toEqual([])
+        expect(compiled.units.length).toBe(1)
+        expect(compiled.units[0]?.ownedRelPaths).toEqual([OwnedRelPath.make("libs/alpha")])
+      }),
+    ),
+  )
+
+  it.live(
+    "compiles explicit inputJsonPath and honors explicit CLI level/mode precedence over JSON overrides (F-14.3)",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot } = initGitRepo(dir)
           const inputJsonPath = WorkspaceFilePath.make(join(dir, "plan-input.json"))
           writeFileSync(
             inputJsonPath,
             JSON.stringify({
               runId: "run-json-0001",
+              level: "epic",
+              mode: {
+                _tag: "Automatic",
+                runner: "antigravity",
+                maxConcurrency: 4,
+              },
               units: [
                 {
                   _tag: "PackageUnit",
@@ -942,370 +2001,56 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
             }),
             "utf8",
           )
-          const jsonCompiled = yield* compileWorkflowPlanFromRepo({
+          const compiledExplicit = yield* compileWorkflowPlanFromRepo({
             repoRoot,
             level: "slice",
             mode: { _tag: "Manual" },
             inputJsonPath,
           })
-          expect(jsonCompiled.runId).toBe("run-json-0001")
-          expect(jsonCompiled.sharedStepPaths).toEqual([OwnedRelPath.make("libs/shared")])
+          expect(compiledExplicit.runId).toBe("run-json-0001")
+          expect(compiledExplicit.level).toBe("slice")
+          expect(compiledExplicit.mode).toEqual({ _tag: "Manual" })
+          expect(compiledExplicit.sharedStepPaths).toEqual([OwnedRelPath.make("libs/shared")])
+
+          const compiledOmitted = yield* compileWorkflowPlanFromRepo({
+            repoRoot,
+            inputJsonPath,
+          })
+          expect(compiledOmitted.runId).toBe("run-json-0001")
+          expect(compiledOmitted.level).toBe("epic")
+          expect(compiledOmitted.mode).toEqual({
+            _tag: "Automatic",
+            runner: RunnerId.make("antigravity"),
+            maxConcurrency: MaxConcurrency.make(4),
+          })
+          expect(compiledOmitted.sharedStepPaths).toEqual([OwnedRelPath.make("libs/shared")])
         }),
       ),
   )
 
   it.live(
-    "daemon-client WF-3 helpers perform handshake capability checks and decode typed RPC responses",
+    "fails closed with WorkspaceFsError on unreadable stub files or corrupt/unreadable package.json (F-14.2)",
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
-          const { repoRoot, baseSha } = initGitRepo(dir)
-          const commonGitDir = GitCommonDirPath.make(realpathSync.native(join(repoRoot, ".git")))
-          const { socketPath } = resolveWorkflowRuntimePaths(commonGitDir)
-
-          const samplePlan: CompiledPlan = {
-            runId: WorkflowRunId.make("run-ipc-0001"),
-            level: "slice",
-            planSha: PlanSha256.make("c".repeat(64)),
-            baseSha,
-            mode: { _tag: "Manual" },
-            units: [
-              {
-                _tag: "PackageUnit",
-                unitId: WorkUnitId.make("u-alpha"),
-                projectName: NxProjectName.make("@harness/alpha"),
-                waveIndex: WaveIndex.make(0),
-                dependsOn: [],
-                ownedRelPaths: [OwnedRelPath.make("libs/alpha")],
-                stubKeys: [],
-                earsKeys: [],
-                packageVerifyCommand: PackageVerifyCommand.make(
-                  "pnpm nx run @harness/alpha:verify",
-                ),
-              },
-            ],
-            sharedStepPaths: [],
-          }
-
-          const runId = WorkflowRunId.make("run-ipc-0001")
-          const executionId = WorkflowExecutionId.make("run-ipc-0001")
-
-          yield* Effect.scoped(
-            Effect.gen(function* () {
-              yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(repoRoot), {
-                lineHandler: (line: string) => {
-                  const parsed = decodeJsonLine(line)
-                  const id = parsed.id ?? ""
-                  const command = parsed.command ?? ""
-                  const response = match(command)
-                    .with("workflow.handshake", () => ({
-                      id,
-                      ok: true,
-                      command,
-                      handshake: {
-                        protocolVersion: "1",
-                        capabilities: [
-                          "workflow.handshake",
-                          "workflow.start",
-                          "workflow.status",
-                          "workflow.complete",
-                          "workflow.resume",
-                          "workflow.abort",
-                          "workflow.doctor",
-                        ],
-                        repoRoot,
-                        commonGitDir,
-                        writerLeaseEpoch: 1,
-                      },
-                    }))
-                    .with("workflow.start", () => ({
-                      id,
-                      ok: true,
-                      result: { runId, executionId, outcome: "started" },
-                    }))
-                    .with("workflow.status", () => ({
-                      id,
-                      ok: true,
-                      result: {
-                        units: [],
-                        attempts: [],
-                        pendingDeferreds: [],
-                        storeStatus: "ready",
-                        projectionStatus: "fresh",
-                        writerLeaseEpoch: 1,
-                      },
-                    }))
-                    .with("workflow.complete", () => ({
-                      id,
-                      ok: true,
-                      result: {
-                        _tag: "LlmPhaseCompleted",
-                        runId,
-                        executionId,
-                        receipt: {
-                          workspaceHash: WorkspaceTreeHash.make("d".repeat(64)),
-                          frictionLogCleared: FrictionLogState.make("cleared"),
-                        },
-                      },
-                    }))
-                    .with("workflow.resume", () => ({
-                      id,
-                      ok: true,
-                      result: {
-                        _tag: "EscalationResolved",
-                        runId,
-                        executionId,
-                        unitId: WorkUnitId.make("u-alpha"),
-                        decision: EscalationDecision.make("retry"),
-                      },
-                    }))
-                    .with("workflow.abort", () => ({
-                      id,
-                      ok: true,
-                      result: { runId, executionId, state: "aborted" },
-                    }))
-                    .with("workflow.doctor", () => ({
-                      id,
-                      ok: true,
-                      result: {
-                        repoRoot,
-                        commonGitDir,
-                        writerLeaseEpoch: 1,
-                        rebuiltRunCount: 2,
-                        checks: [],
-                      },
-                    }))
-                    .otherwise(() => ({ id, ok: false, error: `Unknown command ${command}` }))
-                  return Effect.succeed(JSON.stringify(response))
-                },
-              })
-
-              const startRes = yield* startWorkflowViaDaemon(
-                { repoRoot, plan: samplePlan },
-                { socketPath },
-              )
-              expect(startRes).toEqual({ runId, executionId, outcome: "started" })
-
-              const statusRes = yield* getWorkflowStatusViaDaemon(
-                { repoRoot, runId },
-                { socketPath },
-              )
-              expect(statusRes.storeStatus).toBe("ready")
-              expect(statusRes.writerLeaseEpoch).toBe(LeaseEpoch.make(1))
-
-              const completeRes = yield* completeWorkflowViaDaemon(
-                { _tag: "CompleteLlmPhase", repoRoot, runId },
-                { socketPath },
-              )
-              expect(completeRes._tag).toBe("LlmPhaseCompleted")
-
-              const resumeRes = yield* resumeWorkflowViaDaemon(
-                {
-                  repoRoot,
-                  runId,
-                  unitId: WorkUnitId.make("u-alpha"),
-                  decision: EscalationDecision.make("retry"),
-                },
-                { socketPath },
-              )
-              expect(resumeRes._tag).toBe("EscalationResolved")
-
-              const abortRes = yield* abortWorkflowViaDaemon({ repoRoot, runId }, { socketPath })
-              expect(abortRes.state).toBe("aborted")
-
-              const doctorRes = yield* doctorWorkflowViaDaemon(
-                { repoRoot, mode: WorkflowDoctorMode.make("rebuild") },
-                { socketPath },
-              )
-              expect(doctorRes.rebuiltRunCount).toBe(2)
-            }),
-          ).pipe(Effect.provide(UnixSocketDaemonLive))
-        }),
-      ),
-  )
-
-  it.live(
-    "async spawn strips HARNESS_STATE_DIR, records Harness.completeUnit span budget, catches git mv renames, protected paths, TimedOut, and invalid baseSha",
-    () =>
-      withTempDir((dir) =>
-        Effect.gen(function* () {
-          const { repoRoot, baseSha } = initGitRepo(dir)
-          const pkgUnit = {
-            _tag: "PackageUnit" as const,
-            unitId: WorkUnitId.make("pkg-async"),
-            projectName: NxProjectName.make("@harness/alpha"),
-            waveIndex: WaveIndex.make(0),
-            dependsOn: [],
-            ownedRelPaths: [OwnedRelPath.make("libs/alpha")],
-            stubKeys: [],
-            earsKeys: [],
-            packageVerifyCommand: PackageVerifyCommand.make("nx run @harness/alpha:verify"),
-          }
-
-          // Real async spawn subprocess via fake executable `nx` on PATH
-          const binDir = join(dir, "bin")
-          mkdirSync(binDir, { recursive: true })
-          const envCapturePath = join(dir, "captured-env.json")
-          const nxScript = join(binDir, "nx")
+          const { repoRoot } = initGitRepo(dir)
+          const pkgPath = join(repoRoot, "libs", "alpha", "package.json")
+          const stubPath = join(repoRoot, "libs", "alpha", "src", "index.ts")
+          writeFileSync(pkgPath, "{corrupt-json", "utf8")
           writeFileSync(
-            nxScript,
-            `#!/usr/bin/env node\nconst fs = require("node:fs")\nfs.writeFileSync(${JSON.stringify(envCapturePath)}, JSON.stringify({ wid: process.env.HARNESS_WORKTREE_ID || null, sdir: process.env.HARNESS_STATE_DIR || null }))\nprocess.exit(0)\n`,
-            "utf8",
-          )
-          chmodSync(nxScript, 0o755)
-
-          writeFileSync(
-            join(repoRoot, "libs", "alpha", "src", "index.ts"),
-            "export const alpha = 55\n",
+            stubPath,
+            `import { Effect } from "effect"\nimport { stub } from "@harness/contract"\nexport const runAlpha = Effect.fn("Alpha.run")(function* () {\n  return yield* stub<void>("harness:SPEC-1", "REQ-1")\n})\n`,
             "utf8",
           )
 
-          const envWithInheritedState: Readonly<Record<string, string | undefined>> = {
-            ...process.env,
-            PATH: `${binDir}:${process.env.PATH ?? ""}`,
-            HARNESS_STATE_DIR: "/tmp/inherited-state-dir-must-be-stripped",
-            HARNESS_WORKTREE_ID: "parent-worktree-id",
-          }
-
-          const { result: asyncOutcome, spans: completeSpans } = yield* runWithTestTracer(
-            "completeUnit.async",
-            completeUnitImpl(
-              {
-                runId: WorkflowRunId.make("run-async-1"),
-                level: "slice",
-                baseSha,
-                unit: pkgUnit,
-                attempt: AttemptNumber.make(1),
-                cwd: repoRoot,
-                siblingInFlightOwnedPaths: [],
-              },
-              { env: envWithInheritedState },
-            ),
-          )
-          expect(completeSpans.some((s) => s.name === "Harness.completeUnit")).toBe(true)
-          expect(yield* decideSpanBudgets({ spans: completeSpans })).toEqual([])
-          expect(asyncOutcome._tag).toBe("Completed")
-          const capturedEnv = yield* Schema.decodeEffect(
-            Schema.fromJsonString(
-              Schema.Struct({
-                wid: Schema.NullOr(Schema.String),
-                sdir: Schema.NullOr(Schema.String),
-              }),
-            ),
-          )(readFileSync(envCapturePath, "utf8"))
-          expect(capturedEnv).toEqual({ wid: "pkg-async", sdir: null })
-
-          // TimedOut verification -> Rejected(PackageVerifyFailed(exitCode: 1))
-          const timeoutOutcome = yield* completeUnitImpl(
-            {
-              runId: WorkflowRunId.make("run-async-1"),
+          const corruptPkgExit = yield* Effect.exit(
+            compileWorkflowPlanFromRepo({
+              repoRoot,
               level: "slice",
-              baseSha,
-              unit: pkgUnit,
-              attempt: AttemptNumber.make(1),
-              cwd: repoRoot,
-              siblingInFlightOwnedPaths: [],
-            },
-            {
-              runVerifyCommand: () =>
-                Effect.succeed({ _tag: "TimedOut", stdout: "", stderr: "timed out" }),
-            },
-          )
-          match(timeoutOutcome)
-            .with({ _tag: "Rejected" }, (r) => {
-              match(r.rejection)
-                .with({ _tag: "PackageVerifyFailed" }, (p) => {
-                  expect(p.exitCode).toBe(1)
-                })
-                .with(
-                  { _tag: "AgentFailed" },
-                  { _tag: "WriteSetViolation" },
-                  { _tag: "StampMissing" },
-                  () => {
-                    expect.unreachable("Expected PackageVerifyFailed on TimedOut")
-                  },
-                )
-                .exhaustive()
-            })
-            .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
-              expect.unreachable("Expected Rejected(PackageVerifyFailed)")
-            })
-            .exhaustive()
-
-          // Protected path (.harness/custom-policy.json) -> Rejected(AgentFailed)
-          mkdirSync(join(repoRoot, ".harness"), { recursive: true })
-          writeFileSync(join(repoRoot, ".harness", "custom-policy.json"), "{}\n", "utf8")
-          const protectedOutcome = yield* completeUnitImpl({
-            runId: WorkflowRunId.make("run-async-1"),
-            level: "slice",
-            baseSha,
-            unit: pkgUnit,
-            attempt: AttemptNumber.make(1),
-            cwd: repoRoot,
-            siblingInFlightOwnedPaths: [],
-          })
-          match(protectedOutcome)
-            .with({ _tag: "Rejected" }, (r) => {
-              expect(r.rejection._tag).toBe("AgentFailed")
-            })
-            .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
-              expect.unreachable("Expected Rejected(AgentFailed) for protected .harness path")
-            })
-            .exhaustive()
-          rmSync(join(repoRoot, ".harness"), { recursive: true, force: true })
-
-          // git mv across ownership boundary (--no-renames) -> WriteSetViolation
-          execFileSync("git", ["checkout", "--", "libs/alpha/src/index.ts"], { cwd: repoRoot })
-          execFileSync("git", ["mv", "libs/alpha/src/index.ts", "libs/beta/src/moved.ts"], {
-            cwd: repoRoot,
-          })
-          execFileSync("git", ["commit", "-m", "rename outside ownership"], {
-            cwd: repoRoot,
-            stdio: "ignore",
-          })
-          const renameOutcome = yield* completeUnitImpl({
-            runId: WorkflowRunId.make("run-async-1"),
-            level: "slice",
-            baseSha,
-            unit: pkgUnit,
-            attempt: AttemptNumber.make(1),
-            cwd: repoRoot,
-            siblingInFlightOwnedPaths: [],
-          })
-          match(renameOutcome)
-            .with({ _tag: "Rejected" }, (r) => {
-              match(r.rejection)
-                .with({ _tag: "WriteSetViolation" }, (v) => {
-                  expect(v.offendingPaths).toContain(OwnedRelPath.make("libs/beta/src/moved.ts"))
-                })
-                .with(
-                  { _tag: "AgentFailed" },
-                  { _tag: "PackageVerifyFailed" },
-                  { _tag: "StampMissing" },
-                  () => {
-                    expect.unreachable("Expected WriteSetViolation on git mv outside ownership")
-                  },
-                )
-                .exhaustive()
-            })
-            .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
-              expect.unreachable("Expected Rejected(WriteSetViolation) on git mv")
-            })
-            .exhaustive()
-
-          // Invalid baseSha -> WorkspaceFsError
-          const badShaExit = yield* Effect.exit(
-            completeUnitImpl({
-              runId: WorkflowRunId.make("run-async-1"),
-              level: "slice",
-              baseSha: GitCommitSha.make("0".repeat(40)),
-              unit: pkgUnit,
-              attempt: AttemptNumber.make(1),
-              cwd: repoRoot,
-              siblingInFlightOwnedPaths: [],
+              mode: { _tag: "Manual" },
             }),
           )
-          match(badShaExit)
+          match(corruptPkgExit)
             .with({ _tag: "Failure" }, ({ cause }) => {
               expect(
                 Option.match(Cause.findErrorOption(cause), {
@@ -1315,10 +2060,194 @@ describe("WF-3 UnitVerifier, WorkflowWorktreePort, ReviewRouter, PlanCompiler, a
               ).toBe("WorkspaceFsError")
             })
             .with({ _tag: "Success" }, () => {
-              expect.unreachable("Expected WorkspaceFsError for invalid baseSha")
+              expect.unreachable("Expected WorkspaceFsError for corrupt package.json")
+            })
+            .exhaustive()
+
+          writeFileSync(pkgPath, JSON.stringify({ name: "@harness/alpha" }), "utf8")
+          chmodSync(stubPath, 0o000)
+
+          const unreadableStubExit = yield* Effect.exit(
+            compileWorkflowPlanFromRepo({
+              repoRoot,
+              level: "slice",
+              mode: { _tag: "Manual" },
+            }),
+          )
+          chmodSync(stubPath, 0o644)
+          match(unreadableStubExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(
+                Option.match(Cause.findErrorOption(cause), {
+                  onNone: () => undefined,
+                  onSome: (e) => e._tag,
+                }),
+              ).toBe("WorkspaceFsError")
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected WorkspaceFsError for unreadable stub file")
             })
             .exhaustive()
         }),
       ),
+  )
+})
+
+describe("DaemonClient WF-3 IPC", () => {
+  it.live("performs handshake capability checks and decodes typed RPC responses", () =>
+    withTempDir((dir) =>
+      Effect.gen(function* () {
+        const { repoRoot, baseSha } = initGitRepo(dir)
+        const commonGitDir = GitCommonDirPath.make(realpathSync.native(join(repoRoot, ".git")))
+        const { socketPath } = resolveWorkflowRuntimePaths(commonGitDir)
+
+        const samplePlan: CompiledPlan = {
+          runId: WorkflowRunId.make("run-ipc-0001"),
+          level: "slice",
+          planSha: PlanSha256.make("c".repeat(64)),
+          baseSha,
+          mode: { _tag: "Manual" },
+          units: [makePackageUnit({ unitId: "u-alpha" })],
+          sharedStepPaths: [],
+        }
+
+        const runId = WorkflowRunId.make("run-ipc-0001")
+        const executionId = WorkflowExecutionId.make("run-ipc-0001")
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(repoRoot), {
+              lineHandler: (line: string) => {
+                const parsed = decodeJsonLine(line)
+                const id = parsed.id ?? ""
+                const command = parsed.command ?? ""
+                const response = match(command)
+                  .with("workflow.handshake", () => ({
+                    id,
+                    ok: true,
+                    command,
+                    handshake: {
+                      protocolVersion: "1",
+                      capabilities: [
+                        "workflow.handshake",
+                        "workflow.start",
+                        "workflow.status",
+                        "workflow.complete",
+                        "workflow.resume",
+                        "workflow.abort",
+                        "workflow.doctor",
+                      ],
+                      repoRoot,
+                      commonGitDir,
+                      writerLeaseEpoch: 1,
+                    },
+                  }))
+                  .with("workflow.start", () => ({
+                    id,
+                    ok: true,
+                    result: { runId, executionId, outcome: "started" },
+                  }))
+                  .with("workflow.status", () => ({
+                    id,
+                    ok: true,
+                    result: {
+                      _tag: "Ready",
+                      writerLeaseEpoch: 1,
+                      outcome: { _tag: "NotFound" },
+                    },
+                  }))
+                  .with("workflow.complete", () => ({
+                    id,
+                    ok: true,
+                    result: {
+                      _tag: "LlmPhaseCompleted",
+                      runId,
+                      executionId,
+                      receipt: {
+                        workspaceHash: WorkspaceTreeHash.make("d".repeat(64)),
+                        frictionLogCleared: FrictionLogState.make("cleared"),
+                      },
+                    },
+                  }))
+                  .with("workflow.resume", () => ({
+                    id,
+                    ok: true,
+                    result: {
+                      _tag: "EscalationResolved",
+                      runId,
+                      executionId,
+                      unitId: WorkUnitId.make("u-alpha"),
+                      decision: EscalationDecision.make("retry"),
+                    },
+                  }))
+                  .with("workflow.abort", () => ({
+                    id,
+                    ok: true,
+                    result: { runId, executionId, state: "aborted" },
+                  }))
+                  .with("workflow.doctor", () => ({
+                    id,
+                    ok: true,
+                    result: {
+                      repoRoot,
+                      commonGitDir,
+                      writerLeaseEpoch: 1,
+                      rebuiltRunCount: 2,
+                      checks: [],
+                    },
+                  }))
+                  .otherwise(() => ({ id, ok: false, error: `Unknown command ${command}` }))
+                return Effect.succeed(JSON.stringify(response))
+              },
+            })
+
+            const startRes = yield* startWorkflowViaDaemon(
+              { repoRoot, plan: samplePlan },
+              { socketPath },
+            )
+            expect(startRes).toEqual({ runId, executionId, outcome: "started" })
+
+            const statusRes = yield* getWorkflowStatusViaDaemon({ repoRoot, runId }, { socketPath })
+            expect(statusRes._tag).toBe("Ready")
+            match(statusRes)
+              .with({ _tag: "Ready" }, (ready) => {
+                expect(ready.writerLeaseEpoch).toBe(LeaseEpoch.make(1))
+                expect(ready.outcome._tag).toBe("NotFound")
+              })
+              .with({ _tag: "DaemonOffline" }, { _tag: "StorePaused" }, () => {
+                expect.unreachable("Expected Ready status")
+              })
+              .exhaustive()
+
+            const completeRes = yield* completeWorkflowViaDaemon(
+              { _tag: "CompleteLlmPhase", repoRoot, runId },
+              { socketPath },
+            )
+            expect(completeRes._tag).toBe("LlmPhaseCompleted")
+
+            const resumeRes = yield* resumeWorkflowViaDaemon(
+              {
+                _tag: "ResolveEscalation",
+                repoRoot,
+                runId,
+                unitId: WorkUnitId.make("u-alpha"),
+                decision: EscalationDecision.make("retry"),
+              },
+              { socketPath },
+            )
+            expect(resumeRes._tag).toBe("EscalationResolved")
+
+            const abortRes = yield* abortWorkflowViaDaemon({ repoRoot, runId }, { socketPath })
+            expect(abortRes.state).toBe("aborted")
+
+            const doctorRes = yield* doctorWorkflowViaDaemon(
+              { repoRoot, mode: WorkflowDoctorMode.make("rebuild") },
+              { socketPath },
+            )
+            expect(doctorRes.rebuiltRunCount).toBe(2)
+          }),
+        ).pipe(Effect.provide(UnixSocketDaemonLive))
+      }),
+    ),
   )
 })

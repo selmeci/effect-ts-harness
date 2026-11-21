@@ -40,11 +40,12 @@ The plugin registers four lifecycle hooks to enforce safety constraints and inde
 1. **`PreInvocation` (`harness session --format=antigravity`):**
    Executes before each agent invocation. Runs `SessionHandoff.decide` to evaluate dirty working tree files, inspect git branch state, check `.harness/verify-stamp.json` freshness, and surface environment readiness.
 2. **`PreToolUse` (`harness guard --format=antigravity`):**
-   Intercepts tool calls (`run_command`, `edit_file`, `write_file`, `replace_file_content`, `multi_replace_file_content`, `write_to_file`).
+   Intercepts tool calls (`run_command`, `edit_file`, `write_file`, `replace_file_content`, `multi_replace_file_content`, `write_to_file`, `view_file`, `grep_search`, `find_by_name`, `list_dir`).
    - Blocks edits to read-only `repos/effect` and `repos/alchemy`.
    - Blocks direct writes to `.harness/verify-stamp.json` (stamp forgery prevention).
+   - Blocks reads of secret files and protected harness runtime state (`daemon.sock`, `auth-tokens.json`, `<git-common-dir>/harness/**`).
    - Blocks destructive shell commands (`git push --force`, `rm -rf`).
-   - Under `HARNESS_UNIT_WORKER=1` worker isolation, blocks recursive `harness workflow start|resume|abort|done` commands and direct access to `daemon.sock` or `auth-tokens.json`.
+   - When `HARNESS_UNIT_WORKER=1` is set on unit worker invocations (automatic runner spawning lands in WF-5), blocks recursive `harness workflow start|resume|abort|doctor|complete --phase llm`, `harness done`, and direct access to `daemon.sock` or `auth-tokens.json`.
    - Requires explicit human approval for `alchemy deploy` and `alchemy destroy`.
 3. **`PostToolUse` (`harness ingest --format=antigravity`):**
    Executes immediately following file write or replacement operations. Incrementally parses modified TypeScript ASTs, EARS specifications, and ADR documents into `.harness/index.sqlite` and the resident Omnigraph property graph.
@@ -173,4 +174,4 @@ Invoke specialist review subagents as read-only inspectors during implementation
    ```
 4. **Orchestrate Durable Task Workflows & Determinism Gates:**
    - Control `HarnessTaskWorkflow` runs via `harness workflow` (`compile | start | status | complete | resume | doctor | abort`) over `<git-common-dir>/harness/daemon.sock`, and inspect status read-only with `harness_workflow_plan`.
-   - Workflow definition modules containing `Workflow.make(...)` are checked by the `nondeterministic-workflow-body` AST and `oxlint` rule (`harness/syntax-bans`), requiring side effects, clock/randomness, env, fs, git, Omnigraph, and network calls to run inside `Activity.make({ execute: ... })`.
+   - Workflow definition modules containing `Workflow.make(...)` are checked across `toLayer`/`register` handlers and same-module helper functions by the `nondeterministic-workflow-body` AST and `oxlint` rule (`harness/syntax-bans`), requiring side effects, clock/randomness, env, fs, git, Omnigraph, and network calls to run inside `Activity.make({ execute: ... })`.

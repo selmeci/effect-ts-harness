@@ -1265,8 +1265,10 @@ describe("harness-mcp tools", () => {
           resolvedRepoRoot: expect.any(String),
           commonGitDir: expect.any(String),
           status: {
-            storeStatus: expect.any(String),
-            units: expect.any(Array),
+            _tag: "DaemonOffline",
+            outcome: {
+              _tag: "NotFound",
+            },
           },
         })
       }

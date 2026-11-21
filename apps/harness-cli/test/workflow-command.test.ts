@@ -11,6 +11,7 @@ import {
   CompiledPlan,
   EscalationDecision,
   FrictionLogState,
+  GateExitCode,
   GitCommitSha,
   GitCommonDirPath,
   LeaseEpoch,
@@ -18,15 +19,24 @@ import {
   OwnedRelPath,
   PackageStampHash,
   PackageVerifyCommand,
+  PackageVerifyFailureDetail,
   PlanSha256,
+  UnitAgentDispatchResult,
   UnitOutcome,
   UnitRejection,
   WaveIndex,
   WorkUnitId,
   WorkflowDoctorMode,
   WorkflowExecutionId,
+  WorkflowProjectionStatus,
   WorkflowRebuiltRunCount,
   WorkflowRunId,
+  WorkflowRunOutcome,
+  WorkflowRunState,
+  WorkflowStatusSummary,
+  WorkflowStoreFailureReason,
+  WorkflowTerminalError,
+  WorkflowTimestampMs,
   WorkspaceFilePath,
   WorkspaceTreeHash,
   type WorkflowCompleteRequest,
@@ -39,6 +49,7 @@ import {
   startScopedUnixSocketDaemon,
   validateWorktreeRepoRoot,
 } from "@harness/infra"
+import { UnitAgentDispatcher } from "@harness/service"
 import { runDeclarativeCli } from "../src/commands/declarative-cli.js"
 import { handleWorkflow, type WorkflowCliDeps } from "../src/commands/workflow.command.js"
 
@@ -169,7 +180,7 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
       "utf8",
     )
 
-    const autoEpicCompile = await Effect.runPromise(
+    const autoPlaceholderCompile = await Effect.runPromise(
       runDeclarativeCli(
         [
           "workflow",
@@ -188,6 +199,33 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
         { repoRoot: dir, skipBackgroundDaemons: true },
       ),
     )
+    expect(autoPlaceholderCompile.exitCode).toBe(1)
+    expect(autoPlaceholderCompile.stderr).toContain("WF-5")
+
+    const liveDispatcher = {
+      runnerKind: "live" as const,
+      dispatchUnit: () => Effect.succeed(UnitAgentDispatchResult.cases.Completed.make({})),
+    }
+
+    const autoEpicCompile = await Effect.runPromise(
+      handleWorkflow(
+        [
+          "workflow",
+          "compile",
+          "--level",
+          "epic",
+          "--mode",
+          "automatic",
+          "--runner",
+          "claude-code",
+          "--max-concurrency",
+          "2",
+          "--input",
+          inputPath,
+        ],
+        { repoRoot: dir },
+      ).pipe(Effect.provideService(UnitAgentDispatcher, liveDispatcher)),
+    )
     expect(autoEpicCompile.exitCode).toBe(0)
     const epicPlan = Schema.decodeSync(Schema.fromJsonString(CompiledPlan))(autoEpicCompile.stdout)
     expect(epicPlan.runId).toBe(WorkflowRunId.make("wf-epic-test-01"))
@@ -197,6 +235,71 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
       runner: "claude-code",
       maxConcurrency: 2,
     })
+
+    // F-14.3: omitted CLI --level and --mode honor --input JSON; explicit CLI flags override JSON
+    const inputWithLevelAndMode = join(dir, "plan-input-defaults.json")
+    writeFileSync(
+      inputWithLevelAndMode,
+      JSON.stringify({
+        runId: "wf-input-defaults-01",
+        level: "epic",
+        mode: { _tag: "Automatic", runner: "claude-code", maxConcurrency: 3 },
+        units: [
+          {
+            _tag: "SliceUnit",
+            unitId: "slice-a",
+            branch: "slice/alpha-unit",
+            ownedRelPaths: ["libs/alpha"],
+            earsKeys: [],
+          },
+        ],
+      }),
+      "utf8",
+    )
+    const fromInputJson = await Effect.runPromise(
+      handleWorkflow(["workflow", "compile", "--input", inputWithLevelAndMode], {
+        repoRoot: dir,
+      }).pipe(Effect.provideService(UnitAgentDispatcher, liveDispatcher)),
+    )
+    expect(fromInputJson.exitCode).toBe(0)
+    const inputDefaultsPlan = Schema.decodeSync(Schema.fromJsonString(CompiledPlan))(
+      fromInputJson.stdout,
+    )
+    expect(inputDefaultsPlan.level).toBe("epic")
+    expect(inputDefaultsPlan.mode).toEqual({
+      _tag: "Automatic",
+      runner: "claude-code",
+      maxConcurrency: 3,
+    })
+
+    const fromInputPlaceholderErr = await Effect.runPromise(
+      handleWorkflow(["workflow", "compile", "--input", inputWithLevelAndMode], {
+        repoRoot: dir,
+      }),
+    )
+    expect(fromInputPlaceholderErr.exitCode).toBe(1)
+    expect(fromInputPlaceholderErr.stderr).toContain("WF-5")
+
+    const cliOverrideJson = await Effect.runPromise(
+      handleWorkflow(
+        ["workflow", "compile", "--mode", "manual", "--input", inputWithLevelAndMode],
+        { repoRoot: dir },
+      ),
+    )
+    expect(cliOverrideJson.exitCode).toBe(0)
+    const overriddenPlan = Schema.decodeSync(Schema.fromJsonString(CompiledPlan))(
+      cliOverrideJson.stdout,
+    )
+    expect(overriddenPlan.level).toBe("epic")
+    expect(overriddenPlan.mode).toEqual({ _tag: "Manual" })
+
+    // F-17.1: workflow start rejects Automatic plan fail-closed when placeholder dispatcher is active
+    const autoPlanJson = JSON.stringify(Schema.encodeSync(CompiledPlan)(epicPlan))
+    const autoStartPlaceholder = await Effect.runPromise(
+      handleWorkflow(["workflow", "start"], { repoRoot: dir, stdin: autoPlanJson }),
+    )
+    expect(autoStartPlaceholder.exitCode).toBe(1)
+    expect(autoStartPlaceholder.stderr).toContain("WF-5")
 
     const manualWithRunner = await Effect.runPromise(
       handleWorkflow(["workflow", "compile", "--mode", "manual", "--runner", "claude-code"], {
@@ -344,6 +447,27 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
       outcome: { _tag: "Rejected" },
     })
 
+    // F-18.2: PackageVerifyFailed summary includes failureKind and bounded detail
+    const verifyFailedOutcome = UnitOutcome.cases.Rejected.make({
+      unitId: WorkUnitId.make("u-alpha"),
+      attempt: AttemptNumber.make(2),
+      rejection: UnitRejection.cases.PackageVerifyFailed.make({
+        exitCode: GateExitCode.make(124),
+        failureKind: "timed-out",
+        detail: PackageVerifyFailureDetail.make("Timed out running nx verify"),
+      }),
+    })
+    const verifyFailedRes = await Effect.runPromise(
+      handleWorkflow(
+        ["workflow", "complete", "--unit", "u-alpha", "--repo-root", dir, "--json"],
+        undefined,
+        makeDeps(verifyFailedOutcome),
+      ),
+    )
+    expect(verifyFailedRes.exitCode).toBe(1)
+    expect(verifyFailedRes.stderr).toContain("failureKind=timed-out")
+    expect(verifyFailedRes.stderr).toContain("Timed out running nx verify")
+
     // shared-step completion passes WorkUnitId("shared-step")
     const sharedRes = await Effect.runPromise(
       handleWorkflow(
@@ -417,15 +541,20 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
       resumeWorkflow: (req) => {
         resumeRequests.push(req)
         return Effect.succeed(
-          req.unitId !== undefined && req.decision !== undefined
-            ? {
-                _tag: "EscalationResolved" as const,
-                runId: req.runId,
-                executionId,
-                unitId: req.unitId,
-                decision: req.decision,
-              }
-            : { _tag: "WorkflowResumed" as const, runId: req.runId, executionId },
+          match(req)
+            .with({ _tag: "ResolveEscalation" }, (r) => ({
+              _tag: "EscalationResolved" as const,
+              runId: r.runId,
+              executionId,
+              unitId: r.unitId,
+              decision: r.decision,
+            }))
+            .with({ _tag: "ResumeRun" }, (r) => ({
+              _tag: "WorkflowResumed" as const,
+              runId: r.runId,
+              executionId,
+            }))
+            .exhaustive(),
         )
       },
       doctorWorkflow: (req) => {
@@ -631,12 +760,9 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
                   id,
                   ok: true,
                   result: {
-                    units: [],
-                    attempts: [],
-                    pendingDeferreds: [],
-                    storeStatus: "ready",
-                    projectionStatus: "fresh",
+                    _tag: "Ready",
                     writerLeaseEpoch: 1,
+                    outcome: { _tag: "NotFound" },
                   },
                 }))
                 .with("workflow.complete", () => ({
@@ -714,8 +840,9 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
           )
           expect(statusRes.exitCode).toBe(0)
           expect(JSON.parse(statusRes.stdout)).toMatchObject({
-            storeStatus: "ready",
-            projectionStatus: "fresh",
+            _tag: "Ready",
+            writerLeaseEpoch: 1,
+            outcome: { _tag: "NotFound" },
           })
 
           const completeLinkedRes = yield* runDeclarativeCli(
@@ -783,5 +910,55 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
       { command: "workflow.doctor", repoRoot: dir },
       { command: "workflow.abort", repoRoot: dir },
     ])
+  })
+
+  it("status preserves typed WorkflowTerminalError._tag (F-15.1)", async () => {
+    const { dir, headSha } = createTempGitRepo("harness-wf-status-tag-")
+    const runId = WorkflowRunId.make("wf-status-err-01")
+    const executionId = WorkflowExecutionId.make("wf-status-err-01")
+
+    const summary = WorkflowStatusSummary.cases.Ready.make({
+      writerLeaseEpoch: LeaseEpoch.make(2),
+      outcome: WorkflowRunOutcome.cases.Failed.make({
+        run: {
+          runId,
+          executionId,
+          level: "slice",
+          planSha: PlanSha256.make("a".repeat(64)),
+          baseSha: headSha,
+          state: WorkflowRunState.make("aborted"),
+          updatedMs: WorkflowTimestampMs.make(100),
+        },
+        units: [],
+        attempts: [],
+        pendingDeferreds: [],
+        terminalError: WorkflowTerminalError.cases.Interrupted.make({
+          reason: WorkflowStoreFailureReason.make("Operator interrupted execution"),
+        }),
+        projectionStatus: WorkflowProjectionStatus.make("fresh"),
+      }),
+    })
+
+    const res = await Effect.runPromise(
+      handleWorkflow(
+        ["workflow", "status", "--run-id", runId, "--json"],
+        { repoRoot: dir },
+        {
+          getWorkflowStatus: () => Effect.succeed(summary),
+        },
+      ),
+    )
+    expect(res.exitCode).toBe(0)
+    expect(JSON.parse(res.stdout)).toMatchObject({
+      _tag: "Ready",
+      writerLeaseEpoch: 2,
+      outcome: {
+        _tag: "Failed",
+        terminalError: {
+          _tag: "Interrupted",
+          reason: "Operator interrupted execution",
+        },
+      },
+    })
   })
 })

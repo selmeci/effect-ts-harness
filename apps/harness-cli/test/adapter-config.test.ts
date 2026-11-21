@@ -44,6 +44,13 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
       "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard || exit 2",
     )
 
+    const readPreHook = hooks.hooks.PreToolUse[2]
+    expect(readPreHook.matcher).toBe("Read|Grep|Glob|LS|Find")
+    expect(readPreHook.hooks[0].command).toBe(
+      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard || exit 2",
+    )
+    expect(readPreHook.hooks[0].timeout).toBe(15)
+
     const postHook = hooks.hooks.PostToolUse[0]
     expect(postHook.matcher).toBe("Edit|Write|MultiEdit")
     expect(postHook.hooks[0].command).toBe(
@@ -243,6 +250,13 @@ describe("Antigravity adapter & plugin configuration", () => {
     expect(spec.PreToolUse[1].matcher).toBe(
       "edit_file|write_file|replace_file_content|multi_replace_file_content|write_to_file",
     )
+    expect(spec.PreToolUse[2].matcher).toBe(
+      "view_file|view_file_outline|view_code_item|read_file|grep_search|find_by_name|list_dir",
+    )
+    expect(spec.PreToolUse[2].hooks[0].command).toContain(
+      "hook-entry.ts guard --format=antigravity",
+    )
+    expect(spec.PreToolUse[2].hooks[0].timeout).toBe(15)
     expect(spec.PostToolUse[0].matcher).toBe(
       "edit_file|write_file|replace_file_content|multi_replace_file_content|write_to_file",
     )

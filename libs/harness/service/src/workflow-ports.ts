@@ -22,6 +22,7 @@ import type {
   WorkflowUnitRecord,
   WorktreeProvisionReceipt,
   WorkspaceFsError,
+  WriterLeaseHeldError,
 } from "@harness/contract"
 
 export interface WorkflowGraphBackupShape {
@@ -52,6 +53,7 @@ export class UnitVerifier extends Context.Service<UnitVerifier, UnitVerifierShap
 
 /** Dispatches an automatic work unit against a pluggable agent runner boundary (live runners land in WF-5). */
 export interface UnitAgentDispatcherShape {
+  readonly runnerKind: "live" | "placeholder"
   readonly dispatchUnit: (
     request: UnitAgentRequest,
   ) => Effect.Effect<UnitAgentDispatchResult, WorkspaceFsError>
@@ -62,7 +64,10 @@ export class UnitAgentDispatcher extends Context.Service<
   UnitAgentDispatcherShape
 >()("@harness/service/UnitAgentDispatcher") {}
 
-/** Provisions and tears down isolated slice worktrees and executes wave merges for L1 runs. */
+/**
+ * Provisions and tears down L1 linked slice worktrees (and resolves L2 canonical mappings)
+ * and executes wave merges for L1 slice runs.
+ */
 export interface WorkflowWorktreePortShape {
   readonly provisionWorktrees: (
     plan: CompiledPlan,
@@ -92,15 +97,20 @@ export class WorkflowReviewRouter extends Context.Service<
   WorkflowReviewRouterShape
 >()("@harness/service/WorkflowReviewRouter") {}
 
-/** Write-only Omnigraph read-model projection port used by `HarnessTaskWorkflow` activities (`REQ-3.1`). */
+/**
+ * Write-only projection port used by `HarnessTaskWorkflow` activities (`REQ-3.1`)
+ * to maintain `harness-workflows` read-model entities; only live daemon holders with a valid lease may write.
+ */
 export interface WorkflowProjectionWriterShape {
-  readonly upsertRun: (run: WorkflowRunRecord) => Effect.Effect<void, WorkflowStoreUnavailableError>
+  readonly upsertRun: (
+    run: WorkflowRunRecord,
+  ) => Effect.Effect<void, WorkflowStoreUnavailableError | WriterLeaseHeldError>
   readonly upsertUnit: (
     unit: WorkflowUnitRecord,
-  ) => Effect.Effect<void, WorkflowStoreUnavailableError>
+  ) => Effect.Effect<void, WorkflowStoreUnavailableError | WriterLeaseHeldError>
   readonly upsertAttempt: (
     attempt: WorkflowAttemptRecord,
-  ) => Effect.Effect<void, WorkflowStoreUnavailableError>
+  ) => Effect.Effect<void, WorkflowStoreUnavailableError | WriterLeaseHeldError>
 }
 
 export class WorkflowProjectionWriter extends Context.Service<
@@ -108,18 +118,33 @@ export class WorkflowProjectionWriter extends Context.Service<
   WorkflowProjectionWriterShape
 >()("@harness/service/WorkflowProjectionWriter") {}
 
-/** Read-only Omnigraph query port for `workflow status`, `harness_workflow_plan`, and `workflow doctor` (`REQ-3.1`). */
+/**
+ * Read-only `harness-workflows` query port for `workflow status`, `harness_workflow_plan`,
+ * and `workflow doctor` (`REQ-3.1`); never queried from `HarnessTaskWorkflow` orchestration or pure `.decide` functions.
+ */
 export interface WorkflowReadModelQueryShape {
   readonly getRun: (
     runId: WorkflowRunId,
-  ) => Effect.Effect<Option.Option<WorkflowRunRecord>, WorkflowStoreUnavailableError>
-  readonly listRuns: Effect.Effect<ReadonlyArray<WorkflowRunRecord>, WorkflowStoreUnavailableError>
+  ) => Effect.Effect<
+    Option.Option<WorkflowRunRecord>,
+    WorkflowStoreUnavailableError | WriterLeaseHeldError
+  >
+  readonly listRuns: Effect.Effect<
+    ReadonlyArray<WorkflowRunRecord>,
+    WorkflowStoreUnavailableError | WriterLeaseHeldError
+  >
   readonly listUnits: (
     runId: WorkflowRunId,
-  ) => Effect.Effect<ReadonlyArray<WorkflowUnitRecord>, WorkflowStoreUnavailableError>
+  ) => Effect.Effect<
+    ReadonlyArray<WorkflowUnitRecord>,
+    WorkflowStoreUnavailableError | WriterLeaseHeldError
+  >
   readonly listAttempts: (
     runId: WorkflowRunId,
-  ) => Effect.Effect<ReadonlyArray<WorkflowAttemptRecord>, WorkflowStoreUnavailableError>
+  ) => Effect.Effect<
+    ReadonlyArray<WorkflowAttemptRecord>,
+    WorkflowStoreUnavailableError | WriterLeaseHeldError
+  >
   readonly probeAvailability: Effect.Effect<WorkflowStoreAvailabilityState, never>
 }
 

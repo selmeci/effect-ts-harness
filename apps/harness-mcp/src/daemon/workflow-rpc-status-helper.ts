@@ -8,9 +8,9 @@ import {
   type EscalationOrdinal,
   type LeaseEpoch,
   PendingDeferredName,
-  type ReviewRoutingPlan,
   SHARED_STEP_UNIT_ID,
   type SliceBranchName,
+  TaskRunAbortedError,
   type TaskRunReceipt,
   type UnitEscalation,
   type UnitOutcome,
@@ -18,20 +18,25 @@ import {
   WaveIndex,
   type WorkUnitId,
   type WorkflowAttemptRecord,
-  WorkflowDoctorCheckItem,
-  WorkflowDoctorCheckName,
-  WorkflowDoctorRequest,
-  type WorkflowDoctorResponse,
+  WorkflowDaemonCapability,
   type WorkflowExecutionId,
   WorkflowPendingDeferred,
   WorkflowProjectionStatus,
-  WorkflowRebuiltRunCount,
+  type WorkflowRpcEnvelope,
   type WorkflowRunId,
   type WorkflowRunRecord,
+  WorkflowRunOutcome,
   WorkflowStatusRequest,
-  type WorkflowStatusSummary,
+  WorkflowStatusSummary,
   type WorkflowStoreFailureReason,
+  WorkflowStoreUnavailableError,
+  WorkflowTerminalError,
+  WorkflowTimestampMs,
   type WorkflowUnitRecord,
+  WorkspaceFsError,
+  WriterLeaseHeldError,
+  isPureInterruptCause,
+  makeWorkflowAttemptKey,
   toBoundedReason,
   wavesOf,
 } from "@harness/contract"
@@ -42,12 +47,13 @@ import {
   unitEscalationDeferredName,
 } from "@harness/gates"
 import { WorkflowReadModelQuery } from "@harness/service"
-import { nodeSyncHostIo, rebuildWorkflowReadModelViews } from "@harness/infra"
+import { nodeSyncHostIo } from "@harness/infra"
 import {
   WORKFLOW_DAEMON_CAPABILITIES,
   handleDaemonWorkflowStatusRequest,
 } from "./workflow-daemon-helper.js"
 import type { WorkflowDaemonRuntime } from "./workflow-engine-daemon-helper.js"
+import { handleDaemonWorkflowDoctorRequest } from "./workflow-rpc-doctor-helper.js"
 import {
   type WorkflowRpcHandlerInput,
   checkDeferredResult,
@@ -61,18 +67,23 @@ import {
   isUnitStatus,
   resolveRunTarget,
   rpcError,
-  rpcSuccess,
+  storeOrLeaseToBoundedReason,
+  toWorkflowRpcRequestId,
   validateRpcRepoRoot,
 } from "./workflow-rpc-shared.js"
 
+export { handleDaemonWorkflowDoctorRequest }
+
+const STATUS_COMMAND = WorkflowDaemonCapability.make("workflow.status")
 const decodeWorkflowStatusRequest = Schema.decodeUnknownEffect(WorkflowStatusRequest)
-const decodeWorkflowDoctorRequest = Schema.decodeUnknownEffect(WorkflowDoctorRequest)
 const decodeAbsoluteRepoRoot = Schema.decodeUnknownEffect(AbsoluteRepoRoot)
 
-const attemptBelongsToCycle = (attemptKey: string, escalationOrdinal: EscalationOrdinal): boolean =>
-  escalationOrdinal === 1
-    ? !attemptKey.includes("/r")
-    : attemptKey.endsWith(`/r${escalationOrdinal}`)
+const attemptBelongsToCycle = (
+  attempt: WorkflowAttemptRecord,
+  escalationOrdinal: EscalationOrdinal,
+): boolean =>
+  attempt.attemptKey ===
+  makeWorkflowAttemptKey(attempt.runId, attempt.unitId, attempt.attempt, escalationOrdinal)
 
 const resolveFallbackEscalation = (params: {
   readonly plan: CompiledPlan
@@ -86,31 +97,39 @@ const resolveFallbackEscalation = (params: {
     readonly outcome: Option.Option<UnitOutcome>
   }>
   readonly attempts: ReadonlyArray<WorkflowAttemptRecord>
-}): UnitEscalation => {
+}): Effect.Effect<UnitEscalation, WorkflowStoreFailureReason> => {
   if (params.completedPriorToEscalation && params.branch !== undefined) {
-    return { _tag: "MergeConflict", branch: params.branch }
+    return Effect.succeed({ _tag: "MergeConflict", branch: params.branch })
   }
   const rejectedInCycle = params.attempts.filter(
     (a) =>
       a.unitId === params.unitId &&
       hasAttemptVerdict(a, "rejected") &&
-      attemptBelongsToCycle(a.attemptKey, params.escalationOrdinal),
+      attemptBelongsToCycle(a, params.escalationOrdinal),
   ).length
   if (params.allThreeRejected || rejectedInCycle >= 3) {
-    return {
-      _tag: "RetryBudgetExhausted",
-      lastRejection: extractLastRejection(params.attemptOutcomes, params.attempts, params.unitId),
-    }
+    return extractLastRejection(params.attemptOutcomes, params.attempts, params.unitId).pipe(
+      Effect.map((lastRejection) => ({
+        _tag: "RetryBudgetExhausted" as const,
+        lastRejection,
+      })),
+    )
   }
   return match(params.plan.mode)
-    .with({ _tag: "Automatic" }, (auto): UnitEscalation => ({
-      _tag: "AuthRequired",
-      runner: auto.runner,
-    }))
-    .with({ _tag: "Manual" }, (): UnitEscalation => ({
-      _tag: "RetryBudgetExhausted",
-      lastRejection: extractLastRejection(params.attemptOutcomes, params.attempts, params.unitId),
-    }))
+    .with({ _tag: "Automatic" }, (auto) =>
+      Effect.succeed<UnitEscalation>({
+        _tag: "AuthRequired",
+        runner: auto.runner,
+      }),
+    )
+    .with({ _tag: "Manual" }, () =>
+      extractLastRejection(params.attemptOutcomes, params.attempts, params.unitId).pipe(
+        Effect.map((lastRejection): UnitEscalation => ({
+          _tag: "RetryBudgetExhausted",
+          lastRejection,
+        })),
+      ),
+    )
     .exhaustive()
 }
 
@@ -151,89 +170,93 @@ const discoverPendingDeferreds = Effect.fn("WorkflowRpcDaemon.discoverPendingDef
         desc.unitId,
       )
 
-      match(cycleState)
-        .with({ _tag: "Aborted" }, () => {
-          allUnitsCompleted = false
-        })
-        .with({ _tag: "Active" }, ({ escalationOrdinal, attemptOutcomes }) => {
-          const completedInJournal = attemptOutcomes.some((item) =>
-            hasOutcomeTag(item.outcome, "Completed"),
-          )
-          const completedInReadModelOrAttempts =
-            isUnitStatus(unitRecord, "completed") ||
-            params.attempts.some(
-              (a) => a.unitId === desc.unitId && hasAttemptVerdict(a, "completed"),
+      yield* match(cycleState)
+        .with({ _tag: "Aborted" }, () =>
+          Effect.sync(() => {
+            allUnitsCompleted = false
+          }),
+        )
+        .with({ _tag: "Active" }, ({ escalationOrdinal, attemptOutcomes }) =>
+          Effect.gen(function* () {
+            const completedInJournal = attemptOutcomes.some((item) =>
+              hasOutcomeTag(item.outcome, "Completed"),
             )
-          const unitCompleted = match(params.plan.mode)
-            .with(
-              { _tag: "Manual" },
-              () => completedInJournal || isUnitStatus(unitRecord, "completed"),
-            )
-            .with({ _tag: "Automatic" }, () => completedInReadModelOrAttempts)
-            .exhaustive()
+            const completedInReadModelOrAttempts =
+              isUnitStatus(unitRecord, "completed") ||
+              params.attempts.some(
+                (a) => a.unitId === desc.unitId && hasAttemptVerdict(a, "completed"),
+              )
+            const unitCompleted = match(params.plan.mode)
+              .with(
+                { _tag: "Manual" },
+                () => completedInJournal || isUnitStatus(unitRecord, "completed"),
+              )
+              .with({ _tag: "Automatic" }, () => completedInReadModelOrAttempts)
+              .exhaustive()
 
-          const unitIsEscalated = isUnitStatus(unitRecord, "escalated")
-          if (unitCompleted && !unitIsEscalated) {
-            return
-          }
-          allUnitsCompleted = false
+            const unitIsEscalated = isUnitStatus(unitRecord, "escalated")
+            if (unitCompleted && !unitIsEscalated) {
+              return
+            }
+            allUnitsCompleted = false
 
-          const allThreeRejected =
-            attemptOutcomes.length === 3 &&
-            attemptOutcomes.every((item) => hasOutcomeTag(item.outcome, "Rejected"))
-          const explicitEsc = findExplicitEscalation(attemptOutcomes)
+            const allThreeRejected =
+              attemptOutcomes.length === 3 &&
+              attemptOutcomes.every((item) => hasOutcomeTag(item.outcome, "Rejected"))
+            const explicitEsc = findExplicitEscalation(attemptOutcomes)
 
-          if (unitIsEscalated || allThreeRejected || explicitEsc !== undefined) {
-            const escalation =
-              explicitEsc ??
-              resolveFallbackEscalation({
-                plan: params.plan,
-                unitId: desc.unitId,
-                branch: desc.branch,
-                escalationOrdinal,
-                completedPriorToEscalation:
-                  completedInJournal ||
-                  params.attempts.some(
-                    (a) => a.unitId === desc.unitId && hasAttemptVerdict(a, "completed"),
-                  ),
-                allThreeRejected,
-                attemptOutcomes,
-                attempts: params.attempts,
-              })
-            pending.push(
-              WorkflowPendingDeferred.cases.Escalation.make({
-                unitId: desc.unitId,
-                deferredName: unitEscalationDeferredName(desc.unitId, escalationOrdinal),
-                escalation,
-              }),
-            )
-            return
-          }
-
-          match(params.plan.mode)
-            .with({ _tag: "Automatic" }, () => {})
-            .with({ _tag: "Manual" }, () => {
-              const firstOpen = attemptOutcomes.find((item) => !isOptionPresent(item.outcome))
-              if (
-                firstOpen !== undefined &&
-                (isUnitStatus(unitRecord, "dispatched") ||
-                  (unitRecord === undefined && desc.waveIndex === 0))
-              ) {
-                pending.push(
-                  WorkflowPendingDeferred.cases.UnitCompletion.make({
-                    unitId: desc.unitId,
-                    attempt: firstOpen.attempt,
-                    deferredName: unitCompletionDeferredName(
-                      desc.unitId,
-                      firstOpen.attempt,
-                      escalationOrdinal,
+            if (unitIsEscalated || allThreeRejected || explicitEsc !== undefined) {
+              const escalation =
+                explicitEsc ??
+                (yield* resolveFallbackEscalation({
+                  plan: params.plan,
+                  unitId: desc.unitId,
+                  branch: desc.branch,
+                  escalationOrdinal,
+                  completedPriorToEscalation:
+                    completedInJournal ||
+                    params.attempts.some(
+                      (a) => a.unitId === desc.unitId && hasAttemptVerdict(a, "completed"),
                     ),
-                  }),
-                )
-              }
-            })
-            .exhaustive()
-        })
+                  allThreeRejected,
+                  attemptOutcomes,
+                  attempts: params.attempts,
+                }))
+              pending.push(
+                WorkflowPendingDeferred.cases.Escalation.make({
+                  unitId: desc.unitId,
+                  deferredName: unitEscalationDeferredName(desc.unitId, escalationOrdinal),
+                  escalation,
+                }),
+              )
+              return
+            }
+
+            match(params.plan.mode)
+              .with({ _tag: "Automatic" }, () => {})
+              .with({ _tag: "Manual" }, () => {
+                const firstOpen = attemptOutcomes.find((item) => !isOptionPresent(item.outcome))
+                if (
+                  firstOpen !== undefined &&
+                  (isUnitStatus(unitRecord, "dispatched") ||
+                    (unitRecord === undefined && desc.waveIndex === 0))
+                ) {
+                  pending.push(
+                    WorkflowPendingDeferred.cases.UnitCompletion.make({
+                      unitId: desc.unitId,
+                      attempt: firstOpen.attempt,
+                      deferredName: unitCompletionDeferredName(
+                        desc.unitId,
+                        firstOpen.attempt,
+                        escalationOrdinal,
+                      ),
+                    }),
+                  )
+                }
+              })
+              .exhaustive()
+          }),
+        )
         .exhaustive()
     }
 
@@ -294,105 +317,210 @@ const computeProjectionStatus = (
     .exhaustive()
 }
 
+/** Classifies a terminal workflow failure `Cause` into a typed `WorkflowTerminalError` union. */
+export const classifyWorkflowTerminalError = (
+  cause: Cause.Cause<unknown>,
+): WorkflowTerminalError => {
+  if (isPureInterruptCause(cause)) {
+    return WorkflowTerminalError.cases.Interrupted.make({
+      reason: toBoundedReason(Cause.pretty(cause), "Workflow execution interrupted"),
+    })
+  }
+  return match(Cause.findErrorOption(cause))
+    .with({ _tag: "Some" }, ({ value: err }) => {
+      if (err instanceof TaskRunAbortedError) {
+        return WorkflowTerminalError.cases.Aborted.make({
+          runId: err.runId,
+          escalation: err.escalation,
+        })
+      }
+      if (err instanceof WorkspaceFsError) {
+        return WorkflowTerminalError.cases.WorkspaceFs.make({
+          operation: err.operation,
+          reason: toBoundedReason(err.reason, "Workspace filesystem error"),
+        })
+      }
+      if (err instanceof WorkflowStoreUnavailableError) {
+        return WorkflowTerminalError.cases.StoreUnavailable.make({
+          operation: err.operation,
+          reason: err.reason,
+        })
+      }
+      if (err instanceof WriterLeaseHeldError) {
+        return WorkflowTerminalError.cases.LeaseHeld.make({
+          holderId: err.holderId,
+          ...(err.leaseEpoch !== undefined ? { leaseEpoch: err.leaseEpoch } : {}),
+          lockFilePath: err.lockFilePath,
+        })
+      }
+      return WorkflowTerminalError.cases.Defect.make({
+        reason: toBoundedReason(Cause.pretty(cause), "Workflow failed"),
+      })
+    })
+    .with({ _tag: "None" }, () =>
+      WorkflowTerminalError.cases.Defect.make({
+        reason: toBoundedReason(Cause.pretty(cause), "Workflow failed with defect"),
+      }),
+    )
+    .exhaustive()
+}
+
+const wrapSummaryWithStoreState = (
+  storeStatus: "ready" | "paused" | "inactive",
+  writerLeaseEpoch: LeaseEpoch | undefined,
+  outcome: WorkflowRunOutcome,
+): WorkflowStatusSummary => {
+  if (writerLeaseEpoch === undefined) {
+    return WorkflowStatusSummary.cases.DaemonOffline.make({ outcome })
+  }
+  return match(storeStatus)
+    .with("ready", () => WorkflowStatusSummary.cases.Ready.make({ writerLeaseEpoch, outcome }))
+    .with("paused", () =>
+      WorkflowStatusSummary.cases.StorePaused.make({ writerLeaseEpoch, outcome }),
+    )
+    .with("inactive", () => WorkflowStatusSummary.cases.DaemonOffline.make({ outcome }))
+    .exhaustive()
+}
+
 export const buildStatusSummaryForRuntime = Effect.fn("WorkflowRpcDaemon.buildStatusSummary")(
   function* (
     runtime: WorkflowDaemonRuntime,
-    writerLeaseEpoch: LeaseEpoch,
+    writerLeaseEpoch: LeaseEpoch | undefined,
     requestedRunId?: WorkflowRunId,
   ): Effect.fn.Return<WorkflowStatusSummary, WorkflowStoreFailureReason, WorkflowReadModelQuery> {
     const readModelQuery = yield* WorkflowReadModelQuery
     const storeStatus = yield* readModelQuery.probeAvailability
     const targetRes = yield* resolveRunTarget(runtime, requestedRunId).pipe(Effect.result)
 
-    return yield* match(targetRes)
-      .with({ _tag: "Failure" }, ({ failure }) =>
-        requestedRunId !== undefined
-          ? Effect.fail(failure)
-          : Effect.succeed<WorkflowStatusSummary>({
-              units: [],
-              attempts: [],
-              pendingDeferreds: [],
-              storeStatus,
-              projectionStatus: WorkflowProjectionStatus.make("not-projected"),
-              writerLeaseEpoch,
-            }),
-      )
+    const outcome = yield* match(targetRes)
+      .with({ _tag: "Failure" }, ({ failure }) => {
+        if (requestedRunId === undefined && failure === "No workflow run found") {
+          return Effect.succeed<WorkflowRunOutcome>(WorkflowRunOutcome.cases.NotFound.make({}))
+        }
+        return Effect.fail(failure)
+      })
       .with({ _tag: "Success" }, ({ success: target }) =>
         Effect.gen(function* () {
           const units = yield* readModelQuery
             .listUnits(target.runId)
-            .pipe(Effect.mapError((err) => err.reason))
+            .pipe(Effect.mapError(storeOrLeaseToBoundedReason))
           const attempts = yield* readModelQuery
             .listAttempts(target.runId)
-            .pipe(Effect.mapError((err) => err.reason))
+            .pipe(Effect.mapError(storeOrLeaseToBoundedReason))
 
           const polledOpt = yield* HarnessTaskWorkflow.poll(target.executionId).pipe(
             Effect.provideContext(runtime.workflowContext),
           )
 
-          let terminalReceipt: TaskRunReceipt | undefined
-          let review: ReviewRoutingPlan | undefined
-          let terminalError: WorkflowStoreFailureReason | undefined
-          let isTerminal = false
+          const effectiveRun: WorkflowRunRecord | undefined =
+            target.runRecord ??
+            (target.plan !== undefined
+              ? {
+                  runId: target.plan.runId,
+                  executionId: target.executionId,
+                  level: target.plan.level,
+                  planSha: target.plan.planSha,
+                  baseSha: target.plan.baseSha,
+                  state: "running",
+                  updatedMs: WorkflowTimestampMs.make(0),
+                }
+              : undefined)
 
-          match(polledOpt)
-            .with({ _tag: "None" }, () => {})
-            .with({ _tag: "Some" }, ({ value: wfResult }) => {
+          if (effectiveRun === undefined) {
+            return WorkflowRunOutcome.cases.NotFound.make({})
+          }
+
+          const projectionStatus = computeProjectionStatus(target.runRecord, polledOpt)
+
+          const terminalOutcome = match(polledOpt)
+            .with({ _tag: "None" }, () => undefined)
+            .with({ _tag: "Some" }, ({ value: wfResult }) =>
               match(wfResult)
-                .with({ _tag: "Suspended" }, () => {})
-                .with({ _tag: "Complete" }, ({ exit }) => {
-                  isTerminal = true
+                .with({ _tag: "Suspended" }, () => undefined)
+                .with({ _tag: "Complete" }, ({ exit }) =>
                   Exit.match(exit, {
-                    onSuccess: (receipt) => {
-                      terminalReceipt = receipt
-                      review = receipt.review
-                    },
-                    onFailure: (cause) => {
-                      terminalError = toBoundedReason(Cause.pretty(cause), "Workflow failed")
-                    },
-                  })
-                })
-                .exhaustive()
-            })
+                    onSuccess: (receipt): WorkflowRunOutcome =>
+                      WorkflowRunOutcome.cases.Completed.make({
+                        run: effectiveRun,
+                        units,
+                        attempts,
+                        pendingDeferreds: [],
+                        review: receipt.review,
+                        terminalReceipt: receipt,
+                        projectionStatus,
+                      }),
+                    onFailure: (cause): WorkflowRunOutcome =>
+                      WorkflowRunOutcome.cases.Failed.make({
+                        run: effectiveRun,
+                        units,
+                        attempts,
+                        pendingDeferreds: [],
+                        terminalError: classifyWorkflowTerminalError(cause),
+                        projectionStatus,
+                      }),
+                  }),
+                )
+                .exhaustive(),
+            )
             .exhaustive()
 
-          const run = target.runRecord
-          const projectionStatus = computeProjectionStatus(run, polledOpt)
-          const pendingDeferreds =
-            !isTerminal &&
-            (run === undefined || !isRunTerminalState(run.state)) &&
-            target.plan !== undefined
-              ? yield* discoverPendingDeferreds({
-                  engine: runtime.engine,
-                  executionId: target.executionId,
-                  plan: target.plan,
+          if (terminalOutcome !== undefined) {
+            return terminalOutcome
+          }
+
+          return yield* match(effectiveRun.state)
+            .with("aborted", () =>
+              Effect.succeed<WorkflowRunOutcome>(
+                WorkflowRunOutcome.cases.Failed.make({
+                  run: effectiveRun,
                   units,
                   attempts,
-                })
-              : []
+                  pendingDeferreds: [],
+                  terminalError: WorkflowTerminalError.cases.OperatorAborted.make({
+                    runId: effectiveRun.runId,
+                    reason: toBoundedReason("Workflow run marked aborted in read-model"),
+                  }),
+                  projectionStatus,
+                }),
+              ),
+            )
+            .with("running", "waiting", "completed", () =>
+              Effect.gen(function* () {
+                const pendingDeferreds =
+                  !isRunTerminalState(effectiveRun.state) && target.plan !== undefined
+                    ? yield* discoverPendingDeferreds({
+                        engine: runtime.engine,
+                        executionId: target.executionId,
+                        plan: target.plan,
+                        units,
+                        attempts,
+                      })
+                    : []
 
-          return {
-            ...(run !== undefined ? { run } : {}),
-            units,
-            attempts,
-            pendingDeferreds,
-            ...(review !== undefined ? { review } : {}),
-            ...(terminalReceipt !== undefined ? { terminalReceipt } : {}),
-            ...(terminalError !== undefined ? { terminalError } : {}),
-            storeStatus,
-            projectionStatus,
-            writerLeaseEpoch,
-          } satisfies WorkflowStatusSummary
+                return WorkflowRunOutcome.cases.Active.make({
+                  run: effectiveRun,
+                  units,
+                  attempts,
+                  pendingDeferreds,
+                  projectionStatus,
+                })
+              }),
+            )
+            .exhaustive()
         }),
       )
       .exhaustive()
+
+    return wrapSummaryWithStoreState(storeStatus, writerLeaseEpoch, outcome)
   },
 )
 
 /** Processes `workflow.status` over daemon IPC, preserving legacy status keys plus `result: WorkflowStatusSummary`. */
 export const handleDaemonWorkflowStatusRpcRequest = Effect.fn(
   "WorkflowRpcDaemon.handleStatusRequest",
-)(function* (input: WorkflowRpcHandlerInput): Effect.fn.Return<Record<string, unknown>> {
+)(function* (
+  input: WorkflowRpcHandlerInput,
+): Effect.fn.Return<WorkflowRpcEnvelope | Readonly<Record<string, unknown>>> {
   if (input.runtime === undefined) {
     if (typeof input.rawPayload["repoRoot"] === "string") {
       const rawStr = input.rawPayload["repoRoot"]
@@ -410,7 +538,7 @@ export const handleDaemonWorkflowStatusRpcRequest = Effect.fn(
         .with({ _tag: "Success" }, () => undefined)
         .exhaustive()
       if (validationFailure !== undefined) {
-        return rpcError(input.requestId, "workflow.status", validationFailure)
+        return rpcError(input.requestId, STATUS_COMMAND, validationFailure)
       }
     }
     return handleDaemonWorkflowStatusRequest({
@@ -433,26 +561,26 @@ export const handleDaemonWorkflowStatusRpcRequest = Effect.fn(
     Effect.mapError((err) => toBoundedReason(err, "Invalid workflow.status request")),
     Effect.flatMap((req) => validateRpcRepoRoot(req.repoRoot, input.scope).pipe(Effect.as(req))),
     Effect.flatMap((req) =>
-      buildStatusSummaryForRuntime(runtime, input.writerLeaseEpoch, req.runId).pipe(
-        Effect.provideService(WorkflowReadModelQuery, runtime.readModelQuery),
+      runtime.rebuildRpcGateSemaphore.withPermits(1)(
+        buildStatusSummaryForRuntime(runtime, input.writerLeaseEpoch, req.runId).pipe(
+          Effect.provideService(WorkflowReadModelQuery, runtime.readModelQuery),
+        ),
       ),
     ),
     Effect.result,
   )
 
   return match(parsedRes)
-    .with({ _tag: "Failure" }, ({ failure }) =>
-      rpcError(input.requestId, "workflow.status", failure),
-    )
+    .with({ _tag: "Failure" }, ({ failure }) => rpcError(input.requestId, STATUS_COMMAND, failure))
     .with({ _tag: "Success" }, ({ success: summary }) => {
-      const topStatus = match(summary.storeStatus)
-        .with("ready", () => "ready" as const)
-        .with("paused", "inactive", () => "inactive" as const)
+      const topStatus = match(summary)
+        .with({ _tag: "Ready" }, () => "ready" as const)
+        .with({ _tag: "StorePaused" }, { _tag: "DaemonOffline" }, () => "inactive" as const)
         .exhaustive()
       return {
-        id: input.requestId,
-        ok: true,
-        command: "workflow.status",
+        id: toWorkflowRpcRequestId(input.requestId),
+        ok: true as const,
+        command: STATUS_COMMAND,
         status: topStatus,
         protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
         capabilities: [...WORKFLOW_DAEMON_CAPABILITIES],
@@ -463,105 +591,11 @@ export const handleDaemonWorkflowStatusRpcRequest = Effect.fn(
               worktreeKind: input.scope.validatedWorktree.kind,
             }
           : {}),
-        writerLeaseEpoch: input.writerLeaseEpoch,
+        ...(input.writerLeaseEpoch !== undefined
+          ? { writerLeaseEpoch: input.writerLeaseEpoch }
+          : {}),
         result: summary,
       }
     })
     .exhaustive()
 })
-
-/** Processes `workflow.doctor` (`check-only` or `rebuild`) over daemon Unix socket IPC. */
-export const handleDaemonWorkflowDoctorRequest = Effect.fn("WorkflowRpcDaemon.handleDoctorRequest")(
-  function* (input: WorkflowRpcHandlerInput): Effect.fn.Return<Record<string, unknown>> {
-    const runtime = input.runtime
-    if (runtime === undefined) {
-      return rpcError(
-        input.requestId,
-        "workflow.doctor",
-        "Workflow engine runtime is inactive (no active writer lease)",
-      )
-    }
-
-    const res = yield* decodeWorkflowDoctorRequest(input.rawPayload).pipe(
-      Effect.mapError((err) => toBoundedReason(err, "Invalid workflow.doctor request")),
-      Effect.flatMap((req) =>
-        Effect.gen(function* () {
-          const validated = yield* validateRpcRepoRoot(req.repoRoot, input.scope)
-          const checks: Array<WorkflowDoctorCheckItem> = [
-            WorkflowDoctorCheckItem.make({
-              name: WorkflowDoctorCheckName.make("worktree-binding"),
-              status: "ok",
-              detail: toBoundedReason(
-                `Validated ${validated.kind} worktree at '${validated.worktreeRoot}'`,
-              ),
-            }),
-            WorkflowDoctorCheckItem.make({
-              name: WorkflowDoctorCheckName.make("writer-lease"),
-              status: input.writerLeaseEpoch >= 1 ? "ok" : "fail",
-              detail: toBoundedReason(`Active writer lease epoch ${input.writerLeaseEpoch}`),
-            }),
-          ]
-
-          const storeAvailability = yield* runtime.readModelQuery.probeAvailability
-          checks.push(
-            WorkflowDoctorCheckItem.make({
-              name: WorkflowDoctorCheckName.make("omnigraph-read-model"),
-              status: match(storeAvailability)
-                .with("ready", () => "ok" as const)
-                .with("paused", () => "warn" as const)
-                .with("inactive", () => "fail" as const)
-                .exhaustive(),
-              detail: toBoundedReason(`Workflow read-model store status: ${storeAvailability}`),
-            }),
-          )
-
-          const rebuiltRunCount = yield* match(req.mode)
-            .with("check-only", () => Effect.succeed(WorkflowRebuiltRunCount.make(0)))
-            .with("rebuild", () =>
-              rebuildWorkflowReadModelViews(runtime.canonicalRepoRoot, {
-                ...(runtime.client !== undefined ? { client: runtime.client } : {}),
-                hostIo: runtime.hostIo,
-                ...(runtime.env !== undefined ? { env: runtime.env } : {}),
-              }).pipe(
-                Effect.mapError((err) =>
-                  toBoundedReason(err.message, "Failed to rebuild workflow read-model views"),
-                ),
-                Effect.tap((count) =>
-                  Effect.sync(() => {
-                    checks.push(
-                      WorkflowDoctorCheckItem.make({
-                        name: WorkflowDoctorCheckName.make("read-model-rebuild"),
-                        status: "ok",
-                        detail: toBoundedReason(
-                          `Rebuilt ${count} run view bundle(s) from authoritative journal`,
-                        ),
-                      }),
-                    )
-                  }),
-                ),
-              ),
-            )
-            .exhaustive()
-
-          return {
-            repoRoot: validated.worktreeRoot,
-            commonGitDir: validated.commonGitDir,
-            writerLeaseEpoch: input.writerLeaseEpoch,
-            rebuiltRunCount,
-            checks,
-          } satisfies WorkflowDoctorResponse
-        }),
-      ),
-      Effect.result,
-    )
-
-    return match(res)
-      .with({ _tag: "Failure" }, ({ failure }) =>
-        rpcError(input.requestId, "workflow.doctor", failure),
-      )
-      .with({ _tag: "Success" }, ({ success: response }) =>
-        rpcSuccess(input.requestId, "workflow.doctor", response),
-      )
-      .exhaustive()
-  },
-)

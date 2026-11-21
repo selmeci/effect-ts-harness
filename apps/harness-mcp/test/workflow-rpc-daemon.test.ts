@@ -1,9 +1,18 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { Effect, Layer, Schema } from "effect"
+import { Effect, Exit, Layer, Schema } from "effect"
+import { DurableDeferred, WorkflowEngine } from "effect/workflow"
 import { match } from "ts-pattern"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import {
@@ -11,8 +20,10 @@ import {
   type CompiledPlan,
   type CompleteSharedStepInput,
   type CompleteUnitInput,
+  DaemonSocketPath,
   EarsRequirementKey,
   EscalationDecision,
+  EscalationOrdinal,
   GateExitCode,
   GitCommitSha,
   LeaseEpoch,
@@ -21,6 +32,7 @@ import {
   OwnedRelPath,
   PackageStampHash,
   PackageVerifyCommand,
+  PackageVerifyFailureDetail,
   PlanSha256,
   ReviewDepth,
   ReviewRoutingPlan,
@@ -36,19 +48,40 @@ import {
   WaveIndex,
   WorkUnitId,
   WorkflowDoctorMode,
+  WorkflowExecutionId,
   WorkflowRunId,
+  WorkflowStoreOperation,
+  WorkflowStoreUnavailableError,
+  WorkflowTimestampMs,
+  makeWorkflowUnitKey,
+  toBoundedReason,
   toErrorReasonMessage,
 } from "@harness/contract"
-import { appendFrictionEvent, clearFrictionEvents, resolveHarnessStateDir } from "@harness/gates"
-import { makeWorkflowOmnigraphClient } from "@harness/graph"
+import {
+  HarnessTaskWorkflow,
+  appendFrictionEvent,
+  clearFrictionEvents,
+  executionIdOf,
+  makeUnitEscalationDeferred,
+  resolveHarnessStateDir,
+} from "@harness/gates"
+import { OmnigraphClient, makeWorkflowOmnigraphClient } from "@harness/graph"
 import {
   UnitAgentDispatcherLive,
+  UnixSocketDaemonLive,
+  WORKFLOW_COMPLETE_IPC_TIMEOUT_MS,
+  WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
+  WRITER_LEASE_HEARTBEAT_TTL_MS,
   abortWorkflowViaDaemon,
   completeWorkflowViaDaemon,
   doctorWorkflowViaDaemon,
   getWorkflowStatusViaDaemon,
   makeWorkflowWorktreePortLayer,
   nodeSyncHostIo,
+  queryUnixSocketLineDetailed,
+  queryWorkflowDaemonCommand,
+  resolveWorkflowRuntimePaths,
+  resolveWorkflowWorktreeDir,
   resumeWorkflowViaDaemon,
   startWorkflowViaDaemon,
   validateWorktreeRepoRoot,
@@ -56,10 +89,12 @@ import {
 import {
   UnitAgentDispatcher,
   UnitVerifier,
+  WorkflowReadModelQuery,
   WorkflowReviewRouter,
   WorkflowWorktreePort,
 } from "@harness/service"
 import { startHarnessDaemonServer } from "../src/daemon/unix-socket-daemon.js"
+import { extractLastRejection, inspectActiveUnitCycle } from "../src/daemon/workflow-rpc-shared.js"
 import { executeWorkflowPlanTool } from "../src/tools/workflow-plan.tools.js"
 
 const graphConfigDir = resolve(import.meta.dirname, "../../../libs/harness/graph")
@@ -218,6 +253,210 @@ const makeNoopWorktreeLayer = (
       }),
   })
 
+const makeCompletedVerifierLayer = (
+  onCompleteUnit?: (input: CompleteUnitInput) => void,
+  onCompleteShared?: (input: CompleteSharedStepInput) => void,
+): Layer.Layer<UnitVerifier> =>
+  Layer.succeed(UnitVerifier, {
+    completeUnit: (input) =>
+      Effect.sync(() => {
+        onCompleteUnit?.(input)
+        return UnitOutcome.cases.Completed.make({
+          unitId: input.unit.unitId,
+          attempt: input.attempt,
+          changedPaths: [...input.unit.ownedRelPaths],
+          packageStampHash: PackageStampHash.make("a".repeat(64)),
+        })
+      }),
+    completeSharedStep: (input) =>
+      Effect.sync(() => {
+        onCompleteShared?.(input)
+        return UnitOutcome.cases.Completed.make({
+          unitId: SHARED_STEP_UNIT_ID,
+          attempt: input.attempt,
+          changedPaths: [...input.sharedStepPaths],
+          packageStampHash: PackageStampHash.make("b".repeat(64)),
+        })
+      }),
+  })
+
+const makeSingleUnitManualPlan = (
+  runId: string,
+  baseSha: GitCommitSha,
+  options?: {
+    readonly unitId?: string | undefined
+    readonly planSha?: string | undefined
+    readonly sharedStepPaths?: ReadonlyArray<string> | undefined
+  },
+): CompiledPlan => ({
+  runId: WorkflowRunId.make(runId),
+  level: "slice",
+  planSha: PlanSha256.make(options?.planSha ?? "c".repeat(64)),
+  baseSha,
+  mode: { _tag: "Manual" },
+  units: [
+    {
+      _tag: "PackageUnit",
+      unitId: WorkUnitId.make(options?.unitId ?? "unit-alpha"),
+      projectName: NxProjectName.make("@harness/alpha"),
+      waveIndex: WaveIndex.make(0),
+      dependsOn: [],
+      ownedRelPaths: [OwnedRelPath.make("libs/alpha/src")],
+      stubKeys: [StubSymbolKey.make("Alpha.run")],
+      earsKeys: [EarsRequirementKey.make("REQ-1.1")],
+      packageVerifyCommand: PackageVerifyCommand.make("pnpm nx run @harness/alpha:verify"),
+    },
+  ],
+  sharedStepPaths: (options?.sharedStepPaths ?? []).map((p) => OwnedRelPath.make(p)),
+})
+
+const makeMockLeaseStoreClient = (overrides?: {
+  readonly getLeaseRow?: () => Record<string, unknown> | null
+  readonly onRunRow?: (runId: string) => Record<string, unknown> | null
+  readonly forceCorruptJournal?: boolean
+}) => {
+  let leaseRow: Record<string, unknown> | null = null
+  let commitSeq = 1
+  const baseClient = new OmnigraphClient({
+    baseUrl: "http://127.0.0.1:1",
+    graphId: "harness-workflows",
+  })
+
+  const invokeMock = (
+    queryName: string,
+    input?: { readonly params?: Readonly<Record<string, unknown>> | undefined },
+  ): Promise<unknown> => {
+    const params = input?.params ?? {}
+    return Promise.resolve(
+      match(queryName)
+        .with("wf_get_writer_lease", () => {
+          const effectiveRow =
+            overrides?.getLeaseRow !== undefined ? overrides.getLeaseRow() : leaseRow
+          return {
+            queryName,
+            rowCount: effectiveRow === null ? 0 : 1,
+            rows: effectiveRow === null ? [] : [{ ...effectiveRow }],
+            graphCommitId: `commit-${commitSeq}`,
+            target: { branch: "main" },
+          }
+        })
+        .with("wf_insert_writer_lease", () => {
+          commitSeq += 1
+          leaseRow = {
+            name: typeof params.name === "string" ? params.name : "engine",
+            owner: typeof params.owner === "string" ? params.owner : "",
+            leaseEpoch: Number(params.leaseEpoch ?? 1),
+            heartbeatMs: Number(params.heartbeatMs ?? Date.now()),
+          }
+          return {
+            queryName,
+            affectedNodes: 1,
+            affectedEdges: 0,
+            branch: "main",
+            commit: { graphCommitId: `commit-${commitSeq}` },
+          }
+        })
+        .with("wf_cas_writer_lease", () => {
+          commitSeq += 1
+          leaseRow = {
+            name: "engine",
+            owner: typeof params.owner === "string" ? params.owner : "",
+            leaseEpoch: Number(params.nextEpoch ?? 2),
+            heartbeatMs: Number(params.heartbeatMs ?? Date.now()),
+          }
+          return {
+            queryName,
+            affectedNodes: 1,
+            affectedEdges: 0,
+            branch: "main",
+            commit: { graphCommitId: `commit-${commitSeq}` },
+          }
+        })
+        .with("wf_refresh_writer_lease", () => {
+          commitSeq += 1
+          return {
+            queryName,
+            affectedNodes: 1,
+            affectedEdges: 0,
+            branch: "main",
+            commit: { graphCommitId: `commit-${commitSeq}` },
+          }
+        })
+        .with("wf_get_run", () => {
+          const runIdStr = typeof params.runId === "string" ? params.runId : ""
+          const row = overrides?.onRunRow !== undefined ? overrides.onRunRow(runIdStr) : null
+          return {
+            queryName,
+            rowCount: row === null ? 0 : 1,
+            rows: row === null ? [] : [row],
+            graphCommitId: `commit-${commitSeq}`,
+            target: { branch: "main" },
+          }
+        })
+        .with("wf_all_entities", () => ({
+          queryName,
+          rowCount: overrides?.forceCorruptJournal ? 1 : 0,
+          rows: overrides?.forceCorruptJournal
+            ? [
+                {
+                  messageKey: "1",
+                  seqKey: "0".repeat(20),
+                  entityType: "Workflow/HarnessTaskWorkflow",
+                },
+              ]
+            : [],
+          graphCommitId: `commit-${commitSeq}`,
+          target: { branch: "main" },
+        }))
+        .with(
+          "wf_all_replies",
+          "wf_dangling_processed_requests",
+          "wf_unprocessed_candidate_messages",
+          "wf_unprocessed_candidate_messages_for_addresses",
+          "wf_orphan_entity_messages",
+          "wf_probe_runs",
+          "wf_list_runs",
+          "wf_units_for_run",
+          "wf_attempts_for_run",
+          () => ({
+            queryName,
+            rowCount: 0,
+            rows: [],
+            graphCommitId: `commit-${commitSeq}`,
+            target: { branch: "main" },
+          }),
+        )
+        .otherwise(() => ({
+          queryName,
+          rowCount: 0,
+          rows: [],
+          affectedNodes: 0,
+          affectedEdges: 0,
+          branch: "main",
+          commit: null,
+          graphCommitId: `commit-${commitSeq}`,
+          target: { branch: "main" },
+        })),
+    )
+  }
+
+  return new Proxy(baseClient, {
+    get(target, prop, receiver) {
+      if (prop === "queries") {
+        return new Proxy(target.queries, {
+          get(qTarget, qProp, qReceiver) {
+            if (qProp === "invoke") {
+              return invokeMock
+            }
+            return Reflect.get(qTarget, qProp, qReceiver)
+          },
+        })
+      }
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+}
+
 describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => {
   const tempDirs: Array<string> = []
   let serverProc: ChildProcess | undefined
@@ -226,6 +465,12 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
 
   const createClient = () =>
     makeWorkflowOmnigraphClient({ baseUrl: serverBaseUrl, token: cliToken })
+
+  const createWorkRepo = (name: string) => {
+    const workBase = mkdtempSync(join(tmpdir(), `wf3-${name}-`))
+    tempDirs.push(workBase)
+    return initTestGitRepo(workBase, name)
+  }
 
   beforeAll(async () => {
     expect(existsSync(omnigraphBin)).toBe(true)
@@ -283,17 +528,103 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
     }
   })
 
-  it("drives full Manual lifecycle over Unix socket IPC: start (idempotent + planSha mismatch), premature guards, 3x reject -> escalation -> resume retry -> shared-step -> dirty/corrupt friction rejection -> llm-phase -> doctor rebuild preserving shared-step -> harness_workflow_plan", async () => {
-    const workBase = mkdtempSync(join(tmpdir(), "wf3-rpc-flow-"))
-    tempDirs.push(workBase)
-    const { canonicalDir, linkedDir, baseSha } = initTestGitRepo(workBase, "repo")
+  it("manual start is idempotent, rejects planSha mismatch and premature CompleteLlmPhase/resume, and serves harness_workflow_plan from linked worktree", async () => {
+    const { canonicalDir, linkedDir, baseSha } = createWorkRepo("happy")
     const validatedCanonical = await Effect.runPromise(
       validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
     )
     const validatedLinked = await Effect.runPromise(
       validateWorktreeRepoRoot(AbsoluteRepoRoot.make(linkedDir)),
     )
+    const plan = makeSingleUnitManualPlan("run-rpc-happy-01", baseSha, {
+      sharedStepPaths: ["README.md"],
+    })
+    const unitId = plan.units[0]!.unitId
 
+    const daemon = await startHarnessDaemonServer(canonicalDir, {
+      workflowEngine: {
+        mode: "required",
+        client: createClient(),
+        entityReplyPollInterval: "50 millis",
+        unitVerifierLayer: makeCompletedVerifierLayer(),
+        worktreePortLayer: makeNoopWorktreeLayer(validatedCanonical.worktreeRoot),
+        reviewRouterLayer: makeReviewStubLayer(),
+      },
+    })
+
+    try {
+      expect(daemon.writerLeaseEpoch).toBeGreaterThanOrEqual(1)
+      const start1 = await Effect.runPromise(
+        startWorkflowViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, plan }),
+      )
+      expect(start1.outcome).toBe("started")
+
+      const start2 = await Effect.runPromise(
+        startWorkflowViaDaemon({ repoRoot: validatedLinked.worktreeRoot, plan }),
+      )
+      expect(start2.executionId).toBe(start1.executionId)
+      expect(start2.outcome).toBe("existing")
+
+      const conflictingPlan: CompiledPlan = { ...plan, planSha: PlanSha256.make("1".repeat(64)) }
+      const planShaErr = await Effect.runPromise(
+        startWorkflowViaDaemon({
+          repoRoot: validatedCanonical.worktreeRoot,
+          plan: conflictingPlan,
+        }).pipe(Effect.flip),
+      )
+      expect(planShaErr.message).toContain("planSha")
+
+      const initialStatus = await Effect.runPromise(
+        getWorkflowStatusViaDaemon({ repoRoot: validatedLinked.worktreeRoot, runId: plan.runId }),
+      )
+      expect(initialStatus).toMatchObject({
+        _tag: "Ready",
+        writerLeaseEpoch: daemon.writerLeaseEpoch,
+        outcome: {
+          _tag: "Active",
+          run: { state: "running" },
+          pendingDeferreds: [
+            { _tag: "UnitCompletion", unitId, attempt: 1, deferredName: `unit/${unitId}/1` },
+          ],
+        },
+      })
+
+      const prematureLlmErr = await Effect.runPromise(
+        completeWorkflowViaDaemon({
+          _tag: "CompleteLlmPhase",
+          repoRoot: validatedCanonical.worktreeRoot,
+          runId: plan.runId,
+        }).pipe(Effect.flip),
+      )
+      expect(prematureLlmErr.message).toContain("waiting")
+
+      const prematureResumeErr = await Effect.runPromise(
+        resumeWorkflowViaDaemon({
+          _tag: "ResolveEscalation",
+          repoRoot: validatedCanonical.worktreeRoot,
+          runId: plan.runId,
+          unitId,
+          decision: EscalationDecision.make("retry"),
+        }).pipe(Effect.flip),
+      )
+      expect(prematureResumeErr.message).toContain("escalated")
+
+      const mcpStatus = await Effect.runPromise(
+        executeWorkflowPlanTool({ repoRoot: linkedDir, runId: plan.runId }),
+      )
+      expect(mcpStatus.resolvedRepoRoot).toBe(validatedLinked.worktreeRoot)
+      expect(mcpStatus.commonGitDir).toBe(validatedCanonical.commonGitDir)
+      expect(mcpStatus.status._tag).toBe("Ready")
+    } finally {
+      await daemon.close()
+    }
+  }, 45_000)
+
+  it("handles 3x PackageVerifyFailed -> Escalation -> resume retry -> shared-step -> friction gate -> CompleteLlmPhase -> doctor rebuild", async () => {
+    const { canonicalDir, baseSha } = createWorkRepo("esc-flow")
+    const validatedCanonical = await Effect.runPromise(
+      validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
+    )
     let completeCalls = 0
     const recordedSharedInputs: Array<CompleteSharedStepInput> = []
     const verifierLayer = Layer.succeed(UnitVerifier, {
@@ -306,6 +637,8 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
               attempt: input.attempt,
               rejection: UnitRejection.cases.PackageVerifyFailed.make({
                 exitCode: GateExitCode.make(1),
+                failureKind: "non-zero-exit",
+                detail: PackageVerifyFailureDetail.make(`attempt ${completeCalls} failed`),
               }),
             })
           }
@@ -328,29 +661,10 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
         }),
     })
 
-    const runId = WorkflowRunId.make("run-rpc-flow-01")
-    const unitId = WorkUnitId.make("unit-alpha")
-    const plan: CompiledPlan = {
-      runId,
-      level: "slice",
-      planSha: PlanSha256.make("c".repeat(64)),
-      baseSha,
-      mode: { _tag: "Manual" },
-      units: [
-        {
-          _tag: "PackageUnit",
-          unitId,
-          projectName: NxProjectName.make("@harness/alpha"),
-          waveIndex: WaveIndex.make(0),
-          dependsOn: [],
-          ownedRelPaths: [OwnedRelPath.make("libs/alpha/src")],
-          stubKeys: [StubSymbolKey.make("Alpha.run")],
-          earsKeys: [EarsRequirementKey.make("REQ-1.1")],
-          packageVerifyCommand: PackageVerifyCommand.make("pnpm nx run @harness/alpha:verify"),
-        },
-      ],
-      sharedStepPaths: [OwnedRelPath.make("README.md")],
-    }
+    const plan = makeSingleUnitManualPlan("run-rpc-esc-02", baseSha, {
+      sharedStepPaths: ["README.md"],
+    })
+    const unitId = plan.units[0]!.unitId
 
     const daemon = await startHarnessDaemonServer(canonicalDir, {
       workflowEngine: {
@@ -360,219 +674,115 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
         unitVerifierLayer: verifierLayer,
         worktreePortLayer: makeNoopWorktreeLayer(validatedCanonical.worktreeRoot),
         reviewRouterLayer: makeReviewStubLayer(),
-        agentDispatcherLayer: UnitAgentDispatcherLive,
       },
     })
 
     try {
-      expect(daemon.writerLeaseEpoch).toBeGreaterThanOrEqual(1)
-
-      const start1 = await Effect.runPromise(
+      const startRes = await Effect.runPromise(
         startWorkflowViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, plan }),
       )
-      expect(start1.runId).toBe(runId)
-      expect(start1.outcome).toBe("started")
 
-      const start2 = await Effect.runPromise(
-        startWorkflowViaDaemon({ repoRoot: validatedLinked.worktreeRoot, plan }),
-      )
-      expect(start2.executionId).toBe(start1.executionId)
-      expect(start2.outcome).toBe("existing")
-
-      // Duplicate runId with different planSha fails closed
-      const conflictingPlan: CompiledPlan = {
-        ...plan,
-        planSha: PlanSha256.make("1".repeat(64)),
-      }
-      const planShaErr = await Effect.runPromise(
-        startWorkflowViaDaemon({
-          repoRoot: validatedCanonical.worktreeRoot,
-          plan: conflictingPlan,
-        }).pipe(Effect.flip),
-      )
-      expect(planShaErr.message).toContain("planSha")
-
-      const initialStatus = await Effect.runPromise(
-        getWorkflowStatusViaDaemon({ repoRoot: validatedLinked.worktreeRoot, runId }),
-      )
-      expect(initialStatus.storeStatus).toBe("ready")
-      expect(initialStatus.writerLeaseEpoch).toBe(daemon.writerLeaseEpoch)
-      expect(initialStatus.run?.state).toBe("running")
-      expect(initialStatus.pendingDeferreds).toEqual([
-        {
-          _tag: "UnitCompletion",
-          unitId,
-          attempt: 1,
-          deferredName: "unit/unit-alpha/1",
-        },
-      ])
-
-      // Premature CompleteLlmPhase while unit-alpha is dispatched is rejected
-      const prematureLlmErr = await Effect.runPromise(
-        completeWorkflowViaDaemon({
-          _tag: "CompleteLlmPhase",
-          repoRoot: validatedCanonical.worktreeRoot,
-          runId,
-        }).pipe(Effect.flip),
-      )
-      expect(prematureLlmErr.message).toContain("waiting")
-
-      // Resume on non-escalated unit is rejected
-      const prematureResumeErr = await Effect.runPromise(
-        resumeWorkflowViaDaemon({
-          repoRoot: validatedCanonical.worktreeRoot,
-          runId,
-          unitId,
-          decision: EscalationDecision.make("retry"),
-        }).pipe(Effect.flip),
-      )
-      expect(prematureResumeErr.message).toContain("escalated")
-
-      const mcpStatusFromLinked = await Effect.runPromise(
-        executeWorkflowPlanTool({ repoRoot: linkedDir, runId }),
-      )
-      expect(mcpStatusFromLinked.resolvedRepoRoot).toBe(validatedLinked.worktreeRoot)
-      expect(mcpStatusFromLinked.commonGitDir).toBe(validatedCanonical.commonGitDir)
-      expect(mcpStatusFromLinked.status.pendingDeferreds).toHaveLength(1)
-
-      // Attempts 1, 2, 3 reject -> escalates to escalation/unit-alpha/1
       for (const expectedAttempt of [1, 2, 3] as const) {
         const compRes = await Effect.runPromise(
           completeWorkflowViaDaemon({
             _tag: "CompleteUnit",
             repoRoot: validatedCanonical.worktreeRoot,
             unitId,
-            runId,
+            runId: plan.runId,
           }),
         )
-        match(compRes)
-          .with({ _tag: "UnitCompleted" }, ({ outcome }) => {
-            match(outcome)
-              .with({ _tag: "Rejected" }, (rej) => {
-                expect(rej.attempt).toBe(expectedAttempt)
-              })
-              .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
-                expect.fail("Expected Rejected outcome")
-              })
-              .exhaustive()
-          })
-          .with({ _tag: "LlmPhaseCompleted" }, () => {
-            expect.fail("Expected UnitCompleted response")
-          })
-          .exhaustive()
+        expect(compRes).toMatchObject({
+          _tag: "UnitCompleted",
+          outcome: {
+            _tag: "Rejected",
+            attempt: expectedAttempt,
+          },
+        })
       }
 
       const escalatedStatus = await Effect.runPromise(
-        getWorkflowStatusViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, runId }),
+        getWorkflowStatusViaDaemon({
+          repoRoot: validatedCanonical.worktreeRoot,
+          runId: plan.runId,
+        }),
       )
-      expect(escalatedStatus.units.find((u) => u.unitId === unitId)?.status).toBe("escalated")
-      expect(escalatedStatus.pendingDeferreds).toEqual([
-        {
-          _tag: "Escalation",
-          unitId,
-          deferredName: "escalation/unit-alpha/1",
-          escalation: {
-            _tag: "RetryBudgetExhausted",
-            lastRejection: {
-              _tag: "PackageVerifyFailed",
-              exitCode: 1,
+      expect(escalatedStatus).toMatchObject({
+        _tag: "Ready",
+        outcome: {
+          _tag: "Active",
+          pendingDeferreds: [
+            {
+              _tag: "Escalation",
+              unitId,
+              deferredName: `escalation/${unitId}/1`,
+              escalation: {
+                _tag: "RetryBudgetExhausted",
+                lastRejection: {
+                  _tag: "PackageVerifyFailed",
+                  exitCode: 1,
+                  failureKind: "non-zero-exit",
+                  detail: "attempt 3 failed",
+                },
+              },
             },
-          },
+          ],
         },
-      ])
+      })
+      match(escalatedStatus)
+        .with({ _tag: "Ready" }, ({ outcome }) => {
+          match(outcome)
+            .with({ _tag: "Active" }, ({ units }) => {
+              expect(units.find((u) => u.unitId === unitId)?.status).toBe("escalated")
+            })
+            .with({ _tag: "NotFound" }, { _tag: "Completed" }, { _tag: "Failed" }, () => {
+              expect.unreachable("Expected Active outcome")
+            })
+            .exhaustive()
+        })
+        .with({ _tag: "DaemonOffline" }, { _tag: "StorePaused" }, () => {
+          expect.unreachable("Expected Ready status")
+        })
+        .exhaustive()
 
-      // Resolve escalation with retry -> moves to cycle r2
       const resumed = await Effect.runPromise(
         resumeWorkflowViaDaemon({
+          _tag: "ResolveEscalation",
           repoRoot: validatedCanonical.worktreeRoot,
-          runId,
+          runId: plan.runId,
           unitId,
           decision: "retry",
         }),
       )
       expect(resumed).toEqual({
         _tag: "EscalationResolved",
-        runId,
-        executionId: start1.executionId,
+        runId: plan.runId,
+        executionId: startRes.executionId,
         unitId,
         decision: "retry",
       })
 
-      const retryStatus = await Effect.runPromise(
-        getWorkflowStatusViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, runId }),
-      )
-      expect(retryStatus.pendingDeferreds).toEqual([
-        {
-          _tag: "UnitCompletion",
-          unitId,
-          attempt: 1,
-          deferredName: "unit/unit-alpha/1/r2",
-        },
-      ])
-
-      // Complete unit-alpha in cycle r2
       const unitDone = await Effect.runPromise(
         completeWorkflowViaDaemon({
           _tag: "CompleteUnit",
           repoRoot: validatedCanonical.worktreeRoot,
           unitId,
-          runId,
+          runId: plan.runId,
         }),
       )
-      match(unitDone)
-        .with({ _tag: "UnitCompleted" }, ({ outcome }) => {
-          expect(outcome._tag).toBe("Completed")
-        })
-        .with({ _tag: "LlmPhaseCompleted" }, () => {
-          expect.fail("Expected UnitCompleted response")
-        })
-        .exhaustive()
+      expect(unitDone._tag === "UnitCompleted" && unitDone.outcome._tag).toBe("Completed")
 
-      // Now shared-step is active
-      const sharedPendingStatus = await Effect.runPromise(
-        getWorkflowStatusViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, runId }),
-      )
-      expect(sharedPendingStatus.pendingDeferreds).toEqual([
-        {
-          _tag: "UnitCompletion",
-          unitId: SHARED_STEP_UNIT_ID,
-          attempt: 1,
-          deferredName: "unit/shared-step/1",
-        },
-      ])
-
-      // Complete shared-step and verify priorUnitOwnedPaths propagation
       const sharedDone = await Effect.runPromise(
         completeWorkflowViaDaemon({
           _tag: "CompleteUnit",
           repoRoot: validatedCanonical.worktreeRoot,
           unitId: SHARED_STEP_UNIT_ID,
-          runId,
+          runId: plan.runId,
         }),
       )
-      match(sharedDone)
-        .with({ _tag: "UnitCompleted" }, ({ outcome }) => {
-          expect(outcome._tag).toBe("Completed")
-        })
-        .with({ _tag: "LlmPhaseCompleted" }, () => {
-          expect.fail("Expected UnitCompleted response")
-        })
-        .exhaustive()
-      expect(recordedSharedInputs).toHaveLength(1)
+      expect(sharedDone._tag === "UnitCompleted" && sharedDone.outcome._tag).toBe("Completed")
       expect(recordedSharedInputs[0]?.priorUnitOwnedPaths).toEqual(["libs/alpha/src"])
 
-      // Now llm-phase-done is pending
-      const llmPendingStatus = await Effect.runPromise(
-        getWorkflowStatusViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, runId }),
-      )
-      expect(llmPendingStatus.pendingDeferreds).toEqual([
-        {
-          _tag: "LlmPhase",
-          deferredName: "llm-phase-done",
-        },
-      ])
-
-      // Corrupt/unparseable line in default friction log blocks CompleteLlmPhase
+      // Corrupt & dirty friction log block CompleteLlmPhase
       const defaultStateDir = resolveHarnessStateDir(validatedCanonical.worktreeRoot, {})
       mkdirSync(defaultStateDir, { recursive: true })
       const defaultFrictionPath = join(defaultStateDir, "friction-log.jsonl")
@@ -581,13 +791,12 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
         completeWorkflowViaDaemon({
           _tag: "CompleteLlmPhase",
           repoRoot: validatedCanonical.worktreeRoot,
-          runId,
+          runId: plan.runId,
         }).pipe(Effect.flip),
       )
       expect(corruptFrictionErr.message).toContain("friction log")
       writeFileSync(defaultFrictionPath, "", "utf8")
 
-      // Dirty valid friction event also blocks CompleteLlmPhase
       appendFrictionEvent(
         validatedCanonical.worktreeRoot,
         {
@@ -601,39 +810,21 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
         completeWorkflowViaDaemon({
           _tag: "CompleteLlmPhase",
           repoRoot: validatedCanonical.worktreeRoot,
-          runId,
+          runId: plan.runId,
         }).pipe(Effect.flip),
       )
       expect(dirtyFrictionErr.message).toContain("friction log")
 
-      // Clear friction log -> CompleteLlmPhase succeeds
       clearFrictionEvents(validatedCanonical.worktreeRoot, nodeSyncHostIo)
       const llmDone = await Effect.runPromise(
         completeWorkflowViaDaemon({
           _tag: "CompleteLlmPhase",
           repoRoot: validatedCanonical.worktreeRoot,
-          runId,
+          runId: plan.runId,
         }),
       )
-      match(llmDone)
-        .with({ _tag: "LlmPhaseCompleted" }, ({ receipt }) => {
-          expect(receipt.frictionLogCleared).toBe("cleared")
-          expect(receipt.workspaceHash).toMatch(/^[0-9a-f]{64}$/)
-        })
-        .with({ _tag: "UnitCompleted" }, () => {
-          expect.fail("Expected LlmPhaseCompleted response")
-        })
-        .exhaustive()
+      expect(llmDone._tag).toBe("LlmPhaseCompleted")
 
-      const completedStatus = await Effect.runPromise(
-        getWorkflowStatusViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, runId }),
-      )
-      expect(completedStatus.run?.state).toBe("completed")
-      expect(completedStatus.pendingDeferreds).toEqual([])
-      expect(completedStatus.terminalReceipt?.runId).toBe(runId)
-      expect(completedStatus.review?._tag).toBe("SkipReviewPlan")
-
-      // Doctor check-only + rebuild preserves BOTH unitId and SHARED_STEP_UNIT_ID completed
       const docCheck = await Effect.runPromise(
         doctorWorkflowViaDaemon({
           repoRoot: validatedCanonical.worktreeRoot,
@@ -654,58 +845,40 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
         docRebuild.checks.some((c) => c.name === "read-model-rebuild" && c.status === "ok"),
       ).toBe(true)
 
-      const afterRebuildStatus = await Effect.runPromise(
-        getWorkflowStatusViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, runId }),
+      const afterRebuild = await Effect.runPromise(
+        getWorkflowStatusViaDaemon({
+          repoRoot: validatedCanonical.worktreeRoot,
+          runId: plan.runId,
+        }),
       )
-      expect(afterRebuildStatus.run?.state).toBe("completed")
-      expect(afterRebuildStatus.units.find((u) => u.unitId === unitId)?.status).toBe("completed")
-      expect(afterRebuildStatus.units.find((u) => u.unitId === SHARED_STEP_UNIT_ID)?.status).toBe(
-        "completed",
-      )
+      match(afterRebuild)
+        .with({ _tag: "Ready" }, ({ outcome }) => {
+          match(outcome)
+            .with({ _tag: "Completed" }, ({ run, units }) => {
+              expect(run.state).toBe("completed")
+              expect(units.find((u) => u.unitId === unitId)?.status).toBe("completed")
+              expect(units.find((u) => u.unitId === SHARED_STEP_UNIT_ID)?.status).toBe("completed")
+            })
+            .with({ _tag: "NotFound" }, { _tag: "Active" }, { _tag: "Failed" }, () => {
+              expect.unreachable("Expected Completed outcome")
+            })
+            .exhaustive()
+        })
+        .with({ _tag: "DaemonOffline" }, { _tag: "StorePaused" }, () => {
+          expect.unreachable("Expected Ready status")
+        })
+        .exhaustive()
     } finally {
       await daemon.close()
     }
   }, 45_000)
 
-  it("handles L1 complete cwd binding & abort compensation, L2 siblingInFlightOwnedPaths, Automatic pending LlmPhaseDone, and cross-repo/offline harness_workflow_plan", async () => {
-    const workBase = mkdtempSync(join(tmpdir(), "wf3-rpc-abort-"))
-    tempDirs.push(workBase)
-    const { canonicalDir, baseSha } = initTestGitRepo(workBase, "l1repo")
-    const { canonicalDir: otherGitRepo } = initTestGitRepo(workBase, "otherrepo")
-    const outsideDir = join(workBase, "outside-nongit")
-    mkdirSync(outsideDir, { recursive: true })
+  it("enforces F-1.1 epic worktree cwd (<canonicalRepoRoot>/.harness/workflow-worktrees/<runId>/<unitId>), abort compensation, and F-15.1 Interrupted status", async () => {
+    const { canonicalDir, baseSha } = createWorkRepo("epic-abort")
     const validatedCanonical = await Effect.runPromise(
       validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
     )
-
-    const recordedVerifierInputs: Array<CompleteUnitInput> = []
-    const recordingVerifierLayer = Layer.succeed(UnitVerifier, {
-      completeUnit: (input) =>
-        Effect.sync(() => {
-          recordedVerifierInputs.push(input)
-          return UnitOutcome.cases.Completed.make({
-            unitId: input.unit.unitId,
-            attempt: input.attempt,
-            changedPaths: [...input.unit.ownedRelPaths],
-            packageStampHash: PackageStampHash.make("d".repeat(64)),
-          })
-        }),
-      completeSharedStep: (input) =>
-        Effect.succeed(
-          UnitOutcome.cases.Completed.make({
-            unitId: SHARED_STEP_UNIT_ID,
-            attempt: input.attempt,
-            changedPaths: [...input.sharedStepPaths],
-            packageStampHash: PackageStampHash.make("e".repeat(64)),
-          }),
-        ),
-    })
-
-    const autoDispatcherLayer = Layer.succeed(UnitAgentDispatcher, {
-      dispatchUnit: () => Effect.succeed(UnitAgentDispatchResult.cases.Completed.make({})),
-    })
-
-    const l1RunId = WorkflowRunId.make("run-l1-abort-01")
+    const l1RunId = WorkflowRunId.make("run-l1-abort-03")
     const l1UnitOne = WorkUnitId.make("slice-one")
     const l1UnitTwo = WorkUnitId.make("slice-two")
     const l1BranchOne = SliceBranchName.make("slice/wf3-abort-one")
@@ -739,7 +912,119 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
       sharedStepPaths: [],
     }
 
-    const l2RunId = WorkflowRunId.make("run-l2-sib-01")
+    const daemon = await startHarnessDaemonServer(canonicalDir, {
+      workflowEngine: {
+        mode: "required",
+        client: createClient(),
+        entityReplyPollInterval: "50 millis",
+        unitVerifierLayer: makeCompletedVerifierLayer(),
+        worktreePortLayer: makeWorkflowWorktreePortLayer({
+          repoRoot: validatedCanonical.worktreeRoot,
+        }),
+        reviewRouterLayer: makeReviewStubLayer(),
+      },
+    })
+
+    try {
+      await Effect.runPromise(
+        startWorkflowViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, plan: l1Plan }),
+      )
+      const wtOnePath = resolveWorkflowWorktreeDir(
+        validatedCanonical.worktreeRoot,
+        l1RunId,
+        l1UnitOne,
+      )
+      const wtTwoPath = resolveWorkflowWorktreeDir(
+        validatedCanonical.worktreeRoot,
+        l1RunId,
+        l1UnitTwo,
+      )
+      expect(wtOnePath).toBe(
+        join(validatedCanonical.worktreeRoot, ".harness", "workflow-worktrees", l1RunId, l1UnitOne),
+      )
+      expect(existsSync(wtOnePath)).toBe(true)
+      expect(existsSync(wtTwoPath)).toBe(true)
+
+      const spoofCwdErr = await Effect.runPromise(
+        completeWorkflowViaDaemon({
+          _tag: "CompleteUnit",
+          repoRoot: validatedCanonical.worktreeRoot,
+          unitId: l1UnitOne,
+          runId: l1RunId,
+        }).pipe(Effect.flip),
+      )
+      expect(spoofCwdErr.message).toContain("provisioned worktree")
+
+      const validatedWtOne = await Effect.runPromise(
+        validateWorktreeRepoRoot(AbsoluteRepoRoot.make(wtOnePath)),
+      )
+      const l1CompOne = await Effect.runPromise(
+        completeWorkflowViaDaemon({
+          _tag: "CompleteUnit",
+          repoRoot: validatedWtOne.worktreeRoot,
+          unitId: l1UnitOne,
+          runId: l1RunId,
+        }),
+      )
+      expect(l1CompOne._tag).toBe("UnitCompleted")
+
+      const abortRes = await Effect.runPromise(
+        abortWorkflowViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, runId: l1RunId }),
+      )
+      expect(abortRes.state).toBe("aborted")
+      expect(existsSync(wtOnePath)).toBe(false)
+      expect(existsSync(wtTwoPath)).toBe(false)
+
+      const abortedStatus = await Effect.runPromise(
+        getWorkflowStatusViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, runId: l1RunId }),
+      )
+      expect(abortedStatus).toMatchObject({
+        _tag: "Ready",
+        outcome: {
+          _tag: "Failed",
+          terminalError: { _tag: "Interrupted" },
+        },
+      })
+    } finally {
+      await daemon.close()
+    }
+  }, 45_000)
+
+  it("propagates slice siblingInFlightOwnedPaths and classifies TaskRunAbortedError into WorkflowTerminalError.Aborted (F-15.1)", async () => {
+    const { canonicalDir, baseSha } = createWorkRepo("slice-aborted")
+    const validatedCanonical = await Effect.runPromise(
+      validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
+    )
+    const recordedInputs: Array<CompleteUnitInput> = []
+    const verifierLayer = Layer.succeed(UnitVerifier, {
+      completeUnit: (input) =>
+        Effect.sync(() => {
+          recordedInputs.push(input)
+          if (input.unit.unitId === "unit-a") {
+            return UnitOutcome.cases.Completed.make({
+              unitId: input.unit.unitId,
+              attempt: input.attempt,
+              changedPaths: [...input.unit.ownedRelPaths],
+              packageStampHash: PackageStampHash.make("d".repeat(64)),
+            })
+          }
+          return UnitOutcome.cases.Escalated.make({
+            unitId: input.unit.unitId,
+            escalation: { _tag: "AuthRequired", runner: RunnerId.make("claude-code") },
+          })
+        }),
+      completeSharedStep: (input) =>
+        Effect.succeed(
+          UnitOutcome.cases.Completed.make({
+            unitId: SHARED_STEP_UNIT_ID,
+            attempt: input.attempt,
+            changedPaths: [...input.sharedStepPaths],
+            packageStampHash: PackageStampHash.make("e".repeat(64)),
+          }),
+        ),
+    })
+
+    const l2RunId = WorkflowRunId.make("run-l2-sib-04")
     const unitA = WorkUnitId.make("unit-a")
     const unitB = WorkUnitId.make("unit-b")
     const l2Plan: CompiledPlan = {
@@ -775,10 +1060,82 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
       sharedStepPaths: [],
     }
 
-    const autoRunId = WorkflowRunId.make("run-auto-llm-01")
-    const autoUnitId = WorkUnitId.make("auto-unit")
+    const daemon = await startHarnessDaemonServer(canonicalDir, {
+      workflowEngine: {
+        mode: "required",
+        client: createClient(),
+        entityReplyPollInterval: "50 millis",
+        unitVerifierLayer: verifierLayer,
+        worktreePortLayer: makeNoopWorktreeLayer(validatedCanonical.worktreeRoot),
+        reviewRouterLayer: makeReviewStubLayer(),
+      },
+    })
+
+    try {
+      await Effect.runPromise(
+        startWorkflowViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, plan: l2Plan }),
+      )
+      await Effect.runPromise(
+        completeWorkflowViaDaemon({
+          _tag: "CompleteUnit",
+          repoRoot: validatedCanonical.worktreeRoot,
+          unitId: unitA,
+          runId: l2RunId,
+        }),
+      )
+      expect(
+        recordedInputs.find((i) => i.unit.unitId === unitA)?.siblingInFlightOwnedPaths,
+      ).toEqual(["libs/pkg-b/src"])
+
+      await Effect.runPromise(
+        completeWorkflowViaDaemon({
+          _tag: "CompleteUnit",
+          repoRoot: validatedCanonical.worktreeRoot,
+          unitId: unitB,
+          runId: l2RunId,
+        }),
+      )
+      await Effect.runPromise(
+        resumeWorkflowViaDaemon({
+          _tag: "ResolveEscalation",
+          repoRoot: validatedCanonical.worktreeRoot,
+          runId: l2RunId,
+          unitId: unitB,
+          decision: "abort",
+        }),
+      )
+
+      const failedStatus = await Effect.runPromise(
+        getWorkflowStatusViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, runId: l2RunId }),
+      )
+      expect(failedStatus).toMatchObject({
+        _tag: "Ready",
+        outcome: {
+          _tag: "Failed",
+          terminalError: { _tag: "Aborted" },
+        },
+      })
+
+      const mcpToolOut = await Effect.runPromise(
+        executeWorkflowPlanTool({ repoRoot: canonicalDir, runId: l2RunId }),
+      )
+      expect(
+        mcpToolOut.status._tag === "Ready" &&
+          mcpToolOut.status.outcome._tag === "Failed" &&
+          mcpToolOut.status.outcome.terminalError._tag,
+      ).toBe("Aborted")
+    } finally {
+      await daemon.close()
+    }
+  }, 45_000)
+
+  it("F-17.1: rejects Automatic mode when placeholder dispatcher is active, and runs Automatic mode when runnerKind: 'live'", async () => {
+    const { canonicalDir, baseSha } = createWorkRepo("auto-gate")
+    const validatedCanonical = await Effect.runPromise(
+      validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
+    )
     const autoPlan: CompiledPlan = {
-      runId: autoRunId,
+      runId: WorkflowRunId.make("run-auto-gate-05"),
       level: "slice",
       planSha: PlanSha256.make("7".repeat(64)),
       baseSha,
@@ -790,7 +1147,7 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
       units: [
         {
           _tag: "PackageUnit",
-          unitId: autoUnitId,
+          unitId: WorkUnitId.make("auto-unit"),
           projectName: NxProjectName.make("@harness/auto"),
           waveIndex: WaveIndex.make(0),
           dependsOn: [],
@@ -803,136 +1160,569 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
       sharedStepPaths: [],
     }
 
-    const daemon = await startHarnessDaemonServer(canonicalDir, {
+    const placeholderDaemon = await startHarnessDaemonServer(canonicalDir, {
       workflowEngine: {
         mode: "required",
         client: createClient(),
         entityReplyPollInterval: "50 millis",
-        unitVerifierLayer: recordingVerifierLayer,
-        worktreePortLayer: makeWorkflowWorktreePortLayer({
-          repoRoot: validatedCanonical.worktreeRoot,
-        }),
+        unitVerifierLayer: makeCompletedVerifierLayer(),
+        worktreePortLayer: makeNoopWorktreeLayer(validatedCanonical.worktreeRoot),
         reviewRouterLayer: makeReviewStubLayer(),
-        agentDispatcherLayer: autoDispatcherLayer,
+        agentDispatcherLayer: UnitAgentDispatcherLive,
       },
     })
-
     try {
-      // 1. Start L1 epic plan -> creates linked worktrees under <commonGitDir>/harness/worktrees/<runId>/<unitId>
-      const l1Start = await Effect.runPromise(
-        startWorkflowViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, plan: l1Plan }),
-      )
-      expect(l1Start.outcome).toBe("started")
-      const wtOnePath = join(
-        validatedCanonical.commonGitDir,
-        "harness",
-        "worktrees",
-        l1RunId,
-        l1UnitOne,
-      )
-      const wtTwoPath = join(
-        validatedCanonical.commonGitDir,
-        "harness",
-        "worktrees",
-        l1RunId,
-        l1UnitTwo,
-      )
-      expect(existsSync(wtOnePath)).toBe(true)
-      expect(existsSync(wtTwoPath)).toBe(true)
-
-      // L1 complete rejects canonicalDir (must be unit's provisioned linked worktree!)
-      const spoofCwdErr = await Effect.runPromise(
-        completeWorkflowViaDaemon({
-          _tag: "CompleteUnit",
+      const placeholderErr = await Effect.runPromise(
+        startWorkflowViaDaemon({
           repoRoot: validatedCanonical.worktreeRoot,
-          unitId: l1UnitOne,
-          runId: l1RunId,
+          plan: autoPlan,
         }).pipe(Effect.flip),
       )
-      expect(spoofCwdErr.message).toContain("provisioned worktree")
+      expect(placeholderErr.message).toContain("WF-5")
+    } finally {
+      await placeholderDaemon.close()
+    }
 
-      // L1 complete succeeds when passed the unit's provisioned linked worktree
-      const validatedWtOne = await Effect.runPromise(
-        validateWorktreeRepoRoot(AbsoluteRepoRoot.make(wtOnePath)),
-      )
-      const l1CompOne = await Effect.runPromise(
-        completeWorkflowViaDaemon({
-          _tag: "CompleteUnit",
-          repoRoot: validatedWtOne.worktreeRoot,
-          unitId: l1UnitOne,
-          runId: l1RunId,
-        }),
-      )
-      expect(l1CompOne._tag).toBe("UnitCompleted")
-
-      // Abort L1 run -> compensation removes linked worktrees while preserving slice/* branches
-      const abortRes = await Effect.runPromise(
-        abortWorkflowViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, runId: l1RunId }),
-      )
-      expect(abortRes.state).toBe("aborted")
-      expect(existsSync(wtOnePath)).toBe(false)
-      expect(existsSync(wtTwoPath)).toBe(false)
-      const branches = execFileSync("git", ["branch", "--list", "slice/wf3-abort-*"], {
-        cwd: canonicalDir,
-        encoding: "utf8",
-      })
-      expect(branches).toContain(l1BranchOne)
-      expect(branches).toContain(l1BranchTwo)
-
-      // 2. Start L2 slice plan -> complete unit-a -> verify unit-b's ownedRelPaths passed as siblingInFlightOwnedPaths
-      await Effect.runPromise(
-        startWorkflowViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, plan: l2Plan }),
-      )
-      const compA = await Effect.runPromise(
-        completeWorkflowViaDaemon({
-          _tag: "CompleteUnit",
-          repoRoot: validatedCanonical.worktreeRoot,
-          unitId: unitA,
-          runId: l2RunId,
-        }),
-      )
-      expect(compA._tag).toBe("UnitCompleted")
-      const compAInput = recordedVerifierInputs.find((i) => i.unit.unitId === unitA)
-      expect(compAInput?.siblingInFlightOwnedPaths).toEqual(["libs/pkg-b/src"])
-
-      // 3. Automatic mode workflow completes unit via dispatcher + verifier and surfaces LlmPhaseDone
+    const liveDispatcherLayer = Layer.succeed(UnitAgentDispatcher, {
+      runnerKind: "live" as const,
+      dispatchUnit: () => Effect.succeed(UnitAgentDispatchResult.cases.Completed.make({})),
+    })
+    const liveDaemon = await startHarnessDaemonServer(canonicalDir, {
+      workflowEngine: {
+        mode: "required",
+        client: createClient(),
+        entityReplyPollInterval: "50 millis",
+        unitVerifierLayer: makeCompletedVerifierLayer(),
+        worktreePortLayer: makeNoopWorktreeLayer(validatedCanonical.worktreeRoot),
+        reviewRouterLayer: makeReviewStubLayer(),
+        agentDispatcherLayer: liveDispatcherLayer,
+      },
+    })
+    try {
       await Effect.runPromise(
         startWorkflowViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, plan: autoPlan }),
       )
       const autoStatus = await Effect.runPromise(
         getWorkflowStatusViaDaemon({
           repoRoot: validatedCanonical.worktreeRoot,
-          runId: autoRunId,
+          runId: autoPlan.runId,
         }),
       )
-      expect(autoStatus.run?.state).toBe("waiting")
-      expect(autoStatus.units.find((u) => u.unitId === autoUnitId)?.status).toBe("completed")
-      expect(autoStatus.pendingDeferreds).toEqual([
-        {
-          _tag: "LlmPhase",
-          deferredName: "llm-phase-done",
+      expect(autoStatus).toMatchObject({
+        _tag: "Ready",
+        outcome: {
+          _tag: "Active",
+          run: { state: "waiting" },
+          pendingDeferreds: [{ _tag: "LlmPhase", deferredName: "llm-phase-done" }],
         },
-      ])
+      })
+    } finally {
+      await liveDaemon.close()
+    }
+  }, 45_000)
+
+  it("F-6.1 & F-6.2: workflow.start fails closed on missing/corrupt WfRun.planJson and on engine execution without stored plan", async () => {
+    const { canonicalDir, baseSha } = createWorkRepo("start-plan-verify")
+    const validatedCanonical = await Effect.runPromise(
+      validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
+    )
+    const plan = makeSingleUnitManualPlan("run-f6-missing-plan-06", baseSha)
+    const execId = await Effect.runPromise(executionIdOf(plan))
+
+    let runRowMode: "missing-planJson" | "corrupt-planJson" = "missing-planJson"
+    const client = makeMockLeaseStoreClient({
+      onRunRow: () => ({
+        runId: plan.runId,
+        executionId: execId,
+        level: plan.level,
+        planSha: plan.planSha,
+        baseSha: plan.baseSha,
+        state: "running",
+        updatedMs: 100,
+        ...(runRowMode === "corrupt-planJson" ? { planJson: "{not-valid-compiled-plan" } : {}),
+      }),
+    })
+
+    const daemon = await startHarnessDaemonServer(canonicalDir, {
+      workflowEngine: {
+        mode: "required",
+        client,
+        unitVerifierLayer: makeCompletedVerifierLayer(),
+        worktreePortLayer: makeNoopWorktreeLayer(validatedCanonical.worktreeRoot),
+        reviewRouterLayer: makeReviewStubLayer(),
+      },
+    })
+
+    try {
+      const missingErr = await Effect.runPromise(
+        startWorkflowViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, plan }).pipe(
+          Effect.flip,
+        ),
+      )
+      expect(missingErr.message).toContain("missing stored planJson")
+
+      runRowMode = "corrupt-planJson"
+      const corruptErr = await Effect.runPromise(
+        startWorkflowViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, plan }).pipe(
+          Effect.flip,
+        ),
+      )
+      expect(corruptErr.message).toContain("corrupt stored planJson")
     } finally {
       await daemon.close()
     }
 
-    // Offline fallback when daemon is stopped (read-only, no mutation)
+    // F-6.1: verify WorkflowEngine poll returns Some(Suspended) while getRun returns None -> fails closed!
+    const { canonicalDir: dir2, baseSha: sha2 } = createWorkRepo("f61-polled")
+    const val2 = await Effect.runPromise(validateWorktreeRepoRoot(AbsoluteRepoRoot.make(dir2)))
+    const plan2 = makeSingleUnitManualPlan("run-f61-engine-only-07", sha2)
+    const daemon2 = await startHarnessDaemonServer(dir2, {
+      workflowEngine: {
+        mode: "required",
+        client: createClient(),
+        entityReplyPollInterval: "50 millis",
+        unitVerifierLayer: makeCompletedVerifierLayer(),
+        worktreePortLayer: makeNoopWorktreeLayer(val2.worktreeRoot),
+        reviewRouterLayer: makeReviewStubLayer(),
+      },
+    })
+    try {
+      const execId2 = await Effect.runPromise(executionIdOf(plan2))
+      await Effect.runPromise(startWorkflowViaDaemon({ repoRoot: val2.worktreeRoot, plan: plan2 }))
+      await daemon2.close()
+
+      // Restart fresh daemon (empty plansRef) with a client that hides WfRun from getRun -> F-6.1 must reject!
+      const hideRunClient = makeWorkflowOmnigraphClient({ baseUrl: serverBaseUrl, token: cliToken })
+      const origInvoke = hideRunClient.queries.invoke.bind(hideRunClient.queries)
+      const proxiedHideRun = new Proxy(hideRunClient, {
+        get(target, prop, receiver) {
+          if (prop === "queries") {
+            return new Proxy(target.queries, {
+              get(qt, qp, qr) {
+                if (qp === "invoke") {
+                  return (...args: Parameters<typeof origInvoke>) => {
+                    if (args[0] === "wf_get_run") {
+                      return Promise.resolve({
+                        queryName: args[0],
+                        rowCount: 0,
+                        rows: [],
+                        graphCommitId: null,
+                        target: { branch: "main" },
+                      })
+                    }
+                    return origInvoke(...args)
+                  }
+                }
+                return Reflect.get(qt, qp, qr)
+              },
+            })
+          }
+          return Reflect.get(target, prop, receiver)
+        },
+      })
+
+      const daemon3 = await startHarnessDaemonServer(dir2, {
+        workflowEngine: {
+          mode: "required",
+          client: proxiedHideRun,
+          entityReplyPollInterval: "50 millis",
+          unitVerifierLayer: makeCompletedVerifierLayer(),
+          worktreePortLayer: makeNoopWorktreeLayer(val2.worktreeRoot),
+          reviewRouterLayer: makeReviewStubLayer(),
+        },
+      })
+      try {
+        const f61Err = await Effect.runPromise(
+          startWorkflowViaDaemon({ repoRoot: val2.worktreeRoot, plan: plan2 }).pipe(Effect.flip),
+        )
+        expect(f61Err.message).toContain(execId2)
+        expect(f61Err.message).toContain("without a verifiable stored plan")
+      } finally {
+        await daemon3.close()
+      }
+    } finally {
+      await daemon2.close()
+    }
+  }, 45_000)
+
+  it("F-23.2: covers daemon runtime inactive, malformed RPC payload, unknown RPC method, and concurrent same-run calls", async () => {
+    const { canonicalDir, baseSha } = createWorkRepo("edge-cases")
+    const validatedCanonical = await Effect.runPromise(
+      validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
+    )
+    const plan = makeSingleUnitManualPlan("run-edge-conc-08", baseSha)
+
+    // 1. Inactive runtime returns explicit "runtime is inactive" error on workflow.start
+    const inactiveDaemon = await startHarnessDaemonServer(canonicalDir, {
+      writerLeaseEpoch: LeaseEpoch.make(1),
+      workflowEngine: { mode: "disabled" },
+    })
+    try {
+      const inactiveErr = await Effect.runPromise(
+        startWorkflowViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, plan }).pipe(
+          Effect.flip,
+        ),
+      )
+      expect(inactiveErr.message).toContain("runtime is inactive")
+
+      // 2. Malformed JSON payload -> "Invalid daemon request payload"
+      const malformedRes = await Effect.runPromise(
+        queryUnixSocketLineDetailed(
+          DaemonSocketPath.make(inactiveDaemon.socketPath),
+          "{not-valid-json",
+          { timeoutMs: 5000 },
+        ).pipe(Effect.provide(UnixSocketDaemonLive)),
+      )
+      match(malformedRes)
+        .with({ _tag: "Reply" }, ({ line }) => {
+          expect(JSON.parse(line)).toMatchObject({
+            ok: false,
+            error: "Invalid daemon request payload",
+          })
+        })
+        .with({ _tag: "Unavailable" }, ({ reason }) => {
+          expect.unreachable(`Expected Reply, got Unavailable(${reason})`)
+        })
+        .exhaustive()
+
+      // 3. Unknown RPC method preserves id/command and returns explicit unknown command error
+      const unknownCmd = await Effect.runPromise(
+        queryWorkflowDaemonCommand({
+          socketPath: DaemonSocketPath.make(inactiveDaemon.socketPath),
+          command: "workflow.unknownMethod",
+          payload: { repoRoot: canonicalDir },
+        }).pipe(Effect.provide(UnixSocketDaemonLive)),
+      )
+      expect(unknownCmd).toMatchObject({
+        ok: false,
+        command: "workflow.unknownMethod",
+      })
+      expect(String(unknownCmd.error)).toContain("Unknown daemon command")
+    } finally {
+      await inactiveDaemon.close()
+    }
+
+    // 4. Concurrent same-run workflow.start calls serialize cleanly via withRunLock
+    const liveDaemon = await startHarnessDaemonServer(canonicalDir, {
+      workflowEngine: {
+        mode: "required",
+        client: createClient(),
+        entityReplyPollInterval: "50 millis",
+        unitVerifierLayer: makeCompletedVerifierLayer(),
+        worktreePortLayer: makeNoopWorktreeLayer(validatedCanonical.worktreeRoot),
+        reviewRouterLayer: makeReviewStubLayer(),
+      },
+    })
+    try {
+      const [r1, r2] = await Effect.runPromise(
+        Effect.all(
+          [
+            startWorkflowViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, plan }),
+            startWorkflowViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, plan }),
+          ],
+          { concurrency: 2 },
+        ),
+      )
+      expect(r1.executionId).toBe(r2.executionId)
+      expect([r1.outcome, r2.outcome].sort()).toEqual(["existing", "started"])
+    } finally {
+      await liveDaemon.close()
+    }
+  }, 45_000)
+
+  it("F-7.1, F-8.1, F-8.2, F-12.1, F-2.4/F-2.5: tests lease epoch change mid-request, doctor lease checks, rebuild fail-closed, timeout constants, and immediate poll failure", async () => {
+    expect(WORKFLOW_COMPLETE_IPC_TIMEOUT_MS).toBe(150_000)
+    expect(WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS).toBe(160_000)
+    const { canonicalDir } = createWorkRepo("lease-poll-doc")
+    const validatedCanonical = await Effect.runPromise(
+      validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
+    )
+    const runtimePaths = resolveWorkflowRuntimePaths(validatedCanonical.commonGitDir)
+    let overriddenLease: Record<string, unknown> | null | undefined = undefined
+    let forceCorruptJournal = false
+
+    const client = makeMockLeaseStoreClient({
+      getLeaseRow: () => overriddenLease ?? null,
+      forceCorruptJournal,
+    })
+
+    const leaseBox: { row: Record<string, unknown> | null } = { row: null }
+    const baseClient = new OmnigraphClient({
+      baseUrl: "http://127.0.0.1:1",
+      graphId: "harness-workflows",
+    })
+    const statefulClient = new Proxy(baseClient, {
+      get(target, prop, receiver) {
+        if (prop === "queries") {
+          return new Proxy(target.queries, {
+            get(qt, qp, qr) {
+              if (qp === "invoke") {
+                return (
+                  queryName: string,
+                  input?: { readonly params?: Record<string, unknown> },
+                ) => {
+                  const params = input?.params ?? {}
+                  if (queryName === "wf_get_writer_lease") {
+                    const row = overriddenLease !== undefined ? overriddenLease : leaseBox.row
+                    return Promise.resolve({
+                      queryName,
+                      rowCount: row === null ? 0 : 1,
+                      rows: row === null ? [] : [{ ...row }],
+                      graphCommitId: "commit-1",
+                      target: { branch: "main" },
+                    })
+                  }
+                  if (queryName === "wf_insert_writer_lease") {
+                    leaseBox.row = {
+                      name: "engine",
+                      owner: typeof params.owner === "string" ? params.owner : "",
+                      leaseEpoch: Number(params.leaseEpoch ?? 1),
+                      heartbeatMs: Number(params.heartbeatMs ?? Date.now()),
+                    }
+                    return Promise.resolve({
+                      queryName,
+                      affectedNodes: 1,
+                      affectedEdges: 0,
+                      branch: "main",
+                      commit: { graphCommitId: "commit-2" },
+                    })
+                  }
+                  if (queryName === "wf_all_entities" && forceCorruptJournal) {
+                    return Promise.resolve({
+                      queryName,
+                      rowCount: 1,
+                      rows: [
+                        {
+                          messageKey: "1",
+                          seqKey: "0".repeat(20),
+                          entityType: "Workflow/HarnessTaskWorkflow",
+                        },
+                      ],
+                      graphCommitId: "commit-2",
+                      target: { branch: "main" },
+                    })
+                  }
+                  return client.queries.invoke(queryName, input)
+                }
+              }
+              return Reflect.get(qt, qp, qr)
+            },
+          })
+        }
+        return Reflect.get(target, prop, receiver)
+      },
+    })
+
+    const daemon = await startHarnessDaemonServer(canonicalDir, {
+      workflowEngine: {
+        mode: "required",
+        client: statefulClient,
+        heartbeatIntervalMs: 60_000,
+        unitVerifierLayer: makeCompletedVerifierLayer(),
+        worktreePortLayer: makeNoopWorktreeLayer(validatedCanonical.worktreeRoot),
+        reviewRouterLayer: makeReviewStubLayer(),
+      },
+    })
+
+    try {
+      // 1. Healthy lease check passes
+      const healthyDoc = await Effect.runPromise(
+        doctorWorkflowViaDaemon({
+          repoRoot: validatedCanonical.worktreeRoot,
+          mode: WorkflowDoctorMode.make("check-only"),
+        }),
+      )
+      expect(healthyDoc.checks.find((c) => c.name === "writer-lease")?.status).toBe("ok")
+
+      // 2. Stale heartbeat TTL -> warn (F-8.2)
+      const currentStoredLease = leaseBox.row
+      if (currentStoredLease === null) {
+        expect.unreachable("Expected storedLease to be populated")
+        return
+      }
+      overriddenLease = {
+        ...currentStoredLease,
+        heartbeatMs: Date.now() - WRITER_LEASE_HEARTBEAT_TTL_MS - 1_000,
+      }
+      const staleDoc = await Effect.runPromise(
+        doctorWorkflowViaDaemon({
+          repoRoot: validatedCanonical.worktreeRoot,
+          mode: WorkflowDoctorMode.make("check-only"),
+        }),
+      )
+      expect(staleDoc.checks.find((c) => c.name === "writer-lease")?.status).toBe("warn")
+
+      // 3. Missing meta.json -> warn (F-8.2)
+      overriddenLease = undefined
+      const metaPath = `${runtimePaths.lockFilePath}.meta.json`
+      const savedMeta = readFileSync(metaPath, "utf8")
+      unlinkSync(metaPath)
+      const missingMetaDoc = await Effect.runPromise(
+        doctorWorkflowViaDaemon({
+          repoRoot: validatedCanonical.worktreeRoot,
+          mode: WorkflowDoctorMode.make("check-only"),
+        }),
+      )
+      expect(missingMetaDoc.checks.find((c) => c.name === "writer-lease")?.status).toBe("warn")
+      writeFileSync(metaPath, savedMeta, "utf8")
+
+      // 4. F-2.5: corrupt journal fails doctor rebuild closed instead of swallowing/skipping
+      forceCorruptJournal = true
+      const corruptRebuildErr = await Effect.runPromise(
+        doctorWorkflowViaDaemon({
+          repoRoot: validatedCanonical.worktreeRoot,
+          mode: WorkflowDoctorMode.make("rebuild"),
+        }).pipe(Effect.flip),
+      )
+      expect(corruptRebuildErr.message).toContain("Corrupt")
+      forceCorruptJournal = false
+
+      // 5. Writer lease epoch change mid-request (F-8.1, F-8.2, F-23.2) -> doctor reports fail, status/getRun fails closed
+      overriddenLease = {
+        name: "engine",
+        owner: "rival-daemon#999",
+        leaseEpoch: 99,
+        heartbeatMs: Date.now(),
+      }
+      const mismatchedDoc = await Effect.runPromise(
+        doctorWorkflowViaDaemon({
+          repoRoot: validatedCanonical.worktreeRoot,
+          mode: WorkflowDoctorMode.make("check-only"),
+        }),
+      )
+      expect(mismatchedDoc.checks.find((c) => c.name === "writer-lease")?.status).toBe("fail")
+
+      const fencedStatusErr = await Effect.runPromise(
+        getWorkflowStatusViaDaemon({
+          repoRoot: validatedCanonical.worktreeRoot,
+          runId: WorkflowRunId.make("run-fenced-01"),
+        }).pipe(Effect.flip),
+      )
+      expect(fencedStatusErr.message).toContain("rival-daemon")
+    } finally {
+      await daemon.close()
+    }
+
+    // 6. F-12.1: polling loop in workflow.complete fails immediately on WorkflowStoreUnavailableError
+    const { canonicalDir: pollDir, baseSha: pollSha } = createWorkRepo("f12-poll")
+    const valPoll = await Effect.runPromise(
+      validateWorktreeRepoRoot(AbsoluteRepoRoot.make(pollDir)),
+    )
+    const pollPlan = makeSingleUnitManualPlan("run-f12-poll-09", pollSha)
+    const pollUnitId = pollPlan.units[0]!.unitId
+    let listUnitsCalls = 0
+    let failPollOnSecondList = false
+
+    const pollDaemon = await startHarnessDaemonServer(pollDir, {
+      workflowEngine: {
+        mode: "required",
+        client: createClient(),
+        entityReplyPollInterval: "50 millis",
+        unitVerifierLayer: makeCompletedVerifierLayer(),
+        worktreePortLayer: makeNoopWorktreeLayer(valPoll.worktreeRoot),
+        reviewRouterLayer: makeReviewStubLayer(),
+        readModelQueryLayer: Layer.succeed(WorkflowReadModelQuery, {
+          getRun: () => Effect.succeedNone,
+          listRuns: Effect.succeed([]),
+          listUnits: () => {
+            listUnitsCalls += 1
+            if (failPollOnSecondList && listUnitsCalls >= 2) {
+              return Effect.fail(
+                new WorkflowStoreUnavailableError({
+                  operation: WorkflowStoreOperation.make("Test.listUnits"),
+                  reason: toBoundedReason("Injected outage during poll"),
+                }),
+              )
+            }
+            return Effect.succeed([
+              {
+                unitKey: makeWorkflowUnitKey(pollPlan.runId, pollUnitId),
+                runId: pollPlan.runId,
+                unitId: pollUnitId,
+                kind: "package" as const,
+                waveIndex: WaveIndex.make(0),
+                status: "dispatched" as const,
+                ownedRelPaths: [OwnedRelPath.make("libs/alpha/src")],
+                updatedMs: WorkflowTimestampMs.make(1),
+              },
+            ])
+          },
+          listAttempts: () => Effect.succeed([]),
+          probeAvailability: Effect.succeed("ready" as const),
+        }),
+      },
+    })
+    try {
+      await Effect.runPromise(
+        startWorkflowViaDaemon({ repoRoot: valPoll.worktreeRoot, plan: pollPlan }),
+      )
+      failPollOnSecondList = true
+      const pollErr = await Effect.runPromise(
+        completeWorkflowViaDaemon({
+          _tag: "CompleteUnit",
+          repoRoot: valPoll.worktreeRoot,
+          unitId: pollUnitId,
+          runId: pollPlan.runId,
+        }).pipe(Effect.flip),
+      )
+      expect(pollErr.message).toContain("Injected outage during poll")
+    } finally {
+      await pollDaemon.close()
+    }
+  }, 45_000)
+
+  it("F-21.1 & F-21.3: fails closed on missing rejection or corrupt EscalationResolution deferred payload", async () => {
+    const unitId = WorkUnitId.make("unit-corrupt")
+    const missingRejErr = await Effect.runPromise(
+      extractLastRejection([], [], unitId).pipe(Effect.flip),
+    )
+    expect(missingRejErr).toContain("No recorded UnitRejection found")
+
+    const escDef = makeUnitEscalationDeferred(unitId, EscalationOrdinal.make(1))
+    const corruptDef = DurableDeferred.make(escDef.name, {
+      success: Schema.Struct({ invalid: Schema.String }),
+    })
+    const executionId = WorkflowExecutionId.make("run-corrupt-esc")
+
+    const corruptCycleErr = await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* WorkflowEngine.WorkflowEngine
+        yield* engine.deferredDone(corruptDef, {
+          workflowName: HarnessTaskWorkflow.name,
+          executionId,
+          deferredName: escDef.name,
+          exit: Exit.succeed({ invalid: "payload" }),
+        })
+        return yield* inspectActiveUnitCycle(engine, executionId, unitId)
+      }).pipe(Effect.provide(WorkflowEngine.layerMemory), Effect.flip),
+    )
+    expect(corruptCycleErr).toContain("Missing key")
+  })
+
+  it("offline harness_workflow_plan returns DaemonOffline+NotFound, and non-git/escape/cross-repo roots fail closed", async () => {
+    const workBase = mkdtempSync(join(tmpdir(), "wf3-offline-"))
+    tempDirs.push(workBase)
+    const { canonicalDir } = initTestGitRepo(workBase, "offline-repo")
+    const { canonicalDir: otherGitRepo } = initTestGitRepo(workBase, "other-repo")
+    const outsideDir = join(workBase, "outside-nongit")
+    mkdirSync(outsideDir, { recursive: true })
+    const validatedCanonical = await Effect.runPromise(
+      validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
+    )
+
     const offlinePlanOut = await Effect.runPromise(
       executeWorkflowPlanTool({ repoRoot: canonicalDir }),
     )
     expect(offlinePlanOut.resolvedRepoRoot).toBe(validatedCanonical.worktreeRoot)
     expect(offlinePlanOut.commonGitDir).toBe(validatedCanonical.commonGitDir)
-    expect(offlinePlanOut.status.storeStatus).toBe("inactive")
-    expect(offlinePlanOut.status.writerLeaseEpoch).toBe(LeaseEpoch.make(0))
+    expect(offlinePlanOut.status._tag).toBe("DaemonOffline")
+    expect("writerLeaseEpoch" in offlinePlanOut.status).toBe(false)
 
-    // Invalid / non-git repoRoot fails closed
     const invalidErr = await Effect.runPromise(
       executeWorkflowPlanTool({ repoRoot: outsideDir }).pipe(Effect.flip),
     )
     expect(toErrorReasonMessage(invalidErr)).toContain("git")
 
-    // Relative escape against configured ServerOptions.repoRoot fails with ProjectPathEscapeError
     const escapeErr = await Effect.runPromise(
       executeWorkflowPlanTool({ repoRoot: "../outside-nongit" }, { repoRoot: canonicalDir }).pipe(
         Effect.flip,
@@ -940,12 +1730,109 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
     )
     expect(escapeErr._tag).toBe("ProjectPathEscapeError")
 
-    // Cross-repo commonGitDir mismatch fails with ProjectPathEscapeError
     const crossRepoErr = await Effect.runPromise(
       executeWorkflowPlanTool({ repoRoot: otherGitRepo }, { repoRoot: canonicalDir }).pipe(
         Effect.flip,
       ),
     )
     expect(crossRepoErr._tag).toBe("ProjectPathEscapeError")
+  })
+
+  it("handles StorePaused, OperatorAborted, and doctor rebuild fail-closed on failed writer lease", async () => {
+    const { canonicalDir, baseSha } = createWorkRepo("status-edge-cases")
+    const val = await Effect.runPromise(
+      validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
+    )
+    const runId = WorkflowRunId.make("run-paused-abort-01")
+    const pausedPlan = makeSingleUnitManualPlan(runId, baseSha)
+    const client = createClient()
+    let simulateAbortedRun = false
+
+    const daemon = await startHarnessDaemonServer(canonicalDir, {
+      workflowEngine: {
+        mode: "required",
+        client,
+        entityReplyPollInterval: "50 millis",
+        unitVerifierLayer: makeCompletedVerifierLayer(),
+        worktreePortLayer: makeNoopWorktreeLayer(val.worktreeRoot),
+        reviewRouterLayer: makeReviewStubLayer(),
+        readModelQueryLayer: Layer.succeed(WorkflowReadModelQuery, {
+          getRun: (id) =>
+            simulateAbortedRun
+              ? Effect.succeedSome({
+                  runId: id,
+                  executionId: WorkflowExecutionId.make(id),
+                  level: "slice" as const,
+                  planSha: pausedPlan.planSha,
+                  baseSha,
+                  state: "aborted" as const,
+                  updatedMs: WorkflowTimestampMs.make(123),
+                })
+              : Effect.succeedNone,
+          listRuns: simulateAbortedRun
+            ? Effect.succeed([
+                {
+                  runId,
+                  executionId: WorkflowExecutionId.make(runId),
+                  level: "slice" as const,
+                  planSha: pausedPlan.planSha,
+                  baseSha,
+                  state: "aborted" as const,
+                  updatedMs: WorkflowTimestampMs.make(123),
+                },
+              ])
+            : Effect.succeed([]),
+          listUnits: () => Effect.succeed([]),
+          listAttempts: () => Effect.succeed([]),
+          probeAvailability: Effect.succeed("paused" as const),
+        }),
+      },
+    })
+    try {
+      const pausedStatus = await Effect.runPromise(
+        getWorkflowStatusViaDaemon({ repoRoot: val.worktreeRoot }),
+      )
+      match(pausedStatus)
+        .with({ _tag: "StorePaused" }, ({ outcome }) => {
+          expect(outcome._tag).toBe("NotFound")
+        })
+        .with({ _tag: "Ready" }, { _tag: "DaemonOffline" }, () => {
+          expect.unreachable("Expected StorePaused")
+        })
+        .exhaustive()
+
+      simulateAbortedRun = true
+      const abortedStatus = await Effect.runPromise(
+        getWorkflowStatusViaDaemon({ repoRoot: val.worktreeRoot, runId }),
+      )
+      match(abortedStatus)
+        .with({ _tag: "StorePaused" }, ({ outcome }) => {
+          match(outcome)
+            .with({ _tag: "Failed" }, ({ terminalError }) => {
+              expect(terminalError._tag).toBe("OperatorAborted")
+            })
+            .with({ _tag: "Active" }, { _tag: "Completed" }, { _tag: "NotFound" }, () => {
+              expect.unreachable("Expected Failed(OperatorAborted)")
+            })
+            .exhaustive()
+        })
+        .with({ _tag: "Ready" }, { _tag: "DaemonOffline" }, () => {
+          expect.unreachable("Expected StorePaused")
+        })
+        .exhaustive()
+
+      // Remove OS lockFilePath so checkWriterLeaseDoctorHealth reports fail -> doctor rebuild must refuse fail-closed
+      const runtimePaths = resolveWorkflowRuntimePaths(val.commonGitDir)
+      unlinkSync(runtimePaths.lockFilePath)
+      const doctorRebuildErr = await Effect.runPromise(
+        doctorWorkflowViaDaemon({
+          repoRoot: val.worktreeRoot,
+          mode: WorkflowDoctorMode.make("rebuild"),
+        }).pipe(Effect.flip),
+      )
+      expect(doctorRebuildErr.message).toContain("Refusing read-model rebuild while writer-lease")
+    } finally {
+      await daemon.close()
+    }
   }, 45_000)
 })

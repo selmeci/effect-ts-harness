@@ -20,11 +20,18 @@ import {
   InvalidPlanWorkflowGraphError,
   LlmPhaseReceipt,
   MaxConcurrency,
+  NxAffectedTargetFlag,
   NxProjectName,
   OwnedRelPath,
   PackageStampHash,
   PackageUnitDraft,
   PackageVerifyCommand,
+  PackageVerifyCommandArgv,
+  PackageVerifyExecutable,
+  PackageVerifyFailureDetail,
+  PackageVerifyFailureKind,
+  PackageVerifyTarget,
+  ParsedPackageVerifyCommand,
   PlanGraphIssue,
   PlanSha256,
   RUNNER_IDS,
@@ -34,6 +41,7 @@ import {
   ReviewerId,
   ReviewerSelection,
   RunnerId,
+  SHARED_STEP_UNIT_ID,
   SHIP_STAGES,
   ShipAttempt,
   ShipReceipt,
@@ -56,7 +64,9 @@ import {
   WorkflowRunId,
   WorkspaceFilePath,
   WorkspaceTreeHash,
+  parsePackageVerifyCommand,
   pathsOverlap,
+  toPackageVerifyCommandArgv,
   wavesOf,
 } from "../src/index.js"
 
@@ -363,7 +373,12 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
         _tag: "WriteSetViolation",
         offendingPaths: [OwnedRelPath.make("libs/harness/contract/src/index.ts")],
       },
-      { _tag: "PackageVerifyFailed", exitCode: GateExitCode.make(1) },
+      {
+        _tag: "PackageVerifyFailed",
+        exitCode: GateExitCode.make(1),
+        failureKind: PackageVerifyFailureKind.make("non-zero-exit"),
+        detail: PackageVerifyFailureDetail.make("exit code 1"),
+      },
       { _tag: "StampMissing" },
       { _tag: "AgentFailed", reason: AgentFailureReason.make("crashed") },
     ]
@@ -682,7 +697,11 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
         _tag: "Rejected",
         unitId: WorkUnitId.make("unit-pkg-1"),
         attempt: AttemptNumber.make(2),
-        rejection: { _tag: "PackageVerifyFailed", exitCode: GateExitCode.make(1) },
+        rejection: {
+          _tag: "PackageVerifyFailed",
+          exitCode: GateExitCode.make(1),
+          failureKind: PackageVerifyFailureKind.make("timed-out"),
+        },
       },
       {
         _tag: "Escalated",
@@ -825,7 +844,26 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
 
     expectDecodeFailure(UnitRejection, { _tag: "UnknownRejection" })
     expectDecodeFailure(UnitRejection, { _tag: "WriteSetViolation", offendingPaths: [] })
-    expectDecodeFailure(UnitRejection, { _tag: "PackageVerifyFailed", exitCode: 0 })
+    expectDecodeFailure(UnitRejection, {
+      _tag: "PackageVerifyFailed",
+      exitCode: 0,
+      failureKind: "non-zero-exit",
+    })
+    expectDecodeFailure(UnitRejection, {
+      _tag: "PackageVerifyFailed",
+      exitCode: 1,
+    })
+    expectDecodeFailure(UnitRejection, {
+      _tag: "PackageVerifyFailed",
+      exitCode: 1,
+      failureKind: "killed",
+    })
+    expectDecodeFailure(UnitRejection, {
+      _tag: "PackageVerifyFailed",
+      exitCode: 1,
+      failureKind: "signaled",
+      detail: "",
+    })
 
     expectDecodeFailure(UnitEscalation, { _tag: "UnknownEscalation" })
     expectDecodeFailure(UnitOutcome, { _tag: "UnknownOutcome" })
@@ -847,6 +885,122 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
       _tag: "DisjointOwnershipViolationError",
       waveIndex: 0,
       overlappingPaths: [],
+    })
+  })
+
+  it("parses PackageVerifyCommand into typed argv and rejects reserved unitIds and mismatched project targets (F-2.1, F-15.1)", () => {
+    const nxRunCmd = expectDecodeSuccess(PackageVerifyCommand, "nx run @harness/contract:verify")
+    const pnpmNxRunCmd = expectDecodeSuccess(
+      PackageVerifyCommand,
+      "pnpm nx run @harness/service:typecheck",
+    )
+    const nxAffectedShort = expectDecodeSuccess(PackageVerifyCommand, "nx affected -t lint")
+    const pnpmNxAffectedLong = expectDecodeSuccess(
+      PackageVerifyCommand,
+      "pnpm nx affected --target test",
+    )
+    const pnpmFilterCmd = expectDecodeSuccess(
+      PackageVerifyCommand,
+      "pnpm --filter @harness/core verify",
+    )
+
+    const cases = [
+      {
+        cmd: nxRunCmd,
+        expectedTag: "NxRun" as const,
+        executable: "nx",
+        args: ["run", "@harness/contract:verify"],
+      },
+      {
+        cmd: pnpmNxRunCmd,
+        expectedTag: "NxRun" as const,
+        executable: "pnpm",
+        args: ["nx", "run", "@harness/service:typecheck"],
+      },
+      {
+        cmd: nxAffectedShort,
+        expectedTag: "NxAffected" as const,
+        executable: "nx",
+        args: ["affected", "-t", "lint"],
+      },
+      {
+        cmd: pnpmNxAffectedLong,
+        expectedTag: "NxAffected" as const,
+        executable: "pnpm",
+        args: ["nx", "affected", "--target", "test"],
+      },
+      {
+        cmd: pnpmFilterCmd,
+        expectedTag: "PnpmFilter" as const,
+        executable: "pnpm",
+        args: ["--filter", "@harness/core", "verify"],
+      },
+    ] as const
+
+    for (const item of cases) {
+      const parsed = match(parsePackageVerifyCommand(item.cmd))
+        .with({ _tag: "Some" }, ({ value }) => value)
+        .with({ _tag: "None" }, () =>
+          expect.unreachable(`Expected parsePackageVerifyCommand to parse ${item.cmd}`),
+        )
+        .exhaustive()
+      expect(parsed._tag).toBe(item.expectedTag)
+      expectDecodeSuccess(ParsedPackageVerifyCommand, parsed)
+      const argv = toPackageVerifyCommandArgv(parsed)
+      expectDecodeSuccess(PackageVerifyCommandArgv, argv)
+      expect(argv).toEqual({ executable: item.executable, args: [...item.args] })
+    }
+
+    expect(PackageVerifyExecutable.make("pnpm")).toBe("pnpm")
+    expect(PackageVerifyTarget.make("verify")).toBe("verify")
+    expect(NxAffectedTargetFlag.make("-t")).toBe("-t")
+    expectDecodeFailure(PackageVerifyCommand, "bad command")
+    expectDecodeFailure(PackageVerifyCommand, "nx run @harness/contract:unknown")
+
+    expectDecodeFailure(SliceUnitDraft, {
+      _tag: "SliceUnit",
+      unitId: SHARED_STEP_UNIT_ID,
+      branch: "slice/wf3-reserved",
+      ownedRelPaths: ["libs/a/src"],
+      earsKeys: [],
+    })
+    expectDecodeFailure(PackageUnitDraft, {
+      _tag: "PackageUnit",
+      unitId: SHARED_STEP_UNIT_ID,
+      projectName: "@harness/contract",
+      ownedRelPaths: ["libs/a/src"],
+      stubKeys: [],
+      earsKeys: [],
+      packageVerifyCommand: "nx run @harness/contract:verify",
+    })
+    expectDecodeFailure(PackageUnitDraft, {
+      _tag: "PackageUnit",
+      unitId: "pkg-a",
+      projectName: "@harness/contract",
+      ownedRelPaths: ["libs/a/src"],
+      stubKeys: [],
+      earsKeys: [],
+      packageVerifyCommand: "nx run @harness/gates:verify",
+    })
+    expectDecodeFailure(CompiledWorkUnit, {
+      _tag: "PackageUnit",
+      unitId: "pkg-a",
+      projectName: "@harness/contract",
+      waveIndex: 0,
+      dependsOn: [],
+      ownedRelPaths: ["libs/a/src"],
+      stubKeys: [],
+      earsKeys: [],
+      packageVerifyCommand: "pnpm --filter @harness/gates verify",
+    })
+    expectDecodeSuccess(PackageUnitDraft, {
+      _tag: "PackageUnit",
+      unitId: "pkg-a",
+      projectName: "@harness/contract",
+      ownedRelPaths: ["libs/a/src"],
+      stubKeys: [],
+      earsKeys: [],
+      packageVerifyCommand: "pnpm nx affected -t verify",
     })
   })
 })

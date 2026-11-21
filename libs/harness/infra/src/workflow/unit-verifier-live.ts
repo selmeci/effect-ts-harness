@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
+import { constants } from "node:os"
 import { Effect, Layer, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
@@ -9,6 +10,7 @@ import {
   GateExitCode,
   OwnedRelPath,
   PackageStampHash,
+  PackageVerifyFailureDetail,
   SHARED_STEP_UNIT_ID,
   UnitOutcome,
   UnitRejection,
@@ -16,7 +18,9 @@ import {
   WorkspaceFsError,
   WorkspaceFsOperation,
   compareCodeUnits,
+  parsePackageVerifyCommand,
   toErrorReasonMessage,
+  toPackageVerifyCommandArgv,
 } from "@harness/contract"
 import { checkVerifyStamp, computeWorkspaceTreeHashChecked } from "@harness/gates"
 import { UnitVerifier, type UnitVerifierShape } from "@harness/service"
@@ -66,7 +70,7 @@ const normalizeRelPath = (raw: string): string => {
   return normalized
 }
 
-const normalizeForCompare = (relPath: string): string => relPath.normalize("NFC").toLowerCase()
+const normalizeForCompare = (relPath: string): string => relPath.normalize("NFC")
 
 const isCoveredByOwner = (candidate: string, ownerPrefix: string): boolean => {
   const normCandidate = normalizeForCompare(candidate)
@@ -185,6 +189,75 @@ const gatherChangedPaths = Effect.fnUntraced(function* (
   }
 })
 
+const MAX_CAPTURE_BYTES = 64 * 1024
+const STDIO_DRAIN_GRACE_MS = 100
+const KILL_GRACE_MS = 500
+const MAX_VERIFY_DETAIL_CHARS = 2048
+
+interface BoundedTailBuffer {
+  chunks: Array<Buffer>
+  totalBytes: number
+}
+
+const createBoundedTailBuffer = (): BoundedTailBuffer => ({
+  chunks: [],
+  totalBytes: 0,
+})
+
+const appendBoundedTailChunk = (state: BoundedTailBuffer, chunk: Buffer | string): void => {
+  const buf = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk
+  if (buf.length === 0) {
+    return
+  }
+  if (buf.length >= MAX_CAPTURE_BYTES) {
+    state.chunks = [buf.subarray(buf.length - MAX_CAPTURE_BYTES)]
+    state.totalBytes = MAX_CAPTURE_BYTES
+    return
+  }
+  state.chunks.push(buf)
+  state.totalBytes += buf.length
+  while (state.totalBytes > MAX_CAPTURE_BYTES && state.chunks.length > 0) {
+    const overflow = state.totalBytes - MAX_CAPTURE_BYTES
+    const head = state.chunks[0]!
+    if (head.length <= overflow) {
+      state.chunks.shift()
+      state.totalBytes -= head.length
+    } else {
+      state.chunks[0] = head.subarray(overflow)
+      state.totalBytes -= overflow
+    }
+  }
+}
+
+const readBoundedTailText = (state: BoundedTailBuffer): string =>
+  state.totalBytes === 0 ? "" : Buffer.concat(state.chunks, state.totalBytes).toString("utf8")
+
+const toPackageVerifyFailureDetail = (stderr: string): PackageVerifyFailureDetail | undefined => {
+  const trimmed = stderr.trim()
+  if (trimmed.length === 0) {
+    return undefined
+  }
+  const tail =
+    trimmed.length <= MAX_VERIFY_DETAIL_CHARS
+      ? trimmed
+      : trimmed.slice(-MAX_VERIFY_DETAIL_CHARS).trim()
+  if (tail.length === 0) {
+    return undefined
+  }
+  return match(Schema.decodeOption(PackageVerifyFailureDetail)(tail))
+    .with({ _tag: "Some" }, ({ value }) => value)
+    .with({ _tag: "None" }, () => undefined)
+    .exhaustive()
+}
+
+const resolveSignaledExitCode = (signal: string): GateExitCode => {
+  const signalNumber = Reflect.get(constants.signals, signal)
+  if (typeof signalNumber === "number" && Number.isInteger(signalNumber) && signalNumber >= 1) {
+    return GateExitCode.make(Math.min(255, 128 + signalNumber))
+  }
+  return GateExitCode.make(1)
+}
+
 const spawnVerifyCommand = (
   cmd: string,
   args: ReadonlyArray<string>,
@@ -197,9 +270,10 @@ const spawnVerifyCommand = (
   Effect.callback<SyncHostExecResult, WorkspaceFsError>((resume) => {
     let settled = false
     let timedOut = false
-    let stdout = ""
-    let stderr = ""
+    const stdoutBuf = createBoundedTailBuffer()
+    const stderrBuf = createBoundedTailBuffer()
     let killGraceTimer: ReturnType<typeof setTimeout> | undefined = undefined
+    let stdioDrainTimer: ReturnType<typeof setTimeout> | undefined = undefined
 
     const child = spawn(cmd, args, {
       cwd: opts.cwd,
@@ -209,10 +283,10 @@ const spawnVerifyCommand = (
     })
 
     child.stdout?.on("data", (chunk: Buffer | string) => {
-      stdout += typeof chunk === "string" ? chunk : chunk.toString("utf8")
+      appendBoundedTailChunk(stdoutBuf, chunk)
     })
     child.stderr?.on("data", (chunk: Buffer | string) => {
-      stderr += typeof chunk === "string" ? chunk : chunk.toString("utf8")
+      appendBoundedTailChunk(stderrBuf, chunk)
     })
 
     const terminateChild = (): void => {
@@ -224,7 +298,7 @@ const spawnVerifyCommand = (
         if (child.exitCode === null && child.signalCode === null) {
           child.kill("SIGKILL")
         }
-      }, 2_000)
+      }, KILL_GRACE_MS)
       killGraceTimer.unref()
     }
 
@@ -246,30 +320,27 @@ const spawnVerifyCommand = (
       if (killGraceTimer !== undefined) {
         clearTimeout(killGraceTimer)
       }
+      if (stdioDrainTimer !== undefined) {
+        clearTimeout(stdioDrainTimer)
+      }
     }
 
-    child.once("error", (err) => {
-      if (settled) {
-        return
-      }
-      settled = true
-      cleanupTimers()
-      resume(
-        Effect.succeed({
-          _tag: "SpawnFailed",
-          spawnError: err.message,
-          stdout,
-          stderr,
-        }),
-      )
-    })
+    const destroyStdio = (): void => {
+      child.stdout?.removeAllListeners()
+      child.stdout?.destroy()
+      child.stderr?.removeAllListeners()
+      child.stderr?.destroy()
+    }
 
-    child.once("close", (code, signal) => {
+    const settleWithExit = (code: number | null, signal: NodeJS.Signals | null): void => {
       if (settled) {
         return
       }
       settled = true
       cleanupTimers()
+      destroyStdio()
+      const stdout = readBoundedTailText(stdoutBuf)
+      const stderr = readBoundedTailText(stderrBuf)
       if (timedOut) {
         resume(
           Effect.succeed({
@@ -300,11 +371,47 @@ const spawnVerifyCommand = (
           stderr,
         }),
       )
+    }
+
+    child.once("error", (err) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      cleanupTimers()
+      destroyStdio()
+      resume(
+        Effect.succeed({
+          _tag: "SpawnFailed",
+          spawnError: err.message,
+          stdout: readBoundedTailText(stdoutBuf),
+          stderr: readBoundedTailText(stderrBuf),
+        }),
+      )
+    })
+
+    child.once("exit", (code, signal) => {
+      if (timeoutTimer !== undefined) {
+        clearTimeout(timeoutTimer)
+      }
+      if (settled || stdioDrainTimer !== undefined) {
+        return
+      }
+      stdioDrainTimer = setTimeout(() => {
+        settleWithExit(code, signal)
+      }, STDIO_DRAIN_GRACE_MS)
+      stdioDrainTimer.unref()
+    })
+
+    child.once("close", (code, signal) => {
+      settleWithExit(code, signal)
     })
 
     return Effect.sync(() => {
+      settled = true
       cleanupTimers()
       terminateChild()
+      destroyStdio()
     })
   })
 
@@ -350,17 +457,6 @@ const computePackageStampHash = (
     }),
   )
   return PackageStampHash.make(hasher.digest("hex"))
-}
-
-const splitPackageVerifyCommand = (
-  command: string,
-): { readonly cmd: string; readonly args: ReadonlyArray<string> } | undefined => {
-  const parts = command
-    .trim()
-    .split(/\s+/)
-    .filter((part) => part.length > 0)
-  const [cmd, ...args] = parts
-  return cmd === undefined ? undefined : { cmd, args }
 }
 
 /** Verifies unit write-set ownership and verification stamps/commands for manual & automatic modes. */
@@ -425,15 +521,15 @@ export const completeUnitImpl = Effect.fn("Harness.completeUnit")(function* (
           match(input.unit)
             .with({ _tag: "PackageUnit" }, (pkgUnit) =>
               Effect.gen(function* () {
-                const parsedCmd = splitPackageVerifyCommand(pkgUnit.packageVerifyCommand)
+                const parsedCmd = match(parsePackageVerifyCommand(pkgUnit.packageVerifyCommand))
+                  .with({ _tag: "Some" }, ({ value }) => toPackageVerifyCommandArgv(value))
+                  .with({ _tag: "None" }, () => undefined)
+                  .exhaustive()
                 if (parsedCmd === undefined) {
-                  return UnitOutcome.cases.Rejected.make({
-                    unitId: pkgUnit.unitId,
-                    attempt: input.attempt,
-                    rejection: UnitRejection.cases.PackageVerifyFailed.make({
-                      exitCode: GateExitCode.make(1),
-                    }),
-                  })
+                  return yield* toFsError(
+                    input.cwd,
+                    `Invalid or empty packageVerifyCommand: '${pkgUnit.packageVerifyCommand}'`,
+                  )
                 }
 
                 const verifyTimeoutMs = options?.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS
@@ -442,7 +538,7 @@ export const completeUnitImpl = Effect.fn("Harness.completeUnit")(function* (
                   HARNESS_WORKTREE_ID: pkgUnit.unitId,
                 }
                 const execRes = yield* options?.runVerifyCommand !== undefined
-                  ? options.runVerifyCommand(parsedCmd.cmd, parsedCmd.args, {
+                  ? options.runVerifyCommand(parsedCmd.executable, parsedCmd.args, {
                       cwd: input.cwd,
                       env: verifyEnv,
                       timeoutMs: verifyTimeoutMs,
@@ -450,28 +546,31 @@ export const completeUnitImpl = Effect.fn("Harness.completeUnit")(function* (
                   : injectedHostIo !== undefined
                     ? Effect.try({
                         try: () =>
-                          injectedHostIo.execFileSync(parsedCmd.cmd, parsedCmd.args, {
+                          injectedHostIo.execFileSync(parsedCmd.executable, parsedCmd.args, {
                             cwd: input.cwd,
                             env: verifyEnv,
                             timeoutMs: verifyTimeoutMs,
                           }),
                         catch: (cause) => toFsError(input.cwd, cause),
                       })
-                    : spawnVerifyCommand(parsedCmd.cmd, parsedCmd.args, {
+                    : spawnVerifyCommand(parsedCmd.executable, parsedCmd.args, {
                         cwd: input.cwd,
                         env: verifyEnv,
                         timeoutMs: verifyTimeoutMs,
                       })
 
                 return yield* match(execRes)
-                  .with({ _tag: "Exited" }, ({ exitCode }) => {
+                  .with({ _tag: "Exited" }, ({ exitCode, stderr }) => {
                     if (exitCode !== 0) {
+                      const detail = toPackageVerifyFailureDetail(stderr)
                       return Effect.succeed(
                         UnitOutcome.cases.Rejected.make({
                           unitId: pkgUnit.unitId,
                           attempt: input.attempt,
                           rejection: UnitRejection.cases.PackageVerifyFailed.make({
                             exitCode: GateExitCode.make(Math.min(255, Math.max(1, exitCode))),
+                            failureKind: "non-zero-exit",
+                            ...(detail !== undefined ? { detail } : {}),
                           }),
                         }),
                       )
@@ -501,15 +600,40 @@ export const completeUnitImpl = Effect.fn("Harness.completeUnit")(function* (
                       )
                       .exhaustive()
                   })
-                  .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () =>
-                    Effect.succeed(
+                  .with({ _tag: "TimedOut" }, ({ stderr }) => {
+                    const detail = toPackageVerifyFailureDetail(stderr)
+                    return Effect.succeed(
                       UnitOutcome.cases.Rejected.make({
                         unitId: pkgUnit.unitId,
                         attempt: input.attempt,
                         rejection: UnitRejection.cases.PackageVerifyFailed.make({
                           exitCode: GateExitCode.make(1),
+                          failureKind: "timed-out",
+                          ...(detail !== undefined ? { detail } : {}),
                         }),
                       }),
+                    )
+                  })
+                  .with({ _tag: "Signaled" }, ({ signal, stderr }) => {
+                    const detail = toPackageVerifyFailureDetail(stderr)
+                    return Effect.succeed(
+                      UnitOutcome.cases.Rejected.make({
+                        unitId: pkgUnit.unitId,
+                        attempt: input.attempt,
+                        rejection: UnitRejection.cases.PackageVerifyFailed.make({
+                          exitCode: resolveSignaledExitCode(signal),
+                          failureKind: "signaled",
+                          ...(detail !== undefined ? { detail } : {}),
+                        }),
+                      }),
+                    )
+                  })
+                  .with({ _tag: "SpawnFailed" }, ({ spawnError }) =>
+                    Effect.fail(
+                      toFsError(
+                        input.cwd,
+                        `Package verify command '${pkgUnit.packageVerifyCommand}' failed to spawn: ${spawnError}`,
+                      ),
                     ),
                   )
                   .exhaustive()
