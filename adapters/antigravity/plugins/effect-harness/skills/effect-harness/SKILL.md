@@ -63,8 +63,9 @@ Always prefer in-process MCP tools over spawning shell subcommands to eliminate 
 - **Test Impact Analysis:** `harness_tests_reaching` (determines affected test files for touched symbols).
 - **Session Telemetry:** `harness_telemetry_report` (reviews session metrics and friction logs).
 - **Graph Queries & Diffs:** `harness_gq_query`, `harness_structural_search`, `harness_git_diff`.
-- **Task Lifecycle Gates (CLI only):** Use `pnpm harness <cmd>` (`plan-check`, `gc --strict`, `mutate --strict`, `verify`, `done`) strictly for task state transitions and cryptographic verify-stamp generation.
+- **Task Lifecycle Gates & Workflow Control Plane (CLI only):** Use `pnpm harness <cmd>` (`plan-check`, `gc --strict`, `mutate --strict`, `verify`, `done`, `workflow <compile|start|status|complete|resume|doctor|abort>`) strictly for task state transitions, durable `HarnessTaskWorkflow` orchestration, and cryptographic verify-stamp generation. When `HARNESS_UNIT_WORKER=1` is set on unit worker invocations (automatic runner spawning lands in WF-5), isolation guards block recursive `harness workflow start|resume|abort|doctor|complete --phase llm`, `harness done`, and direct access to `daemon.sock`/`auth-tokens.json`.
 - **Long-Running CLI Gate Execution (`WaitMsBeforeAsync`):** When running CLI lifecycle gates (`pnpm harness plan-check`, `pnpm harness gc --strict`, `pnpm harness mutate --strict`, `pnpm harness verify`, `pnpm harness done`), always pass `WaitMsBeforeAsync: 10000` to `run_command`. If a command goes to the background, rely on Antigravity's reactive wakeup — never poll in a loop with `manage_task status` or `schedule` timers.
+- **Durable Workflow Determinism (`nondeterministic-workflow-body`):** Modules containing `Workflow.make(...)` must move side effects, wall-clock reads, randomness, env, fs, git, Omnigraph, and network calls inside `toLayer`/`register` handlers and same-module helper functions into `Activity.make({ execute: ... })` callbacks.
 - **Advisory `clef-flash` (TypeSafe System One API):** `clef-flash` is a structured System One model (`POST http://localhost:11434/v1/systemone` via `DecisionModel.decide` + `@effect/ai-typesafe`), never a generative/chat LLM. Use `pnpm harness doctor` for warm-up/health checks; `/api/generate`, `/api/chat`, `/v1/chat/completions`, `/v1/completions`, and `ollama run clef-flash` are unsupported and blocked.
 
 ---
@@ -88,6 +89,7 @@ The plugin provides three complementary MCP servers in `mcp_config.json` (`harne
 - **`harness_graph_infer`** / **`harness_graph_complete`** / **`harness_graph_rewrite`**: Runs incremental Datalog (`@electric-sql/d2ts`) inference, computes missing traceability edges, and evaluates double-pushout (DPO) graph rewrite rules.
 - **`harness_telemetry_report`** (`format?: "json" | "markdown"`, `cumulative?: boolean`, `repoRoot?: string`): Generates the session observability scorecard and tool-usage health report.
 - **`harness_git_diff`** (`repoRoot?: string`, `baseRef?: string`, `paths?: string[]`, `statOnly?: boolean`, `maxPatchChars?: number`): Returns bounded read-only unified diff, stats, and untracked-file previews via `git --no-optional-locks` without acquiring repository lock files.
+- **`harness_workflow_plan`** (`repoRoot?: string`, `runId?: string`): Read-only status inspection of the active or latest `HarnessTaskWorkflow` run, work units, attempts, pending `DurableDeferred`s, and worktree/`commonGitDir` binding.
 
 ### `@modernrelay/omnigraph-mcp` (Property Graph & Branching)
 

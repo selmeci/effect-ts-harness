@@ -2,24 +2,39 @@ import { randomUUID } from "node:crypto"
 import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
+  type AbsoluteRepoRoot,
   type DaemonHandshakeRequest,
   DaemonHandshakeResponse,
   DaemonProtocolMismatchDetail,
   DaemonProtocolMismatchError,
   type DaemonSocketPath,
-  toBoundedReason,
+  type GitCommonDirPath,
   WORKFLOW_DAEMON_PROTOCOL_VERSION,
-  type WorkflowDaemonCapability,
+  WorkflowAbortRequest,
+  WorkflowAbortResponse,
+  WorkflowCompleteRequest,
+  WorkflowCompleteResponse,
+  WorkflowDaemonCapability,
+  WorkflowDoctorRequest,
+  WorkflowDoctorResponse,
   WorkflowProtocolVersion,
+  WorkflowResumeRequest,
+  WorkflowResumeResponse,
+  WorkflowStartRequest,
+  WorkflowStartResponse,
+  WorkflowStatusRequest,
+  WorkflowStatusSummary,
   type WorkflowStoreFailureReason,
   WorkflowStoreOperation,
   WorkflowStoreUnavailableError,
+  toBoundedReason,
 } from "@harness/contract"
 import { nodeSyncHostIo } from "../node-host-io.js"
 import {
-  queryUnixSocketLineDetailed,
   type UnixSocketQueryReason,
+  queryUnixSocketLineDetailed,
 } from "../unix-socket-daemon-live.js"
+import { resolveWorkflowRuntimePaths, validateWorktreeRepoRoot } from "../worktree-repo-root.js"
 
 const canonicalPathOrRaw = (filePath: string): string =>
   match(Result.try(() => nodeSyncHostIo.realpathSync(filePath)))
@@ -29,6 +44,9 @@ const canonicalPathOrRaw = (filePath: string): string =>
 
 /** Dedicated workflow daemon IPC timeout (decoupled from the 5 s LSP query socket timeout). */
 export const WORKFLOW_DAEMON_IPC_TIMEOUT_MS = 30_000
+
+/** Extended workflow daemon IPC timeout for `workflow.complete` (exceeds 120 s package verify timeout). */
+export const WORKFLOW_COMPLETE_IPC_TIMEOUT_MS = 150_000
 
 const HANDSHAKE_OPERATION = WorkflowStoreOperation.make("HarnessDaemonClient.handshake")
 const QUERY_COMMAND_OPERATION = WorkflowStoreOperation.make("HarnessDaemonClient.queryCommand")
@@ -329,16 +347,273 @@ export const handshakeWorkflowDaemon = Effect.fn("HarnessDaemonClient.handshake"
     })
   }
 
-  if (requireActiveLease && response.writerLeaseEpoch < 1) {
+  if (requireActiveLease && response.writerLeaseEpoch === undefined) {
     return yield* new DaemonProtocolMismatchError({
       expectedVersion,
       actualVersion: response.protocolVersion,
       socketPath: input.socketPath,
       detail: toMismatchDetail(
-        `Daemon has no active writer lease (writerLeaseEpoch=${response.writerLeaseEpoch}, expected >= 1)`,
+        "Daemon has no active writer lease (writerLeaseEpoch omitted, expected >= 1)",
       ),
     })
   }
 
   return response
+})
+
+/** Optional IPC overrides for high-level typed workflow daemon RPC client calls. */
+export interface WorkflowDaemonRpcOptions {
+  readonly socketPath?: DaemonSocketPath | undefined
+  readonly commonGitDir?: GitCommonDirPath | undefined
+  readonly requireActiveLease?: boolean | undefined
+  readonly timeoutMs?: number | undefined
+}
+
+const PlainRecordSchema = Schema.Record(Schema.String, Schema.Unknown)
+const decodePlainRecordOption = Schema.decodeUnknownOption(PlainRecordSchema)
+
+const extractRpcResponseCandidate = (
+  reply: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> => {
+  const resultOpt = decodePlainRecordOption(reply.result)
+  const fromResult = match(resultOpt)
+    .with({ _tag: "Some" }, ({ value }) => value)
+    .with({ _tag: "None" }, () => undefined)
+    .exhaustive()
+  if (fromResult !== undefined) {
+    return fromResult
+  }
+  const responseOpt = decodePlainRecordOption(reply.response)
+  const fromResponse = match(responseOpt)
+    .with({ _tag: "Some" }, ({ value }) => value)
+    .with({ _tag: "None" }, () => undefined)
+    .exhaustive()
+  return fromResponse ?? reply
+}
+
+const invokeWorkflowDaemonRpc = <
+  TReq extends { readonly repoRoot: AbsoluteRepoRoot },
+  TReqEncoded,
+  TRes,
+>(config: {
+  readonly command: string
+  readonly operation: WorkflowStoreOperation
+  readonly request: TReq
+  readonly requestSchema: Schema.Codec<TReq, TReqEncoded>
+  readonly responseSchema: Schema.Codec<TRes, unknown>
+  readonly defaultRequireActiveLease: boolean
+  readonly options?: WorkflowDaemonRpcOptions | undefined
+}): Effect.Effect<TRes, DaemonProtocolMismatchError | WorkflowStoreUnavailableError> =>
+  Effect.gen(function* () {
+    const resolvedTarget =
+      config.options?.socketPath !== undefined
+        ? {
+            socketPath: config.options.socketPath,
+            commonGitDir: config.options.commonGitDir,
+          }
+        : yield* validateWorktreeRepoRoot(config.request.repoRoot).pipe(
+            Effect.map((validated) => ({
+              socketPath: resolveWorkflowRuntimePaths(validated.commonGitDir).socketPath,
+              commonGitDir: config.options?.commonGitDir ?? validated.commonGitDir,
+            })),
+          )
+
+    yield* handshakeWorkflowDaemon({
+      socketPath: resolvedTarget.socketPath,
+      request: {
+        protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+        repoRoot: config.request.repoRoot,
+        ...(resolvedTarget.commonGitDir !== undefined
+          ? { commonGitDir: resolvedTarget.commonGitDir }
+          : {}),
+      },
+      requiredCapabilities: [WorkflowDaemonCapability.make(config.command)],
+      requireActiveLease: config.options?.requireActiveLease ?? config.defaultRequireActiveLease,
+    })
+
+    const encodedPayload = yield* Schema.encodeUnknownEffect(config.requestSchema)(
+      config.request,
+    ).pipe(
+      Effect.mapError(
+        (err) =>
+          new WorkflowStoreUnavailableError({
+            operation: config.operation,
+            reason: toBoundedReason(err, `Failed to encode '${config.command}' request`),
+          }),
+      ),
+    )
+
+    const payloadRecord = yield* match(decodePlainRecordOption(encodedPayload))
+      .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+      .with({ _tag: "None" }, () =>
+        Effect.fail(
+          new WorkflowStoreUnavailableError({
+            operation: config.operation,
+            reason: toBoundedReason(`Encoded '${config.command}' request was not an object`),
+          }),
+        ),
+      )
+      .exhaustive()
+
+    const reply = yield* queryWorkflowDaemonCommand({
+      socketPath: resolvedTarget.socketPath,
+      command: config.command,
+      payload: payloadRecord,
+      ...(config.options?.timeoutMs !== undefined ? { timeoutMs: config.options.timeoutMs } : {}),
+    })
+
+    const errorText = extractStringField(reply, "error")
+    if (reply.ok === false || errorText !== undefined) {
+      const detailText =
+        extractStringField(reply, "detail") ??
+        errorText ??
+        `Daemon rejected '${config.command}' request`
+      return yield* new WorkflowStoreUnavailableError({
+        operation: config.operation,
+        reason: toStoreFailureReason(detailText),
+      })
+    }
+
+    const candidate = extractRpcResponseCandidate(reply)
+    return yield* Schema.decodeEffect(config.responseSchema)(candidate).pipe(
+      Effect.mapError(
+        (err) =>
+          new WorkflowStoreUnavailableError({
+            operation: config.operation,
+            reason: toBoundedReason(err, `Daemon returned malformed '${config.command}' response`),
+          }),
+      ),
+    )
+  })
+
+const START_WORKFLOW_OPERATION = WorkflowStoreOperation.make("HarnessDaemonClient.startWorkflow")
+const STATUS_WORKFLOW_OPERATION = WorkflowStoreOperation.make(
+  "HarnessDaemonClient.getWorkflowStatus",
+)
+const COMPLETE_WORKFLOW_OPERATION = WorkflowStoreOperation.make(
+  "HarnessDaemonClient.completeWorkflow",
+)
+const RESUME_WORKFLOW_OPERATION = WorkflowStoreOperation.make("HarnessDaemonClient.resumeWorkflow")
+const ABORT_WORKFLOW_OPERATION = WorkflowStoreOperation.make("HarnessDaemonClient.abortWorkflow")
+const DOCTOR_WORKFLOW_OPERATION = WorkflowStoreOperation.make("HarnessDaemonClient.doctorWorkflow")
+
+/** Starts or attaches to a `HarnessTaskWorkflow` run over daemon Unix socket IPC. */
+export const startWorkflowViaDaemon = Effect.fn("HarnessDaemonClient.startWorkflow")(function* (
+  request: WorkflowStartRequest,
+  options?: WorkflowDaemonRpcOptions,
+): Effect.fn.Return<
+  WorkflowStartResponse,
+  DaemonProtocolMismatchError | WorkflowStoreUnavailableError
+> {
+  return yield* invokeWorkflowDaemonRpc({
+    command: "workflow.start",
+    operation: START_WORKFLOW_OPERATION,
+    request,
+    requestSchema: WorkflowStartRequest,
+    responseSchema: WorkflowStartResponse,
+    defaultRequireActiveLease: true,
+    options,
+  })
+})
+
+/** Queries workflow status summary over daemon Unix socket IPC. */
+export const getWorkflowStatusViaDaemon = Effect.fn("HarnessDaemonClient.getWorkflowStatus")(
+  function* (
+    request: WorkflowStatusRequest,
+    options?: WorkflowDaemonRpcOptions,
+  ): Effect.fn.Return<
+    WorkflowStatusSummary,
+    DaemonProtocolMismatchError | WorkflowStoreUnavailableError
+  > {
+    return yield* invokeWorkflowDaemonRpc({
+      command: "workflow.status",
+      operation: STATUS_WORKFLOW_OPERATION,
+      request,
+      requestSchema: WorkflowStatusRequest,
+      responseSchema: WorkflowStatusSummary,
+      defaultRequireActiveLease: false,
+      options,
+    })
+  },
+)
+
+/** Completes a manual unit or LLM phase over daemon Unix socket IPC. */
+export const completeWorkflowViaDaemon = Effect.fn("HarnessDaemonClient.completeWorkflow")(
+  function* (
+    request: WorkflowCompleteRequest,
+    options?: WorkflowDaemonRpcOptions,
+  ): Effect.fn.Return<
+    WorkflowCompleteResponse,
+    DaemonProtocolMismatchError | WorkflowStoreUnavailableError
+  > {
+    return yield* invokeWorkflowDaemonRpc({
+      command: "workflow.complete",
+      operation: COMPLETE_WORKFLOW_OPERATION,
+      request,
+      requestSchema: WorkflowCompleteRequest,
+      responseSchema: WorkflowCompleteResponse,
+      defaultRequireActiveLease: true,
+      options: {
+        ...options,
+        timeoutMs: options?.timeoutMs ?? WORKFLOW_COMPLETE_IPC_TIMEOUT_MS,
+      },
+    })
+  },
+)
+
+/** Resumes a workflow run or resolves an escalation over daemon Unix socket IPC. */
+export const resumeWorkflowViaDaemon = Effect.fn("HarnessDaemonClient.resumeWorkflow")(function* (
+  request: WorkflowResumeRequest,
+  options?: WorkflowDaemonRpcOptions,
+): Effect.fn.Return<
+  WorkflowResumeResponse,
+  DaemonProtocolMismatchError | WorkflowStoreUnavailableError
+> {
+  return yield* invokeWorkflowDaemonRpc({
+    command: "workflow.resume",
+    operation: RESUME_WORKFLOW_OPERATION,
+    request,
+    requestSchema: WorkflowResumeRequest,
+    responseSchema: WorkflowResumeResponse,
+    defaultRequireActiveLease: true,
+    options,
+  })
+})
+
+/** Aborts an active workflow run over daemon Unix socket IPC. */
+export const abortWorkflowViaDaemon = Effect.fn("HarnessDaemonClient.abortWorkflow")(function* (
+  request: WorkflowAbortRequest,
+  options?: WorkflowDaemonRpcOptions,
+): Effect.fn.Return<
+  WorkflowAbortResponse,
+  DaemonProtocolMismatchError | WorkflowStoreUnavailableError
+> {
+  return yield* invokeWorkflowDaemonRpc({
+    command: "workflow.abort",
+    operation: ABORT_WORKFLOW_OPERATION,
+    request,
+    requestSchema: WorkflowAbortRequest,
+    responseSchema: WorkflowAbortResponse,
+    defaultRequireActiveLease: true,
+    options,
+  })
+})
+
+/** Runs workflow diagnostics and optional view rebuild over daemon Unix socket IPC. */
+export const doctorWorkflowViaDaemon = Effect.fn("HarnessDaemonClient.doctorWorkflow")(function* (
+  request: WorkflowDoctorRequest,
+  options?: WorkflowDaemonRpcOptions,
+): Effect.fn.Return<
+  WorkflowDoctorResponse,
+  DaemonProtocolMismatchError | WorkflowStoreUnavailableError
+> {
+  return yield* invokeWorkflowDaemonRpc({
+    command: "workflow.doctor",
+    operation: DOCTOR_WORKFLOW_OPERATION,
+    request,
+    requestSchema: WorkflowDoctorRequest,
+    responseSchema: WorkflowDoctorResponse,
+    defaultRequireActiveLease: false,
+    options,
+  })
 })

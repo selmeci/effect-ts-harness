@@ -6,6 +6,7 @@ import {
   normalizeShellLineContinuations,
   unwrapCommandSegment,
 } from "../src/policy-shell-parser.js"
+import { stripSafeLeadingEnvVarsDetailed } from "../src/policy-command-rules.js"
 import {
   CD_COMMAND_BANNED_REASON,
   classifyCommand,
@@ -856,7 +857,7 @@ describe("guard policy", () => {
     }
   })
 
-  it("REQ-4.6 denies shell mutations, redirections, socket pokes, and token reads against <git-common-dir>/harness/** while allowing benign commands", () => {
+  it("REQ-4.6 denies shell mutations, redirections, and socket pokes against <git-common-dir>/harness/**", () => {
     const deniedMutateCmds = [
       "rm .git/harness/daemon.lock",
       "rm -f /path/to/repo/.git/harness/daemon.sock",
@@ -923,7 +924,9 @@ describe("guard policy", () => {
       expect(classifyCommand(cmd), cmd).toBe("deny")
       expect(explainCommandDenyRule(cmd)?.ruleId, cmd).toBe("harness-state-mutation")
     }
+  })
 
+  it("REQ-4.6 denies shell reads of protected harness runtime files and auth-tokens.json while allowing benign reads and ls/find", () => {
     for (const readStateCmd of [
       "cat .git/harness/daemon.lock",
       "/bin/cat .git/harness/daemon.lock",
@@ -994,8 +997,9 @@ describe("guard policy", () => {
     expect(classifyCommand("ls > /tmp/ok && ls .git/harness")).toBe("escalate")
     expect(isHarnessStateMutationCommand("echo a >x&&ls .git/harness")).toBe(false)
     expect(classifyCommand("echo a >x&&ls .git/harness")).toBe("escalate")
+  })
 
-    // Parser-level assertions covering bun runner vs script eval, env -S, and unquoted segment splitting
+  it("unwraps bun, env -S, and command wrappers cleanly in unwrapCommandSegment and extractCommandSegments", () => {
     expect(unwrapCommandSegment(["bun", "-e", "console.log(1)"])).toEqual({
       envAssignments: [],
       commandWords: ["bun", "-e", "console.log(1)"],
@@ -1273,7 +1277,7 @@ describe("guard policy", () => {
     }
   })
 
-  it("closes P0/P1/P2 bypass vectors on rg/git grep -f/-e/--files, wrapper -C/--dir/--cwd, env -S/-u, time -o, parameter/double-slash harness paths, export GIT_COMMON_DIR, command -pv cd, and harness --cwd guard", () => {
+  it("closes P0/P1/P2 rg and git grep -f/-e/--files/--regexp secret and harness-state bypasses", () => {
     const deniedCases: ReadonlyArray<{ readonly cmd: string; readonly ruleId: string }> = [
       {
         cmd: "rg -f tsconfig.json .git/harness/auth-tokens.json",
@@ -1309,6 +1313,15 @@ describe("guard policy", () => {
       },
       { cmd: "git grep --file=.env --no-index libs/", ruleId: "secret-file-access" },
       { cmd: "git grep -f.env --no-index libs/", ruleId: "secret-file-access" },
+    ]
+    for (const c of deniedCases) {
+      expect(classifyCommand(c.cmd), c.cmd).toBe("deny")
+      expect(explainCommandDenyRule(c.cmd)?.ruleId, c.cmd).toBe(c.ruleId)
+    }
+  })
+
+  it("closes P0/P1/P2 wrapper -C/--dir/--cwd, env -S/-u, time -o, GIT_COMMON_DIR, command -pv cd, and harness --cwd guard bypasses", () => {
+    const deniedCases: ReadonlyArray<{ readonly cmd: string; readonly ruleId: string }> = [
       {
         cmd: "pnpm --filter . -C .git/harness/workflow-backups exec rm workflow-backup-123.ndjson",
         ruleId: "harness-state-mutation",
@@ -1376,29 +1389,47 @@ describe("guard policy", () => {
       },
       { cmd: "time --output=.git/harness/custom.log ls", ruleId: "harness-state-mutation" },
       { cmd: "time -o.git/harness/custom.log ls", ruleId: "harness-state-mutation" },
-      { cmd: "git ls-remote --upl=touch .", ruleId: "git-pack-exec-override" },
-      { cmd: "git ls-remote --upload=touch .", ruleId: "git-pack-exec-override" },
-      { cmd: "git ls-remote --upload-pac touch .", ruleId: "git-pack-exec-override" },
-      { cmd: "git ls-remote -ubash .", ruleId: "git-pack-exec-override" },
-      { cmd: "git ls-remote -u'touch f' .", ruleId: "git-pack-exec-override" },
-      { cmd: "git ls-remote --upload-pack=bash .", ruleId: "git-pack-exec-override" },
-      { cmd: "git ls-remote --upload-pack='sh -c id' .", ruleId: "git-pack-exec-override" },
-      { cmd: "git ls-remote -u bash .", ruleId: "git-pack-exec-override" },
-      { cmd: "git fetch --upl=bash", ruleId: "git-pack-exec-override" },
-      { cmd: "git clone -u bash repo", ruleId: "git-pack-exec-override" },
-      { cmd: "git push --rece=bash origin main", ruleId: "git-pack-exec-override" },
-      { cmd: "git archive --exec=bash HEAD", ruleId: "git-pack-exec-override" },
-      { cmd: "git ls-remote 'ext::sh -c id'", ruleId: "git-pack-exec-override" },
-      { cmd: 'git fetch origin "a\nb" --upload-pack=bash', ruleId: "git-pack-exec-override" },
-      { cmd: 'git push origin "a\nb" --exec=bash', ruleId: "git-pack-exec-override" },
-      { cmd: 'git push origin "a\nb" --receive-pack=bash', ruleId: "git-pack-exec-override" },
-      { cmd: 'git fetch origin "a\nb" "ext::sh -c id"', ruleId: "git-pack-exec-override" },
     ]
     for (const c of deniedCases) {
       expect(classifyCommand(c.cmd), c.cmd).toBe("deny")
       expect(explainCommandDenyRule(c.cmd)?.ruleId, c.cmd).toBe(c.ruleId)
     }
+    expect(
+      classifyCommand("node ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard"),
+    ).toBe("deny")
+    expect(
+      explainCommandDenyRule(
+        "node ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard",
+      )?.ruleId,
+    ).toBe("guard-self-invocation")
+  })
 
+  it("denies git upload-pack/receive-pack/exec and ext:: transfer overrides", () => {
+    for (const cmd of [
+      "git ls-remote --upl=touch .",
+      "git ls-remote --upload=touch .",
+      "git ls-remote --upload-pac touch .",
+      "git ls-remote -ubash .",
+      "git ls-remote -u'touch f' .",
+      "git ls-remote --upload-pack=bash .",
+      "git ls-remote --upload-pack='sh -c id' .",
+      "git ls-remote -u bash .",
+      "git fetch --upl=bash",
+      "git clone -u bash repo",
+      "git push --rece=bash origin main",
+      "git archive --exec=bash HEAD",
+      "git ls-remote 'ext::sh -c id'",
+      'git fetch origin "a\nb" --upload-pack=bash',
+      'git push origin "a\nb" --exec=bash',
+      'git push origin "a\nb" --receive-pack=bash',
+      'git fetch origin "a\nb" "ext::sh -c id"',
+    ]) {
+      expect(classifyCommand(cmd), cmd).toBe("deny")
+      expect(explainCommandDenyRule(cmd)?.ruleId, cmd).toBe("git-pack-exec-override")
+    }
+  })
+
+  it("allows safe rg/git/pnpm/env prefixes and rejects unsafe env prefixes and overlong inputs", () => {
     for (const allowedCmd of [
       "rg --files libs/",
       "rg -f tsconfig.json libs/",
@@ -1428,14 +1459,6 @@ describe("guard policy", () => {
         "TMPDIR=/home/roan/.cache/tmp git status && TMPDIR=/home/roan/.cache/tmp git push origin main",
       ),
     ).toBe("escalate")
-    expect(
-      classifyCommand("node ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard"),
-    ).toBe("deny")
-    expect(
-      explainCommandDenyRule(
-        "node ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard",
-      )?.ruleId,
-    ).toBe("guard-self-invocation")
 
     for (const nonAllowedEnvCmd of [
       "TMPDIR=/tmp/../etc pnpm nx test",
@@ -1480,8 +1503,94 @@ describe("guard policy", () => {
     expect(classifyCommand("CI=1 ".repeat(50_000) + "curl x")).toBe("ask")
     expect(performance.now() - longStart).toBeLessThan(200)
     expect(classifyCommand("CI=1 ".repeat(33) + "pnpm test")).toBe("escalate")
-
     expect(classifyCommand("NX_SKIP_NX_CACHE=1 pnpm nx test")).toBe("deny")
     expect(classifyCommand("TMPDIR=/home/roan/.cache/tmp rm -rf /")).toBe("deny")
+  })
+
+  it("harness:SPEC-0024 strips validated env -u / --unset wrappers and allows read-only df, git worktree list, and wc/rg filters", () => {
+    expect(
+      stripSafeLeadingEnvVarsDetailed("env -u HARNESS_WORKTREE_ID pnpm harness verify"),
+    ).toEqual({ rest: "pnpm harness verify", sawWorktreeId: false })
+    expect(
+      stripSafeLeadingEnvVarsDetailed("CI=true env -u HARNESS_WORKTREE_ID -u NX_DAEMON pnpm test"),
+    ).toEqual({ rest: "pnpm test", sawWorktreeId: false })
+    expect(stripSafeLeadingEnvVarsDetailed("env --unset=HARNESS_WORKTREE_ID pnpm test")).toEqual({
+      rest: "pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env CI=true pnpm test")).toEqual({
+      rest: "pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env HARNESS_WORKTREE_ID=wt1 pnpm test")).toEqual({
+      rest: "pnpm test",
+      sawWorktreeId: true,
+    })
+    expect(
+      stripSafeLeadingEnvVarsDetailed(
+        "HARNESS_WORKTREE_ID=wt1 env -u HARNESS_WORKTREE_ID pnpm harness verify",
+      ),
+    ).toEqual({ rest: "pnpm harness verify", sawWorktreeId: true })
+    expect(stripSafeLeadingEnvVarsDetailed("env -u HARNESS_WORKTREE_ID")).toEqual({
+      rest: "",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env pnpm test")).toEqual({
+      rest: "env pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env -u PATH pnpm test")).toEqual({
+      rest: "env -u PATH pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env --unset=PATH pnpm test")).toEqual({
+      rest: "env --unset=PATH pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env -i pnpm test")).toEqual({
+      rest: "env -i pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env PATH=/tmp pnpm test")).toEqual({
+      rest: "env PATH=/tmp pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env -u")).toEqual({
+      rest: "env -u",
+      sawWorktreeId: false,
+    })
+
+    for (const allowedCmd of [
+      "env -u HARNESS_WORKTREE_ID pnpm harness verify",
+      "env -u HARNESS_WORKTREE_ID CI=true pnpm harness verify && env -u HARNESS_WORKTREE_ID CI=true pnpm harness done",
+      "env -u HARNESS_WORKTREE_ID -u NX_DAEMON pnpm test",
+      "env --unset=HARNESS_WORKTREE_ID pnpm --filter @harness/gates run test",
+      "df -ih /tmp",
+      "df",
+      "git worktree list",
+      "git worktree list --porcelain",
+      "git status | rg policy | wc",
+      "ls -la libs/harness | rg -n telemetry",
+    ]) {
+      expect(classifyCommand(allowedCmd), allowedCmd).toBe("allow")
+    }
+
+    for (const nonAllowed of [
+      { cmd: "env -u PATH pnpm test", verdict: "escalate" },
+      { cmd: "env --unset=PATH pnpm test", verdict: "escalate" },
+      { cmd: "env -i pnpm test", verdict: "escalate" },
+      { cmd: "env pnpm test", verdict: "escalate" },
+      { cmd: "env -u HARNESS_WORKTREE_ID", verdict: "escalate" },
+      { cmd: "env HARNESS_WORKTREE_ID=wt1 pnpm harness verify", verdict: "escalate" },
+      {
+        cmd: "HARNESS_WORKTREE_ID=wt1 env -u HARNESS_WORKTREE_ID pnpm harness verify",
+        verdict: "escalate",
+      },
+      { cmd: "env -u HARNESS_WORKTREE_ID git push --force", verdict: "deny" },
+      { cmd: "git worktree remove /tmp/wt-1", verdict: "escalate" },
+      { cmd: "dfx build", verdict: "escalate" },
+    ] as const) {
+      expect(classifyCommand(nonAllowed.cmd), nonAllowed.cmd).toBe(nonAllowed.verdict)
+    }
   })
 })

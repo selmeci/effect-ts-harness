@@ -61,7 +61,7 @@ Always prefer in-process MCP tools over spawning shell subcommands to eliminate 
 - **Test Impact Analysis:** `harness_tests_reaching` (determines affected test files for touched symbols).
 - **Session Telemetry:** `harness_telemetry_report` (reviews session metrics and friction logs).
 - **Graph Queries & Diffs:** `harness_gq_query`, `harness_structural_search`, `harness_git_diff`.
-- **Task Lifecycle Gates (CLI only):** Use `pnpm harness <cmd>` (`plan-check`, `gc --strict`, `mutate --strict`, `verify`, `done`) strictly for task state transitions and cryptographic verify-stamp generation.
+- **Task Lifecycle Gates & Workflow Control Plane (CLI only):** Use `pnpm harness <cmd>` (`plan-check`, `gc --strict`, `mutate --strict`, `verify`, `done`, `workflow <compile|start|status|complete|resume|doctor|abort>`) strictly for task state transitions, durable `HarnessTaskWorkflow` orchestration, and cryptographic verify-stamp generation. When `HARNESS_UNIT_WORKER=1` is set on unit worker invocations (automatic runner spawning lands in WF-5), isolation guards block recursive `harness workflow start|resume|abort|doctor|complete --phase llm`, `harness done`, and direct access to `daemon.sock`/`auth-tokens.json`.
 - **Advisory `clef-flash` (TypeSafe System One API):** `clef-flash` is a structured System One model (`POST http://localhost:11434/v1/systemone` via `DecisionModel.decide` + `@effect/ai-typesafe`), never a generative/chat LLM. Use `pnpm harness doctor` for warm-up/health checks; `/api/generate`, `/api/chat`, `/v1/chat/completions`, `/v1/completions`, and `ollama run clef-flash` are unsupported and blocked.
 
 ---
@@ -85,6 +85,7 @@ The harness provides three complementary MCP servers in `.mcp.json` (`harness-mc
 - **`harness_graph_infer`** / **`harness_graph_complete`** / **`harness_graph_rewrite`**: Runs incremental Datalog (`@electric-sql/d2ts`) inference, computes missing traceability edges, and evaluates double-pushout (DPO) graph rewrite rules.
 - **`harness_telemetry_report`** (`format?: "json" | "markdown"`, `cumulative?: boolean`, `repoRoot?: string`): Generates the session observability scorecard and tool-usage health report.
 - **`harness_git_diff`** (`repoRoot?: string`, `baseRef?: string`, `paths?: string[]`, `statOnly?: boolean`, `maxPatchChars?: number`): Returns bounded read-only unified diff, stats, and untracked-file previews via `git --no-optional-locks` without acquiring repository lock files.
+- **`harness_workflow_plan`** (`repoRoot?: string`, `runId?: string`): Read-only status inspection of the active or latest `HarnessTaskWorkflow` run, work units, attempts, pending `DurableDeferred`s, and worktree/`commonGitDir` binding.
 
 ### `@modernrelay/omnigraph-mcp` (Property Graph & Branching)
 
@@ -121,3 +122,4 @@ The workspace is structured into **5 hexagonal architectural tiers** (`1. Contra
 - **Exhaustive Pattern Matching (`ts-pattern`):** Model all multi-state values, domain outcomes, and commands as closed Discriminated Unions (`Schema.TaggedUnion`, `Schema.TaggedStruct`, `Schema.TaggedClass`). Branch on discriminated unions exclusively with `match(val)...exhaustive()` from `ts-pattern` (even for 2-variant unions). `switch` statements, `else if` chains, `match().run()`, and `if` / ternary checks on union discriminants (`_tag`, `Option.isSome`, `Either.isRight`, `Result.isSuccess`) are banned (`agent-patterns/pattern-matching.md`).
 - **Data Layer:** `drizzle-orm` and `drizzle-kit` are **banned across the workspace**. Native Effect v4 SQL (`@effect/sql-d1`, `@effect/sql-sqlite-do`, `SqlClient`, `SqliteMigrator`) lives exclusively in `type:infra`. Decode database rows into `type:contract` Schemas at repository boundaries.
 - **Infrastructure:** Alchemy v2 (`2.0.0-beta.80`) resources live in `type:infra` and `apps/sample/alchemy.run.ts`. Never run `alchemy deploy` or `alchemy destroy` directly — they require explicit human approval via the safety guard.
+- **Durable Workflow Determinism:** Modules containing `Workflow.make(...)` must satisfy the `nondeterministic-workflow-body` AST and `oxlint` gate (`harness/syntax-bans`): move all side effects, wall-clock reads, randomness, env, fs, git, Omnigraph, and network calls inside `toLayer`/`register` handlers and same-module helper functions into `Activity.make({ execute: ... })` callbacks.

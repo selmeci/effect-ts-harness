@@ -272,7 +272,10 @@ const checkWriterLeaseFence = <Q extends WorkflowGqQueryName>(
       return yield* Effect.fail<WorkflowStoreAttemptFailure>({
         _tag: "WorkflowStoreAttemptFailure",
         operation: input.operation,
-        cause: makeHeldLeaseError(NO_ACTIVE_LEASE_HOLDER, LeaseEpoch.make(0), lockPath, undefined),
+        cause: new WriterLeaseHeldError({
+          holderId: NO_ACTIVE_LEASE_HOLDER,
+          lockFilePath: lockPath,
+        }),
       })
     }
     const decoded = yield* match(decodeWriterLeaseRow(firstRow))

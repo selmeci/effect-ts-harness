@@ -20,6 +20,7 @@ import {
   NxProjectName,
   OwnedRelPath,
   PackageStampHash,
+  PackageUnitDraft,
   PackageVerifyCommand,
   PlanSha256,
   RUNNER_IDS,
@@ -27,11 +28,13 @@ import {
   ReviewRoutingReason,
   ReviewRoutingSource,
   RunnerId,
+  SHARED_STEP_UNIT_ID,
   SHIP_STAGES,
   ShipAttempt,
   ShipReceipt,
   ShipStage,
   SliceBranchName,
+  SliceUnitDraft,
   StubSymbolKey,
   TaskRunReceipt,
   UnitDependency,
@@ -1043,4 +1046,56 @@ describe("PlanWorkflowCompiler & workflow contracts (RFC-0013 WF-1)", () => {
     assertDecodeFailure(Schema.decodeExit(GateExitCode)(0), "GateExitCode 0")
     assertDecodeFailure(Schema.decodeExit(GateExitCode)(256), "GateExitCode 256")
   })
+
+  it.effect(
+    "S-5.1: rejects reserved SHARED_STEP_UNIT_ID ('shared-step') in draft schemas and PlanWorkflowCompiler.decide",
+    () =>
+      Effect.gen(function* () {
+        const reservedSlice = makeSliceUnit(SHARED_STEP_UNIT_ID, ["libs/shared/a.ts"])
+        const reservedPackage = makePackageUnit(SHARED_STEP_UNIT_ID, ["libs/shared/b.ts"])
+
+        const sliceDecodeExit = Schema.decodeUnknownExit(SliceUnitDraft)(reservedSlice)
+        match(sliceDecodeExit)
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            expect(Cause.hasDies(cause)).toBe(false)
+            expect(Cause.hasFails(cause)).toBe(true)
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected SliceUnitDraft to reject reserved shared-step unitId")
+          })
+          .exhaustive()
+
+        const pkgDecodeExit = Schema.decodeUnknownExit(PackageUnitDraft)(reservedPackage)
+        match(pkgDecodeExit)
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            expect(Cause.hasDies(cause)).toBe(false)
+            expect(Cause.hasFails(cause)).toBe(true)
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected PackageUnitDraft to reject reserved shared-step unitId")
+          })
+          .exhaustive()
+
+        for (const reservedUnit of [reservedSlice, reservedPackage]) {
+          const exit = yield* Effect.exit(
+            PlanWorkflowCompiler.decide({
+              units: [reservedUnit],
+              dependencies: [],
+            }),
+          )
+          const err = extractTypedError(exit)
+          expect(err).toBeInstanceOf(InvalidPlanWorkflowGraphError)
+          if (err instanceof InvalidPlanWorkflowGraphError) {
+            match(err.issue)
+              .with({ _tag: "DuplicateWorkUnitId" }, (issue) => {
+                expect(issue.unitId).toBe(SHARED_STEP_UNIT_ID)
+              })
+              .with({ _tag: "DanglingUnitDependency" }, () => {
+                expect.unreachable("Expected DuplicateWorkUnitId for reserved shared-step unitId")
+              })
+              .exhaustive()
+          }
+        }
+      }),
+  )
 })

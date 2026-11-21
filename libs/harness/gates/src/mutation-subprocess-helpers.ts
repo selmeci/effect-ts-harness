@@ -146,13 +146,15 @@ const runVitestBaselineCheck = (
   testFiles: ReadonlyArray<string>,
   targetLabel: string,
   timeoutMs: number,
+  bailOnFailure: boolean,
 ): string | undefined => {
   const vitestCliPath = join(repoRoot, "node_modules", "vitest", "vitest.mjs")
   const useDirectVitest = hostIo.existsSync(vitestCliPath)
   const execCmd = useDirectVitest ? process.execPath : "pnpm"
+  const bailArgs = bailOnFailure ? ["--bail=1"] : []
   const execArgs = useDirectVitest
-    ? [vitestCliPath, "run", "--maxWorkers=2", ...testFiles]
-    : ["vitest", "run", ...testFiles]
+    ? [vitestCliPath, "run", ...bailArgs, "--maxWorkers=2", ...testFiles]
+    : ["vitest", "run", ...bailArgs, ...testFiles]
   const baselineExecRes = Result.try(() =>
     hostIo.execFileSync(execCmd, execArgs, {
       cwd: repoRoot,
@@ -206,6 +208,7 @@ export const runVitestPackageBaseline = (
     testFiles,
     `on package '${pkgKey}'`,
     timeoutMs,
+    true,
   )
   return diag === undefined ? { _tag: "Ok" } : { _tag: "Failed", diagnostic: diag }
 }
@@ -240,6 +243,7 @@ export const runVitestTargetList = (
       reachingTestFiles,
       `on unmutated file '${file.relFile}'`,
       scaledTimeoutMs,
+      false,
     )
     if (baselineDiag !== undefined) return { _tag: "Abort", diagnostic: baselineDiag }
   }

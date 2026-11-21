@@ -11,7 +11,7 @@ import { match } from "ts-pattern"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { DETERMINISTIC_TRIAGE_RULES, makeMockDecisionModelLayer } from "@harness/decision"
 import { CLEF_SYSTEMONE_ONLY_BANNED_REASON, DstSeed, writeVerifyStamp } from "@harness/gates"
-import { resolveOmnigraphClusterDir } from "@harness/graph"
+import { buildHarnessGraph, resolveOmnigraphClusterDir, saveGraphSnapshot } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 import { runWithTestTracer } from "@harness/ingest"
 import {
@@ -2032,5 +2032,399 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
       stderrSpy.mockRestore()
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  it("REQ-4.1: handleGuard enforces HARNESS_UNIT_WORKER=1 via CliEnv.env across commands and file reads while allowing complete/status/verify", async () => {
+    const workerEnv = { HARNESS_UNIT_WORKER: "1" } as const
+    const nonWorkerEnv = { HARNESS_UNIT_WORKER: "0" } as const
+
+    for (const cmd of [
+      "pnpm harness workflow start --plan plan.json",
+      "pnpm harness workflow resume --run-id wf-12345678",
+      "pnpm harness workflow abort --run-id wf-12345678",
+      "pnpm harness workflow done",
+      "pnpm harness done",
+      "pnpm --filter harness-cli start workflow start",
+      "cat .git/harness/daemon.sock",
+      "cat .harness/omnigraph-cluster/auth-tokens.*",
+      "rg -u . .harness/omnigraph-cluster",
+    ]) {
+      const agyRes = await Effect.runPromise(
+        handleGuard(["guard", "--format=antigravity"], {
+          env: workerEnv,
+          stdin: JSON.stringify({ toolCall: { name: "run_command", args: { CommandLine: cmd } } }),
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(agyRes.exitCode, cmd).toBe(0)
+      expect(JSON.parse(agyRes.stdout)).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining("HARNESS_UNIT_WORKER=1"),
+      })
+
+      const ccRes = await Effect.runPromise(
+        handleGuard(["guard"], {
+          env: workerEnv,
+          stdin: JSON.stringify({ tool_name: "Bash", tool_input: { command: cmd } }),
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(ccRes.exitCode, cmd).toBe(2)
+      expect(ccRes.stderr).toContain("HARNESS_UNIT_WORKER=1")
+    }
+
+    for (const stdinPayload of [
+      JSON.stringify({
+        tool_name: "Read",
+        tool_input: { file_path: "/repo/.harness/omnigraph-cluster/auth-tokens.json" },
+      }),
+      JSON.stringify({
+        toolCall: {
+          name: "view_file",
+          args: { AbsolutePath: "/repo/.git/harness/daemon.sock" },
+        },
+      }),
+      JSON.stringify({
+        toolCall: {
+          name: "view_file_outline",
+          args: { AbsolutePath: "/repo/auth-tokens.json" },
+        },
+      }),
+      JSON.stringify({
+        toolCall: {
+          name: "view_code_item",
+          args: { File: "/repo/.git/harness/daemon.sock" },
+        },
+      }),
+      JSON.stringify({
+        toolCall: {
+          name: "find_by_name",
+          args: { SearchDirectory: "/repo/.git/harness/daemon.sock" },
+        },
+      }),
+      JSON.stringify({
+        toolCall: {
+          name: "read_file",
+          args: { Path: "/repo/.harness/omnigraph-cluster/auth-tokens.json" },
+        },
+      }),
+      JSON.stringify({
+        toolCall: {
+          name: "read_file",
+          args: { Path: "/repo/.git/harness/daemon.sock" },
+        },
+      }),
+      JSON.stringify({
+        tool_name: "Glob",
+        tool_input: { pattern: "**/*auth-tokens*" },
+      }),
+      JSON.stringify({
+        tool_name: "Grep",
+        tool_input: { pattern: ".", glob: "**/auth-tokens.json" },
+      }),
+    ]) {
+      const res = await Effect.runPromise(
+        handleGuard(["guard", "--format=antigravity"], {
+          env: workerEnv,
+          stdin: stdinPayload,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(res.exitCode).toBe(0)
+      expect(JSON.parse(res.stdout)).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining("HARNESS_UNIT_WORKER=1"),
+      })
+    }
+
+    for (const allowedCmd of [
+      "pnpm harness workflow complete --unit u1 --repo-root /tmp/repo",
+      "pnpm harness workflow status --json",
+      "nx run @harness/contract:verify",
+    ]) {
+      const res = await Effect.runPromise(
+        handleGuard(["guard", "--format=antigravity"], {
+          env: workerEnv,
+          stdin: JSON.stringify({
+            toolCall: { name: "run_command", args: { CommandLine: allowedCmd } },
+          }),
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(res.exitCode, allowedCmd).toBe(0)
+      expect(JSON.parse(res.stdout)).toEqual({ decision: "allow" })
+    }
+
+    const normalReadRes = await Effect.runPromise(
+      handleGuard(["guard"], {
+        env: workerEnv,
+        stdin: JSON.stringify({
+          tool_name: "Read",
+          tool_input: { file_path: "libs/harness/contract/src/workflow.ts" },
+        }),
+        skipBackgroundDaemons: true,
+      }),
+    )
+    expect(normalReadRes.exitCode).toBe(0)
+    expect(normalReadRes.stdout).toBe("")
+
+    const dir = mkdtempSync(join(tmpdir(), "harness-worker-guard-symlink-"))
+    tempDirs.push(dir)
+    const clusterDir = join(dir, ".harness", "omnigraph-cluster")
+    mkdirSync(clusterDir, { recursive: true })
+    const targetTokens = join(clusterDir, "auth-tokens.json")
+    writeFileSync(targetTokens, JSON.stringify({ token: "secret" }), "utf8")
+    const { symlinkSync } = await import("node:fs")
+    const symlinkPath = join(dir, "alias-tokens.json")
+    symlinkSync(targetTokens, symlinkPath)
+    const symlinkReadRes = await Effect.runPromise(
+      handleGuard(["guard", "--format=antigravity"], {
+        env: workerEnv,
+        stdin: JSON.stringify({ toolCall: { name: "read_file", args: { Path: symlinkPath } } }),
+        skipBackgroundDaemons: true,
+      }),
+    )
+    expect(symlinkReadRes.exitCode).toBe(0)
+    expect(JSON.parse(symlinkReadRes.stdout)).toMatchObject({
+      decision: "deny",
+      reason: expect.stringContaining("HARNESS_UNIT_WORKER=1"),
+    })
+
+    const nonWorkerStartRes = await Effect.runPromise(
+      handleGuard(["guard", "--format=antigravity"], {
+        env: nonWorkerEnv,
+        stdin: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm harness workflow start --plan plan.json" },
+          },
+        }),
+        skipBackgroundDaemons: true,
+      }),
+    )
+    expect(nonWorkerStartRes.exitCode).toBe(0)
+    expect(JSON.parse(nonWorkerStartRes.stdout)).toEqual({ decision: "allow" })
+
+    // F-4.1: secret & harness-state reads denied even in non-worker mode
+    for (const readInput of [
+      JSON.stringify({ tool_name: "Read", tool_input: { file_path: ".env" } }),
+      JSON.stringify({ tool_name: "Read", tool_input: { file_path: ".git/harness/daemon.sock" } }),
+      JSON.stringify({
+        tool_name: "Read",
+        tool_input: { file_path: ".git/harness/auth-tokens.json" },
+      }),
+      JSON.stringify({
+        tool_name: "Read",
+        tool_input: { file_path: ".git/harness/workflow-backups/2026-11-20.ndjson" },
+      }),
+    ]) {
+      const readDeny = await Effect.runPromise(
+        handleGuard(["guard", "--format=antigravity"], {
+          env: nonWorkerEnv,
+          stdin: readInput,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(readDeny.exitCode).toBe(0)
+      expect(JSON.parse(readDeny.stdout)).toMatchObject({ decision: "deny" })
+    }
+
+    // F-16.2: Grep/grep_search pattern/Query regexes allowed; Glob/SearchPath secret/harness paths denied
+    const grepEnvPatternAllow = await Effect.runPromise(
+      handleGuard(["guard", "--format=antigravity"], {
+        env: nonWorkerEnv,
+        stdin: JSON.stringify({
+          tool_name: "Grep",
+          tool_input: { pattern: "process\\.env", path: "libs/" },
+        }),
+        skipBackgroundDaemons: true,
+      }),
+    )
+    expect(JSON.parse(grepEnvPatternAllow.stdout)).toEqual({ decision: "allow" })
+
+    const agyGrepAllow = await Effect.runPromise(
+      handleGuard(["guard", "--format=antigravity"], {
+        env: nonWorkerEnv,
+        stdin: JSON.stringify({
+          toolCall: {
+            name: "grep_search",
+            args: { Query: "process.env", SearchPath: "libs/" },
+          },
+        }),
+        skipBackgroundDaemons: true,
+      }),
+    )
+    expect(JSON.parse(agyGrepAllow.stdout)).toEqual({ decision: "allow" })
+
+    const globEnvDeny = await Effect.runPromise(
+      handleGuard(["guard", "--format=antigravity"], {
+        env: nonWorkerEnv,
+        stdin: JSON.stringify({
+          tool_name: "Glob",
+          tool_input: { pattern: "**/.env*" },
+        }),
+        skipBackgroundDaemons: true,
+      }),
+    )
+    expect(JSON.parse(globEnvDeny.stdout)).toMatchObject({ decision: "deny" })
+
+    // F-16.1: deep nesting > 8 fails closed
+    let deepPayload: Record<string, unknown> = { leaf: ".env" }
+    for (let i = 0; i < 10; i++) {
+      deepPayload = { child: deepPayload }
+    }
+    const deepDeny = await Effect.runPromise(
+      handleGuard(["guard", "--format=antigravity"], {
+        env: nonWorkerEnv,
+        stdin: JSON.stringify({
+          tool_name: "Read",
+          tool_input: { file_path: "libs/a.ts", extra: deepPayload },
+        }),
+        skipBackgroundDaemons: true,
+      }),
+    )
+    expect(JSON.parse(deepDeny.stdout)).toMatchObject({
+      decision: "deny",
+      reason: expect.stringContaining("maximum inspection depth"),
+    })
+
+    // F-3.6: non-existent file inside symlinked .git/harness dir fails closed
+    const symHarnessAlias = join(dir, "sym-harness-dir")
+    mkdirSync(join(dir, ".git", "harness"), { recursive: true })
+    symlinkSync(join(dir, ".git", "harness"), symHarnessAlias)
+    const symNewFileDeny = await Effect.runPromise(
+      handleGuard(["guard", "--format=antigravity"], {
+        env: nonWorkerEnv,
+        stdin: JSON.stringify({
+          toolCall: {
+            name: "write_to_file",
+            args: { TargetFile: join(symHarnessAlias, "new.sock") },
+          },
+        }),
+        skipBackgroundDaemons: true,
+      }),
+    )
+    expect(JSON.parse(symNewFileDeny.stdout)).toMatchObject({ decision: "deny" })
+
+    // F-3.3 & F-3.4: worker mode blocks doctor, complete --phase llm, and nx run harness-cli:start
+    for (const workerCmd of [
+      "pnpm harness workflow doctor",
+      "pnpm harness workflow complete --phase llm",
+      "nx run harness-cli:start -- workflow abort",
+    ]) {
+      const workerDeny = await Effect.runPromise(
+        handleGuard(["guard", "--format=antigravity"], {
+          env: workerEnv,
+          stdin: JSON.stringify({
+            toolCall: { name: "run_command", args: { CommandLine: workerCmd } },
+          }),
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(JSON.parse(workerDeny.stdout), workerCmd).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining("HARNESS_UNIT_WORKER=1"),
+      })
+    }
+  })
+
+  it("SPEC-0024 idempotent done: persists treeHash in last-done.json, short-circuits repeated Stop hooks with alreadyDone=true, and fails closed on stale/corrupt/mutated state", async () => {
+    const { execFileSync } = await import("node:child_process")
+    const { symlinkSync, utimesSync } = await import("node:fs")
+    const { isAlreadyDoneForVerifiedTree, readLastDoneMarker } =
+      await import("../src/commands/session-fastpath.js")
+
+    const dir = mkdtempSync(join(tmpdir(), "harness-idempotent-done-"))
+    tempDirs.push(dir)
+    mkdirSync(join(dir, "libs", "demo", "src"), { recursive: true })
+    writeFileSync(join(dir, "libs", "demo", "src", "mod.ts"), "export const v = 1\n", "utf8")
+    execFileSync("git", ["init"], { cwd: dir })
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir })
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: dir })
+    execFileSync("git", ["add", "."], { cwd: dir })
+    execFileSync("git", ["commit", "-m", "init"], { cwd: dir })
+
+    const stamp = writeVerifyStamp(dir, nodeSyncHostIo, "impl/test", {
+      dstSeed: DstSeed.make(1),
+      dstSeedsRun: 1,
+    })
+    const emptyGraph = buildHarnessGraph({})
+    const planSnapshotPath = join(dir, ".harness", "plan-graph-snapshot.json")
+    const implSnapshotPath = join(dir, ".harness", "graph-snapshot.json")
+    saveGraphSnapshot(emptyGraph, planSnapshotPath, nodeSyncHostIo)
+    saveGraphSnapshot(emptyGraph, implSnapshotPath, nodeSyncHostIo)
+    const pastSeconds = (Date.now() - 10_000) / 1000
+    utimesSync(planSnapshotPath, pastSeconds, pastSeconds)
+
+    // 1. First done persists { completedAt, treeHash } in .harness/last-done.json
+    const firstDone = await Effect.runPromise(
+      runCliEffect(["done"], {
+        repoRoot: dir,
+        skipBackgroundDaemons: true,
+        stdin: JSON.stringify({ stop_hook_active: false }),
+      }),
+    )
+    expect(firstDone.exitCode).toBe(0)
+    const marker = readLastDoneMarker(dir, nodeSyncHostIo)
+    expect(marker).toBeDefined()
+    expect(marker?.treeHash).toBe(stamp.treeHash)
+
+    // 2. Second handleDone short-circuits BEFORE loadSnapshotPair / syncOmnigraphOnDone even if
+    //    plan-graph-snapshot.json remains on disk and graph-snapshot.json is corrupt
+    writeFileSync(implSnapshotPath, "{corrupt-snapshot-should-not-be-read", "utf8")
+    const secondDone = await Effect.runPromise(
+      handleDone(["done", "--format=antigravity"], {
+        repoRoot: dir,
+        skipBackgroundDaemons: true,
+        stdin: JSON.stringify({ stop_hook_active: false }),
+      }),
+    )
+    expect(secondDone.exitCode).toBe(0)
+    expect(JSON.parse(secondDone.stdout)).toEqual({ decision: "stop" })
+    expect(secondDone.telemetryDetail).toBe("alreadyDone=true")
+
+    // 3. Touching plan-graph-snapshot.json with a newer mtime invalidates alreadyDone=true
+    const futureMs = Date.parse(marker!.completedAt) + 5_000
+    utimesSync(planSnapshotPath, futureMs / 1000, futureMs / 1000)
+    expect(isAlreadyDoneForVerifiedTree(dir, stamp, undefined, nodeSyncHostIo)).toBe(false)
+    utimesSync(planSnapshotPath, pastSeconds, pastSeconds)
+    expect(isAlreadyDoneForVerifiedTree(dir, stamp, undefined, nodeSyncHostIo)).toBe(true)
+
+    // 4. Newer verify-stamp.json timestamp also invalidates alreadyDone=true
+    const newerStamp = {
+      ...stamp,
+      timestamp: new Date(Date.parse(marker!.completedAt) + 5_000).toISOString(),
+    }
+    expect(isAlreadyDoneForVerifiedTree(dir, newerStamp, undefined, nodeSyncHostIo)).toBe(false)
+
+    // 5. Editing a workspace file still blocks at checkVerifyStamp
+    writeFileSync(join(dir, "libs", "demo", "src", "mod.ts"), "export const v = 2\n", "utf8")
+    const dirtyDone = await Effect.runPromise(
+      handleDone(["done", "--format=antigravity"], {
+        repoRoot: dir,
+        skipBackgroundDaemons: true,
+        stdin: JSON.stringify({ stop_hook_active: false }),
+      }),
+    )
+    expect(dirtyDone.exitCode).toBe(0)
+    expect(JSON.parse(dirtyDone.stdout)).toMatchObject({
+      decision: "continue",
+      reason: expect.stringContaining("Workspace files changed since last verify"),
+    })
+
+    // 6. Corrupt or symlinked .harness/last-done.json fails closed
+    const markerPath = join(dir, ".harness", "last-done.json")
+    writeFileSync(markerPath, "{corrupt-json", "utf8")
+    expect(readLastDoneMarker(dir, nodeSyncHostIo)).toBeUndefined()
+
+    const outsideTarget = join(dir, "outside.json")
+    writeFileSync(
+      outsideTarget,
+      JSON.stringify({ completedAt: new Date().toISOString(), treeHash: stamp.treeHash }),
+      "utf8",
+    )
+    rmSync(markerPath)
+    symlinkSync(outsideTarget, markerPath)
+    expect(readLastDoneMarker(dir, nodeSyncHostIo)).toBeUndefined()
   })
 })

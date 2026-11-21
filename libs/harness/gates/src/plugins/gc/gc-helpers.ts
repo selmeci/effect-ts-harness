@@ -44,6 +44,12 @@ export const IGNORED_SERVICES = new Set([
   "Scope.Scope",
   "DecisionModel",
   "DecisionModel.DecisionModel",
+  "WorkflowEngine",
+  "WorkflowEngine.WorkflowEngine",
+  "WorkflowInstance",
+  "WorkflowEngine.WorkflowInstance",
+  "Execution",
+  "Workflow.Execution",
   "OmnigraphSync",
   "SpanRecorder",
   "@harness/ingest/SpanRecorder",
@@ -53,6 +59,12 @@ export const IGNORED_SERVICES = new Set([
   "CartEsAtomClient",
   "ActiveCounterStore",
 ])
+
+/** Returns `true` for Effect/framework runtime services and fixture tags exempt from `unused-service` / `unprovided-service`. */
+export const isIgnoredServiceTag = (tagId: string, name: string): boolean =>
+  IGNORED_SERVICES.has(tagId) ||
+  IGNORED_SERVICES.has(name) ||
+  tagId.startsWith("Workflow.Execution<")
 
 export const IGNORED_ERRORS = new Set([
   "OmnigraphLoadError",

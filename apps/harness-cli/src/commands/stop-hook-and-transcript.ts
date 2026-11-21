@@ -158,7 +158,13 @@ const hasDisallowedReadOnlyFlags = (tokens: ReadonlyArray<string>): boolean => {
   if (cmd === "rg") {
     return tokens
       .slice(1)
-      .some((t) => t === "--pre" || t.startsWith("--pre=") || t === "--pre-glob" || t.startsWith("--pre-glob="))
+      .some(
+        (t) =>
+          t === "--pre" ||
+          t.startsWith("--pre=") ||
+          t === "--pre-glob" ||
+          t.startsWith("--pre-glob="),
+      )
   }
   if (cmd === "git") {
     const sub = tokens[1]
@@ -230,7 +236,8 @@ const isMutatingTranscriptToolCall = (
   if (WRITE_TOOL_NAMES.has(tc.name)) {
     const targetFile =
       unwrapTranscriptStringArg(tc.args?.TargetFile) ||
-      unwrapTranscriptStringArg(tc.args?.file_path)
+      unwrapTranscriptStringArg(tc.args?.file_path) ||
+      unwrapTranscriptStringArg(tc.args?.Path)
     if (targetFile.length > 0) {
       const normalized = posix.normalize(targetFile.replace(/\\/g, "/"))
       if (normalized.startsWith("/") && normalized.includes("/.gemini/antigravity/brain/")) {
@@ -386,22 +393,16 @@ export const isReadOnlyStopTurn = (decoded?: StopHookStdin): boolean =>
   inspectTranscriptSessionReadOnly(decoded)._tag === "ReadOnly"
 
 export const isSubagentStopContext = (repoRoot: string, decoded?: StopHookStdin): boolean => {
-  if (
-    process.env.HARNESS_SUBAGENT === "1" ||
-    repoRoot.includes("/.gemini/antigravity/worktrees/") ||
-    repoRoot.includes("/subagent-")
-  ) {
+  if (process.env.HARNESS_SUBAGENT === "1" || repoRoot.includes("/subagent-")) {
     return true
   }
-  if (
-    decoded?.workspacePaths?.some(
-      (p) => p.includes("/.gemini/antigravity/worktrees/") || p.includes("/subagent-"),
-    )
-  ) {
+  if (decoded?.workspacePaths?.some((p) => p.includes("/subagent-"))) {
     return true
   }
   if (decoded?.transcriptPath && nodeSyncHostIo.existsSync(decoded.transcriptPath)) {
-    const isSubagentTranscript = match(parseTranscriptSteps({ transcriptPath: decoded.transcriptPath }))
+    const isSubagentTranscript = match(
+      parseTranscriptSteps({ transcriptPath: decoded.transcriptPath }),
+    )
       .with({ _tag: "Corrupt" }, () => false)
       .with({ _tag: "Ok" }, ({ steps }) => {
         const first = steps[0]

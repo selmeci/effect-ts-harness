@@ -26,7 +26,10 @@ import {
 import { runWithTestTracer } from "@harness/ingest"
 import type { SyncHostExecResult, SyncHostIo } from "@harness/service/host-io"
 import { runDomainMutationSuite } from "../src/mutation-check.js"
-import { runVitestTargetList } from "../src/mutation-subprocess-helpers.js"
+import {
+  runVitestPackageBaseline,
+  runVitestTargetList,
+} from "../src/mutation-subprocess-helpers.js"
 import {
   type CodeMutant,
   MutantId,
@@ -1331,6 +1334,46 @@ process.exit(1);
       expect(getClosure().usedFallbackAllLibs).toBe(true)
     } finally {
       rmSync(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("runVitestPackageBaseline passes --bail=1 for direct vitest and pnpm fallback runners", () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "pkg-baseline-bail-"))
+    try {
+      const vitestMjs = join(tmpDir, "node_modules", "vitest", "vitest.mjs")
+      const captured: Array<{ readonly cmd: string; readonly args: ReadonlyArray<string> }> = []
+      const makeSpyIo = (hasVitestMjs: boolean): SyncHostIo => ({
+        ...testHostIo,
+        existsSync: (p) => (p === vitestMjs ? hasVitestMjs : testHostIo.existsSync(p)),
+        execFileSync: (cmd, args) => {
+          captured.push({ cmd, args })
+          return { _tag: "Exited", exitCode: 0, stdout: "Tests  1 passed (1)\n", stderr: "" }
+        },
+      })
+
+      const directRes = runVitestPackageBaseline(
+        tmpDir,
+        "sample:domain",
+        ["a.test.ts"],
+        makeSpyIo(true),
+        {},
+      )
+      expect(directRes).toEqual({ _tag: "Ok" })
+      expect(captured[0]?.args).toContain("--bail=1")
+      expect(captured[0]?.args).toContain("--maxWorkers=2")
+
+      const pnpmRes = runVitestPackageBaseline(
+        tmpDir,
+        "sample:domain",
+        ["a.test.ts"],
+        makeSpyIo(false),
+        {},
+      )
+      expect(pnpmRes).toEqual({ _tag: "Ok" })
+      expect(captured[1]?.cmd).toBe("pnpm")
+      expect(captured[1]?.args).toEqual(["vitest", "run", "--bail=1", "a.test.ts"])
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
     }
   })
 })
