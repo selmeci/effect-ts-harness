@@ -8,9 +8,12 @@ import { CANONICAL_CLI_COMMAND_NAMES, CANONICAL_MCP_TOOL_NAMES } from "@harness/
 import { buildHarnessGraph } from "@harness/graph"
 import { AST_GATE_RULE_SOURCE_FILES } from "../src/ast-cache.js"
 import {
+  ADAPTER_SKILL_PARITY_CLAUSES,
+  auditAdapterSkillParityPair,
   auditCatalogDocTruthInContent,
   evaluateDocTruthPlugin,
 } from "../src/plugins/gc/gc-doc-truth.plugin.js"
+import { extractMarkdownSubsection } from "../src/plugins/gc/gc-adapter-skill-parity.js"
 import { evaluatePackageAndMigrationPlugin } from "../src/plugins/gc/gc-package-and-migration.plugin.js"
 import {
   checkAstGateRuleClosure,
@@ -942,4 +945,151 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
         expect(findings.some((f) => f.kind === "doc-cli-command-truth")).toBe(true)
       }),
   )
+
+  it("SPEC-0030 REQ-2.2: auditAdapterSkillParityPair validates symmetric headings, required tokens, and cross-adapter equality", () => {
+    const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..")
+    for (const clause of ADAPTER_SKILL_PARITY_CLAUSES) {
+      const agy = testHostIo.readTextSync(
+        join(
+          repoRoot,
+          `adapters/antigravity/plugins/effect-harness/skills/${clause.skillName}/SKILL.md`,
+        ),
+      )
+      const claude = testHostIo.readTextSync(
+        join(repoRoot, `adapters/claude-code/skills/${clause.skillName}/SKILL.md`),
+      )
+      expect(auditAdapterSkillParityPair(clause, agy, claude)).toEqual([])
+      expect(extractMarkdownSubsection(agy, clause.heading)).toBeDefined()
+    }
+    expect(extractMarkdownSubsection("### Heading\nBody", "### Heading")).toBe("### Heading\nBody")
+
+    const seamClause = ADAPTER_SKILL_PARITY_CLAUSES[0]!
+    const validDoc = [
+      "## Overview",
+      seamClause.heading,
+      seamClause.requiredMarkers.join(" "),
+      "---",
+      "### After",
+    ].join("\n")
+
+    expect(
+      auditAdapterSkillParityPair(seamClause, "No heading\n", validDoc).map((f) => f.nodeId),
+    ).toEqual([
+      `adapters/antigravity/plugins/effect-harness/skills/${seamClause.skillName}/SKILL.md:missing-heading`,
+    ])
+    expect(
+      auditAdapterSkillParityPair(seamClause, validDoc, "No heading\n").map((f) => f.nodeId),
+    ).toEqual([`adapters/claude-code/skills/${seamClause.skillName}/SKILL.md:missing-heading`])
+
+    const missingMarkerDoc = `${seamClause.heading}\nIncomplete text\n`
+    const agyMissing = auditAdapterSkillParityPair(seamClause, missingMarkerDoc, validDoc)
+    expect(
+      agyMissing.some((f) => f.kind === "adapter-skill-parity" && f.nodeId.includes(":missing:")),
+    ).toBe(true)
+    const claudeMissing = auditAdapterSkillParityPair(seamClause, validDoc, missingMarkerDoc)
+    expect(
+      claudeMissing.some(
+        (f) => f.kind === "adapter-skill-parity" && f.nodeId.includes(":missing:"),
+      ),
+    ).toBe(true)
+
+    const driftedDoc = `${validDoc.replace("---", "\nExtra drifted note\n---")}`
+    const driftFindings = auditAdapterSkillParityPair(seamClause, validDoc, driftedDoc)
+    expect(driftFindings).toEqual([
+      expect.objectContaining({
+        kind: "adapter-skill-parity",
+        nodeId: `adapter-skill-parity:${seamClause.skillName}`,
+      }),
+    ])
+  })
+
+  it("SPEC-0030 REQ-2.2: evaluateDocTruthPlugin detects missing adapter skill counterparts and skips unrelated repos", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "harness-adapter-skill-parity-"))
+    try {
+      const agySkill = join(
+        tempDir,
+        "adapters/antigravity/plugins/effect-harness/skills/effect-lfg/SKILL.md",
+      )
+      mkdirSync(dirname(agySkill), { recursive: true })
+      writeFileSync(agySkill, "### Swarm Seam Checklist (Pre-Review)\nWORKFLOW_TIMEOUT_BUDGETS\n")
+
+      const findings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: tempDir,
+        hostIo: testHostIo,
+      })
+      expect(
+        findings.some(
+          (f) =>
+            f.kind === "adapter-skill-parity" &&
+            f.nodeId === "adapters/claude-code/skills/effect-lfg/SKILL.md:missing-counterpart",
+        ),
+      ).toBe(true)
+
+      const claudeOnlySkill = join(
+        tempDir,
+        "adapters/claude-code/skills/effect-code-review/SKILL.md",
+      )
+      mkdirSync(dirname(claudeOnlySkill), { recursive: true })
+      writeFileSync(
+        claudeOnlySkill,
+        "### Mandatory Second-Pass Remediation Re-Audit\nremediationContext\n",
+      )
+      const secondFindings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: tempDir,
+        hostIo: testHostIo,
+      })
+      expect(
+        secondFindings.some(
+          (f) =>
+            f.kind === "adapter-skill-parity" &&
+            f.nodeId ===
+              "adapters/antigravity/plugins/effect-harness/skills/effect-code-review/SKILL.md:missing-counterpart",
+        ),
+      ).toBe(true)
+
+      const agyExec = join(
+        tempDir,
+        "adapters/antigravity/plugins/effect-harness/skills/executing-effect-stubs/SKILL.md",
+      )
+      const claudeExec = join(
+        tempDir,
+        "adapters/claude-code/skills/executing-effect-stubs/SKILL.md",
+      )
+      mkdirSync(dirname(agyExec), { recursive: true })
+      mkdirSync(dirname(claudeExec), { recursive: true })
+      writeFileSync(agyExec, "### Swarm Seam Checklist (Pre-Review)\nWORKFLOW_TIMEOUT_BUDGETS\n")
+      writeFileSync(claudeExec, "### Swarm Seam Checklist (Pre-Review)\nWORKFLOW_TIMEOUT_BUDGETS\n")
+      const readablePairFindings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: tempDir,
+        hostIo: testHostIo,
+      })
+      expect(
+        readablePairFindings.some(
+          (f) =>
+            f.kind === "adapter-skill-parity" &&
+            f.location === "adapters/claude-code/skills/executing-effect-stubs/SKILL.md",
+        ),
+      ).toBe(true)
+      const failClaudeReadIo = {
+        ...testHostIo,
+        readTextSync: (target: string): string => {
+          if (target.endsWith("claude-code/skills/executing-effect-stubs/SKILL.md")) {
+            throw new Error("EACCES: permission denied")
+          }
+          return testHostIo.readTextSync(target)
+        },
+      }
+      const unreadableFindings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: tempDir,
+        hostIo: failClaudeReadIo,
+      })
+      expect(unreadableFindings.some((f) => f.kind === "unreadable-workspace-file")).toBe(true)
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
 })

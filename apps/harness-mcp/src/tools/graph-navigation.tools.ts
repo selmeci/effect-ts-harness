@@ -1,6 +1,7 @@
 import * as path from "node:path"
 import { Cause, Effect, Option, Schema } from "effect"
 import type * as DecisionModel from "effect/ai/DecisionModel"
+import { match } from "ts-pattern"
 import {
   ErrorReasonMessage,
   InvalidReviewRouteInputError,
@@ -20,6 +21,7 @@ import {
   resolveNode,
 } from "@harness/graph"
 import {
+  attachReviewSlicesIfThresholdReached,
   inferReviewDiffSignals,
   normalizeReviewFilePaths,
   routeReviewDiff,
@@ -168,7 +170,9 @@ export const executeReviewRouteTool = Effect.fn("HarnessMcp.routeReview")(functi
         tiers: [] as ReadonlyArray<NxTierTag>,
         scopes: [] as ReadonlyArray<NxScopeTag>,
         warnings: [
-          ErrorReasonMessage.make("No repoRoot supplied; manifest tier/scope enrichment unavailable"),
+          ErrorReasonMessage.make(
+            "No repoRoot supplied; manifest tier/scope enrichment unavailable",
+          ),
         ] as ReadonlyArray<ErrorReasonMessage>,
       }
     }
@@ -177,9 +181,7 @@ export const executeReviewRouteTool = Effect.fn("HarnessMcp.routeReview")(functi
         tiers: [] as ReadonlyArray<NxTierTag>,
         scopes: [] as ReadonlyArray<NxScopeTag>,
         warnings: [
-          toErrorReasonMessage(
-            `Configured repoRoot does not exist on disk: ${context.repoRoot}`,
-          ),
+          toErrorReasonMessage(`Configured repoRoot does not exist on disk: ${context.repoRoot}`),
         ] as ReadonlyArray<ErrorReasonMessage>,
       }
     }
@@ -206,8 +208,13 @@ export const executeReviewRouteTool = Effect.fn("HarnessMcp.routeReview")(functi
 
   const signals = yield* inferReviewDiffSignals(enrichedInput)
   const rawPlan = yield* routeReviewDiff(enrichedInput, signals)
-  const plan =
+  const escalatedPlan =
     manifestResult.warnings.length > 0 ? escalatePlanOnDiagnostics(rawPlan) : rawPlan
+  const plan = attachReviewSlicesIfThresholdReached(signals, escalatedPlan)
+  const reviewSlices = match(plan)
+    .with({ _tag: "ActiveReviewPlan" }, (active) => active.reviewSlices)
+    .with({ _tag: "SkipReviewPlan" }, () => undefined)
+    .exhaustive()
   const graphContext = buildReviewGraphContextBundle(
     context?.repoRoot,
     context?.graph,
@@ -220,6 +227,7 @@ export const executeReviewRouteTool = Effect.fn("HarnessMcp.routeReview")(functi
     graphContext,
     warnings: manifestResult.warnings,
     degraded: context?.graphStatus?.degraded ?? false,
+    ...(reviewSlices !== undefined ? { reviewSlices } : {}),
     ...(context?.graphStatus?.degradedReason !== undefined
       ? { degradedReason: toErrorReasonMessage(context.graphStatus.degradedReason) }
       : {}),
@@ -381,6 +389,9 @@ export const buildGraphNavigationToolDescriptors = (
           touchedTiers: parsed.touchedTiers ?? [],
           touchedScopes: parsed.touchedScopes ?? [],
           ...(effectiveTimeoutMs !== undefined ? { timeoutMs: effectiveTimeoutMs } : {}),
+          ...(parsed.remediationContext !== undefined
+            ? { remediationContext: parsed.remediationContext }
+            : {}),
         })
         const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
         const graphStatus = yield* resolveGraphWithStatus(

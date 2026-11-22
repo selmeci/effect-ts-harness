@@ -111,6 +111,15 @@ Stage 6: Git Commit, Optional Push/PR & <promise>DONE</promise>
      Provide the 4-part prompt/brief (Target Stubs, EARS Clauses, Pattern Reference, Package Gate `pnpm --filter <pkg> run typecheck && pnpm --filter <pkg> run lint && pnpm --filter <pkg> run test` / `CI=true pnpm nx run <project>:verify`). When only a single downstream package has stubs, implement it inline under the same package gate.
 3. Ensure every EARS clause is verified by `@effect/vitest` (`it.effect` + `runWithTestTracer` + `checkSpanBudgets`), negative tests assert exact error instances via `Cause.findErrorOption(exit.cause)`, and every pure `*.decide` / reducer has `it.effect.prop` / `it.prop` property-based tests over `Schema.Array(EventUnionSchema)`.
 
+### Swarm Seam Checklist (Pre-Review)
+
+Before dispatching review routing (`harness_review_route`) after multi-package or cross-layer implementation, verify all four cross-package seams across touched units:
+
+1. **Symmetric Activity & Deferred Codecs:** Producer and consumer packages decode and encode shared payloads through the same branded `@harness/contract` Schema round-trip with zero unbranded raw JSON assumptions.
+2. **Single-Source Timeout Budgets:** Every retry, lease, and RPC/subprocess wait reads from canonical `WORKFLOW_TIMEOUT_BUDGETS` bounds rather than ad-hoc hardcoded constants.
+3. **Fenced Non-Lease Mutations:** Non-lease state transitions pass and assert explicit `expectedLeaseEpoch` fencing so stale workers fail closed before mutating shared state.
+4. **Differential Replay Parity:** Fresh execution and recovery/journal replay converge to identical terminal state, pending deferreds, and telemetry projections under `SPEC-0026` seam invariants.
+
 ### Stage 4 — Signal-Routed 7-Lens Specialist Review & Autonomous Fix Loop
 
 **REQUIRED SUB-SKILL:** Use `resolving-effect-review-feedback` per [references/review-and-shipping.md](references/review-and-shipping.md) (executed once on the controller workspace after Stage 3 on Routes A/C, or after all Waves are integrated in Step D5 on Route D):

@@ -131,6 +131,8 @@ export {
   evaluatePackageAndMigrationPlugin,
   evaluateTestAndDeciderPlugin,
   evaluateTopologyEntropyPlugin,
+  ADAPTER_SKILL_PARITY_CLAUSES,
+  auditAdapterSkillParityPair,
   auditCatalogDocTruthInContent,
   DOC_TRUTH_RULE_ID_SOURCES,
   checkAstGateRuleClosure,

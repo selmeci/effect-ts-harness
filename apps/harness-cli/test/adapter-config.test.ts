@@ -18,6 +18,7 @@ import {
   TierTopologyRuleId,
 } from "@harness/contract"
 import { resolveHarnessStateDir } from "@harness/gates/hook-fastpath"
+import { ADAPTER_SKILL_PARITY_CLAUSES, auditAdapterSkillParityPair } from "@harness/gates"
 import {
   CLI_REPO_ROOT,
   recordTelemetry,
@@ -1413,5 +1414,28 @@ describe("Antigravity adapter & plugin configuration", () => {
       },
     )
     expect(hookLoadOut).toContain("INFRA_HOOK_OK")
+  })
+
+  it("SPEC-0030 REQ-2.1 / REQ-2.2: keeps Swarm Seam Checklist and Second-Pass Remediation Re-Audit synchronized across Antigravity and Claude Code", () => {
+    for (const clause of ADAPTER_SKILL_PARITY_CLAUSES) {
+      const agyContent = readFileSync(
+        resolve(pluginDir, "skills", clause.skillName, "SKILL.md"),
+        "utf8",
+      )
+      const claudeContent = readFileSync(
+        resolve(repoRoot, "adapters/claude-code/skills", clause.skillName, "SKILL.md"),
+        "utf8",
+      )
+      expect(
+        auditAdapterSkillParityPair(clause, agyContent, claudeContent),
+        `Adapter skill parity drifted for ${clause.skillName}`,
+      ).toEqual([])
+      const strippedClaude = claudeContent.replace(clause.heading, "### Removed Heading")
+      expect(
+        auditAdapterSkillParityPair(clause, agyContent, strippedClaude).some(
+          (f) => f.kind === "adapter-skill-parity",
+        ),
+      ).toBe(true)
+    }
   })
 })

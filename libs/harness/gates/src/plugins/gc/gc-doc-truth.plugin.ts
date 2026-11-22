@@ -19,8 +19,18 @@ import {
 } from "./gc-rule-ids.js"
 import { checkHookMatcherToolParity } from "./gc-hook-parity.js"
 import { auditCatalogDocTruthInContent, checkCatalogDocTruth } from "./gc-catalog-doc-truth.js"
+import {
+  ADAPTER_SKILL_PARITY_CLAUSES,
+  auditAdapterSkillParityPair,
+  checkAdapterSkillParity,
+} from "./gc-adapter-skill-parity.js"
 
-export { auditCatalogDocTruthInContent, extractGateRuleIdsFromSources }
+export {
+  ADAPTER_SKILL_PARITY_CLAUSES,
+  auditAdapterSkillParityPair,
+  auditCatalogDocTruthInContent,
+  extractGateRuleIdsFromSources,
+}
 
 const PkgManifestDepsSchema = Schema.Struct({
   name: Schema.optional(Schema.String),
@@ -730,6 +740,7 @@ export const evaluateDocTruthPlugin = (input: GraphEntropyInput): ReadonlyArray<
   checkDocBannedOrPhantomTech(repoRoot, hostIo, findings)
   checkAstGateRuleClosure(repoRoot, hostIo, findings)
   checkCatalogDocTruth(repoRoot, hostIo, findings)
+  checkAdapterSkillParity(repoRoot, hostIo, findings)
 
   return findings
 }

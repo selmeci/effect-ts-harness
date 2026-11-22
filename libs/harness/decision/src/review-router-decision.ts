@@ -9,7 +9,10 @@ import {
   InvalidReviewRouteInputError,
   NxScopeTag,
   NxTierTag,
+  REMEDIATION_FINDING_SEVERITIES,
   REVIEW_DEPTH_RANK,
+  type RemediationFindingSeverity,
+  RemediationReviewContext,
   ReviewChangedLines,
   ReviewDepth,
   type ReviewDepthRank,
@@ -20,6 +23,8 @@ import {
   ReviewRoutingReason,
   ReviewRoutingSource,
   ReviewSignalPath,
+  type ReviewSlicePlan,
+  ReviewSummaryText,
   ReviewerId,
   ReviewerSelection,
   SkipReviewPlan,
@@ -27,6 +32,7 @@ import {
   toErrorReasonMessage,
 } from "@harness/contract"
 import { match } from "ts-pattern"
+import { partitionDiffReviewSlices } from "./review-slice-partitioner.js"
 
 /** Versioned System One decision definition for monotonic review depth & specialist lens routing. */
 export const ReviewRouterV1 = Decision.make({
@@ -132,7 +138,9 @@ const normalizeRawFilePath = (
     return Effect.fail(
       new InvalidReviewRouteInputError({
         offendingPath: raw,
-        reason: ErrorReasonMessage.make("Absolute file paths escaping workspace root are not allowed"),
+        reason: ErrorReasonMessage.make(
+          "Absolute file paths escaping workspace root are not allowed",
+        ),
       }),
     )
   }
@@ -183,15 +191,32 @@ export const normalizeReviewFilePaths = (
     return changedFiles
   })
 
-export const inferReviewDiffSignals = Effect.fn("ReviewRouter.inferDiffSignals")(function* (
-  input: ReviewRawDiffInput,
-): Effect.fn.Return<ReviewDiffSignals, InvalidReviewRouteInputError> {
-  const changedFiles = yield* normalizeReviewFilePaths(input.changedFiles)
+interface ReviewSurfaceFlags {
+  readonly hasTestOrSpecChange: boolean
+  readonly hasContractBoundaryChange: boolean
+  readonly hasMigrationOrInfraBindingChange: boolean
+  readonly hasStatefulOrDeciderChange: boolean
+  readonly hasConcurrencyOrResourceChange: boolean
+  readonly hasAuthOrSecretSurface: boolean
+  readonly hasArchitectureOrAdapterSurface: boolean
+  readonly hasWebSurface: boolean
+}
 
-  const summary = input.diffSummary
-  const tiers = new Set<NxTierTag>(input.touchedTiers)
-  const scopes = new Set<NxScopeTag>(input.touchedScopes)
+const isEscalatingRemediationSeverity = (severity: RemediationFindingSeverity): boolean => {
+  const level: (typeof REMEDIATION_FINDING_SEVERITIES)[number] = severity
+  return match(level)
+    .with("blocker", "critical", "major", () => true)
+    .with("minor", () => false)
+    .exhaustive()
+}
 
+const computeFilePathSurfaceFlags = (
+  changedFiles: ReadonlyArray<ReviewSignalPath>,
+  tiers: ReadonlySet<NxTierTag>,
+  scopes: ReadonlySet<NxScopeTag>,
+  summary: ReviewSummaryText,
+  changedLineCount: ReviewChangedLines,
+): ReviewSurfaceFlags => {
   const hasWebSurface =
     scopes.has(NxScopeTag.make("scope:web")) ||
     changedFiles.some((p) => /^apps\/[^/]+-web\//.test(p) || p.endsWith(".tsx")) ||
@@ -208,9 +233,7 @@ export const inferReviewDiffSignals = Effect.fn("ReviewRouter.inferDiffSignals")
   const hasContractBoundaryChange =
     tiers.has(NxTierTag.make("type:contract")) ||
     changedFiles.some(
-      (p) =>
-        /^libs\/[^/]+\/contract\//.test(p) ||
-        /(?:^|\/)openapi[^/]*\.(?:json|ya?ml)$/i.test(p),
+      (p) => /^libs\/[^/]+\/contract\//.test(p) || /(?:^|\/)openapi[^/]*\.(?:json|ya?ml)$/i.test(p),
     ) ||
     /\b(?:HttpApi|RpcGroup|Schema\.Tagged)\b/.test(summary)
 
@@ -229,9 +252,7 @@ export const inferReviewDiffSignals = Effect.fn("ReviewRouter.inferDiffSignals")
   const hasConcurrencyOrResourceChange =
     tiers.has(NxTierTag.make("type:infra")) ||
     changedFiles.some(
-      (p) =>
-        /^libs\/[^/]+\/infra\//.test(p) ||
-        /(?:daemon|socket|subprocess|queue|alarm)/i.test(p),
+      (p) => /^libs\/[^/]+\/infra\//.test(p) || /(?:daemon|socket|subprocess|queue|alarm)/i.test(p),
     ) ||
     /\b(?:Scope|Schedule|withTransaction|DurableObject|D1Database|Queue|Queues|alarm)\b/.test(
       summary,
@@ -248,7 +269,7 @@ export const inferReviewDiffSignals = Effect.fn("ReviewRouter.inferDiffSignals")
     )
 
   const hasArchitectureOrAdapterSurface =
-    input.changedLineCount >= 180 ||
+    changedLineCount >= 180 ||
     tiers.has(NxTierTag.make("type:service")) ||
     changedFiles.some(
       (p) =>
@@ -266,12 +287,7 @@ export const inferReviewDiffSignals = Effect.fn("ReviewRouter.inferDiffSignals")
       /(?:^|\/)docs\/(?:specs|adr)\/[^/]+\.md$/.test(p),
   )
 
-  return yield* Schema.decodeEffect(ReviewDiffSignals)({
-    changedFiles,
-    touchedTiers: input.touchedTiers,
-    touchedScopes: input.touchedScopes,
-    changedLineCount: input.changedLineCount,
-    diffSummary: input.diffSummary,
+  return {
     hasTestOrSpecChange,
     hasContractBoundaryChange,
     hasMigrationOrInfraBindingChange,
@@ -280,6 +296,48 @@ export const inferReviewDiffSignals = Effect.fn("ReviewRouter.inferDiffSignals")
     hasAuthOrSecretSurface,
     hasArchitectureOrAdapterSurface,
     hasWebSurface,
+  }
+}
+
+export const inferReviewDiffSignals = Effect.fn("ReviewRouter.inferDiffSignals")(function* (
+  input: ReviewRawDiffInput,
+): Effect.fn.Return<ReviewDiffSignals, InvalidReviewRouteInputError> {
+  const changedFiles = yield* normalizeReviewFilePaths(input.changedFiles)
+
+  const tiers = new Set<NxTierTag>(input.touchedTiers)
+  const scopes = new Set<NxScopeTag>(input.touchedScopes)
+  const flags = computeFilePathSurfaceFlags(
+    changedFiles,
+    tiers,
+    scopes,
+    input.diffSummary,
+    input.changedLineCount,
+  )
+
+  let remediationContext: RemediationReviewContext | undefined = undefined
+  if (input.remediationContext !== undefined) {
+    const deduped: Array<ReviewerId> = []
+    const seen = new Set<ReviewerId>()
+    for (const sp of input.remediationContext.priorSpecialists) {
+      if (!seen.has(sp)) {
+        seen.add(sp)
+        deduped.push(sp)
+      }
+    }
+    remediationContext = RemediationReviewContext.make({
+      priorSpecialists: [deduped[0]!, ...deduped.slice(1)],
+      maxSeverity: input.remediationContext.maxSeverity,
+    })
+  }
+
+  return yield* Schema.decodeEffect(ReviewDiffSignals)({
+    changedFiles,
+    touchedTiers: input.touchedTiers,
+    touchedScopes: input.touchedScopes,
+    changedLineCount: input.changedLineCount,
+    diffSummary: input.diffSummary,
+    ...flags,
+    ...(remediationContext !== undefined ? { remediationContext } : {}),
   }).pipe(
     Effect.mapError(
       (schemaError) =>
@@ -311,6 +369,114 @@ const addSelection = (
   )
 }
 
+const collectSurfaceSelections = (
+  flags: ReviewSurfaceFlags,
+  remediationContext: RemediationReviewContext | undefined,
+): Array<ReviewerSelection> => {
+  const selections: Array<ReviewerSelection> = []
+  const seen = new Set<ReviewerId>()
+  const push = (id: ReviewerId, reason: string): void =>
+    addSelection(selections, seen, id, reason, true)
+
+  if (flags.hasStatefulOrDeciderChange) {
+    push(
+      ReviewerId.make("effect-ears-test-reviewer"),
+      "Stateful or decider surface requires EARS and test coverage review",
+    )
+    push(
+      ReviewerId.make("effect-adversarial-reviewer"),
+      "Stateful or decider surface requires adversarial boundary review",
+    )
+  }
+  if (flags.hasTestOrSpecChange) {
+    push(
+      ReviewerId.make("effect-ears-test-reviewer"),
+      "TypeScript, test, or EARS spec files modified",
+    )
+  }
+  if (flags.hasAuthOrSecretSurface) {
+    push(
+      ReviewerId.make("effect-security-reviewer"),
+      "Auth, secret, trust-boundary, or storage access surface touched",
+    )
+  }
+  if (flags.hasConcurrencyOrResourceChange) {
+    push(
+      ReviewerId.make("effect-reliability-reviewer"),
+      "Infra, resource Scope, concurrency, or daemon surface touched",
+    )
+  }
+  if (flags.hasWebSurface) {
+    push(
+      ReviewerId.make("effect-web-reviewer"),
+      "Frontend scope:web or AtomHttpApi React surface touched",
+    )
+  }
+  if (flags.hasMigrationOrInfraBindingChange || flags.hasContractBoundaryChange) {
+    push(
+      ReviewerId.make("effect-migration-contract-reviewer"),
+      "Contract boundary, SQL migration, or Alchemy binding surface touched",
+    )
+  }
+  if (flags.hasArchitectureOrAdapterSurface) {
+    push(
+      ReviewerId.make("effect-architecture-reviewer"),
+      "Service tier, harness core/adapter, or large (>=180 lines) surface touched",
+    )
+  }
+  if (
+    remediationContext !== undefined &&
+    isEscalatingRemediationSeverity(remediationContext.maxSeverity)
+  ) {
+    for (const priorReviewer of remediationContext.priorSpecialists) {
+      push(
+        priorReviewer,
+        `Mandatory second-pass remediation re-audit for prior ${remediationContext.maxSeverity} finding`,
+      )
+    }
+  }
+
+  return selections
+}
+
+const computeSliceSelections = (
+  signals: ReviewDiffSignals,
+  sliceFiles: readonly [ReviewSignalPath, ...Array<ReviewSignalPath>],
+  wholePlan: ActiveReviewPlan,
+): readonly [ReviewerSelection, ...Array<ReviewerSelection>] => {
+  const sliceFlags = computeFilePathSurfaceFlags(
+    sliceFiles,
+    new Set(),
+    new Set(),
+    ReviewSummaryText.make(""),
+    ReviewChangedLines.make(0),
+  )
+  const sliceSelections = collectSurfaceSelections(sliceFlags, signals.remediationContext)
+  const [firstSliceSel, ...restSliceSel] = sliceSelections
+  return firstSliceSel !== undefined ? [firstSliceSel, ...restSliceSel] : [wholePlan.selections[0]]
+}
+
+/** Attaches disjoint package-grouped `reviewSlices` when `changedFiles` meets `REVIEW_SLICE_FILE_THRESHOLD`. */
+export const attachReviewSlicesIfThresholdReached = (
+  signals: ReviewDiffSignals,
+  plan: ReviewRoutingPlan,
+): ReviewRoutingPlan =>
+  match(plan)
+    .with({ _tag: "SkipReviewPlan" }, (skip) => skip)
+    .with({ _tag: "ActiveReviewPlan" }, (active) => {
+      if (active.reviewSlices !== undefined) {
+        return active
+      }
+      const reviewSlices: readonly [ReviewSlicePlan, ...Array<ReviewSlicePlan>] | undefined =
+        partitionDiffReviewSlices(signals, active, (sliceFiles) =>
+          computeSliceSelections(signals, sliceFiles, active),
+        )
+      return reviewSlices !== undefined
+        ? ActiveReviewPlan.make({ ...active, reviewSlices })
+        : active
+    })
+    .exhaustive()
+
 export const decideDeterministicReviewRoute = Effect.fn("ReviewRouter.decideDeterministic")(
   function* (signals: ReviewDiffSignals): Effect.fn.Return<ReviewRoutingPlan> {
     return yield* Effect.sync(() => {
@@ -324,7 +490,12 @@ export const decideDeterministicReviewRoute = Effect.fn("ReviewRouter.decideDete
         !signals.hasArchitectureOrAdapterSurface &&
         !signals.hasWebSurface
 
+      const requiresRemediationAudit =
+        signals.remediationContext !== undefined &&
+        isEscalatingRemediationSeverity(signals.remediationContext.maxSeverity)
+
       if (
+        !requiresRemediationAudit &&
         signals.changedFiles.every(isNonGovernanceDocPath) &&
         noSurfaceFlags &&
         signals.changedLineCount < 40
@@ -337,85 +508,7 @@ export const decideDeterministicReviewRoute = Effect.fn("ReviewRouter.decideDete
         })
       }
 
-      const selections: Array<ReviewerSelection> = []
-      const seen = new Set<ReviewerId>()
-
-      if (signals.hasStatefulOrDeciderChange) {
-        addSelection(
-          selections,
-          seen,
-          ReviewerId.make("effect-ears-test-reviewer"),
-          "Stateful or decider surface requires EARS and test coverage review",
-          true,
-        )
-        addSelection(
-          selections,
-          seen,
-          ReviewerId.make("effect-adversarial-reviewer"),
-          "Stateful or decider surface requires adversarial boundary review",
-          true,
-        )
-      }
-
-      if (signals.hasTestOrSpecChange) {
-        addSelection(
-          selections,
-          seen,
-          ReviewerId.make("effect-ears-test-reviewer"),
-          "TypeScript, test, or EARS spec files modified",
-          true,
-        )
-      }
-
-      if (signals.hasAuthOrSecretSurface) {
-        addSelection(
-          selections,
-          seen,
-          ReviewerId.make("effect-security-reviewer"),
-          "Auth, secret, trust-boundary, or storage access surface touched",
-          true,
-        )
-      }
-
-      if (signals.hasConcurrencyOrResourceChange) {
-        addSelection(
-          selections,
-          seen,
-          ReviewerId.make("effect-reliability-reviewer"),
-          "Infra, resource Scope, concurrency, or daemon surface touched",
-          true,
-        )
-      }
-
-      if (signals.hasWebSurface) {
-        addSelection(
-          selections,
-          seen,
-          ReviewerId.make("effect-web-reviewer"),
-          "Frontend scope:web or AtomHttpApi React surface touched",
-          true,
-        )
-      }
-
-      if (signals.hasMigrationOrInfraBindingChange || signals.hasContractBoundaryChange) {
-        addSelection(
-          selections,
-          seen,
-          ReviewerId.make("effect-migration-contract-reviewer"),
-          "Contract boundary, SQL migration, or Alchemy binding surface touched",
-          true,
-        )
-      }
-
-      if (signals.hasArchitectureOrAdapterSurface) {
-        addSelection(
-          selections,
-          seen,
-          ReviewerId.make("effect-architecture-reviewer"),
-          "Service tier, harness core/adapter, or large (>=180 lines) surface touched",
-          true,
-        )
-      }
+      const selections = collectSurfaceSelections(signals, signals.remediationContext)
 
       const [firstSelection, ...restSelections] = selections
       const hasTypeScriptFile = signals.changedFiles.some(
@@ -451,7 +544,8 @@ export const decideDeterministicReviewRoute = Effect.fn("ReviewRouter.decideDete
 
       const isFocused =
         !isFull &&
-        (signals.changedFiles.length > 1 ||
+        (requiresRemediationAudit ||
+          signals.changedFiles.length > 1 ||
           signals.changedLineCount >= 40 ||
           nonEmptySelections.length >= 2 ||
           signals.hasAuthOrSecretSurface ||
@@ -463,11 +557,12 @@ export const decideDeterministicReviewRoute = Effect.fn("ReviewRouter.decideDete
           ? ReviewDepth.make("focused")
           : ReviewDepth.make("lite")
 
-      return ActiveReviewPlan.make({
+      const basePlan = ActiveReviewPlan.make({
         depth,
         source: ReviewRoutingSource.make("deterministic"),
         selections: nonEmptySelections,
       })
+      return attachReviewSlicesIfThresholdReached(signals, basePlan)
     })
   },
 )
@@ -661,11 +756,14 @@ export const routeReviewDiff = Effect.fn("Harness.routeReviewDiff")(function* (
                         ]
                   const selectionsImpliedRank = deriveSelectionsImpliedRank(promotedSelections)
                   const finalRank = Math.max(1, floorRank, modelRank, selectionsImpliedRank)
-                  return ActiveReviewPlan.make({
-                    depth: activeDepthFromRank(toActiveRank(finalRank)),
-                    source: modelAugmentedSource,
-                    selections: promotedSelections,
-                  })
+                  return attachReviewSlicesIfThresholdReached(
+                    signals,
+                    ActiveReviewPlan.make({
+                      depth: activeDepthFromRank(toActiveRank(finalRank)),
+                      source: modelAugmentedSource,
+                      selections: promotedSelections,
+                    }),
+                  )
                 })
                 .with({ _tag: "ActiveReviewPlan" }, (active) => {
                   const combined: readonly [ReviewerSelection, ...Array<ReviewerSelection>] = [
@@ -683,6 +781,9 @@ export const routeReviewDiff = Effect.fn("Harness.routeReviewDiff")(function* (
                     depth: activeDepthFromRank(toActiveRank(finalRank)),
                     source: modelAugmentedSource,
                     selections: combined,
+                    ...(active.reviewSlices !== undefined
+                      ? { reviewSlices: active.reviewSlices }
+                      : {}),
                   })
                 })
                 .exhaustive()

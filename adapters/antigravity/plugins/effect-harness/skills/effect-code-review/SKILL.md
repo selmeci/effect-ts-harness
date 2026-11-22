@@ -59,6 +59,14 @@ Emit the exact 4-section report defined in [references/report-contract-and-suppr
 3. `## 3. Coverage & Suppressed Deterministic Gate Summary`
 4. `## 4. Remediation Handoff` (pointing to `resolving-effect-review-feedback` with EARS/ADR sync first)
 
+### Mandatory Second-Pass Remediation Re-Audit
+
+Whenever resolving `blocker`, `critical`, or `major` findings or reviewing diffs above `REVIEW_SLICE_FILE_THRESHOLD` (`12` changed files), enforce sliced routing and a mandatory second-pass specialist re-audit:
+
+1. **Remediation Routing Context (`remediationContext`):** Pass `remediationContext: { priorSpecialists, maxSeverity }` into `harness_review_route` after applying fixes for any `blocker`, `critical`, or `major` finding so deterministic routing retains every cited specialist with `mandatory: true` and enforces depth `>= focused`.
+2. **Cohesive Package Slices (`reviewSlices`):** When `harness_review_route` emits `reviewSlices` (for diffs `>= REVIEW_SLICE_FILE_THRESHOLD`), dispatch specialist subagents per slice with that slice's exact file list and selections while preserving whole-diff cross-package seam inspection.
+3. **Second-Pass Specialist Sign-Off:** Complete a read-only second-pass specialist re-audit covering all modified remediation hunks and callers before entering final `gc --strict`, `ontology check --strict`, `mutate --strict`, `verify`, and `done` gates.
+
 ---
 
 ## Common Mistakes

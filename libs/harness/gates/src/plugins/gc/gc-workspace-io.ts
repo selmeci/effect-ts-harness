@@ -48,6 +48,7 @@ export const GcFindingKind = Schema.Literals([
   "untested-union-variant",
   "doc-mcp-tool-count-truth",
   "doc-cli-command-truth",
+  "adapter-skill-parity",
 ])
 export type GcFindingKind = typeof GcFindingKind.Type
 

@@ -6,6 +6,9 @@ import { describe, expect, it } from "vitest"
 import {
   NxScopeTag,
   NxTierTag,
+  REVIEW_SLICE_FILE_THRESHOLD,
+  RemediationFindingSeverity,
+  RemediationReviewContext,
   ReviewChangedLines,
   ReviewDepth,
   ReviewRawDiffInput,
@@ -317,10 +320,7 @@ describe("harness_review_route MCP tool", () => {
       fs.writeFileSync(path.join(tmpRoot, "pnpm-workspace.yaml"), "packages:\n  - 'libs/*'\n")
       const pkgDir = path.join(tmpRoot, "libs", "pkg")
       fs.mkdirSync(path.join(pkgDir, "src"), { recursive: true })
-      fs.writeFileSync(
-        path.join(pkgDir, "project.json"),
-        JSON.stringify({ tags: ["type:domain"] }),
-      )
+      fs.writeFileSync(path.join(pkgDir, "project.json"), JSON.stringify({ tags: ["type:domain"] }))
       fs.writeFileSync(
         path.join(pkgDir, "package.json"),
         JSON.stringify({ name: "@test/pkg", nx: { tags: ["scope:web"] } }),
@@ -497,14 +497,8 @@ describe("harness_review_route MCP tool", () => {
   })
 
   it("10. enforces input bounds and maps > 16 touchedTiers in executeReviewRouteTool to InvalidReviewRouteInputError", async () => {
-    await expectSchemaRejection(
-      { changedFiles: [], changedLineCount: 1 },
-      REPO_ROOT,
-    )
-    await expectSchemaRejection(
-      { changedFiles: ["docs/notes.md"] },
-      REPO_ROOT,
-    )
+    await expectSchemaRejection({ changedFiles: [], changedLineCount: 1 }, REPO_ROOT)
+    await expectSchemaRejection({ changedFiles: ["docs/notes.md"] }, REPO_ROOT)
     await expectSchemaRejection(
       {
         changedFiles: Array.from({ length: 201 }, (_, i) => `docs/file-${i}.md`),
@@ -524,10 +518,7 @@ describe("harness_review_route MCP tool", () => {
       fs.writeFileSync(path.join(tmpRoot, "pnpm-workspace.yaml"), "packages: []\n")
       const pkgDir = path.join(tmpRoot, "libs", "pkg")
       fs.mkdirSync(path.join(pkgDir, "src"), { recursive: true })
-      fs.writeFileSync(
-        path.join(pkgDir, "project.json"),
-        JSON.stringify({ tags: ["type:infra"] }),
-      )
+      fs.writeFileSync(path.join(pkgDir, "project.json"), JSON.stringify({ tags: ["type:infra"] }))
       fs.writeFileSync(path.join(pkgDir, "src", "index.ts"), "export const x = 1\n")
 
       const seventeenTiers: ReadonlyArray<NxTierTag> = Array.from({ length: 17 }, () =>
@@ -580,5 +571,136 @@ describe("harness_review_route MCP tool", () => {
     expect(spanNames).toContain("ReviewRouter.inferDiffSignals")
     expect(spanNames).toContain("ReviewRouter.decideDeterministic")
     expect(spans.filter((s) => s.name === "ReviewRouter.inferDiffSignals")).toHaveLength(1)
+  })
+
+  it("12. SPEC-0030 REQ-1.1: returns deterministic disjoint reviewSlices above REVIEW_SLICE_FILE_THRESHOLD and omits below", async () => {
+    const graph = buildHarnessGraph({ fns: [], services: [], layers: [], errors: [] })
+    const opts = {
+      repoRoot: REPO_ROOT,
+      graph,
+      skipOmnigraphSpawn: true,
+      skipTelemetry: true,
+      skipActiveWorkspaceLookup: true,
+      decisionLayer: makeMockDecisionModelLayer(),
+    } as const
+
+    const belowRaw = await executeTool(
+      "harness_review_route",
+      {
+        changedFiles: Array.from(
+          { length: REVIEW_SLICE_FILE_THRESHOLD - 1 },
+          (_, i) => `libs/sample/domain/src/item-${i}.ts`,
+        ),
+        changedLineCount: 30,
+      },
+      opts,
+    )
+    const belowOutput = Schema.decodeUnknownSync(ReviewRouteToolOutput)(belowRaw)
+    expect(belowOutput.reviewSlices).toBeUndefined()
+
+    const twelveFiles = [
+      "apps/harness-mcp/src/a.ts",
+      "libs/harness/contract/src/b.ts",
+      "libs/harness/decision/src/c.ts",
+      ...Array.from({ length: 9 }, (_, i) => `libs/harness/gates/src/g-${i}.ts`),
+    ]
+    const firstRaw = await executeTool(
+      "harness_review_route",
+      { changedFiles: twelveFiles, changedLineCount: 95 },
+      opts,
+    )
+    const secondRaw = await executeTool(
+      "harness_review_route",
+      { changedFiles: [...twelveFiles].reverse(), changedLineCount: 95 },
+      opts,
+    )
+    const firstOut = Schema.decodeUnknownSync(ReviewRouteToolOutput)(firstRaw)
+    const secondOut = Schema.decodeUnknownSync(ReviewRouteToolOutput)(secondRaw)
+
+    expect(firstOut.reviewSlices).toBeDefined()
+    expect(firstOut.reviewSlices?.map((s) => s.sliceId)).toEqual([
+      "apps/harness-mcp",
+      "libs/harness/contract",
+      "libs/harness/decision",
+      "libs/harness/gates",
+    ])
+    expect(secondOut.reviewSlices?.map((s) => s.sliceId)).toEqual(
+      firstOut.reviewSlices?.map((s) => s.sliceId),
+    )
+    const flatFiles = firstOut.reviewSlices?.flatMap((s) => s.files) ?? []
+    expect(new Set(flatFiles)).toEqual(new Set(twelveFiles))
+  })
+
+  it("13. SPEC-0030 REQ-3.1: forwards remediationContext to enforce focused mandatory re-audit and rejects malformed remediationContext", async () => {
+    const graph = buildHarnessGraph({ fns: [], services: [], layers: [], errors: [] })
+    const opts = {
+      repoRoot: REPO_ROOT,
+      graph,
+      skipOmnigraphSpawn: true,
+      skipTelemetry: true,
+      skipActiveWorkspaceLookup: true,
+      decisionLayer: makeMockDecisionModelLayer({ reviewDepthLabel: ReviewDepth.make("skip") }),
+    } as const
+
+    const raw = await executeTool(
+      "harness_review_route",
+      {
+        changedFiles: ["docs/notes.md"],
+        changedLineCount: 4,
+        diffSummary: "Remediation patch",
+        remediationContext: RemediationReviewContext.make({
+          priorSpecialists: [ReviewerId.make("effect-adversarial-reviewer")],
+          maxSeverity: RemediationFindingSeverity.make("critical"),
+        }),
+      },
+      opts,
+    )
+    const output = Schema.decodeUnknownSync(ReviewRouteToolOutput)(raw)
+    expect(output.plan._tag).toBe("ActiveReviewPlan")
+    expect(output.plan.depth).toBe("focused")
+    expect(
+      output.plan.selections.some(
+        (s) => s.reviewer === ReviewerId.make("effect-adversarial-reviewer") && s.mandatory,
+      ),
+    ).toBe(true)
+
+    await expectSchemaRejection(
+      {
+        changedFiles: ["docs/notes.md"],
+        changedLineCount: 4,
+        remediationContext: { priorSpecialists: [], maxSeverity: "critical" },
+      },
+      REPO_ROOT,
+    )
+    await expectSchemaRejection(
+      {
+        changedFiles: ["docs/notes.md"],
+        changedLineCount: 4,
+        remediationContext: {
+          priorSpecialists: ["effect-security-reviewer"],
+          maxSeverity: "unknown-severity",
+        },
+      },
+      REPO_ROOT,
+    )
+
+    const diagRaw = await executeReviewRouteTool(
+      ReviewRawDiffInput.make({
+        changedFiles: Array.from({ length: 12 }, (_, i) =>
+          ReviewRawFileInput.make(`docs/notes/page-${i}.md`),
+        ),
+        diffSummary: ReviewSummaryText.make("Doc batch"),
+        changedLineCount: ReviewChangedLines.make(12),
+        touchedTiers: [],
+        touchedScopes: [],
+      }),
+      { graph },
+    ).pipe(
+      Effect.provide(makeMockDecisionModelLayer({ reviewDepthLabel: ReviewDepth.make("skip") })),
+      Effect.runPromise,
+    )
+    expect(diagRaw.warnings.length).toBeGreaterThan(0)
+    expect(diagRaw.plan._tag).toBe("ActiveReviewPlan")
+    expect(diagRaw.reviewSlices).toHaveLength(1)
   })
 })

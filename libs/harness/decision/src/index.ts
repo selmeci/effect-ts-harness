@@ -169,8 +169,10 @@ export {
 } from "./mock-layer.js"
 export {
   ReviewRouterV1,
+  attachReviewSlicesIfThresholdReached,
   normalizeReviewFilePaths,
   inferReviewDiffSignals,
   decideDeterministicReviewRoute,
   routeReviewDiff,
 } from "./review-router-decision.js"
+export { partitionDiffReviewSlices, resolveReviewSliceUnitKey } from "./review-slice-partitioner.js"

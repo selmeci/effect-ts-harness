@@ -68,6 +68,8 @@ export { evaluateTestAndDeciderPlugin } from "./plugins/gc/gc-test-and-decider.p
 export { evaluateGovernanceDocsPlugin } from "./plugins/gc/gc-governance-docs.plugin.js"
 export { evaluatePackageAndMigrationPlugin } from "./plugins/gc/gc-package-and-migration.plugin.js"
 export {
+  ADAPTER_SKILL_PARITY_CLAUSES,
+  auditAdapterSkillParityPair,
   auditCatalogDocTruthInContent,
   evaluateDocTruthPlugin,
   extractGateRuleIdsFromSources,

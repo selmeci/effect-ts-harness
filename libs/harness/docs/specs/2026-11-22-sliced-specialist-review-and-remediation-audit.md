@@ -1,18 +1,24 @@
 ---
 id: harness:SPEC-0030
 title: Sliced Diff Specialist Review Routing, Seam Checklist, and Mandatory Remediation Re-Audit
-status: proposed
+status: accepted
 archetype: framework
 date: 2026-11-22
 owners:
   - "@harness/architecture"
 scope: harness
+informed_by:
+  - harness:ADR-0014
+  - harness:ADR-0024
 enforced_by:
   - libs/harness/contract/src/review-routing.ts
   - libs/harness/decision/src/review-slice-partitioner.ts
   - libs/harness/decision/src/review-router-decision.ts
   - apps/harness-mcp/src/tools/review-route-helpers.ts
   - apps/harness-mcp/src/tools/graph-navigation.tools.ts
+  - libs/harness/gates/src/plugins/gc/gc-adapter-skill-parity.ts
+  - libs/harness/gates/src/plugins/gc/gc-doc-truth.plugin.ts
+  - libs/harness/gates/src/plugins/gc/gc-workspace-io.ts
   - adapters/antigravity/plugins/effect-harness/skills/effect-code-review/SKILL.md
   - adapters/claude-code/skills/effect-code-review/SKILL.md
   - adapters/antigravity/plugins/effect-harness/skills/resolving-effect-review-feedback/SKILL.md
@@ -23,7 +29,8 @@ enforced_by:
   - adapters/claude-code/skills/executing-effect-stubs/SKILL.md
   - apps/harness-cli/test/adapter-config.test.ts
   - apps/harness-mcp/test/review-route.test.ts
-  - libs/harness/decision/test/review-router-decision.test.ts
+  - libs/harness/decision/test/review-router.test.ts
+  - libs/harness/gates/test/gc-doc-truth.test.ts
 spans:
   - ReviewRouter.inferDiffSignals
   - ReviewRouter.decideDeterministic
@@ -36,7 +43,7 @@ errors: []
 
 ## Context
 
-Post-mortem review of PR #44 identified three review-coverage and multi-agent coordination gaps when shipping large workflow-engine changes. First, `Harness.routeReviewDiff` (`libs/harness/decision/src/review-router-decision.ts`) and `HarnessMcp.routeReview` (`apps/harness-mcp/src/tools/graph-navigation.tools.ts`) currently emit one flat reviewer plan across the entire diff regardless of size, forcing specialist reviewers to skim 30+ changed files in a single pass where cross-package seam bugs easily hide.
+Post-mortem review of PR #44 identified three review-coverage and multi-agent coordination gaps when shipping large workflow-engine changes. First, un-sliced flat routing in `Harness.routeReviewDiff` (`libs/harness/decision/src/review-router-decision.ts`) and `HarnessMcp.routeReview` (`apps/harness-mcp/src/tools/graph-navigation.tools.ts`) forces specialist reviewers to skim 30+ changed files in a single pass where cross-package seam bugs easily hide.
 
 Second, implementation skills (`effect-lfg` and `executing-effect-stubs`) across both `adapters/antigravity` and `adapters/claude-code` lack a standardized Swarm Seam Checklist verifying cross-package wire/activity formats, timeout hierarchy, lease fencing, and journal replay symmetry before specialist review begins. Third, remediation workflows (`resolving-effect-review-feedback` and `effect-code-review`) do not programmatically enforce a second-pass specialist re-audit on remediation diffs or preserve at least `focused` depth for the findings' original specialist lenses.
 
@@ -100,4 +107,4 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 - `review-slice-partitioner.ts` (`<= 160` lines) partitions diffs at `changedFiles.length >= REVIEW_SLICE_FILE_THRESHOLD` deterministically with 100% file coverage and zero duplicate paths.
 - Supplying `remediationContext` with `blocker`/`major`/`critical` findings enforces `depth >= focused` and retains every cited specialist with `mandatory: true`.
 - Antigravity and Claude Code skills carry identical Swarm Seam Checklist and second-pass remediation re-audit directives enforced by `GraphGc.decide` and `apps/harness-cli/test/adapter-config.test.ts`.
-- `pnpm harness gc --strict`, `pnpm harness ontology check --strict`, and `pnpm harness mutate --strict` pass with full positive, negative, and property test coverage in `review-router-decision.test.ts`, `review-route.test.ts`, and `adapter-config.test.ts`.
+- `pnpm harness gc --strict`, `pnpm harness ontology check --strict`, and `pnpm harness mutate --strict` pass with full positive, negative, and property test coverage in `review-router.test.ts`, `review-route.test.ts`, `gc-doc-truth.test.ts`, and `adapter-config.test.ts`.

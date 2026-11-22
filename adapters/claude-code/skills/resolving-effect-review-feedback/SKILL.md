@@ -107,6 +107,14 @@ Partition `fix` and `class-fix` `Atomic IDs` by disjoint file/package ownership 
    - For `class-fix` or state-stack/worker items, verify `State-Stack / Twin / Caller Checks Performed` lists concrete module-wide `file:line` inspections and nested/interrupt/listener invariants.
    - **Phase 5 & `swarm kill` Blocker:** A failed or missing fixer `Sub-Bullet Verification Matrix` or verification gate MUST block Phase 5 and `swarm kill`: re-dispatch or resume the subagent to complete all missing/failed rows before proceeding to Phase 5.
 
+### Mandatory Second-Pass Remediation Re-Audit
+
+Whenever resolving `blocker`, `critical`, or `major` findings or reviewing diffs above `REVIEW_SLICE_FILE_THRESHOLD` (`12` changed files), enforce sliced routing and a mandatory second-pass specialist re-audit:
+
+1. **Remediation Routing Context (`remediationContext`):** Pass `remediationContext: { priorSpecialists, maxSeverity }` into `harness_review_route` after applying fixes for any `blocker`, `critical`, or `major` finding so deterministic routing retains every cited specialist with `mandatory: true` and enforces depth `>= focused`.
+2. **Cohesive Package Slices (`reviewSlices`):** When `harness_review_route` emits `reviewSlices` (for diffs `>= REVIEW_SLICE_FILE_THRESHOLD`), dispatch specialist subagents per slice with that slice's exact file list and selections while preserving whole-diff cross-package seam inspection.
+3. **Second-Pass Specialist Sign-Off:** Complete a read-only second-pass specialist re-audit covering all modified remediation hunks and callers before entering final `gc --strict`, `ontology check --strict`, `mutate --strict`, `verify`, and `done` gates.
+
 ---
 
 ### Phase 5 — Gate Promotion, Metric Sync & Stamp-Safe Deterministic Gates (Orchestrator Only)

@@ -7,6 +7,7 @@ import {
   ErrorReasonMessage,
   NxScopeTag,
   NxTierTag,
+  RemediationReviewContext,
   ReviewDepth,
   ReviewGraphContextBundle,
   type ReviewRoutingPlan,
@@ -55,6 +56,12 @@ export const ReviewRouteInputSchema = Schema.Struct({
   timeoutMs: Schema.optional(
     ReviewTimeoutMillis.annotate({
       description: "Optional DecisionModel timeout in milliseconds (100..30000)",
+    }),
+  ),
+  remediationContext: Schema.optional(
+    RemediationReviewContext.annotate({
+      description:
+        "Optional prior finding context enforcing second-pass specialist remediation re-audit",
     }),
   ),
   repoRoot: Schema.optional(
@@ -142,7 +149,10 @@ export const collectManifestTagsForFiles = (
 
         for (const manifestName of ["project.json", "package.json"] as const) {
           const manifestPath = path.join(currDir, manifestName)
-          if (isPathInsideRoot(resolvedRoot, manifestPath) && nodeSyncHostIo.existsSync(manifestPath)) {
+          if (
+            isPathInsideRoot(resolvedRoot, manifestPath) &&
+            nodeSyncHostIo.existsSync(manifestPath)
+          ) {
             const relManifest = path.relative(resolvedRoot, manifestPath).replaceAll("\\", "/")
             const readOutcome = yield* Effect.try(() =>
               nodeSyncHostIo.readTextSync(manifestPath),
@@ -177,10 +187,7 @@ export const collectManifestTagsForFiles = (
                   )
                 })
                 .with({ _tag: "DecodeOk" }, ({ decoded }) => {
-                  const candidateTags = [
-                    ...(decoded.tags ?? []),
-                    ...(decoded.nx?.tags ?? []),
-                  ]
+                  const candidateTags = [...(decoded.tags ?? []), ...(decoded.nx?.tags ?? [])]
                   if (candidateTags.length > 0) {
                     const parsed = parseManifestTags(candidateTags)
                     for (const t of parsed.nxTags) tiers.add(t)
@@ -254,6 +261,7 @@ export const escalatePlanOnDiagnostics = (plan: ReviewRoutingPlan): ReviewRoutin
         source: active.source,
         ...(active.degradedReason !== undefined ? { degradedReason: active.degradedReason } : {}),
         selections: nextSelections,
+        ...(active.reviewSlices !== undefined ? { reviewSlices: active.reviewSlices } : {}),
       })
     })
     .exhaustive()
