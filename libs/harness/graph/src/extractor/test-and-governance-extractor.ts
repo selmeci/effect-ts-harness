@@ -8,7 +8,6 @@ import {
   type BranchingViolation,
   type EarsSpecNode,
   type EffectFnNode,
-  type GovernanceDocStatus,
   type HarnessEdge,
   type HarnessNode,
   NodeKey,
@@ -23,10 +22,16 @@ import {
 } from "../model.js"
 import {
   decodePackageJson,
-  resolveRepoRoot,
   stripCommentsAndTestTitles,
 } from "./extractor-types-and-helpers.js"
 import type { SourceFileInput } from "./compiler-session.js"
+export {
+  loadWorkspaceGovernanceDocs,
+  loadWorkspaceGovernanceDocsWithViolations,
+  parseGovernanceDocFile,
+  parseGovernanceDocFileChecked,
+  type ParseGovernanceDocFileResult,
+} from "./governance-doc-parser.js"
 
 export interface PackageJsonEntry {
   readonly name?: string | undefined
@@ -95,107 +100,6 @@ export const testImportsFn = (
     if (fnPkg?.dir && spec.includes(fnPkg.dir)) return true
   }
   return false
-}
-
-export const parseGovernanceDocFile = (
-  relDocPath: string,
-  content: string,
-): AdrDocNode | EarsSpecNode | null => {
-  const normalized = content.replace(/^\uFEFF/, "")
-  const matchFm = normalized.match(/^---\r?\n([\s\S]*?)\r?\n---/)
-  if (!matchFm || matchFm[1] === undefined) return null
-
-  const lines = matchFm[1].split(/\r?\n/)
-  const scalars = new Map<string, string>(), lists = new Map<string, Array<string>>()
-  let currentListKey: string | null = null
-
-  const stripQuotes = (val: string): string => {
-    let t = val.trim()
-    if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) t = t.slice(1, -1).trim()
-    const hashIdx = t.indexOf("#")
-    return hashIdx !== -1 ? t.slice(0, hashIdx).trim() : t
-  }
-
-  for (const rawLine of lines) {
-    const trimmed = rawLine.trim()
-    if (trimmed === "" || trimmed.startsWith("#")) continue
-    const listItemMatch = rawLine.match(/^\s*-\s*(.*)$/)
-    if (listItemMatch && currentListKey !== null) {
-      const item = stripQuotes(listItemMatch[1] ?? "")
-      if (item.length > 0) lists.get(currentListKey)?.push(item)
-      continue
-    }
-    currentListKey = null
-    const keyValMatch = rawLine.match(/^([a-zA-Z0-9_-]+)\s*:(.*)$/)
-    if (keyValMatch) {
-      const key = keyValMatch[1]!.trim(), rest = keyValMatch[2]!.trim()
-      if (rest.startsWith("[") && rest.endsWith("]")) {
-        const inner = rest.slice(1, -1).trim()
-        lists.set(key, inner.length === 0 ? [] : inner.split(",").map(stripQuotes).filter((s) => s.length > 0))
-        continue
-      }
-      if (rest === "") { lists.set(key, []); currentListKey = key; continue }
-      scalars.set(key, stripQuotes(rest))
-    }
-  }
-
-  const id = scalars.get("id")
-  if (!id || id.trim() === "") return null
-
-  let title = scalars.get("title")
-  if (!title || title.trim() === "") {
-    const titleMatch = normalized.match(/^#\s+(.+)$/m)
-    title = titleMatch ? titleMatch[1]!.trim() : id
-  }
-
-  const rawStatus = scalars.get("status")
-  const status: GovernanceDocStatus =
-    rawStatus === "accepted" || rawStatus === "proposed" || rawStatus === "superseded" || rawStatus === "deprecated"
-      ? rawStatus : "proposed"
-
-  const enforcedByFiles = lists.get("enforced_by") ?? []
-  const referencedSpans = lists.get("spans") ?? []
-  const referencedServices = lists.get("services") ?? []
-  const referencedErrors = lists.get("errors") ?? []
-
-  if (relDocPath.includes("/adr/")) return { _tag: "AdrDoc", id, title, status, path: relDocPath, enforcedByFiles, referencedSpans, referencedServices, referencedErrors }
-  if (relDocPath.includes("/specs/")) return { _tag: "EarsSpec", id, title, status, path: relDocPath, enforcedByFiles, referencedSpans, referencedServices, referencedErrors }
-  return null
-}
-
-export const loadWorkspaceGovernanceDocs = (
-  repoRoot: string,
-  hostIo: SyncHostIo,
-): ReadonlyArray<AdrDocNode | EarsSpecNode> => {
-  const root = resolveRepoRoot(repoRoot, hostIo)
-  const candidateRelDirs: Array<string> = ["docs/adr", "docs/specs"]
-  const listSubdirs = (p: string) =>
-    !hostIo.existsSync(path.join(root, p))
-      ? []
-      : hostIo
-          .readdirSync(path.join(root, p))
-          .filter((e) => e.isDirectory)
-          .map((e) => e.name)
-          .sort((a, b) => a.localeCompare(b))
-  for (const s of listSubdirs("libs")) candidateRelDirs.push(`libs/${s}/docs/adr`, `libs/${s}/docs/specs`)
-  for (const a of listSubdirs("apps")) candidateRelDirs.push(`apps/${a}/docs/adr`, `apps/${a}/docs/specs`)
-
-  const results: Array<AdrDocNode | EarsSpecNode> = []
-  for (const relDir of candidateRelDirs) {
-    const fullDir = path.join(root, relDir)
-    if (!hostIo.existsSync(fullDir)) continue
-    const files = hostIo
-      .readdirSync(fullDir)
-      .filter((e) => e.isFile && e.name.endsWith(".md") && e.name !== "README.md" && e.name !== "TEMPLATE.md")
-      .map((e) => e.name)
-      .sort((a, b) => a.localeCompare(b))
-    for (const file of files) {
-      const relDocPath = `${relDir}/${file}`
-      const parsed = parseGovernanceDocFile(relDocPath, hostIo.readTextSync(path.join(root, relDocPath)))
-      if (parsed !== null) results.push(parsed)
-    }
-  }
-  return results
 }
 
 const splitTopLevelCommas = (input: string): Array<string> => {

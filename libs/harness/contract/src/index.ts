@@ -34,6 +34,7 @@ export {
 export {
   ActiveMutantId,
   BatchExitCode,
+  CANONICAL_CLI_COMMAND_NAMES,
   CANONICAL_MCP_TOOL_NAMES,
   CliCommandInput,
   CliCommandName,

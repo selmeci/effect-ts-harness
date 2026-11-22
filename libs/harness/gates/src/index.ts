@@ -131,6 +131,7 @@ export {
   evaluatePackageAndMigrationPlugin,
   evaluateTestAndDeciderPlugin,
   evaluateTopologyEntropyPlugin,
+  auditCatalogDocTruthInContent,
   DOC_TRUTH_RULE_ID_SOURCES,
   checkAstGateRuleClosure,
   extractBalancedBraces,

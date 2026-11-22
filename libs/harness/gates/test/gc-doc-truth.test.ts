@@ -3,10 +3,14 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
+import { CANONICAL_CLI_COMMAND_NAMES, CANONICAL_MCP_TOOL_NAMES } from "@harness/contract"
 import { buildHarnessGraph } from "@harness/graph"
 import { AST_GATE_RULE_SOURCE_FILES } from "../src/ast-cache.js"
-import { evaluateDocTruthPlugin } from "../src/plugins/gc/gc-doc-truth.plugin.js"
+import {
+  auditCatalogDocTruthInContent,
+  evaluateDocTruthPlugin,
+} from "../src/plugins/gc/gc-doc-truth.plugin.js"
 import { evaluatePackageAndMigrationPlugin } from "../src/plugins/gc/gc-package-and-migration.plugin.js"
 import {
   checkAstGateRuleClosure,
@@ -791,4 +795,151 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
       rmSync(tempDir, { recursive: true, force: true })
     }
   })
+
+  it("SPEC-0029 REQ-1.1/REQ-1.2: validates MCP tool counts, unknown harness_* backticks, mermaid blocks, and headings", () => {
+    const validCount = CANONICAL_MCP_TOOL_NAMES.length
+    const validDoc = [
+      "### 8.4 MCP Tools",
+      "```mermaid",
+      `flowchart LR\n  MCP["harness-mcp (${validCount} tools)"]`,
+      "```",
+      `Exposes ${validCount} MCP tools including \`${CANONICAL_MCP_TOOL_NAMES[0]}\`.`,
+      "```ts",
+      "// inside code fence: 99 MCP tools and `harness_fake_in_code` are ignored",
+      "```",
+      "",
+    ].join("\n")
+    expect(auditCatalogDocTruthInContent("README.md", validDoc)).toEqual([])
+
+    const wrongCount = validCount - 1
+    const driftedDoc = [
+      "```mermaid",
+      `MCP["harness-mcp (${wrongCount} MCP tools)"]`,
+      "```",
+      `harness-mcp exposes ${wrongCount} tools and \`harness_nonexistent_tool\` twice \`harness_nonexistent_tool\`.`,
+      "```ts",
+      "`harness_ignored_inside_ts`",
+      "```",
+      `Trailing ${wrongCount} MCP tools after closed fence.`,
+    ].join("\n")
+    const findings = auditCatalogDocTruthInContent("README.md", driftedDoc)
+    expect(findings.every((f) => f.kind === "doc-mcp-tool-count-truth")).toBe(true)
+    expect(findings.filter((f) => f.nodeId.includes(":mcp-count:"))).toHaveLength(3)
+    expect(findings.some((f) => f.location === "README.md:2")).toBe(true)
+    expect(findings.some((f) => f.location === "README.md:8")).toBe(true)
+    expect(
+      findings.filter((f) => f.nodeId === "README.md:mcp:harness_nonexistent_tool"),
+    ).toHaveLength(1)
+    expect(findings.some((f) => f.nodeId.includes("harness_ignored_inside_ts"))).toBe(false)
+  })
+
+  it("SPEC-0029 REQ-2.1/REQ-2.2: validates CLI subcommands in prose and bash fences plus CLI counts", () => {
+    const validCount = CANONICAL_CLI_COMMAND_NAMES.length
+    const validDoc = [
+      `Uses ${validCount} CLI commands on harness-cli:`,
+      "```bash",
+      "pnpm harness verify",
+      "pnpm harness <cmd>",
+      "pnpm harness --help",
+      "```",
+    ].join("\n")
+    expect(auditCatalogDocTruthInContent("README.md", validDoc)).toEqual([])
+
+    const wrongCount = validCount - 2
+    const driftedDoc = [
+      `Uses ${wrongCount} CLI commands while harness-cli exposes ${wrongCount} subcommands.`,
+      "```bash",
+      "pnpm harness bogus-cmd",
+      "```",
+      "Repeat `pnpm harness bogus-cmd` and also `pnpm harness another-fake`.",
+    ].join("\n")
+    const findings = auditCatalogDocTruthInContent("AGENTS.md", driftedDoc)
+    expect(findings.every((f) => f.kind === "doc-cli-command-truth")).toBe(true)
+    expect(findings.filter((f) => f.nodeId.includes(":cli-count:"))).toHaveLength(1)
+    expect(findings.filter((f) => f.nodeId === "AGENTS.md:cli:bogus-cmd")).toHaveLength(1)
+    expect(findings.filter((f) => f.nodeId === "AGENTS.md:cli:another-fake")).toHaveLength(1)
+  })
+
+  it("SPEC-0029 REQ-1.1/REQ-2.1/REQ-4.2: scans live catalog docs, ignores docs/plans, and exempts draft specs from doc-missing-file-path", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "harness-catalog-draft-"))
+    try {
+      mkdirSync(join(tempDir, "libs/harness/docs/specs"), { recursive: true })
+      mkdirSync(join(tempDir, "adapters/claude-code"), { recursive: true })
+      mkdirSync(join(tempDir, "docs/plans"), { recursive: true })
+      writeFileSync(
+        join(tempDir, "README.md"),
+        "Using `harness_bogus_mcp` and `pnpm harness unknown-subcmd`.\n",
+      )
+      writeFileSync(
+        join(tempDir, "adapters/claude-code/README.md"),
+        "Exposes `harness_other_fake` tool.\n",
+      )
+      writeFileSync(
+        join(tempDir, "docs/plans/historical.md"),
+        "Historical 17 MCP tools and `harness_historical_tool` and pnpm harness old-cmd.\n",
+      )
+      writeFileSync(
+        join(tempDir, "libs/harness/docs/specs/2026-11-22-draft-future.md"),
+        "---\nid: harness:SPEC-9991\ntitle: Draft\nstatus: draft\nspans:\n  - Future.decide\n---\n\nSee `libs/harness/gates/src/nonexistent-draft-module.ts`.\n",
+      )
+      writeFileSync(
+        join(tempDir, "libs/harness/docs/specs/2026-11-22-proposed-missing.md"),
+        "---\nid: harness:SPEC-9992\ntitle: Proposed\nstatus: proposed\nspans:\n  - Future.decide\n---\n\nSee `libs/harness/gates/src/nonexistent-proposed-module.ts`.\n",
+      )
+
+      const findings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: tempDir,
+        hostIo: testHostIo,
+      })
+      expect(
+        findings.some((f) => f.kind === "doc-mcp-tool-count-truth" && f.location === "README.md:1"),
+      ).toBe(true)
+      expect(
+        findings.some(
+          (f) =>
+            f.kind === "doc-mcp-tool-count-truth" &&
+            f.location === "adapters/claude-code/README.md:1",
+        ),
+      ).toBe(true)
+      expect(findings.some((f) => f.kind === "doc-cli-command-truth")).toBe(true)
+      expect(findings.some((f) => f.location?.startsWith("docs/plans/historical.md"))).toBe(false)
+      expect(
+        findings.some(
+          (f) =>
+            f.kind === "doc-missing-file-path" &&
+            f.location === "libs/harness/docs/specs/2026-11-22-draft-future.md",
+        ),
+      ).toBe(false)
+      expect(
+        findings.some(
+          (f) =>
+            f.kind === "doc-missing-file-path" &&
+            f.location === "libs/harness/docs/specs/2026-11-22-proposed-missing.md",
+        ),
+      ).toBe(true)
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it.effect.prop(
+    "SPEC-0029 property: wrong MCP/CLI counts and fabricated catalog names always emit exact findings",
+    {
+      delta: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 9 })),
+      suffix: Schema.Literals(["alpha", "beta", "gamma"]),
+    },
+    ({ delta, suffix }) =>
+      Effect.sync(() => {
+        const badMcpCount = CANONICAL_MCP_TOOL_NAMES.length + delta
+        const badCliCount = CANONICAL_CLI_COMMAND_NAMES.length + delta
+        const doc = [
+          `Exposes ${badMcpCount} MCP tools (\`harness_fake_${suffix}\`).`,
+          `Runs ${badCliCount} CLI commands (\`pnpm harness fake-${suffix}\`).`,
+        ].join("\n")
+        const findings = auditCatalogDocTruthInContent("README.md", doc)
+        expect(findings.some((f) => f.kind === "doc-mcp-tool-count-truth")).toBe(true)
+        expect(findings.some((f) => f.kind === "doc-cli-command-truth")).toBe(true)
+      }),
+  )
 })

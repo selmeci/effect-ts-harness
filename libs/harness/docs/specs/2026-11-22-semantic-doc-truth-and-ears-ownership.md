@@ -1,28 +1,42 @@
 ---
 id: harness:SPEC-0029
 title: Semantic Documentation Catalog Truth and EARS Effect-Symbol Ownership
-status: proposed
+status: accepted
 archetype: framework
 date: 2026-11-22
 owners:
   - "@harness/architecture"
 scope: harness
+informed_by:
+  - harness:ADR-0023
 enforced_by:
   - libs/harness/contract/src/workspace-and-process.ts
+  - libs/harness/contract/src/index.ts
   - libs/harness/gates/src/plugins/gc/gc-catalog-doc-truth.ts
   - libs/harness/gates/src/plugins/gc/gc-doc-truth.plugin.ts
+  - libs/harness/gates/src/plugins/gc/gc-governance-docs.plugin.ts
   - libs/harness/gates/src/plugins/gc/gc-workspace-io.ts
   - libs/harness/gates/src/ears-lint.ts
   - libs/harness/gates/src/ears-consistency.ts
+  - libs/harness/gates/src/ontology-invariants.ts
+  - libs/harness/decision/src/ontology-conflict-decision.ts
   - apps/harness-cli/src/commands/command-registry.ts
+  - apps/harness-cli/test/command-registry.test.ts
   - libs/harness/gates/test/gc-doc-truth.test.ts
   - libs/harness/gates/test/gc-ears-and-adr-quality.test.ts
+  - libs/harness/gates/test/gc-handoff-budget.test.ts
   - libs/harness/graph/src/model.ts
   - libs/harness/graph/schema.pg
   - libs/harness/graph/src/gq-static-assets.ts
+  - libs/harness/graph/src/type-extractor.ts
+  - libs/harness/graph/src/extractor/governance-doc-parser.ts
   - libs/harness/graph/src/extractor/test-and-governance-extractor.ts
-  - libs/harness/graph/src/datalog/stratum-1-and-2-rules.ts
+  - libs/harness/graph/src/datalog/datalog-types-and-semiring.ts
+  - libs/harness/graph/src/rewrite/dpo-algebra-core.ts
+  - libs/harness/graph/src/rewrite/plan-rules.plugin.ts
   - libs/harness/graph/src/policy-check.ts
+  - libs/harness/graph/test/datalog-engine.test.ts
+  - libs/harness/graph/test/governance-nodes.test.ts
   - docs/specs/README.md
   - adapters/antigravity/plugins/effect-harness/skills/specifying-ears-with-effect/SKILL.md
   - adapters/claude-code/skills/specifying-ears-with-effect/SKILL.md
@@ -37,9 +51,9 @@ errors: []
 
 ## Context
 
-Post-mortem review of PR #44 uncovered recurring semantic drift between live harness contracts and markdown documentation that existing syntactic checks in `gc-doc-truth.plugin.ts` (`doc-unknown-package-name`, `doc-unknown-rule-id`, `doc-missing-file-path`) do not catch. First, overview documents (`README.md`, `AGENTS.md`, `CLAUDE.md`, skill files) state hard-coded MCP tool counts and `harness_*` tool lists that can silently diverge from `CANONICAL_MCP_TOOL_NAMES` in `libs/harness/contract/src/workspace-and-process.ts`, as well as documented `pnpm harness <subcommand>` invocations that can drift from `CliCommandName` and `CANONICAL_CLI_COMMAND_NAMES` without violating package or path existence checks.
+Post-mortem review of PR #44 uncovered recurring semantic drift vectors between live harness contracts and markdown documentation that purely syntactic checks in `gc-doc-truth.plugin.ts` (`doc-unknown-package-name`, `doc-unknown-rule-id`, `doc-missing-file-path`) could not detect. Overview documents (`README.md`, `AGENTS.md`, `CLAUDE.md`, skill files) state hard-coded MCP tool counts and `harness_*` tool lists that must stay synchronized with `CANONICAL_MCP_TOOL_NAMES` in `libs/harness/contract/src/workspace-and-process.ts`, as well as documented `pnpm harness <subcommand>` invocations that must align with `CliCommandName` and `CANONICAL_CLI_COMMAND_NAMES`.
 
-Second, EARS specifications validated by `EarsSpecLint.decide` (`libs/harness/gates/src/ears-lint.ts`) can declare `Effect Symbol` values in requirement tables that are omitted from the spec's own YAML frontmatter (`spans`, `services`, `errors`), weakening traceability between behavioral clauses, `HarnessGraph` symbols, and `EarsConsistency.decide` (`libs/harness/gates/src/ears-consistency.ts`) purity guarantees (`R = never`). Third, `EarsStatus` and `GovernanceDocStatus` currently lack an explicit backlog state (`draft`), causing multi-wave roadmaps to conflict with active `INF-07` (`unmapped-spec-symbol`) and `doc-missing-file-path` checks meant for active `proposed` Plan-as-Code tasks.
+Second, EARS specifications validated by `EarsSpecLint.decide` (`libs/harness/gates/src/ears-lint.ts`) require strict parity between requirement-table `Effect Symbol` cells and the spec's own YAML frontmatter (`spans`, `services`, `errors`) alongside `EarsConsistency.decide` (`libs/harness/gates/src/ears-consistency.ts`) `R = never` purity guarantees. Third, `EarsStatus` and `GovernanceDocStatus` require an explicit backlog state (`draft`) separating queued multi-wave roadmaps from active single-task `proposed` Plan-as-Code contracts validated under `INF-07` (`unmapped-spec-symbol`) and `doc-missing-file-path`.
 
 - **Reused Contracts / Errors:** `CANONICAL_MCP_TOOL_NAMES`, `CliCommandName` from `@harness/contract`; `GcFinding`, `GcFindingKind` from `@harness/gates`; `EarsStatus`, `GovernanceDocStatus` from `@harness/graph`
 - **Reused Services:** `SyncHostIo` from `@harness/service/host-io`

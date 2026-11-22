@@ -197,7 +197,7 @@ export const computeGraphMeasure = (
               if (declaredCount === 0) unmappedSpecSymbols += 1
             }
           })
-          .with("accepted", "superseded", "deprecated", () => undefined)
+          .with("draft", "accepted", "superseded", "deprecated", () => undefined)
           .exhaustive()
       })
       .with(

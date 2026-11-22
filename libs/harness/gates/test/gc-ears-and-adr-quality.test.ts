@@ -3,12 +3,18 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { Effect, Schema } from "effect"
-import { buildHarnessGraph } from "@harness/graph"
+import * as Graph from "effect/Graph"
+import { match } from "ts-pattern"
+import { buildHarnessGraph, extractTypeAwareGraphFromSource } from "@harness/graph"
 import {
   decideAdrDocQuality,
+  decideEarsConsistency,
   decideEarsSpecQuality,
   decideGraphEntropy,
   evaluatePackageAndMigrationPlugin,
+  type EarsConsistencyError,
+  type EarsConsistencyInput,
+  type EarsConsistencyReport,
   type GovernanceDocReference,
 } from "../src/index.js"
 import { testHostIo } from "./helpers/test-host-io.js"
@@ -252,6 +258,179 @@ Currently, this is inside a fenced code block and must be ignored.
             false,
           )
         }),
+    )
+
+    it.effect(
+      "SPEC-0029 REQ-3.1/REQ-3.2/REQ-4.2/REQ-4.3: enforces Effect Symbol frontmatter ownership and fails closed on invalid status",
+      () =>
+        Effect.gen(function* () {
+          const validDraft = `---
+id: harness:SPEC-9991
+title: Owned Draft
+status: draft
+spans: [Alpha.decide]
+services:
+  - "@harness/graph/OmnigraphSync"
+errors:
+  - AlphaFailedError
+---
+
+## Requirements
+
+### 1 · Ownership
+**Source:** Verified ownership.
+
+| ID | Pattern | Requirement | Effect Symbol | Verification |
+|---|---|---|---|---|
+| REQ-1.1 | Event-driven | **When** Alpha runs, Alpha.decide **shall** complete. | \`Alpha.decide\` | UnitTest |
+| REQ-1.2 | Ubiquitous | OmnigraphSync **shall** persist schemas. | OmnigraphSync | UnitTest |
+| REQ-1.3 | Unwanted behaviour | **If** Alpha breaks, **then** Alpha.decide **shall** fail with AlphaFailedError. | AlphaFailedError | UnitTest |
+| REQ-1.4 | Ubiquitous | Schema types **shall** validate inputs. | — | UnitTest |
+`
+          const validReport = yield* decideEarsSpecQuality({
+            docPath: "libs/harness/docs/specs/valid-draft.md",
+            markdown: validDraft,
+          })
+          expect(validReport.clean).toBe(true)
+
+          const unownedMd = validDraft.replace("| `Alpha.decide` |", "| Ghost.decide |")
+          const unownedReport = yield* decideEarsSpecQuality({
+            docPath: "libs/harness/docs/specs/unowned.md",
+            markdown: unownedMd,
+          })
+          expect(unownedReport.clean).toBe(false)
+          const ownershipFinding = unownedReport.findings.find(
+            (f) => f.kind === "spec-source-symbol-ownership",
+          )
+          expect(ownershipFinding).toBeDefined()
+          expect(ownershipFinding?.message).toContain("REQ-1.1")
+          expect(ownershipFinding?.message).toContain("Ghost.decide")
+
+          const badStatusMd = validDraft.replace("status: draft", "status: bogus_status")
+          const badStatusReport = yield* decideEarsSpecQuality({
+            docPath: "libs/harness/docs/specs/bad-status.md",
+            markdown: badStatusMd,
+          })
+          expect(badStatusReport.clean).toBe(false)
+          expect(
+            badStatusReport.findings.some(
+              (f) => f.kind === "invalid-frontmatter-status" && f.line === 4,
+            ),
+          ).toBe(true)
+
+          const emptyQuotedStatusReport = yield* decideEarsSpecQuality({
+            docPath: "libs/harness/docs/specs/empty-status.md",
+            markdown: validDraft.replace("status: draft", 'status: ""'),
+          })
+          expect(
+            emptyQuotedStatusReport.findings.some(
+              (f) => f.kind === "invalid-frontmatter-status" && f.message.includes("'<missing>'"),
+            ),
+          ).toBe(true)
+
+          const draftGenericMd = validDraft.replace(
+            "Alpha.decide **shall** complete",
+            "the system **shall** complete",
+          )
+          const draftGenericReport = yield* decideEarsSpecQuality({
+            docPath: "libs/harness/docs/specs/draft-generic.md",
+            markdown: draftGenericMd,
+          })
+          expect(draftGenericReport.findings.some((f) => f.kind === "generic-subject")).toBe(true)
+        }),
+    )
+
+    it.effect.prop(
+      "SPEC-0029 REQ-3.1/REQ-3.2 property: undeclared Effect Symbol triggers spec-source-symbol-ownership",
+      { suffix: Schema.Literals(["One", "Two", "Three"]) },
+      ({ suffix }) =>
+        Effect.gen(function* () {
+          const md = `---
+id: harness:SPEC-9992
+title: Prop
+status: proposed
+spans:
+  - Owned.fn${suffix}
+---
+
+## Requirements
+
+### 1 · Area
+**Source:** test source
+
+| ID | Pattern | Requirement | Effect Symbol | Verification |
+|---|---|---|---|---|
+| REQ-1.1 | Ubiquitous | The Owned.fn${suffix} handler **shall** run. | Unowned.fn${suffix} | UnitTest |
+`
+          const report = yield* decideEarsSpecQuality({
+            docPath: "libs/harness/docs/specs/prop.md",
+            markdown: md,
+          })
+          expect(
+            report.findings.some(
+              (f) =>
+                f.kind === "spec-source-symbol-ownership" &&
+                f.message.includes(`Unowned.fn${suffix}`),
+            ),
+          ).toBe(true)
+        }),
+    )
+
+    it.effect("SPEC-0029 REQ-3.3: EarsConsistency.decide preserves R = never purity", () =>
+      Effect.sync(() => {
+        const checkPurity: (
+          input: EarsConsistencyInput,
+        ) => Effect.Effect<EarsConsistencyReport, EarsConsistencyError, never> =
+          decideEarsConsistency
+        expect(typeof checkPurity).toBe("function")
+
+        let root = process.cwd()
+        while (root !== dirname(root)) {
+          if (existsSync(join(root, "pnpm-workspace.yaml"))) break
+          root = dirname(root)
+        }
+        const sourcePath = "libs/harness/gates/src/ears-consistency.ts"
+        const graph = extractTypeAwareGraphFromSource([
+          {
+            filePath: sourcePath,
+            content: readFileSync(join(root, sourcePath), "utf8"),
+            packageTag: "domain",
+          },
+        ])
+        let foundSpan = false
+        let requiredServicesCount = -1
+        for (const [, node] of Graph.nodes(graph.graph)) {
+          match(node)
+            .with({ _tag: "EffectFn" }, (fnNode) => {
+              if (fnNode.spanName === "EarsConsistency.decide") {
+                foundSpan = true
+              }
+            })
+            .with({ _tag: "EffectSignature" }, (sigNode) => {
+              if (sigNode.callerQualname.endsWith("#decideEarsConsistency")) {
+                requiredServicesCount = sigNode.requiredServices.length
+              }
+            })
+            .with(
+              { _tag: "ServiceTag" },
+              { _tag: "ServiceLayer" },
+              { _tag: "TaggedError" },
+              { _tag: "SchemaDef" },
+              { _tag: "VitestCase" },
+              { _tag: "PatternDoc" },
+              { _tag: "AdrDoc" },
+              { _tag: "EarsSpec" },
+              { _tag: "LayerFlow" },
+              { _tag: "TraceabilityTuple" },
+              { _tag: "HttpEndpointTuple" },
+              { _tag: "MigrationTuple" },
+              () => {},
+            )
+            .exhaustive()
+        }
+        expect(foundSpan).toBe(true)
+        expect(requiredServicesCount).toBe(0)
+      }),
     )
   })
 

@@ -25,7 +25,8 @@ import { checkBrandedDomainTypesAndPrimitiveBoundaries, checkSchemaBooleanStateA
 import { autoRegisterReferencedEntities, commitSessionFragments, extractLayers, extractServicesAndErrors, syncSessionCacheAndProject } from "./extractor/service-and-layer-extractor.js"
 import { extractEffectFns } from "./extractor/effect-fn-extractor.js"
 import { checkDeciderTracing, checkEventSourcingReducers, checkMissingAggregateIdGuard } from "./extractor/decider-reducer-extractor.js"
-import { assembleTestAndGovernanceGraph, checkNodeSqliteTestViolations, checkUnassertedStateFieldsForInputs, loadWorkspaceGovernanceDocs } from "./extractor/test-and-governance-extractor.js"
+import { assembleTestAndGovernanceGraph, checkNodeSqliteTestViolations, checkUnassertedStateFieldsForInputs } from "./extractor/test-and-governance-extractor.js"
+import { loadWorkspaceGovernanceDocsWithViolations } from "./extractor/governance-doc-parser.js"
 
 export {
   computeDynamicPaths, resolveContainedRelPath, resolveImportSpecToRelFile,
@@ -38,7 +39,7 @@ export {
   type SourceFileInput, type TypeScriptProgramSession, type TypeExtractorOptions,
   type ExtractTypeGraphOptions, type OverlayDiagnosticItem, type FileGraphFragment,
 } from "./extractor/compiler-session.js"
-export { loadWorkspaceGovernanceDocs } from "./extractor/test-and-governance-extractor.js"
+export { loadWorkspaceGovernanceDocs, loadWorkspaceGovernanceDocsWithViolations, parseGovernanceDocFile, parseGovernanceDocFileChecked, type ParseGovernanceDocFileResult } from "./extractor/governance-doc-parser.js"
 export { extractLayers, extractServicesAndErrors } from "./extractor/service-and-layer-extractor.js"
 export { extractEffectFns } from "./extractor/effect-fn-extractor.js"
 
@@ -190,8 +191,9 @@ export const extractWorkspaceTypeAwareGraph = Effect.fnUntraced(function* (
       const content = overlays.get(rel) ?? hostIo.readTextSync(path.join(root, rel))
       testShaMap.set(rel, sha256Hex(content)); testContentMap.set(rel, content)
     }
-    const governanceDocs = loadWorkspaceGovernanceDocs(root, hostIo), govShaMap = new Map<string, string>()
+    const { docs: governanceDocs, violations: governanceStatusViolations } = loadWorkspaceGovernanceDocsWithViolations(root, hostIo), govShaMap = new Map<string, string>()
     for (const d of governanceDocs) govShaMap.set(d.path, sha256Hex(`${d.id}:${d.title}:${d.status}:${(d.referencedSpans ?? []).join(",")}:${(d.referencedServices ?? []).join(",")}:${(d.referencedErrors ?? []).join(",")}`))
+    for (const v of governanceStatusViolations) govShaMap.set(v.file, sha256Hex(`invalid-gov-status:${v.enclosingSymbol}:${v.message}`))
     const patternDocs = loadPatternDocs(root, hostIo), patternShaMap = new Map<string, string>()
     for (const p of patternDocs) patternShaMap.set(p.path, sha256Hex(`${p.slug}:${p.summary}:${(p.coveredSpans ?? []).join(",")}:${(p.coveredTags ?? []).join(",")}`))
     const fastSnap = checkWorkspaceSnapshotMatch(session, testShaMap, govShaMap, patternShaMap, inputShaMap)
@@ -222,7 +224,7 @@ export const extractWorkspaceTypeAwareGraph = Effect.fnUntraced(function* (
     })
     const resultGraph: HarnessGraph = {
       graph: augmentedGraph, nodeIndexByKey: updatedNodeIndexByKey,
-      branchingViolations: [...(baseGraph.branchingViolations ?? []), ...unassertedStateViolations, ...nodeSqliteTestViolations],
+      branchingViolations: [...(baseGraph.branchingViolations ?? []), ...unassertedStateViolations, ...nodeSqliteTestViolations, ...governanceStatusViolations],
       unresolvedReferences: [...(baseGraph.unresolvedReferences ?? []), ...unresolvedReferences],
     }
     session.lastWorkspaceSnapshot = {

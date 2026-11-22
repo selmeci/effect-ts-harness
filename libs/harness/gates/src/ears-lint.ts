@@ -18,6 +18,8 @@ export type EarsLintFindingKind =
   | "legacy-effect-v3-symbol"
   | "defect-polarity-inversion"
   | "stale-temporal-context"
+  | "spec-source-symbol-ownership"
+  | "invalid-frontmatter-status"
 
 export interface EarsLintFinding {
   readonly line: number
@@ -61,6 +63,25 @@ const ALLOWED_VERIFICATION_METHODS = new Set([
 
 const FORBIDDEN_COLUMNS = new Set(["status", "state", "evidence", "proof", "done"])
 
+const ALLOWED_EARS_STATUSES = new Set(["draft", "proposed", "accepted", "superseded", "deprecated"])
+
+const FRONTMATTER_SYMBOL_LIST_KEYS = new Set(["spans", "services", "errors"])
+
+const stripFmQuotes = (val: string): string => {
+  const t = val.trim()
+  if (
+    t.length >= 2 &&
+    ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))
+  ) {
+    return t.slice(1, -1).trim()
+  }
+  const hashIdx = t.indexOf("#")
+  return hashIdx !== -1 ? t.slice(0, hashIdx).trim() : t
+}
+
+const isPlaceholderEffectSymbol = (sym: string): boolean =>
+  sym === "" || sym === "-" || sym === "—" || sym === "--" || sym.toLowerCase() === "n/a"
+
 const stripMarkup = (text: string): string => text.replace(/[*_`]/g, "").trim()
 
 const isTableRow = (line: string): boolean => {
@@ -97,16 +118,68 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
 
   let frontmatterEndIdx = -1
   let frontmatterStatus: string | undefined
+  let frontmatterStatusLine = 1
+  const ownedFrontmatterSymbols = new Set<string>()
+  const addOwnedSymbol = (key: string, sym: string): void => {
+    if (sym.length === 0) return
+    ownedFrontmatterSymbols.add(sym)
+    if (key === "services" && sym.includes("/")) {
+      const shortName = sym.slice(sym.lastIndexOf("/") + 1)
+      if (shortName.length > 0) ownedFrontmatterSymbols.add(shortName)
+    }
+  }
+
   if (rawLines[0]?.trim() === "---") {
     for (let i = 1; i < rawLines.length; i++) {
-      const fmLine = rawLines[i] ?? ""
-      if (fmLine.trim() === "---") {
+      if ((rawLines[i] ?? "").trim() === "---") {
         frontmatterEndIdx = i
         break
       }
-      const statusMatch = /^status:\s*['"]?([a-z-]+)['"]?/i.exec(fmLine.trim())
-      if (statusMatch?.[1]) {
-        frontmatterStatus = statusMatch[1].toLowerCase()
+    }
+    if (frontmatterEndIdx !== -1) {
+      let currentSymbolListKey: string | null = null
+      for (let i = 1; i < frontmatterEndIdx; i++) {
+        const fmLine = rawLines[i] ?? ""
+        const fmTrimmed = fmLine.trim()
+        if (fmTrimmed === "" || fmTrimmed.startsWith("#")) continue
+        const listMatch = /^\s*-\s*(.*)$/.exec(fmLine)
+        if (listMatch !== null) {
+          if (currentSymbolListKey !== null) {
+            addOwnedSymbol(currentSymbolListKey, stripFmQuotes(listMatch[1] ?? ""))
+          }
+          continue
+        }
+        currentSymbolListKey = null
+        const kvMatch = /^([a-zA-Z0-9_-]+)\s*:(.*)$/.exec(fmLine)
+        if (kvMatch === null) continue
+        const fmKey = kvMatch[1]!.trim().toLowerCase()
+        const fmRest = kvMatch[2]!.trim()
+        if (fmKey === "status") {
+          const parsedStatus = stripFmQuotes(fmRest).toLowerCase()
+          frontmatterStatus = parsedStatus.length > 0 ? parsedStatus : undefined
+          frontmatterStatusLine = i + 1
+          continue
+        }
+        if (!FRONTMATTER_SYMBOL_LIST_KEYS.has(fmKey)) continue
+        if (fmRest === "") {
+          currentSymbolListKey = fmKey
+          continue
+        }
+        if (fmRest.startsWith("[") && fmRest.endsWith("]")) {
+          const inner = fmRest.slice(1, -1).trim()
+          if (inner.length > 0) {
+            for (const entry of inner.split(",")) {
+              addOwnedSymbol(fmKey, stripFmQuotes(entry))
+            }
+          }
+        }
+      }
+      if (frontmatterStatus === undefined || !ALLOWED_EARS_STATUSES.has(frontmatterStatus)) {
+        findings.push({
+          line: frontmatterStatusLine,
+          kind: "invalid-frontmatter-status",
+          message: `EARS spec declares unrecognized or missing frontmatter status '${frontmatterStatus ?? "<missing>"}' (allowed: draft, proposed, accepted, superseded, deprecated).`,
+        })
       }
     }
   }
@@ -565,6 +638,20 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
                   message: `${cleanId} has invalid verification method '${token}'. Allowed: test, unittest, propertytest, tracetest, inspection, astgate, graphcheck, analysis, demonstration.`,
                 })
               }
+            }
+          }
+
+          if (frontmatterEndIdx !== -1 && rawEffectSymbol !== undefined) {
+            const cleanEffectSymbol = stripMarkup(rawEffectSymbol).trim()
+            if (
+              !isPlaceholderEffectSymbol(cleanEffectSymbol) &&
+              !ownedFrontmatterSymbols.has(cleanEffectSymbol)
+            ) {
+              findings.push({
+                line: lineNum,
+                kind: "spec-source-symbol-ownership",
+                message: `Requirement ${cleanId} references Effect Symbol '${cleanEffectSymbol}' which is not declared in frontmatter spans, services, or errors.`,
+              })
             }
           }
 

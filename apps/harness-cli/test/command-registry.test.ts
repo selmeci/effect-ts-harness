@@ -5,6 +5,7 @@ import { join, resolve } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import { Cause, Effect, Exit, Layer } from "effect"
 import { match } from "ts-pattern"
+import { CANONICAL_CLI_COMMAND_NAMES as CONTRACT_CLI_COMMAND_NAMES } from "@harness/contract"
 import { decideSpanBudgets, type SpanSample } from "@harness/gates"
 import { runWithTestTracer, type IndexedEffectFn, type RecordedSpanEvent } from "@harness/ingest"
 import {
@@ -37,6 +38,7 @@ const toSpanSamples = (spans: ReadonlyArray<RecordedSpanEvent>): ReadonlyArray<S
 
 describe("HarnessCli.dispatchCommand (SPEC-0011 §4)", () => {
   it("REQ-4.1: CANONICAL_CLI_COMMAND_NAMES and DEFAULT_CLI_COMMAND_DESCRIPTORS match COMMANDS 1-to-1", () => {
+    expect([...CONTRACT_CLI_COMMAND_NAMES]).toEqual([...COMMANDS])
     expect([...CANONICAL_CLI_COMMAND_NAMES]).toEqual([...COMMANDS])
     expect(DEFAULT_CLI_COMMAND_DESCRIPTORS.map((d) => d.name)).toEqual([...COMMANDS])
   })
@@ -84,45 +86,43 @@ describe("HarnessCli.dispatchCommand (SPEC-0011 §4)", () => {
       }),
   )
 
-  it.effect(
-    "REQ-4.1: executes custom command registered via makeHarnessCommandRegistryLayer",
-    () =>
-      Effect.gen(function* () {
-        const testId = "HarnessCli.dispatchCommand::custom-layer"
-        const emptyFnIndex = new Map<string, IndexedEffectFn>()
+  it.effect("REQ-4.1: executes custom command registered via makeHarnessCommandRegistryLayer", () =>
+    Effect.gen(function* () {
+      const testId = "HarnessCli.dispatchCommand::custom-layer"
+      const emptyFnIndex = new Map<string, IndexedEffectFn>()
 
-        const customDescriptor: CliCommandPluginDescriptor = {
-          name: CliCommandName.make("custom-cmd"),
-          summary: "Custom test command",
-          execute: (args) =>
-            Effect.succeed({
-              exitCode: 0,
-              stdout: `custom:${args.join(",")}`,
-              stderr: "",
-            }),
-        }
+      const customDescriptor: CliCommandPluginDescriptor = {
+        name: CliCommandName.make("custom-cmd"),
+        summary: "Custom test command",
+        execute: (args) =>
+          Effect.succeed({
+            exitCode: 0,
+            stdout: `custom:${args.join(",")}`,
+            stderr: "",
+          }),
+      }
 
-        const customLayer = makeHarnessCommandRegistryLayer([customDescriptor])
+      const customLayer = makeHarnessCommandRegistryLayer([customDescriptor])
 
-        const { result, spans } = yield* runWithTestTracer(
-          testId,
-          dispatchCliCommand({
-            command: "custom-cmd",
-            args: ["alpha", "beta"],
-          }).pipe(Effect.provide(customLayer)),
-          emptyFnIndex,
-        )
+      const { result, spans } = yield* runWithTestTracer(
+        testId,
+        dispatchCliCommand({
+          command: "custom-cmd",
+          args: ["alpha", "beta"],
+        }).pipe(Effect.provide(customLayer)),
+        emptyFnIndex,
+      )
 
-        expect(result.exitCode).toBe(0)
-        expect(result.stdout).toBe("custom:alpha,beta")
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toBe("custom:alpha,beta")
 
-        const dispatchSpan = spans.find((s) => s.name === "HarnessCli.dispatchCommand")
-        expect(dispatchSpan?.name).toBe("HarnessCli.dispatchCommand")
-        expect(dispatchSpan?.exitTag).toBe("Success")
+      const dispatchSpan = spans.find((s) => s.name === "HarnessCli.dispatchCommand")
+      expect(dispatchSpan?.name).toBe("HarnessCli.dispatchCommand")
+      expect(dispatchSpan?.exitTag).toBe("Success")
 
-        const violations = yield* decideSpanBudgets({ spans: toSpanSamples(spans) })
-        expect(violations).toHaveLength(0)
-      }),
+      const violations = yield* decideSpanBudgets({ spans: toSpanSamples(spans) })
+      expect(violations).toHaveLength(0)
+    }),
   )
 
   it.effect(
@@ -137,10 +137,7 @@ describe("HarnessCli.dispatchCommand (SPEC-0011 §4)", () => {
           dispatchCliCommand({
             command: "unregistered-cmd",
             args: [],
-          }).pipe(
-            Effect.provide(HarnessCommandRegistryLive),
-            Effect.exit,
-          ),
+          }).pipe(Effect.provide(HarnessCommandRegistryLive), Effect.exit),
           emptyFnIndex,
         )
 

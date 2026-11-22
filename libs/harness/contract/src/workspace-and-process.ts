@@ -252,6 +252,32 @@ export class CliCommandNotFoundError extends Schema.TaggedError<CliCommandNotFou
   },
 ) {}
 
+export const CANONICAL_CLI_COMMAND_NAMES: ReadonlyArray<CliCommandName> = [
+  CliCommandName.make("guard"),
+  CliCommandName.make("route"),
+  CliCommandName.make("plan-check"),
+  CliCommandName.make("plan-synth"),
+  CliCommandName.make("repair"),
+  CliCommandName.make("verify"),
+  CliCommandName.make("done"),
+  CliCommandName.make("learn"),
+  CliCommandName.make("gc"),
+  CliCommandName.make("mutate"),
+  CliCommandName.make("bench"),
+  CliCommandName.make("benchmark"),
+  CliCommandName.make("ingest"),
+  CliCommandName.make("session"),
+  CliCommandName.make("doctor"),
+  CliCommandName.make("ontology"),
+  CliCommandName.make("report"),
+  CliCommandName.make("check-openapi"),
+  CliCommandName.make("check-migrations"),
+  CliCommandName.make("check-event-schemas"),
+  CliCommandName.make("scenario"),
+  CliCommandName.make("workflow"),
+  CliCommandName.make("help"),
+]
+
 export const McpToolName = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),
   Schema.check(Schema.isMaxLength(256)),

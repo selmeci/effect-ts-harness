@@ -21,6 +21,7 @@ enforced_by:
   - apps/harness-cli/src/index.ts
   - apps/harness-mcp/src/server.ts
 spans:
+  - SessionHandoff.decide
   - SessionReport.decide
   - LoopCircuitBreaker.decide
   - GraphGc.decide
@@ -86,7 +87,7 @@ Requirements follow EARS syntax. Each requirement is one sentence with bold keyw
 | REQ-3.1 | Event-driven       | **When** `extractTypeAwareGraphFromSource` inspects class declarations and synchronous reducer functions (`evolve*` or `*Reducer`), the type extractor **shall** extract generic `Schema.TaggedError` classes (`TaggedError<`) as `TaggedError` nodes and synchronous 2-parameter reducers as `EffectFn` nodes. | SessionReport.decide | test         |
 | REQ-3.2 | Event-driven       | **When** `extractWorkspaceTypeAwareGraph` links Vitest suites to `EffectFn` nodes, the graph extractor **shall** propagate `ExercisesSpan` edges through `Decider.make({ decide, evolve })` bindings and ignore `_tag` and `version` metadata fields in `dead-event-payload`.                                   | SessionReport.decide | test         |
 | REQ-3.3 | Unwanted behaviour | **If** a `TaggedError` declared in an active `EarsSpec` or `AdrDoc` has zero incoming `FailsWith` edges during `plan-check` in a workspace with `EffectFn` nodes, **then** the `handlePlanCheck` gate **shall** reject the plan before writing `plan-graph-snapshot.json`.                                      | SessionReport.decide | test         |
-| REQ-3.4 | Event-driven       | **When** `findDomainFiles` in `mutation-check.ts` and `resolvePackageTag` in `libs/harness/graph/src/extractor/extractor-types-and-helpers.ts` scan a workspace, the harness **shall** treat `libs/*/core/src` (`type:core`) identically to `libs/*/domain/src` (`type:domain`).                                                                              | MutationCheck.decide | test         |
+| REQ-3.4 | Event-driven       | **When** `findDomainFiles` in `mutation-check.ts` and `resolvePackageTag` in `libs/harness/graph/src/extractor/extractor-types-and-helpers.ts` scan a workspace, the harness **shall** treat `libs/*/core/src` (`type:core`) identically to `libs/*/domain/src` (`type:domain`).                                | MutationCheck.decide | test         |
 
 ### 4 · Guard policy ergonomics and Event Sourcing idiom routing
 

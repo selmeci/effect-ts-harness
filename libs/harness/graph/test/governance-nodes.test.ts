@@ -1,13 +1,21 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { Effect, Schema } from "effect"
+import { match } from "ts-pattern"
 import { describe, expect, it } from "vitest"
 import {
   buildHarnessGraph,
   checkEffectGraph,
+  decideEffectGraphPolicy,
   diffHarnessGraphs,
   extractWorkspaceTypeAwareGraph,
   findCallees,
   findCallers,
   loadWorkspaceGovernanceDocs,
+  loadWorkspaceGovernanceDocsWithViolations,
+  parseGovernanceDocFile,
+  parseGovernanceDocFileChecked,
   renderMermaid,
   resolveNode,
   toOmnigraphNdjson,
@@ -488,6 +496,136 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
       const res = checkEffectGraph(graph)
       expect(res.ok).toBe(true)
       expect(res.violations).toHaveLength(0)
+    })
+
+    it("SPEC-0029 REQ-4.1: ignores unmapped symbols for status: draft EARS specs", () => {
+      const graph = buildHarnessGraph({
+        earsSpecs: [
+          {
+            id: "harness:SPEC-DRAFT",
+            title: "Draft Spec",
+            status: "draft",
+            path: "libs/harness/docs/specs/draft.md",
+            enforcedByFiles: [],
+            referencedSpans: ["Future.span"],
+            referencedServices: ["FutureService"],
+            referencedErrors: ["FutureError"],
+          },
+        ],
+      })
+      const res = checkEffectGraph(graph)
+      expect(res.ok).toBe(true)
+      expect(res.violations).toHaveLength(0)
+    })
+
+    it("SPEC-0029 REQ-4.3: fails closed on unrecognized spec/adr status via parseGovernanceDocFileChecked and GraphPolicy.decide", () => {
+      const okDraft = parseGovernanceDocFileChecked(
+        "libs/harness/docs/specs/draft.md",
+        "---\nid: harness:SPEC-1\nstatus: draft\n---\n",
+      )
+      expect(okDraft._tag).toBe("Ok")
+
+      const badAdrDraft = parseGovernanceDocFileChecked(
+        "libs/harness/docs/adr/0001.md",
+        "---\nid: harness:ADR-1\nstatus: draft\n---\n",
+      )
+      expect(badAdrDraft._tag).toBe("InvalidStatus")
+
+      const badSpecStatus = parseGovernanceDocFileChecked(
+        "libs/harness/docs/specs/bogus.md",
+        "---\nid: harness:SPEC-2\nstatus: bogus\n---\n",
+      )
+      expect(badSpecStatus._tag).toBe("InvalidStatus")
+
+      const tempDir = mkdtempSync(join(tmpdir(), "harness-gov-status-failclosed-"))
+      try {
+        mkdirSync(join(tempDir, "libs/harness/docs/specs"), { recursive: true })
+        writeFileSync(join(tempDir, "pnpm-workspace.yaml"), "packages:\n  - 'libs/**'\n")
+        writeFileSync(
+          join(tempDir, "libs/harness/docs/specs/2026-11-22-bogus.md"),
+          "---\nid: harness:SPEC-9999\ntitle: Bogus\nstatus: bogus\n---\n",
+        )
+        const loaded = loadWorkspaceGovernanceDocsWithViolations(tempDir, testHostIo)
+        expect(loaded.docs).toHaveLength(0)
+        expect(loaded.violations).toHaveLength(1)
+        const extracted = Effect.runSync(extractWorkspaceTypeAwareGraph(tempDir, testHostIo))
+        const policyRes = Effect.runSync(decideEffectGraphPolicy(extracted))
+        expect(policyRes.ok).toBe(false)
+        expect(
+          policyRes.violations.some(
+            (v) => v.rule === "unmapped-spec-symbol" && v.message.includes("bogus"),
+          ),
+        ).toBe(true)
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    })
+
+    it("SPEC-0029: exercises governance-doc-parser Skip, AdrDoc, quoted frontmatter, heading title fallback, and null compatibility wrapper", () => {
+      expect(parseGovernanceDocFileChecked("docs/notes.md", "---\nid: x\n---\n")._tag).toBe("Skip")
+      expect(parseGovernanceDocFileChecked("libs/harness/docs/specs/a.md", "no fm")._tag).toBe(
+        "Skip",
+      )
+      expect(
+        parseGovernanceDocFileChecked("libs/harness/docs/specs/a.md", "---\ntitle: NoId\n---\n")
+          ._tag,
+      ).toBe("Skip")
+      expect(
+        parseGovernanceDocFileChecked(
+          "libs/harness/docs/specs/missing-status.md",
+          "---\nid: harness:SPEC-1\n---\n",
+        )._tag,
+      ).toBe("InvalidStatus")
+      expect(
+        parseGovernanceDocFileChecked(
+          "libs/harness/docs/adr/bad-adr.md",
+          "---\nid: harness:ADR-9\nstatus: bogus\n---\n",
+        )._tag,
+      ).toBe("InvalidStatus")
+
+      const validAdr = parseGovernanceDocFileChecked(
+        "libs/harness/docs/adr/0009.md",
+        '\uFEFF---\n# comment\nid: "harness:ADR-9"\nstatus: \'accepted\'\nenforced_by: [libs/a.ts]\nspans: []\nservices:\n  - "SvcTag"\nerrors:\n  - ErrA # inline\n---\n# Heading Fallback Title\n',
+      )
+      match(validAdr)
+        .with({ _tag: "Ok" }, ({ node }) => {
+          expect(node._tag).toBe("AdrDoc")
+          expect(node.id).toBe("harness:ADR-9")
+          expect(node.title).toBe("Heading Fallback Title")
+          expect(node.enforcedByFiles).toEqual(["libs/a.ts"])
+          expect(node.referencedSpans).toEqual([])
+          expect(node.referencedServices).toEqual(["SvcTag"])
+          expect(node.referencedErrors).toEqual(["ErrA"])
+        })
+        .with({ _tag: "Skip" }, { _tag: "InvalidStatus" }, () => {
+          expect.unreachable("Expected Ok for valid ADR")
+        })
+        .exhaustive()
+      expect(
+        parseGovernanceDocFile(
+          "libs/harness/docs/specs/a.md",
+          "---\nid: harness:SPEC-1\nstatus: bogus\n---\n",
+        ),
+      ).toBeNull()
+      expect(
+        parseGovernanceDocFile(
+          "libs/harness/docs/specs/a.md",
+          "---\nid: harness:SPEC-1\nstatus: draft\n---\n# Title\n",
+        )?.id,
+      ).toBe("harness:SPEC-1")
+
+      const explicitTitleAdr = parseGovernanceDocFileChecked(
+        "libs/harness/docs/adr/0010.md",
+        "---\nid: harness:ADR-10\ntitle: Explicit FM Title\nstatus: accepted\n---\n# Body Heading\n",
+      )
+      match(explicitTitleAdr)
+        .with({ _tag: "Ok" }, ({ node }) => {
+          expect(node.title).toBe("Explicit FM Title")
+        })
+        .with({ _tag: "Skip" }, { _tag: "InvalidStatus" }, () => {
+          expect.unreachable("Expected Ok for explicit title ADR")
+        })
+        .exhaustive()
     })
   })
 

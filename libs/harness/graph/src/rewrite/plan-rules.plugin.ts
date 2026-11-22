@@ -42,7 +42,7 @@ export const findPhase1PlanPatches = (
   for (const [specKey, specNode] of sortedSpecs) {
     const isActiveSpec = match(specNode.status)
       .with("proposed", "accepted", () => true)
-      .with("superseded", "deprecated", () => false)
+      .with("draft", "superseded", "deprecated", () => false)
       .exhaustive()
     if (!isActiveSpec) {
       continue
@@ -61,7 +61,13 @@ export const findPhase1PlanPatches = (
         ? specNode.referencedSpans
         : match(specNode.status)
             .with("proposed", () => [`${sanitizeDpoIdentifier(specNode.id)}.execute`])
-            .with("accepted", "superseded", "deprecated", () => [] as ReadonlyArray<string>)
+            .with(
+              "draft",
+              "accepted",
+              "superseded",
+              "deprecated",
+              () => [] as ReadonlyArray<string>,
+            )
             .exhaustive()
 
     // PLAN-01: WHEN clause -> Input SchemaDef + Use-Case EffectFn stub + EffectSignature + TraceabilityTuple
@@ -288,7 +294,10 @@ export const findPhase1PlanPatches = (
         match<string>(e.role)
           .with("realizing-symbol", "specified-target", () => {
             const fnNode = ctx.fnsByKey.get(e.entityKey)
-            if (fnNode !== undefined && !specRealizingFns.some((item) => item.key === e.entityKey)) {
+            if (
+              fnNode !== undefined &&
+              !specRealizingFns.some((item) => item.key === e.entityKey)
+            ) {
               specRealizingFns.push({ key: e.entityKey, node: fnNode })
             }
           })
@@ -312,7 +321,11 @@ export const findPhase1PlanPatches = (
       const alreadyWiredOnSig =
         sigRelId !== undefined &&
         (ctx.edgesByRelId.get(sigRelId) ?? []).some(
-          (e) => e.entityKey === errKey && match<string>(e.role).with("fails-with", () => true).otherwise(() => false),
+          (e) =>
+            e.entityKey === errKey &&
+            match<string>(e.role)
+              .with("fails-with", () => true)
+              .otherwise(() => false),
         )
 
       if (existingErr !== undefined && (targetFn === undefined || alreadyWiredOnSig)) {
@@ -389,7 +402,11 @@ export const findPhase1PlanPatches = (
         return (
           sId !== undefined &&
           (ctx.edgesByRelId.get(sId) ?? []).some(
-            (e) => e.entityKey === svcKey && match<string>(e.role).with("requires-service", () => true).otherwise(() => false),
+            (e) =>
+              e.entityKey === svcKey &&
+              match<string>(e.role)
+                .with("requires-service", () => true)
+                .otherwise(() => false),
           )
         )
       })
@@ -470,7 +487,11 @@ export const findPhase1PlanPatches = (
           preservedKeys.push(NodeKey.make(sigRelId))
         }
         const alreadyReq = (ctx.edgesByRelId.get(sigRelId) ?? []).some(
-          (e) => e.entityKey === svcKey && match<string>(e.role).with("requires-service", () => true).otherwise(() => false),
+          (e) =>
+            e.entityKey === svcKey &&
+            match<string>(e.role)
+              .with("requires-service", () => true)
+              .otherwise(() => false),
         )
         if (!alreadyReq) {
           insertedEdges.push(makePlaysRoleEdge(sigRelId, svcKey, "requires-service"))

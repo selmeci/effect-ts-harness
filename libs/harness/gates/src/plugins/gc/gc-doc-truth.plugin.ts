@@ -8,6 +8,7 @@ import {
   GcFindingKind,
   type GraphEntropyInput,
   collectMarkdownFilesRecursive,
+  parseGovernanceDocFrontmatter,
   readdirOrReport,
   readTextOrReport,
 } from "./gc-helpers.js"
@@ -17,8 +18,9 @@ import {
   extractGateRuleIdsFromSources,
 } from "./gc-rule-ids.js"
 import { checkHookMatcherToolParity } from "./gc-hook-parity.js"
+import { auditCatalogDocTruthInContent, checkCatalogDocTruth } from "./gc-catalog-doc-truth.js"
 
-export { extractGateRuleIdsFromSources }
+export { auditCatalogDocTruthInContent, extractGateRuleIdsFromSources }
 
 const PkgManifestDepsSchema = Schema.Struct({
   name: Schema.optional(Schema.String),
@@ -641,7 +643,11 @@ export const evaluateDocTruthPlugin = (input: GraphEntropyInput): ReadonlyArray<
       }
     }
 
-    if (docFilesForPaths.has(absDoc)) {
+    const isDraftSpec =
+      (relDoc.includes("/docs/specs/") || relDoc.startsWith("docs/specs/")) &&
+      parseGovernanceDocFrontmatter(relDoc, content)?.status === "draft"
+
+    if (docFilesForPaths.has(absDoc) && !isDraftSpec) {
       const seenPaths = new Set<string>()
       for (const m of content.matchAll(/`([^`\n]+)`/g)) {
         const raw = m[1]!
@@ -723,6 +729,7 @@ export const evaluateDocTruthPlugin = (input: GraphEntropyInput): ReadonlyArray<
   checkMermaidDependencyDrift(repoRoot, hostIo, depsByPkg, pkgByRelDir, findings)
   checkDocBannedOrPhantomTech(repoRoot, hostIo, findings)
   checkAstGateRuleClosure(repoRoot, hostIo, findings)
+  checkCatalogDocTruth(repoRoot, hostIo, findings)
 
   return findings
 }

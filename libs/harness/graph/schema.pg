@@ -141,7 +141,7 @@ node EarsSpec
   id: String @key @description("Canonical EARS spec identifier, e.g. harness:SPEC-0001")
   qualname: String @index
   title: String @index
-  status: enum(accepted, proposed, superseded, deprecated) @index
+  status: enum(draft, accepted, proposed, superseded, deprecated) @index
   date: String?
   path: String @index
   enforcedByFiles: [String]

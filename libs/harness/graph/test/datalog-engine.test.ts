@@ -1601,4 +1601,49 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
         expect(directPipeline.iterations).toBeGreaterThanOrEqual(1)
       }),
   )
+
+  it.effect(
+    "SPEC-0029 REQ-4.1: INF-07 unmapped-spec-symbol skips status: draft specs while enforcing proposed and accepted",
+    () =>
+      Effect.gen(function* () {
+        const graph = buildHarnessGraph({
+          earsSpecs: [
+            {
+              id: "harness:SPEC-DRAFT",
+              title: "Draft Backlog Spec",
+              status: "draft",
+              path: "libs/harness/docs/specs/draft.md",
+              enforcedByFiles: [],
+              referencedSpans: ["Future.unimplementedSpan"],
+              referencedServices: ["FutureService"],
+              referencedErrors: ["FutureError"],
+            },
+            {
+              id: "harness:SPEC-PROPOSED",
+              title: "Active Proposed Spec",
+              status: "proposed",
+              path: "libs/harness/docs/specs/proposed.md",
+              enforcedByFiles: [],
+              referencedSpans: ["Active.missingSpan"],
+              referencedServices: [],
+              referencedErrors: [],
+            },
+          ],
+        })
+        const inferred = yield* decideGraphInference(graph)
+        expect(
+          inferred.antiPatterns.some(
+            (a) => a.ruleId === "unmapped-spec-symbol" && a.path.includes("harness:SPEC-DRAFT"),
+          ),
+        ).toBe(false)
+        expect(
+          inferred.antiPatterns.some(
+            (a) =>
+              a.ruleId === "unmapped-spec-symbol" &&
+              a.path.includes("harness:SPEC-PROPOSED") &&
+              a.path.includes("Active.missingSpan"),
+          ),
+        ).toBe(true)
+      }),
+  )
 })
