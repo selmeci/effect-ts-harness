@@ -14,6 +14,8 @@ import {
   SHARED_STEP_UNIT_ID,
   UnitOutcome,
   UnitRejection,
+  WORKFLOW_TIMEOUT_BUDGETS,
+  type WorkflowTimeoutMs,
   WorkspaceFilePath,
   WorkspaceFsError,
   WorkspaceFsOperation,
@@ -46,7 +48,7 @@ export interface UnitVerifierOptions {
     | undefined
 }
 
-const DEFAULT_VERIFY_TIMEOUT_MS = 120_000
+const DEFAULT_VERIFY_TIMEOUT_MS: WorkflowTimeoutMs = WORKFLOW_TIMEOUT_BUDGETS.unitVerifyMs
 
 const HARNESS_STAMP_ARTIFACTS: ReadonlySet<string> = new Set([
   ".harness/verify-stamp.json",

@@ -1759,4 +1759,97 @@ describe("REQ-3.1: Differential live HarnessTaskWorkflow projections vs rebuildW
         expect(byRun.get(planMerge.runId)?.run.state).toBe("running")
       }),
   )
+
+  it.effect(
+    "SPEC-0027 REQ-1.3: replayActivityMessage and reconstructJournalViews fail closed on unrecognized activity and deferred names",
+    () =>
+      Effect.gen(function* () {
+        const unitId = WorkUnitId.make("u-fail-proto")
+        const plan: CompiledPlan = {
+          runId: WorkflowRunIdSchema.make("run-fail-proto-1"),
+          level: "slice",
+          planSha: PLAN_SHA,
+          baseSha: BASE_SHA,
+          mode: { _tag: "Manual" },
+          units: [makePackageUnit(unitId, "@harness/fail-proto", ["libs/fp/src"], 0)],
+          sharedStepPaths: [],
+        }
+        const now = yield* Clock.currentTimeMillis
+        const unitStatusMap = new Map<WorkUnitId, WorkflowUnitStatus>([[unitId, "pending"]])
+        const attemptsMap = new Map<WorkflowAttemptKey, WorkflowAttemptRecord>()
+        const mergeConflictUnits = new Set<WorkUnitId>()
+        let runState: WorkflowRunState = "running"
+
+        const badActErr = yield* replayActivityMessage({
+          operation: WorkflowStoreOperation.make("WorkflowReadModel.rebuild"),
+          plan,
+          activityName: "UnrecognizedActivity/u-fail-proto/1",
+          actReplyStr: undefined,
+          hasRunReply: false,
+          nowValue: WorkflowTimestampMs.make(Math.floor(now)),
+          unitStatusMap,
+          attemptsMap,
+          mergeConflictUnits,
+          getRunState: () => runState,
+          setRunState: (next) => {
+            runState = next
+          },
+        }).pipe(Effect.flip)
+        expect(badActErr._tag).toBe("WorkflowStoreUnavailableError")
+
+        const client = makeInMemoryWorkflowOmnigraphClient()
+        const encodeRunPayload = Schema.encodeEffect(
+          Schema.fromJsonString(Schema.Struct({ plan: CompiledPlanSchema })),
+        )
+        const execId = yield* executionIdOf(plan)
+        let rawId = 600000000000000001n
+        const pushMsg = (tag: "run" | "deferred", payload: string) =>
+          Effect.promise(async () => {
+            const messageKey = MessageKey.make(rawId.toString())
+            rawId += 1n
+            const seqRes = encodeSeqKey(messageKey)
+            const seqKey = match(seqRes)
+              .with({ _tag: "Success" }, ({ success }) => success)
+              .with({ _tag: "Failure" }, ({ failure }) => expect.unreachable(failure))
+              .exhaustive()
+            await client.queries.invoke("wf_insert_request_message", {
+              branch: "main",
+              expectMutation: true,
+              params: {
+                messageKey,
+                seqKey,
+                primaryKeyHash: null,
+                shardId: "default:0",
+                entityType: "Workflow/HarnessTaskWorkflow",
+                entityId: execId,
+                tag,
+                payload,
+                headers: "{}",
+                traceId: null,
+                spanId: null,
+                sampled: null,
+                requestId: messageKey,
+                deliverAtMs: null,
+              },
+            })
+          })
+
+        yield* pushMsg("run", yield* encodeRunPayload({ plan }))
+        yield* pushMsg(
+          "deferred",
+          JSON.stringify({
+            name: "unit/u-fail-proto/1/r1",
+            exit: { _tag: "Success", value: {} },
+          }),
+        )
+
+        const badDefErr = yield* reconstructJournalViews(
+          CANONICAL_ROOT,
+          WorkflowStoreOperation.make("WorkflowReadModel.rebuild"),
+          WorkflowTimestampMs.make(Math.floor(now)),
+          { client },
+        ).pipe(Effect.flip)
+        expect(badDefErr._tag).toBe("WorkflowStoreUnavailableError")
+      }),
+  )
 })

@@ -225,6 +225,7 @@ export const SelfDogfoodingRuleId = Schema.Literals([
   "locale-dependent-sort",
   "unhandled-effect-promise",
   "provision-tap-error-leak",
+  "omnigraph-fenced-mutation",
 ])
 export type SelfDogfoodingRuleId = typeof SelfDogfoodingRuleId.Type
 

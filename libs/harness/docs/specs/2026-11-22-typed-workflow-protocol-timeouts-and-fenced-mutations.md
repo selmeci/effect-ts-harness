@@ -1,29 +1,42 @@
 ---
 id: harness:SPEC-0027
 title: Typed Workflow Activity Protocol, Single-Source Timeout Budgets, and Fenced Omnigraph Mutations
-status: proposed
+status: accepted
 archetype: framework
 date: 2026-11-22
 owners:
   - "@harness/architecture"
 scope: harness
+informed_by:
+  - harness:ADR-0021
 enforced_by:
   - libs/harness/contract/src/workflow-protocol.ts
   - libs/harness/contract/src/workflow-timeouts.ts
   - libs/harness/contract/src/index.ts
+  - libs/harness/contract/src/ast-and-gate-primitives.ts
   - libs/harness/gates/src/harness-task-workflow.ts
   - libs/harness/gates/src/harness-task-workflow-projections.ts
   - libs/harness/gates/src/plugins/ast-workflow-fence-law.ts
   - libs/harness/gates/src/plugins/self-dogfooding-plugin.ts
+  - libs/harness/gates/src/ast-cache.ts
   - libs/harness/infra/src/workflow/read-model-rebuild.ts
   - libs/harness/infra/src/workflow/read-model-rebuild-journal.ts
   - libs/harness/infra/src/workflow/daemon-client.ts
   - libs/harness/infra/src/unix-socket-daemon-live.ts
   - libs/harness/infra/src/workflow/unit-verifier-live.ts
+  - libs/harness/infra/src/omnigraph-workflow-store.ts
+  - libs/harness/infra/src/omnigraph-message-storage.ts
+  - libs/harness/infra/src/writer-lease.ts
+  - libs/harness/infra/src/workflow-engine-live.ts
   - apps/harness-mcp/src/daemon/workflow-rpc-complete-helper.ts
   - apps/harness-mcp/src/daemon/workflow-rpc-daemon-helper.ts
+  - apps/harness-mcp/src/daemon/workflow-rpc-status-helper.ts
   - libs/harness/contract/test/workflow-protocol.test.ts
   - libs/harness/gates/test/self-dogfooding-capability-plugins.test.ts
+  - libs/harness/infra/test/workflow-replay-differential.test.ts
+  - libs/harness/infra/test/worktree-and-daemon-protocol.test.ts
+  - libs/harness/infra/test/workflow-storage-fencing-and-recovery.test.ts
+  - libs/harness/infra/test/workflow-read-model.test.ts
 spans:
   - Harness.executeTaskWorkflow
   - Harness.rebuildWorkflowReadModelViews

@@ -366,6 +366,24 @@ export {
   toBoundedReason,
 } from "./workflow-storage.js"
 export {
+  WORKFLOW_TIMEOUT_BUDGETS,
+  WorkflowPollAttempts,
+  WorkflowPollBudget,
+  WorkflowTimeoutBudgets,
+  WorkflowTimeoutMs,
+  validateWorkflowTimeoutBudgets,
+} from "./workflow-timeouts.js"
+export {
+  WorkflowActivityName,
+  WorkflowActivityTag,
+  WorkflowDeferredTag,
+  WorkflowRunAbortTarget,
+  decodeWorkflowActivityName,
+  decodeWorkflowDeferredName,
+  encodeWorkflowActivityName,
+  encodeWorkflowDeferredName,
+} from "./workflow-protocol.js"
+export {
   BatchMutantOutcomeResult,
   BatchMutantResultEntry,
   BatchMutantResultsSchema,

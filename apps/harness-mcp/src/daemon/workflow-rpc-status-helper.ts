@@ -7,7 +7,6 @@ import {
   type CompiledPlan,
   type EscalationOrdinal,
   type LeaseEpoch,
-  PendingDeferredName,
   SHARED_STEP_UNIT_ID,
   type SliceBranchName,
   TaskRunAbortedError,
@@ -19,6 +18,7 @@ import {
   type WorkUnitId,
   type WorkflowAttemptRecord,
   WorkflowDaemonCapability,
+  WorkflowDeferredTag,
   type WorkflowExecutionId,
   WorkflowPendingDeferred,
   WorkflowProjectionStatus,
@@ -35,6 +35,7 @@ import {
   type WorkflowUnitRecord,
   WorkspaceFsError,
   WriterLeaseHeldError,
+  encodeWorkflowDeferredName,
   isPureInterruptCause,
   makeWorkflowAttemptKey,
   toBoundedReason,
@@ -267,7 +268,9 @@ const discoverPendingDeferreds = Effect.fn("WorkflowRpcDaemon.discoverPendingDef
         .with({ _tag: "None" }, () => {
           pending.push(
             WorkflowPendingDeferred.cases.LlmPhase.make({
-              deferredName: PendingDeferredName.make("llm-phase-done"),
+              deferredName: encodeWorkflowDeferredName(
+                WorkflowDeferredTag.cases.LlmPhaseDone.make({}),
+              ),
             }),
           )
         })

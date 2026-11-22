@@ -7,12 +7,14 @@ import {
   LeaseFilePath,
   LeaseHolderId,
   MessageKey,
+  WORKFLOW_TIMEOUT_BUDGETS,
   toBoundedReason,
   type WorkflowGqParamsMap,
   type WorkflowGqQueryName,
   type WorkflowStoreFailureReason,
   WorkflowStoreOperation,
   WorkflowStoreUnavailableError,
+  type WorkflowTimeoutMs,
   WriterLeaseHeldError,
 } from "@harness/contract"
 import {
@@ -41,7 +43,8 @@ export const WORKFLOW_MAX_CONCURRENT_HTTP = 12
 export const WORKFLOW_MAX_OCC_RETRIES = 48
 
 /** Per-HTTP request timeout (ms) enforced via `AbortSignal.timeout` on GQ store calls. */
-export const WORKFLOW_HTTP_TIMEOUT_MS = 15_000
+export const WORKFLOW_HTTP_TIMEOUT_MS: WorkflowTimeoutMs =
+  WORKFLOW_TIMEOUT_BUDGETS.httpRequestTimeoutMs
 
 const DEFAULT_FENCE_LOCK_PATH = LeaseFilePath.make("/harness/daemon.lock")
 const NO_ACTIVE_LEASE_HOLDER = LeaseHolderId.make("no-active-lease")
@@ -432,6 +435,7 @@ export interface QuarantineOrphanEntityMessagesInput {
   readonly hostIo?: SyncHostIo | undefined
   readonly env?: Readonly<Record<string, string | undefined>> | undefined
   readonly expectedLeaseEpoch?: LeaseEpoch | undefined
+  readonly expectedLeaseOwner?: string | undefined
   readonly lockFilePath?: LeaseFilePath | undefined
 }
 
@@ -547,6 +551,7 @@ export const quarantineOrphanEntityMessages = Effect.fn("WorkflowStore.quarantin
           },
           expectMutation: true,
           expectedLeaseEpoch: input.expectedLeaseEpoch,
+          expectedLeaseOwner: input.expectedLeaseOwner,
           lockFilePath: input.lockFilePath,
           client: input.client,
           hostIo: input.hostIo,
@@ -561,6 +566,7 @@ export const quarantineOrphanEntityMessages = Effect.fn("WorkflowStore.quarantin
         params: { messageKeys },
         expectMutation: true,
         expectedLeaseEpoch: input.expectedLeaseEpoch,
+        expectedLeaseOwner: input.expectedLeaseOwner,
         lockFilePath: input.lockFilePath,
         client: input.client,
         hostIo: input.hostIo,

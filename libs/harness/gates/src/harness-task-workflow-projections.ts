@@ -21,6 +21,8 @@ import {
   type UnitRejection,
   WaveIndex,
   type WorkUnitId,
+  type WorkflowActivityName,
+  WorkflowActivityTag,
   type WorkflowExecutionId,
   type WorkflowLevel,
   WorkflowStoreUnavailableError,
@@ -32,6 +34,7 @@ import {
   WorkspaceFsError,
   WorkspaceFsOperation,
   WriterLeaseHeldError,
+  encodeWorkflowActivityName,
   makeWorkflowAttemptKey,
   makeWorkflowUnitKey,
   wavesOf,
@@ -78,8 +81,8 @@ const currentTimestampMs = Effect.gen(function* () {
   return WorkflowTimestampMs.make(Math.max(0, Math.floor(millis)))
 })
 
-export const cycleSuffixFor = (escalationOrdinal: EscalationOrdinal): string =>
-  escalationOrdinal === 1 ? "" : `/r${escalationOrdinal}`
+const encodeProjectionActivityName = (tag: WorkflowActivityTag): WorkflowActivityName =>
+  encodeWorkflowActivityName(tag)
 
 export const unitKindOf = (unit: CompiledWorkUnit): WorkflowUnitKind =>
   match(unit)
@@ -194,14 +197,14 @@ export interface UnitCycleDescriptor {
 }
 
 export const projectRunStateActivity = (
-  activityName: string,
+  activityTag: WorkflowActivityTag,
   plan: CompiledPlan,
   executionId: WorkflowExecutionId,
   state: "running" | "waiting" | "completed" | "aborted",
   includePlanJson: boolean,
 ) =>
   Activity.make({
-    name: activityName,
+    name: encodeProjectionActivityName(activityTag),
     error: WorkflowProjectionError,
     execute: withProjectionRetry(
       Effect.gen(function* () {
@@ -223,7 +226,7 @@ export const projectRunStateActivity = (
 
 export const projectInitialViewsActivity = (plan: CompiledPlan, executionId: WorkflowExecutionId) =>
   Activity.make({
-    name: "ProjectRunStarted",
+    name: encodeProjectionActivityName(WorkflowActivityTag.cases.ProjectRunStarted.make({})),
     error: WorkflowProjectionError,
     execute: withProjectionRetry(
       Effect.gen(function* () {
@@ -275,7 +278,13 @@ export const projectUnitAttemptDispatched = (
   escalationOrdinal: EscalationOrdinal,
 ) =>
   Activity.make({
-    name: `ProjectUnitDispatched/${descriptor.unitId}/${attempt}${cycleSuffixFor(escalationOrdinal)}`,
+    name: encodeProjectionActivityName(
+      WorkflowActivityTag.cases.ProjectUnitDispatched.make({
+        unitId: descriptor.unitId,
+        attempt,
+        escalationOrdinal,
+      }),
+    ),
     error: WorkflowProjectionError,
     execute: withProjectionRetry(
       Effect.gen(function* () {
@@ -317,12 +326,17 @@ export const projectUnitOutcome = (
   escalationOrdinal: EscalationOrdinal,
   outcome: UnitOutcome,
 ) => {
-  const cycleSuffix = cycleSuffixFor(escalationOrdinal)
   const runner = runnerOfMode(plan.mode)
   return match(outcome)
     .with({ _tag: "Completed" }, (completed) =>
       Activity.make({
-        name: `ProjectUnitCompleted/${descriptor.unitId}/${attempt}${cycleSuffix}`,
+        name: encodeProjectionActivityName(
+          WorkflowActivityTag.cases.ProjectUnitCompleted.make({
+            unitId: descriptor.unitId,
+            attempt,
+            escalationOrdinal,
+          }),
+        ),
         error: WorkflowProjectionError,
         execute: withProjectionRetry(
           Effect.gen(function* () {
@@ -359,7 +373,13 @@ export const projectUnitOutcome = (
     )
     .with({ _tag: "Rejected" }, (rejected) =>
       Activity.make({
-        name: `ProjectUnitRejected/${descriptor.unitId}/${attempt}${cycleSuffix}`,
+        name: encodeProjectionActivityName(
+          WorkflowActivityTag.cases.ProjectUnitRejected.make({
+            unitId: descriptor.unitId,
+            attempt,
+            escalationOrdinal,
+          }),
+        ),
         error: WorkflowProjectionError,
         execute: withProjectionRetry(
           Effect.gen(function* () {
@@ -386,7 +406,13 @@ export const projectUnitOutcome = (
     )
     .with({ _tag: "Escalated" }, (escalated) =>
       Activity.make({
-        name: `ProjectUnitAttemptEscalated/${descriptor.unitId}/${attempt}${cycleSuffix}`,
+        name: encodeProjectionActivityName(
+          WorkflowActivityTag.cases.ProjectUnitAttemptEscalated.make({
+            unitId: descriptor.unitId,
+            attempt,
+            escalationOrdinal,
+          }),
+        ),
         error: WorkflowProjectionError,
         execute: withProjectionRetry(
           Effect.gen(function* () {
@@ -434,10 +460,10 @@ export const projectUnitEscalated = (
   ownedRelPaths: ReadonlyArray<OwnedRelPath>,
   status: WorkflowUnitStatus,
   runState: "waiting" | "running",
-  activityName: string,
+  activityTag: WorkflowActivityTag,
 ) =>
   Activity.make({
-    name: activityName,
+    name: encodeProjectionActivityName(activityTag),
     error: WorkflowProjectionError,
     execute: withProjectionRetry(
       Effect.gen(function* () {

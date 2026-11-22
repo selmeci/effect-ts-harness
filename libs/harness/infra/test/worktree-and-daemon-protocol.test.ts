@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } fr
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Schema, Tracer } from "effect"
+import { Effect, Result, Schema, Tracer } from "effect"
 import { match } from "ts-pattern"
 import {
   AbsoluteRepoRoot,
@@ -13,16 +13,22 @@ import {
   LeaseEpoch,
   PackageStampHash,
   WORKFLOW_DAEMON_PROTOCOL_VERSION,
+  WORKFLOW_TIMEOUT_BUDGETS,
   WorkUnitId,
   WorkflowCompleteRequest,
   WorkflowCompleteResponse,
   WorkflowDaemonCapability,
   WorkflowExecutionId,
+  WorkflowPollAttempts,
+  WorkflowPollBudget,
   WorkflowProtocolVersion,
   WorkflowRunId,
+  WorkflowTimeoutBudgets,
+  WorkflowTimeoutMs,
   WorkspaceFilePath,
   OwnedRelPath,
   UnitOutcome,
+  validateWorkflowTimeoutBudgets,
 } from "@harness/contract"
 import { UnitAgentDispatcher } from "@harness/service"
 import {
@@ -760,4 +766,19 @@ describe("WF-2 Worktree Validation & Daemon Protocol", () => {
       expect(dispatcher.runnerKind).toBe("placeholder")
     }).pipe(Effect.provide(UnitAgentDispatcherLive)),
   )
+
+  it("SPEC-0027 REQ-2.1/REQ-2.2: WORKFLOW_TIMEOUT_BUDGETS satisfies monotonicity and matches daemon/client constants", () => {
+    const validated = validateWorkflowTimeoutBudgets(WORKFLOW_TIMEOUT_BUDGETS)
+    expect(Result.isSuccess(validated)).toBe(true)
+    const parsedBudgets: WorkflowTimeoutBudgets =
+      Schema.decodeSync(WorkflowTimeoutBudgets)(WORKFLOW_TIMEOUT_BUDGETS)
+    const pollBudget: WorkflowPollBudget = Schema.decodeSync(WorkflowPollBudget)({
+      maxAttempts: WorkflowPollAttempts.make(parsedBudgets.pollSettleMaxAttempts),
+      intervalMs: WorkflowTimeoutMs.make(parsedBudgets.pollSettleIntervalMs),
+    })
+    expect(pollBudget.maxAttempts * pollBudget.intervalMs).toBe(2_000)
+    expect(WORKFLOW_COMPLETE_IPC_TIMEOUT_MS).toBe(parsedBudgets.workflowCompleteIpcMs)
+    expect(DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS).toBe(parsedBudgets.defaultServerSocketMs)
+    expect(WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS).toBe(parsedBudgets.workflowServerSocketMs)
+  })
 })

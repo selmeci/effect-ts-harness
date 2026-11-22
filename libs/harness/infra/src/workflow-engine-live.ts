@@ -64,6 +64,7 @@ const makeHarnessShardingLayer = (
             hostIo: options.hostIo,
             env: options.env,
             expectedLeaseEpoch: options.expectedLeaseEpoch,
+            expectedLeaseOwner: options.expectedLeaseOwner,
             lockFilePath: options.lockFilePath,
           })
         }

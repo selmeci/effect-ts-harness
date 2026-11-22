@@ -4,6 +4,7 @@ import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
+import { match } from "ts-pattern"
 import {
   AstGatePackageTag,
   AstSourceContent,
@@ -1546,6 +1547,140 @@ describe("Self-Dogfooding Capability Plugins & AST Gate Rules (SPEC-0011)", () =
           "apps/harness-cli/src/evade-promise.ts",
           "apps/harness-cli/src/evade-promise.ts",
         ])
+      }),
+  )
+
+  it.effect(
+    "SPEC-0027 REQ-3.1: flags unfenced expectMutation: true calls and permits fenced or exempt lease calls",
+    () =>
+      Effect.gen(function* () {
+        const cleanReport = yield* SelfDogfooding.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/infra/src/fenced-calls.ts"),
+              content: AstSourceContent.make(
+                [
+                  "declare function invokeWorkflowStoreQuery(input: unknown): unknown",
+                  "declare function invokeWorkflowStoreQueryWithMeta(input: unknown): unknown",
+                  "declare function invokeWorkflowStoreQueryOnce(input: unknown): unknown",
+                  "declare const WorkflowStore: { invoke: (i: unknown) => unknown; invokeWithMeta: (i: unknown) => unknown }",
+                  "declare const otherClient: { invoke: (i: unknown) => unknown }",
+                  "declare const expectedLeaseEpoch: number",
+                  "declare const fenceConfig: object",
+                  "declare const target: object",
+                  "declare const storeTarget: object",
+                  "declare const cond: boolean",
+                  'export const okRead = invokeWorkflowStoreQuery({ queryName: "wf_get_run", expectMutation: false })',
+                  'export const okNoFlag = invokeWorkflowStoreQuery({ queryName: "wf_get_run" })',
+                  "export const okNonObj = invokeWorkflowStoreQuery(fenceConfig)",
+                  "export const okZeroArg = invokeWorkflowStoreQuery()",
+                  'export const okExplicit = invokeWorkflowStoreQuery({ queryName: "wf_insert_run", expectMutation: true, expectedLeaseEpoch: expectedLeaseEpoch })',
+                  'export const okTemplateProp = invokeWorkflowStoreQuery({ [`queryName`]: "wf_insert_run", ["expectMutation"]: true, [`expectedLeaseEpoch`]: expectedLeaseEpoch })',
+                  'export const okShorthand = invokeWorkflowStoreQueryWithMeta({ queryName: "wf_insert_run", expectMutation: true, expectedLeaseEpoch })',
+                  'export const okFenceSpread = invokeWorkflowStoreQueryOnce({ queryName: "wf_insert_run", expectMutation: true, ...fenceConfig })',
+                  'export const okTargetSpread = WorkflowStore.invoke({ queryName: "wf_insert_run", expectMutation: true, ...target })',
+                  'export const okStoreTarget = WorkflowStore.invokeWithMeta({ queryName: "wf_insert_run", expectMutation: true, ...storeTarget })',
+                  'export const okCondTrue = invokeWorkflowStoreQuery({ queryName: "wf_insert_run", expectMutation: true, ...(cond ? { expectedLeaseEpoch } : {}) })',
+                  'export const okCondFalse = invokeWorkflowStoreQuery({ queryName: "wf_insert_run", expectMutation: true, ...(cond ? {} : { expectedLeaseEpoch }) })',
+                  'export const okObjSpread = invokeWorkflowStoreQuery({ queryName: "wf_insert_run", expectMutation: true, ...({ expectedLeaseEpoch }) })',
+                  'export const okLease1 = invokeWorkflowStoreQuery({ queryName: "wf_insert_writer_lease", expectMutation: true })',
+                  "export const okLease2 = invokeWorkflowStoreQuery({ queryName: `wf_cas_writer_lease`, expectMutation: true })",
+                  'export const okLease3 = invokeWorkflowStoreQuery({ queryName: "wf_refresh_writer_lease", expectMutation: true })',
+                  'export const okOtherInvoke = otherClient.invoke({ queryName: "wf_insert_run", expectMutation: true })',
+                ].join("\n") + "\n",
+              ),
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/harness/infra/src/offline-maint.ts"),
+              content: AstSourceContent.make(
+                [
+                  "declare function verifyOfflineClusterAccess(): void",
+                  "declare function invokeWorkflowStoreQuery(input: unknown): unknown",
+                  "export const runOffline = () => {",
+                  "  verifyOfflineClusterAccess()",
+                  '  return invokeWorkflowStoreQuery({ queryName: "wf_insert_run", expectMutation: true })',
+                  "}",
+                ].join("\n") + "\n",
+              ),
+            },
+          ],
+          maxPluginFileLines: MaxPluginFileLines.make(800),
+        })
+        expect(
+          cleanReport.violations.filter((v) => v.rule === "omnigraph-fenced-mutation"),
+        ).toEqual([])
+
+        const violatedReport = yield* SelfDogfooding.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/infra/src/unfenced-calls.ts"),
+              content: AstSourceContent.make(
+                [
+                  "declare function invokeWorkflowStoreQuery(input: unknown): unknown",
+                  "declare function invokeWorkflowStoreQueryWithMeta(input: unknown): unknown",
+                  "declare function invokeWorkflowStoreQueryOnce(input: unknown): unknown",
+                  "declare function buildConfig(): object",
+                  "declare const WorkflowStore: { invoke: (i: unknown) => unknown; invokeWithMeta: (i: unknown) => unknown }",
+                  "declare const wf_cas_writer_lease: string",
+                  "declare const storeConfig: object",
+                  "declare const cond: boolean",
+                  'export const bad1 = (invokeWorkflowStoreQuery)({ queryName: "wf_insert_run", expectMutation: true })',
+                  'export const bad2 = invokeWorkflowStoreQueryWithMeta({ queryName: "wf_insert_run", expectMutation: true, expectedLeaseEpoch: undefined })',
+                  'export const bad3 = invokeWorkflowStoreQueryOnce({ queryName: "wf_insert_run", expectMutation: true, expectedLeaseEpoch: null })',
+                  'export const bad4 = WorkflowStore.invoke({ queryName: "wf_insert_run", expectMutation: true, ...storeConfig })',
+                  'export const bad5 = WorkflowStore.invokeWithMeta({ queryName: "wf_insert_run", expectMutation: true, ...(cond ? {} : {}), ...buildConfig() })',
+                  "export const bad6 = invokeWorkflowStoreQuery({ queryName: wf_cas_writer_lease, expectMutation: true })",
+                ].join("\n") + "\n",
+              ),
+            },
+          ],
+          maxPluginFileLines: MaxPluginFileLines.make(800),
+        })
+        const fenceViolations = violatedReport.violations.filter(
+          (v) => v.rule === "omnigraph-fenced-mutation",
+        )
+        expect(fenceViolations).toHaveLength(6)
+      }),
+  )
+
+  it.effect.prop(
+    "SPEC-0027 REQ-3.1 determinism: SelfDogfooding.decide emits deterministic omnigraph-fenced-mutation verdicts",
+    {
+      spec: Schema.Struct({
+        queryName: Schema.Literals(["wf_insert_run", "wf_cas_writer_lease", "wf_update_unit"]),
+        fencingMode: Schema.Literals(["explicit", "fenceSpread", "missing"]),
+        expectMutation: Schema.Boolean,
+      }),
+    },
+    ({ spec }) =>
+      Effect.gen(function* () {
+        const fenceField = match(spec.fencingMode)
+          .with("explicit", () => ", expectedLeaseEpoch: epoch")
+          .with("fenceSpread", () => ", ...fenceConfig")
+          .with("missing", () => "")
+          .exhaustive()
+        const src = AstSourceContent.make(
+          `declare function invokeWorkflowStoreQuery(input: unknown): unknown\n` +
+            `declare const epoch: number\n` +
+            `declare const fenceConfig: object\n` +
+            `export const call = invokeWorkflowStoreQuery({ queryName: "${spec.queryName}", expectMutation: ${String(spec.expectMutation)}${fenceField} })\n`,
+        )
+        const input = {
+          files: [
+            { filePath: AstSourceFilePath.make("libs/harness/infra/src/prop.ts"), content: src },
+          ],
+          maxPluginFileLines: MaxPluginFileLines.make(800),
+        }
+        const first = yield* SelfDogfooding.decide(input)
+        const second = yield* SelfDogfooding.decide(input)
+        expect(first).toEqual(second)
+        const shouldViolate =
+          spec.expectMutation &&
+          spec.queryName !== "wf_cas_writer_lease" &&
+          spec.fencingMode === "missing"
+        expect(first.violations.some((v) => v.rule === "omnigraph-fenced-mutation")).toBe(
+          shouldViolate,
+        )
       }),
   )
 })

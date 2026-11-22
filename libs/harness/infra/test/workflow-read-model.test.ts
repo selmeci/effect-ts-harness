@@ -1113,7 +1113,7 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
               kind: "request",
               tag: "activity",
               payload: JSON.stringify({
-                name: idx === 1029 ? `DispatchUnitAgent/${unitId}/1` : `NoopTick/${idx}`,
+                name: idx === 1029 ? `DispatchUnitAgent/${unitId}/1` : "ProvisionWorktrees",
               }),
               headers: "{}",
               requestId: key,

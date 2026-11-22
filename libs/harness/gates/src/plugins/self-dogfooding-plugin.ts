@@ -44,6 +44,7 @@ import {
 } from "./ast-gate-law-helpers.js"
 import { type SelfDogfoodingInput } from "./self-dogfooding-contract.js"
 import { isProvisionTapErrorRollback } from "./ast-fail-closed-laws.js"
+import { isUnfencedOmnigraphMutationCall } from "./ast-workflow-fence-law.js"
 
 const isExcludedProductionPath = (normPath: string): boolean =>
   normPath.endsWith(".test.ts") ||
@@ -364,6 +365,20 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
       }
     }
 
+    const pushWalkViolation = (
+      rule: SelfDogfoodingRuleId,
+      message: string,
+      target: ts.Node,
+    ): void => {
+      violations.push({
+        rule,
+        message: SelfDogfoodingMessage.make(message),
+        file: file.filePath,
+        line: getLineNumber(sourceFile, target.getStart(sourceFile)),
+        enclosingSymbol: resolveEnclosingSymbol(target, file.filePath),
+      })
+    }
+
     const walk = (node: ts.Node): void => {
       if (ts.isYieldExpression(node)) {
         if (node.expression !== undefined && isDummyEffectVoidYield(node.expression, sourceFile)) {
@@ -452,28 +467,20 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
           unwrappedNodeExpr.name.text === "run" &&
           /\bmatch\s*\(/.test(unwrappedNodeExpr.expression.getText(sourceFile))
         ) {
-          violations.push({
-            rule: SelfDogfoodingRuleId.make("match-run-statement"),
-            message: SelfDogfoodingMessage.make(
-              `match(...).run() in '${file.filePath}' is banned — use .exhaustive() instead.`,
-            ),
-            file: file.filePath,
-            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-            enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
-          })
+          pushWalkViolation(
+            SelfDogfoodingRuleId.make("match-run-statement"),
+            `match(...).run() in '${file.filePath}' is banned — use .exhaustive() instead.`,
+            node,
+          )
         }
 
         const isCatchCauseOnly = isCatchCauseInterruptsOnlyCall(node, sourceFile)
         if (isCatchCauseOnly) {
-          violations.push({
-            rule: SelfDogfoodingRuleId.make("catch-cause-interrupts-only"),
-            message: SelfDogfoodingMessage.make(
-              "Cause.hasInterruptsOnly(cause) inside Effect.catchCause / Exit inspection swallows fiber interruption on composite causes (Fail + Interrupt). Use isPureInterruptCause(cause) or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause) instead.",
-            ),
-            file: file.filePath,
-            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-            enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
-          })
+          pushWalkViolation(
+            SelfDogfoodingRuleId.make("catch-cause-interrupts-only"),
+            "Cause.hasInterruptsOnly(cause) inside Effect.catchCause / Exit inspection swallows fiber interruption on composite causes (Fail + Interrupt). Use isPureInterruptCause(cause) or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause) instead.",
+            node,
+          )
         }
 
         if (
@@ -481,50 +488,41 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
           /(?:^|\/)src\//.test(normPath) &&
           isBareCauseHasInterruptsNode(node, sourceFile, normPath)
         ) {
-          violations.push({
-            rule: SelfDogfoodingRuleId.make("bare-cause-has-interrupts"),
-            message: SelfDogfoodingMessage.make(
-              "Bare Cause.hasInterrupts(cause) or Cause.hasInterruptsOnly(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) from @harness/contract (or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)).",
-            ),
-            file: file.filePath,
-            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-            enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
-          })
+          pushWalkViolation(
+            SelfDogfoodingRuleId.make("bare-cause-has-interrupts"),
+            "Bare Cause.hasInterrupts(cause) or Cause.hasInterruptsOnly(cause) in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause(cause) from @harness/contract (or Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)).",
+            node,
+          )
         }
 
         if (isSilentCatchDefectCall(node, sourceFile)) {
-          violations.push({
-            rule: SelfDogfoodingRuleId.make("silent-catch-defect"),
-            message: SelfDogfoodingMessage.make(
-              `Effect.catchDefect handler in '${file.filePath}' silently swallows runtime defects without logging or reporting — log via Effect.logWarning / process.stderr.write or re-fail.`,
-            ),
-            file: file.filePath,
-            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-            enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
-          })
+          pushWalkViolation(
+            SelfDogfoodingRuleId.make("silent-catch-defect"),
+            `Effect.catchDefect handler in '${file.filePath}' silently swallows runtime defects without logging or reporting — log via Effect.logWarning / process.stderr.write or re-fail.`,
+            node,
+          )
         }
         if (/(?:^|\/)src\//.test(normPath) && isProvisionTapErrorRollback(node, sourceFile)) {
-          violations.push({
-            rule: SelfDogfoodingRuleId.make("provision-tap-error-leak"),
-            message: SelfDogfoodingMessage.make(
-              `Effect.tapError rollback inside provision/acquireRelease in '${file.filePath}' skips fiber interrupts — use Effect.onExit or Effect.acquireRelease.`,
-            ),
-            file: file.filePath,
-            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-            enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
-          })
+          pushWalkViolation(
+            SelfDogfoodingRuleId.make("provision-tap-error-leak"),
+            `Effect.tapError rollback inside provision/acquireRelease in '${file.filePath}' skips fiber interrupts — use Effect.onExit or Effect.acquireRelease.`,
+            node,
+          )
+        }
+        if (/(?:^|\/)src\//.test(normPath) && isUnfencedOmnigraphMutationCall(node, sourceFile)) {
+          pushWalkViolation(
+            SelfDogfoodingRuleId.make("omnigraph-fenced-mutation"),
+            `Non-lease Omnigraph mutation in '${file.filePath}' omits single-writer expectedLeaseEpoch fencing.`,
+            node,
+          )
         }
 
         if (isIgnoredChmodPermissionCall(node, sourceFile)) {
-          violations.push({
-            rule: SelfDogfoodingRuleId.make("ignored-chmod-permission"),
-            message: SelfDogfoodingMessage.make(
-              `Ignoring chmodSync/fchmodSync failure with Effect.ignore or Effect.orElseSucceed in '${file.filePath}' is banned — permission hardening must fail closed on error.`,
-            ),
-            file: file.filePath,
-            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
-            enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
-          })
+          pushWalkViolation(
+            SelfDogfoodingRuleId.make("ignored-chmod-permission"),
+            `Ignoring chmodSync/fchmodSync failure with Effect.ignore or Effect.orElseSucceed in '${file.filePath}' is banned — permission hardening must fail closed on error.`,
+            node,
+          )
         }
 
         if (

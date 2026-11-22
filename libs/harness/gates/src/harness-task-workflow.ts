@@ -24,11 +24,16 @@ import {
   type UnitRejection,
   WaveIndex,
   type WorkUnitId,
+  WorkflowActivityTag,
+  WorkflowDeferredTag,
   WorkflowExecutionId,
+  WorkflowRunAbortTarget,
   WorkflowStoreUnavailableError,
   WorktreeProvisionReceipt,
   WorkspaceFsError,
   WriterLeaseHeldError,
+  encodeWorkflowActivityName,
+  encodeWorkflowDeferredName,
   wavesOf,
 } from "@harness/contract"
 import {
@@ -40,7 +45,6 @@ import {
 } from "@harness/service"
 import {
   type UnitCycleDescriptor,
-  cycleSuffixFor,
   findConflictUnitId,
   makeSharedStepSyntheticUnit,
   projectInitialViewsActivity,
@@ -82,9 +86,12 @@ export const executionIdOf = (plan: CompiledPlan): Effect.Effect<WorkflowExecuti
   Effect.map(HarnessTaskWorkflow.executionId({ plan }), (id) => WorkflowExecutionId.make(id))
 
 /** Durable deferred marking operator completion of the post-unit LLM verification phase. */
-export const LlmPhaseDone = DurableDeferred.make("llm-phase-done", {
-  success: LlmPhaseReceipt,
-})
+export const LlmPhaseDone = DurableDeferred.make(
+  encodeWorkflowDeferredName(WorkflowDeferredTag.cases.LlmPhaseDone.make({})),
+  {
+    success: LlmPhaseReceipt,
+  },
+)
 
 /** Computes the deterministic deferred name for a manual unit attempt within an escalation cycle. */
 export const unitCompletionDeferredName = (
@@ -92,9 +99,13 @@ export const unitCompletionDeferredName = (
   attempt: AttemptNumber,
   escalationOrdinal: EscalationOrdinal,
 ): PendingDeferredName =>
-  escalationOrdinal === 1
-    ? PendingDeferredName.make(`unit/${unitId}/${attempt}`)
-    : PendingDeferredName.make(`unit/${unitId}/${attempt}/r${escalationOrdinal}`)
+  encodeWorkflowDeferredName(
+    WorkflowDeferredTag.cases.UnitCompletion.make({
+      unitId,
+      attempt,
+      escalationOrdinal,
+    }),
+  )
 
 /** Constructs the typed `DurableDeferred` for a manual unit completion attempt. */
 export const makeUnitCompletionDeferred = (
@@ -110,7 +121,13 @@ export const makeUnitCompletionDeferred = (
 export const unitEscalationDeferredName = (
   unitId: WorkUnitId,
   escalationOrdinal: EscalationOrdinal,
-): PendingDeferredName => PendingDeferredName.make(`escalation/${unitId}/${escalationOrdinal}`)
+): PendingDeferredName =>
+  encodeWorkflowDeferredName(
+    WorkflowDeferredTag.cases.UnitEscalation.make({
+      unitId,
+      escalationOrdinal,
+    }),
+  )
 
 /** Constructs the typed `DurableDeferred` for an operator escalation decision (`retry | abort`). */
 export const makeUnitEscalationDeferred = (
@@ -142,9 +159,14 @@ const dispatchAutomaticUnit = Effect.fnUntraced(function* (
   | UnitVerifier
   | UnitAgentDispatcher
 > {
-  const cycleSuffix = cycleSuffixFor(escalationOrdinal)
   const dispatchResult = yield* Activity.make({
-    name: `DispatchUnitAgent/${descriptor.unitId}/${attempt}${cycleSuffix}`,
+    name: encodeWorkflowActivityName(
+      WorkflowActivityTag.cases.DispatchUnitAgent.make({
+        unitId: descriptor.unitId,
+        attempt,
+        escalationOrdinal,
+      }),
+    ),
     success: UnitAgentDispatchResult,
     error: WorkspaceFsError,
     execute: Effect.gen(function* () {
@@ -292,7 +314,10 @@ const driveUnitLoop = Effect.fnUntraced(function* (
             descriptor.ownedRelPaths,
             "escalated",
             "waiting",
-            `ProjectUnitEscalated/${descriptor.unitId}/${escalationOrdinal}`,
+            WorkflowActivityTag.cases.ProjectUnitEscalated.make({
+              unitId: descriptor.unitId,
+              escalationOrdinal,
+            }),
           )
 
           const resolution = yield* DurableDeferred.await(
@@ -311,7 +336,10 @@ const driveUnitLoop = Effect.fnUntraced(function* (
                   descriptor.ownedRelPaths,
                   "dispatched",
                   "running",
-                  `ProjectUnitEscalationRetried/${descriptor.unitId}/${escalationOrdinal}`,
+                  WorkflowActivityTag.cases.ProjectUnitEscalationRetried.make({
+                    unitId: descriptor.unitId,
+                    escalationOrdinal,
+                  }),
                 )
                 return undefined
               }),
@@ -319,7 +347,12 @@ const driveUnitLoop = Effect.fnUntraced(function* (
             .with("abort", () =>
               Effect.gen(function* () {
                 yield* projectRunStateActivity(
-                  `ProjectRunAborted/${descriptor.unitId}/${escalationOrdinal}`,
+                  WorkflowActivityTag.cases.ProjectRunAborted.make({
+                    target: WorkflowRunAbortTarget.cases.Unit.make({
+                      unitId: descriptor.unitId,
+                      escalationOrdinal,
+                    }),
+                  }),
                   plan,
                   executionId,
                   "aborted",
@@ -358,7 +391,13 @@ const makeUnitCycleDescriptor = (
     unitForDispatch: unit,
     verifyAttempt: (attempt, escalationOrdinal) =>
       Activity.make({
-        name: `VerifyUnit/${unit.unitId}/${attempt}${cycleSuffixFor(escalationOrdinal)}`,
+        name: encodeWorkflowActivityName(
+          WorkflowActivityTag.cases.VerifyUnit.make({
+            unitId: unit.unitId,
+            attempt,
+            escalationOrdinal,
+          }),
+        ),
         success: UnitOutcome,
         error: WorkspaceFsError,
         execute: Effect.gen(function* () {
@@ -424,7 +463,12 @@ export const driveSharedStep = Effect.fn("Harness.driveSharedStep")(function* (
     unitForDispatch: syntheticUnit,
     verifyAttempt: (attempt, escalationOrdinal) =>
       Activity.make({
-        name: `VerifySharedStep/${attempt}${cycleSuffixFor(escalationOrdinal)}`,
+        name: encodeWorkflowActivityName(
+          WorkflowActivityTag.cases.VerifySharedStep.make({
+            attempt,
+            escalationOrdinal,
+          }),
+        ),
         success: UnitOutcome,
         error: WorkspaceFsError,
         execute: Effect.gen(function* () {
@@ -476,7 +520,12 @@ const mergeEpicWaveWithEscalation = Effect.fnUntraced(function* (
   const usedPerUnit = new Map<WorkUnitId, number>()
   while (true) {
     const mergeOutcome = yield* Activity.make({
-      name: `MergeSliceWave/${waveIndex}${cycleSuffixFor(mergeCycleOrdinal)}`,
+      name: encodeWorkflowActivityName(
+        WorkflowActivityTag.cases.MergeSliceWave.make({
+          waveIndex,
+          escalationOrdinal: mergeCycleOrdinal,
+        }),
+      ),
       success: MergeSliceWaveOutcome,
       error: WorkspaceFsError,
       execute: Effect.gen(function* () {
@@ -515,7 +564,10 @@ const mergeEpicWaveWithEscalation = Effect.fnUntraced(function* (
             conflictUnit.ownedRelPaths,
             "escalated",
             "waiting",
-            `ProjectWaveMergeEscalated/${waveIndex}/${mergeCycleOrdinal}`,
+            WorkflowActivityTag.cases.ProjectWaveMergeEscalated.make({
+              waveIndex,
+              escalationOrdinal: mergeCycleOrdinal,
+            }),
           )
 
           const resolution = yield* DurableDeferred.await(
@@ -534,7 +586,10 @@ const mergeEpicWaveWithEscalation = Effect.fnUntraced(function* (
                   conflictUnit.ownedRelPaths,
                   "completed",
                   "running",
-                  `ProjectWaveMergeRetried/${waveIndex}/${mergeCycleOrdinal}`,
+                  WorkflowActivityTag.cases.ProjectWaveMergeRetried.make({
+                    waveIndex,
+                    escalationOrdinal: mergeCycleOrdinal,
+                  }),
                 )
                 return false
               }),
@@ -542,7 +597,12 @@ const mergeEpicWaveWithEscalation = Effect.fnUntraced(function* (
             .with("abort", () =>
               Effect.gen(function* () {
                 yield* projectRunStateActivity(
-                  `ProjectRunAborted/merge/${waveIndex}/${mergeCycleOrdinal}`,
+                  WorkflowActivityTag.cases.ProjectRunAborted.make({
+                    target: WorkflowRunAbortTarget.cases.Merge.make({
+                      waveIndex,
+                      escalationOrdinal: mergeCycleOrdinal,
+                    }),
+                  }),
                   plan,
                   executionId,
                   "aborted",
@@ -587,7 +647,7 @@ export const executeTaskWorkflow = Effect.fn("Harness.executeTaskWorkflow")(func
 
   const worktrees = yield* HarnessTaskWorkflow.withCompensation(
     Activity.make({
-      name: "ProvisionWorktrees",
+      name: encodeWorkflowActivityName(WorkflowActivityTag.cases.ProvisionWorktrees.make({})),
       success: WorktreeProvisionReceipt,
       error: WorkspaceFsError,
       execute: Effect.gen(function* () {
@@ -645,11 +705,17 @@ export const executeTaskWorkflow = Effect.fn("Harness.executeTaskWorkflow")(func
     yield* driveSharedStep(plan, worktrees.canonicalRepoRoot)
   }
 
-  yield* projectRunStateActivity("ProjectRunWaitingLlmPhase", plan, executionId, "waiting", false)
+  yield* projectRunStateActivity(
+    WorkflowActivityTag.cases.ProjectRunWaitingLlmPhase.make({}),
+    plan,
+    executionId,
+    "waiting",
+    false,
+  )
   const llmPhase = yield* DurableDeferred.await(LlmPhaseDone)
 
   const review = yield* Activity.make({
-    name: "RouteReview",
+    name: encodeWorkflowActivityName(WorkflowActivityTag.cases.RouteReview.make({})),
     success: ReviewRoutingPlan,
     error: WorkspaceFsError,
     execute: Effect.gen(function* () {
@@ -662,7 +728,13 @@ export const executeTaskWorkflow = Effect.fn("Harness.executeTaskWorkflow")(func
     }),
   })
 
-  yield* projectRunStateActivity("ProjectRunCompleted", plan, executionId, "completed", false)
+  yield* projectRunStateActivity(
+    WorkflowActivityTag.cases.ProjectRunCompleted.make({}),
+    plan,
+    executionId,
+    "completed",
+    false,
+  )
 
   return {
     runId: plan.runId,

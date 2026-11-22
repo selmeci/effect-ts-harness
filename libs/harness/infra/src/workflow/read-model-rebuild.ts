@@ -2,19 +2,17 @@ import { Effect, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   type AbsoluteRepoRoot,
-  AttemptNumber,
   CompiledPlan,
-  EscalationOrdinal,
+  type EscalationOrdinal,
   EscalationResolution,
   type GitCommonDirPath,
   type LeaseEpoch,
   LeaseFilePath,
   LeaseHolderId,
   MergeSliceWaveOutcome,
-  SHARED_STEP_UNIT_ID,
   SeqKey,
   UnitOutcome,
-  WorkUnitId,
+  type WorkUnitId,
   type WorkflowAttemptKey,
   type WorkflowAttemptRecord,
   type WorkflowAttemptVerdict,
@@ -244,97 +242,7 @@ const decodeUnitOutcomeOption = Schema.decodeUnknownOption(UnitOutcome)
 const decodeMergeOutcomeOption = Schema.decodeUnknownOption(MergeSliceWaveOutcome)
 const decodeEscalationResolutionOption = Schema.decodeUnknownOption(EscalationResolution)
 const decodeExecutionIdOption = Schema.decodeUnknownOption(WorkflowExecutionId)
-const decodeWorkUnitIdOption = Schema.decodeUnknownOption(WorkUnitId)
-const decodeAttemptNumberOption = Schema.decodeUnknownOption(AttemptNumber)
-const decodeEscalationOrdinalOption = Schema.decodeUnknownOption(EscalationOrdinal)
 const decodeSeqKeyOption = Schema.decodeUnknownOption(SeqKey)
-
-const decodeMatchedWorkUnitId = (
-  operation: WorkflowStoreOperation,
-  rawUnitId: string,
-  activityName: string,
-): Effect.Effect<WorkUnitId, WorkflowStoreUnavailableError> =>
-  match(decodeWorkUnitIdOption(rawUnitId))
-    .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
-    .with({ _tag: "None" }, () =>
-      Effect.fail(
-        new WorkflowStoreUnavailableError({
-          operation,
-          reason: toBoundedReason(
-            `Invalid WorkUnitId '${rawUnitId}' in activity '${activityName}'`,
-          ),
-        }),
-      ),
-    )
-    .exhaustive()
-
-const parseCycleTuple = (
-  rawUnitId: string,
-  rawAttempt: string,
-  rawOrdinal: string | undefined,
-):
-  | {
-      readonly unitId: WorkUnitId
-      readonly attempt: AttemptNumber
-      readonly escalationOrdinal?: EscalationOrdinal | undefined
-    }
-  | undefined => {
-  const unitId = unwrapOption(decodeWorkUnitIdOption(rawUnitId))
-  const attempt = unwrapOption(decodeAttemptNumberOption(Number(rawAttempt)))
-  const escalationOrdinal =
-    rawOrdinal !== undefined
-      ? unwrapOption(decodeEscalationOrdinalOption(Number(rawOrdinal)))
-      : undefined
-  if (
-    unitId === undefined ||
-    attempt === undefined ||
-    (rawOrdinal !== undefined && escalationOrdinal === undefined)
-  ) {
-    return undefined
-  }
-  return {
-    unitId,
-    attempt,
-    ...(escalationOrdinal !== undefined ? { escalationOrdinal } : {}),
-  }
-}
-
-const ParsedVerifyActivityResult = Schema.TaggedUnion({
-  NotVerify: {},
-  Parsed: {
-    unitId: WorkUnitId,
-    attempt: AttemptNumber,
-    escalationOrdinal: Schema.optional(EscalationOrdinal),
-  },
-  Invalid: {
-    reason: Schema.String,
-  },
-})
-type ParsedVerifyActivityResult = typeof ParsedVerifyActivityResult.Type
-
-const parseVerifyActivity = (name: string): ParsedVerifyActivityResult => {
-  if (name.startsWith("VerifyUnit/")) {
-    const unitMatch = /^VerifyUnit\/([^/]+)\/([1-3])(?:\/r(\d+))?$/.exec(name)
-    if (unitMatch === null || unitMatch[1] === undefined || unitMatch[2] === undefined) {
-      return { _tag: "Invalid", reason: `Malformed VerifyUnit activity name '${name}'` }
-    }
-    const parsed = parseCycleTuple(unitMatch[1], unitMatch[2], unitMatch[3])
-    return parsed !== undefined
-      ? { _tag: "Parsed", ...parsed }
-      : { _tag: "Invalid", reason: `Invalid VerifyUnit identifiers in '${name}'` }
-  }
-  if (name.startsWith("VerifySharedStep/")) {
-    const sharedMatch = /^VerifySharedStep\/([1-3])(?:\/r(\d+))?$/.exec(name)
-    if (sharedMatch === null || sharedMatch[1] === undefined) {
-      return { _tag: "Invalid", reason: `Malformed VerifySharedStep activity name '${name}'` }
-    }
-    const parsed = parseCycleTuple(SHARED_STEP_UNIT_ID, sharedMatch[1], sharedMatch[2])
-    return parsed !== undefined
-      ? { _tag: "Parsed", ...parsed }
-      : { _tag: "Invalid", reason: `Invalid VerifySharedStep identifiers in '${name}'` }
-  }
-  return { _tag: "NotVerify" }
-}
 
 const scanAllJournalRows = (
   repoRoot: AbsoluteRepoRoot,
@@ -529,7 +437,6 @@ export {
   decodeDeferredPayloadOption,
   decodeEscalationResolutionOption,
   decodeExecutionIdOption,
-  decodeMatchedWorkUnitId,
   decodeMergeOutcomeOption,
   decodeRunPayloadOption,
   findSliceByBranch,
@@ -537,8 +444,6 @@ export {
   moveRunningToWaiting,
   moveWaitingToRunning,
   optionalNonEmptyString,
-  parseCycleTuple,
-  parseVerifyActivity,
   preserveStoreOrLeaseError,
   recordUnitOutcome,
   scanAllJournalRows,

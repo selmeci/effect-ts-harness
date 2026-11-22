@@ -10,6 +10,8 @@ import {
   type DaemonServerInfo,
   DaemonSocketPath,
   ErrorReasonMessage,
+  WORKFLOW_TIMEOUT_BUDGETS,
+  type WorkflowTimeoutMs,
   isPureInterruptCause,
   toErrorReasonMessage,
   type WorkspaceFilePath,
@@ -19,9 +21,11 @@ import { UnixSocketDaemonPort, type UnixSocketDaemonPortShape } from "@harness/s
 import { nodeSyncHostIo } from "./node-host-io.js"
 
 const MAX_DAEMON_BUFFER_BYTES = 1_048_576
-export const DAEMON_SOCKET_TIMEOUT_MS = 5000
-export const DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS = 35_000
-export const WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS = 160_000
+export const DAEMON_SOCKET_TIMEOUT_MS: WorkflowTimeoutMs = WORKFLOW_TIMEOUT_BUDGETS.defaultSocketMs
+export const DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS: WorkflowTimeoutMs =
+  WORKFLOW_TIMEOUT_BUDGETS.defaultServerSocketMs
+export const WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS: WorkflowTimeoutMs =
+  WORKFLOW_TIMEOUT_BUDGETS.workflowServerSocketMs
 const PROBE_SOCKET_TIMEOUT_MS = 1500
 const MAX_DAEMON_LINE_CONCURRENCY = 4
 const MAX_DAEMON_LINE_QUEUE_CAPACITY = 256
