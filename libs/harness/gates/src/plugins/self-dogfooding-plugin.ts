@@ -43,6 +43,7 @@ import {
   isSilentGateFsFallbackCall,
 } from "./ast-gate-law-helpers.js"
 import { type SelfDogfoodingInput } from "./self-dogfooding-contract.js"
+import { isProvisionTapErrorRollback } from "./ast-fail-closed-laws.js"
 
 const isExcludedProductionPath = (normPath: string): boolean =>
   normPath.endsWith(".test.ts") ||
@@ -496,6 +497,17 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
             rule: SelfDogfoodingRuleId.make("silent-catch-defect"),
             message: SelfDogfoodingMessage.make(
               `Effect.catchDefect handler in '${file.filePath}' silently swallows runtime defects without logging or reporting — log via Effect.logWarning / process.stderr.write or re-fail.`,
+            ),
+            file: file.filePath,
+            line: getLineNumber(sourceFile, node.getStart(sourceFile)),
+            enclosingSymbol: resolveEnclosingSymbol(node, file.filePath),
+          })
+        }
+        if (/(?:^|\/)src\//.test(normPath) && isProvisionTapErrorRollback(node, sourceFile)) {
+          violations.push({
+            rule: SelfDogfoodingRuleId.make("provision-tap-error-leak"),
+            message: SelfDogfoodingMessage.make(
+              `Effect.tapError rollback inside provision/acquireRelease in '${file.filePath}' skips fiber interrupts — use Effect.onExit or Effect.acquireRelease.`,
             ),
             file: file.filePath,
             line: getLineNumber(sourceFile, node.getStart(sourceFile)),

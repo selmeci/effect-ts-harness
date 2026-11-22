@@ -29,19 +29,31 @@ export const decodePreToolUseStdin = Schema.decodeOption(
   Schema.fromJsonString(PreToolUseStdinSchema),
 )
 
-export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
-  "Read",
-  "Glob",
-  "Grep",
-  "LS",
-  "Find",
+export const CLAUDE_CODE_READ_ONLY_TOOL_NAMES = ["Read", "Glob", "Grep", "LS", "Find"] as const
+export const CLAUDE_CODE_WRITE_TOOL_NAMES = ["Edit", "Write", "MultiEdit"] as const
+export const CLAUDE_CODE_COMMAND_TOOL_NAMES = ["Bash"] as const
+
+export const ANTIGRAVITY_READ_ONLY_TOOL_NAMES = [
   "view_file",
   "view_file_outline",
   "view_code_item",
+  "read_file",
   "grep_search",
   "find_by_name",
   "list_dir",
-  "read_file",
+] as const
+export const ANTIGRAVITY_WRITE_TOOL_NAMES = [
+  "edit_file",
+  "write_file",
+  "replace_file_content",
+  "multi_replace_file_content",
+  "write_to_file",
+] as const
+export const ANTIGRAVITY_COMMAND_TOOL_NAMES = ["run_command"] as const
+
+export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
+  ...CLAUDE_CODE_READ_ONLY_TOOL_NAMES,
+  ...ANTIGRAVITY_READ_ONLY_TOOL_NAMES,
 ])
 
 export const resolveUnitWorkerMode = (

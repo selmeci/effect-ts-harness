@@ -1,6 +1,6 @@
 import { ts } from "@harness/graph"
 
-const unwrapExpr = (expr: ts.Expression): ts.Expression => {
+export const unwrapExpr = (expr: ts.Expression): ts.Expression => {
   let curr = expr
   while (
     ts.isParenthesizedExpression(curr) ||
@@ -33,7 +33,9 @@ export const isBannedNodeBuiltinSpecifier = (specifier: string): boolean => {
 
 export const isSilentFsFallbackCheckedPath = (normPath: string): boolean =>
   !/(?:^|\/)libs\/harness\/graph\/src\/extractor\/compiler-session\.ts$/.test(normPath) &&
-  /(?:^|\/)(?:libs\/harness\/(?:gates|graph)\/src|apps\/harness-(?:cli|mcp)\/src)\//.test(normPath)
+  /(?:^|\/)(?:libs\/harness\/(?:gates|graph|infra)\/src|apps\/harness-(?:cli|mcp)\/src)\//.test(
+    normPath,
+  )
 
 const FS_READ_SYNC_NAMES = new Set(["readTextSync", "readdirSync", "readBytesSync"])
 

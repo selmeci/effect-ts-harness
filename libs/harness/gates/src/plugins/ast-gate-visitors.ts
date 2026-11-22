@@ -37,6 +37,10 @@ import {
 } from "./ast-gate-law-helpers.js"
 import { analyzeSqliteMigratorFromRecordAst } from "./sqlite-migrator-ast.js"
 import { collectWorkflowBodyViolations } from "./workflow-body-ast.js"
+import {
+  isSilentDecodeOrStoreFallback,
+  isUntypedCatchCauseWithoutInterruptGuard,
+} from "./ast-fail-closed-laws.js"
 
 export {
   isCatchCauseInterruptsOnlyCall,
@@ -365,6 +369,14 @@ export const visitSourceFileSinglePass = (
       const m = `Silent Effect.catchDefect in '${fp}' — log or re-fail.`
       pushViolation(catEff, "silent-catch-defect", m, node)
     }
+    if (isProdSrc && isUntypedCatchCauseWithoutInterruptGuard(node)) {
+      const m = `Effect.catchCause in '${fp}' must guard isPureInterruptCause(cause).`
+      pushViolation(catEff, "untyped-catch-cause-interrupt-leak", m, node)
+    }
+    if (isProdSrc && isSilentDecodeOrStoreFallback(node, sourceFile)) {
+      const m = `Silent decode/workflow-store fallback in '${fp}' is banned — propagate typed failure.`
+      pushViolation(catEff, "silent-decode-fallback", m, node)
+    }
     if (!isTest && isIgnoredChmodPermissionCall(node, sourceFile)) {
       const m = `Ignoring chmodSync/fchmodSync failure in '${fp}' is banned.`
       pushViolation(catSyntax, "ignored-chmod-permission", m, node)
@@ -493,6 +505,14 @@ export const visitSourceFileSinglePass = (
       pushViolation(catDom, "unscoped-effect-run", m, node)
     }
     if (ts.isCallExpression(node)) checkCall(node)
+    if (
+      isProdSrc &&
+      ts.isBinaryExpression(node) &&
+      isSilentDecodeOrStoreFallback(node, sourceFile)
+    ) {
+      const m = `Nullish fallback on Schema.decodeOption in '${fp}' is banned — match Option explicitly.`
+      pushViolation(catEff, "silent-decode-fallback", m, node)
+    }
     const isEq =
       ts.isBinaryExpression(node) &&
       isTest &&

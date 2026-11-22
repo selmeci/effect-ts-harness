@@ -16,6 +16,7 @@ import {
   checkAstGateRuleClosure,
   extractGateRuleIdsFromSources,
 } from "./gc-rule-ids.js"
+import { checkHookMatcherToolParity } from "./gc-hook-parity.js"
 
 export { extractGateRuleIdsFromSources }
 
@@ -717,6 +718,7 @@ export const evaluateDocTruthPlugin = (input: GraphEntropyInput): ReadonlyArray<
     hostIo,
     findings,
   )
+  checkHookMatcherToolParity(repoRoot, hostIo, findings)
   checkSkillTierTables(repoRoot, hostIo, findings)
   checkMermaidDependencyDrift(repoRoot, hostIo, depsByPkg, pkgByRelDir, findings)
   checkDocBannedOrPhantomTech(repoRoot, hostIo, findings)

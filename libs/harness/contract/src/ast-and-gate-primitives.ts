@@ -224,6 +224,7 @@ export const SelfDogfoodingRuleId = Schema.Literals([
   "process-exit-outside-app",
   "locale-dependent-sort",
   "unhandled-effect-promise",
+  "provision-tap-error-leak",
 ])
 export type SelfDogfoodingRuleId = typeof SelfDogfoodingRuleId.Type
 

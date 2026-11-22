@@ -826,6 +826,153 @@ Every domain fixture must have the scope:fixture tag applied in project.json.
     )
 
     it.effect(
+      "flags adr-enforcement-mismatch when frontmatter enforced_by file is missing from Deterministic Enforcement table",
+      () =>
+        Effect.gen(function* () {
+          const adrMissingFromTable = `---
+id: test:ADR-0001
+title: Test ADR
+status: accepted
+date: 2026-10-27
+enforced_by:
+  - libs/harness/gates/src/adr-lint.ts
+  - libs/harness/gates/src/adr-enforcement-table-lint.ts
+  - libs/harness/graph/schema.pg
+  - libs/harness/graph/queries/harness.gq
+  - libs/harness/graph/cluster.yaml
+spans:
+  - AdrDocLint.decide
+---
+
+# test:ADR-0001: Test ADR
+
+## Context and Problem Statement
+Context description here.
+
+## Decision Drivers
+* Driver 1
+* Driver 2
+
+## Considered Options
+* Option 1
+* Option 2
+
+## Decision Outcome
+**Chosen option:** "Option 1"
+
+## Rejected Alternatives
+### 1 · Option 2
+- **Why rejected:** Reasons
+
+## Consequences and Enforcement
+### Positive Consequences
+- Good things
+
+### Negative Consequences and Trade-offs
+- Tradeoffs
+
+### Deterministic Enforcement
+| Rule | Enforced By | Gate / Mechanism | Governed Symbols |
+| --- | --- | --- | --- |
+| Check $O(\\|T\\| + \\|F\\|)$ Rule | \`libs/harness/gates/src/adr-lint.ts\`, \`libs/harness/graph/schema.pg\` | AdrDocLint.decide | \`AdrDocLint.decide\` |
+`
+          const failReport = yield* decideAdrDocQuality({
+            docPath: "docs/adr/test.md",
+            markdown: adrMissingFromTable,
+          })
+          expect(failReport.clean).toBe(false)
+          const missingMessages = failReport.findings
+            .filter((f) => f.kind === "adr-enforcement-mismatch")
+            .map((f) => f.message)
+          expect(
+            missingMessages.some((m) =>
+              m.includes("libs/harness/gates/src/adr-enforcement-table-lint.ts"),
+            ),
+          ).toBe(true)
+          expect(
+            missingMessages.some((m) => m.includes("libs/harness/graph/queries/harness.gq")),
+          ).toBe(true)
+          expect(missingMessages.some((m) => m.includes("libs/harness/graph/cluster.yaml"))).toBe(
+            true,
+          )
+
+          const completeAdr = adrMissingFromTable.replace(
+            "`libs/harness/gates/src/adr-lint.ts`, `libs/harness/graph/schema.pg`",
+            "`libs/harness/gates/src/adr-lint.ts`, `libs/harness/gates/src/adr-enforcement-table-lint.ts`, `libs/harness/graph/schema.pg`, `libs/harness/graph/queries/harness.gq`, `libs/harness/graph/cluster.yaml`",
+          )
+          const okReport = yield* decideAdrDocQuality({
+            docPath: "docs/adr/test.md",
+            markdown: completeAdr,
+          })
+          expect(okReport.clean).toBe(true)
+          expect(okReport.findings).toHaveLength(0)
+        }),
+    )
+
+    it.effect.prop(
+      "enforces bidirectional equality between enforced_by frontmatter and Deterministic Enforcement table",
+      {
+        scenario: Schema.Struct({
+          extraInFrontmatter: Schema.Boolean,
+          extraInTable: Schema.Boolean,
+        }),
+      },
+      ({ scenario: { extraInFrontmatter, extraInTable } }) =>
+        Effect.gen(function* () {
+          const f1 = "libs/harness/gates/src/adr-lint.ts"
+          const f2 = "libs/harness/gates/src/adr-enforcement-table-lint.ts"
+          const f3 = "libs/harness/graph/schema.pg"
+          const fmFiles = [f1, ...(extraInFrontmatter ? [f2] : [])]
+          const tblFiles = [f1, ...(extraInTable ? [f3] : [])]
+          const md = `---
+id: test:ADR-0001
+title: Bidirectional Check
+status: accepted
+date: 2026-10-27
+enforced_by:
+${fmFiles.map((p) => `  - ${p}`).join("\n")}
+spans:
+  - AdrDocLint.decide
+---
+
+# test:ADR-0001: Bidirectional Check
+
+## Context and Problem Statement
+Context description here.
+
+## Decision Drivers
+* Driver 1
+* Driver 2
+
+## Considered Options
+* Option 1
+* Option 2
+
+## Decision Outcome
+**Chosen option:** "Option 1"
+
+## Rejected Alternatives
+### 1 · Option 2
+- **Why rejected:** Reasons
+
+## Consequences and Enforcement
+### Positive Consequences
+- Good things
+
+### Negative Consequences and Trade-offs
+- Tradeoffs
+
+### Deterministic Enforcement
+| Rule | Enforced By | Gate / Mechanism | Governed Symbols |
+| --- | --- | --- | --- |
+| Bidirectional Parity | ${tblFiles.map((p) => `\`${p}\``).join(", ")} | AdrDocLint.decide | \`AdrDocLint.decide\` |
+`
+          const report = yield* decideAdrDocQuality({ docPath: "docs/adr/prop.md", markdown: md })
+          expect(report.clean).toBe(!extraInFrontmatter && !extraInTable)
+        }),
+    )
+
+    it.effect(
       "flags adr-overstated-proof-claim outside fenced code blocks while ignoring negations",
       () =>
         Effect.gen(function* () {

@@ -1,13 +1,17 @@
 ---
 id: harness:SPEC-0025
 title: Fail-Closed AST Guards, Hook Matcher Tool Parity, and Bidirectional ADR Enforcement
-status: proposed
+status: accepted
 archetype: framework
 date: 2026-11-21
 owners:
   - "@harness/architecture"
 scope: harness
+informed_by:
+  - harness:ADR-0020
 enforced_by:
+  - apps/harness-cli/src/commands/hook-guard-payload.ts
+  - libs/harness/contract/src/ast-and-gate-primitives.ts
   - libs/harness/gates/src/plugins/gc/gc-hook-parity.ts
   - libs/harness/gates/src/plugins/gc/gc-doc-truth.plugin.ts
   - libs/harness/gates/src/plugins/gc/gc-workspace-io.ts
@@ -99,3 +103,21 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 - All requirement rows pass their declared Verification methods (`UnitTest`, `AstGate`, `GraphCheck`).
 - All modified and newly extracted `@harness/gates` source files remain `<= 800` lines post-`oxfmt` and preserve the `gc-hook-fastpath.ts` 3-profile lightweight closure.
 - `pnpm harness gc --strict`, `pnpm harness ontology check --strict`, `pnpm harness mutate --strict`, `CI=true pnpm harness verify`, and `CI=true pnpm harness done` pass after updating frontmatter to `status: accepted`.
+
+## Verified Plan Topology (`harness plan-check`)
+
+```mermaid
+flowchart TD
+  89["AdrDocLint.decide #91;domain#93;"]
+  90["AstGateCache.decide #91;domain#93;"]
+  103["GraphGc.decide #91;domain#93;"]
+  119["SelfDogfooding.decide #91;domain#93;"]
+  2278["Trace: TraceabilityTuple:specifies:harness:SPEC-0025"] -->|"PlaysRole:realizing-symbol"| 103
+  2279["Trace: TraceabilityTuple:specifies:harness:SPEC-0025"] -->|"PlaysRole:realizing-symbol"| 90
+  2280["Trace: TraceabilityTuple:specifies:harness:SPEC-0025"] -->|"PlaysRole:realizing-symbol"| 119
+  2281["Trace: TraceabilityTuple:specifies:harness:SPEC-0025"] -->|"PlaysRole:realizing-symbol"| 89
+  1402["Trace: libs/harness/gates/test/ast-fail-closed-laws.test.ts"] -->|"PlaysRole:exercised-span"| 90
+  1403["Trace: libs/harness/gates/test/ast-fail-closed-laws.test.ts"] -->|"PlaysRole:exercised-span"| 119
+  1418["Trace: libs/harness/gates/test/gc-ears-and-adr-quality.test.ts"] -->|"PlaysRole:exercised-span"| 89
+  1420["Trace: libs/harness/gates/test/gc-ears-and-adr-quality.test.ts"] -->|"PlaysRole:exercised-span"| 103
+```

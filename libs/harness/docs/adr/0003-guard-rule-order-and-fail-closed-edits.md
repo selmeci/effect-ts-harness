@@ -68,10 +68,10 @@ The same session showed a second failure mode. The guard hook imports `policy.ts
 
 ### Deterministic Enforcement
 
-| Rule                                          | Enforced By                        | Gate / Mechanism                                                                                         | Governed Symbols             |
-| :-------------------------------------------- | :--------------------------------- | :------------------------------------------------------------------------------------------------------- | :--------------------------- |
-| Stage order deny → ask → escalate → allowlist | `libs/harness/gates/src/policy.ts` | `classifyCommand` + `libs/harness/gates/test/policy.test.ts` (REQ-1.4 pipe case, REQ-1.1 `find -delete`) | `Harness.decideGuardCommand` |
-| Git discards ask, never escalate              | `libs/harness/gates/src/policy.ts` | `GIT_DISCARD_PATTERNS` + policy tests REQ-1.2                                                            | `Harness.decideGuardCommand` |
-| Secret files as path tokens only              | `libs/harness/gates/src/policy.ts` | `SECRET_FILE_PATTERN` + policy tests REQ-3.1 / REQ-3.2                                                   | `Harness.decideGuardCommand` |
-| No agent-initiated guard calls                | `libs/harness/gates/src/policy.ts` | `GUARD_SELF_INVOCATION_PATTERN` + policy tests REQ-2.1 / REQ-2.2                                         | `Harness.decideGuardCommand` |
-| Destructive argument & obfuscation escalation | `libs/harness/gates/src/policy.ts` | `DESTRUCTIVE_ARGUMENT_PATTERNS` + `OBFUSCATION_PATTERNS` + policy tests REQ-1.1 / REQ-1.3 / REQ-3.3      | `Harness.decideGuardCommand` |
+| Rule                                          | Enforced By                                                                  | Gate / Mechanism                                                                                         | Governed Symbols             |
+| :-------------------------------------------- | :--------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------- | :--------------------------- |
+| Stage order deny → ask → escalate → allowlist | `libs/harness/gates/src/policy.ts`, `libs/harness/gates/test/policy.test.ts` | `classifyCommand` + `libs/harness/gates/test/policy.test.ts` (REQ-1.4 pipe case, REQ-1.1 `find -delete`) | `Harness.decideGuardCommand` |
+| Git discards ask, never escalate              | `libs/harness/gates/src/policy.ts`                                           | `GIT_DISCARD_PATTERNS` + policy tests REQ-1.2                                                            | `Harness.decideGuardCommand` |
+| Secret files as path tokens only              | `libs/harness/gates/src/policy.ts`                                           | `SECRET_FILE_PATTERN` + policy tests REQ-3.1 / REQ-3.2                                                   | `Harness.decideGuardCommand` |
+| No agent-initiated guard calls                | `libs/harness/gates/src/policy.ts`                                           | `GUARD_SELF_INVOCATION_PATTERN` + policy tests REQ-2.1 / REQ-2.2                                         | `Harness.decideGuardCommand` |
+| Destructive argument & obfuscation escalation | `libs/harness/gates/src/policy.ts`                                           | `DESTRUCTIVE_ARGUMENT_PATTERNS` + `OBFUSCATION_PATTERNS` + policy tests REQ-1.1 / REQ-1.3 / REQ-3.3      | `Harness.decideGuardCommand` |

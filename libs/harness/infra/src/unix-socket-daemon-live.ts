@@ -527,8 +527,13 @@ const makeUnixSocketDaemonLayer = (
                   server.close()
                 })
               }).pipe(
-                Effect.tapError(() =>
-                  closeNetServer(fs, server, socketPath, openSockets, shouldUnlinkSocket),
+                Effect.onExit((exit) =>
+                  match(exit)
+                    .with({ _tag: "Failure" }, () =>
+                      closeNetServer(fs, server, socketPath, openSockets, shouldUnlinkSocket),
+                    )
+                    .with({ _tag: "Success" }, () => Effect.void)
+                    .exhaustive(),
                 ),
               )
 
@@ -539,8 +544,13 @@ const makeUnixSocketDaemonLayer = (
                   },
                   catch: (err) => toDaemonServerError(socketPath, err, "chmod-failed"),
                 }).pipe(
-                  Effect.tapError(() =>
-                    closeNetServer(fs, server, socketPath, openSockets, shouldUnlinkSocket),
+                  Effect.onExit((exit) =>
+                    match(exit)
+                      .with({ _tag: "Failure" }, () =>
+                        closeNetServer(fs, server, socketPath, openSockets, shouldUnlinkSocket),
+                      )
+                      .with({ _tag: "Success" }, () => Effect.void)
+                      .exhaustive(),
                   ),
                 )
               }

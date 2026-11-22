@@ -38,6 +38,7 @@ export const GcFindingKind = Schema.Literals([
   "adapter-rules-drift",
   "hook-timeout-parity",
   "hook-bootstrap-fail-closed",
+  "hook-matcher-tool-parity",
   "skill-tier-table-drift",
   "mermaid-dependency-drift",
   "doc-banned-or-phantom-tech",

@@ -155,8 +155,15 @@ const readLockIdsFromLockJson = (
   if (!hostIo.existsSync(lockJsonPath) || hostIo.isSymbolicLinkSync(lockJsonPath)) {
     return []
   }
-  match(Result.try(() => hostIo.readTextSync(lockJsonPath)))
-    .with({ _tag: "Failure" }, () => undefined)
+  match(
+    Result.try({
+      try: () => hostIo.readTextSync(lockJsonPath),
+      catch: (err) => toErrorReasonMessage(err, `Failed to read ${lockJsonPath}`),
+    }),
+  )
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      process.stderr.write(`[harness:workflow] Warning: ${failure}\n`)
+    })
     .with({ _tag: "Success" }, ({ success }) => {
       match(Schema.decodeOption(LockJsonSchema)(success))
         .with({ _tag: "None" }, () => undefined)
