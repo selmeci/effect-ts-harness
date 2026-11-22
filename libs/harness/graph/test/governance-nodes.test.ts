@@ -950,5 +950,33 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
         rmSync(tempDir, { recursive: true, force: true })
       }
     })
+
+    it("stripFmQuotes strips empty quoted frontmatter items (length === 2)", () => {
+      const res = parseGovernanceDocFileChecked(
+        "libs/sample/docs/specs/2026-11-22-empty-quotes.md",
+        [
+          "---",
+          "id: sample:SPEC-9001",
+          'title: "Empty Quotes Spec"',
+          "status: accepted",
+          'spans: ["Sample.validSpan", "", \'\']',
+          "services:",
+          '  - ""',
+          "  - ''",
+          "  - PhotoRepo",
+          "---",
+          "# Empty Quotes Spec",
+        ].join("\n"),
+      )
+      match(res)
+        .with({ _tag: "Ok" }, ({ node }) => {
+          expect(node.referencedSpans).toEqual(["Sample.validSpan"])
+          expect(node.referencedServices).toEqual(["PhotoRepo"])
+        })
+        .with({ _tag: "Skip" }, { _tag: "InvalidStatus" }, () => {
+          expect.unreachable("Expected Ok governance doc result")
+        })
+        .exhaustive()
+    })
   })
 })

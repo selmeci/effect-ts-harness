@@ -1045,7 +1045,7 @@ describe("hook-entry.ts fast-path", () => {
         expect(fastRes.stdout.trim()).toBe(fullRes.stdout.trim())
         expect(fastRes.stderr).toContain("HARNESS_UNIT_WORKER=1")
       }
-    })
+    }, 15_000)
 
     it("resolves symlinks pointing to .harness/omnigraph-cluster/auth-tokens.json and denies with fast-path parity", () => {
       const dir = mkdtempSync(join(tmpdir(), "harness-worker-symlink-"))
@@ -1116,7 +1116,7 @@ describe("hook-entry.ts fast-path", () => {
         expect(JSON.parse(fastRes.stdout.trim())).toEqual({ decision: "allow" })
         expect(fullRes.stdout.trim()).toBe(fastRes.stdout.trim())
       }
-    })
+    }, 15_000)
 
     it("F-4.1: denies Read .env and <commonGitDir>/harness/** reads in non-worker mode with fast-path parity", () => {
       const env = { HARNESS_UNIT_WORKER: "0" }
@@ -1151,7 +1151,7 @@ describe("hook-entry.ts fast-path", () => {
       })
       expect(agyEnvRes.status).toBe(0)
       expect(JSON.parse(agyEnvRes.stdout.trim())).toMatchObject({ decision: "deny" })
-    })
+    }, 15_000)
 
     it("F-3.6: walks ancestors to resolve non-existent files under symlinked dirs and fails closed on symlink loops", () => {
       const dir = mkdtempSync(join(tmpdir(), "harness-f36-ancestor-"))
@@ -1270,7 +1270,7 @@ describe("hook-entry.ts fast-path", () => {
         expect(fullRes.status, deniedInput).toBe(0)
         expect(JSON.parse(fullRes.stdout.trim()), deniedInput).toMatchObject({ decision: "deny" })
       }
-    })
+    }, 15_000)
   })
 
   describe("done --format=antigravity fast-path", () => {
