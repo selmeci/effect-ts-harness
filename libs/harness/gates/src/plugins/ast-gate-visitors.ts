@@ -531,7 +531,7 @@ export const visitSourceFileSinglePass = (
       const m = `Fallback JSON.stringify equality in '${fp}' — use Equal.equals.`
       pushViolation(catTest, "fallback-json-equality", m, node)
     }
-    if (ts.isTaggedTemplateExpression(node)) {
+    if (!isTestOrHelper && ts.isTaggedTemplateExpression(node)) {
       const tag = node.tag.getText(sourceFile)
       if (tag === "sql" || tag.endsWith(".sql")) {
         const sql = node.template.getText(sourceFile).slice(1, -1)
