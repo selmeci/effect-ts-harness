@@ -7,6 +7,8 @@ date: 2026-11-21
 owners:
   - "@harness/architecture"
 scope: harness
+informed_by:
+  - harness:ADR-0019
 enforced_by:
   - libs/harness/gates/src/plugins/gc/gc-test-and-decider.plugin.ts
   - libs/harness/gates/src/plugins/gc/gc-helpers.ts
