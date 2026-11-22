@@ -22,7 +22,7 @@ import {
   toBoundedReason,
   wavesOf,
 } from "@harness/contract"
-import { toWorkflowStoreUnavailableError } from "../omnigraph-workflow-store.js"
+import { toWorkflowStoreUnavailableError } from "./workflow-store-codec.js"
 import {
   type RebuiltRunBundle,
   type WorkflowReadModelOptions,

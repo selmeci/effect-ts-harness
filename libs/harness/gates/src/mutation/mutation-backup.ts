@@ -140,7 +140,7 @@ export const extractGitDiffModifiedLinesChecked = (
     targetMap: Map<string, Set<number>>,
   ): Result.Result<void, string> =>
     Result.flatMap(
-      runGit(["ls-files", "--others", "--exclude-standard", "--", "libs/"]),
+      runGit(["ls-files", "--others", "--exclude-standard", "--", "libs/", "apps/"]),
       (stdout) => {
         for (const rawLine of stdout.split(/\r?\n/)) {
           const relPath = rawLine.trim().replace(/\\/g, "/")
@@ -209,11 +209,14 @@ export const extractGitDiffModifiedLinesChecked = (
         if (mergeBase.length === 0) {
           return Result.fail(`git merge-base HEAD ${baseRef} returned empty output`)
         }
-        return Result.flatMap(runGit(["diff", "-U0", mergeBase, "--", "libs/"]), (diffStdout) => {
-          const lineMap = new Map<string, Set<number>>()
-          mergeLineMaps(lineMap, parseGitDiffModifiedLines(diffStdout))
-          return Result.map(collectUntrackedLibsFiles(lineMap), () => lineMap)
-        })
+        return Result.flatMap(
+          runGit(["diff", "-U0", mergeBase, "--", "libs/", "apps/"]),
+          (diffStdout) => {
+            const lineMap = new Map<string, Set<number>>()
+            mergeLineMaps(lineMap, parseGitDiffModifiedLines(diffStdout))
+            return Result.map(collectUntrackedLibsFiles(lineMap), () => lineMap)
+          },
+        )
       }),
     )
   }

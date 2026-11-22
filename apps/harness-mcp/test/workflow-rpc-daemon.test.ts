@@ -11,7 +11,7 @@ import {
 import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { Effect, Exit, Layer, Schema } from "effect"
+import { Context, Effect, Exit, Layer, Schema, Scope, Semaphore, SynchronizedRef } from "effect"
 import { DurableDeferred, WorkflowEngine } from "effect/workflow"
 import { match } from "ts-pattern"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
@@ -50,6 +50,7 @@ import {
   WorkflowDoctorMode,
   WorkflowExecutionId,
   WorkflowRunId,
+  WorkflowRunOutcome,
   WorkflowStoreOperation,
   WorkflowStoreUnavailableError,
   WorkflowTimestampMs,
@@ -89,12 +90,31 @@ import {
 import {
   UnitAgentDispatcher,
   UnitVerifier,
+  WorkflowProjectionWriter,
   WorkflowReadModelQuery,
   WorkflowReviewRouter,
   WorkflowWorktreePort,
 } from "@harness/service"
+import { HarnessTaskWorkflowLayer } from "@harness/gates"
 import { startHarnessDaemonServer } from "../src/daemon/unix-socket-daemon.js"
-import { extractLastRejection, inspectActiveUnitCycle } from "../src/daemon/workflow-rpc-shared.js"
+import { handleDaemonWorkflowCompleteRequest } from "../src/daemon/workflow-rpc-complete-helper.js"
+import {
+  handleDaemonWorkflowAbortRequest,
+  handleDaemonWorkflowResumeRequest,
+  handleDaemonWorkflowStartRequest,
+} from "../src/daemon/workflow-rpc-daemon-helper.js"
+import { handleDaemonWorkflowDoctorRequest } from "../src/daemon/workflow-rpc-doctor-helper.js"
+import { type WorkflowDaemonRuntime } from "../src/daemon/workflow-engine-daemon-helper.js"
+import {
+  extractLastRejection,
+  inspectActiveUnitCycle,
+  resolveRunTarget,
+  validateRpcRepoRoot,
+} from "../src/daemon/workflow-rpc-shared.js"
+import {
+  buildStatusSummaryForRuntime,
+  handleDaemonWorkflowStatusRpcRequest,
+} from "../src/daemon/workflow-rpc-status-helper.js"
 import { executeWorkflowPlanTool } from "../src/tools/workflow-plan.tools.js"
 
 const graphConfigDir = resolve(import.meta.dirname, "../../../libs/harness/graph")
@@ -1688,7 +1708,7 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
       Effect.gen(function* () {
         const engine = yield* WorkflowEngine.WorkflowEngine
         yield* engine.deferredDone(corruptDef, {
-          workflowName: HarnessTaskWorkflow.name,
+          workflowName: HarnessTaskWorkflow._tag,
           executionId,
           deferredName: escDef.name,
           exit: Exit.succeed({ invalid: "payload" }),
@@ -1835,4 +1855,155 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
       await daemon.close()
     }
   }, 45_000)
+
+  it("directly exercises all WorkflowRpcDaemon EffectFns fail-closed and in-memory", async () => {
+    const workBase = mkdtempSync(join(tmpdir(), "wf3-direct-rpc-"))
+    tempDirs.push(workBase)
+    const { canonicalDir } = initTestGitRepo(workBase, "direct-repo")
+    const { canonicalDir: otherDir } = initTestGitRepo(workBase, "other-repo")
+    const validatedCanonical = await Effect.runPromise(
+      validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
+    )
+
+    const allowedScope = {
+      _tag: "Allowed" as const,
+      resolvedRoot: validatedCanonical.worktreeRoot,
+      validatedWorktree: validatedCanonical,
+      daemonWorktree: validatedCanonical,
+    }
+
+    const offlineStart = await Effect.runPromise(
+      handleDaemonWorkflowStartRequest({
+        requestId: "direct-start-1",
+        rawPayload: {},
+        scope: allowedScope,
+      }),
+    )
+    expect(offlineStart.ok).toBe(false)
+
+    const offlineComplete = await Effect.runPromise(
+      handleDaemonWorkflowCompleteRequest({
+        requestId: "direct-complete-1",
+        rawPayload: {},
+        scope: allowedScope,
+      }),
+    )
+    expect(offlineComplete.ok).toBe(false)
+
+    const offlineResume = await Effect.runPromise(
+      handleDaemonWorkflowResumeRequest({
+        requestId: "direct-resume-1",
+        rawPayload: {},
+        scope: allowedScope,
+      }),
+    )
+    expect(offlineResume.ok).toBe(false)
+
+    const offlineAbort = await Effect.runPromise(
+      handleDaemonWorkflowAbortRequest({
+        requestId: "direct-abort-1",
+        rawPayload: {},
+        scope: allowedScope,
+      }),
+    )
+    expect(offlineAbort.ok).toBe(false)
+
+    const offlineDoctor = await Effect.runPromise(
+      handleDaemonWorkflowDoctorRequest({
+        requestId: "direct-doctor-1",
+        rawPayload: {},
+        scope: allowedScope,
+      }),
+    )
+    expect(offlineDoctor.ok).toBe(false)
+
+    const offlineStatus = await Effect.runPromise(
+      handleDaemonWorkflowStatusRpcRequest({
+        requestId: "direct-status-1",
+        rawPayload: {},
+        scope: allowedScope,
+      }),
+    )
+    expect(offlineStatus).toMatchObject({ ok: true, result: { _tag: "DaemonOffline" } })
+
+    const validatedViaHelper = await Effect.runPromise(
+      validateRpcRepoRoot(validatedCanonical.worktreeRoot, allowedScope),
+    )
+    expect(validatedViaHelper.commonGitDir).toBe(validatedCanonical.commonGitDir)
+
+    const crossRepoErr = await Effect.runPromise(
+      validateRpcRepoRoot(AbsoluteRepoRoot.make(otherDir), allowedScope).pipe(Effect.flip),
+    )
+    expect(crossRepoErr).toContain("commonGitDir")
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scope = yield* Scope.Scope
+          const projectionWriterLayer = Layer.succeed(WorkflowProjectionWriter, {
+            upsertRun: () => Effect.void,
+            upsertUnit: () => Effect.void,
+            upsertAttempt: () => Effect.void,
+          })
+          const readModelLayer = Layer.succeed(WorkflowReadModelQuery, {
+            getRun: () => Effect.succeedNone,
+            listRuns: Effect.succeed([]),
+            listUnits: () => Effect.succeed([]),
+            listAttempts: () => Effect.succeed([]),
+            probeAvailability: Effect.succeed("ready" as const),
+          })
+          const portsLayer = Layer.mergeAll(
+            makeCompletedVerifierLayer(),
+            makeNoopWorktreeLayer(validatedCanonical.worktreeRoot),
+            UnitAgentDispatcherLive,
+            makeReviewStubLayer(),
+            projectionWriterLayer,
+            readModelLayer,
+          )
+          const fullLayer = HarnessTaskWorkflowLayer.pipe(
+            Layer.provideMerge(Layer.merge(WorkflowEngine.layerMemory, portsLayer)),
+          )
+          const workflowContext = yield* Layer.buildWithScope(fullLayer, scope)
+          const plansRef = yield* SynchronizedRef.make<ReadonlyMap<WorkflowRunId, CompiledPlan>>(
+            new Map(),
+          )
+          const runMutexesRef = yield* SynchronizedRef.make<
+            ReadonlyMap<WorkflowRunId, Semaphore.Semaphore>
+          >(new Map())
+          const runtime: WorkflowDaemonRuntime = {
+            workflowContext,
+            engine: Context.get(workflowContext, WorkflowEngine.WorkflowEngine),
+            projectionWriter: Context.get(workflowContext, WorkflowProjectionWriter),
+            readModelQuery: Context.get(workflowContext, WorkflowReadModelQuery),
+            unitVerifier: Context.get(workflowContext, UnitVerifier),
+            unitAgentDispatcher: Context.get(workflowContext, UnitAgentDispatcher),
+            worktreePort: Context.get(workflowContext, WorkflowWorktreePort),
+            reviewRouter: Context.get(workflowContext, WorkflowReviewRouter),
+            leaseFence: { commonGitDir: validatedCanonical.commonGitDir },
+            plansRef,
+            runMutexesRef,
+            rebuildMutex: Semaphore.makeUnsafe(1),
+            rebuildRpcGateSemaphore: Semaphore.makeUnsafe(16),
+            rebuildProjectionGateSemaphore: Semaphore.makeUnsafe(16),
+            journalWriteMutex: Semaphore.makeUnsafe(1),
+            canonicalRepoRoot: validatedCanonical.worktreeRoot,
+            commonGitDir: validatedCanonical.commonGitDir,
+            hostIo: nodeSyncHostIo,
+          }
+
+          const missingRunErr = yield* resolveRunTarget(runtime).pipe(Effect.flip)
+          expect(missingRunErr).toBe("No workflow run found")
+
+          const summary = yield* buildStatusSummaryForRuntime(runtime, LeaseEpoch.make(1)).pipe(
+            Effect.provideService(WorkflowReadModelQuery, runtime.readModelQuery),
+          )
+          expect(summary).toEqual({
+            _tag: "Ready",
+            writerLeaseEpoch: LeaseEpoch.make(1),
+            outcome: WorkflowRunOutcome.cases.NotFound.make({}),
+          })
+        }),
+      ),
+    )
+  })
 })

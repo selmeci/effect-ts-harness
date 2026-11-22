@@ -55,9 +55,13 @@ export {
   VerifyStampSchema,
   checkMutateStamp,
   checkVerifyStamp,
+  computeMutableTreeHash,
+  computeMutableTreeHashChecked,
   computeWorkspaceTreeHash,
   computeWorkspaceTreeHashChecked,
+  isMarkdownDocPath,
   parseDstSeedEnv,
+  readExistingVerifyStamp,
   removeMutateStamp,
   type CheckMutateStampResult,
   type CheckVerifyStampResult,
@@ -113,7 +117,6 @@ export {
   GraphGcReport,
   IGNORED_ERRORS,
   IGNORED_SERVICES,
-  IGNORED_UNTESTED_FNS,
   augmentReachabilityWithInference,
   buildGraphReachabilityContext,
   checkUnusedContractExports,
@@ -226,6 +229,11 @@ export {
   type TraceSpanObservation,
   type UntestedMutationFile,
 } from "./mutation-check.js"
+export {
+  classifyMutationModulePurity,
+  isPureMutationCandidate,
+  type PureModuleClassification,
+} from "./mutation/mutation-pure-module-classifier.js"
 export {
   decideEarsSpecLint,
   decideEarsSpecQuality,

@@ -6,12 +6,17 @@ import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import { compareCodeUnits } from "@harness/contract"
 import type { SyncHostDirEntry, SyncHostIo } from "@harness/service/host-io"
+import {
+  type PureDiscoveredFile,
+  collectExcludedLibPureFilesChecked,
+  discoverAppPureFilesChecked,
+} from "./mutation-pure-module-classifier.js"
 
 export interface DomainFile {
   readonly scope: string
   readonly pkgDir: string
   readonly pkgName?: string | undefined
-  readonly tier: "domain" | "core" | "contract"
+  readonly tier: "domain" | "core" | "contract" | "infra-pure" | "app-pure"
   readonly fullPath: string
   readonly relFile: string
 }
@@ -196,6 +201,7 @@ export const resolveLibPackageClassificationChecked = (
       readonly _tag: "Ok"
       readonly classification: PackageTierClassification
       readonly pkgName: string | undefined
+      readonly tags: ReadonlyArray<string>
     }
   | {
       readonly _tag: "CorruptManifest"
@@ -210,6 +216,7 @@ export const resolveLibPackageClassificationChecked = (
         .with("domain", "core", "contract", (t) => t)
         .otherwise(() => "unclassified" as const),
       pkgName: undefined,
+      tags: [] as ReadonlyArray<string>,
     }))
     .with({ _tag: "Ok" }, ({ manifest }) =>
       match(classifyFromTags(manifest.tags, pkgPath))
@@ -218,6 +225,7 @@ export const resolveLibPackageClassificationChecked = (
           _tag: "Ok" as const,
           classification,
           pkgName: manifest.pkgName,
+          tags: manifest.tags,
         }))
         .exhaustive(),
     )
@@ -244,7 +252,7 @@ const matchesScopeFilter = (
 ): boolean => {
   const normalized = scope
     .replace(/^@harness\//, "")
-    .replace(/-(domain|core|contract|gates|graph|decision|ingest)$/, "")
+    .replace(/-(domain|core|contract|infra|app|gates|graph|decision|ingest)$/, "")
   return (
     scope === sDir ||
     scope === pkgDir ||
@@ -346,102 +354,133 @@ export const findDomainFilesChecked = (
         .exhaustive(),
     }
   }
-  if (!libsExists) return { _tag: "Ok", files: results }
-
   const targetSet =
     targetFiles !== undefined ? new Set(targetFiles.map(normalizeTargetPath)) : undefined
-  const libsDirRes = readdirGuarded(libsDir, hostIo)
-  const libsEntries = match(libsDirRes)
-    .with({ _tag: "Success" }, ({ success }) => success)
-    .with({ _tag: "Failure" }, () => undefined)
-    .exhaustive()
-  if (libsEntries === undefined) {
-    return {
-      _tag: "Error",
-      reason: match(libsDirRes)
-        .with({ _tag: "Failure" }, ({ failure }) => failure)
-        .with({ _tag: "Success" }, () => "")
-        .exhaustive(),
-    }
-  }
-  const scopeDirs = [...libsEntries]
-    .filter((e) => e.isDirectory)
-    .map((e) => e.name)
-    .sort(compareCodeUnits)
-
-  for (const sDir of scopeDirs) {
-    const scopePath = join(libsDir, sDir)
-    const scopeDirRes = readdirGuarded(scopePath, hostIo)
-    const scopeEntries = match(scopeDirRes)
+  if (libsExists) {
+    const libsDirRes = readdirGuarded(libsDir, hostIo)
+    const libsEntries = match(libsDirRes)
       .with({ _tag: "Success" }, ({ success }) => success)
       .with({ _tag: "Failure" }, () => undefined)
       .exhaustive()
-    if (scopeEntries === undefined) {
+    if (libsEntries === undefined) {
       return {
         _tag: "Error",
-        reason: match(scopeDirRes)
+        reason: match(libsDirRes)
           .with({ _tag: "Failure" }, ({ failure }) => failure)
           .with({ _tag: "Success" }, () => "")
           .exhaustive(),
       }
     }
-    const pkgDirs = [...scopeEntries]
+    const scopeDirs = [...libsEntries]
       .filter((e) => e.isDirectory)
       .map((e) => e.name)
       .sort(compareCodeUnits)
 
-    for (const pkgDir of pkgDirs) {
-      const pkgPath = join(scopePath, pkgDir)
-      const classRes = resolveLibPackageClassificationChecked(pkgPath, pkgDir, hostIo)
-      const pkgError = match(classRes)
-        .with({ _tag: "CorruptManifest" }, ({ reason }) => reason)
-        .with({ _tag: "Ok" }, ({ classification, pkgName }) =>
-          match(classification)
-            .with("excluded", "unclassified", () => undefined)
-            .with("domain", "core", "contract", (tier) => {
-              if (scope !== undefined && !matchesScopeFilter(scope, sDir, pkgDir, pkgName)) {
-                return undefined
-              }
-              const scanRoots: ReadonlyArray<string> = match(tier)
-                .with("contract", () => [join(pkgPath, "src")])
-                .with("domain", "core", () => [
-                  join(pkgPath, "src"),
-                  join(pkgPath, "test", "fixtures"),
-                ])
-                .exhaustive()
-              for (const dir of scanRoots) {
-                const existsErr = match(existsGuarded(dir, hostIo))
-                  .with({ _tag: "Failure" }, ({ failure }) => failure)
-                  .with({ _tag: "Success" }, ({ success: exists }) => {
-                    if (!exists) return undefined
-                    return match(
-                      walkTsFilesChecked(
-                        dir,
-                        repoRoot,
-                        sDir,
-                        pkgDir,
-                        pkgName,
-                        tier,
-                        targetSet,
-                        hostIo,
-                        results,
-                      ),
-                    )
-                      .with({ _tag: "Success" }, () => undefined)
-                      .with({ _tag: "Failure" }, ({ failure }) => failure)
-                      .exhaustive()
-                  })
-                  .exhaustive()
-                if (existsErr !== undefined) return existsErr
-              }
-              return undefined
-            })
-            .exhaustive(),
-        )
+    for (const sDir of scopeDirs) {
+      const scopePath = join(libsDir, sDir)
+      const scopeDirRes = readdirGuarded(scopePath, hostIo)
+      const scopeEntries = match(scopeDirRes)
+        .with({ _tag: "Success" }, ({ success }) => success)
+        .with({ _tag: "Failure" }, () => undefined)
         .exhaustive()
-      if (pkgError !== undefined) return { _tag: "Error", reason: pkgError }
+      if (scopeEntries === undefined) {
+        return {
+          _tag: "Error",
+          reason: match(scopeDirRes)
+            .with({ _tag: "Failure" }, ({ failure }) => failure)
+            .with({ _tag: "Success" }, () => "")
+            .exhaustive(),
+        }
+      }
+      const pkgDirs = [...scopeEntries]
+        .filter((e) => e.isDirectory)
+        .map((e) => e.name)
+        .sort(compareCodeUnits)
+
+      for (const pkgDir of pkgDirs) {
+        const pkgPath = join(scopePath, pkgDir)
+        const classRes = resolveLibPackageClassificationChecked(pkgPath, pkgDir, hostIo)
+        const pkgError = match(classRes)
+          .with({ _tag: "CorruptManifest" }, ({ reason }) => reason)
+          .with({ _tag: "Ok" }, ({ classification, pkgName, tags }) =>
+            match(classification)
+              .with("unclassified", () => undefined)
+              .with("excluded", () => {
+                const pureResults: Array<PureDiscoveredFile> = []
+                const err = collectExcludedLibPureFilesChecked({
+                  pkgPath,
+                  repoRoot,
+                  sDir,
+                  pkgDir,
+                  pkgName,
+                  tags,
+                  scope,
+                  targetSet,
+                  hostIo,
+                  matchesScopeFilter,
+                  results: pureResults,
+                })
+                results.push(...pureResults)
+                return err
+              })
+              .with("domain", "core", "contract", (tier) => {
+                if (scope !== undefined && !matchesScopeFilter(scope, sDir, pkgDir, pkgName)) {
+                  return undefined
+                }
+                const scanRoots: ReadonlyArray<string> = match(tier)
+                  .with("contract", () => [join(pkgPath, "src")])
+                  .with("domain", "core", () => [
+                    join(pkgPath, "src"),
+                    join(pkgPath, "test", "fixtures"),
+                  ])
+                  .exhaustive()
+                for (const dir of scanRoots) {
+                  const existsErr = match(existsGuarded(dir, hostIo))
+                    .with({ _tag: "Failure" }, ({ failure }) => failure)
+                    .with({ _tag: "Success" }, ({ success: exists }) => {
+                      if (!exists) return undefined
+                      return match(
+                        walkTsFilesChecked(
+                          dir,
+                          repoRoot,
+                          sDir,
+                          pkgDir,
+                          pkgName,
+                          tier,
+                          targetSet,
+                          hostIo,
+                          results,
+                        ),
+                      )
+                        .with({ _tag: "Success" }, () => undefined)
+                        .with({ _tag: "Failure" }, ({ failure }) => failure)
+                        .exhaustive()
+                    })
+                    .exhaustive()
+                  if (existsErr !== undefined) return existsErr
+                }
+                return undefined
+              })
+              .exhaustive(),
+          )
+          .exhaustive()
+        if (pkgError !== undefined) return { _tag: "Error", reason: pkgError }
+      }
     }
   }
+
+  const appPureResults: Array<PureDiscoveredFile> = []
+  const appErr = discoverAppPureFilesChecked({
+    repoRoot,
+    scope,
+    targetSet,
+    hostIo,
+    readPackageManifest,
+    matchesScopeFilter,
+    results: appPureResults,
+  })
+  if (appErr !== undefined) return { _tag: "Error", reason: appErr }
+  results.push(...appPureResults)
   return { _tag: "Ok", files: results }
 }
 
@@ -544,7 +583,10 @@ export const findReachingTestFilesChecked = (
 ):
   | { readonly _tag: "Ok"; readonly files: ReadonlyArray<string> }
   | { readonly _tag: "Error"; readonly reason: string } => {
-  const testDir = join(repoRoot, "libs", file.scope, file.pkgDir, "test")
+  const testDir =
+    file.tier === "app-pure" && file.scope === "apps"
+      ? join(repoRoot, "apps", file.pkgDir, "test")
+      : join(repoRoot, "libs", file.scope, file.pkgDir, "test")
   const existsRes = existsGuarded(testDir, hostIo)
   const testDirExists = match(existsRes)
     .with({ _tag: "Success" }, ({ success }) => success)

@@ -13,7 +13,18 @@ import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import { Effect } from "effect"
 import { makeMockDecisionModelLayer } from "@harness/decision"
-import { MutantCount, MutateStampPassed, StampRelFilePath, writeMutateStamp } from "@harness/gates"
+import { buildHarnessGraph, resolveOmnigraphTaskBranches } from "@harness/graph"
+import {
+  checkVerifyStamp,
+  computeMutableTreeHashChecked,
+  DstSeed,
+  DstSeedsRunCount,
+  MutantCount,
+  MutateStampPassed,
+  StampRelFilePath,
+  writeMutateStamp,
+  writeVerifyStamp,
+} from "@harness/gates"
 import { nodeSyncHostIo } from "@harness/infra"
 import type { SyncHostIo } from "@harness/service/host-io"
 import {
@@ -22,8 +33,10 @@ import {
   handleBench,
   handleMutate,
 } from "../src/commands/mutate-and-bench.command.js"
+import { cleanupStalePlanSnapshotAfterDone } from "../src/commands/omnigraph-safety-helpers.js"
 import { handlePlanCheck } from "../src/commands/plan-and-repair.command.js"
 import { handleVerify } from "../src/commands/verify-and-done.command.js"
+import { tryRunDocOnlyVerifyFastPath } from "../src/commands/verify-doc-fastpath.js"
 import { runDeclarativeCli } from "../src/index.js"
 
 const REAL_REPO_ROOT = resolve(import.meta.dirname, "../../..")
@@ -679,6 +692,141 @@ describe("CLI handleMutate, handleVerify (mutate-stamp), handleBench, and handle
       )
       expect(unscopedDiffRes.exitCode).toBe(0)
       expect(existsSync(stampPath)).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  it("REQ-4.3 & REQ-4.4: doc-only handleVerify fast-path skips subprocess verify on matching mutableTreeHash and cleanupStalePlanSnapshotAfterDone removes stale snapshot", async () => {
+    const dir = initTempGitRepo("harness-doc-fastpath-")
+    try {
+      git(dir, ["checkout", "-b", "feat/doc-fastpath"])
+      writeDemoGatesPkg(
+        dir,
+        "export const isEven = (n: number): boolean => n % 2 === 0\n",
+        [
+          'import { expect, it } from "vitest"',
+          'import { isEven } from "../src/engine.js"',
+          'it("kills %", () => { expect(isEven(2)).toBe(true); expect(isEven(3)).toBe(false) })',
+        ].join("\n"),
+      )
+      writeFileSync(join(dir, "README.md"), "# initial readme\n", "utf8")
+      gitCommitAll(dir, "add gates")
+
+      // 1. Prime mutate-stamp & verify-stamp (with mutableTreeHash and branch)
+      const mutRes = await Effect.runPromise(
+        handleMutate(["mutate", "--strict"], { repoRoot: dir }),
+      )
+      expect(mutRes.exitCode).toBe(0)
+
+      const { implBranch } = resolveOmnigraphTaskBranches(dir, nodeSyncHostIo)
+      const initialStamp = writeVerifyStamp(dir, nodeSyncHostIo, implBranch, {
+        dstSeed: DstSeed.make(12345),
+        dstSeedsRun: DstSeedsRunCount.make(42),
+      })
+      expect(initialStamp.mutableTreeHash).toBeDefined()
+
+      // 2. Modify markdown only -> handleVerify WITHOUT skipSubprocessVerify takes fast-path without invoking Nx/pnpm
+      writeFileSync(join(dir, "README.md"), "# updated markdown only\n", "utf8")
+      const fastPathRes = await Effect.runPromise(
+        handleVerify({
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+          skipAutoSessionReport: true,
+          mutateStampPolicy: "enforce",
+          decisionLayer: makeMockDecisionModelLayer(),
+        }),
+      )
+      expect(fastPathRes.exitCode).toBe(0)
+      const refreshedCheck = checkVerifyStamp(dir, nodeSyncHostIo)
+      expect(refreshedCheck.valid).toBe(true)
+      if (refreshedCheck.valid) {
+        expect(refreshedCheck.stamp.mutableTreeHash).toBe(initialStamp.mutableTreeHash)
+        expect(refreshedCheck.stamp.treeHash).not.toBe(initialStamp.treeHash)
+        expect(refreshedCheck.stamp.dstSeed).toBe(12345)
+      }
+
+      // 3. Direct tryRunDocOnlyVerifyFastPath checks: branch mismatch returns undefined, GC failure fails closed
+      const emptyGraph = buildHarnessGraph({
+        fns: [],
+        services: [],
+        layers: [],
+        errors: [],
+        tests: [],
+      })
+      const mismatchRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch: "impl/other-branch",
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(mismatchRes).toBeUndefined()
+
+      const gcFailRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [
+            {
+              id: "harness:SPEC-9999",
+              docPath: "libs/harness/docs/specs/bad.md",
+              status: "accepted",
+              markdown:
+                "## Requirements\n\n### 1 · Bad\n**Source:** t\n\n| ID | Pattern | Requirement | Effect Symbol | Verification |\n|---|---|---|---|---|\n| REQ-1.1 | Ubiquitous | The system should fail. | x | test |\n",
+              enforcedByFiles: [],
+            },
+          ],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(gcFailRes?.exitCode).toBe(1)
+      expect(gcFailRes?.stderr).toContain("verify:gc-doc-only")
+
+      // 4. Editing .ts code bypasses fast path (mutableTreeHash mismatches)
+      writeFileSync(
+        join(dir, "libs", "demo", "gates", "src", "engine.ts"),
+        "export const isEven = (n: number): boolean => n % 2 === 0 // code edit\n",
+        "utf8",
+      )
+      const codeEditedFastPath = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(codeEditedFastPath).toBeUndefined()
+      expect(computeMutableTreeHashChecked(dir, nodeSyncHostIo)._tag).toBe("Success")
+
+      // 5. cleanupStalePlanSnapshotAfterDone removes .harness/plan-graph-snapshot.json, no-ops if absent, fails on symlink/unlink error
+      const planSnapPath = join(dir, ".harness", "plan-graph-snapshot.json")
+      writeFileSync(planSnapPath, "{}", "utf8")
+      expect(cleanupStalePlanSnapshotAfterDone(dir, nodeSyncHostIo)).toBeUndefined()
+      expect(existsSync(planSnapPath)).toBe(false)
+      expect(cleanupStalePlanSnapshotAfterDone(dir, nodeSyncHostIo)).toBeUndefined()
+
+      writeFileSync(planSnapPath, "{}", "utf8")
+      const symlinkIo: SyncHostIo = {
+        ...nodeSyncHostIo,
+        isSymbolicLinkSync: (p) =>
+          p === planSnapPath ? true : nodeSyncHostIo.isSymbolicLinkSync(p),
+      }
+      expect(cleanupStalePlanSnapshotAfterDone(dir, symlinkIo)).toContain("Refusing symlink")
+
+      const failUnlinkIo: SyncHostIo = {
+        ...nodeSyncHostIo,
+        isSymbolicLinkSync: () => false,
+        unlinkSync: () => {
+          throw new Error("EPERM")
+        },
+      }
+      expect(cleanupStalePlanSnapshotAfterDone(dir, failUnlinkIo)).toContain("EPERM")
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

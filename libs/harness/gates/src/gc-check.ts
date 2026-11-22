@@ -57,7 +57,6 @@ export {
   collectModularPluginFiles,
   IGNORED_SERVICES,
   IGNORED_ERRORS,
-  IGNORED_UNTESTED_FNS,
 } from "./plugins/gc/gc-helpers.js"
 export type { GovernanceDocStatus } from "@harness/graph"
 export {

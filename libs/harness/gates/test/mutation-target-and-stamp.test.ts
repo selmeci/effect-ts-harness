@@ -8,7 +8,12 @@ import { match } from "ts-pattern"
 import { AstSourceContent, AstSourceFilePath } from "@harness/contract"
 import { ts } from "@harness/graph"
 import type { SyncHostExecResult, SyncHostIo } from "@harness/service/host-io"
-import { SelfDogfooding, writeVerifyStamp } from "../src/index.js"
+import {
+  SelfDogfooding,
+  classifyMutationModulePurity,
+  isPureMutationCandidate,
+  writeVerifyStamp,
+} from "../src/index.js"
 import { runDomainMutationSuite } from "../src/mutation-check.js"
 import {
   compileMutantSchemaModule,
@@ -20,6 +25,7 @@ import {
 import { extractGitDiffModifiedLinesChecked } from "../src/mutation/mutation-backup.js"
 import {
   findDomainFiles,
+  findReachingTestFiles,
   findUnclassifiedModifiedLibFiles,
   partitionReachingTestFiles,
   resolveLibPackageClassification,
@@ -313,14 +319,57 @@ describe("mutation-target-discovery: tag classification, scope/target filtering,
         name: "@demo/inf",
         tags: ["type:infra"],
       })
-      writeFileSync(join(infPkg, "src", "inf.ts"), "export const i = 1\n", "utf8")
+      writeFileSync(
+        join(infPkg, "src", "inf.ts"),
+        'import { readFileSync } from "node:fs"\nexport const i = (p: string) => readFileSync(p, "utf8")\n',
+        "utf8",
+      )
+      writeFileSync(
+        join(infPkg, "src", "pure-codec.ts"),
+        'import type { Stats } from "node:fs"\nexport const isNonNeg = (n: number): boolean => n >= 0\nexport type StatShape = Stats\n',
+        "utf8",
+      )
 
       const appPkg = writePkg(dir, "demo", "app", {
         type: "package.json",
         name: "@demo/app",
         tags: ["type:app"],
       })
-      writeFileSync(join(appPkg, "src", "app.ts"), "export const a = 1\n", "utf8")
+      writeFileSync(
+        join(appPkg, "src", "app.ts"),
+        'import { execFileSync } from "node:child_process"\nexport const a = () => execFileSync("git", ["--version"])\n',
+        "utf8",
+      )
+
+      const demoCliPath = join(dir, "apps", "demo-cli")
+      mkdirSync(join(demoCliPath, "src"), { recursive: true })
+      mkdirSync(join(demoCliPath, "test"), { recursive: true })
+      writeFileSync(
+        join(demoCliPath, "package.json"),
+        JSON.stringify({ name: "demo-cli", nx: { tags: ["type:app"] } }),
+        "utf8",
+      )
+      writeFileSync(
+        join(demoCliPath, "src", "pure-helper.ts"),
+        "export const clampPositive = (n: number): number => (n > 0 ? n : 0)\n",
+        "utf8",
+      )
+      writeFileSync(
+        join(demoCliPath, "src", "impure-entry.ts"),
+        'import { existsSync } from "node:fs"\nexport const hasFile = (p: string) => existsSync(p)\n',
+        "utf8",
+      )
+      const demoCliTest = join(demoCliPath, "test", "pure-helper.test.ts")
+      writeFileSync(demoCliTest, "export const ok = true\n", "utf8")
+
+      const demoWebPath = join(dir, "apps", "demo-web")
+      mkdirSync(join(demoWebPath, "src"), { recursive: true })
+      writeFileSync(
+        join(demoWebPath, "package.json"),
+        JSON.stringify({ name: "demo-web", nx: { tags: ["type:app", "scope:web"] } }),
+        "utf8",
+      )
+      writeFileSync(join(demoWebPath, "src", "ui.ts"), "export const ui = 1\n", "utf8")
 
       // No manifests: domain/core/contract fallback vs unknown folder
       const noManDom = writePkg(dir, "nom", "domain", null)
@@ -344,13 +393,24 @@ describe("mutation-target-discovery: tag classification, scope/target filtering,
       expect(rels).toContain("libs/harness/ingest/src/ing.ts")
       expect(rels).toContain("libs/demo/billing/src/bill.ts")
       expect(rels).toContain("libs/demo/proto/src/helper.ts")
+      expect(rels).toContain("libs/demo/inf/src/pure-codec.ts")
+      expect(rels).toContain("apps/demo-cli/src/pure-helper.ts")
       expect(rels).toContain("libs/nom/domain/src/nd.ts")
       expect(rels).toContain("libs/nom/core/src/nc.ts")
       expect(rels).toContain("libs/nom/contract/src/ncon.ts")
       expect(rels).not.toContain("libs/demo/svc/src/svc.ts")
       expect(rels).not.toContain("libs/demo/inf/src/inf.ts")
       expect(rels).not.toContain("libs/demo/app/src/app.ts")
+      expect(rels).not.toContain("apps/demo-cli/src/impure-entry.ts")
+      expect(rels).not.toContain("apps/demo-web/src/ui.ts")
       expect(rels).not.toContain("libs/nom/mystery/src/unk.ts")
+
+      const demoCliEntry = all.find((f) => f.relFile === "apps/demo-cli/src/pure-helper.ts")!
+      expect(demoCliEntry.tier).toBe("app-pure")
+      expect(findReachingTestFiles(dir, demoCliEntry, testHostIo)).toEqual([demoCliTest])
+      expect(findDomainFiles(dir, testHostIo, "demo-cli").map((f) => f.relFile)).toEqual([
+        "apps/demo-cli/src/pure-helper.ts",
+      ])
 
       // Scope filters
       expect(findDomainFiles(dir, testHostIo, "harness").map((f) => f.pkgDir)).toEqual([
@@ -499,7 +559,7 @@ describe("mutation-target-discovery: tag classification, scope/target filtering,
     }
   })
 
-  it("live dogfooding: findDomainFiles discovers @harness/gates plan-workflow-compiler.ts and @harness/contract repo-identity.ts & workflow.ts", () => {
+  it("live dogfooding: findDomainFiles discovers gates/contract and pure infra/app modules while excluding impure IO modules", () => {
     const gatesFiles = findDomainFiles(REAL_REPO_ROOT, testHostIo, "@harness/gates").map(
       (f) => f.relFile,
     )
@@ -510,7 +570,139 @@ describe("mutation-target-discovery: tag classification, scope/target filtering,
     )
     expect(contractFiles).toContain("libs/harness/contract/src/repo-identity.ts")
     expect(contractFiles).toContain("libs/harness/contract/src/workflow.ts")
+
+    const infraFiles = findDomainFiles(REAL_REPO_ROOT, testHostIo, "@harness/infra").map(
+      (f) => f.relFile,
+    )
+    expect(infraFiles).toContain("libs/harness/infra/src/workflow/read-model-rebuild-journal.ts")
+    expect(infraFiles).toContain("libs/harness/infra/src/workflow/writer-lease-codec.ts")
+    expect(infraFiles).toContain("libs/harness/infra/src/workflow/workflow-store-codec.ts")
+    expect(infraFiles).toContain("libs/harness/infra/src/workflow/message-storage-codec.ts")
+    expect(infraFiles).not.toContain("libs/harness/infra/src/cache-helpers.ts")
+    expect(infraFiles).not.toContain("libs/harness/infra/src/node-host-io.ts")
+    expect(infraFiles).not.toContain("libs/harness/infra/src/omnigraph-workflow-store.ts")
+
+    const cliFiles = findDomainFiles(REAL_REPO_ROOT, testHostIo, "harness-cli").map(
+      (f) => f.relFile,
+    )
+    expect(cliFiles).toContain("apps/harness-cli/src/commands/workflow-command-helpers.ts")
+    expect(cliFiles).toContain("apps/harness-cli/src/commands/hook-format.ts")
+
+    const mcpFiles = findDomainFiles(REAL_REPO_ROOT, testHostIo, "harness-mcp").map(
+      (f) => f.relFile,
+    )
+    expect(mcpFiles).not.toContain("apps/harness-mcp/src/daemon/unix-socket-daemon.ts")
+    expect(mcpFiles).not.toContain(
+      "apps/harness-mcp/src/daemon/workflow-rpc-complete-validation.ts",
+    )
   })
+
+  it("REQ-2.2 & REQ-2.3: classifyMutationModulePurity excludes runtime I/O while permitting type-only imports and failing strict mode on 0 reaching tests", () => {
+    const pureSource = [
+      'import type { Stats } from "node:fs"',
+      'import type { OmnigraphClient } from "@harness/graph"',
+      'import { Schema } from "effect"',
+      "export interface ClientHolder { readonly client?: OmnigraphClient; readonly stats?: Stats }",
+      "export const addOne = (x: number): number => x + 1",
+    ].join("\n")
+    expect(classifyMutationModulePurity("libs/demo/inf/src/pure.ts", pureSource)).toEqual({
+      _tag: "Pure",
+    })
+    expect(isPureMutationCandidate("libs/demo/inf/src/pure.ts", pureSource)).toBe(true)
+
+    const impureCases: ReadonlyArray<readonly [string, string]> = [
+      [
+        "libs/demo/inf/src/a.ts",
+        'import { readFileSync } from "node:fs"\nexport const f = () => readFileSync("a", "utf8")\n',
+      ],
+      ["libs/demo/inf/src/b.ts", 'export const run = () => import("node:child_process")\n'],
+      [
+        "libs/demo/inf/src/c.ts",
+        'import { SqlClient } from "effect/sql/SqlClient"\nexport const s = SqlClient\n',
+      ],
+      [
+        "libs/demo/inf/src/d.ts",
+        'import { Layer } from "effect"\nexport const l = Layer.effect({} as never, () => {})\n',
+      ],
+      ["libs/demo/inf/src/e.ts", 'export const env = () => process.env["HOME"]\n'],
+      ["libs/demo/inf/src/f.ts", 'export const req = () => fetch("http://127.0.0.1")\n'],
+      [
+        "apps/demo-cli/src/g.ts",
+        'import { nodeSyncHostIo } from "@harness/infra"\nexport const io = nodeSyncHostIo\n',
+      ],
+      ["apps/demo-cli/src/index.ts", "export const x = 1\n"],
+      [
+        "libs/demo/inf/src/only-types.ts",
+        'export type OnlyType = string\nexport * from "./a.js"\n',
+      ],
+      [
+        "libs/demo/inf/src/cluster-runtime.ts",
+        'import { Sharding } from "effect/cluster"\nexport const s = Sharding\n',
+      ],
+    ]
+    for (const [relPath, src] of impureCases) {
+      expect(classifyMutationModulePurity(relPath, src)._tag).toBe("Excluded")
+      expect(isPureMutationCandidate(relPath, src)).toBe(false)
+    }
+
+    const clusterCodecSrc =
+      'import { ClusterError, ShardId, type Envelope } from "effect/cluster"\nexport const makeErr = (cause: unknown) => new ClusterError.PersistenceError({ cause })\nexport const shard = ShardId\nexport type Env = Envelope\n'
+    expect(
+      classifyMutationModulePurity("libs/demo/inf/src/cluster-codec.ts", clusterCodecSrc),
+    ).toEqual({
+      _tag: "Pure",
+    })
+
+    // REQ-2.3: pure infra module with 0 reaching test files fails strict mutation check
+    const dir = mkdtempSync(join(tmpdir(), "mut-pure-untested-"))
+    try {
+      const infPkg = writePkg(dir, "demo", "inf", {
+        type: "package.json",
+        name: "@demo/inf",
+        tags: ["type:infra"],
+      })
+      writeFileSync(
+        join(infPkg, "src", "codec.ts"),
+        "export const isNonNegative = (x: number): boolean => x >= 0\n",
+        "utf8",
+      )
+      const strictReport = runDomainMutationSuite(dir, testHostIo, {
+        enforcementMode: "strict",
+        includeAllLines: true,
+      })
+      expect(strictReport.passed).toBe(false)
+      expect(
+        (strictReport.untestedFiles ?? []).some((u) => u.file === "libs/demo/inf/src/codec.ts"),
+      ).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it.effect.prop(
+    "classifyMutationModulePurity property: type-only node:* imports preserve Pure whereas runtime disallowed imports always yield Excluded",
+    {
+      nodeMod: Schema.Literals(["node:fs", "node:child_process", "node:net", "node:os"]),
+      isTypeOnly: Schema.Boolean,
+    },
+    ({ nodeMod, isTypeOnly }) =>
+      Effect.sync(() => {
+        const src = isTypeOnly
+          ? `import type * as M from "${nodeMod}"\nexport const ok = (x: number): boolean => x >= 0\nexport type Used = typeof M\n`
+          : `import * as M from "${nodeMod}"\nexport const ok = (x: number): boolean => Boolean(M) && x >= 0\n`
+        const res = classifyMutationModulePurity("libs/demo/inf/src/prop-codec.ts", src)
+        match(res)
+          .with({ _tag: "Pure" }, () => {
+            expect(isTypeOnly).toBe(true)
+            expect(isPureMutationCandidate("libs/demo/inf/src/prop-codec.ts", src)).toBe(true)
+          })
+          .with({ _tag: "Excluded" }, ({ reason }) => {
+            expect(isTypeOnly).toBe(false)
+            expect(reason).toContain("Node I/O builtin")
+          })
+          .exhaustive()
+      }),
+  )
 })
 
 describe("mutation-backup: untracked files, branch-base fallback, explicitBaseRef, and fail-closed git errors", () => {

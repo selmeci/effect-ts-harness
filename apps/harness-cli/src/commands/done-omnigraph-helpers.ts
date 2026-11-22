@@ -32,13 +32,12 @@ import {
   recordTelemetry,
   resolveClusterRepoRoot,
 } from "./daemon-and-omnigraph.service.js"
+import { runOmnigraphMaintenance, runVerifyOmnigraphLintCheck } from "./omnigraph-lint-gate.js"
 import {
-  runOmnigraphMaintenance,
-  runVerifyOmnigraphLintCheck,
-} from "./omnigraph-lint-gate.js"
-import {
+  cleanupStalePlanSnapshotAfterDone,
   countImplEffectFns,
   formatDiffErrorMessage,
+  formatPlanSnapshotCleanupFailure,
   isBranchNotFoundError,
   loadPlanEffectFnQualnames,
   readEffectFnStubAfterFromImage,
@@ -127,7 +126,9 @@ export const runPreMergeOmnigraphBranchVerify = (
           )
         }
         return Effect.sync(() => {
-          process.stderr.write(`[harness:done] Omnigraph branch diff missing merge base: ${formatDiffErrorMessage(err)}\n`)
+          process.stderr.write(
+            `[harness:done] Omnigraph branch diff missing merge base: ${formatDiffErrorMessage(err)}\n`,
+          )
           return { _tag: "MissingMergeBase" }
         })
       }),
@@ -383,11 +384,15 @@ export const syncVerifyImplToOmnigraph = (
         process.env,
         commitId !== undefined ? { omnigraphCommitId: commitId } : undefined,
       )
-      if ((headState.headSha !== null || headState.gitBranch !== null || commitId !== undefined) && savedMeta === null) {
+      if (
+        (headState.headSha !== null || headState.gitBranch !== null || commitId !== undefined) &&
+        savedMeta === null
+      ) {
         return {
           exitCode: 1,
           stdout: "",
-          stderr: "Verification failed: could not persist graph head metadata (.harness/graph-head.json)",
+          stderr:
+            "Verification failed: could not persist graph head metadata (.harness/graph-head.json)",
         }
       }
       const blobFail = yield* uploadAndVerifySpanTraceBlob(
@@ -601,6 +606,12 @@ export const syncOmnigraphOnDone = (
       .exhaustive()
 
     if (mergeOutcome.ok) {
+      const cleanupFail = formatPlanSnapshotCleanupFailure(
+        cleanupStalePlanSnapshotAfterDone(repoRoot, nodeSyncHostIo),
+        failExitCode,
+        blockDecision,
+      )
+      if (cleanupFail !== undefined) return cleanupFail
       const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
       const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
       if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {

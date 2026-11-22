@@ -232,11 +232,22 @@ export const resolveTargetsForSuite = (input: {
         targets.push(existing)
         continue
       }
+      const appParts = /^apps\/([^/]+)\//.exec(relFile)
+      if (appParts !== null) {
+        targets.push({
+          scope: "apps",
+          pkgDir: appParts[1]!,
+          tier: "app-pure",
+          fullPath: join(input.repoRoot, relFile),
+          relFile,
+        })
+        continue
+      }
       const parts = /^libs\/([^/]+)\/([^/]+)\//.exec(relFile)
       if (parts === null) {
         return {
           _tag: "Abort",
-          diagnostic: `[mutation-check] Invalid overlay path '${relFile}': expected 'libs/<scope>/<pkg>/...'`,
+          diagnostic: `[mutation-check] Invalid overlay path '${relFile}': expected 'libs/<scope>/<pkg>/...' or 'apps/<app>/...'`,
         }
       }
       const scope = parts[1]!

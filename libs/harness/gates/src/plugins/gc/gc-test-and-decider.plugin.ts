@@ -14,7 +14,6 @@ import {
   type GcFinding,
   type GraphEntropyInput,
   type GraphReachabilityContext,
-  IGNORED_UNTESTED_FNS,
 } from "./gc-helpers.js"
 
 export const evaluateTestAndDeciderPlugin = (
@@ -30,17 +29,19 @@ export const evaluateTestAndDeciderPlugin = (
       match(node)
         .with({ _tag: "EffectFn" }, (n) => {
           if (
-            (n.packageTag === "domain" || n.packageTag === "contract") &&
+            (n.packageTag === "domain" ||
+              n.packageTag === "contract" ||
+              n.packageTag === "infra" ||
+              n.packageTag === "app") &&
             !n.isStub &&
-            !IGNORED_UNTESTED_FNS.has(n.spanName) &&
             (ctx.incomingTestOrCall.get(idx) ?? 0) === 0
           ) {
             findings.push({
               kind: "untested-effect-fn",
               nodeId: n.spanName,
               location: `${n.file}:${n.line}`,
-              message: `Domain EffectFn "${n.spanName}" (${n.qualname}) has 0 reaching tests (0 ExercisesSpan / TracedCall edges).`,
-              action: `Add a unit/integration test importing and calling "${n.spanName}" to verify domain behavior.`,
+              message: `EffectFn "${n.spanName}" (${n.qualname}) in tier "${n.packageTag}" has 0 reaching tests (0 ExercisesSpan / TracedCall edges).`,
+              action: `Add a unit/integration test importing and calling "${n.spanName}" to verify behavior.`,
             })
           }
         })
@@ -72,8 +73,7 @@ export const evaluateTestAndDeciderPlugin = (
           if (
             (n.packageTag === "domain" || n.packageTag === "contract") &&
             !n.isStub &&
-            (n.spanName.endsWith(".decide") || n.spanName === "decide") &&
-            !IGNORED_UNTESTED_FNS.has(n.spanName)
+            (n.spanName.endsWith(".decide") || n.spanName === "decide")
           ) {
             if ((ctx.incomingPropertyTests.get(idx) ?? 0) === 0) {
               findings.push({

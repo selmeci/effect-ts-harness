@@ -5,7 +5,6 @@ import { match } from "ts-pattern"
 import { isPureInterruptCause } from "@harness/contract"
 import { checkPlanStepCoverage, triageFailure } from "@harness/decision"
 import {
-  checkLoopThrashing,
   checkVerifyStamp,
   decideOntologyInvariants,
   decideSpanBudgets,
@@ -14,7 +13,6 @@ import {
   DstStepCount,
   loadGovernanceDocsChecked,
   parseDstSeedEnv,
-  readFrictionEvents,
   runDstSeedSuite,
   writeVerifyStamp,
 } from "@harness/gates"
@@ -40,7 +38,6 @@ import {
   isIsolatedExternalWorkspace,
   isRootConfigOrSharedCoreChange,
   makeReadStdinEffect,
-  recordFriction,
   recordTelemetry,
   resolveDecisionModelLayer,
   resolveModifiedFilesSinceStampOrHead,
@@ -77,21 +74,7 @@ import {
   readRecordedSpans,
   runDeltaAstAndPluginGates,
 } from "./verify-delta-gates.js"
-
-const verifyFailureWithThrashing = (
-  options: CliEnv | undefined,
-  repoRoot: string,
-  summary: string,
-  detail: string,
-  stderrMsg: string,
-): CliResult => {
-  recordFriction(options, { kind: "verify_failure", summary, detail })
-  const thrashing = checkLoopThrashing(readFrictionEvents(repoRoot, nodeSyncHostIo))
-  if (thrashing.stuck && thrashing.escalationMessage !== null) {
-    return { exitCode: 2, stdout: "", stderr: `${thrashing.escalationMessage}\n${stderrMsg}` }
-  }
-  return { exitCode: 1, stdout: "", stderr: stderrMsg }
-}
+import { tryRunDocOnlyVerifyFastPath, verifyFailureWithThrashing } from "./verify-doc-fastpath.js"
 
 export const handleVerify = (options: CliEnv | undefined): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
@@ -273,6 +256,15 @@ export const handleVerify = (options: CliEnv | undefined): Effect.Effect<CliResu
       )
       if (verifySyncFail !== undefined) return verifySyncFail
     }
+
+    const docOnlyResult = yield* tryRunDocOnlyVerifyFastPath({
+      repoRoot,
+      graph,
+      governanceDocs,
+      implBranch: taskBranches.implBranch,
+      options,
+    })
+    if (docOnlyResult !== undefined) return docOnlyResult
 
     if (
       !options?.skipSubprocessVerify &&

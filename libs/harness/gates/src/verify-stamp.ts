@@ -78,6 +78,7 @@ export type CheckMutateStampResult =
 
 export const VerifyStampSchema = Schema.Struct({
   treeHash: WorkspaceTreeHash,
+  mutableTreeHash: Schema.optional(WorkspaceTreeHash),
   timestamp: StampIsoTimestamp,
   taskBranch: StampBranchName,
   dstSeed: Schema.optional(DstSeed),
@@ -319,19 +320,27 @@ const collectFilesChecked = (
   })
 }
 
-export const computeWorkspaceTreeHashChecked = (
+/**
+ * Returns true iff a repo-relative path is a markdown documentation file excluded
+ * from mutable code stamps (`mutate-stamp.json`).
+ */
+export const isMarkdownDocPath = (relPath: string): boolean => /\.(?:md|mdx)$/i.test(relPath)
+
+const computeFilteredWorkspaceTreeHashChecked = (
   repoRoot: string,
   hostIo: SyncHostIo,
+  includeFile?: (relPath: string) => boolean,
 ): Result.Result<WorkspaceTreeHash, string> =>
   Result.flatMap(resolveHarnessDirChecked(repoRoot, hostIo), (harnessStateDir) =>
     Result.flatMap(checkSafeExistingDir(repoRoot, hostIo), (canonicalRoot) => {
       if (canonicalRoot === undefined) {
         return Result.fail(`Workspace root '${repoRoot}' does not exist`)
       }
-      const files: Array<string> = []
+      const rawFiles: Array<string> = []
       return Result.flatMap(
-        collectFilesChecked(repoRoot, repoRoot, canonicalRoot, files, harnessStateDir, hostIo),
+        collectFilesChecked(repoRoot, repoRoot, canonicalRoot, rawFiles, harnessStateDir, hostIo),
         () => {
+          const files = includeFile !== undefined ? rawFiles.filter(includeFile) : rawFiles
           files.sort()
           const hasher = createHash("sha256")
           for (const rel of files) {
@@ -385,8 +394,23 @@ export const computeWorkspaceTreeHashChecked = (
     }),
   )
 
+export const computeWorkspaceTreeHashChecked = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): Result.Result<WorkspaceTreeHash, string> =>
+  computeFilteredWorkspaceTreeHashChecked(repoRoot, hostIo)
+
 export const computeWorkspaceTreeHash = (repoRoot: string, hostIo: SyncHostIo): WorkspaceTreeHash =>
   Result.getOrThrowWith(computeWorkspaceTreeHashChecked(repoRoot, hostIo), (err) => new Error(err))
+
+export const computeMutableTreeHashChecked = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): Result.Result<WorkspaceTreeHash, string> =>
+  computeFilteredWorkspaceTreeHashChecked(repoRoot, hostIo, (rel) => !isMarkdownDocPath(rel))
+
+export const computeMutableTreeHash = (repoRoot: string, hostIo: SyncHostIo): WorkspaceTreeHash =>
+  Result.getOrThrowWith(computeMutableTreeHashChecked(repoRoot, hostIo), (err) => new Error(err))
 
 const decodeDstSeedSync = Schema.decodeUnknownSync(DstSeed)
 
@@ -417,6 +441,7 @@ export const writeVerifyStamp = (
   },
 ): VerifyStamp => {
   const treeHash = computeWorkspaceTreeHash(repoRoot, hostIo)
+  const mutableTreeHash = computeMutableTreeHash(repoRoot, hostIo)
   const env = hostIo.getEnv()
   const envSeed = parseDstSeedEnv(env["DST_SEED"])
   const resolvedSeed = dstOptions?.dstSeed ?? envSeed ?? DstSeed.make(0)
@@ -424,6 +449,7 @@ export const writeVerifyStamp = (
     taskBranch !== undefined && taskBranch.trim().length > 0 ? taskBranch : "unknown"
   const stamp: VerifyStamp = {
     treeHash,
+    mutableTreeHash,
     timestamp: StampIsoTimestamp.make(new Date().toISOString()),
     taskBranch: StampBranchName.make(resolvedBranch),
     dstSeed: resolvedSeed,
@@ -450,6 +476,33 @@ export const writeVerifyStamp = (
 }
 
 const decodeVerifyStamp = Schema.decodeOption(Schema.fromJsonString(VerifyStampSchema))
+
+/**
+ * Safely reads and schema-decodes `.harness/verify-stamp.json` without checking `treeHash`.
+ * Returns `undefined` when missing, symlinked, outside harness state dir, or malformed.
+ */
+export const readExistingVerifyStamp = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): VerifyStamp | undefined => {
+  const contentRes = Result.flatMap(resolveHarnessDirChecked(repoRoot, hostIo), (harnessDir) =>
+    checkSafeStampFileForRead(
+      harnessDir,
+      join(harnessDir, "verify-stamp.json"),
+      hostIo,
+      "Missing .harness/verify-stamp.json.",
+    ),
+  )
+  return match(contentRes)
+    .with({ _tag: "Failure" }, () => undefined)
+    .with({ _tag: "Success" }, ({ success: content }) =>
+      match(decodeVerifyStamp(content))
+        .with({ _tag: "Some" }, ({ value }) => value)
+        .with({ _tag: "None" }, () => undefined)
+        .exhaustive(),
+    )
+    .exhaustive()
+}
 
 export const checkVerifyStamp = (repoRoot: string, hostIo: SyncHostIo): CheckVerifyStampResult => {
   const missingMsg =
@@ -498,7 +551,7 @@ export const writeMutateStamp = (
   hostIo: SyncHostIo,
   input: Omit<MutateStamp, "treeHash" | "timestamp">,
 ): MutateStamp => {
-  const treeHash = computeWorkspaceTreeHash(repoRoot, hostIo)
+  const treeHash = computeMutableTreeHash(repoRoot, hostIo)
   const stamp: MutateStamp = {
     treeHash,
     timestamp: StampIsoTimestamp.make(new Date().toISOString()),
@@ -655,10 +708,10 @@ export const checkMutateStamp = (
               if (coverageErr !== undefined) {
                 return { _tag: "Invalid" as const, reason: coverageErr }
               }
-              return match(computeWorkspaceTreeHashChecked(repoRoot, hostIo))
+              return match(computeMutableTreeHashChecked(repoRoot, hostIo))
                 .with({ _tag: "Failure" }, ({ failure }) => ({
                   _tag: "Invalid" as const,
-                  reason: `Failed to compute workspace tree hash (${failure}). Run pnpm harness mutate --strict after your latest edits before verify.`,
+                  reason: `Failed to compute mutable workspace tree hash (${failure}). Run pnpm harness mutate --strict after your latest edits before verify.`,
                 }))
                 .with({ _tag: "Success" }, ({ success: currentTreeHash }) =>
                   stamp.treeHash !== currentTreeHash
