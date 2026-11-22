@@ -47,6 +47,8 @@ interface InMemoryLeaseRow {
 interface FakeLeaseHarness {
   readonly client: InstanceType<typeof OmnigraphClient>
   readonly getRefreshCount: () => number
+  readonly getRefreshFailureCount: () => number
+  readonly setRefreshFailuresRemaining: (count: number) => void
   readonly supersedeLease: (owner: string, leaseEpoch: number) => void
 }
 
@@ -54,6 +56,8 @@ const makeInMemoryWorkflowLeaseClient = (): FakeLeaseHarness => {
   let leaseRow: InMemoryLeaseRow | null = null
   let commitSeq = 1
   let refreshCount = 0
+  let refreshFailureCount = 0
+  let refreshFailuresRemaining = 0
 
   const baseClient = new OmnigraphClient({
     baseUrl: "http://127.0.0.1:1",
@@ -113,6 +117,11 @@ const makeInMemoryWorkflowLeaseClient = (): FakeLeaseHarness => {
           }
         })
         .with("wf_refresh_writer_lease", () => {
+          if (refreshFailuresRemaining > 0) {
+            refreshFailuresRemaining -= 1
+            refreshFailureCount += 1
+            return Promise.reject(new Error("Simulated transient Omnigraph store outage"))
+          }
           refreshCount += 1
           const paramOwner = typeof params.owner === "string" ? params.owner : ""
           if (
@@ -181,6 +190,10 @@ const makeInMemoryWorkflowLeaseClient = (): FakeLeaseHarness => {
   return {
     client: proxiedClient,
     getRefreshCount: () => refreshCount,
+    getRefreshFailureCount: () => refreshFailureCount,
+    setRefreshFailuresRemaining: (count: number) => {
+      refreshFailuresRemaining = count
+    },
     supersedeLease: (owner: string, leaseEpoch: number) => {
       leaseRow = {
         name: "engine",
@@ -552,6 +565,44 @@ describe("harness-mcp workflow daemon writer lease & lifecycle (F-1.1, F-20.4)",
         expect(statusRes.writerLeaseEpoch).toBeUndefined()
       } finally {
         await primaryAuto.close()
+      }
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("shuts down fail-closed after 3 consecutive WorkflowStoreUnavailableError heartbeat failures while resetting streak on recovery", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "hmcp-wl-store-err-"))
+    try {
+      const repoDir = initCanonicalGitRepo(tmpDir)
+      const fakeLease = makeInMemoryWorkflowLeaseClient()
+      fakeLease.setRefreshFailuresRemaining(1)
+      const leaseLostReasons: Array<string> = []
+
+      const handle = await startHarnessDaemonServer(repoDir, {
+        workflowEngine: {
+          mode: "required",
+          client: fakeLease.client,
+          heartbeatIntervalMs: 30,
+          onLeaseLost: (reason) => {
+            leaseLostReasons.push(reason)
+          },
+        },
+      })
+
+      try {
+        await pollUntil(
+          () => fakeLease.getRefreshFailureCount() === 1 && fakeLease.getRefreshCount() >= 2,
+        )
+        expect(existsSync(handle.socketPath)).toBe(true)
+        expect(leaseLostReasons).toEqual([])
+
+        fakeLease.setRefreshFailuresRemaining(3)
+        await pollUntil(() => leaseLostReasons.length >= 1 && !existsSync(handle.socketPath))
+        expect(fakeLease.getRefreshFailureCount()).toBe(4)
+        expect(leaseLostReasons[0]).toContain("Simulated transient Omnigraph store outage")
+      } finally {
+        await handle.close()
       }
     } finally {
       rmSync(tmpDir, { recursive: true, force: true })

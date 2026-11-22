@@ -567,6 +567,8 @@ export const forkWorkflowLeaseWatchers = (input: {
       10,
       opts?.heartbeatIntervalMs ?? DEFAULT_WRITER_LEASE_HEARTBEAT_INTERVAL_MS,
     )
+    const maxConsecutiveStoreFailures = 3
+    let consecutiveStoreFailures = 0
 
     yield* Effect.forever(
       Effect.sleep(heartbeatIntervalMs).pipe(
@@ -586,6 +588,11 @@ export const forkWorkflowLeaseWatchers = (input: {
               ? { readProcessStartTime: opts.readProcessStartTime }
               : {}),
           }).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                consecutiveStoreFailures = 0
+              }),
+            ),
             Effect.catchTags({
               WriterLeaseHeldError: (err) =>
                 Effect.sync(() => {
@@ -595,12 +602,18 @@ export const forkWorkflowLeaseWatchers = (input: {
                   input.triggerShutdown()
                   Result.try(() => opts?.onLeaseLost?.(err.message))
                 }).pipe(Effect.andThen(Effect.interrupt)),
-              WorkflowStoreUnavailableError: (err) =>
-                Effect.sync(() => {
-                  process.stderr.write(
-                    `[harness-mcp] Workflow writer lease heartbeat warning: ${err.message}\n`,
-                  )
-                }),
+              WorkflowStoreUnavailableError: (err) => {
+                consecutiveStoreFailures += 1
+                process.stderr.write(
+                  `[harness-mcp] Workflow writer lease heartbeat warning (${consecutiveStoreFailures}/${maxConsecutiveStoreFailures}): ${err.message}\n`,
+                )
+                if (consecutiveStoreFailures >= maxConsecutiveStoreFailures) {
+                  input.triggerShutdown()
+                  Result.try(() => opts?.onLeaseLost?.(err.message))
+                  return Effect.fail(err)
+                }
+                return Effect.void
+              },
             }),
           ),
         ),

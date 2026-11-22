@@ -207,16 +207,19 @@ export const collectPureCandidateFilesChecked = (input: {
 
   for (const mod of scanned) {
     if (input.targetSet !== undefined && !input.targetSet.has(mod.relFile)) continue
-    if (effectiveStatus.get(mod.relFile)?._tag === "Pure") {
-      input.results.push({
-        scope: input.scope,
-        pkgDir: input.pkgDir,
-        pkgName: input.pkgName,
-        tier: input.tier,
-        fullPath: mod.fullPath,
-        relFile: mod.relFile,
+    match(effectiveStatus.get(mod.relFile))
+      .with({ _tag: "Pure" }, () => {
+        input.results.push({
+          scope: input.scope,
+          pkgDir: input.pkgDir,
+          pkgName: input.pkgName,
+          tier: input.tier,
+          fullPath: mod.fullPath,
+          relFile: mod.relFile,
+        })
       })
-    }
+      .with({ _tag: "Excluded" }, undefined, () => undefined)
+      .exhaustive()
   }
   return undefined
 }
