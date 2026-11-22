@@ -34,6 +34,7 @@ import {
   reconcileReviewSlicesWithSelections,
   routeReviewDiff,
 } from "../src/review-router-decision.js"
+import { isNonGovernanceDocPath } from "../src/review-signal-inference.js"
 import {
   partitionDiffReviewSlices,
   resolveReviewSliceUnitKey,
@@ -300,6 +301,25 @@ describe("ReviewRouterV1 and monotonic hybrid review routing", () => {
         expect(doc40Plan.selections.map((s) => s.reviewer)).toContain(
           ReviewerId.make("effect-architecture-reviewer"),
         )
+
+        expect(
+          isNonGovernanceDocPath(
+            ReviewSignalPath.make("adapters/claude-code/skills/effect-code-review/SKILL.md"),
+          ),
+        ).toBe(false)
+        expect(isNonGovernanceDocPath(ReviewSignalPath.make("agent-patterns/planning.md"))).toBe(
+          false,
+        )
+        expect(isNonGovernanceDocPath(ReviewSignalPath.make("docs/specs/SPEC-0001.md"))).toBe(false)
+        expect(
+          isNonGovernanceDocPath(
+            ReviewSignalPath.make(
+              "libs/harness/docs/adr/0024-sliced-specialist-review-and-remediation-audit.md",
+            ),
+          ),
+        ).toBe(false)
+        expect(isNonGovernanceDocPath(ReviewSignalPath.make("docs/changelog.md"))).toBe(true)
+        expect(isNonGovernanceDocPath(ReviewSignalPath.make("LICENSE"))).toBe(true)
       }),
   )
 
