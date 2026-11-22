@@ -1,4 +1,4 @@
-import { basename, dirname, join, relative, resolve } from "node:path"
+import { dirname, join, relative, resolve } from "node:path"
 import { Result } from "effect"
 import { match } from "ts-pattern"
 import { compareCodeUnits } from "@harness/contract"
@@ -169,19 +169,17 @@ export const collectPureCandidateFilesChecked = (input: {
     effectiveStatus.set(mod.relFile, mod.analysis.classification)
   }
 
-  // Fixed-point propagation: if a module value-imports/re-exports any excluded relative module
-  // (excluding benign pure type-only barrels unless they re-export something excluded), mark it Excluded.
+  // Fixed-point propagation: if a pure module value-imports/re-exports any excluded relative module, mark it Excluded.
   let changed = true
-  while (changed) {
+  for (let pass = 0; pass < scanned.length && changed; pass += 1) {
     changed = false
     for (const mod of scanned) {
       const curr = effectiveStatus.get(mod.relFile)!
-      const expectedTypeOnlyReason = `type-only or re-export-only file '${basename(mod.relFile)}'`
-      const shouldSkip = match(curr)
-        .with({ _tag: "Pure" }, () => false)
-        .with({ _tag: "Excluded" }, ({ reason }) => reason !== expectedTypeOnlyReason)
+      const isPure = match(curr)
+        .with({ _tag: "Pure" }, () => true)
+        .with({ _tag: "Excluded" }, () => false)
         .exhaustive()
-      if (shouldSkip) {
+      if (!isPure) {
         continue
       }
       for (const spec of mod.analysis.relativeValueImports) {
