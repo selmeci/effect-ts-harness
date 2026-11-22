@@ -95,6 +95,7 @@ export const AST_GATE_RULE_SOURCE_FILES: readonly [WorkspaceFilePath, ...Array<W
     WorkspaceFilePath.make("libs/harness/gates/src/plugins/ast-fail-closed-laws.ts"),
     WorkspaceFilePath.make("libs/harness/gates/src/plugins/ast-effect-promise-law.ts"),
     WorkspaceFilePath.make("libs/harness/gates/src/plugins/ast-workflow-fence-law.ts"),
+    WorkspaceFilePath.make("libs/harness/gates/src/plugins/ast-contract-and-test-hygiene.ts"),
     WorkspaceFilePath.make("libs/harness/gates/src/plugins/sqlite-migrator-ast.ts"),
     WorkspaceFilePath.make("libs/harness/gates/src/plugins/workflow-body-ast.ts"),
     WorkspaceFilePath.make("libs/harness/contract/src/ast-and-gate-primitives.ts"),

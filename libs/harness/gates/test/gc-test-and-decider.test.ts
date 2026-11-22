@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
 import { buildHarnessGraph } from "@harness/graph"
@@ -325,4 +328,149 @@ describe("GraphGc test & decider reachability plugin (SPEC-0026)", () => {
     )
     expect(directFindings).toEqual([])
   })
+})
+
+const writeContractUnionWorkspace = (
+  contractCode: string,
+  testCode: string | undefined,
+  fixtureCode?: string,
+): string => {
+  const dir = mkdtempSync(join(tmpdir(), "gc-union-variants-"))
+  mkdirSync(join(dir, "libs/demo/contract/src"), { recursive: true })
+  writeFileSync(join(dir, "libs/demo/contract/src/index.ts"), contractCode, "utf8")
+  if (testCode !== undefined) {
+    mkdirSync(join(dir, "libs/demo/contract/test"), { recursive: true })
+    writeFileSync(join(dir, "libs/demo/contract/test/index.test.ts"), testCode, "utf8")
+  }
+  if (fixtureCode !== undefined) {
+    mkdirSync(join(dir, "libs/demo/contract/test/fixtures"), { recursive: true })
+    writeFileSync(join(dir, "libs/demo/contract/test/fixtures/f.ts"), fixtureCode, "utf8")
+  }
+  return dir
+}
+
+describe("GraphGc untested-union-variant gate (SPEC-0028 REQ-3.2)", () => {
+  it.effect(
+    "passes cleanly when all exported Schema.TaggedUnion variants are referenced in non-fixture test ASTs",
+    () =>
+      Effect.gen(function* () {
+        const contract = [
+          'import { Schema } from "effect"',
+          "export const Action = Schema.TaggedUnion({",
+          "  Create: { id: Schema.String },",
+          '  "Delete": {},',
+          "}).pipe(Schema.annotate({ title: 'Action' }))",
+          "const LocalOnly = Schema.TaggedUnion({ Ignored: {} })",
+        ].join("\n")
+        const test = [
+          'import { Action } from "../src/index.js"',
+          "const a = Action.cases.Create.make({ id: '1' })",
+          "const b = `Delete`",
+        ].join("\n")
+        const dir = writeContractUnionWorkspace(contract, test)
+        try {
+          const report = yield* decideGraphEntropy({
+            graph: buildHarnessGraph({}),
+            workspaceRoot: dir,
+            hostIo: testHostIo,
+          })
+          expect(report.findings.filter((f) => f.kind === "untested-union-variant")).toEqual([])
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      }),
+  )
+
+  it.effect(
+    "flags unreferenced, comment-only, and fixture-only variants with exact nodeId and fails closed on unreadable files",
+    () =>
+      Effect.gen(function* () {
+        const contract = [
+          'import { Schema } from "effect"',
+          "export const JobState = Schema.TaggedUnion({",
+          "  Queued: {},",
+          "  CommentOnly: {},",
+          "  FixtureOnly: {},",
+          "})",
+        ].join("\n")
+        const test = ["// CommentOnly only appears inside a comment", 'const q = "Queued"'].join(
+          "\n",
+        )
+        const fixture = 'export const fx = { _tag: "FixtureOnly" }'
+        const dir = writeContractUnionWorkspace(contract, test, fixture)
+        try {
+          const report = yield* decideGraphEntropy({
+            graph: buildHarnessGraph({}),
+            workspaceRoot: dir,
+            hostIo: testHostIo,
+          })
+          const missing = report.findings
+            .filter((f) => f.kind === "untested-union-variant")
+            .map((f) => ({ nodeId: f.nodeId, location: f.location }))
+            .sort((a, b) => a.nodeId.localeCompare(b.nodeId))
+          expect(missing).toEqual([
+            { nodeId: "JobState.CommentOnly", location: "libs/demo/contract/src/index.ts:4" },
+            { nodeId: "JobState.FixtureOnly", location: "libs/demo/contract/src/index.ts:5" },
+          ])
+
+          const failingIo = {
+            ...testHostIo,
+            readTextSync: () => {
+              throw new Error("EACCES")
+            },
+          }
+          const failClosedReport = yield* decideGraphEntropy({
+            graph: buildHarnessGraph({}),
+            workspaceRoot: dir,
+            hostIo: failingIo,
+          })
+          expect(
+            failClosedReport.findings.some((f) => f.kind === "unreadable-workspace-file"),
+          ).toBe(true)
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      }),
+  )
+
+  it.effect.prop(
+    "property: untested-union-variant matches exact set difference (declared \\ tested) across generated variant subsets",
+    {
+      coverAlpha: Schema.Boolean,
+      coverBeta: Schema.Boolean,
+      coverGamma: Schema.Boolean,
+    },
+    ({ coverAlpha, coverBeta, coverGamma }) =>
+      Effect.gen(function* () {
+        const contract = [
+          'import { Schema } from "effect"',
+          "export const PropUnion = Schema.TaggedUnion({ Alpha: {}, Beta: {}, Gamma: {} })",
+        ].join("\n")
+        const tested: Array<string> = []
+        if (coverAlpha) tested.push('"Alpha"')
+        if (coverBeta) tested.push('"Beta"')
+        if (coverGamma) tested.push('"Gamma"')
+        const test = `export const covered = [${tested.join(", ")}]`
+        const dir = writeContractUnionWorkspace(contract, test)
+        try {
+          const report = yield* decideGraphEntropy({
+            graph: buildHarnessGraph({}),
+            workspaceRoot: dir,
+            hostIo: testHostIo,
+          })
+          const expectedMissing = [
+            ...(coverAlpha ? [] : ["PropUnion.Alpha"]),
+            ...(coverBeta ? [] : ["PropUnion.Beta"]),
+            ...(coverGamma ? [] : ["PropUnion.Gamma"]),
+          ].sort()
+          const actual = report.findings
+            .filter((f) => f.kind === "untested-union-variant")
+            .map((f) => f.nodeId)
+            .sort()
+          expect(actual).toEqual(expectedMissing)
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      }),
+  )
 })

@@ -1146,7 +1146,116 @@ describe("@harness/contract schemas", () => {
     expect(invalidErr.message).toContain("unit-a")
   })
 
-  it("validates WF-3 workflow RPC contracts, read-model schemas, TaskRunAbortedError, and 14 new GQ query names", () => {
+  const makeWf3Fixtures = () => {
+    const runId = WorkflowRunId.make("run-wf3-001")
+    const execId = WorkflowExecutionId.make("exec-wf3-001")
+    const unitId = WorkUnitId.make("unit-wf3-1")
+    const planSha = PlanSha256.make("a".repeat(64))
+    const baseSha = GitCommitSha.make("0123456789abcdef0123456789abcdef01234567")
+    const treeHash = WorkspaceTreeHash.make("b".repeat(64))
+    const stampHash = PackageStampHash.make("c".repeat(64))
+    const repoRoot = AbsoluteRepoRoot.make("/workspace/repo")
+    const commonGitDir = GitCommonDirPath.make("/workspace/repo/.git")
+    const expectedUnitKey = makeWorkflowUnitKey(runId, unitId)
+    const expectedAttemptKey = makeWorkflowAttemptKey(runId, unitId, AttemptNumber.make(1))
+    const dispatchedAttempt = Schema.decodeSync(DispatchedWorkflowAttemptRecord)({
+      attemptKey: expectedAttemptKey,
+      runId,
+      unitId,
+      attempt: AttemptNumber.make(1),
+      verdict: "dispatched",
+      runner: RunnerId.make("antigravity"),
+      updatedMs: WorkflowTimestampMs.make(1_150),
+    })
+    const completedAttempt = Schema.decodeSync(CompletedWorkflowAttemptRecord)({
+      attemptKey: expectedAttemptKey,
+      runId,
+      unitId,
+      attempt: AttemptNumber.make(1),
+      verdict: "completed",
+      packageStampHash: stampHash,
+      updatedMs: WorkflowTimestampMs.make(1_180),
+    })
+    const rejectedAttempt = Schema.decodeSync(RejectedWorkflowAttemptRecord)({
+      attemptKey: expectedAttemptKey,
+      runId,
+      unitId,
+      attempt: AttemptNumber.make(1),
+      verdict: "rejected",
+      runner: RunnerId.make("antigravity"),
+      rejection: { _tag: "StampMissing" },
+      packageStampHash: stampHash,
+      updatedMs: WorkflowTimestampMs.make(1_200),
+    })
+    const pendingDeferreds = [
+      {
+        _tag: "UnitCompletion" as const,
+        unitId,
+        attempt: AttemptNumber.make(1),
+        deferredName: PendingDeferredName.make(`unit/${unitId}/1`),
+      },
+      {
+        _tag: "Escalation" as const,
+        unitId,
+        deferredName: PendingDeferredName.make(`escalation/${unitId}/1`),
+        escalation: { _tag: "AuthRequired" as const, runner: RunnerId.make("claude-code") },
+      },
+      {
+        _tag: "LlmPhase" as const,
+        deferredName: PendingDeferredName.make("llm-phase-done"),
+      },
+    ]
+    const skipReview = {
+      _tag: "SkipReviewPlan" as const,
+      depth: ReviewDepth.make("skip"),
+      source: ReviewRoutingSource.make("deterministic"),
+      reason: ReviewRoutingReason.make("doc-only"),
+      selections: [] as const,
+    }
+    const runRecord = {
+      runId,
+      executionId: execId,
+      level: WorkflowLevel.make("slice"),
+      planSha,
+      baseSha,
+      state: WorkflowRunState.make("waiting"),
+      planJson: PlanJsonPayload.make("{}"),
+      updatedMs: WorkflowTimestampMs.make(1_000),
+    }
+    const unitRecord = {
+      unitKey: WorkflowUnitKey.make(expectedUnitKey),
+      runId,
+      unitId,
+      kind: WorkflowUnitKind.make("slice"),
+      waveIndex: WaveIndex.make(0),
+      status: WorkflowUnitStatus.make("escalated"),
+      ownedRelPaths: [OwnedRelPath.make("libs/harness/contract/src")],
+      updatedMs: WorkflowTimestampMs.make(1_100),
+    }
+    return {
+      runId,
+      execId,
+      unitId,
+      planSha,
+      baseSha,
+      treeHash,
+      stampHash,
+      repoRoot,
+      commonGitDir,
+      expectedUnitKey,
+      expectedAttemptKey,
+      dispatchedAttempt,
+      completedAttempt,
+      rejectedAttempt,
+      pendingDeferreds,
+      skipReview,
+      runRecord,
+      unitRecord,
+    }
+  }
+
+  it("validates WF-3 IDs, TaskRunAbortedError, 14 GQ query names, and CompleteSharedStepInput", () => {
+    const { runId, baseSha, repoRoot } = makeWf3Fixtures()
     expect(SHARED_STEP_UNIT_ID).toBe("shared-step")
     expect(Schema.decodeSync(WorkUnitId)(SHARED_STEP_UNIT_ID)).toBe("shared-step")
 
@@ -1166,16 +1275,6 @@ describe("@harness/contract schemas", () => {
     for (const badRebuiltCount of [-1, 1.5, Number.NaN, "2", null]) {
       expect(() => Schema.decodeUnknownSync(WorkflowRebuiltRunCount)(badRebuiltCount)).toThrow()
     }
-
-    const runId = WorkflowRunId.make("run-wf3-001")
-    const execId = WorkflowExecutionId.make("exec-wf3-001")
-    const unitId = WorkUnitId.make("unit-wf3-1")
-    const planSha = PlanSha256.make("a".repeat(64))
-    const baseSha = GitCommitSha.make("0123456789abcdef0123456789abcdef01234567")
-    const treeHash = WorkspaceTreeHash.make("b".repeat(64))
-    const stampHash = PackageStampHash.make("c".repeat(64))
-    const repoRoot = AbsoluteRepoRoot.make("/workspace/repo")
-    const commonGitDir = GitCommonDirPath.make("/workspace/repo/.git")
 
     const authAbort = new TaskRunAbortedError({
       runId,
@@ -1268,6 +1367,20 @@ describe("@harness/contract schemas", () => {
         cwd: repoRoot,
       }),
     ).toThrow()
+  })
+
+  it("validates WF-3 start, complete, resume requests and workflow attempt record schemas", () => {
+    const {
+      runId,
+      unitId,
+      planSha,
+      baseSha,
+      repoRoot,
+      expectedAttemptKey,
+      dispatchedAttempt,
+      completedAttempt,
+      rejectedAttempt,
+    } = makeWf3Fixtures()
 
     const plan = Schema.decodeSync(CompiledPlan)({
       runId,
@@ -1321,10 +1434,7 @@ describe("@harness/contract schemas", () => {
       }),
     ).toThrow()
     expect(() =>
-      Schema.decodeUnknownSync(WorkflowCompleteRequest)({
-        _tag: "CompleteUnknown",
-        repoRoot,
-      }),
+      Schema.decodeUnknownSync(WorkflowCompleteRequest)({ _tag: "CompleteUnknown", repoRoot }),
     ).toThrow()
 
     const resumeEscalationReq = Schema.decodeSync(WorkflowResumeRequest)({
@@ -1355,15 +1465,8 @@ describe("@harness/contract schemas", () => {
         decision: "skip",
       }),
     ).toThrow()
-    expect(() =>
-      Schema.decodeUnknownSync(WorkflowResumeRequest)({
-        repoRoot,
-        runId,
-      }),
-    ).toThrow()
+    expect(() => Schema.decodeUnknownSync(WorkflowResumeRequest)({ repoRoot, runId })).toThrow()
 
-    const expectedUnitKey = makeWorkflowUnitKey(runId, unitId)
-    const expectedAttemptKey = makeWorkflowAttemptKey(runId, unitId, AttemptNumber.make(1))
     const retryEscalationAttemptKey = makeWorkflowAttemptKey(
       runId,
       unitId,
@@ -1373,36 +1476,6 @@ describe("@harness/contract schemas", () => {
     expect(retryEscalationAttemptKey).toBe(`${runId}/${unitId}#1/r2`)
     expect(Schema.decodeSync(WorkflowAttemptKey)(expectedAttemptKey)).toBe(expectedAttemptKey)
     expect(Schema.decodeSync(WorkflowAttemptVerdict)("rejected")).toBe("rejected")
-
-    const dispatchedAttempt = Schema.decodeSync(DispatchedWorkflowAttemptRecord)({
-      attemptKey: expectedAttemptKey,
-      runId,
-      unitId,
-      attempt: AttemptNumber.make(1),
-      verdict: "dispatched",
-      runner: RunnerId.make("antigravity"),
-      updatedMs: WorkflowTimestampMs.make(1_150),
-    })
-    const completedAttempt = Schema.decodeSync(CompletedWorkflowAttemptRecord)({
-      attemptKey: expectedAttemptKey,
-      runId,
-      unitId,
-      attempt: AttemptNumber.make(1),
-      verdict: "completed",
-      packageStampHash: stampHash,
-      updatedMs: WorkflowTimestampMs.make(1_180),
-    })
-    const rejectedAttempt = Schema.decodeSync(RejectedWorkflowAttemptRecord)({
-      attemptKey: expectedAttemptKey,
-      runId,
-      unitId,
-      attempt: AttemptNumber.make(1),
-      verdict: "rejected",
-      runner: RunnerId.make("antigravity"),
-      rejection: { _tag: "StampMissing" },
-      packageStampHash: stampHash,
-      updatedMs: WorkflowTimestampMs.make(1_200),
-    })
     expect(dispatchedAttempt.verdict).toBe("dispatched")
     expect(completedAttempt.verdict).toBe("completed")
     expect(rejectedAttempt.rejection._tag).toBe("StampMissing")
@@ -1420,55 +1493,24 @@ describe("@harness/contract schemas", () => {
         updatedMs: WorkflowTimestampMs.make(1_200),
       }),
     ).toThrow()
+  })
 
-    const pendingDeferreds = [
-      {
-        _tag: "UnitCompletion" as const,
-        unitId,
-        attempt: AttemptNumber.make(1),
-        deferredName: PendingDeferredName.make(`unit/${unitId}/1`),
-      },
-      {
-        _tag: "Escalation" as const,
-        unitId,
-        deferredName: PendingDeferredName.make(`escalation/${unitId}/1`),
-        escalation: { _tag: "AuthRequired" as const, runner: RunnerId.make("claude-code") },
-      },
-      {
-        _tag: "LlmPhase" as const,
-        deferredName: PendingDeferredName.make("llm-phase-done"),
-      },
-    ]
-
-    const skipReview = {
-      _tag: "SkipReviewPlan" as const,
-      depth: ReviewDepth.make("skip"),
-      source: ReviewRoutingSource.make("deterministic"),
-      reason: ReviewRoutingReason.make("doc-only"),
-      selections: [] as const,
-    }
-
-    const runRecord = {
-      runId,
-      executionId: execId,
-      level: WorkflowLevel.make("slice"),
-      planSha,
-      baseSha,
-      state: WorkflowRunState.make("waiting"),
-      planJson: PlanJsonPayload.make("{}"),
-      updatedMs: WorkflowTimestampMs.make(1_000),
-    }
-
-    const unitRecord = {
-      unitKey: WorkflowUnitKey.make(expectedUnitKey),
+  it("validates WF-3 outcomes, WorkflowStatusSummary, RPC envelopes, and WorkflowPlanToolOutput", () => {
+    const {
       runId,
       unitId,
-      kind: WorkflowUnitKind.make("slice"),
-      waveIndex: WaveIndex.make(0),
-      status: WorkflowUnitStatus.make("escalated"),
-      ownedRelPaths: [OwnedRelPath.make("libs/harness/contract/src")],
-      updatedMs: WorkflowTimestampMs.make(1_100),
-    }
+      planSha,
+      treeHash,
+      repoRoot,
+      commonGitDir,
+      dispatchedAttempt,
+      completedAttempt,
+      rejectedAttempt,
+      pendingDeferreds,
+      skipReview,
+      runRecord,
+      unitRecord,
+    } = makeWf3Fixtures()
 
     const failedOutcome = Schema.decodeSync(WorkflowRunOutcome)({
       _tag: "Failed",
@@ -1504,10 +1546,7 @@ describe("@harness/contract schemas", () => {
         planSha,
         review: skipReview,
         completedUnits: [unitId],
-        llmPhase: {
-          workspaceHash: treeHash,
-          frictionLogCleared: FrictionLogState.make("cleared"),
-        },
+        llmPhase: { workspaceHash: treeHash, frictionLogCleared: FrictionLogState.make("cleared") },
       },
       projectionStatus: WorkflowProjectionStatus.make("fresh"),
     })

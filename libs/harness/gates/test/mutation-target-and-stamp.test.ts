@@ -237,182 +237,172 @@ describe("mutant-ast-generator: expression wrapping, multi-mutant same line, AST
   )
 })
 
+const seedMixedTierDiscoveryWorkspace = (dir: string): string => {
+  const gatesPkg = writePkg(dir, "harness", "gates", {
+    type: "package.json",
+    name: "@harness/gates",
+    tags: ["type:core"],
+  })
+  writeFileSync(
+    join(gatesPkg, "src", "gate.ts"),
+    "export const g = (x: number) => x >= 1\n",
+    "utf8",
+  )
+  const graphPkg = writePkg(dir, "harness", "graph", {
+    type: "package.json",
+    name: "@harness/graph",
+    tags: ["type:core"],
+  })
+  writeFileSync(join(graphPkg, "src", "gr.ts"), "export const gr = (x: number) => x >= 1\n", "utf8")
+  const decPkg = writePkg(dir, "harness", "decision", {
+    type: "package.json",
+    name: "@harness/decision",
+    tags: ["type:core"],
+  })
+  writeFileSync(join(decPkg, "src", "dec.ts"), "export const d = (x: number) => x >= 1\n", "utf8")
+  const ingPkg = writePkg(dir, "harness", "ingest", {
+    type: "package.json",
+    name: "@harness/ingest",
+    tags: ["type:core"],
+  })
+  writeFileSync(join(ingPkg, "src", "ing.ts"), "export const i = (x: number) => x >= 1\n", "utf8")
+  const domPkg = writePkg(dir, "demo", "billing", {
+    type: "project.json",
+    name: "demo-billing",
+    tags: ["type:domain"],
+  })
+  writeFileSync(join(domPkg, "src", "bill.ts"), "export const b = (x: number) => x >= 1\n", "utf8")
+  const conPkg = writePkg(dir, "demo", "proto", {
+    type: "package.json",
+    name: "@demo/proto",
+    tags: ["type:contract"],
+  })
+  writeFileSync(
+    join(conPkg, "src", "helper.ts"),
+    "export const isOk = (x: number) => x === 1\n",
+    "utf8",
+  )
+  const svcPkg = writePkg(dir, "demo", "svc", {
+    type: "package.json",
+    name: "@demo/svc",
+    tags: ["type:service"],
+  })
+  writeFileSync(join(svcPkg, "src", "svc.ts"), "export const s = 1\n", "utf8")
+  const infPkg = writePkg(dir, "demo", "inf", {
+    type: "package.json",
+    name: "@demo/inf",
+    tags: ["type:infra"],
+  })
+  writeFileSync(
+    join(infPkg, "src", "inf.ts"),
+    'import { readFileSync } from "node:fs"\nexport const i = (p: string) => readFileSync(p, "utf8")\n',
+    "utf8",
+  )
+  writeFileSync(
+    join(infPkg, "src", "pure-codec.ts"),
+    'import type { Stats } from "node:fs"\nexport const isNonNeg = (n: number): boolean => n >= 0\nexport type StatShape = Stats\n',
+    "utf8",
+  )
+  const appPkg = writePkg(dir, "demo", "app", {
+    type: "package.json",
+    name: "@demo/app",
+    tags: ["type:app"],
+  })
+  writeFileSync(
+    join(appPkg, "src", "app.ts"),
+    'import { execFileSync } from "node:child_process"\nexport const a = () => execFileSync("git", ["--version"])\n',
+    "utf8",
+  )
+
+  const demoCliPath = join(dir, "apps", "demo-cli")
+  mkdirSync(join(demoCliPath, "src"), { recursive: true })
+  mkdirSync(join(demoCliPath, "test"), { recursive: true })
+  writeFileSync(
+    join(demoCliPath, "package.json"),
+    JSON.stringify({ name: "demo-cli", nx: { tags: ["type:app"] } }),
+    "utf8",
+  )
+  writeFileSync(
+    join(demoCliPath, "src", "pure-helper.ts"),
+    "export const clampPositive = (n: number): number => (n > 0 ? n : 0)\n",
+    "utf8",
+  )
+  writeFileSync(
+    join(demoCliPath, "src", "impure-entry.ts"),
+    'import { existsSync } from "node:fs"\nexport const hasFile = (p: string) => existsSync(p)\n',
+    "utf8",
+  )
+  const demoCliTest = join(demoCliPath, "test", "pure-helper.test.ts")
+  writeFileSync(demoCliTest, "export const ok = true\n", "utf8")
+
+  const demoWebPath = join(dir, "apps", "demo-web")
+  mkdirSync(join(demoWebPath, "src"), { recursive: true })
+  writeFileSync(
+    join(demoWebPath, "package.json"),
+    JSON.stringify({ name: "demo-web", nx: { tags: ["type:app", "scope:web"] } }),
+    "utf8",
+  )
+  writeFileSync(join(demoWebPath, "src", "ui.ts"), "export const ui = 1\n", "utf8")
+
+  const noManDom = writePkg(dir, "nom", "domain", null)
+  writeFileSync(join(noManDom, "src", "nd.ts"), "export const nd = 1\n", "utf8")
+  const noManCore = writePkg(dir, "nom", "core", null)
+  writeFileSync(join(noManCore, "src", "nc.ts"), "export const nc = 1\n", "utf8")
+  const noManContract = writePkg(dir, "nom", "contract", null)
+  writeFileSync(join(noManContract, "src", "ncon.ts"), "export const ncon = 1\n", "utf8")
+  const noManUnknown = writePkg(dir, "nom", "mystery", null)
+  writeFileSync(join(noManUnknown, "src", "unk.ts"), "export const unk = 1\n", "utf8")
+  expect(resolveLibPackageClassification(noManUnknown, "mystery", testHostIo)).toBe("unclassified")
+  return demoCliTest
+}
+
 describe("mutation-target-discovery: tag classification, scope/target filtering, reaching test partitioning, and live workspace dogfooding", () => {
   it("classifies type:core in non-core folders, type:domain, type:contract, excludes service/infra/app, and handles manifest-less fallback", () => {
     const dir = mkdtempSync(join(tmpdir(), "mut-disc-tags-"))
     try {
-      const gatesPkg = writePkg(dir, "harness", "gates", {
-        type: "package.json",
-        name: "@harness/gates",
-        tags: ["type:core"],
-      })
-      writeFileSync(
-        join(gatesPkg, "src", "gate.ts"),
-        "export const g = (x: number) => x >= 1\n",
-        "utf8",
-      )
-
-      const graphPkg = writePkg(dir, "harness", "graph", {
-        type: "package.json",
-        name: "@harness/graph",
-        tags: ["type:core"],
-      })
-      writeFileSync(
-        join(graphPkg, "src", "gr.ts"),
-        "export const gr = (x: number) => x >= 1\n",
-        "utf8",
-      )
-
-      const decPkg = writePkg(dir, "harness", "decision", {
-        type: "package.json",
-        name: "@harness/decision",
-        tags: ["type:core"],
-      })
-      writeFileSync(
-        join(decPkg, "src", "dec.ts"),
-        "export const d = (x: number) => x >= 1\n",
-        "utf8",
-      )
-
-      const ingPkg = writePkg(dir, "harness", "ingest", {
-        type: "package.json",
-        name: "@harness/ingest",
-        tags: ["type:core"],
-      })
-      writeFileSync(
-        join(ingPkg, "src", "ing.ts"),
-        "export const i = (x: number) => x >= 1\n",
-        "utf8",
-      )
-
-      const domPkg = writePkg(dir, "demo", "billing", {
-        type: "project.json",
-        name: "demo-billing",
-        tags: ["type:domain"],
-      })
-      writeFileSync(
-        join(domPkg, "src", "bill.ts"),
-        "export const b = (x: number) => x >= 1\n",
-        "utf8",
-      )
-
-      const conPkg = writePkg(dir, "demo", "proto", {
-        type: "package.json",
-        name: "@demo/proto",
-        tags: ["type:contract"],
-      })
-      writeFileSync(
-        join(conPkg, "src", "helper.ts"),
-        "export const isOk = (x: number) => x === 1\n",
-        "utf8",
-      )
-
-      const svcPkg = writePkg(dir, "demo", "svc", {
-        type: "package.json",
-        name: "@demo/svc",
-        tags: ["type:service"],
-      })
-      writeFileSync(join(svcPkg, "src", "svc.ts"), "export const s = 1\n", "utf8")
-
-      const infPkg = writePkg(dir, "demo", "inf", {
-        type: "package.json",
-        name: "@demo/inf",
-        tags: ["type:infra"],
-      })
-      writeFileSync(
-        join(infPkg, "src", "inf.ts"),
-        'import { readFileSync } from "node:fs"\nexport const i = (p: string) => readFileSync(p, "utf8")\n',
-        "utf8",
-      )
-      writeFileSync(
-        join(infPkg, "src", "pure-codec.ts"),
-        'import type { Stats } from "node:fs"\nexport const isNonNeg = (n: number): boolean => n >= 0\nexport type StatShape = Stats\n',
-        "utf8",
-      )
-
-      const appPkg = writePkg(dir, "demo", "app", {
-        type: "package.json",
-        name: "@demo/app",
-        tags: ["type:app"],
-      })
-      writeFileSync(
-        join(appPkg, "src", "app.ts"),
-        'import { execFileSync } from "node:child_process"\nexport const a = () => execFileSync("git", ["--version"])\n',
-        "utf8",
-      )
-
-      const demoCliPath = join(dir, "apps", "demo-cli")
-      mkdirSync(join(demoCliPath, "src"), { recursive: true })
-      mkdirSync(join(demoCliPath, "test"), { recursive: true })
-      writeFileSync(
-        join(demoCliPath, "package.json"),
-        JSON.stringify({ name: "demo-cli", nx: { tags: ["type:app"] } }),
-        "utf8",
-      )
-      writeFileSync(
-        join(demoCliPath, "src", "pure-helper.ts"),
-        "export const clampPositive = (n: number): number => (n > 0 ? n : 0)\n",
-        "utf8",
-      )
-      writeFileSync(
-        join(demoCliPath, "src", "impure-entry.ts"),
-        'import { existsSync } from "node:fs"\nexport const hasFile = (p: string) => existsSync(p)\n',
-        "utf8",
-      )
-      const demoCliTest = join(demoCliPath, "test", "pure-helper.test.ts")
-      writeFileSync(demoCliTest, "export const ok = true\n", "utf8")
-
-      const demoWebPath = join(dir, "apps", "demo-web")
-      mkdirSync(join(demoWebPath, "src"), { recursive: true })
-      writeFileSync(
-        join(demoWebPath, "package.json"),
-        JSON.stringify({ name: "demo-web", nx: { tags: ["type:app", "scope:web"] } }),
-        "utf8",
-      )
-      writeFileSync(join(demoWebPath, "src", "ui.ts"), "export const ui = 1\n", "utf8")
-
-      // No manifests: domain/core/contract fallback vs unknown folder
-      const noManDom = writePkg(dir, "nom", "domain", null)
-      writeFileSync(join(noManDom, "src", "nd.ts"), "export const nd = 1\n", "utf8")
-      const noManCore = writePkg(dir, "nom", "core", null)
-      writeFileSync(join(noManCore, "src", "nc.ts"), "export const nc = 1\n", "utf8")
-      const noManContract = writePkg(dir, "nom", "contract", null)
-      writeFileSync(join(noManContract, "src", "ncon.ts"), "export const ncon = 1\n", "utf8")
-      const noManUnknown = writePkg(dir, "nom", "mystery", null)
-      writeFileSync(join(noManUnknown, "src", "unk.ts"), "export const unk = 1\n", "utf8")
-
-      expect(resolveLibPackageClassification(noManUnknown, "mystery", testHostIo)).toBe(
-        "unclassified",
-      )
-
+      const demoCliTest = seedMixedTierDiscoveryWorkspace(dir)
       const all = findDomainFiles(dir, testHostIo)
       const rels = all.map((f) => f.relFile)
-      expect(rels).toContain("libs/harness/gates/src/gate.ts")
-      expect(rels).toContain("libs/harness/graph/src/gr.ts")
-      expect(rels).toContain("libs/harness/decision/src/dec.ts")
-      expect(rels).toContain("libs/harness/ingest/src/ing.ts")
-      expect(rels).toContain("libs/demo/billing/src/bill.ts")
-      expect(rels).toContain("libs/demo/proto/src/helper.ts")
-      expect(rels).toContain("libs/demo/inf/src/pure-codec.ts")
-      expect(rels).toContain("apps/demo-cli/src/pure-helper.ts")
-      expect(rels).toContain("libs/nom/domain/src/nd.ts")
-      expect(rels).toContain("libs/nom/core/src/nc.ts")
-      expect(rels).toContain("libs/nom/contract/src/ncon.ts")
-      expect(rels).not.toContain("libs/demo/svc/src/svc.ts")
-      expect(rels).not.toContain("libs/demo/inf/src/inf.ts")
-      expect(rels).not.toContain("libs/demo/app/src/app.ts")
-      expect(rels).not.toContain("apps/demo-cli/src/impure-entry.ts")
-      expect(rels).not.toContain("apps/demo-web/src/ui.ts")
-      expect(rels).not.toContain("libs/nom/mystery/src/unk.ts")
-
+      for (const expectedIncluded of [
+        "libs/harness/gates/src/gate.ts",
+        "libs/harness/graph/src/gr.ts",
+        "libs/harness/decision/src/dec.ts",
+        "libs/harness/ingest/src/ing.ts",
+        "libs/demo/billing/src/bill.ts",
+        "libs/demo/proto/src/helper.ts",
+        "libs/demo/inf/src/pure-codec.ts",
+        "apps/demo-cli/src/pure-helper.ts",
+        "libs/nom/domain/src/nd.ts",
+        "libs/nom/core/src/nc.ts",
+        "libs/nom/contract/src/ncon.ts",
+      ]) {
+        expect(rels).toContain(expectedIncluded)
+      }
+      for (const expectedExcluded of [
+        "libs/demo/svc/src/svc.ts",
+        "libs/demo/inf/src/inf.ts",
+        "libs/demo/app/src/app.ts",
+        "apps/demo-cli/src/impure-entry.ts",
+        "apps/demo-web/src/ui.ts",
+        "libs/nom/mystery/src/unk.ts",
+      ]) {
+        expect(rels).not.toContain(expectedExcluded)
+      }
       const demoCliEntry = all.find((f) => f.relFile === "apps/demo-cli/src/pure-helper.ts")!
       expect(demoCliEntry.tier).toBe("app-pure")
       expect(findReachingTestFiles(dir, demoCliEntry, testHostIo)).toEqual([demoCliTest])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("filters domain files by scope strings, normalized targetFiles, and handles empty results", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mut-disc-filters-"))
+    try {
+      seedMixedTierDiscoveryWorkspace(dir)
       expect(findDomainFiles(dir, testHostIo, "demo-cli").map((f) => f.relFile)).toEqual([
         "apps/demo-cli/src/pure-helper.ts",
       ])
-
-      // Scope filters
       expect(findDomainFiles(dir, testHostIo, "harness").map((f) => f.pkgDir)).toEqual([
         "decision",
         "gates",
@@ -435,8 +425,6 @@ describe("mutation-target-discovery: tag classification, scope/target filtering,
         "ingest",
       ])
       expect(findDomainFiles(dir, testHostIo, "nonexistent")).toEqual([])
-
-      // targetFiles filtering with backslash and leading ./
       const targeted = findDomainFiles(dir, testHostIo, undefined, [
         "./libs\\harness\\gates\\src\\gate.ts",
       ])

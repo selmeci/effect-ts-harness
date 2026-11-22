@@ -690,6 +690,107 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
     expect(missingPlanFileStart.stderr).toContain("Failed to read plan file")
   })
 
+  const makeWorkflowIpcLineHandler =
+    (
+      plan: ReturnType<typeof makeSamplePlan>,
+      dir: string,
+      commonGitDir: string,
+      receivedCommands: Array<{ readonly command: string; readonly repoRoot: unknown }>,
+    ) =>
+    (line: string) => {
+      const parsedOpt = decodeJsonRecord(line)
+      const rec = match(parsedOpt)
+        .with({ _tag: "Some" }, ({ value }) => value)
+        .with({ _tag: "None" }, () => ({}) as Readonly<Record<string, unknown>>)
+        .exhaustive()
+      const id = typeof rec["id"] === "string" ? rec["id"] : ""
+      const command = typeof rec["command"] === "string" ? rec["command"] : ""
+      if (command !== "workflow.handshake") {
+        receivedCommands.push({ command, repoRoot: rec["repoRoot"] })
+      }
+      const executionId = WorkflowExecutionId.make(plan.runId)
+      const reply = match(command)
+        .with("workflow.handshake", () => ({
+          id,
+          ok: true,
+          command,
+          handshake: {
+            protocolVersion: "1",
+            capabilities: [
+              "workflow.handshake",
+              "workflow.start",
+              "workflow.status",
+              "workflow.complete",
+              "workflow.resume",
+              "workflow.abort",
+              "workflow.doctor",
+            ],
+            repoRoot: rec["repoRoot"] ?? dir,
+            commonGitDir,
+            writerLeaseEpoch: 1,
+          },
+        }))
+        .with("workflow.start", () => ({
+          id,
+          ok: true,
+          result: { runId: plan.runId, executionId, outcome: "started" },
+        }))
+        .with("workflow.status", () => ({
+          id,
+          ok: true,
+          result: {
+            _tag: "Ready",
+            writerLeaseEpoch: 1,
+            outcome: { _tag: "NotFound" },
+          },
+        }))
+        .with("workflow.complete", () => ({
+          id,
+          ok: true,
+          result: {
+            _tag: "UnitCompleted",
+            runId: plan.runId,
+            executionId,
+            outcome: {
+              _tag: "Completed",
+              unitId: "u-alpha",
+              attempt: 1,
+              changedPaths: ["libs/alpha/src/index.ts"],
+              packageStampHash: "e".repeat(64),
+            },
+          },
+        }))
+        .with("workflow.resume", () => ({
+          id,
+          ok: true,
+          result: {
+            _tag: "EscalationResolved",
+            runId: plan.runId,
+            executionId,
+            unitId: "u-alpha",
+            decision: EscalationDecision.make("retry"),
+          },
+        }))
+        .with("workflow.doctor", () => ({
+          id,
+          ok: true,
+          result: {
+            repoRoot: dir,
+            commonGitDir,
+            writerLeaseEpoch: 1,
+            rebuiltRunCount: 1,
+            checks: [],
+          },
+        }))
+        .with("workflow.abort", () => ({
+          id,
+          ok: true,
+          result: { runId: plan.runId, executionId, state: "aborted" },
+        }))
+        .otherwise(() => ({ id, ok: false, error: `Unexpected command ${command}` }))
+      return Effect.succeed(JSON.stringify(reply))
+    }
+
   it("routes start, status, complete (linked worktree), resume, doctor, and abort end-to-end over real daemon Unix socket IPC", async () => {
     const { dir, headSha } = createTempGitRepo("harness-wf-ipc-")
     const worktreeDirRaw = join(
@@ -718,99 +819,12 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
       Effect.scoped(
         Effect.gen(function* () {
           yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(dir), {
-            lineHandler: (line) => {
-              const parsedOpt = decodeJsonRecord(line)
-              const rec = match(parsedOpt)
-                .with({ _tag: "Some" }, ({ value }) => value)
-                .with({ _tag: "None" }, () => ({}) as Readonly<Record<string, unknown>>)
-                .exhaustive()
-              const id = typeof rec["id"] === "string" ? rec["id"] : ""
-              const command = typeof rec["command"] === "string" ? rec["command"] : ""
-              if (command !== "workflow.handshake") {
-                receivedCommands.push({ command, repoRoot: rec["repoRoot"] })
-              }
-              const executionId = WorkflowExecutionId.make(plan.runId)
-              const reply = match(command)
-                .with("workflow.handshake", () => ({
-                  id,
-                  ok: true,
-                  command,
-                  handshake: {
-                    protocolVersion: "1",
-                    capabilities: [
-                      "workflow.handshake",
-                      "workflow.start",
-                      "workflow.status",
-                      "workflow.complete",
-                      "workflow.resume",
-                      "workflow.abort",
-                      "workflow.doctor",
-                    ],
-                    repoRoot: rec["repoRoot"] ?? dir,
-                    commonGitDir: validatedCanonical.commonGitDir,
-                    writerLeaseEpoch: 1,
-                  },
-                }))
-                .with("workflow.start", () => ({
-                  id,
-                  ok: true,
-                  result: { runId: plan.runId, executionId, outcome: "started" },
-                }))
-                .with("workflow.status", () => ({
-                  id,
-                  ok: true,
-                  result: {
-                    _tag: "Ready",
-                    writerLeaseEpoch: 1,
-                    outcome: { _tag: "NotFound" },
-                  },
-                }))
-                .with("workflow.complete", () => ({
-                  id,
-                  ok: true,
-                  result: {
-                    _tag: "UnitCompleted",
-                    runId: plan.runId,
-                    executionId,
-                    outcome: {
-                      _tag: "Completed",
-                      unitId: "u-alpha",
-                      attempt: 1,
-                      changedPaths: ["libs/alpha/src/index.ts"],
-                      packageStampHash: "e".repeat(64),
-                    },
-                  },
-                }))
-                .with("workflow.resume", () => ({
-                  id,
-                  ok: true,
-                  result: {
-                    _tag: "EscalationResolved",
-                    runId: plan.runId,
-                    executionId,
-                    unitId: "u-alpha",
-                    decision: EscalationDecision.make("retry"),
-                  },
-                }))
-                .with("workflow.doctor", () => ({
-                  id,
-                  ok: true,
-                  result: {
-                    repoRoot: dir,
-                    commonGitDir: validatedCanonical.commonGitDir,
-                    writerLeaseEpoch: 1,
-                    rebuiltRunCount: 1,
-                    checks: [],
-                  },
-                }))
-                .with("workflow.abort", () => ({
-                  id,
-                  ok: true,
-                  result: { runId: plan.runId, executionId, state: "aborted" },
-                }))
-                .otherwise(() => ({ id, ok: false, error: `Unexpected command ${command}` }))
-              return Effect.succeed(JSON.stringify(reply))
-            },
+            lineHandler: makeWorkflowIpcLineHandler(
+              plan,
+              dir,
+              validatedCanonical.commonGitDir,
+              receivedCommands,
+            ),
           })
 
           const startStdinRes = yield* runDeclarativeCli(["workflow", "start", "--json"], {

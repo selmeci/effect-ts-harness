@@ -41,6 +41,11 @@ import {
   isSilentDecodeOrStoreFallback,
   isUntypedCatchCauseWithoutInterruptGuard,
 } from "./ast-fail-closed-laws.js"
+import {
+  collectContractShapeViolations,
+  collectMaxTestCaseLineViolations,
+  collectWorkflowNameAccessViolations,
+} from "./ast-contract-and-test-hygiene.js"
 
 export {
   isCatchCauseInterruptsOnlyCall,
@@ -568,6 +573,19 @@ export const visitSourceFileSinglePass = (
   }
 
   walk(sourceFile)
+  if (isContractSrc) {
+    for (const v of collectContractShapeViolations(sourceFile, norm)) {
+      pushViolation(catSyntax, "contract-shape-hardening", v.message, v.node)
+    }
+  }
+  for (const v of collectWorkflowNameAccessViolations(sourceFile, norm)) {
+    pushViolation(catSyntax, "workflow-name-instead-of-tag", v.message, v.node)
+  }
+  if (isTest) {
+    for (const v of collectMaxTestCaseLineViolations(sourceFile, norm)) {
+      pushViolation(catTest, "max-test-case-lines", v.message, v.node)
+    }
+  }
   if (!isTestOrHelper && /(?:^|\/)(?:libs|apps)\/.*\/src\//.test(norm)) {
     for (const v of collectWorkflowBodyViolations(sourceFile, norm)) {
       pushViolation(catSyntax, "nondeterministic-workflow-body", v.message, v.node)

@@ -130,7 +130,10 @@ export const computeContentSha256 = (content: string): ContentSha256 => {
   return ContentSha256.make(hex)
 }
 
-export const AstSourceContent = Schema.String.pipe(Schema.brand("AstSourceContent"))
+export const AstSourceContent = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(4_194_304)),
+  Schema.brand("AstSourceContent"),
+)
 export type AstSourceContent = typeof AstSourceContent.Type
 
 export const GateCategory = Schema.Literals([
@@ -142,10 +145,17 @@ export const GateCategory = Schema.Literals([
 ])
 export type GateCategory = typeof GateCategory.Type
 
-export const GateRuleId = Schema.NonEmptyString.pipe(Schema.brand("GateRuleId"))
+export const GateRuleId = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(128)),
+  Schema.brand("GateRuleId"),
+)
 export type GateRuleId = typeof GateRuleId.Type
 
-export const GateViolationMessage = Schema.NonEmptyString.pipe(Schema.brand("GateViolationMessage"))
+export const GateViolationMessage = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isMaxLength(8192)),
+  Schema.brand("GateViolationMessage"),
+)
 export type GateViolationMessage = typeof GateViolationMessage.Type
 
 export const SourceLineNumber = Schema.Int.pipe(
@@ -154,7 +164,11 @@ export const SourceLineNumber = Schema.Int.pipe(
 )
 export type SourceLineNumber = typeof SourceLineNumber.Type
 
-export const EnclosingSymbolName = Schema.NonEmptyString.pipe(Schema.brand("EnclosingSymbolName"))
+export const EnclosingSymbolName = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(1024)),
+  Schema.brand("EnclosingSymbolName"),
+)
 export type EnclosingSymbolName = typeof EnclosingSymbolName.Type
 
 export const GateVerdict = Schema.Literals(["clean", "violated"])
@@ -230,6 +244,7 @@ export const SelfDogfoodingRuleId = Schema.Literals([
 export type SelfDogfoodingRuleId = typeof SelfDogfoodingRuleId.Type
 
 export const SelfDogfoodingMessage = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isMaxLength(8192)),
   Schema.brand("SelfDogfoodingMessage"),
 )
 export type SelfDogfoodingMessage = typeof SelfDogfoodingMessage.Type

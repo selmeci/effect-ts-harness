@@ -1314,43 +1314,31 @@ export {};
             const infraSrcDir = join(tempDir, "libs", "sample", "infra", "src")
             mkdirSync(infraSrcDir, { recursive: true })
 
-            // 1. bad-ddl.ts: runs sql`CREATE TABLE foo (id INT)` without SqliteMigrator
             writeFileSync(
               join(infraSrcDir, "bad-ddl.ts"),
               `import {sql} from "@effect/sql";\nexport const makeTable = sql\`CREATE TABLE foo (id INT);\`;\n`,
             )
-
-            // 2. bad-key.ts: passes "init_Without_Number" and duplicate "1_first" / "1_second" to SqliteMigrator.fromRecord
             writeFileSync(
               join(infraSrcDir, "bad-key.ts"),
               `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nexport const badMigrations = SqliteMigrator.fromRecord({\n  "init_Without_Number": sql\`CREATE TABLE IF NOT EXISTS a (id INT);\`,\n  "1_first": sql\`CREATE TABLE IF NOT EXISTS b (id INT);\`,\n  "1_second": sql\`CREATE TABLE IF NOT EXISTS c (id INT);\`,\n});\n`,
             )
-
-            // 3. drop.ts: contains sql`DROP TABLE foo`
             writeFileSync(
               join(infraSrcDir, "drop.ts"),
               `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nexport const dropMigrations = SqliteMigrator.fromRecord({\n  "1_drop_table": sql\`DROP TABLE foo;\`,\n});\n`,
             )
-
-            // 4. multiline-gen.ts: multi-line Effect.gen block with nested object followed by second invalid key "2_InvalidCamel"
             writeFileSync(
               join(infraSrcDir, "multiline-gen.ts"),
               `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nimport {Effect} from "effect";\nexport const complexMigrations = SqliteMigrator.fromRecord({\n  "1_init": Effect.gen(function* () {\n    const nested = { a: 1 };\n    yield* sql\`CREATE TABLE IF NOT EXISTS complex (id INT);\`;\n  }),\n  "2_InvalidCamel": sql\`CREATE TABLE IF NOT EXISTS camel (id INT);\`,\n});\n`,
             )
-
-            // 5. spread-migrations.ts: spread record with duplicate numeric id "1"
             writeFileSync(
               join(infraSrcDir, "spread-migrations.ts"),
               `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nconst aggregateCoreMigrations = {\n  "1_init": sql\`CREATE TABLE IF NOT EXISTS core (id INT);\`,\n};\nexport const migrations = SqliteMigrator.fromRecord({\n  ...aggregateCoreMigrations,\n  "1_second": sql\`CREATE TABLE IF NOT EXISTS duplicate_id (id INT);\`,\n});\n`,
             )
-
-            // 6. stray-ddl.ts: file imports SqliteMigrator, has valid fromRecord, but also has stray CREATE TABLE outside migration record
             writeFileSync(
               join(infraSrcDir, "stray-ddl.ts"),
               `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nexport const managedMigrations = SqliteMigrator.fromRecord({\n  "1_init_managed": sql\`CREATE TABLE IF NOT EXISTS managed (id INT);\`,\n});\nexport const strayTable = sql\`CREATE TABLE stray_table (id INT);\`;\n`,
             )
 
-            // 7. .sql file with destructive DROP TABLE in migrations/
             const migrationsDir = join(tempDir, "libs", "sample", "infra", "migrations")
             mkdirSync(migrationsDir, { recursive: true })
             writeFileSync(join(migrationsDir, "0002_drop.sql"), "DROP TABLE old_table;\n")
@@ -1361,7 +1349,6 @@ export {};
               hostIo: testHostIo,
             })
 
-            // Check unmanaged-sql-ddl
             const unmanagedFindings = findings.filter(
               (f) =>
                 f.kind === "unmanaged-sql-ddl" && f.nodeId === "libs/sample/infra/src/bad-ddl.ts",
@@ -1371,7 +1358,6 @@ export {};
               'Infrastructure module "libs/sample/infra/src/bad-ddl.ts" executes raw SQL DDL without SqliteMigrator',
             )
 
-            // Check stray CREATE TABLE outside fromRecord in a file importing SqliteMigrator
             const strayDdlFinding = findings.find(
               (f) =>
                 f.kind === "unmanaged-sql-ddl" && f.nodeId === "libs/sample/infra/src/stray-ddl.ts",
@@ -1381,7 +1367,6 @@ export {};
               'Infrastructure module "libs/sample/infra/src/stray-ddl.ts" executes raw SQL DDL without SqliteMigrator',
             )
 
-            // Check invalid-migrator-record-key (invalid format and duplicate id)
             const invalidKeyFinding = findings.find(
               (f) =>
                 f.kind === "invalid-migrator-record-key" &&
@@ -1402,7 +1387,6 @@ export {};
               "Duplicate migration version prefix '1_' in SqliteMigrator.fromRecord",
             )
 
-            // Check multiline Effect.gen second key invalid format
             const camelKeyFinding = findings.find(
               (f) =>
                 f.kind === "invalid-migrator-record-key" &&
@@ -1413,7 +1397,6 @@ export {};
               'Invalid SqliteMigrator.fromRecord migration key "2_InvalidCamel"',
             )
 
-            // Check spread record duplicate id detection
             const spreadDuplicateFinding = findings.find(
               (f) =>
                 f.kind === "invalid-migrator-record-key" &&
@@ -1424,7 +1407,6 @@ export {};
               "Duplicate migration version prefix '1_' in SqliteMigrator.fromRecord",
             )
 
-            // Check unsafe-sql-migration from TS file
             const unsafeFindings = findings.filter(
               (f) =>
                 f.kind === "unsafe-sql-migration" &&
@@ -1435,7 +1417,6 @@ export {};
               'Destructive DROP statement in "libs/sample/infra/src/drop.ts" requires human approval (ESCALATE).',
             )
 
-            // Check unsafe-sql-migration from .sql file in migrations/
             const unsafeSqlFileFinding = findings.find(
               (f) =>
                 f.kind === "unsafe-sql-migration" &&
@@ -1448,91 +1429,90 @@ export {};
           } finally {
             rmSync(tempDir, { recursive: true, force: true })
           }
-
-          // 8. Reports 0 findings when SqliteMigrator.fromRecord({ ...aggregateCoreMigrations, "2_init_bar": ... }) is used with additive CREATE TABLE IF NOT EXISTS
-          const cleanTempDir = mkdtempSync(join(tmpdir(), "harness-sql-clean-test-"))
-          try {
-            const cleanInfraSrcDir = join(cleanTempDir, "libs", "sample", "infra", "src")
-            mkdirSync(cleanInfraSrcDir, { recursive: true })
-
-            writeFileSync(
-              join(cleanInfraSrcDir, "clean.ts"),
-              `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nconst aggregateCoreMigrations = {\n  "1_init_foo": sql\`CREATE TABLE IF NOT EXISTS foo (id INT);\`,\n};\nexport const cleanMigrations = SqliteMigrator.fromRecord({\n  ...aggregateCoreMigrations,\n  "2_init_bar": sql\`CREATE TABLE IF NOT EXISTS bar (id INT);\`,\n});\nexport const runAggregateMigrations = SqliteMigrator.run({ loader: cleanMigrations });\nexport const projectorCoreMigrations = {\n  "1_init_projector": sql\`CREATE TABLE IF NOT EXISTS proj (id INT);\`,\n};\nexport const runProjectorMigrations = SqliteMigrator.run({\n  loader: SqliteMigrator.fromRecord(projectorCoreMigrations),\n  table: "es_projector_sql_migrations",\n});\n`,
-            )
-
-            const cleanFindings = yield* evaluatePackageAndMigrationPlugin({
-              graph: buildHarnessGraph({}),
-              workspaceRoot: cleanTempDir,
-              hostIo: testHostIo,
-            })
-            expect(cleanFindings).toHaveLength(0)
-          } finally {
-            rmSync(cleanTempDir, { recursive: true, force: true })
-          }
-
-          // 9. Detects non-1-based migration sequence, non-contiguous sequence, shared default migration table, and untrusted-row-brand-make
-          const collisionTempDir = mkdtempSync(join(tmpdir(), "harness-sql-collision-test-"))
-          try {
-            const collisionInfraSrcDir = join(collisionTempDir, "libs", "sample", "infra", "src")
-            mkdirSync(collisionInfraSrcDir, { recursive: true })
-
-            writeFileSync(
-              join(collisionInfraSrcDir, "aggregate.ts"),
-              `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nexport const aggregateCoreMigrations = {\n  "1_init_agg": sql\`CREATE TABLE IF NOT EXISTS agg (id INT);\`,\n  "3_skip_two": sql\`CREATE TABLE IF NOT EXISTS agg2 (id INT);\`,\n};\nexport const runAgg = SqliteMigrator.run({ loader: SqliteMigrator.fromRecord(aggregateCoreMigrations) });\n`,
-            )
-
-            writeFileSync(
-              join(collisionInfraSrcDir, "projector.ts"),
-              `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nexport const projectorCoreMigrations = {\n  "2_init_projector": sql\`CREATE TABLE IF NOT EXISTS proj (id INT);\`,\n};\nexport const runProj = SqliteMigrator.run({ loader: SqliteMigrator.fromRecord(projectorCoreMigrations) });\nexport const decodeRow = (row: { readonly stream_version: number }) => StreamVersion.make(Math.max(0, row.stream_version));\n`,
-            )
-
-            const collisionFindings = yield* evaluatePackageAndMigrationPlugin({
-              graph: buildHarnessGraph({}),
-              workspaceRoot: collisionTempDir,
-              hostIo: testHostIo,
-            })
-
-            const startAtTwoFinding = collisionFindings.find(
-              (f) =>
-                f.kind === "invalid-migrator-record-key" &&
-                f.nodeId === "libs/sample/infra/src/projector.ts:sequence-start-2",
-            )
-            expect(startAtTwoFinding).toBeDefined()
-            expect(startAtTwoFinding?.message).toContain('starts at id "2" instead of "1"')
-
-            const gapFinding = collisionFindings.find(
-              (f) =>
-                f.kind === "invalid-migrator-record-key" &&
-                f.nodeId === "libs/sample/infra/src/aggregate.ts:sequence-gap-1-3",
-            )
-            expect(gapFinding).toBeDefined()
-            expect(gapFinding?.message).toContain('jumps from "1" to "3"')
-
-            const sharedTableFinding = collisionFindings.find(
-              (f) =>
-                f.kind === "invalid-migrator-record-key" &&
-                f.nodeId ===
-                  "libs/sample/infra/src/projector.ts:shared-default-migrations-table:projectorCoreMigrations",
-            )
-            expect(sharedTableFinding).toBeDefined()
-            expect(sharedTableFinding?.message).toContain(
-              'Multiple distinct SqliteMigrator loaders (aggregateCoreMigrations, projectorCoreMigrations) in "sample/infra" use the default "effect_sql_migrations" table without a custom "table" option',
-            )
-
-            const brandMakeFinding = collisionFindings.find(
-              (f) =>
-                f.kind === "untrusted-row-brand-make" &&
-                f.nodeId ===
-                  "libs/sample/infra/src/projector.ts:StreamVersion.make(row.stream_version)",
-            )
-            expect(brandMakeFinding).toBeDefined()
-            expect(brandMakeFinding?.message).toContain(
-              'Unvalidated "StreamVersion.make(...row.stream_version...)" on SQLite row column',
-            )
-          } finally {
-            rmSync(collisionTempDir, { recursive: true, force: true })
-          }
         }),
+      )
+
+      it.effect(
+        "allows clean SqliteMigrator records and catches sequence gaps, shared default tables, and untrusted-row-brand-make",
+        () =>
+          Effect.gen(function* () {
+            const cleanTempDir = mkdtempSync(join(tmpdir(), "harness-sql-clean-test-"))
+            try {
+              const cleanInfraSrcDir = join(cleanTempDir, "libs", "sample", "infra", "src")
+              mkdirSync(cleanInfraSrcDir, { recursive: true })
+              writeFileSync(
+                join(cleanInfraSrcDir, "clean.ts"),
+                `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nconst aggregateCoreMigrations = {\n  "1_init_foo": sql\`CREATE TABLE IF NOT EXISTS foo (id INT);\`,\n};\nexport const cleanMigrations = SqliteMigrator.fromRecord({\n  ...aggregateCoreMigrations,\n  "2_init_bar": sql\`CREATE TABLE IF NOT EXISTS bar (id INT);\`,\n});\nexport const runAggregateMigrations = SqliteMigrator.run({ loader: cleanMigrations });\nexport const projectorCoreMigrations = {\n  "1_init_projector": sql\`CREATE TABLE IF NOT EXISTS proj (id INT);\`,\n};\nexport const runProjectorMigrations = SqliteMigrator.run({\n  loader: SqliteMigrator.fromRecord(projectorCoreMigrations),\n  table: "es_projector_sql_migrations",\n});\n`,
+              )
+              const cleanFindings = yield* evaluatePackageAndMigrationPlugin({
+                graph: buildHarnessGraph({}),
+                workspaceRoot: cleanTempDir,
+                hostIo: testHostIo,
+              })
+              expect(cleanFindings).toHaveLength(0)
+            } finally {
+              rmSync(cleanTempDir, { recursive: true, force: true })
+            }
+
+            const collisionTempDir = mkdtempSync(join(tmpdir(), "harness-sql-collision-test-"))
+            try {
+              const collisionInfraSrcDir = join(collisionTempDir, "libs", "sample", "infra", "src")
+              mkdirSync(collisionInfraSrcDir, { recursive: true })
+              writeFileSync(
+                join(collisionInfraSrcDir, "aggregate.ts"),
+                `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nexport const aggregateCoreMigrations = {\n  "1_init_agg": sql\`CREATE TABLE IF NOT EXISTS agg (id INT);\`,\n  "3_skip_two": sql\`CREATE TABLE IF NOT EXISTS agg2 (id INT);\`,\n};\nexport const runAgg = SqliteMigrator.run({ loader: SqliteMigrator.fromRecord(aggregateCoreMigrations) });\n`,
+              )
+              writeFileSync(
+                join(collisionInfraSrcDir, "projector.ts"),
+                `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nexport const projectorCoreMigrations = {\n  "2_init_projector": sql\`CREATE TABLE IF NOT EXISTS proj (id INT);\`,\n};\nexport const runProj = SqliteMigrator.run({ loader: SqliteMigrator.fromRecord(projectorCoreMigrations) });\nexport const decodeRow = (row: { readonly stream_version: number }) => StreamVersion.make(Math.max(0, row.stream_version));\n`,
+              )
+
+              const collisionFindings = yield* evaluatePackageAndMigrationPlugin({
+                graph: buildHarnessGraph({}),
+                workspaceRoot: collisionTempDir,
+                hostIo: testHostIo,
+              })
+              const startAtTwoFinding = collisionFindings.find(
+                (f) =>
+                  f.kind === "invalid-migrator-record-key" &&
+                  f.nodeId === "libs/sample/infra/src/projector.ts:sequence-start-2",
+              )
+              expect(startAtTwoFinding).toBeDefined()
+              expect(startAtTwoFinding?.message).toContain('starts at id "2" instead of "1"')
+
+              const gapFinding = collisionFindings.find(
+                (f) =>
+                  f.kind === "invalid-migrator-record-key" &&
+                  f.nodeId === "libs/sample/infra/src/aggregate.ts:sequence-gap-1-3",
+              )
+              expect(gapFinding).toBeDefined()
+              expect(gapFinding?.message).toContain('jumps from "1" to "3"')
+
+              const sharedTableFinding = collisionFindings.find(
+                (f) =>
+                  f.kind === "invalid-migrator-record-key" &&
+                  f.nodeId ===
+                    "libs/sample/infra/src/projector.ts:shared-default-migrations-table:projectorCoreMigrations",
+              )
+              expect(sharedTableFinding).toBeDefined()
+              expect(sharedTableFinding?.message).toContain(
+                'Multiple distinct SqliteMigrator loaders (aggregateCoreMigrations, projectorCoreMigrations) in "sample/infra" use the default "effect_sql_migrations" table without a custom "table" option',
+              )
+
+              const brandMakeFinding = collisionFindings.find(
+                (f) =>
+                  f.kind === "untrusted-row-brand-make" &&
+                  f.nodeId ===
+                    "libs/sample/infra/src/projector.ts:StreamVersion.make(row.stream_version)",
+              )
+              expect(brandMakeFinding).toBeDefined()
+              expect(brandMakeFinding?.message).toContain(
+                'Unvalidated "StreamVersion.make(...row.stream_version...)" on SQLite row column',
+              )
+            } finally {
+              rmSync(collisionTempDir, { recursive: true, force: true })
+            }
+          }),
       )
     })
   })

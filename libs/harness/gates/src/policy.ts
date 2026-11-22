@@ -32,6 +32,7 @@ import {
 } from "./policy-command-rules.js"
 import {
   PROTECTED_HARNESS_FILE_WRITE_PATTERN,
+  expandCommandVariables,
   isHarnessStateAccessCommand,
   isHarnessStateMutationCommand,
 } from "./policy-harness-state.js"
@@ -258,11 +259,17 @@ export const explainCommandDenyRule = (
         "Mutating or directly probing protected harness runtime state (<git-common-dir>/harness/**, auth-tokens.json, daemon.sock, daemon.lock, workflow-backups/, pending-workflow-restore.json) is banned by harness policy.",
     }
   }
-  if (SECRET_FILE_PATTERN.test(view.argv)) {
+  const expandedArgv = toCommandView(expandCommandVariables(trimmed).text).argv
+  if (
+    SECRET_FILE_PATTERN.test(view.argv) ||
+    SECRET_FILE_PATTERN.test(view.argv.replace(/\\(.)/g, "$1")) ||
+    SECRET_FILE_PATTERN.test(expandedArgv) ||
+    SECRET_FILE_PATTERN.test(expandedArgv.replace(/\\(.)/g, "$1"))
+  ) {
     return {
       ruleId: "secret-file-access",
       reason:
-        "Accessing or exposing secret/credential files (.env, mutation-hmac*.key, auth-tokens.json) in shell commands is banned by harness policy.",
+        "Accessing or exposing secret/credential files (.env, .dev.vars, mutation-hmac*.key, auth-tokens.json) in shell commands is banned by harness policy.",
     }
   }
   if (isHarnessStateAccessCommand(trimmed)) {
@@ -450,13 +457,15 @@ const expandGlobObfuscationCandidates = (raw: string): ReadonlyArray<string> => 
 }
 
 const normalizeFilePathCandidates = (filePath: string): ReadonlyArray<string> => {
-  const rawNorm = filePath.replace(/\\/g, "/").trim()
-  if (rawNorm === "") {
+  const trimmed = filePath.trim()
+  if (trimmed === "") {
     return []
   }
+  const rawNorm = trimmed.replace(/\\/g, "/")
   const norm = path.posix.normalize(rawNorm)
+  const bases = new Set<string>([trimmed, rawNorm, norm])
   const out: Array<string> = []
-  for (const base of rawNorm === norm ? [norm] : [rawNorm, norm]) {
+  for (const base of bases) {
     for (const variant of expandGlobObfuscationCandidates(base)) {
       if (!out.includes(variant)) out.push(variant)
     }
@@ -475,6 +484,16 @@ const isSecretFileReadPath = (p: string): boolean =>
     /(^|\/)\.cache\/effect-harness(\/|$)/.test(p)) &&
   !/\.(example|template|sample)$/i.test(p)
 
+const findWorkerCredentialCandidate = (
+  filePath: string,
+  candidates: ReadonlyArray<string>,
+  options?: PolicyGuardOptions,
+): string | undefined => {
+  if (options?.unitWorkerMode !== true) return undefined
+  if (isWorkerDaemonCredentialFilePath(filePath)) return filePath
+  return candidates.find(isWorkerDaemonCredentialFilePath)
+}
+
 export const classifyFileRead = (
   filePath: string,
   options?: PolicyGuardOptions,
@@ -483,12 +502,9 @@ export const classifyFileRead = (
   if (candidates.length === 0) {
     return { verdict: "allow" }
   }
-  if (
-    options?.unitWorkerMode === true &&
-    (isWorkerDaemonCredentialFilePath(filePath) ||
-      candidates.some(isWorkerDaemonCredentialFilePath))
-  ) {
-    return classifyWorkerFileAccess(filePath, true)
+  const workerTarget = findWorkerCredentialCandidate(filePath, candidates, options)
+  if (workerTarget !== undefined) {
+    return classifyWorkerFileAccess(workerTarget, true)
   }
   if (candidates.some((p) => PROTECTED_HARNESS_FILE_WRITE_PATTERN.test(p))) {
     return {
@@ -511,12 +527,13 @@ export const classifyFileWrite = (
   filePath: string,
   options?: PolicyGuardOptions,
 ): FileWriteGuardResult => {
-  if (options?.unitWorkerMode === true && isWorkerDaemonCredentialFilePath(filePath)) {
-    return classifyWorkerFileAccess(filePath, true)
-  }
   const candidates = normalizeFilePathCandidates(filePath)
   if (candidates.length === 0) {
     return { verdict: "allow" }
+  }
+  const workerTarget = findWorkerCredentialCandidate(filePath, candidates, options)
+  if (workerTarget !== undefined) {
+    return classifyWorkerFileAccess(workerTarget, true)
   }
 
   if (candidates.some((p) => /(^|\/)repos\/(effect|alchemy)(\/|$)/.test(p))) {

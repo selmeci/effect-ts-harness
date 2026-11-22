@@ -225,7 +225,7 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
     }
   })
 
-  it("F-14.1: emits hook-bootstrap-fail-closed when guard/done hooks lack || exit 2 or antigravity decision JSON fallback", () => {
+  it("F-14.1: emits hook-bootstrap-fail-closed when guard/done hooks lack || exit 2 or use fail-open antigravity fallback", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "harness-doc-truth-bootstrap-"))
     try {
       const claudeHooks = join(tempDir, "adapters/claude-code/hooks.json")
@@ -312,7 +312,6 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
         ),
       ).toBe(false)
 
-      // Fail-open decisions ("allow" on guard, "stop" on done) must also be rejected
       writeFileSync(
         agyHooks,
         JSON.stringify({
@@ -355,8 +354,18 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
             f.nodeId === "adapters/antigravity/plugins/effect-harness/hooks.json:Stop",
         ),
       ).toBe(true)
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
 
-      // hook-entry.ts guard/done must also enforce || exit 2 and antigravity fallback JSON
+  it("F-14.1: enforces fail-closed fallback on hook-entry.ts and flag-before-subcommand forms, plus Claude terminology isolation", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "harness-doc-truth-hookentry-"))
+    try {
+      const claudeHooks = join(tempDir, "adapters/claude-code/hooks.json")
+      const agyHooks = join(tempDir, "adapters/antigravity/plugins/effect-harness/hooks.json")
+      mkdirSync(dirname(claudeHooks), { recursive: true })
+      mkdirSync(dirname(agyHooks), { recursive: true })
       writeFileSync(
         claudeHooks,
         JSON.stringify({
@@ -438,7 +447,6 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
         ),
       ).toBe(false)
 
-      // Flag-before-subcommand hook-entry.ts --format=antigravity guard without fail-closed fallback
       writeFileSync(
         agyHooks,
         JSON.stringify({
@@ -475,7 +483,6 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
         ),
       ).toBe(true)
 
-      // Claude Code resolving-effect-review-feedback must not leak Antigravity terminology
       const claudeReviewSkill = join(
         tempDir,
         "adapters/claude-code/skills/resolving-effect-review-feedback/SKILL.md",

@@ -17,8 +17,8 @@ import { testHostIo } from "./helpers/test-host-io.js"
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))
 
 describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
-  it("buildHarnessGraph creates doc nodes and governance edges, serializes to NDJSON, and resolves via resolveNode/findCallers/findCallees", () => {
-    const graph = buildHarnessGraph({
+  const makeGovernanceRoundtripGraph = () =>
+    buildHarnessGraph({
       fns: [
         {
           qualname: "libs/sample/domain/src/index.ts#uploadPhoto",
@@ -103,6 +103,9 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
         },
       ],
     })
+
+  it("buildHarnessGraph creates doc nodes and governance edges and resolves via resolveNode/findCallers/findCallees", () => {
+    const graph = makeGovernanceRoundtripGraph()
 
     // 1. resolveNode
     const adrById = resolveNode(graph, "sample:ADR-0001")
@@ -219,6 +222,10 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
         }),
       ]),
     )
+  })
+
+  it("buildHarnessGraph renders Mermaid and serializes governance nodes and edges to NDJSON", () => {
+    const graph = makeGovernanceRoundtripGraph()
 
     // 4. renderMermaid
     const mermaid = renderMermaid(graph)

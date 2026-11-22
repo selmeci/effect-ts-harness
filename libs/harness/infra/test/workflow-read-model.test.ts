@@ -774,22 +774,19 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
     )
   })
 
-  it("rebuildWorkflowReadModelViews reconstructs sharedStepPaths, /r2 cycles, MergeSliceWave conflicts, InterruptSignal, and Failure exits", async () => {
-    const client = createClient()
-    const layer = makeWorkflowReadModelQueryLayer({ repoRoot, client })
-    const autoRunId = WorkflowRunId.make("run-adv-auto-1")
-    const mergeRunId = WorkflowRunId.make("run-adv-merge-2")
-    const escFailRunId = WorkflowRunId.make("run-adv-esc-3")
+  const makeAdvancedReadModelPlans = (params: {
+    readonly autoRunId: WorkflowRunId
+    readonly mergeRunId: WorkflowRunId
+    readonly escFailRunId: WorkflowRunId
+    readonly unit1: WorkUnitId
+    readonly unit10: WorkUnitId
+    readonly sliceUnit: WorkUnitId
+    readonly sliceBranch: SliceBranchName
+    readonly escUnit: WorkUnitId
+  }) => {
     const baseSha = GitCommitSha.make("e".repeat(40))
-    const stampHash = PackageStampHash.make("a".repeat(64))
-    const unit1 = WorkUnitId.make("u-1")
-    const unit10 = WorkUnitId.make("u-10")
-    const sliceUnit = WorkUnitId.make("u-slice-conflict")
-    const sliceBranch = SliceBranchName.make("slice/u-conflict")
-    const escUnit = WorkUnitId.make("u-esc")
-
     const autoPlan: CompiledPlan = {
-      runId: autoRunId,
+      runId: params.autoRunId,
       level: "slice",
       planSha: PlanSha256.make("3".repeat(64)),
       baseSha,
@@ -801,7 +798,7 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
       units: [
         {
           _tag: "PackageUnit",
-          unitId: unit1,
+          unitId: params.unit1,
           projectName: NxProjectName.make("@harness/u1"),
           waveIndex: WaveIndex.make(0),
           dependsOn: [],
@@ -812,7 +809,7 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
         },
         {
           _tag: "PackageUnit",
-          unitId: unit10,
+          unitId: params.unit10,
           projectName: NxProjectName.make("@harness/u10"),
           waveIndex: WaveIndex.make(0),
           dependsOn: [],
@@ -825,7 +822,7 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
       sharedStepPaths: [OwnedRelPath.make("libs/shared")],
     }
     const mergePlan: CompiledPlan = {
-      runId: mergeRunId,
+      runId: params.mergeRunId,
       level: "epic",
       planSha: PlanSha256.make("4".repeat(64)),
       baseSha,
@@ -833,8 +830,8 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
       units: [
         {
           _tag: "SliceUnit",
-          unitId: sliceUnit,
-          branch: sliceBranch,
+          unitId: params.sliceUnit,
+          branch: params.sliceBranch,
           waveIndex: WaveIndex.make(0),
           dependsOn: [],
           ownedRelPaths: [OwnedRelPath.make("libs/beta")],
@@ -844,7 +841,7 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
       sharedStepPaths: [],
     }
     const escPlan: CompiledPlan = {
-      runId: escFailRunId,
+      runId: params.escFailRunId,
       level: "slice",
       planSha: PlanSha256.make("5".repeat(64)),
       baseSha,
@@ -852,7 +849,7 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
       units: [
         {
           _tag: "PackageUnit",
-          unitId: escUnit,
+          unitId: params.escUnit,
           projectName: NxProjectName.make("@harness/esc"),
           waveIndex: WaveIndex.make(0),
           dependsOn: [],
@@ -864,152 +861,202 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
       ],
       sharedStepPaths: [],
     }
+    return { autoPlan, mergePlan, escPlan }
+  }
+
+  const seedAdvancedReadModelJournal = (
+    client: ReturnType<typeof createClient>,
+    params: {
+      readonly autoRunId: WorkflowRunId
+      readonly mergeRunId: WorkflowRunId
+      readonly escFailRunId: WorkflowRunId
+      readonly unit10: WorkUnitId
+      readonly sliceBranch: SliceBranchName
+      readonly escUnit: WorkUnitId
+      readonly autoPlan: CompiledPlan
+      readonly mergePlan: CompiledPlan
+      readonly escPlan: CompiledPlan
+    },
+  ) =>
+    Effect.gen(function* () {
+      const stampHash = PackageStampHash.make("a".repeat(64))
+      const autoRunMsg = yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.autoRunId,
+        tag: "run",
+        payload: JSON.stringify({ plan: params.autoPlan }),
+      })
+      yield* insertJournalReplyExit(client, autoRunMsg, {
+        _tag: "Success",
+        value: { _tag: "Suspended" },
+      })
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.autoRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: `DispatchUnitAgent/${params.unit10}/1` }),
+      })
+      const v1Msg = yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.autoRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: `VerifyUnit/${params.unit10}/1`, attempt: 1 }),
+      })
+      yield* insertJournalReplyExit(client, v1Msg, {
+        _tag: "Success",
+        value: {
+          _tag: "Complete",
+          exit: {
+            _tag: "Success",
+            value: UnitOutcome.cases.Rejected.make({
+              unitId: params.unit10,
+              attempt: AttemptNumber.make(1),
+              rejection: UnitRejection.cases.AgentFailed.make({
+                reason: AgentFailureReason.make("cycle 1 rejected"),
+              }),
+            }),
+          },
+        },
+      })
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.autoRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: `ProjectUnitEscalated/${params.unit10}/1` }),
+      })
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.autoRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: `ProjectUnitEscalationRetried/${params.unit10}/1` }),
+      })
+      const v2Msg = yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.autoRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: `VerifyUnit/${params.unit10}/1/r2`, attempt: 1 }),
+      })
+      yield* insertJournalReplyExit(client, v2Msg, {
+        _tag: "Success",
+        value: {
+          _tag: "Complete",
+          exit: {
+            _tag: "Success",
+            value: UnitOutcome.cases.Completed.make({
+              unitId: params.unit10,
+              attempt: AttemptNumber.make(1),
+              changedPaths: [OwnedRelPath.make("libs/u10/a.ts")],
+              packageStampHash: stampHash,
+            }),
+          },
+        },
+      })
+      const sharedMsg = yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.autoRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: "VerifySharedStep/1", attempt: 1 }),
+      })
+      yield* insertJournalReplyExit(client, sharedMsg, {
+        _tag: "Success",
+        value: {
+          _tag: "Complete",
+          exit: {
+            _tag: "Success",
+            value: UnitOutcome.cases.Completed.make({
+              unitId: SHARED_STEP_UNIT_ID,
+              attempt: AttemptNumber.make(1),
+              changedPaths: [OwnedRelPath.make("libs/shared/index.ts")],
+              packageStampHash: stampHash,
+            }),
+          },
+        },
+      })
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.autoRunId,
+        tag: "deferred",
+        payload: JSON.stringify({
+          name: "Workflow/InterruptSignal",
+          exit: { _tag: "Success", value: null },
+        }),
+      })
+
+      const mergeRunMsg = yield* insertJournalMessage(client, {
+        shardId: "default:1",
+        entityId: params.mergeRunId,
+        tag: "run",
+        payload: JSON.stringify({ plan: params.mergePlan }),
+      })
+      yield* insertJournalReplyExit(client, mergeRunMsg, {
+        _tag: "Success",
+        value: { _tag: "Suspended" },
+      })
+      const mergeWaveMsg = yield* insertJournalMessage(client, {
+        shardId: "default:1",
+        entityId: params.mergeRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: "MergeSliceWave/0" }),
+      })
+      yield* insertJournalReplyExit(client, mergeWaveMsg, {
+        _tag: "Success",
+        value: {
+          _tag: "Complete",
+          exit: {
+            _tag: "Success",
+            value: MergeSliceWaveOutcome.cases.Conflict.make({ branch: params.sliceBranch }),
+          },
+        },
+      })
+
+      const escRunMsg = yield* insertJournalMessage(client, {
+        shardId: "default:2",
+        entityId: params.escFailRunId,
+        tag: "run",
+        payload: JSON.stringify({ plan: params.escPlan }),
+      })
+      yield* insertJournalReplyExit(client, escRunMsg, { _tag: "Failure" })
+      yield* insertJournalMessage(client, {
+        shardId: "default:2",
+        entityId: params.escFailRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: `ProjectUnitEscalated/${params.escUnit}/1` }),
+      })
+    })
+
+  it("rebuildWorkflowReadModelViews reconstructs sharedStepPaths, /r2 cycles, MergeSliceWave conflicts, InterruptSignal, and Failure exits", async () => {
+    const client = createClient()
+    const layer = makeWorkflowReadModelQueryLayer({ repoRoot, client })
+    const autoRunId = WorkflowRunId.make("run-adv-auto-1")
+    const mergeRunId = WorkflowRunId.make("run-adv-merge-2")
+    const escFailRunId = WorkflowRunId.make("run-adv-esc-3")
+    const unit1 = WorkUnitId.make("u-1")
+    const unit10 = WorkUnitId.make("u-10")
+    const sliceUnit = WorkUnitId.make("u-slice-conflict")
+    const sliceBranch = SliceBranchName.make("slice/u-conflict")
+    const escUnit = WorkUnitId.make("u-esc")
+    const plans = makeAdvancedReadModelPlans({
+      autoRunId,
+      mergeRunId,
+      escFailRunId,
+      unit1,
+      unit10,
+      sliceUnit,
+      sliceBranch,
+      escUnit,
+    })
 
     await Effect.runPromise(
       Effect.gen(function* () {
         const query = yield* WorkflowReadModelQuery
-
-        const autoRunMsg = yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: autoRunId,
-          tag: "run",
-          payload: JSON.stringify({ plan: autoPlan }),
-        })
-        yield* insertJournalReplyExit(client, autoRunMsg, {
-          _tag: "Success",
-          value: { _tag: "Suspended" },
-        })
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: autoRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: `DispatchUnitAgent/${unit10}/1` }),
-        })
-        const v1Msg = yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: autoRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: `VerifyUnit/${unit10}/1`, attempt: 1 }),
-        })
-        yield* insertJournalReplyExit(client, v1Msg, {
-          _tag: "Success",
-          value: {
-            _tag: "Complete",
-            exit: {
-              _tag: "Success",
-              value: UnitOutcome.cases.Rejected.make({
-                unitId: unit10,
-                attempt: AttemptNumber.make(1),
-                rejection: UnitRejection.cases.AgentFailed.make({
-                  reason: AgentFailureReason.make("cycle 1 rejected"),
-                }),
-              }),
-            },
-          },
-        })
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: autoRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: `ProjectUnitEscalated/${unit10}/1` }),
-        })
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: autoRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: `ProjectUnitEscalationRetried/${unit10}/1` }),
-        })
-        const v2Msg = yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: autoRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: `VerifyUnit/${unit10}/1/r2`, attempt: 1 }),
-        })
-        yield* insertJournalReplyExit(client, v2Msg, {
-          _tag: "Success",
-          value: {
-            _tag: "Complete",
-            exit: {
-              _tag: "Success",
-              value: UnitOutcome.cases.Completed.make({
-                unitId: unit10,
-                attempt: AttemptNumber.make(1),
-                changedPaths: [OwnedRelPath.make("libs/u10/a.ts")],
-                packageStampHash: stampHash,
-              }),
-            },
-          },
-        })
-        const sharedMsg = yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: autoRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: "VerifySharedStep/1", attempt: 1 }),
-        })
-        yield* insertJournalReplyExit(client, sharedMsg, {
-          _tag: "Success",
-          value: {
-            _tag: "Complete",
-            exit: {
-              _tag: "Success",
-              value: UnitOutcome.cases.Completed.make({
-                unitId: SHARED_STEP_UNIT_ID,
-                attempt: AttemptNumber.make(1),
-                changedPaths: [OwnedRelPath.make("libs/shared/index.ts")],
-                packageStampHash: stampHash,
-              }),
-            },
-          },
-        })
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: autoRunId,
-          tag: "deferred",
-          payload: JSON.stringify({
-            name: "Workflow/InterruptSignal",
-            exit: { _tag: "Success", value: null },
-          }),
-        })
-
-        const mergeRunMsg = yield* insertJournalMessage(client, {
-          shardId: "default:1",
-          entityId: mergeRunId,
-          tag: "run",
-          payload: JSON.stringify({ plan: mergePlan }),
-        })
-        yield* insertJournalReplyExit(client, mergeRunMsg, {
-          _tag: "Success",
-          value: { _tag: "Suspended" },
-        })
-        const mergeWaveMsg = yield* insertJournalMessage(client, {
-          shardId: "default:1",
-          entityId: mergeRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: "MergeSliceWave/0" }),
-        })
-        yield* insertJournalReplyExit(client, mergeWaveMsg, {
-          _tag: "Success",
-          value: {
-            _tag: "Complete",
-            exit: {
-              _tag: "Success",
-              value: MergeSliceWaveOutcome.cases.Conflict.make({ branch: sliceBranch }),
-            },
-          },
-        })
-
-        const escRunMsg = yield* insertJournalMessage(client, {
-          shardId: "default:2",
-          entityId: escFailRunId,
-          tag: "run",
-          payload: JSON.stringify({ plan: escPlan }),
-        })
-        yield* insertJournalReplyExit(client, escRunMsg, { _tag: "Failure" })
-        yield* insertJournalMessage(client, {
-          shardId: "default:2",
-          entityId: escFailRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: `ProjectUnitEscalated/${escUnit}/1` }),
+        yield* seedAdvancedReadModelJournal(client, {
+          autoRunId,
+          mergeRunId,
+          escFailRunId,
+          unit10,
+          sliceBranch,
+          escUnit,
+          ...plans,
         })
 
         const rebuiltTotal = yield* rebuildWorkflowReadModelViews(repoRoot, {
@@ -1710,6 +1757,175 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
     }
   })
 
+  const seedEpicAndLlmRebuildJournal = (
+    client: ReturnType<typeof createClient>,
+    params: {
+      readonly epicRunId: WorkflowRunId
+      readonly llmRunId: WorkflowRunId
+      readonly sliceUnitId: WorkUnitId
+      readonly sliceBranch: SliceBranchName
+      readonly epicPlan: CompiledPlan
+      readonly llmPlan: CompiledPlan
+    },
+  ) =>
+    Effect.gen(function* () {
+      // 1. Epic run: MergeSliceWave Conflict -> Escalation(retry) -> MergeSliceWave Merged + ack_chunk (tag: null) + non-run interrupt (tag: null)
+      const epicRunMsg = yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.epicRunId,
+        tag: "run",
+        payload: JSON.stringify({ plan: params.epicPlan }),
+      })
+      const completedSliceOutcome = UnitOutcome.cases.Completed.make({
+        unitId: params.sliceUnitId,
+        attempt: AttemptNumber.make(1),
+        changedPaths: [OwnedRelPath.make("libs/alpha/src/index.ts")],
+        packageStampHash: PackageStampHash.make("e".repeat(64)),
+      })
+      const unitDoneMsg = yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.epicRunId,
+        tag: "deferred",
+        payload: JSON.stringify({
+          name: `unit/${params.sliceUnitId}/1`,
+          exit: {
+            _tag: "Success",
+            value: completedSliceOutcome,
+          },
+        }),
+      })
+      const ackKey = nextMsgKey()
+      yield* invokeWorkflowStoreQuery({
+        repoRoot,
+        client,
+        operation: WorkflowStoreOperation.make("Test.insertAck"),
+        queryName: "wf_insert_ack_chunk",
+        expectMutation: true,
+        params: {
+          messageKey: ackKey.key,
+          seqKey: ackKey.seqKey,
+          primaryKeyHash: null,
+          shardId: "default:0",
+          entityType: "Workflow/HarnessTaskWorkflow",
+          entityId: params.epicRunId,
+          requestId: unitDoneMsg,
+          replyId: ReplyKey.make("999001"),
+          deliverAtMs: null,
+        },
+      })
+      const conflictMergeMsg = yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.epicRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: "MergeSliceWave/0" }),
+      })
+      yield* insertJournalReplyExit(client, conflictMergeMsg, {
+        _tag: "Success",
+        value: {
+          _tag: "Complete",
+          exit: {
+            _tag: "Success",
+            value: MergeSliceWaveOutcome.cases.Conflict.make({
+              branch: params.sliceBranch,
+            }),
+          },
+        },
+      })
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.epicRunId,
+        tag: "deferred",
+        payload: JSON.stringify({
+          name: `escalation/${params.sliceUnitId}/1`,
+          exit: { _tag: "Success", value: { decision: "retry" } },
+        }),
+      })
+      const retriedMergeMsg = yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.epicRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: "MergeSliceWave/0/r2" }),
+      })
+      yield* insertJournalReplyExit(client, retriedMergeMsg, {
+        _tag: "Success",
+        value: {
+          _tag: "Complete",
+          exit: {
+            _tag: "Success",
+            value: MergeSliceWaveOutcome.cases.Merged.make({
+              mergedBranches: [params.sliceBranch],
+            }),
+          },
+        },
+      })
+      const waitLlmMsg = yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.epicRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: "ProjectRunWaitingLlmPhase" }),
+      })
+      const nonRunInterrupt = nextMsgKey()
+      yield* invokeWorkflowStoreQuery({
+        repoRoot,
+        client,
+        operation: WorkflowStoreOperation.make("Test.insertActivityInterrupt"),
+        queryName: "wf_insert_interrupt",
+        expectMutation: true,
+        params: {
+          messageKey: nonRunInterrupt.key,
+          seqKey: nonRunInterrupt.seqKey,
+          primaryKeyHash: null,
+          shardId: "default:0",
+          entityType: "Workflow/HarnessTaskWorkflow",
+          entityId: params.epicRunId,
+          requestId: waitLlmMsg,
+          deliverAtMs: null,
+        },
+      })
+      void epicRunMsg
+
+      // 2. Second run: WaitingLlmPhase -> llm-phase-done -> ProjectRunCompleted (without final run reply yet)
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.llmRunId,
+        tag: "run",
+        payload: JSON.stringify({ plan: params.llmPlan }),
+      })
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.llmRunId,
+        tag: "deferred",
+        payload: JSON.stringify({
+          name: `unit/${params.sliceUnitId}/1`,
+          exit: {
+            _tag: "Success",
+            value: completedSliceOutcome,
+          },
+        }),
+      })
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.llmRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: "ProjectRunWaitingLlmPhase" }),
+      })
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.llmRunId,
+        tag: "deferred",
+        payload: JSON.stringify({
+          name: "llm-phase-done",
+          exit: { _tag: "Success", value: { workspaceHash: "h", frictionLogCleared: "cleared" } },
+        }),
+      })
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.llmRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: "ProjectRunCompleted" }),
+      })
+    })
+
   it("rebuildWorkflowReadModelViews replays interrupt/ack_chunk rows, retried MergeSliceWave conflict units, and ProjectRunWaitingLlmPhase/ProjectRunCompleted", async () => {
     const client = createClient()
     const layer = Layer.merge(
@@ -1749,159 +1965,13 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
     await Effect.runPromise(
       Effect.gen(function* () {
         const query = yield* WorkflowReadModelQuery
-
-        // 1. Epic run: MergeSliceWave Conflict -> Escalation(retry) -> MergeSliceWave Merged + ack_chunk (tag: null) + non-run interrupt (tag: null)
-        const epicRunMsg = yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: epicRunId,
-          tag: "run",
-          payload: JSON.stringify({ plan: epicPlan }),
-        })
-        const completedSliceOutcome = UnitOutcome.cases.Completed.make({
-          unitId: sliceUnitId,
-          attempt: AttemptNumber.make(1),
-          changedPaths: [OwnedRelPath.make("libs/alpha/src/index.ts")],
-          packageStampHash: PackageStampHash.make("e".repeat(64)),
-        })
-        const unitDoneMsg = yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: epicRunId,
-          tag: "deferred",
-          payload: JSON.stringify({
-            name: `unit/${sliceUnitId}/1`,
-            exit: {
-              _tag: "Success",
-              value: completedSliceOutcome,
-            },
-          }),
-        })
-        const ackKey = nextMsgKey()
-        yield* invokeWorkflowStoreQuery({
-          repoRoot,
-          client,
-          operation: WorkflowStoreOperation.make("Test.insertAck"),
-          queryName: "wf_insert_ack_chunk",
-          expectMutation: true,
-          params: {
-            messageKey: ackKey.key,
-            seqKey: ackKey.seqKey,
-            primaryKeyHash: null,
-            shardId: "default:0",
-            entityType: "Workflow/HarnessTaskWorkflow",
-            entityId: epicRunId,
-            requestId: unitDoneMsg,
-            replyId: ReplyKey.make("999001"),
-            deliverAtMs: null,
-          },
-        })
-        const conflictMergeMsg = yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: epicRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: "MergeSliceWave/0" }),
-        })
-        yield* insertJournalReplyExit(client, conflictMergeMsg, {
-          _tag: "Success",
-          value: {
-            _tag: "Complete",
-            exit: {
-              _tag: "Success",
-              value: MergeSliceWaveOutcome.cases.Conflict.make({
-                branch: sliceBranch,
-              }),
-            },
-          },
-        })
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: epicRunId,
-          tag: "deferred",
-          payload: JSON.stringify({
-            name: `escalation/${sliceUnitId}/1`,
-            exit: { _tag: "Success", value: { decision: "retry" } },
-          }),
-        })
-        const retriedMergeMsg = yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: epicRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: "MergeSliceWave/0/r2" }),
-        })
-        yield* insertJournalReplyExit(client, retriedMergeMsg, {
-          _tag: "Success",
-          value: {
-            _tag: "Complete",
-            exit: {
-              _tag: "Success",
-              value: MergeSliceWaveOutcome.cases.Merged.make({ mergedBranches: [sliceBranch] }),
-            },
-          },
-        })
-        const waitLlmMsg = yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: epicRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: "ProjectRunWaitingLlmPhase" }),
-        })
-        const nonRunInterrupt = nextMsgKey()
-        yield* invokeWorkflowStoreQuery({
-          repoRoot,
-          client,
-          operation: WorkflowStoreOperation.make("Test.insertActivityInterrupt"),
-          queryName: "wf_insert_interrupt",
-          expectMutation: true,
-          params: {
-            messageKey: nonRunInterrupt.key,
-            seqKey: nonRunInterrupt.seqKey,
-            primaryKeyHash: null,
-            shardId: "default:0",
-            entityType: "Workflow/HarnessTaskWorkflow",
-            entityId: epicRunId,
-            requestId: waitLlmMsg,
-            deliverAtMs: null,
-          },
-        })
-        void epicRunMsg
-
-        // 2. Second run: WaitingLlmPhase -> llm-phase-done -> ProjectRunCompleted (without final run reply yet)
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: llmRunId,
-          tag: "run",
-          payload: JSON.stringify({ plan: llmPlan }),
-        })
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: llmRunId,
-          tag: "deferred",
-          payload: JSON.stringify({
-            name: `unit/${sliceUnitId}/1`,
-            exit: {
-              _tag: "Success",
-              value: completedSliceOutcome,
-            },
-          }),
-        })
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: llmRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: "ProjectRunWaitingLlmPhase" }),
-        })
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: llmRunId,
-          tag: "deferred",
-          payload: JSON.stringify({
-            name: "llm-phase-done",
-            exit: { _tag: "Success", value: { workspaceHash: "h", frictionLogCleared: "cleared" } },
-          }),
-        })
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: llmRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: "ProjectRunCompleted" }),
+        yield* seedEpicAndLlmRebuildJournal(client, {
+          epicRunId,
+          llmRunId,
+          sliceUnitId,
+          sliceBranch,
+          epicPlan,
+          llmPlan,
         })
 
         const rebuilt = yield* rebuildWorkflowReadModelViews(repoRoot, {

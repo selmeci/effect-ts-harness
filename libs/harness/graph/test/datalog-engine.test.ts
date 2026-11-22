@@ -105,156 +105,159 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
     ])
   })
 
+  const makeCyclicS1Graph = () =>
+    buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/domain/src/a.ts#fnA",
+          spanName: "Sample.fnA",
+          file: "libs/sample/domain/src/a.ts",
+          line: 1,
+          packageTag: "domain",
+          successType: "void",
+          isStub: false,
+        },
+        {
+          qualname: "libs/sample/domain/src/b.ts#fnB",
+          spanName: "Sample.fnB",
+          file: "libs/sample/domain/src/b.ts",
+          line: 1,
+          packageTag: "domain",
+          successType: "void",
+          isStub: false,
+        },
+        {
+          qualname: "libs/sample/domain/src/c.ts#fnC",
+          spanName: "Sample.fnC",
+          file: "libs/sample/domain/src/c.ts",
+          line: 1,
+          packageTag: "domain",
+          successType: "void",
+          isStub: false,
+        },
+      ],
+      services: [
+        {
+          tagId: "SampleRepo",
+          name: "SampleRepo",
+          packageTag: "service",
+          file: "libs/sample/service/src/repo.ts",
+        },
+        {
+          tagId: "ServiceB",
+          name: "ServiceB",
+          packageTag: "service",
+          file: "libs/sample/service/src/b.ts",
+        },
+        {
+          tagId: "ServiceC",
+          name: "ServiceC",
+          packageTag: "service",
+          file: "libs/sample/service/src/c.ts",
+        },
+      ],
+      layers: [
+        {
+          qualname: "libs/sample/infra/src/layerA.ts#LayerA",
+          layerKind: "live",
+          packageTag: "infra",
+          file: "libs/sample/infra/src/layerA.ts",
+        },
+        {
+          qualname: "libs/sample/infra/src/layerB.ts#LayerB",
+          layerKind: "live",
+          packageTag: "infra",
+          file: "libs/sample/infra/src/layerB.ts",
+        },
+        {
+          qualname: "libs/sample/infra/src/layerC.ts#LayerC",
+          layerKind: "live",
+          packageTag: "infra",
+          file: "libs/sample/infra/src/layerC.ts",
+        },
+      ],
+      errors: [
+        {
+          errorTag: "SampleNotFoundError",
+          file: "libs/sample/contract/src/errors.ts",
+        },
+      ],
+      tests: [
+        {
+          testId: "libs/sample/domain/test/a.test.ts#exercises fnA",
+          testFile: "libs/sample/domain/test/a.test.ts",
+          testName: "exercises fnA",
+          isPropertyTest: true,
+        },
+      ],
+      // Cyclic call graph: fnA -> fnB -> fnA, and fnB -> fnC
+      tracedCalls: [
+        {
+          callerQualname: "libs/sample/domain/src/a.ts#fnA",
+          calleeQualname: "libs/sample/domain/src/b.ts#fnB",
+          callCount: 1,
+          receiverLayer: null,
+        },
+        {
+          callerQualname: "libs/sample/domain/src/b.ts#fnB",
+          calleeQualname: "libs/sample/domain/src/a.ts#fnA",
+          callCount: 1,
+          receiverLayer: null,
+        },
+        {
+          callerQualname: "libs/sample/domain/src/b.ts#fnB",
+          calleeQualname: "libs/sample/domain/src/c.ts#fnC",
+          callCount: 1,
+          receiverLayer: null,
+        },
+      ],
+      requiresService: [
+        {
+          fnQualname: "libs/sample/domain/src/c.ts#fnC",
+          tagId: "SampleRepo",
+        },
+      ],
+      failsWith: [
+        {
+          callerQualname: "libs/sample/domain/src/c.ts#fnC",
+          errorTag: "SampleNotFoundError",
+        },
+      ],
+      providesService: [
+        {
+          layerQualname: "libs/sample/infra/src/layerB.ts#LayerB",
+          tagId: "ServiceB",
+        },
+        {
+          layerQualname: "libs/sample/infra/src/layerC.ts#LayerC",
+          tagId: "ServiceC",
+        },
+      ],
+      layerRequires: [
+        {
+          layerQualname: "libs/sample/infra/src/layerA.ts#LayerA",
+          tagId: "ServiceB",
+        },
+        {
+          layerQualname: "libs/sample/infra/src/layerB.ts#LayerB",
+          tagId: "ServiceC",
+        },
+      ],
+      exercisesSpans: [
+        {
+          testId: "libs/sample/domain/test/a.test.ts#exercises fnA",
+          calleeQualname: "libs/sample/domain/src/a.ts#fnA",
+          callCount: 1,
+          receiverLayer: null,
+        },
+      ],
+    })
+
   it.effect(
     "converges on cyclic call graphs in Stratum S_1 and derives transitive EffectiveRequires (INF-01), EffectiveFailsWith (INF-02), EffectiveLayerDeps, and EffectiveTestReach (INF-03)",
     () =>
       Effect.gen(function* () {
-        const graph = buildHarnessGraph({
-          fns: [
-            {
-              qualname: "libs/sample/domain/src/a.ts#fnA",
-              spanName: "Sample.fnA",
-              file: "libs/sample/domain/src/a.ts",
-              line: 1,
-              packageTag: "domain",
-              successType: "void",
-              isStub: false,
-            },
-            {
-              qualname: "libs/sample/domain/src/b.ts#fnB",
-              spanName: "Sample.fnB",
-              file: "libs/sample/domain/src/b.ts",
-              line: 1,
-              packageTag: "domain",
-              successType: "void",
-              isStub: false,
-            },
-            {
-              qualname: "libs/sample/domain/src/c.ts#fnC",
-              spanName: "Sample.fnC",
-              file: "libs/sample/domain/src/c.ts",
-              line: 1,
-              packageTag: "domain",
-              successType: "void",
-              isStub: false,
-            },
-          ],
-          services: [
-            {
-              tagId: "SampleRepo",
-              name: "SampleRepo",
-              packageTag: "service",
-              file: "libs/sample/service/src/repo.ts",
-            },
-            {
-              tagId: "ServiceB",
-              name: "ServiceB",
-              packageTag: "service",
-              file: "libs/sample/service/src/b.ts",
-            },
-            {
-              tagId: "ServiceC",
-              name: "ServiceC",
-              packageTag: "service",
-              file: "libs/sample/service/src/c.ts",
-            },
-          ],
-          layers: [
-            {
-              qualname: "libs/sample/infra/src/layerA.ts#LayerA",
-              layerKind: "live",
-              packageTag: "infra",
-              file: "libs/sample/infra/src/layerA.ts",
-            },
-            {
-              qualname: "libs/sample/infra/src/layerB.ts#LayerB",
-              layerKind: "live",
-              packageTag: "infra",
-              file: "libs/sample/infra/src/layerB.ts",
-            },
-            {
-              qualname: "libs/sample/infra/src/layerC.ts#LayerC",
-              layerKind: "live",
-              packageTag: "infra",
-              file: "libs/sample/infra/src/layerC.ts",
-            },
-          ],
-          errors: [
-            {
-              errorTag: "SampleNotFoundError",
-              file: "libs/sample/contract/src/errors.ts",
-            },
-          ],
-          tests: [
-            {
-              testId: "libs/sample/domain/test/a.test.ts#exercises fnA",
-              testFile: "libs/sample/domain/test/a.test.ts",
-              testName: "exercises fnA",
-              isPropertyTest: true,
-            },
-          ],
-          // Cyclic call graph: fnA -> fnB -> fnA, and fnB -> fnC
-          tracedCalls: [
-            {
-              callerQualname: "libs/sample/domain/src/a.ts#fnA",
-              calleeQualname: "libs/sample/domain/src/b.ts#fnB",
-              callCount: 1,
-              receiverLayer: null,
-            },
-            {
-              callerQualname: "libs/sample/domain/src/b.ts#fnB",
-              calleeQualname: "libs/sample/domain/src/a.ts#fnA",
-              callCount: 1,
-              receiverLayer: null,
-            },
-            {
-              callerQualname: "libs/sample/domain/src/b.ts#fnB",
-              calleeQualname: "libs/sample/domain/src/c.ts#fnC",
-              callCount: 1,
-              receiverLayer: null,
-            },
-          ],
-          requiresService: [
-            {
-              fnQualname: "libs/sample/domain/src/c.ts#fnC",
-              tagId: "SampleRepo",
-            },
-          ],
-          failsWith: [
-            {
-              callerQualname: "libs/sample/domain/src/c.ts#fnC",
-              errorTag: "SampleNotFoundError",
-            },
-          ],
-          providesService: [
-            {
-              layerQualname: "libs/sample/infra/src/layerB.ts#LayerB",
-              tagId: "ServiceB",
-            },
-            {
-              layerQualname: "libs/sample/infra/src/layerC.ts#LayerC",
-              tagId: "ServiceC",
-            },
-          ],
-          layerRequires: [
-            {
-              layerQualname: "libs/sample/infra/src/layerA.ts#LayerA",
-              tagId: "ServiceB",
-            },
-            {
-              layerQualname: "libs/sample/infra/src/layerB.ts#LayerB",
-              tagId: "ServiceC",
-            },
-          ],
-          exercisesSpans: [
-            {
-              testId: "libs/sample/domain/test/a.test.ts#exercises fnA",
-              calleeQualname: "libs/sample/domain/src/a.ts#fnA",
-              callCount: 1,
-              receiverLayer: null,
-            },
-          ],
-        })
+        const graph = makeCyclicS1Graph()
 
         expect(STANDARD_DATALOG_RULES.length).toBe(15)
 
@@ -310,189 +313,192 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
       }),
   )
 
+  const makeS2S3Graph = () =>
+    buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/domain/src/order.ts#checkout",
+          spanName: "Order.checkout",
+          file: "libs/sample/domain/src/order.ts",
+          line: 10,
+          packageTag: "domain",
+          successType: "void",
+          isStub: false,
+        },
+        {
+          qualname: "libs/sample/domain/src/order.ts#decide",
+          spanName: "Order.decide",
+          file: "libs/sample/domain/src/order.ts",
+          line: 25,
+          packageTag: "domain",
+          successType: "void",
+          isStub: false,
+        },
+        {
+          qualname: "libs/sample/domain/src/order.ts#aggregateHandle",
+          spanName: "Aggregate.handleCommand",
+          file: "libs/sample/domain/src/order.ts",
+          line: 40,
+          packageTag: "domain",
+          successType: "void",
+          isStub: false,
+        },
+      ],
+      services: [
+        {
+          tagId: "OrderRepository",
+          name: "OrderRepository",
+          packageTag: "service",
+          file: "libs/sample/service/src/order-repo.ts",
+        },
+        {
+          tagId: "AuditService",
+          name: "AuditService",
+          packageTag: "service",
+          file: "libs/sample/service/src/audit.ts",
+        },
+        {
+          tagId: "SqlClient",
+          name: "SqlClient",
+          packageTag: "infra",
+          file: "libs/sample/infra/src/sql.ts",
+        },
+        {
+          tagId: "EventBus",
+          name: "EventBus",
+          packageTag: "infra",
+          file: "libs/sample/infra/src/bus.ts",
+        },
+        {
+          tagId: "CycleSvcA",
+          name: "CycleSvcA",
+          packageTag: "service",
+          file: "libs/sample/service/src/cycle.ts",
+        },
+        {
+          tagId: "CycleSvcB",
+          name: "CycleSvcB",
+          packageTag: "service",
+          file: "libs/sample/service/src/cycle.ts",
+        },
+      ],
+      layers: [
+        {
+          qualname: "libs/sample/infra/src/layer.ts#OrderLive",
+          layerKind: "live",
+          packageTag: "infra",
+          file: "libs/sample/infra/src/layer.ts",
+        },
+        {
+          qualname: "libs/sample/infra/src/layer.ts#CycleLayerA",
+          layerKind: "live",
+          packageTag: "infra",
+          file: "libs/sample/infra/src/layer.ts",
+        },
+        {
+          qualname: "libs/sample/infra/src/layer.ts#CycleLayerB",
+          layerKind: "live",
+          packageTag: "infra",
+          file: "libs/sample/infra/src/layer.ts",
+        },
+      ],
+      errors: [
+        {
+          errorTag: "OrderDeclinedError",
+          file: "libs/sample/contract/src/errors.ts",
+        },
+      ],
+      adrDocs: [
+        {
+          id: "sample:ADR-0001",
+          title: "Order Governance",
+          status: "accepted",
+          path: "libs/sample/docs/adr/0001.md",
+          enforcedByFiles: ["libs/sample/domain/src/order.ts"],
+          referencedSpans: ["Order.checkout"],
+          referencedServices: ["OrderRepository"],
+          referencedErrors: ["OrderDeclinedError"],
+        },
+      ],
+      earsSpecs: [
+        {
+          id: "sample:SPEC-0001",
+          title: "Order Checkout Spec",
+          status: "accepted",
+          path: "libs/sample/docs/specs/0001.md",
+          enforcedByFiles: ["libs/sample/domain/src/order.ts"],
+          referencedSpans: ["Order.checkout", "Order.missingSpan"],
+          referencedServices: ["OrderRepository", "AuditService"],
+          referencedErrors: ["OrderDeclinedError"],
+        },
+      ],
+      requiresService: [
+        {
+          fnQualname: "libs/sample/domain/src/order.ts#checkout",
+          tagId: "OrderRepository",
+        },
+        {
+          fnQualname: "libs/sample/domain/src/order.ts#checkout",
+          tagId: "SqlClient",
+        },
+        {
+          fnQualname: "libs/sample/domain/src/order.ts#decide",
+          tagId: "OrderRepository",
+        },
+        {
+          fnQualname: "libs/sample/domain/src/order.ts#aggregateHandle",
+          tagId: "EventBus",
+        },
+      ],
+      providesService: [
+        {
+          layerQualname: "libs/sample/infra/src/layer.ts#CycleLayerA",
+          tagId: "CycleSvcA",
+        },
+        {
+          layerQualname: "libs/sample/infra/src/layer.ts#CycleLayerB",
+          tagId: "CycleSvcB",
+        },
+      ],
+      layerRequires: [
+        {
+          layerQualname: "libs/sample/infra/src/layer.ts#OrderLive",
+          tagId: "OrderRepository",
+        },
+        {
+          layerQualname: "libs/sample/infra/src/layer.ts#CycleLayerA",
+          tagId: "CycleSvcB",
+        },
+        {
+          layerQualname: "libs/sample/infra/src/layer.ts#CycleLayerB",
+          tagId: "CycleSvcA",
+        },
+      ],
+      specifiesSymbols: [
+        {
+          specId: "sample:SPEC-0001",
+          targetKey: "libs/sample/domain/src/order.ts#checkout",
+          targetKind: "span",
+        },
+      ],
+      migrationTuples: [
+        {
+          relationId: RelationId.make("MigrationTuple:1_drop_legacy"),
+          migrationId: "1_drop_legacy",
+          engine: "SqliteMigrator",
+          moduleFile: "libs/sample/infra/src/migrations.ts",
+          isDestructive: true,
+          verifyingTestQualnames: [],
+          line: 15,
+        },
+      ],
+    })
+
   it.effect(
     "derives Stratum S_2 antipatterns (INF-04..09) and Stratum S_3 normative missing-edge completions (COMP-01..05) with DerivationProof lineage",
     () =>
       Effect.gen(function* () {
-        const graph = buildHarnessGraph({
-          fns: [
-            {
-              qualname: "libs/sample/domain/src/order.ts#checkout",
-              spanName: "Order.checkout",
-              file: "libs/sample/domain/src/order.ts",
-              line: 10,
-              packageTag: "domain",
-              successType: "void",
-              isStub: false,
-            },
-            {
-              qualname: "libs/sample/domain/src/order.ts#decide",
-              spanName: "Order.decide",
-              file: "libs/sample/domain/src/order.ts",
-              line: 25,
-              packageTag: "domain",
-              successType: "void",
-              isStub: false,
-            },
-            {
-              qualname: "libs/sample/domain/src/order.ts#aggregateHandle",
-              spanName: "Aggregate.handleCommand",
-              file: "libs/sample/domain/src/order.ts",
-              line: 40,
-              packageTag: "domain",
-              successType: "void",
-              isStub: false,
-            },
-          ],
-          services: [
-            {
-              tagId: "OrderRepository",
-              name: "OrderRepository",
-              packageTag: "service",
-              file: "libs/sample/service/src/order-repo.ts",
-            },
-            {
-              tagId: "AuditService",
-              name: "AuditService",
-              packageTag: "service",
-              file: "libs/sample/service/src/audit.ts",
-            },
-            {
-              tagId: "SqlClient",
-              name: "SqlClient",
-              packageTag: "infra",
-              file: "libs/sample/infra/src/sql.ts",
-            },
-            {
-              tagId: "EventBus",
-              name: "EventBus",
-              packageTag: "infra",
-              file: "libs/sample/infra/src/bus.ts",
-            },
-            {
-              tagId: "CycleSvcA",
-              name: "CycleSvcA",
-              packageTag: "service",
-              file: "libs/sample/service/src/cycle.ts",
-            },
-            {
-              tagId: "CycleSvcB",
-              name: "CycleSvcB",
-              packageTag: "service",
-              file: "libs/sample/service/src/cycle.ts",
-            },
-          ],
-          layers: [
-            {
-              qualname: "libs/sample/infra/src/layer.ts#OrderLive",
-              layerKind: "live",
-              packageTag: "infra",
-              file: "libs/sample/infra/src/layer.ts",
-            },
-            {
-              qualname: "libs/sample/infra/src/layer.ts#CycleLayerA",
-              layerKind: "live",
-              packageTag: "infra",
-              file: "libs/sample/infra/src/layer.ts",
-            },
-            {
-              qualname: "libs/sample/infra/src/layer.ts#CycleLayerB",
-              layerKind: "live",
-              packageTag: "infra",
-              file: "libs/sample/infra/src/layer.ts",
-            },
-          ],
-          errors: [
-            {
-              errorTag: "OrderDeclinedError",
-              file: "libs/sample/contract/src/errors.ts",
-            },
-          ],
-          adrDocs: [
-            {
-              id: "sample:ADR-0001",
-              title: "Order Governance",
-              status: "accepted",
-              path: "libs/sample/docs/adr/0001.md",
-              enforcedByFiles: ["libs/sample/domain/src/order.ts"],
-              referencedSpans: ["Order.checkout"],
-              referencedServices: ["OrderRepository"],
-              referencedErrors: ["OrderDeclinedError"],
-            },
-          ],
-          earsSpecs: [
-            {
-              id: "sample:SPEC-0001",
-              title: "Order Checkout Spec",
-              status: "accepted",
-              path: "libs/sample/docs/specs/0001.md",
-              enforcedByFiles: ["libs/sample/domain/src/order.ts"],
-              referencedSpans: ["Order.checkout", "Order.missingSpan"],
-              referencedServices: ["OrderRepository", "AuditService"],
-              referencedErrors: ["OrderDeclinedError"],
-            },
-          ],
-          requiresService: [
-            {
-              fnQualname: "libs/sample/domain/src/order.ts#checkout",
-              tagId: "OrderRepository",
-            },
-            {
-              fnQualname: "libs/sample/domain/src/order.ts#checkout",
-              tagId: "SqlClient",
-            },
-            {
-              fnQualname: "libs/sample/domain/src/order.ts#decide",
-              tagId: "OrderRepository",
-            },
-            {
-              fnQualname: "libs/sample/domain/src/order.ts#aggregateHandle",
-              tagId: "EventBus",
-            },
-          ],
-          providesService: [
-            {
-              layerQualname: "libs/sample/infra/src/layer.ts#CycleLayerA",
-              tagId: "CycleSvcA",
-            },
-            {
-              layerQualname: "libs/sample/infra/src/layer.ts#CycleLayerB",
-              tagId: "CycleSvcB",
-            },
-          ],
-          layerRequires: [
-            {
-              layerQualname: "libs/sample/infra/src/layer.ts#OrderLive",
-              tagId: "OrderRepository",
-            },
-            {
-              layerQualname: "libs/sample/infra/src/layer.ts#CycleLayerA",
-              tagId: "CycleSvcB",
-            },
-            {
-              layerQualname: "libs/sample/infra/src/layer.ts#CycleLayerB",
-              tagId: "CycleSvcA",
-            },
-          ],
-          specifiesSymbols: [
-            {
-              specId: "sample:SPEC-0001",
-              targetKey: "libs/sample/domain/src/order.ts#checkout",
-              targetKind: "span",
-            },
-          ],
-          migrationTuples: [
-            {
-              relationId: RelationId.make("MigrationTuple:1_drop_legacy"),
-              migrationId: "1_drop_legacy",
-              engine: "SqliteMigrator",
-              moduleFile: "libs/sample/infra/src/migrations.ts",
-              isDestructive: true,
-              verifyingTestQualnames: [],
-              line: 15,
-            },
-          ],
-        })
+        const graph = makeS2S3Graph()
 
         const res = yield* decideGraphInference(graph)
 
@@ -1293,60 +1299,144 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
       }),
   )
 
+  const makeStepDeltaInitialGraph = () =>
+    buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/domain/src/a.ts#fnA",
+          spanName: "Sample.fnA",
+          file: "libs/sample/domain/src/a.ts",
+          line: 1,
+          packageTag: "domain",
+          successType: "void",
+          isStub: false,
+        },
+        {
+          qualname: "libs/sample/domain/src/b.ts#fnB",
+          spanName: "Sample.fnB",
+          file: "libs/sample/domain/src/b.ts",
+          line: 1,
+          packageTag: "domain",
+          successType: "void",
+          isStub: false,
+        },
+      ],
+      services: [
+        {
+          tagId: "RepoA",
+          name: "RepoA",
+          packageTag: "service",
+          file: "libs/sample/service/src/repo.ts",
+        },
+        {
+          tagId: "SqlClient",
+          name: "SqlClient",
+          packageTag: "infra",
+          file: "libs/sample/infra/src/sql.ts",
+        },
+      ],
+      tracedCalls: [
+        {
+          callerQualname: "libs/sample/domain/src/a.ts#fnA",
+          calleeQualname: "libs/sample/domain/src/b.ts#fnB",
+          callCount: 1,
+          receiverLayer: null,
+        },
+      ],
+      requiresService: [
+        {
+          fnQualname: "libs/sample/domain/src/b.ts#fnB",
+          tagId: "SqlClient",
+        },
+      ],
+    })
+
+  const makeStepDeltaEditedBSubgraph = () =>
+    buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/domain/src/b.ts#fnB",
+          spanName: "Sample.fnB",
+          file: "libs/sample/domain/src/b.ts",
+          line: 1,
+          packageTag: "domain",
+          successType: "void",
+          isStub: false,
+        },
+      ],
+      services: [
+        {
+          tagId: "RepoA",
+          name: "RepoA",
+          packageTag: "service",
+          file: "libs/sample/service/src/repo.ts",
+        },
+      ],
+      requiresService: [
+        {
+          fnQualname: "libs/sample/domain/src/b.ts#fnB",
+          tagId: "RepoA",
+        },
+      ],
+    })
+
+  const makeStepDeltaScratchGraph = () =>
+    buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/sample/domain/src/a.ts#fnA",
+          spanName: "Sample.fnA",
+          file: "libs/sample/domain/src/a.ts",
+          line: 1,
+          packageTag: "domain",
+          successType: "void",
+          isStub: false,
+        },
+        {
+          qualname: "libs/sample/domain/src/b.ts#fnB",
+          spanName: "Sample.fnB",
+          file: "libs/sample/domain/src/b.ts",
+          line: 1,
+          packageTag: "domain",
+          successType: "void",
+          isStub: false,
+        },
+      ],
+      services: [
+        {
+          tagId: "RepoA",
+          name: "RepoA",
+          packageTag: "service",
+          file: "libs/sample/service/src/repo.ts",
+        },
+        {
+          tagId: "SqlClient",
+          name: "SqlClient",
+          packageTag: "infra",
+          file: "libs/sample/infra/src/sql.ts",
+        },
+      ],
+      tracedCalls: [
+        {
+          callerQualname: "libs/sample/domain/src/a.ts#fnA",
+          calleeQualname: "libs/sample/domain/src/b.ts#fnB",
+          callCount: 1,
+          receiverLayer: null,
+        },
+      ],
+      requiresService: [
+        {
+          fnQualname: "libs/sample/domain/src/b.ts#fnB",
+          tagId: "RepoA",
+        },
+      ],
+    })
+
   it.effect(
     "REQ-1.3: DatalogSession.stepFileDelta steps incremental DBSP Z-set deltas (+1 insertions and -1 retractions) on single-file edits with 100% parity with GraphInfer.decide",
     () =>
       Effect.gen(function* () {
-        const initialGraph = buildHarnessGraph({
-          fns: [
-            {
-              qualname: "libs/sample/domain/src/a.ts#fnA",
-              spanName: "Sample.fnA",
-              file: "libs/sample/domain/src/a.ts",
-              line: 1,
-              packageTag: "domain",
-              successType: "void",
-              isStub: false,
-            },
-            {
-              qualname: "libs/sample/domain/src/b.ts#fnB",
-              spanName: "Sample.fnB",
-              file: "libs/sample/domain/src/b.ts",
-              line: 1,
-              packageTag: "domain",
-              successType: "void",
-              isStub: false,
-            },
-          ],
-          services: [
-            {
-              tagId: "RepoA",
-              name: "RepoA",
-              packageTag: "service",
-              file: "libs/sample/service/src/repo.ts",
-            },
-            {
-              tagId: "SqlClient",
-              name: "SqlClient",
-              packageTag: "infra",
-              file: "libs/sample/infra/src/sql.ts",
-            },
-          ],
-          tracedCalls: [
-            {
-              callerQualname: "libs/sample/domain/src/a.ts#fnA",
-              calleeQualname: "libs/sample/domain/src/b.ts#fnB",
-              callCount: 1,
-              receiverLayer: null,
-            },
-          ],
-          requiresService: [
-            {
-              fnQualname: "libs/sample/domain/src/b.ts#fnB",
-              tagId: "SqlClient",
-            },
-          ],
-        })
+        const initialGraph = makeStepDeltaInitialGraph()
 
         const program = Effect.gen(function* () {
           const session = yield* DatalogSession
@@ -1356,33 +1446,7 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
           )
 
           // Edit b.ts so fnB requires RepoA (type:service) instead of SqlClient (type:infra)
-          const editedBSubgraph = buildHarnessGraph({
-            fns: [
-              {
-                qualname: "libs/sample/domain/src/b.ts#fnB",
-                spanName: "Sample.fnB",
-                file: "libs/sample/domain/src/b.ts",
-                line: 1,
-                packageTag: "domain",
-                successType: "void",
-                isStub: false,
-              },
-            ],
-            services: [
-              {
-                tagId: "RepoA",
-                name: "RepoA",
-                packageTag: "service",
-                file: "libs/sample/service/src/repo.ts",
-              },
-            ],
-            requiresService: [
-              {
-                fnQualname: "libs/sample/domain/src/b.ts#fnB",
-                tagId: "RepoA",
-              },
-            ],
-          })
+          const editedBSubgraph = makeStepDeltaEditedBSubgraph()
 
           const step1 = yield* stepDatalogFileDelta({
             filePath: DatalogFilePath.make("libs/sample/domain/src/b.ts"),
@@ -1403,56 +1467,7 @@ describe("GraphInfer.decide (4-Stratum @electric-sql/d2ts Stratified Datalog Eng
             ),
           ).toBe(true)
 
-          const expectedScratchGraph = buildHarnessGraph({
-            fns: [
-              {
-                qualname: "libs/sample/domain/src/a.ts#fnA",
-                spanName: "Sample.fnA",
-                file: "libs/sample/domain/src/a.ts",
-                line: 1,
-                packageTag: "domain",
-                successType: "void",
-                isStub: false,
-              },
-              {
-                qualname: "libs/sample/domain/src/b.ts#fnB",
-                spanName: "Sample.fnB",
-                file: "libs/sample/domain/src/b.ts",
-                line: 1,
-                packageTag: "domain",
-                successType: "void",
-                isStub: false,
-              },
-            ],
-            services: [
-              {
-                tagId: "RepoA",
-                name: "RepoA",
-                packageTag: "service",
-                file: "libs/sample/service/src/repo.ts",
-              },
-              {
-                tagId: "SqlClient",
-                name: "SqlClient",
-                packageTag: "infra",
-                file: "libs/sample/infra/src/sql.ts",
-              },
-            ],
-            tracedCalls: [
-              {
-                callerQualname: "libs/sample/domain/src/a.ts#fnA",
-                calleeQualname: "libs/sample/domain/src/b.ts#fnB",
-                callCount: 1,
-                receiverLayer: null,
-              },
-            ],
-            requiresService: [
-              {
-                fnQualname: "libs/sample/domain/src/b.ts#fnB",
-                tagId: "RepoA",
-              },
-            ],
-          })
+          const expectedScratchGraph = makeStepDeltaScratchGraph()
           const batchParity = yield* decideGraphInference(expectedScratchGraph)
           expect(step1.inference).toEqual(batchParity)
 

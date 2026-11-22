@@ -26,10 +26,12 @@
                         "exclusiveMinimum": 0
                       },
                       "name": {
-                        "type": "string"
+                        "type": "string",
+                        "maxLength": 512
                       },
                       "albumId": {
-                        "type": "string"
+                        "type": "string",
+                        "maxLength": 256
                       },
                       "createdAt": {
                         "type": "integer"
@@ -62,10 +64,12 @@
                       "exclusiveMinimum": 0
                     },
                     "name": {
-                      "type": "string"
+                      "type": "string",
+                      "maxLength": 512
                     },
                     "albumId": {
-                      "type": "string"
+                      "type": "string",
+                      "maxLength": 256
                     },
                     "createdAt": {
                       "type": "integer"
@@ -95,10 +99,12 @@
                 "type": "object",
                 "properties": {
                   "name": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 512
                   },
                   "albumId": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 256
                   }
                 },
                 "required": ["name", "albumId"],
@@ -138,10 +144,12 @@
                       "exclusiveMinimum": 0
                     },
                     "name": {
-                      "type": "string"
+                      "type": "string",
+                      "maxLength": 512
                     },
                     "albumId": {
-                      "type": "string"
+                      "type": "string",
+                      "maxLength": 256
                     },
                     "createdAt": {
                       "type": "integer"
@@ -192,7 +200,8 @@
             "enum": ["AlbumQuotaExceededError"]
           },
           "albumId": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 256
           },
           "count": {
             "type": "integer",

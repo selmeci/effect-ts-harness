@@ -111,7 +111,7 @@ export const SHELL_OPERATORS: ReadonlyArray<string> = ["&&", "||", ";", "|", "\n
  * or templates (`.env.example`, `.env.template`, `.env.sample`) — REQ-3.2.
  * Evaluated on `CommandView.argv`. */
 export const SECRET_FILE_PATTERN: RegExp =
-  /(?:^|[\s=:/<>(])(?:\.env(?:\.(?!(?:example|template|sample)(?:$|[\s/]))[\w*?-]+)*\*?|mutation-hmac[^\s;|&)<>]*(?:\.key|\*|\?|\]|\})|[^\s;|&)<>]*\.cache\/effect-harness(?:\/[^\s;|&)<>]*)?|[^\s=:/<>()]*(?:\*|\?|\[[^\]\s]+\]|\{[^}\s]+\})[^\s;|&)<>]*\.key|(?:[^\s;|&)<>]*\/)?auth-tokens\.json)(?=$|[\s/;|&)<>])/
+  /(?:^|[\s=:/<>('"`,])(?:\.(?:env|dev\.vars)(?:\.(?!(?:example|template|sample)(?:$|[\s/'"`,]))[\w*?-]+)*\*?|mutation-hmac[^\s;|&)<>'"`,]*(?:\.key|\*|\?|\]|\})|[^\s;|&)<>'"`,]*\.cache\/effect-harness(?:\/[^\s;|&)<>'"`,]*)?|[^\s=:/<>()'"`,]*(?:\*|\?|\[[^\]\s]+\]|\{[^}\s]+\})[^\s;|&)<>'"`,]*\.key|(?:[^\s;|&)<>'"`,]*\/)?auth-tokens\.json)(?=$|[\s/;|&)<>'"`,])/
 
 /** REQ-2.1: the agent must not use the guard as an oracle to test candidate commands.
  * Hooks invoke the guard directly from the IDE, never through an agent shell command.

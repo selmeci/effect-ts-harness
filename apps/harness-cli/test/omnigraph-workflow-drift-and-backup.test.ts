@@ -598,25 +598,8 @@ EOF
     }
   })
 
-  it("runWithTestTracer records all SPEC-0021 WF-2 spans with Effect.scoped acquireWriterLease", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "harness-wf2-tracer-"))
-    tempDirs.push(dir)
-    const gitRepo = join(dir, "repo")
-    mkdirSync(gitRepo, { recursive: true })
-    execFileSync("git", ["init", "-q"], { cwd: gitRepo })
-    const commonGitDir = GitCommonDirPath.make(join(gitRepo, ".git"))
-    const backupDir = BackupDirPath.make(join(dir, "backups"))
-    const lockFilePath = LeaseFilePath.make(join(commonGitDir, "harness", "daemon.lock"))
-    const clusterDir = join(dir, "cluster")
-    mkdirSync(join(clusterDir, "graphs", "harness-workflows.omni"), { recursive: true })
-    const emptyFnIndex = new Map<string, IndexedEffectFn>()
-
-    const rowJson = JSON.stringify({
-      type: "WfMessage",
-      id: "m-tr-1",
-      data: { messageKey: "m-tr-1", seqKey: "00000000000000000001" },
-    })
-    const httpServer = createServer((req, res) => {
+  const createMockWorkflowTracerHttpServer = (rowJson: string) =>
+    createServer((req, res) => {
       const url = req.url ?? ""
       const headers = { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" } as const
       if (url === "/healthz") {
@@ -672,21 +655,12 @@ EOF
       res.writeHead(404, headers)
       res.end()
     })
-    await new Promise<void>((resPromise) => httpServer.listen(0, "127.0.0.1", () => resPromise()))
-    const httpPort = (httpServer.address() as AddressInfo).port
-    const client = new OmnigraphClient({
-      baseUrl: `http://127.0.0.1:${httpPort}`,
-      graphId: "harness-workflows",
-    })
-    const absRepoRoot = AbsoluteRepoRoot.make(gitRepo)
-    const backupLayer = makeWorkflowGraphBackupLayer({
-      repoRoot: absRepoRoot,
-      client,
-      nowMs: () => 9000,
-    })
 
-    const sockPath = DaemonSocketPath.make(join(dir, "daemon.sock"))
-    const ipcServer = net.createServer((socket) => {
+  const createMockWorkflowTracerIpcServer = (
+    absRepoRoot: AbsoluteRepoRoot,
+    commonGitDir: GitCommonDirPath,
+  ) =>
+    net.createServer((socket) => {
       let buf = ""
       socket.on("data", (chunk) => {
         buf += String(chunk)
@@ -719,6 +693,41 @@ EOF
         socket.end()
       })
     })
+
+  it("runWithTestTracer records all SPEC-0021 WF-2 spans with Effect.scoped acquireWriterLease", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-wf2-tracer-"))
+    tempDirs.push(dir)
+    const gitRepo = join(dir, "repo")
+    mkdirSync(gitRepo, { recursive: true })
+    execFileSync("git", ["init", "-q"], { cwd: gitRepo })
+    const commonGitDir = GitCommonDirPath.make(join(gitRepo, ".git"))
+    const backupDir = BackupDirPath.make(join(dir, "backups"))
+    const lockFilePath = LeaseFilePath.make(join(commonGitDir, "harness", "daemon.lock"))
+    const clusterDir = join(dir, "cluster")
+    mkdirSync(join(clusterDir, "graphs", "harness-workflows.omni"), { recursive: true })
+    const emptyFnIndex = new Map<string, IndexedEffectFn>()
+
+    const rowJson = JSON.stringify({
+      type: "WfMessage",
+      id: "m-tr-1",
+      data: { messageKey: "m-tr-1", seqKey: "00000000000000000001" },
+    })
+    const httpServer = createMockWorkflowTracerHttpServer(rowJson)
+    await new Promise<void>((resPromise) => httpServer.listen(0, "127.0.0.1", () => resPromise()))
+    const httpPort = (httpServer.address() as AddressInfo).port
+    const client = new OmnigraphClient({
+      baseUrl: `http://127.0.0.1:${httpPort}`,
+      graphId: "harness-workflows",
+    })
+    const absRepoRoot = AbsoluteRepoRoot.make(gitRepo)
+    const backupLayer = makeWorkflowGraphBackupLayer({
+      repoRoot: absRepoRoot,
+      client,
+      nowMs: () => 9000,
+    })
+
+    const sockPath = DaemonSocketPath.make(join(dir, "daemon.sock"))
+    const ipcServer = createMockWorkflowTracerIpcServer(absRepoRoot, commonGitDir)
     await new Promise<void>((resPromise) => ipcServer.listen(sockPath, () => resPromise()))
 
     const fakeOmnigraph = join(dir, "omnigraph-maint.sh")

@@ -1,12 +1,14 @@
 ---
 id: harness:SPEC-0028
 title: Contract Shape Hardening, Adversarial Policy Property Matrix, and Test Hygiene Gates
-status: proposed
+status: accepted
 archetype: framework
 date: 2026-11-22
 owners:
   - "@harness/architecture"
 scope: harness
+informed_by:
+  - harness:ADR-0022
 enforced_by:
   - tools/oxlint/syntax-bans.js
   - libs/harness/gates/src/plugins/ast-contract-and-test-hygiene.ts
@@ -14,8 +16,14 @@ enforced_by:
   - libs/harness/gates/src/plugins/gc/gc-test-and-decider.plugin.ts
   - libs/harness/gates/src/plugins/gc/gc-workspace-io.ts
   - libs/harness/gates/src/ast-cache.ts
+  - libs/harness/gates/src/index.ts
+  - libs/harness/gates/src/policy.ts
+  - libs/harness/gates/src/policy-command-rules.ts
+  - libs/harness/gates/src/policy-harness-state.ts
   - libs/harness/gates/test/ast-contract-and-test-hygiene.test.ts
+  - libs/harness/gates/test/gc-test-and-decider.test.ts
   - libs/harness/gates/test/policy-adversarial-property.test.ts
+  - libs/harness/decision/test/guard-decision-property.test.ts
 spans:
   - AstGateCache.decide
   - SyntaxBans.decide

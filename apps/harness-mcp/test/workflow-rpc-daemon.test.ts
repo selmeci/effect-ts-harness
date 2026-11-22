@@ -640,14 +640,11 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
     }
   }, 45_000)
 
-  it("handles 3x PackageVerifyFailed -> Escalation -> resume retry -> shared-step -> friction gate -> CompleteLlmPhase -> doctor rebuild", async () => {
-    const { canonicalDir, baseSha } = createWorkRepo("esc-flow")
-    const validatedCanonical = await Effect.runPromise(
-      validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
-    )
+  const makeRetryAfterEscalationVerifierLayer = (
+    recordedSharedInputs: Array<CompleteSharedStepInput>,
+  ) => {
     let completeCalls = 0
-    const recordedSharedInputs: Array<CompleteSharedStepInput> = []
-    const verifierLayer = Layer.succeed(UnitVerifier, {
+    return Layer.succeed(UnitVerifier, {
       completeUnit: (input) =>
         Effect.sync(() => {
           completeCalls += 1
@@ -680,6 +677,58 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
           })
         }),
     })
+  }
+
+  const assertEscalatedRetryBudgetStatus = (
+    escalatedStatus: Effect.Success<ReturnType<typeof getWorkflowStatusViaDaemon>>,
+    unitId: WorkUnitId,
+  ) => {
+    expect(escalatedStatus).toMatchObject({
+      _tag: "Ready",
+      outcome: {
+        _tag: "Active",
+        pendingDeferreds: [
+          {
+            _tag: "Escalation",
+            unitId,
+            deferredName: `escalation/${unitId}/1`,
+            escalation: {
+              _tag: "RetryBudgetExhausted",
+              lastRejection: {
+                _tag: "PackageVerifyFailed",
+                exitCode: 1,
+                failureKind: "non-zero-exit",
+                detail: "attempt 3 failed",
+              },
+            },
+          },
+        ],
+      },
+    })
+    match(escalatedStatus)
+      .with({ _tag: "Ready" }, ({ outcome }) => {
+        match(outcome)
+          .with({ _tag: "Active" }, ({ units }) => {
+            expect(units.find((u) => u.unitId === unitId)?.status).toBe("escalated")
+          })
+          .with({ _tag: "NotFound" }, { _tag: "Completed" }, { _tag: "Failed" }, () => {
+            expect.unreachable("Expected Active outcome")
+          })
+          .exhaustive()
+      })
+      .with({ _tag: "DaemonOffline" }, { _tag: "StorePaused" }, () => {
+        expect.unreachable("Expected Ready status")
+      })
+      .exhaustive()
+  }
+
+  it("handles 3x PackageVerifyFailed -> Escalation -> resume retry -> shared-step -> friction gate -> CompleteLlmPhase -> doctor rebuild", async () => {
+    const { canonicalDir, baseSha } = createWorkRepo("esc-flow")
+    const validatedCanonical = await Effect.runPromise(
+      validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
+    )
+    const recordedSharedInputs: Array<CompleteSharedStepInput> = []
+    const verifierLayer = makeRetryAfterEscalationVerifierLayer(recordedSharedInputs)
 
     const plan = makeSingleUnitManualPlan("run-rpc-esc-02", baseSha, {
       sharedStepPaths: ["README.md"],
@@ -726,43 +775,7 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
           runId: plan.runId,
         }),
       )
-      expect(escalatedStatus).toMatchObject({
-        _tag: "Ready",
-        outcome: {
-          _tag: "Active",
-          pendingDeferreds: [
-            {
-              _tag: "Escalation",
-              unitId,
-              deferredName: `escalation/${unitId}/1`,
-              escalation: {
-                _tag: "RetryBudgetExhausted",
-                lastRejection: {
-                  _tag: "PackageVerifyFailed",
-                  exitCode: 1,
-                  failureKind: "non-zero-exit",
-                  detail: "attempt 3 failed",
-                },
-              },
-            },
-          ],
-        },
-      })
-      match(escalatedStatus)
-        .with({ _tag: "Ready" }, ({ outcome }) => {
-          match(outcome)
-            .with({ _tag: "Active" }, ({ units }) => {
-              expect(units.find((u) => u.unitId === unitId)?.status).toBe("escalated")
-            })
-            .with({ _tag: "NotFound" }, { _tag: "Completed" }, { _tag: "Failed" }, () => {
-              expect.unreachable("Expected Active outcome")
-            })
-            .exhaustive()
-        })
-        .with({ _tag: "DaemonOffline" }, { _tag: "StorePaused" }, () => {
-          expect.unreachable("Expected Ready status")
-        })
-        .exhaustive()
+      assertEscalatedRetryBudgetStatus(escalatedStatus, unitId)
 
       const resumed = await Effect.runPromise(
         resumeWorkflowViaDaemon({
@@ -1622,7 +1635,9 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
     } finally {
       await daemon.close()
     }
+  }, 45_000)
 
+  it("F-12.1: workflow.complete polling fails immediately on WorkflowStoreUnavailableError", async () => {
     // 6. F-12.1: polling loop in workflow.complete fails immediately on WorkflowStoreUnavailableError
     const { canonicalDir: pollDir, baseSha: pollSha } = createWorkRepo("f12-poll")
     const valPoll = await Effect.runPromise(

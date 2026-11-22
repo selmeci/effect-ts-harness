@@ -11,7 +11,10 @@ export { WorkspaceFilePath }
 export const isPureInterruptCause = <E>(cause: Cause.Cause<E>): boolean =>
   Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)
 
-export const WorkspaceFileContent = Schema.String.pipe(Schema.brand("WorkspaceFileContent"))
+export const WorkspaceFileContent = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(16_777_216)),
+  Schema.brand("WorkspaceFileContent"),
+)
 export type WorkspaceFileContent = typeof WorkspaceFileContent.Type
 
 export const WorkspaceFsOperation = Schema.Literals(["read", "write", "stat", "readdir"])
@@ -119,7 +122,10 @@ export const SubprocessSignalName = Schema.NonEmptyString.pipe(
 )
 export type SubprocessSignalName = typeof SubprocessSignalName.Type
 
-export const SubprocessOutput = Schema.String.pipe(Schema.brand("SubprocessOutput"))
+export const SubprocessOutput = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(16_777_216)),
+  Schema.brand("SubprocessOutput"),
+)
 export type SubprocessOutput = typeof SubprocessOutput.Type
 
 export const SubprocessFailureKind = Schema.Literals([
@@ -205,10 +211,14 @@ export type ActiveMutantId = typeof ActiveMutantId.Type
 export const CompilerRepoRootPath = WorkspaceFilePath.pipe(Schema.brand("CompilerRepoRootPath"))
 export type CompilerRepoRootPath = typeof CompilerRepoRootPath.Type
 
-export const CompilerRepoRootInput = Schema.String.pipe(Schema.brand("CompilerRepoRootInput"))
+export const CompilerRepoRootInput = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(4096)),
+  Schema.brand("CompilerRepoRootInput"),
+)
 export type CompilerRepoRootInput = typeof CompilerRepoRootInput.Type
 
 export const CompilerOverlayErrorReason = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isMaxLength(8192)),
   Schema.brand("CompilerOverlayErrorReason"),
 )
 export type CompilerOverlayErrorReason = typeof CompilerOverlayErrorReason.Type
@@ -221,10 +231,17 @@ export class TsCompilerOverlayError extends Schema.TaggedError<TsCompilerOverlay
   },
 ) {}
 
-export const CliCommandName = Schema.NonEmptyString.pipe(Schema.brand("CliCommandName"))
+export const CliCommandName = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(256)),
+  Schema.brand("CliCommandName"),
+)
 export type CliCommandName = typeof CliCommandName.Type
 
-export const CliCommandInput = Schema.String.pipe(Schema.brand("CliCommandInput"))
+export const CliCommandInput = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(65_536)),
+  Schema.brand("CliCommandInput"),
+)
 export type CliCommandInput = typeof CliCommandInput.Type
 
 export class CliCommandNotFoundError extends Schema.TaggedError<CliCommandNotFoundError>()(
@@ -235,7 +252,11 @@ export class CliCommandNotFoundError extends Schema.TaggedError<CliCommandNotFou
   },
 ) {}
 
-export const McpToolName = Schema.NonEmptyString.pipe(Schema.brand("McpToolName"))
+export const McpToolName = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(256)),
+  Schema.brand("McpToolName"),
+)
 export type McpToolName = typeof McpToolName.Type
 
 export const CANONICAL_MCP_TOOL_NAMES: ReadonlyArray<McpToolName> = [
@@ -259,7 +280,10 @@ export const CANONICAL_MCP_TOOL_NAMES: ReadonlyArray<McpToolName> = [
   McpToolName.make("harness_workflow_plan"),
 ]
 
-export const McpToolInputName = Schema.String.pipe(Schema.brand("McpToolInputName"))
+export const McpToolInputName = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(256)),
+  Schema.brand("McpToolInputName"),
+)
 export type McpToolInputName = typeof McpToolInputName.Type
 
 export class UnknownToolError extends Schema.TaggedError<UnknownToolError>()("UnknownToolError", {

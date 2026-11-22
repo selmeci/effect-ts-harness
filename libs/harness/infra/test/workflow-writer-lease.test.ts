@@ -268,74 +268,112 @@ describe("WfWriterLease (scoped acquireRelease, split-brain fencing, CAS conflic
     }
   })
 
-  it("enforces scoped acquireRelease, flock contention, split-brain refreshWriterLease, and <1s SIGKILL crash takeover", async () => {
+  const seedMockLeaseForTest = async (params: {
+    readonly repoRoot: AbsoluteRepoRoot
+    readonly lockFilePath: LeaseFilePath
+    readonly client: ReturnType<typeof makeWorkflowOmnigraphClient>
+    readonly operation: string
+    readonly holderId: string
+    readonly holderPid: number
+    readonly leaseEpoch: number
+    readonly acquiredAtMs: number
+    readonly holderStartTime?: string
+    readonly owner: string
+    readonly nextEpoch: number
+  }) => {
+    writeFileSync(
+      `${params.lockFilePath}.meta.json`,
+      JSON.stringify({
+        holderId: params.holderId,
+        holderPid: params.holderPid,
+        leaseEpoch: params.leaseEpoch,
+        acquiredAtMs: params.acquiredAtMs,
+        ...(params.holderStartTime !== undefined
+          ? { holderStartTime: params.holderStartTime }
+          : {}),
+      }),
+      "utf8",
+    )
+    await Effect.runPromise(
+      invokeWorkflowStoreQuery({
+        repoRoot: params.repoRoot,
+        operation: WorkflowStoreOperation.make(params.operation),
+        queryName: "wf_cas_writer_lease",
+        params: {
+          name: "engine",
+          expectedEpoch: LeaseEpoch.make(params.leaseEpoch),
+          owner: params.owner,
+          nextEpoch: LeaseEpoch.make(params.nextEpoch),
+          heartbeatMs: params.acquiredAtMs,
+        },
+        expectMutation: true,
+        client: params.client,
+      }),
+    )
+  }
+
+  const setupWriterLeaseWs = (client: ReturnType<typeof makeWorkflowOmnigraphClient>) => {
     const wsRoot = mkdtempSync(join(tmpdir(), "wf2-lease-ws-"))
     tempDirs.push(wsRoot)
     const commonGitDir = GitCommonDirPath.make(join(wsRoot, ".git"))
-    mkdirSync(commonGitDir, { recursive: true })
-    const repoRoot = AbsoluteRepoRoot.make(wsRoot)
-    const lockFilePath = LeaseFilePath.make(join(commonGitDir, "harness", "daemon.lock"))
-    const client = makeWorkflowOmnigraphClient({ baseUrl, token: cliToken })
+    mkdirSync(join(commonGitDir, "harness"), { recursive: true })
+    return {
+      commonGitDir,
+      repoRoot: AbsoluteRepoRoot.make(wsRoot),
+      lockFilePath: LeaseFilePath.make(join(commonGitDir, "harness", "daemon.lock")),
+      client,
+      pid: LeaseHolderPid.make(process.pid),
+    }
+  }
 
+  it("enforces scoped acquireRelease, flock contention, and split-brain refreshWriterLease across epochs 1..2", async () => {
+    const ctx = setupWriterLeaseWs(makeWorkflowOmnigraphClient({ baseUrl, token: cliToken }))
     const holder1 = LeaseHolderId.make("daemon-1")
     const holder2 = LeaseHolderId.make("daemon-2")
-    const pid = LeaseHolderPid.make(process.pid)
 
     // 1. Scoped initial acquisition -> epoch 1, released automatically when scope closes
     const acquiredEpoch1 = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
           const lease = yield* acquireWriterLease({
-            commonGitDir,
-            lockFilePath,
+            ...ctx,
             holderId: holder1,
-            holderPid: pid,
-            repoRoot,
-            client,
+            holderPid: ctx.pid,
           })
           expect(lease.leaseEpoch).toBe(1)
-          expect(existsSync(`${lockFilePath}.meta.json`)).toBe(true)
+          expect(existsSync(`${ctx.lockFilePath}.meta.json`)).toBe(true)
 
           // 2. Concurrent acquisition while held -> WriterLeaseHeldError
           const heldErr = yield* acquireWriterLease({
-            commonGitDir,
-            lockFilePath,
+            ...ctx,
             holderId: holder2,
-            holderPid: pid,
-            repoRoot,
-            client,
+            holderPid: ctx.pid,
           }).pipe(Effect.flip)
           match(heldErr)
             .with({ _tag: "WriterLeaseHeldError" }, (err) => {
               expect(err.holderId).toBe(holder1)
               expect(err.leaseEpoch).toBe(1)
-              expect(err.holderPid).toBe(pid)
+              expect(err.holderPid).toBe(ctx.pid)
             })
             .with({ _tag: "WorkflowStoreUnavailableError" }, (err) => {
               throw new Error(`Unexpected WorkflowStoreUnavailableError: ${err.message}`)
             })
             .exhaustive()
 
-          // 3. F-19.1: LeaseEpoch >= 1 (0 fails validation); refresh succeeds on epoch 1, fails with WriterLeaseHeldError on mismatched epoch
+          // 3. F-19.1: LeaseEpoch >= 1 (0 fails validation); refresh succeeds on epoch 1, fails on mismatched epoch
           expect(Schema.decodeOption(LeaseEpoch)(0)._tag).toBe("None")
           expect(() => LeaseEpoch.make(0)).toThrow()
           yield* refreshWriterLease({
-            commonGitDir,
-            lockFilePath,
+            ...ctx,
             holderId: holder1,
-            holderPid: pid,
+            holderPid: ctx.pid,
             leaseEpoch: lease.leaseEpoch,
-            repoRoot,
-            client,
           })
           const staleRefreshErr = yield* refreshWriterLease({
-            commonGitDir,
-            lockFilePath,
+            ...ctx,
             holderId: holder1,
-            holderPid: pid,
+            holderPid: ctx.pid,
             leaseEpoch: LeaseEpoch.make(99),
-            repoRoot,
-            client,
           }).pipe(Effect.flip)
           expect(staleRefreshErr).toBeInstanceOf(WriterLeaseHeldError)
           return lease.leaseEpoch
@@ -343,36 +381,30 @@ describe("WfWriterLease (scoped acquireRelease, split-brain fencing, CAS conflic
       ),
     )
     expect(acquiredEpoch1).toBe(1)
-    expect(existsSync(`${lockFilePath}.meta.json`)).toBe(false)
+    expect(existsSync(`${ctx.lockFilePath}.meta.json`)).toBe(false)
 
     // 4. F-17.1: Second writer takes over at epoch 2; original writer's split-brain refresh fails with WriterLeaseHeldError
     const epoch2 = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
           const lease2 = yield* acquireWriterLease({
-            commonGitDir,
-            lockFilePath,
+            ...ctx,
             holderId: holder2,
-            holderPid: pid,
-            repoRoot,
-            client,
+            holderPid: ctx.pid,
           })
           expect(lease2.leaseEpoch).toBe(2)
 
           const splitBrainRefreshErr = yield* refreshWriterLease({
-            commonGitDir,
-            lockFilePath,
+            ...ctx,
             holderId: holder1,
-            holderPid: pid,
+            holderPid: ctx.pid,
             leaseEpoch: acquiredEpoch1,
-            repoRoot,
-            client,
           }).pipe(Effect.flip)
           match(splitBrainRefreshErr)
             .with({ _tag: "WriterLeaseHeldError" }, (err) => {
               expect(err.holderId).toBe(holder2)
               expect(err.leaseEpoch).toBe(2)
-              expect(err.holderPid).toBe(pid)
+              expect(err.holderPid).toBe(ctx.pid)
             })
             .with({ _tag: "WorkflowStoreUnavailableError" }, (err) => {
               throw new Error(`Unexpected WorkflowStoreUnavailableError: ${err.message}`)
@@ -383,11 +415,15 @@ describe("WfWriterLease (scoped acquireRelease, split-brain fencing, CAS conflic
       ),
     )
     expect(epoch2).toBe(2)
+  })
+
+  it("enforces <1s SIGKILL crash takeover, TTL boundary (44_999ms vs 45_000ms), same-PID container restart, and stopFlockChild", async () => {
+    const ctx = setupWriterLeaseWs(makeWorkflowOmnigraphClient({ baseUrl, token: cliToken }))
 
     // 5. External flock child + fresh heartbeat -> SIGKILL -> < 1s takeover
     const flockChild = spawn(
       "/usr/bin/flock",
-      ["-n", "-F", "-E", "75", lockFilePath, "/usr/bin/cat"],
+      ["-n", "-F", "-E", "75", ctx.lockFilePath, "/usr/bin/cat"],
       { stdio: ["pipe", "pipe", "pipe"] },
     )
     await new Promise<void>((resolveReady, rejectReady) => {
@@ -396,42 +432,23 @@ describe("WfWriterLease (scoped acquireRelease, split-brain fencing, CAS conflic
       flockChild.stdin.write("ready\n")
     })
     const crashedPid = flockChild.pid!
-    writeFileSync(
-      `${lockFilePath}.meta.json`,
-      JSON.stringify({
-        holderId: "crashed-daemon",
-        holderPid: crashedPid,
-        leaseEpoch: 2,
-        acquiredAtMs: Date.now(),
-      }),
-      "utf8",
-    )
-    await Effect.runPromise(
-      invokeWorkflowStoreQuery({
-        repoRoot,
-        operation: WorkflowStoreOperation.make("test.setCrashedLease"),
-        queryName: "wf_cas_writer_lease",
-        params: {
-          name: "engine",
-          expectedEpoch: LeaseEpoch.make(2),
-          owner: `crashed-daemon#${crashedPid}`,
-          nextEpoch: LeaseEpoch.make(3),
-          heartbeatMs: Date.now(),
-        },
-        expectMutation: true,
-        client,
-      }),
-    )
+    await seedMockLeaseForTest({
+      ...ctx,
+      operation: "test.setCrashedLease",
+      holderId: "crashed-daemon",
+      holderPid: crashedPid,
+      leaseEpoch: 2,
+      acquiredAtMs: Date.now(),
+      owner: `crashed-daemon#${crashedPid}`,
+      nextEpoch: 3,
+    })
 
     const whileAliveErr = await Effect.runPromise(
       Effect.scoped(
         acquireWriterLease({
-          commonGitDir,
-          lockFilePath,
+          ...ctx,
           holderId: LeaseHolderId.make("recovery-daemon"),
-          holderPid: pid,
-          repoRoot,
-          client,
+          holderPid: ctx.pid,
         }),
       ).pipe(Effect.flip),
     )
@@ -447,12 +464,9 @@ describe("WfWriterLease (scoped acquireRelease, split-brain fencing, CAS conflic
     const recoveredEpoch = await Effect.runPromise(
       Effect.scoped(
         acquireWriterLease({
-          commonGitDir,
-          lockFilePath,
+          ...ctx,
           holderId: LeaseHolderId.make("recovery-daemon"),
-          holderPid: pid,
-          repoRoot,
-          client,
+          holderPid: ctx.pid,
         }).pipe(Effect.map((l) => l.leaseEpoch)),
       ),
     )
@@ -462,42 +476,23 @@ describe("WfWriterLease (scoped acquireRelease, split-brain fencing, CAS conflic
     // 6. TTL boundary: 44_999ms rejected vs 45_000ms takeover
     const stalePid = 999_999
     const baseTtlMs = 2_000_000_000
-    writeFileSync(
-      `${lockFilePath}.meta.json`,
-      JSON.stringify({
-        holderId: "ttl-holder",
-        holderPid: stalePid,
-        leaseEpoch: 4,
-        acquiredAtMs: baseTtlMs,
-      }),
-      "utf8",
-    )
-    await Effect.runPromise(
-      invokeWorkflowStoreQuery({
-        repoRoot,
-        operation: WorkflowStoreOperation.make("test.setTtlLease"),
-        queryName: "wf_cas_writer_lease",
-        params: {
-          name: "engine",
-          expectedEpoch: LeaseEpoch.make(4),
-          owner: `ttl-holder#${stalePid}`,
-          nextEpoch: LeaseEpoch.make(5),
-          heartbeatMs: baseTtlMs,
-        },
-        expectMutation: true,
-        client,
-      }),
-    )
+    await seedMockLeaseForTest({
+      ...ctx,
+      operation: "test.setTtlLease",
+      holderId: "ttl-holder",
+      holderPid: stalePid,
+      leaseEpoch: 4,
+      acquiredAtMs: baseTtlMs,
+      owner: `ttl-holder#${stalePid}`,
+      nextEpoch: 5,
+    })
 
     const beforeTtlErr = await Effect.runPromise(
       Effect.scoped(
         acquireWriterLease({
-          commonGitDir,
-          lockFilePath,
+          ...ctx,
           holderId: LeaseHolderId.make("ttl-contender"),
-          holderPid: pid,
-          repoRoot,
-          client,
+          holderPid: ctx.pid,
           nowMs: () => baseTtlMs + (WRITER_LEASE_HEARTBEAT_TTL_MS - 1),
           isPidAlive: () => true,
         }),
@@ -508,12 +503,9 @@ describe("WfWriterLease (scoped acquireRelease, split-brain fencing, CAS conflic
     const atTtlEpoch = await Effect.runPromise(
       Effect.scoped(
         acquireWriterLease({
-          commonGitDir,
-          lockFilePath,
+          ...ctx,
           holderId: LeaseHolderId.make("ttl-winner"),
-          holderPid: pid,
-          repoRoot,
-          client,
+          holderPid: ctx.pid,
           nowMs: () => baseTtlMs + WRITER_LEASE_HEARTBEAT_TTL_MS,
           isPidAlive: () => true,
         }).pipe(Effect.map((l) => l.leaseEpoch)),
@@ -523,43 +515,24 @@ describe("WfWriterLease (scoped acquireRelease, split-brain fencing, CAS conflic
 
     // 7. Same-PID container restart <1s takeover
     const samePidNow = 3_000_000_000
-    writeFileSync(
-      `${lockFilePath}.meta.json`,
-      JSON.stringify({
-        holderId: "restarted-same-pid",
-        holderPid: process.pid,
-        leaseEpoch: 6,
-        acquiredAtMs: samePidNow,
-        holderStartTime: "999999999",
-      }),
-      "utf8",
-    )
-    await Effect.runPromise(
-      invokeWorkflowStoreQuery({
-        repoRoot,
-        operation: WorkflowStoreOperation.make("test.setSamePidLease"),
-        queryName: "wf_cas_writer_lease",
-        params: {
-          name: "engine",
-          expectedEpoch: LeaseEpoch.make(6),
-          owner: `restarted-same-pid#${process.pid}@999999999`,
-          nextEpoch: LeaseEpoch.make(7),
-          heartbeatMs: samePidNow,
-        },
-        expectMutation: true,
-        client,
-      }),
-    )
+    await seedMockLeaseForTest({
+      ...ctx,
+      operation: "test.setSamePidLease",
+      holderId: "restarted-same-pid",
+      holderPid: process.pid,
+      leaseEpoch: 6,
+      acquiredAtMs: samePidNow,
+      holderStartTime: "999999999",
+      owner: `restarted-same-pid#${process.pid}@999999999`,
+      nextEpoch: 7,
+    })
     const tSame0 = Date.now()
     const samePidEpoch = await Effect.runPromise(
       Effect.scoped(
         acquireWriterLease({
-          commonGitDir,
-          lockFilePath,
+          ...ctx,
           holderId: LeaseHolderId.make("restarted-same-pid"),
-          holderPid: pid,
-          repoRoot,
-          client,
+          holderPid: ctx.pid,
           nowMs: () => samePidNow + 100,
           isPidAlive: () => true,
         }).pipe(Effect.map((l) => l.leaseEpoch)),

@@ -556,7 +556,7 @@ describe("Antigravity adapter & plugin configuration", () => {
     }
   })
 
-  it("enforces 5-tier hexagonal architecture and canonical rule/tool registries across skills, references, and reviewer personas in both adapters", () => {
+  const buildAdapterSkillExpectations = () => {
     const registeredRules = new Set<string>([
       ...SelfDogfoodingRuleId.literals,
       ...TierTopologyRuleId.literals,
@@ -579,13 +579,6 @@ describe("Antigravity adapter & plugin configuration", () => {
       "no-double-wrapped-effect-fn",
       "dynamic-harness-import",
     ] as const
-    for (const ruleId of [...canonicalTopologyRules, ...canonicalDogfoodRules]) {
-      expect(registeredRules.has(ruleId), `Rule ${ruleId} must exist in @harness/contract`).toBe(
-        true,
-      )
-    }
-    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(18)
-    expect(CANONICAL_MCP_TOOL_NAMES).toContain("harness_workflow_plan")
 
     const skillExpectations: ReadonlyArray<{
       readonly relPath: string
@@ -800,6 +793,20 @@ describe("Antigravity adapter & plugin configuration", () => {
         bannedTokens: ["Layer.scoped", "Schema.TaggedErrorClass"],
       },
     ]
+
+    return { registeredRules, canonicalTopologyRules, canonicalDogfoodRules, skillExpectations }
+  }
+
+  it("enforces 5-tier hexagonal architecture and canonical rule/tool registries across skills, references, and reviewer personas in both adapters", () => {
+    const { registeredRules, canonicalTopologyRules, canonicalDogfoodRules, skillExpectations } =
+      buildAdapterSkillExpectations()
+    for (const ruleId of [...canonicalTopologyRules, ...canonicalDogfoodRules]) {
+      expect(registeredRules.has(ruleId), `Rule ${ruleId} must exist in @harness/contract`).toBe(
+        true,
+      )
+    }
+    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(18)
+    expect(CANONICAL_MCP_TOOL_NAMES).toContain("harness_workflow_plan")
 
     const skillDirs = [
       resolve(pluginDir, "skills"),

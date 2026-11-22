@@ -1432,152 +1432,64 @@ describe("REQ-3.1: Differential live HarnessTaskWorkflow projections vs rebuildW
         const mergeConflictUnits = new Set<WorkUnitId>()
         let runState: WorkflowRunState = "running"
 
-        yield* replayActivityMessage({
-          operation: WorkflowStoreOperation.make("WorkflowReadModel.rebuild"),
-          plan,
-          activityName: `ProjectUnitDispatched/${unitId}/1`,
-          actReplyStr: undefined,
-          hasRunReply: false,
-          nowValue: WorkflowTimestampMs.make(Math.floor(now)),
-          unitStatusMap,
-          attemptsMap,
-          mergeConflictUnits,
-          getRunState: () => runState,
-          setRunState: (next) => {
-            runState = next
-          },
-        })
+        const step = (activityName: string, actReplyStr?: string) =>
+          replayActivityMessage({
+            operation: WorkflowStoreOperation.make("WorkflowReadModel.rebuild"),
+            plan,
+            activityName,
+            actReplyStr,
+            hasRunReply: false,
+            nowValue: WorkflowTimestampMs.make(Math.floor(now)),
+            unitStatusMap,
+            attemptsMap,
+            mergeConflictUnits,
+            getRunState: () => runState,
+            setRunState: (next) => {
+              runState = next
+            },
+          })
+
+        yield* step(`ProjectUnitDispatched/${unitId}/1`)
         expect(unitStatusMap.get(unitId)).toBe("dispatched")
 
-        yield* replayActivityMessage({
-          operation: WorkflowStoreOperation.make("WorkflowReadModel.rebuild"),
-          plan,
-          activityName: "ProjectRunCompleted",
-          actReplyStr: undefined,
-          hasRunReply: false,
-          nowValue: WorkflowTimestampMs.make(Math.floor(now)),
-          unitStatusMap,
-          attemptsMap,
-          mergeConflictUnits,
-          getRunState: () => runState,
-          setRunState: (next) => {
-            runState = next
-          },
-        })
+        yield* step("ProjectRunCompleted")
         expect(runState).toBe("completed")
 
         // Retry transition from escalated -> dispatched and waiting -> running
         unitStatusMap.set(unitId, "escalated")
         runState = "waiting"
-        yield* replayActivityMessage({
-          operation: WorkflowStoreOperation.make("WorkflowReadModel.rebuild"),
-          plan,
-          activityName: `ProjectUnitEscalationRetried/${unitId}/1`,
-          actReplyStr: undefined,
-          hasRunReply: false,
-          nowValue: WorkflowTimestampMs.make(Math.floor(now)),
-          unitStatusMap,
-          attemptsMap,
-          mergeConflictUnits,
-          getRunState: () => runState,
-          setRunState: (next) => {
-            runState = next
-          },
-        })
+        yield* step(`ProjectUnitEscalationRetried/${unitId}/1`)
         expect(unitStatusMap.get(unitId)).toBe("dispatched")
         expect(runState).toBe("running")
 
         // Non-waiting activity leaves runState='running', while ProjectRunWaitingLlmPhase moves running -> waiting
-        yield* replayActivityMessage({
-          operation: WorkflowStoreOperation.make("WorkflowReadModel.rebuild"),
-          plan,
-          activityName: "RouteReview",
-          actReplyStr: undefined,
-          hasRunReply: false,
-          nowValue: WorkflowTimestampMs.make(Math.floor(now)),
-          unitStatusMap,
-          attemptsMap,
-          mergeConflictUnits,
-          getRunState: () => runState,
-          setRunState: (next) => {
-            runState = next
-          },
-        })
+        yield* step("RouteReview")
         expect(runState).toBe("running")
 
-        yield* replayActivityMessage({
-          operation: WorkflowStoreOperation.make("WorkflowReadModel.rebuild"),
-          plan,
-          activityName: "ProjectRunWaitingLlmPhase",
-          actReplyStr: undefined,
-          hasRunReply: false,
-          nowValue: WorkflowTimestampMs.make(Math.floor(now)),
-          unitStatusMap,
-          attemptsMap,
-          mergeConflictUnits,
-          getRunState: () => runState,
-          setRunState: (next) => {
-            runState = next
-          },
-        })
+        yield* step("ProjectRunWaitingLlmPhase")
         expect(runState).toBe("waiting")
 
         // VerifyUnit promotes pending -> dispatched without clobbering escalated
         unitStatusMap.set(unitId, "pending")
-        yield* replayActivityMessage({
-          operation: WorkflowStoreOperation.make("WorkflowReadModel.rebuild"),
-          plan,
-          activityName: `VerifyUnit/${unitId}/1`,
-          actReplyStr: undefined,
-          hasRunReply: false,
-          nowValue: WorkflowTimestampMs.make(Math.floor(now)),
-          unitStatusMap,
-          attemptsMap,
-          mergeConflictUnits,
-          getRunState: () => runState,
-          setRunState: (next) => {
-            runState = next
-          },
-        })
+        yield* step(`VerifyUnit/${unitId}/1`)
         expect(unitStatusMap.get(unitId)).toBe("dispatched")
 
         unitStatusMap.set(unitId, "escalated")
-        yield* replayActivityMessage({
-          operation: WorkflowStoreOperation.make("WorkflowReadModel.rebuild"),
-          plan,
-          activityName: `VerifyUnit/${unitId}/2`,
-          actReplyStr: undefined,
-          hasRunReply: false,
-          nowValue: WorkflowTimestampMs.make(Math.floor(now)),
-          unitStatusMap,
-          attemptsMap,
-          mergeConflictUnits,
-          getRunState: () => runState,
-          setRunState: (next) => {
-            runState = next
-          },
-        })
+        yield* step(`VerifyUnit/${unitId}/2`)
         expect(unitStatusMap.get(unitId)).toBe("escalated")
 
         // Non-undefined Failure actReply transitions runState to aborted
         runState = "running"
-        yield* replayActivityMessage({
-          operation: WorkflowStoreOperation.make("WorkflowReadModel.rebuild"),
-          plan,
-          activityName: "RouteReview",
-          actReplyStr: JSON.stringify({ _tag: "Failure" }),
-          hasRunReply: false,
-          nowValue: WorkflowTimestampMs.make(Math.floor(now)),
-          unitStatusMap,
-          attemptsMap,
-          mergeConflictUnits,
-          getRunState: () => runState,
-          setRunState: (next) => {
-            runState = next
-          },
-        })
+        yield* step("RouteReview", JSON.stringify({ _tag: "Failure" }))
         expect(runState).toBe("aborted")
+      }),
+  )
 
+  it.effect(
+    "replayActivityMessage MergeSliceWave Merged resolves only escalated slices while preserving pending slices",
+    () =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
         // MergeSliceWave Merged resolves only escalated slices while preserving pending slices
         const sliceAlpha = WorkUnitId.make("slice-alpha")
         const sliceBeta = WorkUnitId.make("slice-beta")

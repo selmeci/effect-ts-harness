@@ -454,6 +454,14 @@ export {
   computePercentileMillis,
   decideHarnessBench,
 } from "./bench-check.js"
+export {
+  MAX_TEST_CASE_LINES,
+  collectContractShapeViolations,
+  collectWorkflowNameAccessViolations,
+  collectMaxTestCaseLineViolations,
+  type AstHygieneFinding,
+  type AstHygieneRuleId,
+} from "./plugins/ast-contract-and-test-hygiene.js"
 export { SelfDogfoodingFileInput, SelfDogfoodingInput } from "./plugins/self-dogfooding-contract.js"
 export {
   SelfDogfooding,

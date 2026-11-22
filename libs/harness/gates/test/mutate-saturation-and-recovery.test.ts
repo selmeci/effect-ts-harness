@@ -233,7 +233,7 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
     }
   })
 
-  it("5. mutation-check: saturation specs, makeAbortedReport metadata, overlays, strict/advisory matrix, diff filtering, and testRunner env restoration", () => {
+  it("5a. mutation-check: saturation specs, startup backup aborts, and sourceCodeOverlays isolation", () => {
     const dummyMutant = {
       id: MutantId.make("m-sat"),
       file: AstSourceFilePath.make("libs/demo/domain/src/a.ts"),
@@ -279,37 +279,15 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
     expect(satFail.passed).toBe(false)
     expect(satFail.saturationViolations).toHaveLength(1)
 
-    const dir = mkdtempSync(join(tmpdir(), "mut-check-63-"))
-    const prevEnvMut = process.env["HARNESS_ACTIVE_MUTANT_ID"]
+    const dir = mkdtempSync(join(tmpdir(), "mut-check-63a-"))
     const prevBackupEnv = process.env["HARNESS_ACTIVE_BACKUP_PATH"]
     try {
-      const corePkg = writePkg(dir, "demo", "core", {
-        type: "package.json",
-        name: "@demo/core",
-        tags: ["type:core"],
-      })
       const protoPkg = writePkg(dir, "demo", "proto", {
         type: "package.json",
         name: "@demo/proto",
         tags: ["type:contract"],
       })
-      const unclassPkg = writePkg(dir, "demo", "mystery", {
-        type: "package.json",
-        name: "@demo/mystery",
-        tags: [],
-      })
-      mkdirSync(join(corePkg, "test"), { recursive: true })
       mkdirSync(join(protoPkg, "test"), { recursive: true })
-
-      const twoLineFile = join(corePkg, "src", "two.ts")
-      const twoLineRel = "libs/demo/core/src/two.ts"
-      writeFileSync(
-        twoLineFile,
-        "export const f1 = (a: number) => a === 1\nexport const f2 = (b: number) => b === 2\n",
-        "utf8",
-      )
-      writeFileSync(join(corePkg, "test", "two.test.ts"), "export const t = 1\n", "utf8")
-
       const protoRel = "libs/demo/proto/src/schema.ts"
       writeFileSync(
         join(protoPkg, "src", "schema.ts"),
@@ -318,13 +296,6 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
       )
       writeFileSync(join(protoPkg, "test", "schema.test.ts"), "export const pt = 1\n", "utf8")
 
-      writeFileSync(
-        join(unclassPkg, "src", "u.ts"),
-        "export const u = (n: number) => n === 1\n",
-        "utf8",
-      )
-
-      // Startup backup abort omits diffMode and scannedCandidateFiles
       mkdirSync(join(dir, ".harness"), { recursive: true })
       const backupPath = join(dir, ".harness", "mutation-backup.json")
       writeFileSync(backupPath, "{corrupt", "utf8")
@@ -333,7 +304,6 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
       expect("diffMode" in startupAbort).toBe(true)
       expect("scannedCandidateFiles" in startupAbort).toBe(true)
 
-      // Active HARNESS_ACTIVE_BACKUP_PATH is NOT clobbered when running with matching path or sourceCodeOverlays
       const liveBackupContent = JSON.stringify({ sentinel: true })
       writeFileSync(backupPath, liveBackupContent, "utf8")
       process.env["HARNESS_ACTIVE_BACKUP_PATH"] = backupPath
@@ -342,7 +312,6 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
         sourceCodeOverlays: { [protoRel]: "export const p = (n: number) => n === 1\n" },
         testRunner: () => "killed",
       })
-      // Note: testRunner returns "killed" for baseline too -> baseline fails unless baseline returns "survived"!
       expect(overlayContract.passed).toBe(false)
       expect(testHostIo.readTextSync(backupPath)).toBe(liveBackupContent)
 
@@ -361,11 +330,42 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
       })
       expect(virtualOverlay.passed).toBe(false)
       expect(virtualOverlay.survivedCount).toBe(1)
+    } finally {
+      if (prevBackupEnv === undefined)
+        Reflect.deleteProperty(process.env, "HARNESS_ACTIVE_BACKUP_PATH")
+      else process.env["HARNESS_ACTIVE_BACKUP_PATH"] = prevBackupEnv
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 
-      Reflect.deleteProperty(process.env, "HARNESS_ACTIVE_BACKUP_PATH")
-      if (testHostIo.existsSync(backupPath)) testHostIo.unlinkSync(backupPath)
+  it("5b. mutation-check: post-diff abort, strict/advisory matrix, diff filtering, unclassified libs, and testRunner env restoration", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mut-check-63b-"))
+    const prevEnvMut = process.env["HARNESS_ACTIVE_MUTANT_ID"]
+    try {
+      const corePkg = writePkg(dir, "demo", "core", {
+        type: "package.json",
+        name: "@demo/core",
+        tags: ["type:core"],
+      })
+      const unclassPkg = writePkg(dir, "demo", "mystery", {
+        type: "package.json",
+        name: "@demo/mystery",
+        tags: [],
+      })
+      mkdirSync(join(corePkg, "test"), { recursive: true })
+      const twoLineRel = "libs/demo/core/src/two.ts"
+      writeFileSync(
+        join(corePkg, "src", "two.ts"),
+        "export const f1 = (a: number) => a === 1\nexport const f2 = (b: number) => b === 2\n",
+        "utf8",
+      )
+      writeFileSync(join(corePkg, "test", "two.test.ts"), "export const t = 1\n", "utf8")
+      writeFileSync(
+        join(unclassPkg, "src", "u.ts"),
+        "export const u = (n: number) => n === 1\n",
+        "utf8",
+      )
 
-      // Post-diff abort sets diffMode: "all-lines" and scannedCandidateFiles
       const postDiffAbort = runDomainMutationSuite(dir, testHostIo, {
         includeAllLines: true,
         scope: "@demo/core",
@@ -379,7 +379,6 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
       expect(postDiffAbort.scannedCandidateFiles).toBe(1)
       expect(postDiffAbort.diagnostic).toContain("Custom testRunner threw")
 
-      // enforcementMode advisory vs strict matrix
       expect(
         runDomainMutationSuite(dir, testHostIo, {
           enforcementMode: "advisory",
@@ -440,7 +439,6 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
       expect(strictBranch.diffMatchedFiles).toEqual([twoLineRel])
       expect(strictBranch.totalMutants).toBe(1)
 
-      // Unclassified modified lib file matrix
       const unclassIo: SyncHostIo = {
         ...testHostIo,
         execFileSync: (_cmd, args) => {
@@ -476,7 +474,6 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
         false,
       )
 
-      // targetFiles vs includeAllLines
       const explicitTargets = runDomainMutationSuite(dir, branchFallbackIo, {
         targetFiles: [twoLineRel],
         testRunner: (m) => (m.id === "__baseline__" ? "survived" : "killed"),
@@ -492,7 +489,6 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
       expect(allLinesRes.diffMode).toBe("all-lines")
       expect(allLinesRes.totalMutants).toBe(2)
 
-      // testRunner globalThis.__HARNESS_ACTIVE_MUTANT_ID restoration (pre-set vs undefined)
       for (const initialActive of ["outer-mut", undefined]) {
         setActiveMutantId(initialActive)
         const observedActive: Array<string | undefined> = []
@@ -511,9 +507,6 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
       setActiveMutantId(undefined)
       if (prevEnvMut === undefined) Reflect.deleteProperty(process.env, "HARNESS_ACTIVE_MUTANT_ID")
       else process.env["HARNESS_ACTIVE_MUTANT_ID"] = prevEnvMut
-      if (prevBackupEnv === undefined)
-        Reflect.deleteProperty(process.env, "HARNESS_ACTIVE_BACKUP_PATH")
-      else process.env["HARNESS_ACTIVE_BACKUP_PATH"] = prevBackupEnv
       rmSync(dir, { recursive: true, force: true })
     }
   })
@@ -645,16 +638,14 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
     }
   })
 
-  it("P0/P1/P2 saturation: branch-base+working-tree union, core.quotePath=false, --base -foo, SIGINT/partial-write restore, treeHash traversal & symlink refusal, checkMutateStamp modes, HARNESS_STATE_DIR=., conflicting tags, and $foo export match", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mut-p0p1p2-"))
+  it("P0/P1/P2a saturation: HARNESS_STATE_DIR=., conflicting tags, $foo export, branch+working-tree diff, and symlink traversal refusal", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mut-p0p1p2a-"))
     const prevStateDir = process.env["HARNESS_STATE_DIR"]
     try {
-      // 1. HARNESS_STATE_DIR=. rejection
       process.env["HARNESS_STATE_DIR"] = "."
       expect(() => resolveHarnessStateDir(dir, process.env)).toThrow()
       Reflect.deleteProperty(process.env, "HARNESS_STATE_DIR")
 
-      // 2. Conflicting type:contract + type:infra -> CorruptManifest
       const conflictPkg = writePkg(dir, "demo", "conflict", {
         type: "package.json",
         name: "@demo/conflict",
@@ -664,7 +655,6 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
         "CorruptManifest",
       )
 
-      // 3. $foo export regex match in partitionReachingTestFiles
       const dollarDomainFile = {
         scope: "demo",
         pkgDir: "core",
@@ -685,10 +675,10 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
       writeFileSync(t2, "const y = 1\n", "utf8")
       writeFileSync(t3, "const z = 1\n", "utf8")
       writeFileSync(t4, "const w = 1\n", "utf8")
-      const part = partitionReachingTestFiles(dir, dollarDomainFile, dollarSrc, testHostIo)
-      expect(part.primaryTests).toEqual([t1])
+      expect(
+        partitionReachingTestFiles(dir, dollarDomainFile, dollarSrc, testHostIo).primaryTests,
+      ).toEqual([t1])
 
-      // 4. core.quotePath=false & --base -foo rejection & branch-base + working-tree union
       const seenGitArgs: Array<ReadonlyArray<string>> = []
       const unionIo: SyncHostIo = {
         ...testHostIo,
@@ -700,9 +690,8 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
           if (args.includes("rev-parse") && args.includes("--verify")) {
             return { _tag: "Exited", exitCode: 0, stdout: "deadbeef\n", stderr: "" }
           }
-          if (args.includes("merge-base")) {
+          if (args.includes("merge-base"))
             return { _tag: "Exited", exitCode: 0, stdout: "abc123\n", stderr: "" }
-          }
           if (args.includes("diff") && args.includes("abc123")) {
             return {
               _tag: "Exited",
@@ -735,14 +724,13 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
         })
         .exhaustive()
       expect(seenGitArgs.some((a) => a.includes("core.quotePath=false"))).toBe(true)
+      expect(
+        extractGitDiffModifiedLinesChecked(dir, unionIo, {
+          explicitBaseRef: true,
+          fallbackBaseRef: "-foo",
+        })._tag,
+      ).toBe("Failed")
 
-      const badBaseRes = extractGitDiffModifiedLinesChecked(dir, unionIo, {
-        explicitBaseRef: true,
-        fallbackBaseRef: "-foo",
-      })
-      expect(badBaseRes._tag).toBe("Failed")
-
-      // 5. libs/*/src/temp-evil.ts & libs/*/src/dist/evil.ts NOT skipped by computeWorkspaceTreeHashChecked
       const tempEvil = join(dir, "libs", "demo", "core", "src", "temp-evil.ts")
       const distEvilDir = join(dir, "libs", "demo", "core", "src", "dist")
       mkdirSync(distEvilDir, { recursive: true })
@@ -753,25 +741,33 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
       const hashAfterTemp = computeWorkspaceTreeHashChecked(dir, testHostIo)
       expect(hashAfterTemp).not.toEqual(hashBefore)
       writeFileSync(join(distEvilDir, "evil.ts"), "export const e2 = 2\n", "utf8")
-      const hashAfterDist = computeWorkspaceTreeHashChecked(dir, testHostIo)
-      expect(hashAfterDist).not.toEqual(hashAfterTemp)
+      expect(computeWorkspaceTreeHashChecked(dir, testHostIo)).not.toEqual(hashAfterTemp)
 
-      // 6. Nested dir symlink refusal
       const symDirIo: SyncHostIo = {
         ...testHostIo,
         isSymbolicLinkSync: (p) => (p === distEvilDir ? true : testHostIo.isSymbolicLinkSync(p)),
       }
-      const symRes = computeWorkspaceTreeHashChecked(dir, symDirIo)
-      match(symRes)
-        .with({ _tag: "Failure" }, ({ failure }) => {
-          expect(failure).toContain("symbolic link")
-        })
-        .with({ _tag: "Success" }, () => {
-          expect.unreachable("Expected Failure for symlink dir")
-        })
+      match(computeWorkspaceTreeHashChecked(dir, symDirIo))
+        .with({ _tag: "Failure" }, ({ failure }) => expect(failure).toContain("symbolic link"))
+        .with({ _tag: "Success" }, () => expect.unreachable("Expected Failure for symlink dir"))
         .exhaustive()
+    } finally {
+      if (prevStateDir === undefined) Reflect.deleteProperty(process.env, "HARNESS_STATE_DIR")
+      else process.env["HARNESS_STATE_DIR"] = prevStateDir
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 
-      // 7. checkMutateStamp passed: false / equivalentCount / all-lines / explicit-files / branch-base / not-git / positive requiredDiffFiles
+  it("P0/P1/P2b saturation: checkMutateStamp modes, equivalencePriors, readPackageManifest, removeMutateStamp, and treeHash boundary", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mut-p0p1p2b-"))
+    try {
+      mkdirSync(join(dir, "libs", "demo", "core", "src"), { recursive: true })
+      writeFileSync(
+        join(dir, "libs", "demo", "core", "src", "dollar.ts"),
+        "export const x = 1\n",
+        "utf8",
+      )
+
       writeMutateStamp(dir, testHostIo, {
         enforcementMode: "strict",
         diffMode: "all-lines",
@@ -834,7 +830,6 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
       })
       expect(checkMutateStamp(dir, testHostIo, ["libs/demo/core/src/dollar.ts"])._tag).toBe("Valid")
 
-      // 8. evaluateMutationOutcomes with defined equivalencePriors & 0 equivalent mutants
       const eqReport = evaluateMutationOutcomes(
         [
           {
@@ -856,7 +851,6 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
       expect("equivalentMutants" in eqReport).toBe(true)
       expect(eqReport.equivalentMutants).toEqual([])
 
-      // 9. readPackageManifest merges package.json pkgName over project.json
       const mergedPkgDir = join(dir, "libs", "demo", "merged")
       mkdirSync(mergedPkgDir, { recursive: true })
       writeFileSync(join(mergedPkgDir, "package.json"), JSON.stringify({ name: "@demo/from-pkg" }))
@@ -864,17 +858,13 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
         join(mergedPkgDir, "project.json"),
         JSON.stringify({ name: "@demo/from-proj", tags: ["type:domain"] }),
       )
-      const mergedManifest = readPackageManifest(mergedPkgDir, testHostIo)
-      match(mergedManifest)
-        .with({ _tag: "Ok" }, ({ manifest }) => {
-          expect(manifest.pkgName).toBe("@demo/from-pkg")
-        })
-        .with({ _tag: "Missing" }, { _tag: "CorruptManifest" }, () => {
-          expect.unreachable("Expected Ok from merged readPackageManifest")
-        })
+      match(readPackageManifest(mergedPkgDir, testHostIo))
+        .with({ _tag: "Ok" }, ({ manifest }) => expect(manifest.pkgName).toBe("@demo/from-pkg"))
+        .with({ _tag: "Missing" }, { _tag: "CorruptManifest" }, () =>
+          expect.unreachable("Expected Ok from merged readPackageManifest"),
+        )
         .exhaustive()
 
-      // 10. findUnclassifiedModifiedLibFilesChecked ignores apps/ and libs/*/test/
       mkdirSync(join(dir, "apps", "demo", "src"), { recursive: true })
       writeFileSync(join(dir, "apps", "demo", "src", "a.ts"), "export const a = 1\n")
       mkdirSync(join(dir, "libs", "demo", "mystery", "test"), { recursive: true })
@@ -882,18 +872,18 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
         join(dir, "libs", "demo", "mystery", "test", "a.test.ts"),
         "export const t = 1\n",
       )
-      const unclassIgnored = findUnclassifiedModifiedLibFilesChecked(
-        dir,
-        new Map([
-          ["apps/demo/src/a.ts", new Set([1])],
-          ["libs/demo/mystery/test/a.test.ts", new Set([1])],
-        ]),
-        [],
-        testHostIo,
-      )
-      expect(unclassIgnored).toEqual({ _tag: "Ok", files: [] })
+      expect(
+        findUnclassifiedModifiedLibFilesChecked(
+          dir,
+          new Map([
+            ["apps/demo/src/a.ts", new Set([1])],
+            ["libs/demo/mystery/test/a.test.ts", new Set([1])],
+          ]),
+          [],
+          testHostIo,
+        ),
+      ).toEqual({ _tag: "Ok", files: [] })
 
-      // 11. writeVerifyStamp taskBranch trimming & removeMutateStamp edge cases
       expect(writeVerifyStamp(dir, testHostIo, "impl/custom").taskBranch).toBe("impl/custom")
       expect(writeVerifyStamp(dir, testHostIo, "   ").taskBranch).toBe("unknown")
 
@@ -921,7 +911,6 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
         },
       }
       expect(Result.isSuccess(removeMutateStamp(dir, enoentIo))).toBe(true)
-
       for (const thrownVal of [null, "boom", new Error("EPERM: denied")] as const) {
         const failUnlinkIo: SyncHostIo = {
           ...testHostIo,
@@ -931,7 +920,6 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
         }
         expect(Result.isFailure(removeMutateStamp(dir, failUnlinkIo))).toBe(true)
       }
-
       const outsideRealpathIo: SyncHostIo = {
         ...testHostIo,
         realpathSync: (p) =>
@@ -939,12 +927,10 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
       }
       expect(Result.isFailure(removeMutateStamp(dir, outsideRealpathIo))).toBe(true)
 
-      // 12. computeWorkspaceTreeHashChecked ignores package-root .harness/ while hashing src/.harness/
       const hashBase = computeWorkspaceTreeHashChecked(dir, testHostIo)
       mkdirSync(join(dir, "apps", "demo", ".harness"), { recursive: true })
       writeFileSync(join(dir, "apps", "demo", ".harness", "telemetry-log.jsonl"), '{"ev":1}\n')
       expect(computeWorkspaceTreeHashChecked(dir, testHostIo)).toEqual(hashBase)
-
       mkdirSync(join(dir, "libs", "demo", "src", ".harness"), { recursive: true })
       writeFileSync(
         join(dir, "libs", "demo", "src", ".harness", "backdoor.ts"),
@@ -952,8 +938,6 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
       )
       expect(computeWorkspaceTreeHashChecked(dir, testHostIo)).not.toEqual(hashBase)
     } finally {
-      if (prevStateDir === undefined) Reflect.deleteProperty(process.env, "HARNESS_STATE_DIR")
-      else process.env["HARNESS_STATE_DIR"] = prevStateDir
       rmSync(dir, { recursive: true, force: true })
     }
   })

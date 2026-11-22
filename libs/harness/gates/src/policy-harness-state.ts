@@ -108,11 +108,15 @@ const matchesProtectedHarnessTokens = (
   }
   return text.split(/[\s=:'"`(),{}[\]]+/).some((tok) => {
     if (tok.length === 0) return false
-    const normTok = path.posix.normalize(tok)
-    return (
-      PROTECTED_HARNESS_SHELL_PATH_PATTERN.test(normTok) ||
-      matchesExplicitCommonDirHarness(tok, commonDirs) ||
-      matchesExplicitCommonDirHarness(normTok, commonDirs)
+    const unescaped = tok.includes("\\") ? tok.replace(/\\(.)/g, "$1") : undefined
+    const candidates =
+      unescaped === undefined
+        ? [tok, path.posix.normalize(tok)]
+        : [tok, path.posix.normalize(tok), unescaped, path.posix.normalize(unescaped)]
+    return candidates.some(
+      (cand) =>
+        PROTECTED_HARNESS_SHELL_PATH_PATTERN.test(cand) ||
+        matchesExplicitCommonDirHarness(cand, commonDirs),
     )
   })
 }
@@ -258,40 +262,59 @@ const isHarnessStateAccessSegment = (
   )
 }
 
-export const isHarnessStateMutationCommand = (command: string): boolean => {
+const prepareStateCommandVariants = (
+  command: string,
+): { readonly variants: ReadonlyArray<string>; readonly overflowed: boolean } => {
   const norm = normalizeShellLineContinuations(command)
-  const segments = extractDetailedCommandSegments(norm)
-  const commonDirs = collectExplicitCommonDirs(segments)
-  const commandHasCommonDirSubst = segments.some((seg) =>
-    GIT_COMMON_DIR_SUBST_PATTERN.test([...seg.envAssignments, ...seg.commandWords].join(" ")),
-  )
-  if (
-    segments.some((seg) => isHarnessStateMutatingSegment(seg, commonDirs, commandHasCommonDirSubst))
-  ) {
-    return true
+  const exp = expandCommandVariables(norm)
+  return {
+    variants: exp.text === norm ? [norm] : [norm, exp.text],
+    overflowed: exp.overflowed,
   }
-  const view = toCommandView(norm)
-  return splitUnquotedShellSegments(norm, view.unquoted).some(
-    (part) =>
-      HARNESS_REDIRECTION_OP_PATTERN.test(part.unquoted) &&
-      matchesProtectedHarnessTokens(
-        toCommandView(part.cmd).argv,
-        commonDirs,
-        commandHasCommonDirSubst,
-      ),
-  )
+}
+
+export const isHarnessStateMutationCommand = (command: string): boolean => {
+  const { variants, overflowed } = prepareStateCommandVariants(command)
+  if (overflowed) return true
+  return variants.some((candidate) => {
+    const segments = extractDetailedCommandSegments(candidate)
+    const commonDirs = collectExplicitCommonDirs(segments)
+    const commandHasCommonDirSubst = segments.some((seg) =>
+      GIT_COMMON_DIR_SUBST_PATTERN.test([...seg.envAssignments, ...seg.commandWords].join(" ")),
+    )
+    if (
+      segments.some((seg) =>
+        isHarnessStateMutatingSegment(seg, commonDirs, commandHasCommonDirSubst),
+      )
+    ) {
+      return true
+    }
+    const view = toCommandView(candidate)
+    return splitUnquotedShellSegments(candidate, view.unquoted).some(
+      (part) =>
+        HARNESS_REDIRECTION_OP_PATTERN.test(part.unquoted) &&
+        matchesProtectedHarnessTokens(
+          toCommandView(part.cmd).argv,
+          commonDirs,
+          commandHasCommonDirSubst,
+        ),
+    )
+  })
 }
 
 export const isHarnessStateAccessCommand = (command: string): boolean => {
-  const norm = normalizeShellLineContinuations(command)
-  const segments = extractDetailedCommandSegments(norm)
-  const commonDirs = collectExplicitCommonDirs(segments)
-  const commandHasCommonDirSubst = segments.some((seg) =>
-    GIT_COMMON_DIR_SUBST_PATTERN.test([...seg.envAssignments, ...seg.commandWords].join(" ")),
-  )
-  return segments.some((seg) =>
-    isHarnessStateAccessSegment(seg, commonDirs, commandHasCommonDirSubst),
-  )
+  const { variants, overflowed } = prepareStateCommandVariants(command)
+  if (overflowed) return true
+  return variants.some((candidate) => {
+    const segments = extractDetailedCommandSegments(candidate)
+    const commonDirs = collectExplicitCommonDirs(segments)
+    const commandHasCommonDirSubst = segments.some((seg) =>
+      GIT_COMMON_DIR_SUBST_PATTERN.test([...seg.envAssignments, ...seg.commandWords].join(" ")),
+    )
+    return segments.some((seg) =>
+      isHarnessStateAccessSegment(seg, commonDirs, commandHasCommonDirSubst),
+    )
+  })
 }
 
 const MAX_VAR_EXPANSION_PASSES = 4

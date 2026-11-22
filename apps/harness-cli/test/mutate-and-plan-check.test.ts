@@ -463,25 +463,30 @@ describe("CLI handleMutate, handleVerify (mutate-stamp), handleBench, and handle
     }
   })
 
-  it("handleMutate CLI integration: failing strict deletes stamp; --scope/--file/--base never write stamp; --file= and 0-mutant strict fail closed", async () => {
-    const dir = initTempGitRepo("cli-mut-integration-")
-    try {
-      const engineSource = "export const isAdult = (age: number): boolean => age >= 18\n"
-      const strongTest = [
-        'import { expect, it } from "vitest"',
-        'import { isAdult } from "../src/engine.js"',
-        'it("strong", () => { expect(isAdult(21)).toBe(true); expect(isAdult(20)).toBe(false) })',
-      ].join("\n")
-      writeDemoGatesPkg(dir, engineSource, strongTest)
-      gitCommitAll(dir, "add demo")
-      git(dir, ["checkout", "-b", "feat/cli-int"])
-      writeFileSync(
-        join(dir, "libs", "demo", "gates", "src", "engine.ts"),
-        "export const isAdult = (age: number): boolean => age >= 21\n",
-        "utf8",
-      )
-      gitCommitAll(dir, "update age")
+  const DEMO_STRONG_TEST = [
+    'import { expect, it } from "vitest"',
+    'import { isAdult } from "../src/engine.js"',
+    'it("strong", () => { expect(isAdult(21)).toBe(true); expect(isAdult(20)).toBe(false) })',
+  ].join("\n")
 
+  const setupMutateCliRepo = () => {
+    const dir = initTempGitRepo("cli-mut-integration-")
+    const engineSource = "export const isAdult = (age: number): boolean => age >= 18\n"
+    writeDemoGatesPkg(dir, engineSource, DEMO_STRONG_TEST)
+    gitCommitAll(dir, "add demo")
+    git(dir, ["checkout", "-b", "feat/cli-int"])
+    writeFileSync(
+      join(dir, "libs", "demo", "gates", "src", "engine.ts"),
+      "export const isAdult = (age: number): boolean => age >= 21\n",
+      "utf8",
+    )
+    gitCommitAll(dir, "update age")
+    return dir
+  }
+
+  it("handleMutate CLI integration: failing strict deletes stamp; --scope/--file/--base never write stamp; --file= and 0-mutant strict fail closed", async () => {
+    const dir = setupMutateCliRepo()
+    try {
       const stampPath = join(dir, ".harness", "mutate-stamp.json")
 
       // 1. --scope, --file, and --base NEVER write a stamp even on passing --strict
@@ -561,6 +566,16 @@ describe("CLI handleMutate, handleVerify (mutate-stamp), handleBench, and handle
       )
       expect(zeroMutantRes.exitCode).toBe(1)
       expect(existsSync(stampPath)).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  it("handleMutate CLI integration: --strict --all writes valid stamp, honors mutant cache/HMAC isolation, and --diff filters branch-base lines", async () => {
+    const dir = setupMutateCliRepo()
+    try {
+      const stampPath = join(dir, ".harness", "mutate-stamp.json")
+      const strongTest = DEMO_STRONG_TEST
 
       // 5. --strict --all with 0-mutant contract sibling passes evaluateVerifyMutateStampGate E2E
       writeFileSync(

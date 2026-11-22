@@ -275,14 +275,14 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
     )
   })
 
-  it("roundtrips closed TaggedUnion and Struct schemas with exhaustive matching", () => {
-    const roundtrip = <A, E>(schema: Schema.Codec<A, E, never, never>, value: A): A => {
-      const encoded = Schema.encodeSync(schema)(value)
-      const decoded = expectDecodeSuccess(schema, encoded)
-      expect(decoded).toEqual(value)
-      return decoded
-    }
+  const roundtrip = <A, E>(schema: Schema.Codec<A, E, never, never>, value: A): A => {
+    const encoded = Schema.encodeSync(schema)(value)
+    const decoded = expectDecodeSuccess(schema, encoded)
+    expect(decoded).toEqual(value)
+    return decoded
+  }
 
+  it("roundtrips UnitMode, WorkUnitDraft, CompiledWorkUnit, CompileInput, and CompiledPlan schemas", () => {
     const modes: ReadonlyArray<UnitMode> = [
       {
         _tag: "Automatic",
@@ -367,7 +367,9 @@ describe("@harness/contract workflow & repo-identity schemas", () => {
       units: [sliceUnit, pkgUnit],
       sharedStepPaths: [OwnedRelPath.make("libs/harness/contract/src/index.ts")],
     })
+  })
 
+  it("roundtrips UnitRejection, UnitEscalation, UnitOutcome, Receipts, and PlanGraphIssue schemas", () => {
     const rejections: ReadonlyArray<UnitRejection> = [
       {
         _tag: "WriteSetViolation",
