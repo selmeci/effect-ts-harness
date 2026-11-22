@@ -410,8 +410,11 @@ const insertRunDirect = (
   operation: WorkflowStoreOperation,
   run: WorkflowRunRecord,
   ifGraphCommit?: string,
-): Effect.Effect<string | undefined, WorkflowStoreUnavailableError | WriterLeaseHeldError> =>
-  invokeWorkflowStoreQueryWithMeta({
+): Effect.Effect<string | undefined, WorkflowStoreUnavailableError | WriterLeaseHeldError> => {
+  // Omit explicit ifGraphCommit under active single-writer lease fencing so checkWriterLeaseFence
+  // supplies a fresh leaseCommitId per attempt and background lease heartbeats retry cleanly.
+  const effectiveIfGraphCommit = target.expectedLeaseEpoch === undefined ? ifGraphCommit : undefined
+  return invokeWorkflowStoreQueryWithMeta({
     ...target,
     operation,
     queryName: "wf_insert_run",
@@ -426,19 +429,21 @@ const insertRunDirect = (
       updatedMs: run.updatedMs,
     },
     expectMutation: true,
-    ...(ifGraphCommit !== undefined ? { ifGraphCommit } : {}),
+    ...(effectiveIfGraphCommit !== undefined ? { ifGraphCommit: effectiveIfGraphCommit } : {}),
   }).pipe(
     Effect.map((res) => res.graphCommitId ?? undefined),
     Effect.mapError((err) => preserveStoreOrLeaseError(operation, err)),
   )
+}
 
 const insertUnitDirect = (
   target: ReturnType<typeof makeStoreTarget>,
   operation: WorkflowStoreOperation,
   unit: WorkflowUnitRecord,
   ifGraphCommit?: string,
-): Effect.Effect<string | undefined, WorkflowStoreUnavailableError | WriterLeaseHeldError> =>
-  invokeWorkflowStoreQueryWithMeta({
+): Effect.Effect<string | undefined, WorkflowStoreUnavailableError | WriterLeaseHeldError> => {
+  const effectiveIfGraphCommit = target.expectedLeaseEpoch === undefined ? ifGraphCommit : undefined
+  return invokeWorkflowStoreQueryWithMeta({
     ...target,
     operation,
     queryName: "wf_insert_unit",
@@ -453,11 +458,12 @@ const insertUnitDirect = (
       updatedMs: unit.updatedMs,
     },
     expectMutation: true,
-    ...(ifGraphCommit !== undefined ? { ifGraphCommit } : {}),
+    ...(effectiveIfGraphCommit !== undefined ? { ifGraphCommit: effectiveIfGraphCommit } : {}),
   }).pipe(
     Effect.map((res) => res.graphCommitId ?? undefined),
     Effect.mapError((err) => preserveStoreOrLeaseError(operation, err)),
   )
+}
 
 const insertAttemptDirect = (
   target: ReturnType<typeof makeStoreTarget>,
@@ -467,6 +473,8 @@ const insertAttemptDirect = (
 ): Effect.Effect<string | undefined, WorkflowStoreUnavailableError | WriterLeaseHeldError> =>
   Effect.gen(function* () {
     const rejectionPayload = yield* encodeAttemptRejectionPayload(operation, attempt)
+    const effectiveIfGraphCommit =
+      target.expectedLeaseEpoch === undefined ? ifGraphCommit : undefined
     const res = yield* invokeWorkflowStoreQueryWithMeta({
       ...target,
       operation,
@@ -483,7 +491,7 @@ const insertAttemptDirect = (
         updatedMs: attempt.updatedMs,
       },
       expectMutation: true,
-      ...(ifGraphCommit !== undefined ? { ifGraphCommit } : {}),
+      ...(effectiveIfGraphCommit !== undefined ? { ifGraphCommit: effectiveIfGraphCommit } : {}),
     }).pipe(Effect.mapError((err) => preserveStoreOrLeaseError(operation, err)))
     return res.graphCommitId ?? undefined
   })
@@ -495,7 +503,8 @@ const clearExistingReadModelViews = (
   initialGraphCommitId: string | undefined,
 ): Effect.Effect<string | undefined, WorkflowStoreUnavailableError | WriterLeaseHeldError> =>
   Effect.gen(function* () {
-    let latestCommitId = initialGraphCommitId
+    const chainExplicitCommit = target.expectedLeaseEpoch === undefined
+    let latestCommitId = chainExplicitCommit ? initialGraphCommitId : undefined
     const deletedRunIds = new Set<WorkflowRunId>()
     let clearedAllExisting = false
 
@@ -508,7 +517,7 @@ const clearExistingReadModelViews = (
         expectMutation: false,
       }).pipe(Effect.mapError((err) => preserveStoreOrLeaseError(operation, err)))
 
-      if (existingBatch.graphCommitId !== null) {
+      if (chainExplicitCommit && existingBatch.graphCommitId !== null) {
         latestCommitId = existingBatch.graphCommitId
       }
 
@@ -546,9 +555,11 @@ const clearExistingReadModelViews = (
           queryName: "wf_delete_run_views",
           params: { runId },
           expectMutation: true,
-          ...(latestCommitId !== undefined ? { ifGraphCommit: latestCommitId } : {}),
+          ...(chainExplicitCommit && latestCommitId !== undefined
+            ? { ifGraphCommit: latestCommitId }
+            : {}),
         }).pipe(Effect.mapError((err) => preserveStoreOrLeaseError(operation, err)))
-        if (delRes.graphCommitId !== null) {
+        if (chainExplicitCommit && delRes.graphCommitId !== null) {
           latestCommitId = delRes.graphCommitId
         }
         deletedRunIds.add(runId)
@@ -579,9 +590,11 @@ const clearExistingReadModelViews = (
         queryName: "wf_delete_run_views",
         params: { runId },
         expectMutation: true,
-        ...(latestCommitId !== undefined ? { ifGraphCommit: latestCommitId } : {}),
+        ...(chainExplicitCommit && latestCommitId !== undefined
+          ? { ifGraphCommit: latestCommitId }
+          : {}),
       }).pipe(Effect.mapError((err) => preserveStoreOrLeaseError(operation, err)))
-      if (delRes.graphCommitId !== null) {
+      if (chainExplicitCommit && delRes.graphCommitId !== null) {
         latestCommitId = delRes.graphCommitId
       }
       deletedRunIds.add(runId)

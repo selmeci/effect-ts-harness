@@ -1,7 +1,7 @@
 import { basename, join, resolve } from "node:path"
 import { Cause, Effect, Graph, Result, Schema } from "effect"
 import { match } from "ts-pattern"
-import { OmnigraphSpanName } from "@harness/contract"
+import { isPureInterruptCause, OmnigraphSpanName } from "@harness/contract"
 import { type HarnessGraph, loadGraphSnapshotEffect } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 import type { SyncHostIo } from "@harness/service/host-io"
@@ -354,17 +354,25 @@ export const loadPlanEffectFnQualnames = (
   planSnapshotPath: string,
   hostIo: SyncHostIo,
 ): Effect.Effect<ReadonlySet<string> | undefined> =>
-  Effect.map(Effect.exit(loadGraphSnapshotEffect(planSnapshotPath, hostIo)), (loadExit) =>
-    match(loadExit)
-      .with({ _tag: "Success" }, ({ value }) => collectPlanEffectFnQualnames(value))
+  Effect.gen(function* () {
+    const loadExit = yield* Effect.exit(loadGraphSnapshotEffect(planSnapshotPath, hostIo))
+    return yield* match(loadExit)
+      .with({ _tag: "Success" }, ({ value }) => Effect.succeed(collectPlanEffectFnQualnames(value)))
       .with({ _tag: "Failure" }, ({ cause }) => {
-        process.stderr.write(
-          `[harness:done] Warning: failed to decode plan snapshot '${planSnapshotPath}': ${Cause.pretty(cause)}\n`,
-        )
-        return undefined
+        if (isPureInterruptCause(cause)) {
+          return Effect.failCause(
+            Cause.fromReasons<never>(cause.reasons.filter(Cause.isInterruptReason)),
+          )
+        }
+        return Effect.sync(() => {
+          process.stderr.write(
+            `[harness:done] Warning: failed to decode plan snapshot '${planSnapshotPath}': ${Cause.pretty(cause)}\n`,
+          )
+          return undefined
+        })
       })
-      .exhaustive(),
-  )
+      .exhaustive()
+  })
 
 export const readIsStubFromImage = (
   image: { readonly properties: unknown } | null | undefined,
@@ -445,11 +453,11 @@ const decodeReadyzBody = Schema.decodeUnknownOption(ReadyzBodySchema)
 
 export function probeOmnigraphServerReady(baseUrl: string): Effect.Effect<ReadyzProbeResult> {
   return Effect.tryPromise({
-    try: () =>
+    try: (fiberSignal) =>
       globalThis
         .fetch(`${baseUrl}/readyz`, {
           method: "GET",
-          signal: AbortSignal.timeout(3000),
+          signal: AbortSignal.any([fiberSignal, AbortSignal.timeout(3000)]),
         })
         .then((r): Promise<ReadyzProbeResult> =>
           match(r.status)

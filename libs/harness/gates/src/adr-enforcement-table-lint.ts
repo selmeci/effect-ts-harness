@@ -22,7 +22,7 @@ export const EXPECTED_ENFORCEMENT_TABLE_COLS = [
   "governed symbols",
 ] as const
 
-const ADR_ENFORCED_FILE_EXT_RE = /\.(?:ts|tsx|js|mjs|md|json|cedar|pg|gq|yaml|yml|sql)$/
+export const ADR_ENFORCED_FILE_EXT_RE = /\.(?:ts|tsx|js|mjs|md|json|cedar|pg|gq|yaml|yml|sql)$/
 
 export const stripTableMarkup = (text: string): string => text.replace(/[*_`]/g, "").trim()
 
@@ -70,7 +70,7 @@ const isCellEmptyOrPlaceholder = (cell: string | undefined): boolean => {
   )
 }
 
-const extractEnforcedFilePathsFromCell = (enforcedByCell: string): ReadonlyArray<string> => {
+export const extractEnforcedFilePathsFromCell = (enforcedByCell: string): ReadonlyArray<string> => {
   const extractedPaths: Array<string> = []
   const backticks = Array.from(enforcedByCell.matchAll(/`([^`]+)`/g)).map((m) => m[1]!.trim())
   for (const b of backticks) {

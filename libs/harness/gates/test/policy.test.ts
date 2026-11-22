@@ -10,6 +10,7 @@ import { stripSafeLeadingEnvVarsDetailed } from "../src/policy-command-rules.js"
 import {
   CD_COMMAND_BANNED_REASON,
   classifyCommand,
+  classifyFileRead,
   classifyFileWrite,
   CLEF_SYSTEMONE_ONLY_BANNED_REASON,
   explainCommandDenyReason,
@@ -1589,8 +1590,93 @@ describe("guard policy", () => {
       { cmd: "env -u HARNESS_WORKTREE_ID git push --force", verdict: "deny" },
       { cmd: "git worktree remove /tmp/wt-1", verdict: "escalate" },
       { cmd: "dfx build", verdict: "escalate" },
+      { cmd: "pnpm --filter @harness/gates exec rm a.ts", verdict: "escalate" },
+      { cmd: "pnpm --filter @harness/gates dlx foo", verdict: "escalate" },
+      { cmd: "nx exec -- echo hi", verdict: "escalate" },
+      { cmd: "rg --pre sh daemon libs/", verdict: "escalate" },
+      { cmd: "rg --pre sh daemon .harness/verify-stamp.json", verdict: "deny" },
+      { cmd: "sort -o .harness/verify-stamp.json a.txt", verdict: "deny" },
+      { cmd: "git diff --output .harness/verify-stamp.json", verdict: "deny" },
+      { cmd: "find libs -fprint .harness/verify-stamp.json", verdict: "deny" },
     ] as const) {
       expect(classifyCommand(nonAllowed.cmd), nonAllowed.cmd).toBe(nonAllowed.verdict)
+    }
+
+    for (const safeCmd of [
+      "pnpm --filter @harness/gates exec vitest run test/policy.test.ts",
+      "CI=true pnpm --filter @harness/gates exec nx show projects",
+      "cat .oxlintrc.json",
+      "rg pattern tools/oxlint",
+    ]) {
+      expect(classifyCommand(safeCmd), safeCmd).toBe("allow")
+    }
+  })
+
+  it("SPEC-0030 2nd-pass: closes ANSI-C alignment/NUL, flagged pnpm/nx, bundled filter flags, multiline args, empty-prefix braces, unset var fallback, xargs env, and glob brackets", () => {
+    for (const deniedCmd of [
+      "echo $'\\x41\\x42\\x43\\x44'; rm .harness/verify-stamp.json",
+      "echo $'\\x41'; cd /tmp",
+      "echo $'a\\'b' .e\\\nnv",
+      "echo $'a\\'b' $(rm .env)",
+      "A=.env; echo $'a\\'b' $A",
+      "cat $'.env\\x00ignored'",
+      "cat ${UNSET:-.env}",
+      "echo .harness/verify-stamp.json | xargs env rm",
+    ]) {
+      expect(classifyCommand(deniedCmd), deniedCmd).toBe("deny")
+    }
+
+    for (const escalatedCmd of [
+      "pnpm --filter @harness/gates --silent exec sh",
+      "pnpm --filter @harness/gates --silent dlx evil-pkg",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter @harness/gates --silent harness done",
+      "nx --verbose exec -- cat /etc/passwd",
+      "sort -uo out.txt",
+      "ls | sort -uo out.txt",
+      'ls | sort "-o" out.txt',
+      "ls | rg '--pre' evil",
+      'git diff "foo\nbar" --output=/tmp/out',
+      'find . -name "a\nb" -delete',
+      'sort "a\nb" -o out.txt',
+      'rg "a\nb" --pre sh foo',
+      "cat .{,e}nv",
+    ]) {
+      expect(classifyCommand(escalatedCmd), escalatedCmd).toBe("escalate")
+    }
+
+    expect(
+      isCommandAllowed("HARNESS_WORKTREE_ID=u1 pnpm --filter @harness/gates --silent harness done"),
+    ).toBe(false)
+
+    for (const allowedCmd of [
+      "pnpm --filter @harness/gates --silent exec -- vitest run",
+      "git status | rg policy | wc",
+      "git status | grep foo | wc",
+    ]) {
+      expect(classifyCommand(allowedCmd), allowedCmd).toBe("allow")
+    }
+
+    for (const secretPath of [
+      ".env?",
+      ".dev.vars?",
+      ".e[mn][uv]",
+      ".[abcde]nv",
+      ".[a-z]nv",
+      ".[!x]nv",
+      "*.k[d-f]y",
+      "auth-tok[d-f]ns.json",
+    ]) {
+      expect(classifyFileRead(secretPath).verdict, `read ${secretPath}`).toBe("deny")
+      expect(classifyFileWrite(secretPath).verdict, `write ${secretPath}`).toBe("deny")
+    }
+    expect(classifyFileWrite(".harness/veri[fghij]y-stamp.json").verdict).toBe("deny")
+
+    for (const routePath of [
+      "apps/web/routes/[accountId]/page.tsx",
+      "apps/web/routes/[...catchall].tsx",
+    ]) {
+      expect(classifyFileRead(routePath).verdict, `read ${routePath}`).toBe("allow")
+      expect(classifyFileWrite(routePath).verdict, `write ${routePath}`).toBe("allow")
     }
   })
 })

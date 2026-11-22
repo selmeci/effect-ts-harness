@@ -320,11 +320,18 @@ const collectFilesChecked = (
   })
 }
 
+const NON_DOC_MARKDOWN_DIR_RE =
+  /(?:^|\/)(?:adapters|agent-patterns|src|test|tests|__tests__|fixtures)\//i
+
 /**
- * Returns true iff a repo-relative path is a markdown documentation file excluded
- * from mutable code stamps (`mutate-stamp.json`).
+ * Returns true iff a repo-relative path is a non-executable markdown documentation file
+ * outside `adapters/`, `agent-patterns/`, source directories, and test/fixture directories
+ * excluded from mutable code stamps (`mutate-stamp.json`).
  */
-export const isMarkdownDocPath = (relPath: string): boolean => /\.(?:md|mdx)$/i.test(relPath)
+export const isMarkdownDocPath = (relPath: string): boolean => {
+  const norm = relPath.replace(/\\/g, "/").replace(/^\.\//, "")
+  return /\.(?:md|mdx)$/i.test(norm) && !NON_DOC_MARKDOWN_DIR_RE.test(norm)
+}
 
 const computeFilteredWorkspaceTreeHashChecked = (
   repoRoot: string,

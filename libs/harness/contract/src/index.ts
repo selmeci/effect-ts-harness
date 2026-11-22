@@ -67,7 +67,10 @@ export {
   WorkspaceFsError,
   WorkspaceFsOperation,
   isPureInterruptCause,
+  toCompilerOverlayErrorReason,
+  toCompilerRepoRootInput,
   toErrorReasonMessage,
+  toMcpToolInputName,
   validateSubprocessInput,
 } from "./workspace-and-process.js"
 export {

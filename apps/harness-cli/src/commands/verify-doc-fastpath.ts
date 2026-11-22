@@ -1,12 +1,18 @@
-import { Effect } from "effect"
+import { join } from "node:path"
+import { Effect, Result } from "effect"
 import { match } from "ts-pattern"
+import { IDIOM_BLOCKS } from "@harness/decision"
 import {
   checkLoopThrashing,
   computeMutableTreeHashChecked,
   decideGraphEntropy,
+  decideSpanBudgets,
+  DstExecutionTier,
   type GovernanceDocReference,
+  parseDstSeedEnv,
   readExistingVerifyStamp,
   readFrictionEvents,
+  resolveDstSeedCount,
   writeVerifyStamp,
 } from "@harness/gates"
 import type { HarnessGraph } from "@harness/graph"
@@ -17,6 +23,7 @@ import {
   isVerifyMutateStampGateEnforced,
   resolveVerifyStampMutateMeta,
 } from "./mutate-and-bench.command.js"
+import { readRecordedSpans } from "./verify-delta-gates.js"
 
 export const verifyFailureWithThrashing = (
   options: CliEnv | undefined,
@@ -51,6 +58,36 @@ export const tryRunDocOnlyVerifyFastPath = (input: {
     ) {
       return undefined
     }
+
+    const seedRes = Result.try(() => parseDstSeedEnv(process.env["DST_SEED"]))
+    const seedOutcome = match(seedRes)
+      .with({ _tag: "Failure" }, ({ failure }) => ({
+        errorReason: failure instanceof Error ? failure.message : String(failure),
+        pinnedSeed: undefined,
+      }))
+      .with({ _tag: "Success" }, ({ success }) => ({
+        errorReason: undefined,
+        pinnedSeed: success,
+      }))
+      .exhaustive()
+    if (seedOutcome.errorReason !== undefined) {
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr: `[GATE FAILURE] verify:dst-seed\n${seedOutcome.errorReason}`,
+      }
+    }
+    if (seedOutcome.pinnedSeed !== undefined && existingStamp.dstSeed !== seedOutcome.pinnedSeed) {
+      return undefined
+    }
+
+    const requiredSeeds = resolveDstSeedCount(
+      DstExecutionTier.make(process.env.CI === "true" ? "ci_full" : "fast_local"),
+    )
+    if ((existingStamp.dstSeedsRun ?? 0) < requiredSeeds) {
+      return undefined
+    }
+
     const currentMutableRes = computeMutableTreeHashChecked(input.repoRoot, nodeSyncHostIo)
     const mutableMatched = match(currentMutableRes)
       .with({ _tag: "Success" }, ({ success }) => success === existingStamp.mutableTreeHash)
@@ -69,8 +106,12 @@ export const tryRunDocOnlyVerifyFastPath = (input: {
       }
     }
 
+    const hasPatternsDir = nodeSyncHostIo.existsSync(join(input.repoRoot, "agent-patterns"))
     const gcReport = yield* decideGraphEntropy({
       graph: input.graph,
+      expectedPatterns: hasPatternsDir ? IDIOM_BLOCKS : undefined,
+      checkUntestedDomainFns: true,
+      checkDeciderPropertyTests: true,
       governanceDocs: input.governanceDocs,
       workspaceRoot: input.repoRoot,
       hostIo: nodeSyncHostIo,
@@ -86,6 +127,33 @@ export const tryRunDocOnlyVerifyFastPath = (input: {
       }
     }
 
+    const spanReadResult = yield* readRecordedSpans(input.repoRoot).pipe(
+      Effect.map((spans) => ({ _tag: "Ok" as const, spans })),
+      Effect.catchTag("SpanTraceReadError", (err) =>
+        Effect.succeed({ _tag: "SpanReadErr" as const, err }),
+      ),
+    )
+    const spanBudgetFailure = yield* match(spanReadResult)
+      .with({ _tag: "SpanReadErr" }, ({ err }) => Effect.succeed(err.message))
+      .with({ _tag: "Ok" }, ({ spans: recordedSpans }) =>
+        decideSpanBudgets({
+          spans: recordedSpans,
+          causalityRules: [],
+          failOnViolation: true,
+        }).pipe(
+          Effect.as(undefined),
+          Effect.catchTag("SpanCausalityError", (err) => Effect.succeed(err.message)),
+        ),
+      )
+      .exhaustive()
+    if (spanBudgetFailure !== undefined) {
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr: `[GATE FAILURE] verify:span-budget\n${spanBudgetFailure}`,
+      }
+    }
+
     const mutateMeta = isVerifyMutateStampGateEnforced(input.repoRoot, input.options)
       ? resolveVerifyStampMutateMeta(input.repoRoot)
       : existingStamp.mutateEnforcementMode !== undefined
@@ -96,21 +164,30 @@ export const tryRunDocOnlyVerifyFastPath = (input: {
               : {}),
           }
         : undefined
-    const refreshed = writeVerifyStamp(
-      input.repoRoot,
-      nodeSyncHostIo,
-      input.implBranch,
-      {
-        ...(existingStamp.dstSeed !== undefined ? { dstSeed: existingStamp.dstSeed } : {}),
-        ...(existingStamp.dstSeedsRun !== undefined
-          ? { dstSeedsRun: existingStamp.dstSeedsRun }
-          : {}),
-      },
-      mutateMeta,
+    const writeRes = Result.try(() =>
+      writeVerifyStamp(
+        input.repoRoot,
+        nodeSyncHostIo,
+        input.implBranch,
+        {
+          ...(existingStamp.dstSeed !== undefined ? { dstSeed: existingStamp.dstSeed } : {}),
+          ...(existingStamp.dstSeedsRun !== undefined
+            ? { dstSeedsRun: existingStamp.dstSeedsRun }
+            : {}),
+        },
+        mutateMeta,
+      ),
     )
-    return {
-      exitCode: 0,
-      stdout: JSON.stringify(refreshed),
-      stderr: "",
-    }
+    return match(writeRes)
+      .with({ _tag: "Failure" }, ({ failure }) => ({
+        exitCode: 1,
+        stdout: "",
+        stderr: `[GATE FAILURE] verify:stamp-write\n${failure instanceof Error ? failure.message : String(failure)}`,
+      }))
+      .with({ _tag: "Success" }, ({ success: refreshed }) => ({
+        exitCode: 0,
+        stdout: JSON.stringify(refreshed),
+        stderr: "",
+      }))
+      .exhaustive()
   })

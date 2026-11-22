@@ -80,6 +80,7 @@ import {
   resolveWorkflowRuntimePaths,
   resolveWorkflowWorktreeDir,
 } from "../src/worktree-repo-root.js"
+import { isLocalPidAlive } from "../src/writer-lease.js"
 
 const runWithTestTracer = <A, E, R>(
   testId: string,
@@ -1259,6 +1260,125 @@ process.exit(2)`,
               expect.unreachable("Expected Completed")
             })
             .exhaustive()
+        }),
+      ),
+  )
+
+  it.live(
+    "F-26: fiber interruption terminates child process group including spawned descendant and escalates immediately if SIGTERM was already sent",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
+          const binDir = join(dir, "bin")
+          const parentPidFile = join(dir, "parent.pid")
+          const descendantPidFile = join(dir, "descendant.pid")
+          writeExecutableScript(
+            binDir,
+            "nx",
+            `const { spawn } = require("node:child_process")
+const { writeFileSync } = require("node:fs")
+const trapTerm = process.env.TRAP_TERM === "1"
+if (trapTerm) { process.on("SIGTERM", () => {}) }
+const child = spawn(process.execPath, ["-e", trapTerm ? "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)" : "setInterval(() => {}, 1000)"], { stdio: "ignore" })
+writeFileSync(${JSON.stringify(descendantPidFile)}, String(child.pid))
+writeFileSync(${JSON.stringify(parentPidFile)}, String(process.pid))
+setInterval(() => {}, 1000)`,
+          )
+          writeFileSync(
+            join(repoRoot, "libs", "alpha", "src", "index.ts"),
+            "export const alpha = 55\n",
+            "utf8",
+          )
+
+          // 1. Direct fiber interruption kills both parent verify process and non-detached descendant
+          const fiber1 = yield* completeUnitImpl(
+            {
+              runId: WorkflowRunId.make("run-interrupt-group-1"),
+              level: "slice",
+              baseSha,
+              unit: makePackageUnit({
+                unitId: "pkg-int-1",
+                command: "nx run @harness/alpha:verify",
+              }),
+              attempt: AttemptNumber.make(1),
+              cwd: repoRoot,
+              siblingInFlightOwnedPaths: [],
+            },
+            { env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` } },
+          ).pipe(Effect.forkChild)
+
+          for (let i = 0; i < 100; i += 1) {
+            if (existsSync(parentPidFile) && existsSync(descendantPidFile)) break
+            yield* Effect.sleep("20 millis")
+          }
+          const parentPid1 = Number(readFileSync(parentPidFile, "utf8").trim())
+          const descendantPid1 = Number(readFileSync(descendantPidFile, "utf8").trim())
+          expect(isLocalPidAlive(parentPid1)).toBe(true)
+          expect(isLocalPidAlive(descendantPid1)).toBe(true)
+
+          yield* Fiber.interrupt(fiber1)
+          const exit1 = yield* Fiber.await(fiber1)
+          match(exit1)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(isPureInterruptCause(cause)).toBe(true)
+            })
+            .with({ _tag: "Success" }, () => expect.unreachable("Expected pure interrupt"))
+            .exhaustive()
+          expect(isLocalPidAlive(parentPid1)).toBe(false)
+          expect(isLocalPidAlive(descendantPid1)).toBe(false)
+
+          rmSync(parentPidFile, { force: true })
+          rmSync(descendantPidFile, { force: true })
+
+          // 2. Interruption after timeout already sent SIGTERM escalates immediately to SIGKILL (-pid)
+          const fiber2 = yield* completeUnitImpl(
+            {
+              runId: WorkflowRunId.make("run-interrupt-group-2"),
+              level: "slice",
+              baseSha,
+              unit: makePackageUnit({
+                unitId: "pkg-int-2",
+                command: "nx run @harness/alpha:verify",
+              }),
+              attempt: AttemptNumber.make(1),
+              cwd: repoRoot,
+              siblingInFlightOwnedPaths: [],
+            },
+            {
+              verifyTimeoutMs: 60,
+              env: {
+                ...process.env,
+                TRAP_TERM: "1",
+                PATH: `${binDir}:${process.env.PATH ?? ""}`,
+              },
+            },
+          ).pipe(Effect.forkChild)
+
+          for (let i = 0; i < 100; i += 1) {
+            if (existsSync(parentPidFile) && existsSync(descendantPidFile)) break
+            yield* Effect.sleep("20 millis")
+          }
+          const parentPid2 = Number(readFileSync(parentPidFile, "utf8").trim())
+          const descendantPid2 = Number(readFileSync(descendantPidFile, "utf8").trim())
+          // Allow verifyTimeoutMs (60ms) to send SIGTERM while 500ms grace timer is still pending
+          yield* Effect.sleep("120 millis")
+          expect(isLocalPidAlive(parentPid2)).toBe(true)
+          expect(isLocalPidAlive(descendantPid2)).toBe(true)
+
+          const startInterruptMs = Date.now()
+          yield* Fiber.interrupt(fiber2)
+          const interruptElapsedMs = Date.now() - startInterruptMs
+          const exit2 = yield* Fiber.await(fiber2)
+          match(exit2)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(isPureInterruptCause(cause)).toBe(true)
+            })
+            .with({ _tag: "Success" }, () => expect.unreachable("Expected pure interrupt"))
+            .exhaustive()
+          expect(isLocalPidAlive(parentPid2)).toBe(false)
+          expect(isLocalPidAlive(descendantPid2)).toBe(false)
+          expect(interruptElapsedMs).toBeLessThan(350)
         }),
       ),
   )

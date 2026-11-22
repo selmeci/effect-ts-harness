@@ -37,9 +37,9 @@ Before reading or judging diff hunks, gather deterministic routing and graph con
 
 Follow the `ReviewRoutingPlan` from Stage 1 (see [references/review-routing-and-lenses.md](references/review-routing-and-lenses.md) for observable predicates and lens checklists):
 
-- **`skip`:** Non-empty diff (`changedFiles.length > 0`, `changedLineCount < 40`) where **every** file matches the non-governance documentation allowlist (`*.md`, `*.mdx`, `*.txt`, `LICENSE*` outside `adapters/`, `agent-patterns/`, and `docs/{specs,adr}/`) with zero surface flags (empty `changedFiles` or missing `changedLineCount` is rejected, never skipped). Emit the Stage 4 receipt noting `depth: skip` and stop.
+- **`skip`:** Non-empty diff (`changedFiles.length > 0`, `changedLineCount < 40`, no `remediationContext`) where **every** file matches the non-governance documentation allowlist (`*.md`, `*.mdx`, `*.txt`, `LICENSE*` outside `adapters/`, `agent-patterns/`, and `docs/{specs,adr}/`) with zero surface flags (empty `changedFiles` or missing `changedLineCount` is rejected, never skipped). Emit the Stage 4 receipt noting `depth: skip` and stop.
 - **`lite`:** Single file (`changedFiles.length === 1`), `changedLineCount < 40`, `1` selection, and no `focused`/`full` escalator (e.g. a small `< 40`-line localized change in a single `scope:web` component, single spec/ADR doc, single test file, or single non-doc config/script). Run a single-pass read-only review using the matching specialist lens without swarming.
-- **`focused`:** Not `full`, and `changedFiles.length > 1`, `changedLineCount >= 40` (`< 180`), `2` selections, `hasAuthOrSecretSurface` (even `< 40` lines), `hasContractBoundaryChange` (even `< 40` lines), or manifest diagnostic warnings. Dispatch only the signal-routed specialist(s) via `invoke_subagent` or `swarm` (`model: "gemini-4-hydrogen-medium"`).
+- **`focused`:** Not `full`, and `changedFiles.length > 1`, `changedLineCount >= 40` (`< 180`), `2` selections, `hasAuthOrSecretSurface` (even `< 40` lines), `hasContractBoundaryChange` (even `< 40` lines), non-empty `remediationContext`, or manifest diagnostic warnings. Dispatch only the signal-routed specialist(s) via `invoke_subagent` or `swarm` (`model: "gemini-4-hydrogen-medium"`), fanning out per `reviewSlices` when present (`changedFiles.length >= REVIEW_SLICE_FILE_THRESHOLD`).
 - **`full`:** `hasStatefulOrDeciderChange` (`type:core`, `type:domain`, `libs/es/`, deciders/outbox/projectors/gates), `hasMigrationOrInfraBindingChange` (`migrations/*.sql`, `*migrator*`, `alchemy.run.ts`), `touchedTiers.length >= 2`, `selections.length >= 3`, or `changedLineCount >= 180`. Dispatch all routed specialists in parallel—always including **both** `effect-ears-test-reviewer` (with the `8-Point Anti-Rubber-Stamp` Audit) and `effect-adversarial-reviewer` for `type:core`/`type:domain`.
 
 ### Stage 3: Graph Verification & Hard False-Positive Suppression Gate
@@ -61,7 +61,7 @@ Emit the exact 4-section report defined in [references/report-contract-and-suppr
 
 ### Mandatory Second-Pass Remediation Re-Audit
 
-Whenever resolving `blocker`, `critical`, or `major` findings or reviewing diffs above `REVIEW_SLICE_FILE_THRESHOLD` (`12` changed files), enforce sliced routing and a mandatory second-pass specialist re-audit:
+Whenever resolving `blocker`, `critical`, or `major` findings or reviewing diffs at or above `REVIEW_SLICE_FILE_THRESHOLD` (`12` changed files), enforce sliced routing and a mandatory second-pass specialist re-audit:
 
 1. **Remediation Routing Context (`remediationContext`):** Pass `remediationContext: { priorSpecialists, maxSeverity }` into `harness_review_route` after applying fixes for any `blocker`, `critical`, or `major` finding so deterministic routing retains every cited specialist with `mandatory: true` and enforces depth `>= focused`.
 2. **Cohesive Package Slices (`reviewSlices`):** When `harness_review_route` emits `reviewSlices` (for diffs `>= REVIEW_SLICE_FILE_THRESHOLD`), dispatch specialist subagents per slice with that slice's exact file list and selections while preserving whole-diff cross-package seam inspection.

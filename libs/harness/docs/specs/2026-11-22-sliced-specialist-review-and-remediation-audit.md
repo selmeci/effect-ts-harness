@@ -13,6 +13,7 @@ informed_by:
 enforced_by:
   - libs/harness/contract/src/review-routing.ts
   - libs/harness/decision/src/review-slice-partitioner.ts
+  - libs/harness/decision/src/review-signal-inference.ts
   - libs/harness/decision/src/review-router-decision.ts
   - apps/harness-mcp/src/tools/review-route-helpers.ts
   - apps/harness-mcp/src/tools/graph-navigation.tools.ts

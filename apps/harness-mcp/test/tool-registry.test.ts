@@ -217,4 +217,37 @@ describe("HarnessMcp.dispatchTool (SPEC-0011 §4)", () => {
         })
       }),
   )
+
+  it.effect(
+    "F-20: truncates oversized (>256-char) unknown tool names into typed UnknownToolError instead of SchemaError defect",
+    () =>
+      Effect.gen(function* () {
+        const longToolName = `unknown_${"x".repeat(320)}`
+        const exit = yield* dispatchMcpTool({
+          toolName: longToolName,
+          args: {},
+        }).pipe(Effect.provide(McpToolRegistryLive), Effect.exit)
+
+        match(exit)
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            match(Cause.findErrorOption(cause))
+              .with({ _tag: "Some" }, ({ value }) => {
+                expect(value).toBeInstanceOf(UnknownToolError)
+                expect(value._tag).toBe("UnknownToolError")
+                if (value instanceof UnknownToolError) {
+                  expect(value.toolName.length).toBe(256)
+                  expect(value.toolName).toBe(longToolName.slice(0, 256))
+                }
+              })
+              .with({ _tag: "None" }, () => {
+                expect.unreachable("Expected UnknownToolError instead of defect")
+              })
+              .exhaustive()
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected UnknownToolError failure")
+          })
+          .exhaustive()
+      }),
+  )
 })

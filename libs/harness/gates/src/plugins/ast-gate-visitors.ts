@@ -374,7 +374,7 @@ export const visitSourceFileSinglePass = (
       const m = `Silent Effect.catchDefect in '${fp}' — log or re-fail.`
       pushViolation(catEff, "silent-catch-defect", m, node)
     }
-    if (isProdSrc && isUntypedCatchCauseWithoutInterruptGuard(node)) {
+    if (isProdSrc && isUntypedCatchCauseWithoutInterruptGuard(node, sourceFile)) {
       const m = `Effect.catchCause in '${fp}' must guard isPureInterruptCause(cause).`
       pushViolation(catEff, "untyped-catch-cause-interrupt-leak", m, node)
     }

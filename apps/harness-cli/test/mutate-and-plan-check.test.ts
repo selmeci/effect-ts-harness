@@ -737,7 +737,7 @@ describe("CLI handleMutate, handleVerify (mutate-stamp), handleBench, and handle
       const { implBranch } = resolveOmnigraphTaskBranches(dir, nodeSyncHostIo)
       const initialStamp = writeVerifyStamp(dir, nodeSyncHostIo, implBranch, {
         dstSeed: DstSeed.make(12345),
-        dstSeedsRun: DstSeedsRunCount.make(42),
+        dstSeedsRun: DstSeedsRunCount.make(100),
       })
       expect(initialStamp.mutableTreeHash).toBeDefined()
 
@@ -843,6 +843,173 @@ describe("CLI handleMutate, handleVerify (mutate-stamp), handleBench, and handle
       }
       expect(cleanupStalePlanSnapshotAfterDone(dir, failUnlinkIo)).toContain("EPERM")
     } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  it("REQ-4.4 F-09: doc-only fast-path enforces CI seed threshold, DST_SEED match/parse, agent-patterns/span-trace gates", async () => {
+    const dir = initTempGitRepo("harness-doc-fastpath-edges-")
+    const prevCi = process.env.CI
+    const prevDstSeed = process.env.DST_SEED
+    try {
+      git(dir, ["checkout", "-b", "feat/doc-fastpath-edges"])
+      writeDemoGatesPkg(
+        dir,
+        "export const isEven = (n: number): boolean => n % 2 === 0\n",
+        [
+          'import { expect, it } from "vitest"',
+          'import { isEven } from "../src/engine.js"',
+          'it("kills %", () => { expect(isEven(2)).toBe(true); expect(isEven(3)).toBe(false) })',
+        ].join("\n"),
+      )
+      mkdirSync(join(dir, "agent-patterns"), { recursive: true })
+      writeFileSync(join(dir, "README.md"), "# initial\n", "utf8")
+      gitCommitAll(dir, "add gates")
+
+      const mutRes = await Effect.runPromise(
+        handleMutate(["mutate", "--strict"], { repoRoot: dir }),
+      )
+      expect(mutRes.exitCode).toBe(0)
+
+      const { implBranch } = resolveOmnigraphTaskBranches(dir, nodeSyncHostIo)
+      const emptyGraph = buildHarnessGraph({
+        fns: [],
+        services: [],
+        layers: [],
+        errors: [],
+        tests: [],
+      })
+
+      // (a) CI=true with stamped dstSeedsRun < 100 bypasses fast-path
+      process.env.CI = "true"
+      Reflect.deleteProperty(process.env, "DST_SEED")
+      writeVerifyStamp(dir, nodeSyncHostIo, implBranch, {
+        dstSeed: DstSeed.make(12345),
+        dstSeedsRun: DstSeedsRunCount.make(42),
+      })
+      const lowSeedRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(lowSeedRes).toBeUndefined()
+
+      // (b) Mismatched DST_SEED bypasses fast-path
+      writeVerifyStamp(dir, nodeSyncHostIo, implBranch, {
+        dstSeed: DstSeed.make(12345),
+        dstSeedsRun: DstSeedsRunCount.make(100),
+      })
+      process.env.DST_SEED = "99999"
+      const mismatchSeedRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(mismatchSeedRes).toBeUndefined()
+
+      // (b2) Matching DST_SEED + CI=true + dstSeedsRun=100 passes fast-path cleanly
+      process.env.DST_SEED = "12345"
+      rmSync(join(dir, "agent-patterns"), { recursive: true, force: true })
+      const matchingSeedRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(matchingSeedRes?.exitCode).toBe(0)
+      mkdirSync(join(dir, "agent-patterns"), { recursive: true })
+
+      // (c) Invalid DST_SEED fails closed with verify:dst-seed
+      process.env.DST_SEED = "not-a-number"
+      const invalidSeedRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(invalidSeedRes?.exitCode).toBe(1)
+      expect(invalidSeedRes?.stderr).toContain("verify:dst-seed")
+
+      // (d) agent-patterns/ present without required docs fails closed with verify:gc-doc-only
+      Reflect.deleteProperty(process.env, "DST_SEED")
+      const missingPatternsRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(missingPatternsRes?.exitCode).toBe(1)
+      expect(missingPatternsRes?.stderr).toContain("verify:gc-doc-only")
+
+      // (e) Corrupt .harness/span-trace.json and SpanCausalityError budget violations both fail closed with verify:span-budget
+      rmSync(join(dir, "agent-patterns"), { recursive: true, force: true })
+      mkdirSync(join(dir, ".harness"), { recursive: true })
+      writeFileSync(join(dir, ".harness", "span-trace.json"), "{not-json", "utf8")
+      const corruptSpanRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(corruptSpanRes?.exitCode).toBe(1)
+      expect(corruptSpanRes?.stderr).toContain("verify:span-budget")
+
+      const violatingSpans = [
+        { spanId: "root-1", name: "Root.run", parentSpanId: null, durationMs: 10 },
+        ...Array.from({ length: 6 }, (_, idx) => ({
+          spanId: `child-${idx}`,
+          name: "Child.work",
+          parentSpanId: "root-1",
+          durationMs: 1,
+        })),
+      ]
+      writeFileSync(
+        join(dir, ".harness", "span-trace.json"),
+        JSON.stringify(violatingSpans),
+        "utf8",
+      )
+      const causalityViolationRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(causalityViolationRes?.exitCode).toBe(1)
+      expect(causalityViolationRes?.stderr).toContain("verify:span-budget")
+    } finally {
+      if (prevCi === undefined) {
+        Reflect.deleteProperty(process.env, "CI")
+      } else {
+        process.env.CI = prevCi
+      }
+      if (prevDstSeed === undefined) {
+        Reflect.deleteProperty(process.env, "DST_SEED")
+      } else {
+        process.env.DST_SEED = prevDstSeed
+      }
       rmSync(dir, { recursive: true, force: true })
     }
   }, 60_000)

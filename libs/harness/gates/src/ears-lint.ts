@@ -641,8 +641,9 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
             }
           }
 
+          const cleanEffectSymbol =
+            rawEffectSymbol !== undefined ? stripMarkup(rawEffectSymbol).trim() : ""
           if (frontmatterEndIdx !== -1 && rawEffectSymbol !== undefined) {
-            const cleanEffectSymbol = stripMarkup(rawEffectSymbol).trim()
             if (
               !isPlaceholderEffectSymbol(cleanEffectSymbol) &&
               !ownedFrontmatterSymbols.has(cleanEffectSymbol)
@@ -658,10 +659,10 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
           requirements.push({
             line: lineNum,
             id: cleanId,
-            pattern: rawPattern.trim(),
+            pattern: stripMarkup(rawPattern).trim(),
             requirement: rawReq.trim(),
-            effectSymbol: rawEffectSymbol ? rawEffectSymbol.trim() || undefined : undefined,
-            verification: rawVerif.trim(),
+            effectSymbol: cleanEffectSymbol.length > 0 ? cleanEffectSymbol : undefined,
+            verification: stripMarkup(rawVerif).trim(),
           })
         }
       }

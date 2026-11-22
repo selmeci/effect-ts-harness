@@ -484,4 +484,38 @@ describe("worker isolation and workflow worktree policy", () => {
       )
     }
   })
+
+  it("SPEC-0030 2nd-pass: denies piped xargs inspect, wrapper -C .git, and .git/h* / .harness/o* globs while allowing workflow worktrees", () => {
+    for (const credCmd of [
+      "pnpm -C .git exec ls",
+      "env -C .git ls",
+      "echo .git | xargs ls",
+      "printf '%s\\n' .git/h* | xargs env cat",
+      "echo .harness/o* | xargs -I{} sh -c 'cat {}'",
+    ]) {
+      expect(isWorkerDaemonCredentialShellAccess(credCmd), credCmd).toBe(true)
+      expect(classifyCommand(credCmd, { unitWorkerMode: true }), credCmd).toBe("deny")
+      expect(explainCommandDenyRule(credCmd, { unitWorkerMode: true })?.ruleId, credCmd).toBe(
+        "worker-daemon-credential-access",
+      )
+    }
+
+    for (const globPath of [".git/h*", ".harness/o*"]) {
+      expect(classifyFileRead(globPath, { unitWorkerMode: true }), globPath).toEqual(
+        expect.objectContaining({ verdict: "deny", ruleId: "worker-daemon-credential-access" }),
+      )
+      expect(classifyFileWrite(globPath, { unitWorkerMode: true }), globPath).toEqual(
+        expect.objectContaining({ verdict: "deny", ruleId: "worker-daemon-credential-access" }),
+      )
+    }
+
+    const worktreeFile = ".harness/workflow-worktrees/run-1/u1/src/foo.ts"
+    expect(classifyFileRead(worktreeFile, { unitWorkerMode: true }).verdict).toBe("allow")
+    expect(classifyFileWrite(worktreeFile, { unitWorkerMode: true }).verdict).toBe("allow")
+    expect(isWorkerDaemonCredentialShellAccess(`echo ${worktreeFile} | xargs ls`)).toBe(false)
+    expect(classifyCommand(`echo ${worktreeFile} | xargs ls`, { unitWorkerMode: true })).not.toBe(
+      "deny",
+    )
+    expect(classifyCommand(`cat ${worktreeFile}`, { unitWorkerMode: true })).toBe("allow")
+  })
 })

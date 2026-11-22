@@ -1,8 +1,7 @@
-import { execFile } from "node:child_process"
+import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { lstatSync } from "node:fs"
 import { join } from "node:path"
-import { promisify } from "node:util"
 import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
@@ -28,6 +27,7 @@ import type { ExtendedHostIo } from "@harness/service/host-io"
 import { nodeSyncHostIo } from "./node-host-io.js"
 import { toWorkflowStoreUnavailableError } from "./omnigraph-workflow-store.js"
 import { withOmnigraphClusterStartupLock } from "./workflow/cluster-startup-lock.js"
+import { signalChildProcessGroup } from "./workflow/verify-child-process.js"
 import {
   computeSha256Hex,
   parseAndValidateExportNdjson,
@@ -36,7 +36,9 @@ import {
 import { resolveWorkflowRuntimePaths } from "./worktree-repo-root.js"
 import { isLocalPidAlive, withAdvisoryFlock } from "./writer-lease.js"
 
-const execFileAsync = promisify(execFile)
+const OMNIGRAPH_CLI_TIMEOUT_MS = 60_000
+const OMNIGRAPH_CLI_MAX_BUFFER_BYTES = 64 * 1024 * 1024
+const OMNIGRAPH_CLI_KILL_GRACE_MS = 500
 
 /** Default number of recent Lance MVCC versions retained during offline cleanup. */
 export const DEFAULT_WORKFLOW_CLEANUP_KEEP_VERSIONS: WorkflowCleanupKeepVersions =
@@ -136,15 +138,178 @@ const runOmnigraphCli = (
   { readonly stdout: string; readonly stderr: string },
   WorkflowStoreUnavailableError
 > =>
-  Effect.tryPromise({
-    try: () =>
-      execFileAsync(omnigraphBin, [...args], {
-        encoding: "utf8",
-        maxBuffer: 64 * 1024 * 1024,
-        timeout: 60_000,
-        env: { ...process.env, ...env },
-      }),
-    catch: (cause) => toWorkflowStoreUnavailableError(operation, cause),
+  Effect.callback((resume) => {
+    let settled = false
+    let cancelled = false
+    let childTerminated = false
+    let timedOut = false
+    let bufferExceeded = false
+    let sigtermSent = false
+    let sigkillSent = false
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined = undefined
+    let killGraceTimer: ReturnType<typeof setTimeout> | undefined = undefined
+    let stdoutBytes = 0
+    let stderrBytes = 0
+    const stdoutChunks: Array<Buffer> = []
+    const stderrChunks: Array<Buffer> = []
+    const terminateWaiters: Array<() => void> = []
+
+    const child = spawn(omnigraphBin, [...args], {
+      env: { ...process.env, ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      detached: process.platform !== "win32",
+    })
+
+    const clearTimeoutTimer = (): void => {
+      if (timeoutTimer !== undefined) {
+        clearTimeout(timeoutTimer)
+        timeoutTimer = undefined
+      }
+    }
+
+    const clearGraceTimer = (): void => {
+      if (killGraceTimer !== undefined) {
+        clearTimeout(killGraceTimer)
+        killGraceTimer = undefined
+      }
+    }
+
+    const destroyStdio = (): void => {
+      child.stdout?.removeAllListeners("data")
+      child.stdout?.destroy()
+      child.stderr?.removeAllListeners("data")
+      child.stderr?.destroy()
+    }
+
+    const notifyTerminated = (): void => {
+      if (childTerminated) return
+      childTerminated = true
+      clearGraceTimer()
+      destroyStdio()
+      while (terminateWaiters.length > 0) {
+        terminateWaiters.shift()?.()
+      }
+    }
+
+    const terminateChild = (): void => {
+      if (childTerminated || child.exitCode !== null || child.signalCode !== null) return
+      if (sigtermSent) {
+        if (!sigkillSent) {
+          sigkillSent = true
+          signalChildProcessGroup(child, "SIGKILL")
+        }
+        return
+      }
+      sigtermSent = true
+      signalChildProcessGroup(child, "SIGTERM")
+      killGraceTimer = setTimeout(() => {
+        if (
+          !childTerminated &&
+          child.exitCode === null &&
+          child.signalCode === null &&
+          !sigkillSent
+        ) {
+          sigkillSent = true
+          signalChildProcessGroup(child, "SIGKILL")
+        }
+      }, OMNIGRAPH_CLI_KILL_GRACE_MS)
+      killGraceTimer.unref()
+    }
+
+    const appendBoundedChunk = (
+      chunk: Buffer | string,
+      chunks: Array<Buffer>,
+      currentBytes: number,
+    ): number => {
+      const buf = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk
+      const nextBytes = currentBytes + buf.byteLength
+      if (nextBytes > OMNIGRAPH_CLI_MAX_BUFFER_BYTES) {
+        if (!bufferExceeded) {
+          bufferExceeded = true
+          clearTimeoutTimer()
+          terminateChild()
+        }
+        return nextBytes
+      }
+      chunks.push(buf)
+      return nextBytes
+    }
+
+    child.stdout?.on("data", (chunk: Buffer | string) => {
+      stdoutBytes = appendBoundedChunk(chunk, stdoutChunks, stdoutBytes)
+    })
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+      stderrBytes = appendBoundedChunk(chunk, stderrChunks, stderrBytes)
+    })
+
+    timeoutTimer = setTimeout(() => {
+      timedOut = true
+      terminateChild()
+    }, OMNIGRAPH_CLI_TIMEOUT_MS)
+    timeoutTimer.unref()
+
+    child.once("error", (err) => {
+      clearTimeoutTimer()
+      notifyTerminated()
+      if (!settled) {
+        settled = true
+        resume(Effect.fail(toWorkflowStoreUnavailableError(operation, err)))
+      }
+    })
+
+    child.once("exit", () => {
+      // Only destroy stdio on exit when aborting so normal runs drain stdout/stderr completely.
+      if (cancelled || timedOut || bufferExceeded) {
+        destroyStdio()
+      }
+      if (cancelled) {
+        notifyTerminated()
+      }
+    })
+
+    child.once("close", (code, signal) => {
+      clearTimeoutTimer()
+      notifyTerminated()
+      if (settled) return
+      settled = true
+      const stdout = Buffer.concat(stdoutChunks).toString("utf8")
+      const stderr = Buffer.concat(stderrChunks).toString("utf8")
+      const stderrSuffix = stderr.trim().length > 0 ? `: ${stderr.trim()}` : ""
+      const failWith = (message: string): void => {
+        resume(Effect.fail(toWorkflowStoreUnavailableError(operation, new Error(message))))
+      }
+      if (bufferExceeded) {
+        failWith(`omnigraph CLI maxBuffer (${OMNIGRAPH_CLI_MAX_BUFFER_BYTES} bytes) exceeded`)
+        return
+      }
+      if (timedOut) {
+        failWith(`omnigraph CLI timed out after ${OMNIGRAPH_CLI_TIMEOUT_MS}ms${stderrSuffix}`)
+        return
+      }
+      if (signal !== null) {
+        failWith(`omnigraph CLI terminated by signal ${signal}${stderrSuffix}`)
+        return
+      }
+      if ((code ?? 1) !== 0) {
+        failWith(`omnigraph CLI exited with code ${code ?? 1}${stderrSuffix}`)
+        return
+      }
+      resume(Effect.succeed({ stdout, stderr }))
+    })
+
+    return Effect.callback<void>((done) => {
+      settled = true
+      cancelled = true
+      clearTimeoutTimer()
+      if (childTerminated || child.exitCode !== null || child.signalCode !== null) {
+        notifyTerminated()
+        done(Effect.void)
+        return
+      }
+      terminateWaiters.push(() => done(Effect.void))
+      terminateChild()
+    })
   })
 
 const readLockIdsFromLockJson = (
@@ -166,7 +331,11 @@ const readLockIdsFromLockJson = (
     })
     .with({ _tag: "Success" }, ({ success }) => {
       match(Schema.decodeOption(LockJsonSchema)(success))
-        .with({ _tag: "None" }, () => undefined)
+        .with({ _tag: "None" }, () => {
+          process.stderr.write(
+            `[harness:workflow] Warning: Failed to decode admission lock metadata at ${lockJsonPath}\n`,
+          )
+        })
         .with({ _tag: "Some" }, ({ value }) => {
           for (const key of ["lock_id", "id", "lockId"]) {
             const val = value[key]
@@ -252,6 +421,21 @@ const forceUnlockClusterAdmissionLocks = (
   )
 }
 
+const unlockAdmissionLocksOnError = (
+  omnigraphBin: string,
+  clusterDir: string,
+  hostIo: ExtendedHostIo,
+  env: Readonly<Record<string, string | undefined>>,
+  stepName: string,
+): Effect.Effect<void> =>
+  forceUnlockClusterAdmissionLocks(omnigraphBin, clusterDir, hostIo, env, []).pipe(
+    Effect.catch((err) =>
+      Effect.logWarning(
+        `Failed to force-unlock cluster admission locks after ${stepName} failure: ${err.reason}`,
+      ),
+    ),
+  )
+
 const assertOmnigraphServerStopped = (
   clusterDir: string,
   hostIo: ExtendedHostIo,
@@ -291,7 +475,12 @@ const assertOmnigraphServerStopped = (
           .with({ _tag: "None" }, () =>
             match(decodeServerPidFallbackOption(success))
               .with({ _tag: "Some" }, ({ value }) => value.pid)
-              .with({ _tag: "None" }, () => undefined)
+              .with({ _tag: "None" }, () => {
+                process.stderr.write(
+                  `[harness:workflow] Warning: Failed to decode server metadata at ${serverJsonPath}\n`,
+                )
+                return undefined
+              })
               .exhaustive(),
           )
           .exhaustive()
@@ -381,9 +570,7 @@ export const runOfflineWorkflowMaintenance = Effect.fn("WorkflowMaintenance.runO
       env,
     ).pipe(
       Effect.onError(() =>
-        forceUnlockClusterAdmissionLocks(omnigraphBin, clusterDir, hostIo, env, []).pipe(
-          Effect.ignore,
-        ),
+        unlockAdmissionLocksOnError(omnigraphBin, clusterDir, hostIo, env, "export"),
       ),
     )
     yield* forceUnlockClusterAdmissionLocks(omnigraphBin, clusterDir, hostIo, env, [
@@ -463,9 +650,7 @@ export const runOfflineWorkflowMaintenance = Effect.fn("WorkflowMaintenance.runO
       env,
     ).pipe(
       Effect.onError(() =>
-        forceUnlockClusterAdmissionLocks(omnigraphBin, clusterDir, hostIo, env, []).pipe(
-          Effect.ignore,
-        ),
+        unlockAdmissionLocksOnError(omnigraphBin, clusterDir, hostIo, env, "optimize"),
       ),
     )
     yield* forceUnlockClusterAdmissionLocks(omnigraphBin, clusterDir, hostIo, env, [
@@ -490,9 +675,7 @@ export const runOfflineWorkflowMaintenance = Effect.fn("WorkflowMaintenance.runO
       env,
     ).pipe(
       Effect.onError(() =>
-        forceUnlockClusterAdmissionLocks(omnigraphBin, clusterDir, hostIo, env, []).pipe(
-          Effect.ignore,
-        ),
+        unlockAdmissionLocksOnError(omnigraphBin, clusterDir, hostIo, env, "cleanup"),
       ),
     )
 

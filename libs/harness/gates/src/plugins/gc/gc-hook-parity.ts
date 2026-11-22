@@ -6,8 +6,14 @@ import { ts } from "@harness/graph"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { type GcFinding, readTextOrReport } from "./gc-helpers.js"
 
+const HookHandlerEntrySchema = Schema.Struct({
+  type: Schema.optional(Schema.String),
+  command: Schema.optional(Schema.String),
+})
+
 const HookMatcherEntrySchema = Schema.Struct({
   matcher: Schema.optional(Schema.String),
+  hooks: Schema.optional(Schema.Array(HookHandlerEntrySchema)),
 })
 
 const HookMatcherContainerSchema = Schema.Struct({
@@ -124,14 +130,43 @@ const extractCanonicalToolArrays = (
 const compileMatchers = (
   relPath: string,
   eventName: "PreToolUse" | "PostToolUse",
-  entries: ReadonlyArray<{ readonly matcher?: string | undefined }>,
+  entries: ReadonlyArray<typeof HookMatcherEntrySchema.Type>,
   findings: Array<GcFinding>,
 ): { readonly rawMatchers: ReadonlyArray<string>; readonly regexes: ReadonlyArray<RegExp> } => {
   const rawMatchers: Array<string> = []
   const regexes: Array<RegExp> = []
+  const expectedSubcommandPattern = match(eventName)
+    .with("PreToolUse", () => /(?:harness\s+|(?:index|hook-entry)\.[cm]?[jt]s\b[\s\S]*?)\bguard\b/)
+    .with(
+      "PostToolUse",
+      () => /(?:harness\s+|(?:index|hook-entry)\.[cm]?[jt]s\b[\s\S]*?)\bingest\b/,
+    )
+    .exhaustive()
+  const expectedSubcommandName = match(eventName)
+    .with("PreToolUse", () => "guard")
+    .with("PostToolUse", () => "ingest")
+    .exhaustive()
+
   for (const entry of entries) {
     if (entry.matcher === undefined || entry.matcher.trim().length === 0) continue
     const raw = entry.matcher.trim()
+    const hasExpectedHookCommand = (entry.hooks ?? []).some(
+      (h) =>
+        (h.type === undefined || h.type === "command") &&
+        h.command !== undefined &&
+        expectedSubcommandPattern.test(h.command),
+    )
+    if (!hasExpectedHookCommand) {
+      findings.push(
+        makeParityFinding(
+          `${relPath}:${eventName}:hook-command:${raw}`,
+          relPath,
+          `${eventName} matcher '${raw}' in '${relPath}' is missing a hook command invoking 'harness ${expectedSubcommandName}'.`,
+          `Configure hook command invoking '${expectedSubcommandName}' under ${eventName} matcher '${raw}' in '${relPath}'.`,
+        ),
+      )
+      continue
+    }
     rawMatchers.push(raw)
     match(Result.try(() => new RegExp(`^(?:${raw})$`)))
       .with({ _tag: "Success" }, ({ success }) => {
@@ -185,6 +220,27 @@ const checkReadmeEventMatchers = (
   }
 
   const readmeMatchers = Array.from(block.matchAll(/Matcher\s+`([^`]+)`/g)).map((m) => m[1]!.trim())
+  const inlinePreMatch = match(eventName)
+    .with("PreToolUse", () => /Intercepts tool calls\s*\(([^)]+)\)/.exec(block))
+    .with("PostToolUse", () => null)
+    .exhaustive()
+
+  if (
+    hooksMatchers.length > 0 &&
+    readmeMatchers.length === 0 &&
+    inlinePreMatch?.[1] === undefined
+  ) {
+    findings.push(
+      makeParityFinding(
+        `${readmePath}:${eventName}:missing-matcher-doc`,
+        readmePath,
+        `Adapter README '${readmePath}' ${eventName} section documents neither 'Matcher \`...\`' clauses nor covered tools.`,
+        `Document 'Matcher \`...\`' clauses under ${eventName} in '${readmePath}' matching hooks.json.`,
+      ),
+    )
+    return
+  }
+
   if (readmeMatchers.length > 0) {
     const hooksSet = new Set(hooksMatchers)
     const readmeSet = new Set(readmeMatchers)
@@ -214,39 +270,41 @@ const checkReadmeEventMatchers = (
     }
   }
 
-  if (eventName === "PreToolUse") {
-    const inlineMatch = /Intercepts tool calls\s*\(([^)]+)\)/.exec(block)
-    if (inlineMatch?.[1] !== undefined) {
-      const documented = new Set(
-        Array.from(inlineMatch[1].matchAll(/`([^`]+)`/g)).map((m) => m[1]!.trim()),
-      )
-      const expectedSet = new Set(expectedPreTools)
-      for (const tool of [...expectedPreTools].sort(compareCodeUnits)) {
-        if (!documented.has(tool)) {
-          findings.push(
-            makeParityFinding(
-              `${readmePath}:PreToolUse:tool:${tool}`,
-              readmePath,
-              `README '${readmePath}' PreToolUse tool list omits '${tool}' enforced by hooks.json and '${GUARD_PAYLOAD_REL_PATH}'.`,
-              `Add '\`${tool}\`' to the PreToolUse Intercepts tool calls list in '${readmePath}'.`,
-            ),
-          )
+  match(eventName)
+    .with("PreToolUse", () => {
+      if (inlinePreMatch?.[1] !== undefined) {
+        const documented = new Set(
+          Array.from(inlinePreMatch[1].matchAll(/`([^`]+)`/g)).map((m) => m[1]!.trim()),
+        )
+        const expectedSet = new Set(expectedPreTools)
+        for (const tool of [...expectedPreTools].sort(compareCodeUnits)) {
+          if (!documented.has(tool)) {
+            findings.push(
+              makeParityFinding(
+                `${readmePath}:PreToolUse:tool:${tool}`,
+                readmePath,
+                `README '${readmePath}' PreToolUse tool list omits '${tool}' enforced by hooks.json and '${GUARD_PAYLOAD_REL_PATH}'.`,
+                `Add '\`${tool}\`' to the PreToolUse Intercepts tool calls list in '${readmePath}'.`,
+              ),
+            )
+          }
+        }
+        for (const tool of [...documented].sort(compareCodeUnits)) {
+          if (!expectedSet.has(tool)) {
+            findings.push(
+              makeParityFinding(
+                `${readmePath}:PreToolUse:extra-tool:${tool}`,
+                readmePath,
+                `README '${readmePath}' PreToolUse tool list cites '${tool}', which is not in canonical adapter tools.`,
+                `Remove or reconcile '${tool}' in '${readmePath}'.`,
+              ),
+            )
+          }
         }
       }
-      for (const tool of [...documented].sort(compareCodeUnits)) {
-        if (!expectedSet.has(tool)) {
-          findings.push(
-            makeParityFinding(
-              `${readmePath}:PreToolUse:extra-tool:${tool}`,
-              readmePath,
-              `README '${readmePath}' PreToolUse tool list cites '${tool}', which is not in canonical adapter tools.`,
-              `Remove or reconcile '${tool}' in '${readmePath}'.`,
-            ),
-          )
-        }
-      }
-    }
-  }
+    })
+    .with("PostToolUse", () => undefined)
+    .exhaustive()
 }
 
 const checkSingleAdapterParity = (

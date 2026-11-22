@@ -50,8 +50,31 @@ const isSchemaBrandCall = (node: ts.CallExpression): boolean =>
   staticStringExpr(node.arguments[0]) !== undefined
 
 const isPipeCallParent = (expr: ts.Node): ts.CallExpression | undefined => {
-  const p = expr.parent
-  if (p === undefined || !ts.isCallExpression(p)) return undefined
+  let currNode: ts.Node = expr
+  while (
+    currNode.parent !== undefined &&
+    (ts.isParenthesizedExpression(currNode.parent) ||
+      ts.isAsExpression(currNode.parent) ||
+      ts.isSatisfiesExpression(currNode.parent) ||
+      ts.isTypeAssertionExpression(currNode.parent) ||
+      ts.isNonNullExpression(currNode.parent))
+  ) {
+    currNode = currNode.parent
+  }
+  const p = currNode.parent
+  if (p === undefined) return undefined
+  if (
+    ts.isPropertyAccessExpression(p) &&
+    p.expression === currNode &&
+    SCHEMA_CHAIN_METHODS.has(p.name.text)
+  ) {
+    const pp = p.parent
+    if (pp !== undefined && ts.isCallExpression(pp) && pp.expression === p) {
+      return pp
+    }
+    return undefined
+  }
+  if (!ts.isCallExpression(p)) return undefined
   const callee = unwrapExpr(p.expression)
   if (ts.isPropertyAccessExpression(callee) && SCHEMA_CHAIN_METHODS.has(callee.name.text)) {
     return p
@@ -65,9 +88,37 @@ const isPipeCallParent = (expr: ts.Node): ts.CallExpression | undefined => {
 const findOutermostSchemaChain = (brandCall: ts.CallExpression): ts.CallExpression | undefined => {
   let curr: ts.CallExpression | undefined = undefined
   let probe: ts.Node = brandCall
+  while (
+    probe.parent !== undefined &&
+    (ts.isParenthesizedExpression(probe.parent) ||
+      ts.isAsExpression(probe.parent) ||
+      ts.isSatisfiesExpression(probe.parent) ||
+      ts.isTypeAssertionExpression(probe.parent) ||
+      ts.isNonNullExpression(probe.parent))
+  ) {
+    probe = probe.parent
+  }
+  if (
+    probe.parent !== undefined &&
+    ts.isCallExpression(probe.parent) &&
+    unwrapExpr(probe.parent.expression) === brandCall
+  ) {
+    curr = probe.parent
+    probe = probe.parent
+  }
   while (true) {
     const parentCall = isPipeCallParent(probe)
     if (parentCall === undefined) break
+    const pCallee = unwrapExpr(parentCall.expression)
+    const isMethodOnCurr =
+      (ts.isPropertyAccessExpression(pCallee) && unwrapExpr(pCallee.expression) === brandCall) ||
+      (ts.isPropertyAccessExpression(pCallee) &&
+        curr !== undefined &&
+        unwrapExpr(pCallee.expression) === curr)
+    const isPipeArg =
+      (ts.isIdentifier(pCallee) && pCallee.text === "pipe") ||
+      (curr === undefined && ts.isPropertyAccessExpression(pCallee))
+    if (!isMethodOnCurr && !isPipeArg) break
     curr = parentCall
     probe = parentCall
   }
@@ -78,6 +129,14 @@ const resolveChainRootSchema = (chainRoot: ts.CallExpression): ts.Expression => 
   let curr: ts.Expression = chainRoot
   while (ts.isCallExpression(curr)) {
     const callee = unwrapExpr(curr.expression)
+    if (
+      ts.isCallExpression(callee) &&
+      isSchemaBrandCall(callee) &&
+      curr.arguments[0] !== undefined
+    ) {
+      curr = unwrapExpr(curr.arguments[0])
+      continue
+    }
     if (
       ts.isPropertyAccessExpression(callee) &&
       SCHEMA_CHAIN_METHODS.has(callee.name.text) &&

@@ -51,15 +51,65 @@ const SUBSECTION_BOUNDARY_RE = /^(?:#{1,3}\s+|---\s*$)/
 /** Extracts a markdown subsection from `heading` up to the next H1–H3 heading, `---`, or EOF. */
 export const extractMarkdownSubsection = (content: string, heading: string): string | undefined => {
   const lines = content.split(/\r?\n/)
-  const startIdx = lines.findIndex((line) => line.trim() === heading)
+  let activeFence: { readonly char: "`" | "~"; readonly len: number } | null = null
+  let startIdx = -1
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!
+    if (activeFence === null) {
+      const openMatch = /^\s*(?:(`{3,})([^`\r\n]*)|(~{3,})([^\r\n]*))$/.exec(line)
+      if (openMatch !== null) {
+        const fenceToken = (openMatch[1] ?? openMatch[3])!
+        activeFence = {
+          char: fenceToken[0] === "~" ? "~" : "`",
+          len: fenceToken.length,
+        }
+        continue
+      }
+      if (line.trim() === heading) {
+        startIdx = i
+        break
+      }
+    } else {
+      const closeMatch = /^\s*(`{3,}|~{3,})\s*$/.exec(line)
+      if (
+        closeMatch !== null &&
+        closeMatch[1]![0] === activeFence.char &&
+        closeMatch[1]!.length >= activeFence.len
+      ) {
+        activeFence = null
+      }
+    }
+  }
   if (startIdx < 0) {
     return undefined
   }
   const collected: Array<string> = [lines[startIdx]!]
+  activeFence = null
   for (let i = startIdx + 1; i < lines.length; i++) {
     const line = lines[i]!
-    if (SUBSECTION_BOUNDARY_RE.test(line.trim())) {
-      break
+    if (activeFence === null) {
+      const openMatch = /^\s*(?:(`{3,})([^`\r\n]*)|(~{3,})([^\r\n]*))$/.exec(line)
+      if (openMatch !== null) {
+        const fenceToken = (openMatch[1] ?? openMatch[3])!
+        activeFence = {
+          char: fenceToken[0] === "~" ? "~" : "`",
+          len: fenceToken.length,
+        }
+        collected.push(line)
+        continue
+      }
+      if (SUBSECTION_BOUNDARY_RE.test(line.trim())) {
+        break
+      }
+    } else {
+      const closeMatch = /^\s*(`{3,}|~{3,})\s*$/.exec(line)
+      if (
+        closeMatch !== null &&
+        closeMatch[1]![0] === activeFence.char &&
+        closeMatch[1]!.length >= activeFence.len
+      ) {
+        activeFence = null
+      }
     }
     collected.push(line)
   }

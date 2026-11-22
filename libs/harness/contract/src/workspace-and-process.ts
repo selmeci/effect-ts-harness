@@ -102,7 +102,7 @@ export const SubprocessTimeoutMs = Schema.Int.pipe(
 export type SubprocessTimeoutMs = typeof SubprocessTimeoutMs.Type
 
 export const SubprocessMaxBufferBytes = Schema.Int.pipe(
-  Schema.check(Schema.isGreaterThanOrEqualTo(1024)),
+  Schema.check(Schema.isBetween({ minimum: 1024, maximum: 16_777_216 })),
   Schema.brand("SubprocessMaxBufferBytes"),
 )
 export type SubprocessMaxBufferBytes = typeof SubprocessMaxBufferBytes.Type
@@ -217,11 +217,22 @@ export const CompilerRepoRootInput = Schema.String.pipe(
 )
 export type CompilerRepoRootInput = typeof CompilerRepoRootInput.Type
 
+export const toCompilerRepoRootInput = (raw: string): CompilerRepoRootInput =>
+  CompilerRepoRootInput.make(raw.slice(0, 4096))
+
 export const CompilerOverlayErrorReason = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isMaxLength(8192)),
   Schema.brand("CompilerOverlayErrorReason"),
 )
 export type CompilerOverlayErrorReason = typeof CompilerOverlayErrorReason.Type
+
+export const toCompilerOverlayErrorReason = (
+  raw: string,
+  fallback = "Compiler overlay operation failed",
+): CompilerOverlayErrorReason => {
+  const normalized = raw.length > 0 ? raw : fallback.length > 0 ? fallback : "Unknown error"
+  return CompilerOverlayErrorReason.make(normalized.slice(0, 8192))
+}
 
 export class TsCompilerOverlayError extends Schema.TaggedError<TsCompilerOverlayError>()(
   "TsCompilerOverlayError",
@@ -311,6 +322,9 @@ export const McpToolInputName = Schema.String.pipe(
   Schema.brand("McpToolInputName"),
 )
 export type McpToolInputName = typeof McpToolInputName.Type
+
+export const toMcpToolInputName = (raw: string): McpToolInputName =>
+  McpToolInputName.make(raw.slice(0, 256))
 
 export class UnknownToolError extends Schema.TaggedError<UnknownToolError>()("UnknownToolError", {
   toolName: McpToolInputName,

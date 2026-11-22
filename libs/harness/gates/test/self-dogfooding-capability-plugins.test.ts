@@ -1566,6 +1566,7 @@ describe("Self-Dogfooding Capability Plugins & AST Gate Rules (SPEC-0011)", () =
                   "declare const WorkflowStore: { invoke: (i: unknown) => unknown; invokeWithMeta: (i: unknown) => unknown }",
                   "declare const otherClient: { invoke: (i: unknown) => unknown }",
                   "declare const expectedLeaseEpoch: number",
+                  "declare const otherEpoch: number",
                   "declare const fenceConfig: object",
                   "declare const target: object",
                   "declare const storeTarget: object",
@@ -1580,8 +1581,7 @@ describe("Self-Dogfooding Capability Plugins & AST Gate Rules (SPEC-0011)", () =
                   'export const okFenceSpread = invokeWorkflowStoreQueryOnce({ queryName: "wf_insert_run", expectMutation: true, ...fenceConfig })',
                   'export const okTargetSpread = WorkflowStore.invoke({ queryName: "wf_insert_run", expectMutation: true, ...target })',
                   'export const okStoreTarget = WorkflowStore.invokeWithMeta({ queryName: "wf_insert_run", expectMutation: true, ...storeTarget })',
-                  'export const okCondTrue = invokeWorkflowStoreQuery({ queryName: "wf_insert_run", expectMutation: true, ...(cond ? { expectedLeaseEpoch } : {}) })',
-                  'export const okCondFalse = invokeWorkflowStoreQuery({ queryName: "wf_insert_run", expectMutation: true, ...(cond ? {} : { expectedLeaseEpoch }) })',
+                  'export const okCondBoth = invokeWorkflowStoreQuery({ queryName: "wf_insert_run", expectMutation: true, ...(cond ? { expectedLeaseEpoch } : { expectedLeaseEpoch: otherEpoch }) })',
                   'export const okObjSpread = invokeWorkflowStoreQuery({ queryName: "wf_insert_run", expectMutation: true, ...({ expectedLeaseEpoch }) })',
                   'export const okLease1 = invokeWorkflowStoreQuery({ queryName: "wf_insert_writer_lease", expectMutation: true })',
                   "export const okLease2 = invokeWorkflowStoreQuery({ queryName: `wf_cas_writer_lease`, expectMutation: true })",
@@ -1619,9 +1619,11 @@ describe("Self-Dogfooding Capability Plugins & AST Gate Rules (SPEC-0011)", () =
                   "declare function invokeWorkflowStoreQuery(input: unknown): unknown",
                   "declare function invokeWorkflowStoreQueryWithMeta(input: unknown): unknown",
                   "declare function invokeWorkflowStoreQueryOnce(input: unknown): unknown",
+                  "declare function verifyOfflineClusterAccess(): void",
                   "declare function buildConfig(): object",
                   "declare const WorkflowStore: { invoke: (i: unknown) => unknown; invokeWithMeta: (i: unknown) => unknown }",
                   "declare const wf_cas_writer_lease: string",
+                  "declare const expectedLeaseEpoch: number",
                   "declare const storeConfig: object",
                   "declare const cond: boolean",
                   'export const bad1 = (invokeWorkflowStoreQuery)({ queryName: "wf_insert_run", expectMutation: true })',
@@ -1630,6 +1632,15 @@ describe("Self-Dogfooding Capability Plugins & AST Gate Rules (SPEC-0011)", () =
                   'export const bad4 = WorkflowStore.invoke({ queryName: "wf_insert_run", expectMutation: true, ...storeConfig })',
                   'export const bad5 = WorkflowStore.invokeWithMeta({ queryName: "wf_insert_run", expectMutation: true, ...(cond ? {} : {}), ...buildConfig() })',
                   "export const bad6 = invokeWorkflowStoreQuery({ queryName: wf_cas_writer_lease, expectMutation: true })",
+                  'export const badCondTrue = invokeWorkflowStoreQuery({ queryName: "wf_insert_run", expectMutation: true, ...(cond ? { expectedLeaseEpoch } : {}) })',
+                  'export const badCondFalse = invokeWorkflowStoreQuery({ queryName: "wf_insert_run", expectMutation: true, ...(cond ? {} : { expectedLeaseEpoch }) })',
+                  "const siblingVerify = () => { verifyOfflineClusterAccess() }",
+                  "export const badSiblingOffline = () => invokeWorkflowStoreQuery({ queryName: 'wf_insert_run', expectMutation: true })",
+                  "export const badTrailingOffline = () => { const res = invokeWorkflowStoreQuery({ queryName: 'wf_insert_run', expectMutation: true }); verifyOfflineClusterAccess(); return res }",
+                  'const badLocalReq = { queryName: "wf_insert_run", expectMutation: true }',
+                  "export const badLocalCall = invokeWorkflowStoreQuery(badLocalReq)",
+                  "const expectMutation = true",
+                  'export const badShorthand = invokeWorkflowStoreQuery({ queryName: "wf_insert_run", expectMutation })',
                 ].join("\n") + "\n",
               ),
             },
@@ -1639,7 +1650,41 @@ describe("Self-Dogfooding Capability Plugins & AST Gate Rules (SPEC-0011)", () =
         const fenceViolations = violatedReport.violations.filter(
           (v) => v.rule === "omnigraph-fenced-mutation",
         )
-        expect(fenceViolations).toHaveLength(6)
+        expect(fenceViolations).toHaveLength(12)
+      }),
+  )
+
+  it.effect(
+    "SPEC-0030 2nd-pass: flags dynamic expectMutation, spread bad local payload, and scopes verifyOfflineClusterAccess per function",
+    () =>
+      Effect.gen(function* () {
+        const report = yield* SelfDogfooding.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/infra/src/fence-recheck.ts"),
+              content: AstSourceContent.make(
+                [
+                  "declare function invokeWorkflowStoreQuery(input: unknown): unknown",
+                  "declare function verifyOfflineClusterAccess(): void",
+                  "const mutFlag = true",
+                  'const badLocalReq = { queryName: "wf_insert_run", expectMutation: true }',
+                  'export const badDynamicFlag = invokeWorkflowStoreQuery({ queryName: "wf_insert_run", expectMutation: mutFlag })',
+                  "export const badSpreadLocal = invokeWorkflowStoreQuery({ ...badLocalReq })",
+                  "export const badOuterOffline = () => {",
+                  "  verifyOfflineClusterAccess()",
+                  "  return () =>",
+                  '    invokeWorkflowStoreQuery({ queryName: "wf_insert_run", expectMutation: true })',
+                  "}",
+                ].join("\n") + "\n",
+              ),
+            },
+          ],
+          maxPluginFileLines: MaxPluginFileLines.make(800),
+        })
+        const fenceViolations = report.violations.filter(
+          (v) => v.rule === "omnigraph-fenced-mutation",
+        )
+        expect(fenceViolations).toHaveLength(3)
       }),
   )
 

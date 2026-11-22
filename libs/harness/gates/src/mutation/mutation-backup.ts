@@ -1,7 +1,8 @@
 /**
  * @fileoverview Backup recovery and git-diff line extraction helpers for mutation-check.
  */
-import { join, relative, resolve } from "node:path"
+import { randomBytes } from "node:crypto"
+import { dirname, join, relative, resolve } from "node:path"
 import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import { computeContentSha256 } from "@harness/contract"
@@ -275,17 +276,114 @@ export const BackupSchema = Schema.fromJsonString(
   }),
 )
 
-export const unlinkBackupChecked = (backupPath: string, hostIo: SyncHostIo): string | undefined => {
-  if (!hostIo.existsSync(backupPath)) return undefined
-  const unlinkRes = Result.try(() => {
-    hostIo.unlinkSync(backupPath)
-  })
-  return match(unlinkRes)
-    .with({ _tag: "Success" }, () => undefined)
+const checkNonSymlinkIfPresent = (
+  targetPath: string,
+  label: string,
+  hostIo: SyncHostIo,
+): string | undefined => {
+  const symRes = Result.try(() => hostIo.isSymbolicLinkSync(targetPath))
+  return match(symRes)
     .with(
       { _tag: "Failure" },
       ({ failure }) =>
-        `Failed to unlink '${backupPath}': ${failure instanceof Error ? failure.message : String(failure)}`,
+        `Failed to inspect ${label} '${targetPath}': ${failure instanceof Error ? failure.message : String(failure)}`,
+    )
+    .with({ _tag: "Success" }, ({ success: isSym }) =>
+      isSym ? `Refusing symlink ${label} '${targetPath}'` : undefined,
+    )
+    .exhaustive()
+}
+
+const existsSyncChecked = (
+  targetPath: string,
+  hostIo: SyncHostIo,
+): Result.Result<boolean, string> =>
+  Result.try({
+    try: () => hostIo.existsSync(targetPath),
+    catch: (err) => (err instanceof Error ? err.message : String(err)),
+  })
+
+const bestEffortUnlinkTemp = (tmpPath: string, hostIo: SyncHostIo): string | undefined => {
+  const existsRes = existsSyncChecked(tmpPath, hostIo)
+  return match(existsRes)
+    .with({ _tag: "Failure" }, ({ failure }) => ` (cleanup exists check failed: ${failure})`)
+    .with({ _tag: "Success" }, ({ success: exists }) =>
+      !exists
+        ? undefined
+        : match(
+            Result.try({
+              try: () => {
+                hostIo.unlinkSync(tmpPath)
+              },
+              catch: (err) => (err instanceof Error ? err.message : String(err)),
+            }),
+          )
+            .with({ _tag: "Success" }, () => undefined)
+            .with({ _tag: "Failure" }, ({ failure }) => ` (cleanup unlink failed: ${failure})`)
+            .exhaustive(),
+    )
+    .exhaustive()
+}
+
+const atomicWriteTextSync = (
+  targetPath: string,
+  content: string,
+  hostIo: SyncHostIo,
+): string | undefined => {
+  const tmpPath = `${targetPath}.tmp.${process.pid}.${randomBytes(6).toString("hex")}`
+  const tmpSymErr = checkNonSymlinkIfPresent(tmpPath, "temporary file", hostIo)
+  if (tmpSymErr !== undefined) return tmpSymErr
+  return match(
+    Result.try({
+      try: () => {
+        hostIo.writeTextSync(tmpPath, content)
+      },
+      catch: (err) => (err instanceof Error ? err.message : String(err)),
+    }),
+  )
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      const cleanupErr = bestEffortUnlinkTemp(tmpPath, hostIo) ?? ""
+      return `${failure}${cleanupErr}`
+    })
+    .with({ _tag: "Success" }, () =>
+      match(
+        Result.try({
+          try: () => {
+            hostIo.renameSync(tmpPath, targetPath)
+          },
+          catch: (err) => (err instanceof Error ? err.message : String(err)),
+        }),
+      )
+        .with({ _tag: "Success" }, () => undefined)
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          const cleanupErr = bestEffortUnlinkTemp(tmpPath, hostIo) ?? ""
+          return `${failure}${cleanupErr}`
+        })
+        .exhaustive(),
+    )
+    .exhaustive()
+}
+
+export const unlinkBackupChecked = (backupPath: string, hostIo: SyncHostIo): string | undefined => {
+  const symErr = checkNonSymlinkIfPresent(backupPath, "backup file", hostIo)
+  if (symErr !== undefined) return symErr
+  return match(existsSyncChecked(backupPath, hostIo))
+    .with({ _tag: "Failure" }, ({ failure }) => `Failed to stat '${backupPath}': ${failure}`)
+    .with({ _tag: "Success" }, ({ success: exists }) =>
+      !exists
+        ? undefined
+        : match(
+            Result.try(() => {
+              hostIo.unlinkSync(backupPath)
+            }),
+          )
+            .with({ _tag: "Success" }, () => undefined)
+            .with(
+              { _tag: "Failure" },
+              ({ failure }) =>
+                `Failed to unlink '${backupPath}': ${failure instanceof Error ? failure.message : String(failure)}`,
+            )
+            .exhaustive(),
     )
     .exhaustive()
 }
@@ -295,57 +393,104 @@ export const recoverStartupBackup = (
   backupPath: string,
   hostIo: SyncHostIo,
 ): string | undefined => {
-  if (!hostIo.existsSync(backupPath)) return undefined
-  const backupReadRes = Result.try(() => hostIo.readTextSync(backupPath))
-  const restoreFailureReason = match(backupReadRes)
-    .with({ _tag: "Success" }, ({ success: rawBackup }) =>
-      match(Schema.decodeOption(BackupSchema)(rawBackup))
-        .with({ _tag: "Some" }, ({ value: decoded }) => {
-          const content = decoded.content ?? decoded.originalSource
-          if (decoded.filePath === undefined || content === undefined)
-            return "Backup JSON missing filePath or content"
-          const resolvedTarget = resolve(repoRoot, decoded.filePath)
-          const relTarget = relative(resolve(repoRoot), resolvedTarget).replace(/\\/g, "/")
-          if (
-            relTarget.startsWith("..") ||
-            relTarget.startsWith("/") ||
-            (!relTarget.startsWith("libs/") && !relTarget.startsWith("apps/"))
-          ) {
-            return `Backup target path '${decoded.filePath}' escapes workspace bounds`
-          }
-          return match(Result.try(() => hostIo.readTextSync(resolvedTarget)))
-            .with(
-              { _tag: "Failure" },
-              ({ failure }) =>
-                `Failed to read target '${relTarget}': ${failure instanceof Error ? failure.message : String(failure)}`,
-            )
-            .with({ _tag: "Success" }, ({ success: currentContent }) => {
-              const currentSha256 = computeContentSha256(currentContent)
-              const originalSha256 = decoded.originalSha256 ?? computeContentSha256(content)
-              if (decoded.mutatedSha256 !== undefined && currentSha256 === decoded.mutatedSha256) {
-                const writeErr = match(
-                  Result.try(() => {
-                    hostIo.writeTextSync(resolvedTarget, content)
-                  }),
-                )
-                  .with({ _tag: "Success" }, () => undefined)
-                  .with({ _tag: "Failure" }, ({ failure }) =>
-                    failure instanceof Error ? failure.message : String(failure),
-                  )
-                  .exhaustive()
-                return writeErr !== undefined ? writeErr : unlinkBackupChecked(backupPath, hostIo)
+  const backupSymErr =
+    checkNonSymlinkIfPresent(dirname(backupPath), "backup directory", hostIo) ??
+    checkNonSymlinkIfPresent(backupPath, "backup file", hostIo)
+  if (backupSymErr !== undefined) {
+    return `[mutation-check] CRITICAL: Failed to restore startup backup '${backupPath}' (${backupSymErr}); aborting without deleting backup.`
+  }
+  const backupExistsRes = existsSyncChecked(backupPath, hostIo)
+  const backupAbsentOrErr = match(backupExistsRes)
+    .with({ _tag: "Failure" }, ({ failure }) => ({
+      _tag: "ReadBackup" as const,
+      stopReason: failure,
+    }))
+    .with({ _tag: "Success" }, ({ success: exists }) =>
+      exists ? ({ _tag: "Continue" as const } as const) : ({ _tag: "Absent" as const } as const),
+    )
+    .exhaustive()
+  const restoreFailureReason = match(backupAbsentOrErr)
+    .with({ _tag: "Absent" }, () => undefined)
+    .with({ _tag: "ReadBackup" }, ({ stopReason }) => stopReason)
+    .with({ _tag: "Continue" }, () => {
+      const backupReadRes = Result.try(() => hostIo.readTextSync(backupPath))
+      return match(backupReadRes)
+        .with({ _tag: "Success" }, ({ success: rawBackup }) =>
+          match(Schema.decodeOption(BackupSchema)(rawBackup))
+            .with({ _tag: "Some" }, ({ value: decoded }) => {
+              const content = decoded.content ?? decoded.originalSource
+              if (decoded.filePath === undefined || content === undefined)
+                return "Backup JSON missing filePath or content"
+              const resolvedTarget = resolve(repoRoot, decoded.filePath)
+              const relTarget = relative(resolve(repoRoot), resolvedTarget).replace(/\\/g, "/")
+              if (
+                relTarget.startsWith("..") ||
+                relTarget.startsWith("/") ||
+                (!relTarget.startsWith("libs/") && !relTarget.startsWith("apps/"))
+              ) {
+                return `Backup target path '${decoded.filePath}' escapes workspace bounds`
               }
-              if (currentSha256 === originalSha256) return unlinkBackupChecked(backupPath, hostIo)
-              return `Target '${relTarget}' was modified on disk (sha256=${currentSha256}) and matches neither originalSha256 (${originalSha256}) nor mutatedSha256 (${decoded.mutatedSha256 ?? "none"}); refusing to overwrite user edits. Inspect and remove '${backupPath}' manually.`
+              const targetSymErr = checkNonSymlinkIfPresent(
+                resolvedTarget,
+                "restore target",
+                hostIo,
+              )
+              if (targetSymErr !== undefined) return targetSymErr
+              const realCheck = Result.try(() => {
+                const canonicalRoot = hostIo.realpathSync(repoRoot)
+                const canonicalTarget = hostIo.realpathSync(resolvedTarget)
+                const canonicalRel = relative(canonicalRoot, canonicalTarget).replace(/\\/g, "/")
+                return (
+                  canonicalRel.startsWith("..") ||
+                  canonicalRel.startsWith("/") ||
+                  (!canonicalRel.startsWith("libs/") && !canonicalRel.startsWith("apps/"))
+                )
+              })
+              const escapeErr = match(realCheck)
+                .with(
+                  { _tag: "Failure" },
+                  ({ failure }) =>
+                    `Failed to canonicalize target '${relTarget}': ${failure instanceof Error ? failure.message : String(failure)}`,
+                )
+                .with({ _tag: "Success" }, ({ success: escaped }) =>
+                  escaped
+                    ? `Canonical target for '${decoded.filePath}' escapes libs/apps bounds`
+                    : undefined,
+                )
+                .exhaustive()
+              if (escapeErr !== undefined) return escapeErr
+              return match(Result.try(() => hostIo.readTextSync(resolvedTarget)))
+                .with(
+                  { _tag: "Failure" },
+                  ({ failure }) =>
+                    `Failed to read target '${relTarget}': ${failure instanceof Error ? failure.message : String(failure)}`,
+                )
+                .with({ _tag: "Success" }, ({ success: currentContent }) => {
+                  const currentSha256 = computeContentSha256(currentContent)
+                  const originalSha256 = decoded.originalSha256 ?? computeContentSha256(content)
+                  if (
+                    decoded.mutatedSha256 !== undefined &&
+                    currentSha256 === decoded.mutatedSha256
+                  ) {
+                    const writeErr = atomicWriteTextSync(resolvedTarget, content, hostIo)
+                    return writeErr !== undefined
+                      ? writeErr
+                      : unlinkBackupChecked(backupPath, hostIo)
+                  }
+                  if (currentSha256 === originalSha256)
+                    return unlinkBackupChecked(backupPath, hostIo)
+                  return `Target '${relTarget}' was modified on disk (sha256=${currentSha256}) and matches neither originalSha256 (${originalSha256}) nor mutatedSha256 (${decoded.mutatedSha256 ?? "none"}); refusing to overwrite user edits. Inspect and remove '${backupPath}' manually.`
+                })
+                .exhaustive()
             })
-            .exhaustive()
-        })
-        .with({ _tag: "None" }, () => "Backup JSON failed schema decoding")
-        .exhaustive(),
-    )
-    .with({ _tag: "Failure" }, ({ failure }) =>
-      failure instanceof Error ? failure.message : String(failure),
-    )
+            .with({ _tag: "None" }, () => "Backup JSON failed schema decoding")
+            .exhaustive(),
+        )
+        .with({ _tag: "Failure" }, ({ failure }) =>
+          failure instanceof Error ? failure.message : String(failure),
+        )
+        .exhaustive()
+    })
     .exhaustive()
 
   return restoreFailureReason !== undefined
@@ -362,24 +507,46 @@ export const writeMutationBackup = (
   hostIo: SyncHostIo,
 ): string | undefined => {
   const harnessDir = join(repoRoot, ".harness")
-  const res = Result.try(() => {
-    if (!hostIo.existsSync(harnessDir)) hostIo.mkdirRecursiveSync(harnessDir)
-    hostIo.writeTextSync(
-      backupPath,
-      JSON.stringify({
-        filePath: targetPath,
-        originalSha256: computeContentSha256(originalSource),
-        mutatedSha256: computeContentSha256(mutatedSource),
-        content: originalSource,
-      }),
-    )
-  })
-  return match(res)
-    .with({ _tag: "Success" }, () => undefined)
-    .with(
-      { _tag: "Failure" },
-      ({ failure }) =>
-        `[mutation-check] Failed to write mutation backup '${backupPath}': ${failure instanceof Error ? failure.message : String(failure)}`,
+  const backupDir = dirname(backupPath)
+  const symErr =
+    checkNonSymlinkIfPresent(harnessDir, "harness dir", hostIo) ??
+    checkNonSymlinkIfPresent(backupDir, "backup dir", hostIo) ??
+    checkNonSymlinkIfPresent(backupPath, "backup file", hostIo)
+  if (symErr !== undefined) {
+    return `[mutation-check] Failed to write mutation backup '${backupPath}': ${symErr}`
+  }
+  const mkdirErr = match(existsSyncChecked(backupDir, hostIo))
+    .with({ _tag: "Failure" }, ({ failure }) => failure)
+    .with({ _tag: "Success" }, ({ success: exists }) =>
+      exists
+        ? undefined
+        : match(
+            Result.try({
+              try: () => {
+                hostIo.mkdirRecursiveSync(backupDir)
+              },
+              catch: (err) => (err instanceof Error ? err.message : String(err)),
+            }),
+          )
+            .with({ _tag: "Success" }, () => undefined)
+            .with({ _tag: "Failure" }, ({ failure }) => failure)
+            .exhaustive(),
     )
     .exhaustive()
+  if (mkdirErr !== undefined) {
+    return `[mutation-check] Failed to write mutation backup '${backupPath}': ${mkdirErr}`
+  }
+  const writeErr = atomicWriteTextSync(
+    backupPath,
+    JSON.stringify({
+      filePath: targetPath,
+      originalSha256: computeContentSha256(originalSource),
+      mutatedSha256: computeContentSha256(mutatedSource),
+      content: originalSource,
+    }),
+    hostIo,
+  )
+  return writeErr !== undefined
+    ? `[mutation-check] Failed to write mutation backup '${backupPath}': ${writeErr}`
+    : undefined
 }

@@ -1,5 +1,9 @@
 import { join, relative } from "node:path"
-import { CANONICAL_CLI_COMMAND_NAMES, CANONICAL_MCP_TOOL_NAMES } from "@harness/contract"
+import {
+  CANONICAL_CLI_COMMAND_NAMES,
+  CANONICAL_MCP_TOOL_NAMES,
+  compareCodeUnits,
+} from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { type GcFinding, collectMarkdownFilesRecursive, readTextOrReport } from "./gc-helpers.js"
 
@@ -90,16 +94,40 @@ export const auditCatalogDocTruthInContent = (
   const seenUnknownCliCmds = new Set<string>()
   const seenCliCounts = new Set<string>()
 
-  let activeFenceLang: string | null = null
+  interface ActiveFence {
+    readonly char: "`" | "~"
+    readonly len: number
+    readonly lang: string
+  }
+  let activeFence: ActiveFence | null = null
   const lines = content.split(/\r?\n/)
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!
     const lineNum = i + 1
-    const fenceMatch = /^\s*```([a-zA-Z0-9_-]*)/.exec(line)
-    if (fenceMatch !== null) {
-      activeFenceLang = activeFenceLang === null ? fenceMatch[1]!.toLowerCase() : null
-      continue
+    if (activeFence === null) {
+      const openMatch = /^\s*(?:(`{3,})([^`\r\n]*)|(~{3,})([^\r\n]*))$/.exec(line)
+      if (openMatch !== null) {
+        const fenceToken = (openMatch[1] ?? openMatch[3])!
+        const info = (openMatch[2] ?? openMatch[4] ?? "").trim()
+        const lang = info.split(/\s+/)[0]?.toLowerCase() ?? ""
+        activeFence = {
+          char: fenceToken[0] === "~" ? "~" : "`",
+          len: fenceToken.length,
+          lang,
+        }
+        continue
+      }
+    } else {
+      const closeMatch = /^\s*(`{3,}|~{3,})\s*$/.exec(line)
+      if (
+        closeMatch !== null &&
+        closeMatch[1]![0] === activeFence.char &&
+        closeMatch[1]!.length >= activeFence.len
+      ) {
+        activeFence = null
+        continue
+      }
     }
 
     for (const cmdMatch of line.matchAll(PNPM_HARNESS_CMD_RE)) {
@@ -116,7 +144,7 @@ export const auditCatalogDocTruthInContent = (
       }
     }
 
-    const inNonMermaidFence = activeFenceLang !== null && activeFenceLang !== "mermaid"
+    const inNonMermaidFence = activeFence !== null && activeFence.lang !== "mermaid"
     if (inNonMermaidFence) continue
 
     for (const toolMatch of line.matchAll(BACKTICK_MCP_TOOL_RE)) {
@@ -198,7 +226,7 @@ export const checkCatalogDocTruth = (
       ...collectMarkdownFilesRecursive(join(repoRoot, relDir), hostIo, repoRoot, findings),
     )
   }
-  const sortedUnique = [...new Set(targetPaths)].sort((a, b) => a.localeCompare(b))
+  const sortedUnique = [...new Set(targetPaths)].sort(compareCodeUnits)
   for (const absPath of sortedUnique) {
     const relDoc = relative(repoRoot, absPath).replace(/\\/g, "/")
     const content = readTextOrReport(absPath, hostIo, repoRoot, findings)

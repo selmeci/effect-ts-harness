@@ -2,6 +2,8 @@ import { Effect, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   type AbsoluteRepoRoot,
+  AgentFailureReason,
+  type AttemptNumber,
   CompiledPlan,
   type EscalationOrdinal,
   EscalationResolution,
@@ -10,8 +12,12 @@ import {
   LeaseFilePath,
   LeaseHolderId,
   MergeSliceWaveOutcome,
+  type RunnerId,
   SeqKey,
+  UnitAgentDispatchResult,
+  type UnitMode,
   UnitOutcome,
+  UnitRejection,
   type WorkUnitId,
   type WorkflowAttemptKey,
   type WorkflowAttemptRecord,
@@ -182,13 +188,22 @@ const moveRunningToWaiting = (state: WorkflowRunState): WorkflowRunState =>
     .with("waiting", "completed", "aborted", (s) => s)
     .exhaustive()
 
-const moveWaitingToRunning = (state: WorkflowRunState, hasRunReply: boolean): WorkflowRunState =>
-  hasRunReply
+const moveWaitingToRunning = (
+  state: WorkflowRunState,
+  hasTerminalRunReply: boolean,
+): WorkflowRunState =>
+  hasTerminalRunReply
     ? state
     : match(state)
         .with("waiting", () => "running" as const)
         .with("running", "completed", "aborted", (s) => s)
         .exhaustive()
+
+const runnerOfMode = (mode: UnitMode): RunnerId | undefined =>
+  match(mode)
+    .with({ _tag: "Automatic" }, (automatic) => automatic.runner)
+    .with({ _tag: "Manual" }, () => undefined)
+    .exhaustive()
 
 const findSliceByBranch = (plan: CompiledPlan, branch: string) =>
   plan.units.find((u) =>
@@ -238,6 +253,7 @@ const ActivityPayloadSchema = Schema.fromJsonString(
 )
 const decodeActivityPayloadOption = Schema.decodeUnknownOption(ActivityPayloadSchema)
 
+const decodeUnitAgentDispatchResultOption = Schema.decodeUnknownOption(UnitAgentDispatchResult)
 const decodeUnitOutcomeOption = Schema.decodeUnknownOption(UnitOutcome)
 const decodeMergeOutcomeOption = Schema.decodeUnknownOption(MergeSliceWaveOutcome)
 const decodeEscalationResolutionOption = Schema.decodeUnknownOption(EscalationResolution)
@@ -363,7 +379,9 @@ const classifyWorkflowResultReply = (
 const recordUnitOutcome = (params: {
   readonly operation: WorkflowStoreOperation
   readonly runId: WorkflowRunId
+  readonly attempt?: AttemptNumber | undefined
   readonly escalationOrdinal?: EscalationOrdinal | undefined
+  readonly runner?: RunnerId | undefined
   readonly rawOutcome: unknown
   readonly nowValue: WorkflowTimestampMs
   readonly unitStatusMap: Map<WorkUnitId, WorkflowUnitStatus>
@@ -382,51 +400,95 @@ const recordUnitOutcome = (params: {
       ),
     )
     .with({ _tag: "Some" }, ({ value: outcome }) =>
-      Effect.sync(() => {
-        match(outcome)
-          .with({ _tag: "Completed" }, (completed) => {
-            const attemptKey = makeWorkflowAttemptKey(
-              params.runId,
-              completed.unitId,
-              completed.attempt,
-              params.escalationOrdinal,
-            )
-            params.unitStatusMap.set(completed.unitId, "completed")
-            params.attemptsMap.set(attemptKey, {
-              attemptKey,
-              runId: params.runId,
-              unitId: completed.unitId,
-              attempt: completed.attempt,
-              verdict: "completed" satisfies WorkflowAttemptVerdict,
-              packageStampHash: completed.packageStampHash,
-              updatedMs: params.nowValue,
-            })
-          })
-          .with({ _tag: "Rejected" }, (rejected) => {
-            const attemptKey = makeWorkflowAttemptKey(
-              params.runId,
-              rejected.unitId,
-              rejected.attempt,
-              params.escalationOrdinal,
-            )
-            if (params.unitStatusMap.get(rejected.unitId) === "pending") {
-              params.unitStatusMap.set(rejected.unitId, "dispatched")
-            }
-            params.attemptsMap.set(attemptKey, {
-              attemptKey,
-              runId: params.runId,
-              unitId: rejected.unitId,
-              attempt: rejected.attempt,
-              verdict: "rejected" satisfies WorkflowAttemptVerdict,
-              rejection: rejected.rejection,
-              updatedMs: params.nowValue,
-            })
-          })
-          .with({ _tag: "Escalated" }, (escalated) => {
-            params.unitStatusMap.set(escalated.unitId, "escalated")
-          })
-          .exhaustive()
-      }),
+      !params.unitStatusMap.has(outcome.unitId)
+        ? Effect.fail(
+            new WorkflowStoreUnavailableError({
+              operation: params.operation,
+              reason: toBoundedReason(
+                `UnitOutcome for ${params.contextLabel} targets unknown unit '${outcome.unitId}' in run '${params.runId}'`,
+              ),
+            }),
+          )
+        : Effect.sync(() => {
+            match(outcome)
+              .with({ _tag: "Completed" }, (completed) => {
+                const attemptKey = makeWorkflowAttemptKey(
+                  params.runId,
+                  completed.unitId,
+                  completed.attempt,
+                  params.escalationOrdinal,
+                )
+                params.unitStatusMap.set(completed.unitId, "completed")
+                params.attemptsMap.set(attemptKey, {
+                  attemptKey,
+                  runId: params.runId,
+                  unitId: completed.unitId,
+                  attempt: completed.attempt,
+                  verdict: "completed" satisfies WorkflowAttemptVerdict,
+                  ...(params.runner !== undefined ? { runner: params.runner } : {}),
+                  packageStampHash: completed.packageStampHash,
+                  updatedMs: params.nowValue,
+                })
+              })
+              .with({ _tag: "Rejected" }, (rejected) => {
+                const attemptKey = makeWorkflowAttemptKey(
+                  params.runId,
+                  rejected.unitId,
+                  rejected.attempt,
+                  params.escalationOrdinal,
+                )
+                if (params.unitStatusMap.get(rejected.unitId) === "pending") {
+                  params.unitStatusMap.set(rejected.unitId, "dispatched")
+                }
+                params.attemptsMap.set(attemptKey, {
+                  attemptKey,
+                  runId: params.runId,
+                  unitId: rejected.unitId,
+                  attempt: rejected.attempt,
+                  verdict: "rejected" satisfies WorkflowAttemptVerdict,
+                  ...(params.runner !== undefined ? { runner: params.runner } : {}),
+                  rejection: rejected.rejection,
+                  updatedMs: params.nowValue,
+                })
+              })
+              .with({ _tag: "Escalated" }, (escalated) => {
+                params.unitStatusMap.set(escalated.unitId, "escalated")
+                if (params.attempt !== undefined) {
+                  const attemptKey = makeWorkflowAttemptKey(
+                    params.runId,
+                    escalated.unitId,
+                    params.attempt,
+                    params.escalationOrdinal,
+                  )
+                  const rejection: UnitRejection = match(escalated.escalation)
+                    .with({ _tag: "AuthRequired" }, (e) =>
+                      UnitRejection.cases.AgentFailed.make({
+                        reason: AgentFailureReason.make(
+                          `Authentication required for runner '${e.runner}'`,
+                        ),
+                      }),
+                    )
+                    .with({ _tag: "RetryBudgetExhausted" }, (e) => e.lastRejection)
+                    .with({ _tag: "MergeConflict" }, (e) =>
+                      UnitRejection.cases.AgentFailed.make({
+                        reason: AgentFailureReason.make(`Merge conflict on branch '${e.branch}'`),
+                      }),
+                    )
+                    .exhaustive()
+                  params.attemptsMap.set(attemptKey, {
+                    attemptKey,
+                    runId: params.runId,
+                    unitId: escalated.unitId,
+                    attempt: params.attempt,
+                    verdict: "rejected" satisfies WorkflowAttemptVerdict,
+                    ...(params.runner !== undefined ? { runner: params.runner } : {}),
+                    rejection,
+                    updatedMs: params.nowValue,
+                  })
+                }
+              })
+              .exhaustive()
+          }),
     )
     .exhaustive()
 
@@ -439,6 +501,7 @@ export {
   decodeExecutionIdOption,
   decodeMergeOutcomeOption,
   decodeRunPayloadOption,
+  decodeUnitAgentDispatchResultOption,
   findSliceByBranch,
   makeStoreTarget,
   moveRunningToWaiting,
@@ -446,6 +509,7 @@ export {
   optionalNonEmptyString,
   preserveStoreOrLeaseError,
   recordUnitOutcome,
+  runnerOfMode,
   scanAllJournalRows,
   unwrapOption,
   verifyReadModelLeaseFence,

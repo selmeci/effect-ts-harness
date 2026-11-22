@@ -562,7 +562,9 @@ describe("mutation-target-discovery: tag classification, scope/target filtering,
     const infraFiles = findDomainFiles(REAL_REPO_ROOT, testHostIo, "@harness/infra").map(
       (f) => f.relFile,
     )
-    expect(infraFiles).toContain("libs/harness/infra/src/workflow/read-model-rebuild-journal.ts")
+    expect(infraFiles).not.toContain(
+      "libs/harness/infra/src/workflow/read-model-rebuild-journal.ts",
+    )
     expect(infraFiles).toContain("libs/harness/infra/src/workflow/writer-lease-codec.ts")
     expect(infraFiles).toContain("libs/harness/infra/src/workflow/workflow-store-codec.ts")
     expect(infraFiles).toContain("libs/harness/infra/src/workflow/message-storage-codec.ts")
@@ -627,6 +629,30 @@ describe("mutation-target-discovery: tag classification, scope/target filtering,
         "libs/demo/inf/src/cluster-runtime.ts",
         'import { Sharding } from "effect/cluster"\nexport const s = Sharding\n',
       ],
+      [
+        "libs/demo/inf/src/fs-alias.ts",
+        'import { FileSystem as FS } from "effect"\nexport const f = FS\n',
+      ],
+      [
+        "libs/demo/inf/src/async-hooks.ts",
+        'import { AsyncLocalStorage } from "node:async_hooks"\nexport const als = new AsyncLocalStorage()\n',
+      ],
+      [
+        "libs/demo/inf/src/timers-prom.ts",
+        'import { setTimeout } from "timers/promises"\nexport const t = setTimeout\n',
+      ],
+      [
+        "libs/demo/inf/src/proc-bracket.ts",
+        'export const envBracket = () => process["env"]["HOME"]\n',
+      ],
+      [
+        "libs/demo/inf/src/proc-destruct.ts",
+        "export const envDestruct = () => { const { env } = process; return env.HOME }\n",
+      ],
+      [
+        "libs/demo/inf/src/proc-alias.ts",
+        "export const procAlias = () => { const p = process; return p.cwd() }\n",
+      ],
     ]
     for (const [relPath, src] of impureCases) {
       expect(classifyMutationModulePurity(relPath, src)._tag).toBe("Excluded")
@@ -641,7 +667,8 @@ describe("mutation-target-discovery: tag classification, scope/target filtering,
       _tag: "Pure",
     })
 
-    // REQ-2.3: pure infra module with 0 reaching test files fails strict mutation check
+    // REQ-2.3: pure infra module with 0 reaching test files fails strict mutation check, and
+    // locally pure module importing relative impure module is transitively excluded
     const dir = mkdtempSync(join(tmpdir(), "mut-pure-untested-"))
     try {
       const infPkg = writePkg(dir, "demo", "inf", {
@@ -654,6 +681,16 @@ describe("mutation-target-discovery: tag classification, scope/target filtering,
         "export const isNonNegative = (x: number): boolean => x >= 0\n",
         "utf8",
       )
+      writeFileSync(
+        join(infPkg, "src", "impure-helper.ts"),
+        'export const readEnv = (): string | undefined => process["env"]["HOME"]\n',
+        "utf8",
+      )
+      writeFileSync(
+        join(infPkg, "src", "transitive-wrapper.ts"),
+        'import { readEnv } from "./impure-helper.js"\nexport const hasEnv = (): boolean => readEnv() !== undefined\n',
+        "utf8",
+      )
       const strictReport = runDomainMutationSuite(dir, testHostIo, {
         enforcementMode: "strict",
         includeAllLines: true,
@@ -662,6 +699,11 @@ describe("mutation-target-discovery: tag classification, scope/target filtering,
       expect(
         (strictReport.untestedFiles ?? []).some((u) => u.file === "libs/demo/inf/src/codec.ts"),
       ).toBe(true)
+      expect(
+        (strictReport.untestedFiles ?? []).some(
+          (u) => u.file === "libs/demo/inf/src/transitive-wrapper.ts",
+        ),
+      ).toBe(false)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -978,6 +1020,50 @@ describe("mutation-check: strict fail-closed modes and primary/fallback test par
         /EACCES: rename denied/,
       )
       expect(testHostIo.existsSync(tmpStampPath)).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("SPEC-0030 2nd-pass: classifyMutationModulePurity excludes globalThis.process, (process), dynamic template imports/require, (fetch), re-exports from effect, and transitively excludes dot relative imports", () => {
+    const impure2ndPassCases: ReadonlyArray<readonly [string, string]> = [
+      ["libs/demo/inf/src/gproc.ts", 'export const g = () => globalThis.process.env["HOME"]\n'],
+      ["libs/demo/inf/src/pproc.ts", "export const p = () => (process).exit(1)\n"],
+      ["libs/demo/inf/src/dynimp.ts", "export const d = () => import(`node:fs`)\n"],
+      ["libs/demo/inf/src/dynreq.ts", "export const r = () => require(`node:fs`)\n"],
+      ["libs/demo/inf/src/pfetch.ts", 'export const f = () => (fetch)("http://127.0.0.1:1234")\n'],
+      ["libs/demo/inf/src/reexp.ts", 'export { FileSystem } from "effect"\n'],
+    ]
+    for (const [relPath, src] of impure2ndPassCases) {
+      expect(classifyMutationModulePurity(relPath, src)._tag, relPath).toBe("Excluded")
+      expect(isPureMutationCandidate(relPath, src), relPath).toBe(false)
+    }
+
+    const dir = mkdtempSync(join(tmpdir(), "mut-dot-imp-"))
+    try {
+      const infPkg = writePkg(dir, "demo", "inf", {
+        type: "package.json",
+        name: "@demo/inf",
+        tags: ["type:infra"],
+      })
+      writeFileSync(
+        join(infPkg, "src", "index.ts"),
+        'export const a = process["env"]["HOME"]\n',
+        "utf8",
+      )
+      writeFileSync(
+        join(infPkg, "src", "dotimp.ts"),
+        'import { a } from "."\nexport const v = a\n',
+        "utf8",
+      )
+      writeFileSync(
+        join(infPkg, "src", "pure.ts"),
+        "export const addOne = (x: number): number => x + 1\n",
+        "utf8",
+      )
+      const discovered = findDomainFiles(dir, testHostIo).map((f) => f.relFile)
+      expect(discovered).toContain("libs/demo/inf/src/pure.ts")
+      expect(discovered).not.toContain("libs/demo/inf/src/dotimp.ts")
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

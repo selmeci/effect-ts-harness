@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process"
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs"
+import * as net from "node:net"
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
-import { describe, expect, it } from "@effect/vitest"
+import { describe, expect, it, vi } from "@effect/vitest"
 import { Effect, Result, Schema, Tracer } from "effect"
 import { match } from "ts-pattern"
 import {
@@ -18,6 +19,7 @@ import {
   WorkflowCompleteRequest,
   WorkflowCompleteResponse,
   WorkflowDaemonCapability,
+  WorkflowDoctorMode,
   WorkflowExecutionId,
   WorkflowPollAttempts,
   WorkflowPollBudget,
@@ -43,7 +45,9 @@ import {
 import { UnitAgentDispatcherLive } from "../src/workflow/agent-dispatcher-live.js"
 import {
   WORKFLOW_COMPLETE_IPC_TIMEOUT_MS,
+  WORKFLOW_DAEMON_IPC_TIMEOUT_MS,
   completeWorkflowViaDaemon,
+  doctorWorkflowViaDaemon,
   handshakeWorkflowDaemon,
   queryWorkflowDaemonCommand,
 } from "../src/workflow/daemon-client.js"
@@ -781,4 +785,150 @@ describe("WF-2 Worktree Validation & Daemon Protocol", () => {
     expect(DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS).toBe(parsedBudgets.defaultServerSocketMs)
     expect(WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS).toBe(parsedBudgets.workflowServerSocketMs)
   })
+
+  it.live(
+    "F-27: doctorWorkflowViaDaemon enforces active lease and WORKFLOW_COMPLETE_IPC_TIMEOUT_MS for mode='rebuild' while keeping check-only read-only",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { canonicalDir } = initGitRepoWithWorktree(dir)
+          const validatedCanonical = yield* validateWorktreeRepoRoot(
+            AbsoluteRepoRoot.make(canonicalDir),
+          )
+          const capDoctor = WorkflowDaemonCapability.make("workflow.doctor")
+          const doctorSock = DaemonSocketPath.make(join(dir, "doctor-daemon.sock"))
+          let includeLeaseEpoch = false
+          const recordedTimeouts: Array<number> = []
+          let timeoutSpy: { readonly mockRestore: () => void } | undefined = undefined
+          const spySetTimeout = function (
+            this: net.Socket,
+            msecs: number,
+            cb?: () => void,
+          ): net.Socket {
+            if (msecs !== WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS) {
+              recordedTimeouts.push(msecs)
+            }
+            timeoutSpy?.mockRestore()
+            const socketResult = this.setTimeout(msecs, cb)
+            timeoutSpy = vi
+              .spyOn(net.Socket.prototype, "setTimeout")
+              .mockImplementation(spySetTimeout)
+            return socketResult
+          }
+          timeoutSpy = vi
+            .spyOn(net.Socket.prototype, "setTimeout")
+            .mockImplementation(spySetTimeout)
+
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(canonicalDir), {
+                socketPathOverride: doctorSock,
+                socketTimeoutMs: WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
+                lineHandler: (line) =>
+                  Effect.sync(() => {
+                    const parsed = decodeJsonRecord(line)
+                    if (parsed.command === "workflow.handshake") {
+                      return JSON.stringify({
+                        id: parsed.id,
+                        ok: true,
+                        handshake: {
+                          protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                          capabilities: [capDoctor],
+                          repoRoot: validatedCanonical.worktreeRoot,
+                          commonGitDir: validatedCanonical.commonGitDir,
+                          ...(includeLeaseEpoch ? { writerLeaseEpoch: LeaseEpoch.make(3) } : {}),
+                        },
+                      })
+                    }
+                    return JSON.stringify({
+                      id: parsed.id,
+                      ok: true,
+                      command: "workflow.doctor",
+                      result: {
+                        repoRoot: validatedCanonical.worktreeRoot,
+                        commonGitDir: validatedCanonical.commonGitDir,
+                        ...(includeLeaseEpoch ? { writerLeaseEpoch: 3 } : {}),
+                        rebuiltRunCount: 1,
+                        checks: [],
+                      },
+                    })
+                  }),
+              })
+
+              // 1. check-only succeeds without active writer lease and uses default IPC timeout
+              recordedTimeouts.length = 0
+              const checkRes = yield* doctorWorkflowViaDaemon(
+                {
+                  repoRoot: validatedCanonical.worktreeRoot,
+                  mode: WorkflowDoctorMode.make("check-only"),
+                },
+                {
+                  socketPath: doctorSock,
+                  commonGitDir: validatedCanonical.commonGitDir,
+                },
+              )
+              expect(checkRes.rebuiltRunCount).toBe(1)
+              expect(recordedTimeouts).toEqual([
+                WORKFLOW_DAEMON_IPC_TIMEOUT_MS,
+                WORKFLOW_DAEMON_IPC_TIMEOUT_MS,
+              ])
+
+              // 2. rebuild rejects when writerLeaseEpoch is omitted (defaultRequireActiveLease: true)
+              const missingLeaseErr = yield* doctorWorkflowViaDaemon(
+                {
+                  repoRoot: validatedCanonical.worktreeRoot,
+                  mode: WorkflowDoctorMode.make("rebuild"),
+                },
+                {
+                  socketPath: doctorSock,
+                  commonGitDir: validatedCanonical.commonGitDir,
+                },
+              ).pipe(Effect.flip)
+              expect(missingLeaseErr._tag).toBe("DaemonProtocolMismatchError")
+
+              // 3. rebuild succeeds with active lease and uses WORKFLOW_COMPLETE_IPC_TIMEOUT_MS
+              includeLeaseEpoch = true
+              recordedTimeouts.length = 0
+              const rebuildRes = yield* doctorWorkflowViaDaemon(
+                {
+                  repoRoot: validatedCanonical.worktreeRoot,
+                  mode: WorkflowDoctorMode.make("rebuild"),
+                },
+                {
+                  socketPath: doctorSock,
+                  commonGitDir: validatedCanonical.commonGitDir,
+                },
+              )
+              expect(rebuildRes.rebuiltRunCount).toBe(1)
+              expect(recordedTimeouts).toEqual([
+                WORKFLOW_DAEMON_IPC_TIMEOUT_MS,
+                WORKFLOW_COMPLETE_IPC_TIMEOUT_MS,
+              ])
+
+              // 4. explicit timeoutMs overrides default on rebuild
+              recordedTimeouts.length = 0
+              yield* doctorWorkflowViaDaemon(
+                {
+                  repoRoot: validatedCanonical.worktreeRoot,
+                  mode: WorkflowDoctorMode.make("rebuild"),
+                },
+                {
+                  socketPath: doctorSock,
+                  commonGitDir: validatedCanonical.commonGitDir,
+                  timeoutMs: 42_000,
+                },
+              )
+              expect(recordedTimeouts).toEqual([WORKFLOW_DAEMON_IPC_TIMEOUT_MS, 42_000])
+            }),
+          ).pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                timeoutSpy?.mockRestore()
+              }),
+            ),
+            Effect.provide(UnixSocketDaemonLive),
+          )
+        }),
+      ),
+  )
 })

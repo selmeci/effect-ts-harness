@@ -1,13 +1,16 @@
-import { basename, join, relative } from "node:path"
+import { basename, dirname, join, relative, resolve } from "node:path"
 import { Result } from "effect"
 import { match } from "ts-pattern"
 import { compareCodeUnits } from "@harness/contract"
-import { ts } from "@harness/graph"
 import type { SyncHostIo } from "@harness/service/host-io"
+import {
+  analyzeModulePurityAst,
+  classifyMutationModulePurity,
+  isPureMutationCandidate,
+  type PureModuleClassification,
+} from "./mutation-pure-ast.js"
 
-export type PureModuleClassification =
-  | { readonly _tag: "Pure" }
-  | { readonly _tag: "Excluded"; readonly reason: string }
+export { classifyMutationModulePurity, isPureMutationCandidate, type PureModuleClassification }
 
 export interface PureDiscoveredFile {
   readonly scope: string
@@ -17,432 +20,6 @@ export interface PureDiscoveredFile {
   readonly fullPath: string
   readonly relFile: string
 }
-
-const DISALLOWED_NODE_BUILTINS: ReadonlySet<string> = new Set([
-  "fs",
-  "fs/promises",
-  "child_process",
-  "net",
-  "http",
-  "https",
-  "http2",
-  "dgram",
-  "tls",
-  "dns",
-  "os",
-  "worker_threads",
-  "cluster",
-  "readline",
-  "sqlite",
-  "stream",
-  "tty",
-  "v8",
-  "vm",
-  "inspector",
-  "perf_hooks",
-  "process",
-])
-
-const DISALLOWED_PACKAGE_EXACT: ReadonlySet<string> = new Set([
-  "@effect/platform",
-  "@effect/platform-node",
-  "@effect/ai-typesafe",
-  "alchemy",
-  "better-sqlite3",
-  "drizzle-orm",
-  "drizzle-kit",
-  "undici",
-  "ws",
-  "execa",
-  "chokidar",
-  "effect/FileSystem",
-  "effect/Terminal",
-  "effect/ChildProcess",
-  "effect/workflow",
-  "effect/ai",
-  "effect/sql",
-  "@harness/infra",
-])
-
-const DISALLOWED_PACKAGE_PREFIXES: ReadonlyArray<string> = [
-  "@effect/platform/",
-  "@effect/platform-node/",
-  "@effect/sql",
-  "@modelcontextprotocol/",
-  "alchemy/",
-  "@alchemy.run/",
-  "@cloudflare/",
-  "effect/cluster/",
-  "effect/sql/",
-  "effect/ai/",
-  "effect/unstable/sql",
-  "@harness/infra/",
-]
-
-const DISALLOWED_EFFECT_IO_SYMBOLS: ReadonlySet<string> = new Set([
-  "FileSystem",
-  "Terminal",
-  "Command",
-  "HttpClient",
-  "HttpServer",
-])
-
-const DISALLOWED_CLUSTER_IO_SYMBOLS: ReadonlySet<string> = new Set([
-  "Sharding",
-  "Runners",
-  "RunnerStorage",
-  "RunnerHealth",
-  "MessageStorage",
-  "ClusterWorkflowEngine",
-  "HttpRunner",
-  "SocketRunner",
-  "SqlMessageStorage",
-  "SqlRunnerStorage",
-  "SocketAddress",
-  "SingleRunner",
-  "Snowflake",
-])
-
-const DISALLOWED_INTERNAL_STEMS: ReadonlySet<string> = new Set([
-  "node-host-io",
-  "hook-io",
-  "hook-io-realpath",
-  "hook-fastpath",
-  "omnigraph-workflow-store",
-  "omnigraph-runner",
-  "omnigraph-message-storage",
-  "workflow-engine-live",
-  "workflow-graph-backup",
-  "workflow-maintenance",
-  "unix-socket-daemon",
-  "unix-socket-daemon-live",
-  "daemon-client",
-  "daemon-and-omnigraph.service",
-  "cli-runtime",
-  "mcp-helpers",
-  "worktree-port-live",
-  "workflow-worktree-live",
-  "workflow-merge-live",
-  "unit-verifier-live",
-  "review-router-live",
-  "agent-dispatcher-live",
-  "read-model-live",
-  "message-storage-cas",
-  "message-storage-hydration",
-  "cluster-startup-lock",
-  "flock-lock",
-  "writer-lease",
-  "ast-gate-cache",
-  "ast-gate-cache-live",
-  "ast-gate-cache-helpers",
-  "decision-cache-live",
-  "local-decision-model-live",
-  "subprocess-runner-live",
-  "workspace-fs-live",
-  "active-mutant-context-live",
-  "worktree-repo-root",
-  "plan-compiler-extractor",
-  "mutation-hmac-secret",
-  "git-helpers",
-  "scenario-fs",
-  "omnigraph-lifecycle",
-  "omnigraph-lifecycle-setup",
-  "omnigraph-auth-and-drift",
-  "omnigraph-workflow-backup",
-  "omnigraph-workflow-journal",
-  "workflow-rpc-shared",
-  "workflow-rpc-complete-validation",
-  "workflow-engine-daemon-helper",
-  "ollama-readiness",
-])
-
-const DISALLOWED_PROCESS_PROPS: ReadonlySet<string> = new Set([
-  "stdin",
-  "stdout",
-  "stderr",
-  "exit",
-  "cwd",
-  "chdir",
-  "kill",
-  "env",
-  "argv",
-  "hrtime",
-  "nextTick",
-])
-
-const DISALLOWED_LAYER_BUILDERS: ReadonlySet<string> = new Set([
-  "effect",
-  "scoped",
-  "unwrapEffect",
-  "effectDiscard",
-  "scopedDiscard",
-  "sync",
-  "scopedContext",
-])
-
-const isRelativeSpecifier = (spec: string): boolean =>
-  spec.startsWith("./") || spec.startsWith("../")
-
-const stripNodePrefix = (spec: string): string =>
-  spec.startsWith("node:") ? spec.slice("node:".length) : spec
-
-const extractModuleStem = (spec: string): string =>
-  basename(spec).replace(/\.(?:[cm]?[jt]sx?)$/, "")
-
-const checkModuleSpecifier = (spec: string): string | undefined => {
-  if (isRelativeSpecifier(spec)) {
-    const stem = extractModuleStem(spec)
-    if (DISALLOWED_INTERNAL_STEMS.has(stem)) {
-      return `imports internal I/O module '${spec}'`
-    }
-    return undefined
-  }
-  const bare = stripNodePrefix(spec)
-  const firstBuiltinRoot = bare.split("/")[0] ?? bare
-  if (
-    spec.startsWith("node:")
-      ? DISALLOWED_NODE_BUILTINS.has(bare) || DISALLOWED_NODE_BUILTINS.has(firstBuiltinRoot)
-      : DISALLOWED_NODE_BUILTINS.has(bare)
-  ) {
-    return `imports Node I/O builtin '${spec}'`
-  }
-  if (
-    DISALLOWED_PACKAGE_EXACT.has(spec) ||
-    DISALLOWED_PACKAGE_PREFIXES.some((prefix) => spec.startsWith(prefix))
-  ) {
-    return `imports runtime I/O package '${spec}'`
-  }
-  return undefined
-}
-
-const isImportTypeOnly = (clause: ts.ImportClause | undefined): boolean => {
-  if (clause === undefined) return false
-  if (clause.isTypeOnly) return true
-  if (clause.name !== undefined || clause.namedBindings === undefined) return false
-  if (!ts.isNamedImports(clause.namedBindings)) return false
-  return (
-    clause.namedBindings.elements.length > 0 &&
-    clause.namedBindings.elements.every((el) => el.isTypeOnly)
-  )
-}
-
-const isExportTypeOnly = (decl: ts.ExportDeclaration): boolean => {
-  if (decl.isTypeOnly) return true
-  if (decl.exportClause === undefined || !ts.isNamedExports(decl.exportClause)) return false
-  return (
-    decl.exportClause.elements.length > 0 && decl.exportClause.elements.every((el) => el.isTypeOnly)
-  )
-}
-
-const hasRuntimeTopLevelStatement = (sf: ts.SourceFile): boolean => {
-  for (const stmt of sf.statements) {
-    if (
-      ts.isImportDeclaration(stmt) ||
-      ts.isInterfaceDeclaration(stmt) ||
-      ts.isTypeAliasDeclaration(stmt) ||
-      ts.isEmptyStatement(stmt)
-    ) {
-      continue
-    }
-    if (ts.isExportDeclaration(stmt) && stmt.moduleSpecifier !== undefined) {
-      continue
-    }
-    return true
-  }
-  return false
-}
-
-/**
- * Classifies an `infra` or non-web `app` TypeScript source module as `"Pure"` when it
- * defines runtime logic with zero runtime I/O imports, host globals, or live Layer builders,
- * and `"Excluded"` otherwise.
- */
-export const classifyMutationModulePurity = (
-  relFile: string,
-  sourceText: string,
-): PureModuleClassification => {
-  const norm = relFile.replace(/\\/g, "/").replace(/^\.\//, "")
-  const base = basename(norm)
-  if (norm.endsWith(".d.ts") || /\.config\.[cm]?tsx?$/.test(base)) {
-    return { _tag: "Excluded", reason: `non-module config/declaration '${base}'` }
-  }
-  if (
-    base === "index.ts" ||
-    base === "index.tsx" ||
-    base === "hook-entry.ts" ||
-    base === "server.ts"
-  ) {
-    return { _tag: "Excluded", reason: `entrypoint or barrel file '${base}'` }
-  }
-
-  const sf = ts.createSourceFile(norm, sourceText, ts.ScriptTarget.Latest, true)
-  if (!hasRuntimeTopLevelStatement(sf)) {
-    return { _tag: "Excluded", reason: `type-only or re-export-only file '${base}'` }
-  }
-
-  let exclusionReason: string | undefined
-
-  const visit = (node: ts.Node): void => {
-    if (exclusionReason !== undefined) return
-    if (ts.isTypeNode(node) || ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) {
-      return
-    }
-
-    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
-      if (!isImportTypeOnly(node.importClause)) {
-        const spec = node.moduleSpecifier.text
-        const specErr = checkModuleSpecifier(spec)
-        if (specErr !== undefined) {
-          exclusionReason = specErr
-          return
-        }
-        if (
-          spec === "effect" &&
-          node.importClause?.namedBindings !== undefined &&
-          ts.isNamedImports(node.importClause.namedBindings)
-        ) {
-          for (const el of node.importClause.namedBindings.elements) {
-            if (!el.isTypeOnly && DISALLOWED_EFFECT_IO_SYMBOLS.has(el.name.text)) {
-              exclusionReason = `imports runtime I/O service '${el.name.text}' from 'effect'`
-              return
-            }
-          }
-        }
-        if (spec === "effect/cluster") {
-          const clause = node.importClause
-          if (
-            clause === undefined ||
-            clause.name !== undefined ||
-            clause.namedBindings === undefined ||
-            !ts.isNamedImports(clause.namedBindings)
-          ) {
-            exclusionReason = "imports runtime namespace from 'effect/cluster'"
-            return
-          }
-          for (const el of clause.namedBindings.elements) {
-            if (!el.isTypeOnly && DISALLOWED_CLUSTER_IO_SYMBOLS.has(el.name.text)) {
-              exclusionReason = `imports runtime I/O service '${el.name.text}' from 'effect/cluster'`
-              return
-            }
-          }
-        }
-      }
-      return
-    }
-
-    if (
-      ts.isExportDeclaration(node) &&
-      node.moduleSpecifier !== undefined &&
-      ts.isStringLiteral(node.moduleSpecifier)
-    ) {
-      if (!isExportTypeOnly(node)) {
-        const spec = node.moduleSpecifier.text
-        const specErr = checkModuleSpecifier(spec)
-        if (specErr !== undefined) {
-          exclusionReason = specErr
-          return
-        }
-        if (spec === "effect/cluster") {
-          if (node.exportClause === undefined || !ts.isNamedExports(node.exportClause)) {
-            exclusionReason = "re-exports runtime namespace from 'effect/cluster'"
-            return
-          }
-          for (const el of node.exportClause.elements) {
-            if (!el.isTypeOnly && DISALLOWED_CLUSTER_IO_SYMBOLS.has(el.name.text)) {
-              exclusionReason = `re-exports runtime I/O service '${el.name.text}' from 'effect/cluster'`
-              return
-            }
-          }
-        }
-      }
-      return
-    }
-
-    if (ts.isCallExpression(node)) {
-      if (
-        node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-        node.arguments[0] !== undefined &&
-        ts.isStringLiteral(node.arguments[0])
-      ) {
-        const specErr = checkModuleSpecifier(node.arguments[0].text)
-        if (specErr !== undefined) {
-          exclusionReason = `dynamic ${specErr}`
-          return
-        }
-      }
-      if (
-        ts.isIdentifier(node.expression) &&
-        node.expression.text === "require" &&
-        node.arguments[0] !== undefined &&
-        ts.isStringLiteral(node.arguments[0])
-      ) {
-        const specErr = checkModuleSpecifier(node.arguments[0].text)
-        if (specErr !== undefined) {
-          exclusionReason = `require ${specErr}`
-          return
-        }
-      }
-      if (ts.isIdentifier(node.expression) && node.expression.text === "fetch") {
-        exclusionReason = "calls global fetch()"
-        return
-      }
-      if (
-        ts.isPropertyAccessExpression(node.expression) &&
-        ts.isIdentifier(node.expression.expression) &&
-        node.expression.expression.text === "globalThis" &&
-        node.expression.name.text === "fetch"
-      ) {
-        exclusionReason = "calls globalThis.fetch()"
-        return
-      }
-    }
-
-    if (
-      ts.isNewExpression(node) &&
-      ts.isIdentifier(node.expression) &&
-      node.expression.text === "OmnigraphClient"
-    ) {
-      exclusionReason = "instantiates live client 'new OmnigraphClient()'"
-      return
-    }
-
-    if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)) {
-      if (node.expression.text === "process" && DISALLOWED_PROCESS_PROPS.has(node.name.text)) {
-        exclusionReason = `accesses runtime global 'process.${node.name.text}'`
-        return
-      }
-      if (node.expression.text === "Layer" && DISALLOWED_LAYER_BUILDERS.has(node.name.text)) {
-        exclusionReason = `constructs runtime effectful Layer via 'Layer.${node.name.text}'`
-        return
-      }
-    }
-
-    if (ts.isIdentifier(node)) {
-      if (
-        node.text === "nodeSyncHostIo" ||
-        node.text === "nodeExtendedHostIo" ||
-        node.text === "makeWorkflowOmnigraphClient"
-      ) {
-        exclusionReason = `references live host/client dependency '${node.text}'`
-        return
-      }
-    }
-
-    ts.forEachChild(node, visit)
-  }
-
-  visit(sf)
-  return exclusionReason !== undefined
-    ? { _tag: "Excluded", reason: exclusionReason }
-    : { _tag: "Pure" }
-}
-
-/** Convenience predicate returning `true` when `classifyMutationModulePurity` returns `"Pure"`. */
-export const isPureMutationCandidate = (relFile: string, sourceText: string): boolean =>
-  match(classifyMutationModulePurity(relFile, sourceText))
-    .with({ _tag: "Pure" }, () => true)
-    .with({ _tag: "Excluded" }, () => false)
-    .exhaustive()
 
 const checkNonSymlinkEntry = (path: string, hostIo: SyncHostIo): string | undefined =>
   match(
@@ -458,22 +35,46 @@ const checkNonSymlinkEntry = (path: string, hostIo: SyncHostIo): string | undefi
     )
     .exhaustive()
 
-/** Walks `srcDir`, collects TypeScript files that pass `isPureMutationCandidate`, and appends them to `results`. */
-export const collectPureCandidateFilesChecked = (input: {
-  readonly dir: string
-  readonly repoRoot: string
-  readonly scope: string
-  readonly pkgDir: string
-  readonly pkgName: string | undefined
-  readonly tier: "infra-pure" | "app-pure"
-  readonly targetSet: ReadonlySet<string> | undefined
-  readonly hostIo: SyncHostIo
-  readonly results: Array<PureDiscoveredFile>
-}): string | undefined => {
+interface ScannedPackageModule {
+  readonly fullPath: string
+  readonly relFile: string
+  readonly analysis: {
+    readonly classification: PureModuleClassification
+    readonly relativeValueImports: ReadonlyArray<string>
+  }
+}
+
+const resolveRelativeSiblingRel = (
+  fromFullPath: string,
+  specifier: string,
+  repoRoot: string,
+  byRel: ReadonlyMap<string, ScannedPackageModule>,
+): string | undefined => {
+  const rawTarget = resolve(dirname(fromFullPath), specifier)
+  const stem = rawTarget.replace(/\.(?:[cm]?[jt]sx?)$/, "")
+  const candidates = [
+    rawTarget,
+    `${stem}.ts`,
+    `${stem}.tsx`,
+    join(rawTarget, "index.ts"),
+    join(rawTarget, "index.tsx"),
+  ]
+  for (const cand of candidates) {
+    const rel = relative(repoRoot, cand).replace(/\\/g, "/").replace(/^\.\//, "")
+    if (byRel.has(rel)) return rel
+  }
+  return undefined
+}
+
+const collectAllPackageTsFilesChecked = (
+  dir: string,
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  out: Array<ScannedPackageModule>,
+): string | undefined => {
   const dirExistsRes = Result.try({
-    try: () => input.hostIo.existsSync(input.dir),
-    catch: (err) =>
-      `Failed to stat '${input.dir}': ${err instanceof Error ? err.message : String(err)}`,
+    try: () => hostIo.existsSync(dir),
+    catch: (err) => `Failed to stat '${dir}': ${err instanceof Error ? err.message : String(err)}`,
   })
   const existsErr = match(dirExistsRes)
     .with({ _tag: "Failure" }, ({ failure }) => failure)
@@ -482,13 +83,13 @@ export const collectPureCandidateFilesChecked = (input: {
   if (existsErr === null) return undefined
   if (existsErr !== undefined) return existsErr
 
-  const dirSymErr = checkNonSymlinkEntry(input.dir, input.hostIo)
+  const dirSymErr = checkNonSymlinkEntry(dir, hostIo)
   if (dirSymErr !== undefined) return dirSymErr
 
   const entriesRes = Result.try({
-    try: () => input.hostIo.readdirSync(input.dir),
+    try: () => hostIo.readdirSync(dir),
     catch: (err) =>
-      `Failed to read directory '${input.dir}': ${err instanceof Error ? err.message : String(err)}`,
+      `Failed to read directory '${dir}': ${err instanceof Error ? err.message : String(err)}`,
   })
   const rawEntries = match(entriesRes)
     .with({ _tag: "Failure" }, () => undefined)
@@ -503,12 +104,12 @@ export const collectPureCandidateFilesChecked = (input: {
 
   const entries = [...rawEntries].sort((a, b) => compareCodeUnits(a.name, b.name))
   for (const entry of entries) {
-    const full = join(input.dir, entry.name)
-    const symErr = checkNonSymlinkEntry(full, input.hostIo)
+    const full = join(dir, entry.name)
+    const symErr = checkNonSymlinkEntry(full, hostIo)
     if (symErr !== undefined) return symErr
 
     if (entry.isDirectory) {
-      const subErr = collectPureCandidateFilesChecked({ ...input, dir: full })
+      const subErr = collectAllPackageTsFilesChecked(full, repoRoot, hostIo, out)
       if (subErr !== undefined) return subErr
       continue
     }
@@ -520,11 +121,9 @@ export const collectPureCandidateFilesChecked = (input: {
       continue
     }
 
-    const relFile = relative(input.repoRoot, full).replace(/\\/g, "/").replace(/^\.\//, "")
-    if (input.targetSet !== undefined && !input.targetSet.has(relFile)) continue
-
+    const relFile = relative(repoRoot, full).replace(/\\/g, "/").replace(/^\.\//, "")
     const readRes = Result.try({
-      try: () => input.hostIo.readTextSync(full),
+      try: () => hostIo.readTextSync(full),
       catch: (err) =>
         `Failed to read '${full}': ${err instanceof Error ? err.message : String(err)}`,
     })
@@ -538,15 +137,84 @@ export const collectPureCandidateFilesChecked = (input: {
         .with({ _tag: "Success" }, () => "")
         .exhaustive()
     }
+    out.push({
+      fullPath: full,
+      relFile,
+      analysis: analyzeModulePurityAst(relFile, content),
+    })
+  }
+  return undefined
+}
 
-    if (isPureMutationCandidate(relFile, content)) {
+/** Walks `srcDir`, collects TypeScript files that pass transitive pure-module classification, and appends them to `results`. */
+export const collectPureCandidateFilesChecked = (input: {
+  readonly dir: string
+  readonly repoRoot: string
+  readonly scope: string
+  readonly pkgDir: string
+  readonly pkgName: string | undefined
+  readonly tier: "infra-pure" | "app-pure"
+  readonly targetSet: ReadonlySet<string> | undefined
+  readonly hostIo: SyncHostIo
+  readonly results: Array<PureDiscoveredFile>
+}): string | undefined => {
+  const scanned: Array<ScannedPackageModule> = []
+  const scanErr = collectAllPackageTsFilesChecked(input.dir, input.repoRoot, input.hostIo, scanned)
+  if (scanErr !== undefined) return scanErr
+
+  const byRel = new Map<string, ScannedPackageModule>()
+  const effectiveStatus = new Map<string, PureModuleClassification>()
+  for (const mod of scanned) {
+    byRel.set(mod.relFile, mod)
+    effectiveStatus.set(mod.relFile, mod.analysis.classification)
+  }
+
+  // Fixed-point propagation: if a module value-imports/re-exports any excluded relative module
+  // (excluding benign pure type-only barrels unless they re-export something excluded), mark it Excluded.
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const mod of scanned) {
+      const curr = effectiveStatus.get(mod.relFile)!
+      const expectedTypeOnlyReason = `type-only or re-export-only file '${basename(mod.relFile)}'`
+      const shouldSkip = match(curr)
+        .with({ _tag: "Pure" }, () => false)
+        .with({ _tag: "Excluded" }, ({ reason }) => reason !== expectedTypeOnlyReason)
+        .exhaustive()
+      if (shouldSkip) {
+        continue
+      }
+      for (const spec of mod.analysis.relativeValueImports) {
+        const targetRel = resolveRelativeSiblingRel(mod.fullPath, spec, input.repoRoot, byRel)
+        if (targetRel === undefined) continue
+        const targetClass = effectiveStatus.get(targetRel)
+        if (targetClass === undefined) continue
+        const targetExcludedReason = match(targetClass)
+          .with({ _tag: "Pure" }, () => undefined)
+          .with({ _tag: "Excluded" }, ({ reason }) => reason)
+          .exhaustive()
+        if (targetExcludedReason !== undefined) {
+          effectiveStatus.set(mod.relFile, {
+            _tag: "Excluded",
+            reason: `transitively imports excluded module '${spec}' (${targetExcludedReason})`,
+          })
+          changed = true
+          break
+        }
+      }
+    }
+  }
+
+  for (const mod of scanned) {
+    if (input.targetSet !== undefined && !input.targetSet.has(mod.relFile)) continue
+    if (effectiveStatus.get(mod.relFile)?._tag === "Pure") {
       input.results.push({
         scope: input.scope,
         pkgDir: input.pkgDir,
         pkgName: input.pkgName,
         tier: input.tier,
-        fullPath: full,
-        relFile,
+        fullPath: mod.fullPath,
+        relFile: mod.relFile,
       })
     }
   }

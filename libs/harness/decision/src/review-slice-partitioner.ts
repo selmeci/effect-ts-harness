@@ -14,12 +14,13 @@ import {
 const NON_SLICE_ID_CHAR_RE = /[^a-z0-9._:/-]/g
 
 const toSafeSliceIdBase = (raw: string): string => {
-  const sanitized = raw
-    .toLowerCase()
-    .replaceAll(NON_SLICE_ID_CHAR_RE, "-")
-    .replace(/^-+/, "")
-    .slice(0, 112)
-  return sanitized.length > 0 ? sanitized : "root"
+  const cleaned = raw.toLowerCase().replaceAll(NON_SLICE_ID_CHAR_RE, "-").replace(/^-+/, "")
+  if (cleaned.length === 0) {
+    return "root"
+  }
+  const safeStart = /^[a-z0-9]/.test(cleaned) ? cleaned : `s-${cleaned}`
+  const sliced = safeStart.slice(0, 112)
+  return sliced.length > 0 ? sliced : "root"
 }
 
 /** Resolves a deterministic Nx package or top-level directory unit key for a relative path. */

@@ -20,10 +20,14 @@ import {
   toErrorReasonMessage,
 } from "@harness/contract"
 import { type HarnessGraph, findTestsReaching } from "@harness/graph"
+import { reconcileReviewSlicesWithSelections } from "@harness/decision"
 import { nodeSyncHostIo } from "@harness/infra"
 import { type GraphResolutionStatus, isPathInsideRoot, type ServerOptions } from "./mcp-helpers.js"
 
-const BoundedRepoRoot = Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 1024)))
+const BoundedRepoRoot = Schema.String.pipe(
+  Schema.check(Schema.isBetweenLength(1, 1024)),
+  Schema.check(Schema.isPattern(/^[^\0]+$/)),
+)
 
 export const ReviewRouteInputSchema = Schema.Struct({
   changedFiles: Schema.Array(Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 512))))
@@ -141,7 +145,7 @@ export const collectManifestTagsForFiles = (
 
     for (const relFile of changedFiles) {
       let currDir = path.dirname(path.resolve(resolvedRoot, relFile))
-      while (isPathInsideRoot(resolvedRoot, currDir) && currDir !== resolvedRoot) {
+      while (isPathInsideRoot(resolvedRoot, currDir)) {
         if (visitedDirs.has(currDir)) {
           break
         }
@@ -205,6 +209,9 @@ export const collectManifestTagsForFiles = (
             }
           }
         }
+        if (currDir === resolvedRoot) {
+          break
+        }
         currDir = path.dirname(currDir)
       }
     }
@@ -256,12 +263,16 @@ export const escalatePlanOnDiagnostics = (plan: ReviewRoutingPlan): ReviewRoutin
           : active.depth === "lite"
             ? ReviewDepth.make("focused")
             : active.depth
+      const reviewSlices =
+        active.reviewSlices !== undefined
+          ? reconcileReviewSlicesWithSelections(active.reviewSlices, nextSelections)
+          : undefined
       return ActiveReviewPlan.make({
         depth: nextDepth,
         source: active.source,
         ...(active.degradedReason !== undefined ? { degradedReason: active.degradedReason } : {}),
         selections: nextSelections,
-        ...(active.reviewSlices !== undefined ? { reviewSlices: active.reviewSlices } : {}),
+        ...(reviewSlices !== undefined ? { reviewSlices } : {}),
       })
     })
     .exhaustive()

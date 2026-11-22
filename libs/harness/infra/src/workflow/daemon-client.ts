@@ -611,13 +611,27 @@ export const doctorWorkflowViaDaemon = Effect.fn("HarnessDaemonClient.doctorWork
   WorkflowDoctorResponse,
   DaemonProtocolMismatchError | WorkflowStoreUnavailableError
 > {
+  const doctorPolicy = match(request.mode)
+    .with("rebuild", () => ({
+      defaultRequireActiveLease: true,
+      options: {
+        ...options,
+        timeoutMs: options?.timeoutMs ?? WORKFLOW_COMPLETE_IPC_TIMEOUT_MS,
+      },
+    }))
+    .with("check-only", () => ({
+      defaultRequireActiveLease: false,
+      options,
+    }))
+    .exhaustive()
+
   return yield* invokeWorkflowDaemonRpc({
     command: "workflow.doctor",
     operation: DOCTOR_WORKFLOW_OPERATION,
     request,
     requestSchema: WorkflowDoctorRequest,
     responseSchema: WorkflowDoctorResponse,
-    defaultRequireActiveLease: false,
-    options,
+    defaultRequireActiveLease: doctorPolicy.defaultRequireActiveLease,
+    options: doctorPolicy.options,
   })
 })

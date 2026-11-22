@@ -79,6 +79,22 @@ describe("AST Fail-Closed & Interrupt-Safe Laws (SPEC-0025 REQ-2.1..REQ-2.4)", (
       expect(testExempt.violations.map((v) => v.rule)).not.toContain(
         "untyped-catch-cause-interrupt-leak",
       )
+
+      const aliasedEffectCatch = yield* evalAstFile(
+        "libs/sample/infra/src/alias.ts",
+        'import { Effect as E } from "effect"\nexport const run = eff.pipe(E.catchCause(() => E.void))',
+      )
+      expect(aliasedEffectCatch.violations.map((v) => v.rule)).toContain(
+        "untyped-catch-cause-interrupt-leak",
+      )
+
+      const nonCallGuardRef = yield* evalAstFile(
+        "libs/sample/infra/src/noncall.ts",
+        "export const run = eff.pipe(Effect.catchCause((c) => isPureInterruptCause ? Effect.succeed(0) : Effect.failCause(c)))",
+      )
+      expect(nonCallGuardRef.violations.map((v) => v.rule)).toContain(
+        "untyped-catch-cause-interrupt-leak",
+      )
     }),
   )
 
@@ -92,9 +108,13 @@ describe("AST Fail-Closed & Interrupt-Safe Laws (SPEC-0025 REQ-2.1..REQ-2.4)", (
           "export const c = Option.getOrElse(Schema.decodeOption(S)(raw), () => [])",
           "export const d = Schema.decodeUnknownOption(S)(raw).pipe(Option.getOrElse(() => undefined))",
           "export const e = pipe(Schema.decodeOption(S)(raw), Option.getOrElse(() => ({})))",
+          "export const e2 = Option.getOrUndefined(Schema.decodeOption(S)(raw)) ?? []",
           'export const f = eff.pipe(Effect.catchTag("WorkflowStoreUnavailableError", () => Effect.succeed([])))',
           'export const g = Effect.catchTag(eff, "WriterLeaseHeldError", () => Effect.void)',
           'export const h = eff.pipe(Effect.catchTag("WorkflowStoreUnavailableError", () => { return Effect.succeed(Option.none()) }))',
+          "export const i = eff.pipe(Effect.catchTags({ WorkflowStoreUnavailableError: () => Effect.succeed([]) }))",
+          'export const j = eff.pipe(Effect.catchTag(["WorkflowStoreUnavailableError"], () => Effect.sync(() => [])))',
+          'export const k = Effect.catchTag(eff, "WriterLeaseHeldError", () => Effect.gen(function* () { return [] }))',
         ]
         for (const [idx, code] of badSnippets.entries()) {
           const report = yield* evalAstFile(`libs/harness/infra/src/bad-${idx}.ts`, code)
@@ -187,16 +207,69 @@ describe("AST Fail-Closed & Interrupt-Safe Laws (SPEC-0025 REQ-2.1..REQ-2.4)", (
         const snippetByKind = {
           catchCause: "export const f1 = eff.pipe(Effect.catchCause(() => Effect.void))",
           decodeFallback: "export const f2 = Schema.decodeOption(S)(x) ?? []",
-          tapError: "export const f3 = () => step.pipe(Effect.tapError(() => rollback()))",
+          tapError:
+            "export const provisionWork = () => step.pipe(Effect.tapError(() => rollback()))",
+        } as const
+        const expectedRuleByKind = {
+          catchCause: "untyped-catch-cause-interrupt-leak",
+          decodeFallback: "silent-decode-fallback",
+          tapError: "provision-tap-error-leak",
         } as const
         const code = scenarios.map((k) => snippetByKind[k]).join("\n")
         const path = "libs/harness/infra/src/provisionWork.ts"
         const r1 = yield* evalAstFile(path, code)
-        const r2 = yield* evalAstFile(path, code)
         const d1 = yield* evalDogfoodFile(path, code)
+        for (const kind of scenarios) {
+          const expectedRule = expectedRuleByKind[kind]
+          if (kind === "catchCause" || kind === "decodeFallback") {
+            expect(r1.violations.map((v) => v.rule)).toContain(expectedRule)
+          }
+          if (kind === "tapError") {
+            expect(d1.violations.map((v) => v.rule)).toContain(expectedRule)
+          }
+        }
+        const r2 = yield* evalAstFile(path, code)
         const d2 = yield* evalDogfoodFile(path, code)
         expect(r1.violations.map((v) => v.rule)).toEqual(r2.violations.map((v) => v.rule))
         expect(d1.violations.map((v) => v.rule)).toEqual(d2.violations.map((v) => v.rule))
+      }),
+  )
+
+  it.effect(
+    "SPEC-0030 2nd-pass: detects logging handlers, gen yield* Effect.void, data-last catchTag/catchTags orElse, Schema as S, and import * as Fx from effect",
+    () =>
+      Effect.gen(function* () {
+        const logCatch = yield* evalAstFile(
+          "libs/sample/infra/src/log-catch.ts",
+          'export const run = eff.pipe(Effect.catchCause(() => Effect.logWarning("dropped")))',
+        )
+        expect(logCatch.violations.map((v) => v.rule)).toContain(
+          "untyped-catch-cause-interrupt-leak",
+        )
+
+        const badFallbackSnippets = [
+          'export const a = eff.pipe(Effect.catchTag("WorkflowStoreUnavailableError", () => Effect.logWarning("ignored")))',
+          'export const b = eff.pipe(Effect.catchTag("WorkflowStoreUnavailableError", () => Effect.gen(function* () { return yield* Effect.void })))',
+          'export const c = eff.pipe(Effect.catchTag("WorkflowStoreUnavailableError", () => Effect.succeed([]), () => Effect.fail(err)))',
+          "export const d = eff.pipe(Effect.catchTags({ WorkflowStoreUnavailableError: () => Effect.succeed([]) }, () => Effect.fail(err)))",
+          'import { Schema as S } from "effect"\nexport const e = S.decodeOption(MySchema)(raw) ?? []',
+          'import * as Fx from "effect"\nexport const f = eff.pipe(Fx.Effect.catchTag("WorkflowStoreUnavailableError", () => Fx.Effect.void))',
+        ]
+        for (const [idx, snippet] of badFallbackSnippets.entries()) {
+          const res = yield* evalAstFile(`libs/harness/infra/src/pass2-${idx}.ts`, snippet)
+          expect(
+            res.violations.map((v) => v.rule),
+            snippet,
+          ).toContain("silent-decode-fallback")
+        }
+
+        const fxNsCatch = yield* evalAstFile(
+          "libs/sample/infra/src/fx-ns.ts",
+          'import * as Fx from "effect"\nexport const g = eff.pipe(Fx.Effect.catchCause(() => Fx.Effect.logWarning("x")))',
+        )
+        expect(fxNsCatch.violations.map((v) => v.rule)).toContain(
+          "untyped-catch-cause-interrupt-leak",
+        )
       }),
   )
 })

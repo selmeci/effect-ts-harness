@@ -58,8 +58,8 @@ Furthermore, a single whole-tree hash (`treeHash`) in `.harness/verify-stamp.jso
 
 1. **Zero-Exemption Tier Reachability:** Legacy ignored-function exemptions in `libs/harness/gates/src/plugins/gc/gc-helpers.ts` remain eliminated (`untested-effect-fn` / `shallow-decider-property-test` with zero allowlist bypasses), and `gc-test-and-decider.plugin.ts` enforces test reachability across `domain` (`type:core`), `contract`, `infra`, and `app` non-stub `EffectFn` spans alongside composite property-test validation on all `.decide` functions.
 2. **AST Zero-I/O Pure-Module Mutation Inclusion:** `mutation-pure-module-classifier.ts` and `mutation-target-discovery.ts` statically include side-effect-free modules inside `type:infra` and `type:app` in `MutationCheck.decide` while keeping live process/socket/filesystem I/O adapters out of mutant generation.
-3. **Dual-Hash Doc-Only Verify Fast-Path:** `libs/harness/gates/src/verify-stamp.ts` computes both full workspace `treeHash` and non-markdown code/config `mutableTreeHash`; `verify-doc-fastpath.ts` and `verify-and-done.command.ts` re-use the prior stamp's build/mutation evidence only when all changed files vs. the verified baseline are markdown (`*.md`), `mutableTreeHash` matches byte-for-byte, and `gc --strict` plus `ontology check --strict` still pass fresh (`CI=true pnpm harness verify`).
-4. **Cross-Seam Differential and Isolation Suites:** `workflow-replay-differential.test.ts` proves `Harness.executeTaskWorkflow` live projections match `rebuildWorkflowReadModelViews` across interrupts, retries, and phase waits, while `worktree-policy-seam.test.ts` locks `WorktreeRepoRoot.validate` path layout against policy guard rules.
+3. **Dual-Hash Doc-Only Verify Fast-Path:** `libs/harness/gates/src/verify-stamp.ts` computes both full workspace `treeHash` and non-markdown code/config `mutableTreeHash` (`isMarkdownDocPath` restricts exclusions to non-executable `.md` docs outside `adapters/`, `agent-patterns/`, `src/`, `test/`, `tests/`, `__tests__/`, and `fixtures/`); `verify-doc-fastpath.ts` and `verify-and-done.command.ts` re-use the prior stamp's build/mutation evidence only when `mutableTreeHash` matches byte-for-byte, `CI=true` `ci_full` seed count and pinned `DST_SEED` remain satisfied, and full `gc --strict` (`expectedPatterns`, `checkUntestedDomainFns`, `checkDeciderPropertyTests`), `ontology check --strict`, and `decideSpanBudgets` checks pass fresh.
+4. **Cross-Seam Differential and Isolation Suites:** `workflow-replay-differential.test.ts` verifies `Harness.executeTaskWorkflow` live projections match `rebuildWorkflowReadModelViews` across interrupts, retries, and phase waits, while `worktree-policy-seam.test.ts` locks `WorktreeRepoRoot.validate` path layout against policy guard rules.
 
 ## Rejected Alternatives
 
@@ -80,7 +80,7 @@ Include live Unix-socket servers, child-process wrappers, and OS lock modules in
 ### Positive Consequences
 
 - Every pure parser, codec, journal state machine, and core decider carries full reachability, property-test, and mutation-kill coverage (`811` evaluated mutants).
-- Documentation-only commits validate formatting, `gc --strict`, and `ontology check --strict` and mint an updated `verify-stamp.json` in ~15–25s while preserving exact `mutableTreeHash` parity.
+- Documentation-only commits validate formatting, full `gc --strict`, `ontology check --strict`, and `decideSpanBudgets` when eligible for fast-path reuse and mint an updated `verify-stamp.json` while preserving exact `mutableTreeHash` parity.
 
 ### Negative Consequences and Trade-offs
 

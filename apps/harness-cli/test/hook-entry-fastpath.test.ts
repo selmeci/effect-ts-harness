@@ -1298,5 +1298,24 @@ describe("hook-entry.ts fast-path", () => {
       expect(JSON.parse(fullInspect.stdout.trim())).toMatchObject({ decision: "continue" })
       expect(fullInspect.loadedUrls.some((u) => u.includes("hook-fallback.ts"))).toBe(true)
     })
+
+    it("F-12: fails closed on glob-combination-overflow across both fast-path and index entry", () => {
+      const manyGlobs = JSON.stringify({
+        tool_name: "Glob",
+        tool_input: {
+          path: "/repo/{a,b,c,d}/{e,f,g,h}/{i,j,k,l}/{m,n,o,p}",
+          pattern: "*.ts",
+        },
+      })
+      const fastRes = runHookEntry(["guard", "--format=antigravity"], { input: manyGlobs })
+      const fullRes = runEntry(INDEX_PATH, ["guard", "--format=antigravity"], { input: manyGlobs })
+      expect(fastRes.status).toBe(0)
+      expect(fullRes.status).toBe(0)
+      expect(JSON.parse(fastRes.stdout.trim())).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining("Glob"),
+      })
+      expect(fullRes.stdout.trim()).toBe(fastRes.stdout.trim())
+    })
   })
 })

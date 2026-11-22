@@ -68,7 +68,7 @@ describe("Harness.decideGuardCommand Adversarial Property Matrix (SPEC-0028 REQ-
             }),
           ),
         )
-        expect(["deny", "ask"]).toContain(result.verdict)
+        expect(result.verdict).toBe("deny")
       }),
   )
 

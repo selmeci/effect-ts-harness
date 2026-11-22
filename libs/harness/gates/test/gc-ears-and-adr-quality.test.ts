@@ -1157,7 +1157,7 @@ Context description here.
         Effect.gen(function* () {
           const adrWithOverclaim = validCanonicalAdr.replace(
             "## Context and Problem Statement",
-            "## Context and Problem Statement\n\nUnit tests prove this invariant holds.\nTests do not prove absence of bugs.\n\n```\nUnit tests prove code inside fences is ignored.\n```",
+            "## Context and Problem Statement\n\nUnit tests prove this invariant holds.\n`foo.test.ts` proves invariants hold.\nTests prove invariants via property tests.\nTests do not prove absence of bugs.\n\n```\nUnit tests prove code inside fences is ignored.\n```",
           )
 
           const report = yield* decideAdrDocQuality({
@@ -1168,7 +1168,7 @@ Context description here.
           const proofFindings = report.findings.filter(
             (f) => f.kind === "adr-overstated-proof-claim",
           )
-          expect(proofFindings).toHaveLength(1)
+          expect(proofFindings).toHaveLength(3)
           expect(proofFindings[0]?.message).toContain("verify")
         }),
     )

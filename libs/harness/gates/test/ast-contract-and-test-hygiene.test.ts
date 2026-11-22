@@ -59,6 +59,7 @@ describe("SPEC-0028 AST Contract Shape, Workflow Name, and Test Hygiene Gates", 
           'export const A = Schema.String.pipe(Schema.brand("A"))',
           'export const B = Schema.NonEmptyString.pipe(Schema.brand("B")).annotate({ title: "B" })',
           'export const C = pipe(Schema.String, Schema.brand("C"))',
+          'export const CurriedBad = Schema.brand("CurriedBad")(Schema.String)',
           "export const Bag = Schema.Record(Schema.String, Schema.Unknown)",
           "export const ObjBag = Schema.Record({ key: Schema.String, value: Schema.Unknown })",
         ].join("\n")
@@ -71,7 +72,7 @@ describe("SPEC-0028 AST Contract Shape, Workflow Name, and Test Hygiene Gates", 
           ],
         })
         const rules = report.violations.map((v) => v.rule)
-        expect(rules).toHaveLength(5)
+        expect(rules).toHaveLength(6)
         expect(rules.every((r) => r === "contract-shape-hardening")).toBe(true)
       }),
   )
@@ -86,6 +87,8 @@ describe("SPEC-0028 AST Contract Shape, Workflow Name, and Test Hygiene Gates", 
           'export const Pat = Schema.NonEmptyString.pipe(Schema.isPattern(/^[a-z]+$/), Schema.brand("Pat"))',
           'export const Max = Schema.String.pipe(Schema.check(Schema.isMaxLength(32)), Schema.brand("Max"))',
           'export const Piped = pipe(Schema.String, Schema.isMaxLength(16), Schema.brand("Piped"))',
+          'export const CurriedGood = Schema.brand("CurriedGood")(Schema.String).check(Schema.isTrimmed())',
+          'export const PostPipeGood = Schema.String.pipe(Schema.brand("PostPipeGood")).check(Schema.isMaxLength(16))',
           'export const Built = Schema.Trimmed.pipe(Schema.brand("Built"))',
           'export const Num = Schema.Int.pipe(Schema.brand("Num"))',
           'export const Derived = Base.pipe(Schema.brand("Derived"))',
@@ -334,6 +337,125 @@ describe("SPEC-0028 AST Contract Shape, Workflow Name, and Test Hygiene Gates", 
       }),
   )
 
+  it.effect(
+    "F-11: mirrors curried Schema.brand and post-brand .check() chains in tools/oxlint/syntax-bans.js",
+    () =>
+      Effect.gen(function* () {
+        const plugin = yield* loadOxlintPlugin()
+        const curriedBadMsgs: Array<string> = []
+        const curriedVisitor = plugin.rules["syntax-bans"].create({
+          filename: "/repo/libs/demo/contract/src/curried.ts",
+          sourceCode: { text: "" },
+          report: (r: { readonly message: string }) => curriedBadMsgs.push(r.message),
+        })
+        const schemaBrandCall = {
+          type: "CallExpression",
+          callee: {
+            type: "MemberExpression",
+            computed: false,
+            object: { type: "Identifier", name: "Schema" },
+            property: { type: "Identifier", name: "brand" },
+          },
+          arguments: [{ type: "Literal", value: "CurriedBad" }],
+        }
+        const schemaStringMember = {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Schema" },
+          property: { type: "Identifier", name: "String" },
+        }
+        curriedVisitor.Program?.({
+          type: "Program",
+          body: [
+            {
+              type: "VariableDeclaration",
+              declarations: [
+                {
+                  type: "VariableDeclarator",
+                  id: { type: "Identifier", name: "CurriedBad" },
+                  init: {
+                    type: "CallExpression",
+                    callee: schemaBrandCall,
+                    arguments: [schemaStringMember],
+                  },
+                },
+              ],
+            },
+          ],
+        })
+        expect(curriedBadMsgs.some((m) => m.includes("[contract-shape-hardening]"))).toBe(true)
+
+        const boundedMsgs: Array<string> = []
+        const boundedVisitor = plugin.rules["syntax-bans"].create({
+          filename: "/repo/libs/demo/contract/src/bounded.ts",
+          sourceCode: { text: "" },
+          report: (r: { readonly message: string }) => boundedMsgs.push(r.message),
+        })
+        const isTrimmedCall = {
+          type: "CallExpression",
+          callee: {
+            type: "MemberExpression",
+            computed: false,
+            object: { type: "Identifier", name: "Schema" },
+            property: { type: "Identifier", name: "isTrimmed" },
+          },
+          arguments: [],
+        }
+        boundedVisitor.Program?.({
+          type: "Program",
+          body: [
+            {
+              type: "VariableDeclaration",
+              declarations: [
+                {
+                  type: "VariableDeclarator",
+                  id: { type: "Identifier", name: "CurriedGood" },
+                  init: {
+                    type: "CallExpression",
+                    callee: {
+                      type: "MemberExpression",
+                      computed: false,
+                      object: {
+                        type: "CallExpression",
+                        callee: schemaBrandCall,
+                        arguments: [schemaStringMember],
+                      },
+                      property: { type: "Identifier", name: "check" },
+                    },
+                    arguments: [isTrimmedCall],
+                  },
+                },
+                {
+                  type: "VariableDeclarator",
+                  id: { type: "Identifier", name: "PostPipeGood" },
+                  init: {
+                    type: "CallExpression",
+                    callee: {
+                      type: "MemberExpression",
+                      computed: false,
+                      object: {
+                        type: "CallExpression",
+                        callee: {
+                          type: "MemberExpression",
+                          computed: false,
+                          object: schemaStringMember,
+                          property: { type: "Identifier", name: "pipe" },
+                        },
+                        arguments: [schemaBrandCall],
+                      },
+                      property: { type: "Identifier", name: "check" },
+                    },
+                    arguments: [isTrimmedCall],
+                  },
+                },
+              ],
+            },
+          ],
+        })
+        expect(boundedMsgs.some((m) => m.includes("[contract-shape-hardening]"))).toBe(false)
+      }),
+  )
+
   it.effect.prop(
     "deterministically classifies identical violation counts for generated contract, workflow, and test batches",
     { kinds: Schema.Array(CaseKindArb).pipe(Schema.check(Schema.isMaxLength(5))) },
@@ -389,6 +511,129 @@ describe("SPEC-0028 AST Contract Shape, Workflow Name, and Test Hygiene Gates", 
         expect(first.violations.filter((v) => v.rule === "max-test-case-lines")).toHaveLength(
           kinds.filter((k) => k === "oversized-test").length,
         )
+      }),
+  )
+
+  it.effect(
+    "SPEC-0030 2nd-pass: accepts parenthesized curried Schema.brand(...).check(...) and pipe(...).check(...) in AST gate and tools/oxlint/syntax-bans.js",
+    () =>
+      Effect.gen(function* () {
+        const parenBoundedSrc = [
+          'import { Schema } from "effect"',
+          'export const P = (Schema.brand("P")(Schema.String)).check(Schema.isTrimmed())',
+          'export const P2 = (Schema.String.pipe(Schema.brand("P2"))).check(Schema.isTrimmed())',
+        ].join("\n")
+        const astRes = yield* decideAstGateCache({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/demo/contract/src/paren-bounded.ts"),
+              content: AstSourceContent.make(parenBoundedSrc),
+            },
+          ],
+        })
+        expect(astRes.violations.filter((v) => v.rule === "contract-shape-hardening")).toEqual([])
+
+        const plugin = yield* loadOxlintPlugin()
+        const msgs: Array<string> = []
+        const visitor = plugin.rules["syntax-bans"].create({
+          filename: "/repo/libs/demo/contract/src/paren-bounded.ts",
+          sourceCode: { text: "" },
+          report: (r: { readonly message: string }) => msgs.push(r.message),
+        })
+        const schemaStringMember = {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Schema" },
+          property: { type: "Identifier", name: "String" },
+        }
+        const isTrimmedCall = {
+          type: "CallExpression",
+          callee: {
+            type: "MemberExpression",
+            computed: false,
+            object: { type: "Identifier", name: "Schema" },
+            property: { type: "Identifier", name: "isTrimmed" },
+          },
+          arguments: [],
+        }
+        visitor.Program?.({
+          type: "Program",
+          body: [
+            {
+              type: "VariableDeclaration",
+              declarations: [
+                {
+                  type: "VariableDeclarator",
+                  id: { type: "Identifier", name: "P" },
+                  init: {
+                    type: "CallExpression",
+                    callee: {
+                      type: "MemberExpression",
+                      computed: false,
+                      object: {
+                        type: "ParenthesizedExpression",
+                        expression: {
+                          type: "CallExpression",
+                          callee: {
+                            type: "CallExpression",
+                            callee: {
+                              type: "MemberExpression",
+                              computed: false,
+                              object: { type: "Identifier", name: "Schema" },
+                              property: { type: "Identifier", name: "brand" },
+                            },
+                            arguments: [{ type: "Literal", value: "P" }],
+                          },
+                          arguments: [schemaStringMember],
+                        },
+                      },
+                      property: { type: "Identifier", name: "check" },
+                    },
+                    arguments: [isTrimmedCall],
+                  },
+                },
+                {
+                  type: "VariableDeclarator",
+                  id: { type: "Identifier", name: "P2" },
+                  init: {
+                    type: "CallExpression",
+                    callee: {
+                      type: "MemberExpression",
+                      computed: false,
+                      object: {
+                        type: "ParenthesizedExpression",
+                        expression: {
+                          type: "CallExpression",
+                          callee: {
+                            type: "MemberExpression",
+                            computed: false,
+                            object: schemaStringMember,
+                            property: { type: "Identifier", name: "pipe" },
+                          },
+                          arguments: [
+                            {
+                              type: "CallExpression",
+                              callee: {
+                                type: "MemberExpression",
+                                computed: false,
+                                object: { type: "Identifier", name: "Schema" },
+                                property: { type: "Identifier", name: "brand" },
+                              },
+                              arguments: [{ type: "Literal", value: "P2" }],
+                            },
+                          ],
+                        },
+                      },
+                      property: { type: "Identifier", name: "check" },
+                    },
+                    arguments: [isTrimmedCall],
+                  },
+                },
+              ],
+            },
+          ],
+        })
+        expect(msgs.some((m) => m.includes("[contract-shape-hardening]"))).toBe(false)
       }),
   )
 })

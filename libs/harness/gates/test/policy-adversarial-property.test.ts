@@ -1,7 +1,12 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Schema } from "effect"
 import { match } from "ts-pattern"
-import { classifyCommand, classifyFileRead, classifyFileWrite } from "../src/index.js"
+import {
+  classifyCommand,
+  classifyFileRead,
+  classifyFileWrite,
+  isCommandAllowed,
+} from "../src/index.js"
 
 const ReadAndWriteProtectedShellTargetSchema = Schema.Literals([
   ".git/harness/daemon.sock",
@@ -114,7 +119,7 @@ const formatVerbPayload = (
   match(verb)
     .with("cp", () => ({ bin: "cp", cmd: `cp ${arg} /tmp/out` }))
     .with("mv", () => ({ bin: "mv", cmd: `mv /tmp/src ${arg}` }))
-    .with("sed-i", () => ({ bin: "sed", cmd: `sed -i 's/a/b/' ${arg}` }))
+    .with("sed-i", () => ({ bin: "sed -i 's/a/b/'", cmd: `sed -i 's/a/b/' ${arg}` }))
     .with("tee", () => ({ bin: "tee", cmd: `printf '{}' | tee ${arg}` }))
     .with("redirect", () => ({ bin: "sh", cmd: `echo '{}' > ${arg}` }))
     .otherwise((v) => ({ bin: v, cmd: `${v} ${arg}` }))
@@ -202,12 +207,12 @@ describe("Adversarial Property-Based Security Policy Matrix (SPEC-0028 REQ-2.1, 
       const arg = applyShellQuoteObfuscation(target, quoteKind)
       const command = wrapObfuscatedShellCommand(verb, arg, wrapper)
       const verdict = classifyCommand(command, { unitWorkerMode })
-      expect(["deny", "escalate", "ask"]).toContain(verdict)
+      expect(verdict).toBe("deny")
     },
   )
 
   it.prop(
-    "denies or escalates every obfuscated mutating shell command targeting stamps, caches, or readonly subtrees",
+    "denies every obfuscated mutating shell command targeting stamps, caches, or readonly subtrees",
     {
       target: WriteProtectedShellTargetSchema,
       quoteKind: QuoteWrapKindSchema,
@@ -219,9 +224,70 @@ describe("Adversarial Property-Based Security Policy Matrix (SPEC-0028 REQ-2.1, 
       const arg = applyShellQuoteObfuscation(target, quoteKind)
       const command = wrapObfuscatedShellCommand(verb, arg, wrapper)
       const verdict = classifyCommand(command, { unitWorkerMode })
-      expect(["deny", "escalate", "ask"]).toContain(verdict)
+      expect(verdict).toBe("deny")
     },
   )
+
+  it("F-12: blocks ANSI-C escapes, flag/runner bypasses, stem wildcards, multi-char brackets, brace truncation, while preserving safe lint/doc reads", () => {
+    for (const cmd of [
+      "cat $'\\x2egit/harness/daemon.sock'",
+      "$'cat .e\\x6ev'",
+      "find libs -fprint .harness/verify-stamp.json",
+      "sort -o .harness/verify-stamp.json a.txt",
+      "git diff --output .harness/verify-stamp.json",
+      "rg --pre sh daemon .harness/verify-stamp.json",
+    ]) {
+      expect(classifyCommand(cmd, { unitWorkerMode: false }), cmd).toBe("deny")
+    }
+    for (const nonAllowedCmd of [
+      "nx exec -- echo hi",
+      "pnpm --filter @harness/gates exec rm a.ts",
+      "pnpm --filter @harness/gates dlx foo",
+    ]) {
+      expect(isCommandAllowed(nonAllowedCmd), nonAllowedCmd).toBe(false)
+      expect(classifyCommand(nonAllowedCmd, { unitWorkerMode: false }), nonAllowedCmd).toBe(
+        "escalate",
+      )
+    }
+    expect(classifyCommand("rg --pre sh daemon libs/", { unitWorkerMode: false })).toBe("escalate")
+
+    for (const pathTarget of [
+      ".dev.vars.local",
+      ".en?",
+      ".dev.var?",
+      "mutation-hma?*.ke?",
+      ".git/harne*/auth-token?.json",
+      ".e[no]v",
+      "mutation-h[mn]ac.key",
+      "/repo/{a,b,c,d,e,f,g,h,i}/secret.txt",
+      "/repo/{a,{b,{c,d}}}/secret.txt",
+    ]) {
+      expect(classifyFileRead(pathTarget, { unitWorkerMode: false }).verdict, pathTarget).toBe(
+        "deny",
+      )
+      expect(classifyFileWrite(pathTarget, { unitWorkerMode: false }).verdict, pathTarget).toBe(
+        "deny",
+      )
+    }
+
+    expect(classifyFileRead(".git", { unitWorkerMode: true }).verdict).toBe("deny")
+    expect(classifyFileRead(".harness", { unitWorkerMode: true }).verdict).toBe("deny")
+
+    for (const safeRead of [
+      ".oxlintrc.json",
+      "tools/oxlint/syntax-bans.js",
+      "repos/effect/LLMS.md",
+    ]) {
+      expect(classifyFileRead(safeRead, { unitWorkerMode: false }).verdict, safeRead).toBe("allow")
+    }
+    for (const safeCmd of [
+      "cat .oxlintrc.json",
+      "rg syntax tools/oxlint",
+      "cat repos/effect/LLMS.md",
+    ]) {
+      expect(classifyCommand(safeCmd, { unitWorkerMode: false }), safeCmd).toBe("allow")
+    }
+  })
 
   it.prop(
     "allows canonical benign workspace and read-only subtree doc inspection commands",

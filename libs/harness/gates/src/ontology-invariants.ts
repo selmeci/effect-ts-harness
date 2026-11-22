@@ -717,20 +717,27 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(f
   for (const spec of parsedSpecs) {
     if (!isActiveDocStatus(spec.doc.status)) continue
     for (const row of spec.requirements) {
-      const verif = row.verification.trim().toLowerCase()
-      if (/\bR\s*=\s*never\b/.test(row.requirement) && verif === "unittest") {
+      const verifTokens = row.verification
+        .replace(/[*_`]/g, "")
+        .split(/[,/]/)
+        .map((t) => t.trim().toLowerCase())
+        .filter((t) => t.length > 0)
+      if (
+        /\bR\s*=\s*never\b/.test(row.requirement) &&
+        verifTokens.includes("unittest") &&
+        !verifTokens.some((t) => t === "graphcheck" || t === "astgate")
+      ) {
         findings.push({
           kind: "ontology-unverified-requirement",
           nodeId: `${spec.doc.id}:${row.id}`,
           message: `Requirement ${row.id} specifies a static type-channel invariant (R = never) with UnitTest verification — use GraphCheck or AstGate instead.`,
         })
       }
-      const isExecVerif =
-        verif === "unittest" ||
-        verif === "propertytest" ||
-        verif === "tracetest" ||
-        verif === "test"
-      if (!hasVitestCases || !isExecVerif || !row.effectSymbol) continue
+      const hasPropertyVerif = verifTokens.includes("propertytest")
+      const hasExecVerif = verifTokens.some(
+        (t) => t === "unittest" || t === "tracetest" || t === "test",
+      )
+      if (!hasVitestCases || (!hasPropertyVerif && !hasExecVerif) || !row.effectSymbol) continue
       const resolved = resolveNode(input.graph, row.effectSymbol)
       if (resolved === undefined) continue
       match(resolved)
@@ -739,17 +746,15 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(f
           const propTestCount =
             nodeIdx !== undefined ? (incomingPropertyTests.get(nodeIdx) ?? 0) : 0
           const testOrCallCount = nodeIdx !== undefined ? (incomingTestOrCall.get(nodeIdx) ?? 0) : 0
-          if (verif === "propertytest") {
-            if (propTestCount === 0) {
-              findings.push({
-                kind: "ontology-unverified-requirement",
-                nodeId: `${spec.doc.id}:${row.id}`,
-                message: `Requirement ${row.id} claims PropertyTest verification for '${row.effectSymbol}' but 0 property tests exercise it.`,
-              })
-            }
+          if (hasPropertyVerif && propTestCount === 0) {
+            findings.push({
+              kind: "ontology-unverified-requirement",
+              nodeId: `${spec.doc.id}:${row.id}`,
+              message: `Requirement ${row.id} claims PropertyTest verification for '${row.effectSymbol}' but 0 property tests exercise it.`,
+            })
             return
           }
-          if (testOrCallCount === 0) {
+          if (hasExecVerif && testOrCallCount === 0) {
             findings.push({
               kind: "ontology-unverified-requirement",
               nodeId: `${spec.doc.id}:${row.id}`,

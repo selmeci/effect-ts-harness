@@ -45,14 +45,16 @@ spans:
   - HarnessDaemonClient.queryCommand
   - SelfDogfooding.decide
 services: []
-errors: []
+errors:
+  - WorkflowStoreUnavailableError
+  - WriterLeaseHeldError
 ---
 
 ## Context
 
 Post-mortem analysis of PR #44 surfaced three cross-package protocol and safety fragility points in the workflow control plane. First, workflow activity names (`ProjectUnitDispatched/...`, `VerifyUnit/...`, `VerifySharedStep/...`, `MergeSliceWave/...`, `ProjectWaveMergeRetried/...`) and durable deferred names (`unit/...`, `escalation/...`, `llm-phase-done`) are built with inline string templates across `harness-task-workflow.ts` and `harness-task-workflow-projections.ts`, then parsed with duplicated ad-hoc regexes inside `read-model-rebuild.ts` and `read-model-rebuild-journal.ts`. Second, timeout budgets for workflow verification, daemon IPC, server socket timeouts, and RPC settle polling are duplicated as magic numbers across `unit-verifier-live.ts` (`120_000`), `daemon-client.ts` (`30_000`, `150_000`), `unix-socket-daemon-live.ts` (`5_000`, `35_000`, `160_000`), `workflow-rpc-complete-helper.ts` (`80 * 25 ms`), and `workflow-rpc-daemon-helper.ts` (`200 * 50 ms`), which enabled the timeout-layer inversion fixed in PR #44 (`F-7.1`).
 
-In addition, single-writer fencing against `harness-workflows` relies on every non-lease `expectMutation: true` query propagating `expectedLeaseEpoch` and `expectedLeaseOwner` into `WorkflowStore.invoke` / `WorkflowStore.invokeWithMeta`, yet no deterministic AST gate currently catches unfenced `expectMutation: true` call sites before runtime.
+In addition, single-writer fencing against `harness-workflows` relies on every non-lease `expectMutation: true` query propagating `expectedLeaseEpoch` and `expectedLeaseOwner` into `WorkflowStore.invoke` / `WorkflowStore.invokeWithMeta`, yet without an AST gate unfenced `expectMutation: true` call sites could escape until runtime.
 
 - **Reused Contracts / Errors:** `WorkUnitId`, `AttemptNumber`, `EscalationOrdinal`, `WaveIndex`, `WorkflowStoreUnavailableError`, `WriterLeaseHeldError` from `@harness/contract`
 - **Reused Services:** `WorkflowProjectionWriter`, `WorkflowReadModelQuery` from `@harness/service`
@@ -85,7 +87,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | ID      | Pattern      | Requirement                                                                                                                                                                                                                                                                   | Effect Symbol                      | Verification |
 | ------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ------------ |
 | REQ-2.1 | Ubiquitous   | `HarnessDaemonClient.queryCommand` and all daemon socket, unit-verifier, and RPC settle loops **shall** source timeout and polling constants from `WORKFLOW_TIMEOUT_BUDGETS` in `workflow-timeouts.ts` (`@harness/contract`).                                                 | `HarnessDaemonClient.queryCommand` | `UnitTest`   |
-| REQ-2.2 | State-driven | **While** validating `WORKFLOW_TIMEOUT_BUDGETS`, the timeout budget validator **shall** enforce strict monotonicity (`workflowServerSocketMs > workflowCompleteIpcMs > unitVerifyMs + pollSettleBudgetMs` and `defaultServerSocketMs > workflowIpcMs > abortSettleBudgetMs`). | `HarnessDaemonClient.queryCommand` | `UnitTest`   |
+| REQ-2.2 | Ubiquitous | The timeout budget validator validating `WORKFLOW_TIMEOUT_BUDGETS` **shall** enforce strict monotonicity (`workflowServerSocketMs > workflowCompleteIpcMs > unitVerifyMs + pollSettleBudgetMs` and `defaultServerSocketMs > workflowIpcMs > abortSettleBudgetMs`). | `HarnessDaemonClient.queryCommand` | `UnitTest`   |
 
 ### 3 · Static Lease-Fencing Gate for Omnigraph Workflow Mutations
 
@@ -94,7 +96,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | ID      | Pattern            | Requirement                                                                                                                                                                                                                                                                                                                 | Effect Symbol           | Verification |
 | ------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- | ------------ |
 | REQ-3.1 | Unwanted behaviour | **If** a production `src/` file invokes `WorkflowStore.invoke` or `WorkflowStore.invokeWithMeta` (or `invokeWorkflowStoreQueryOnce`) with `expectMutation: true` on a non-lease query without propagating `expectedLeaseEpoch`, **then** `SelfDogfooding.decide` **shall** report an `omnigraph-fenced-mutation` violation. | `SelfDogfooding.decide` | `AstGate`    |
-| REQ-3.2 | State-driven       | **While** executing non-lease mutations against `harness-workflows`, `WorkflowStore.invoke` and `WorkflowStore.invokeWithMeta` **shall** enforce `expectedLeaseEpoch` and `expectedLeaseOwner` checks before mutating graph state.                                                                                          | `WorkflowStore.invoke`  | `UnitTest`   |
+| REQ-3.2 | Ubiquitous         | `WorkflowStore.invoke` and `WorkflowStore.invokeWithMeta` **shall** enforce `expectedLeaseEpoch` and `expectedLeaseOwner` checks before mutating graph state on non-lease queries against `harness-workflows`, failing closed with `WriterLeaseHeldError` on stale leases.               | `WorkflowStore.invoke`  | `UnitTest`   |
 
 ## Assumptions
 

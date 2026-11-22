@@ -2362,6 +2362,15 @@ function checkContractShapeHardeningEstree(programNode, filename, report) {
       const c = unwrapEstreeTop(cur.callee)
       if (
         c != null &&
+        isEstreeSchemaMember(c.callee, "Schema", "brand") &&
+        getStaticModuleString(c.arguments?.[0]) != null &&
+        cur.arguments?.[0] != null
+      ) {
+        cur = unwrapEstreeTop(cur.arguments[0])
+        continue
+      }
+      if (
+        c != null &&
         c.type === "MemberExpression" &&
         c.computed !== true &&
         c.property?.type === "Identifier" &&
@@ -2415,9 +2424,55 @@ function checkContractShapeHardeningEstree(programNode, filename, report) {
         getStaticModuleString(node.arguments?.[0]) != null
       ) {
         let chainRoot = null
-        for (let i = ancestors.length - 1; i >= 0; i--) {
-          if (!isPipeParent(ancestors[i])) break
-          chainRoot = ancestors[i]
+        let child = node
+        let idx = ancestors.length - 1
+        while (idx >= 0) {
+          const parent = ancestors[idx]
+          if (parent == null) break
+          if (parent.type === "ParenthesizedExpression" || parent.type === "ChainExpression") {
+            child = unwrapEstreeTop(parent)
+            idx--
+            continue
+          }
+          if (
+            chainRoot === null &&
+            parent.type === "CallExpression" &&
+            unwrapEstreeTop(parent.callee) === child
+          ) {
+            chainRoot = parent
+            child = parent
+            idx--
+            continue
+          }
+          if (
+            parent.type === "MemberExpression" &&
+            parent.computed !== true &&
+            parent.property?.type === "Identifier" &&
+            CONTRACT_SCHEMA_CHAIN_METHODS.has(parent.property.name) &&
+            unwrapEstreeTop(parent.object) === child &&
+            ancestors[idx - 1]?.type === "CallExpression" &&
+            unwrapEstreeTop(ancestors[idx - 1].callee) === parent
+          ) {
+            chainRoot = ancestors[idx - 1]
+            child = chainRoot
+            idx -= 2
+            continue
+          }
+          if (isPipeParent(parent)) {
+            const pCallee = unwrapEstreeTop(parent.callee)
+            const isMethodOnChild =
+              pCallee?.type === "MemberExpression" && unwrapEstreeTop(pCallee.object) === child
+            const isPipeArg =
+              (pCallee?.type === "Identifier" && pCallee.name === "pipe") ||
+              (chainRoot === null && pCallee?.type === "MemberExpression")
+            if (isMethodOnChild || isPipeArg) {
+              chainRoot = parent
+              child = parent
+              idx--
+              continue
+            }
+          }
+          break
         }
         if (chainRoot != null && !visitedChains.has(chainRoot)) {
           visitedChains.add(chainRoot)

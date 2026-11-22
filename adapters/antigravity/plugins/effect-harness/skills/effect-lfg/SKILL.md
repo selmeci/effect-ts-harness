@@ -124,7 +124,7 @@ Before dispatching review routing (`harness_review_route`) after multi-package o
 
 **REQUIRED SUB-SKILL:** Use `resolving-effect-review-feedback` per [references/review-and-shipping.md](references/review-and-shipping.md) (executed once on the controller workspace after Stage 3 on Routes A/C, or after all Waves are integrated in Step D5 on Route D):
 
-1. Route via `harness_review_route` and dispatch parallel read-only `gemini-4-hydrogen-medium` specialist reviewers (`invoke_subagent` by default with `Workspace: "share"`, or `swarm` with `model: "gemini-4-hydrogen-medium"`) across `git diff main...HEAD` based on touched signals, passing the exact list of domain-owned changed files + `baseRef` and instructing each reviewer to start with `harness_git_diff` (`statOnly: true`, then targeted `paths`) instead of re-reading all unchanged files in the PR:
+1. Route via `harness_review_route` and dispatch parallel read-only `gemini-4-hydrogen-medium` specialist reviewers (`invoke_subagent` by default with `Workspace: "share"`, or `swarm` with `model: "gemini-4-hydrogen-medium"`) across `git diff main...HEAD` based on touched signals (fanning out per `reviewSlices` when `changedFiles.length >= REVIEW_SLICE_FILE_THRESHOLD` while preserving whole-diff cross-package seam checks), passing the exact list of domain-owned changed files + `baseRef` and instructing each reviewer to start with `harness_git_diff` (`statOnly: true`, then targeted `paths`) instead of re-reading all unchanged files in the PR:
    - `effect-ears-test-reviewer` (Always)
    - `effect-security-reviewer` (Contracts, `HttpApi`, `Rpc`, auth, SQL, `Config`)
    - `effect-reliability-reviewer` (`type:infra`, DO SQLite, D1, Queues, `Schedule`, `Scope`)
@@ -134,6 +134,7 @@ Before dispatching review routing (`harness_review_route`) after multi-package o
    - `effect-architecture-reviewer` (`type:service`, framework/adapter surfaces, or `changedLineCount >= 180`)
 2. Centrally adjudicate findings via Graph MCP (`harness_resolve`, `harness_ontology_why`, `harness_structural_search`, `harness_tests_reaching`).
 3. Synchronize specs/ADRs first if needed, shard any single package with `> 15` adjudicated findings into `2+` disjoint sub-units by subdirectory/file concern, dispatch post-fix or follow-up remediation spanning `>= 2` packages (or disjoint modules) in parallel back to warm workers/subagents rather than sequential solo edits, enforce the Phase 4 Acceptance Gate (a failed or missing fixer `Sub-Bullet Verification Matrix` or verification gate MUST block Phase 5 / Stage 5 and `swarm kill`), terminate `swarm-monitor` immediately once active remediation waves settle, re-run `pnpm harness plan-check` if any public signature or frontmatter symbol changed, and record any non-blocking declined/residual items for the closeout report.
+4. **Mandatory Second-Pass Remediation Re-Audit:** Whenever any `blocker`, `critical`, or `major` finding was resolved, call `harness_review_route` on the remediation diff with `remediationContext: { priorSpecialists, maxSeverity }` and complete a read-only second-pass specialist re-audit covering all modified remediation hunks and callers before entering Stage 5.
 
 ### Stage 5 — Compounding Learnings & Final Deterministic Gate Sequence
 

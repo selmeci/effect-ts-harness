@@ -375,15 +375,34 @@ export const buildGraphNavigationToolDescriptors = (
             message: "repoRoot escapes configured workspace root",
           })
         }
-        const effectiveRoot =
+        const candidateRoot =
           parsed.repoRoot !== undefined
             ? path.isAbsolute(parsed.repoRoot)
               ? path.resolve(parsed.repoRoot)
               : path.resolve(boundaryRoot, parsed.repoRoot)
             : boundaryRoot
+        const resolvedBoundary = path.resolve(boundaryRoot)
+        const isStrictSubdirWithoutWorkspaceMarker =
+          candidateRoot !== resolvedBoundary &&
+          nodeSyncHostIo.existsSync(candidateRoot) &&
+          nodeSyncHostIo.isDirectorySync(candidateRoot) &&
+          !nodeSyncHostIo.existsSync(path.join(candidateRoot, "pnpm-workspace.yaml")) &&
+          !nodeSyncHostIo.existsSync(path.join(candidateRoot, ".git"))
+        let effectiveRoot = candidateRoot
+        let effectiveChangedFiles: ReadonlyArray<string> = parsed.changedFiles
+        if (isStrictSubdirWithoutWorkspaceMarker) {
+          const relSubdir = path.relative(resolvedBoundary, candidateRoot).replaceAll("\\", "/")
+          const validatedRelPaths = yield* normalizeReviewFilePaths(
+            parsed.changedFiles.map((f) => ReviewRawFileInput.make(f)),
+          )
+          effectiveRoot = resolvedBoundary
+          effectiveChangedFiles = validatedRelPaths.map((relPath) =>
+            relPath.startsWith(`${relSubdir}/`) ? relPath : `${relSubdir}/${relPath}`,
+          )
+        }
         const effectiveTimeoutMs = resolveReviewRouteTimeoutMs(parsed.timeoutMs, options)
         const rawInput = yield* Schema.decodeEffect(ReviewRawDiffInput)({
-          changedFiles: parsed.changedFiles,
+          changedFiles: effectiveChangedFiles,
           diffSummary: parsed.diffSummary ?? "",
           changedLineCount: parsed.changedLineCount,
           touchedTiers: parsed.touchedTiers ?? [],

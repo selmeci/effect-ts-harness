@@ -1003,6 +1003,56 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
     ])
   })
 
+  it("F-17: ignores alternate ~~~ / 4-backtick fences in catalog truth audit and extractMarkdownSubsection", () => {
+    const nestedBackticksInFour = [
+      "# Docs",
+      "````markdown",
+      "Exposes 99 MCP tools (`harness_bogus_tool`).",
+      "```",
+      "```",
+      "Still inside outer fence: 99 CLI commands and `harness_nested_fake`.",
+      "````",
+      "~~~bash",
+      "Using `harness_tilde_fake` and 99 MCP tools.",
+      "~~~",
+      "```inline```",
+      "After fences: `harness_after_close_fake` and 99 MCP tools.",
+    ].join("\n")
+    const afterFenceFindings = auditCatalogDocTruthInContent("README.md", nestedBackticksInFour)
+    expect(afterFenceFindings.map((f) => f.nodeId)).toEqual([
+      "README.md:mcp:harness_after_close_fake",
+      "README.md:L12:mcp-count:99",
+    ])
+
+    const mdWithFencedHeadingsAndRules = [
+      "## Top",
+      "### Target Section",
+      "Intro line.",
+      "```inline```",
+      "````md",
+      "```",
+      "### Four-Backtick Nested Heading",
+      "---",
+      "```",
+      "After inner close inside four-backtick.",
+      "````",
+      "~~~text",
+      "### Tilde Nested Heading",
+      "~~~",
+      "Trailing section line.",
+      "---",
+      "### Real Next Section",
+      "Should not appear.",
+    ].join("\n")
+    const extracted = extractMarkdownSubsection(mdWithFencedHeadingsAndRules, "### Target Section")
+    expect(extracted).toContain("```inline```")
+    expect(extracted).toContain("### Four-Backtick Nested Heading")
+    expect(extracted).toContain("After inner close inside four-backtick.")
+    expect(extracted).toContain("### Tilde Nested Heading")
+    expect(extracted).toContain("Trailing section line.")
+    expect(extracted).not.toContain("### Real Next Section")
+  })
+
   it("SPEC-0030 REQ-2.2: evaluateDocTruthPlugin detects missing adapter skill counterparts and skips unrelated repos", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "harness-adapter-skill-parity-"))
     try {

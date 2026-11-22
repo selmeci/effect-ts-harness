@@ -3,6 +3,7 @@ import { match } from "ts-pattern"
 import { describe, expect, it } from "vitest"
 import {
   AstSourceFilePath,
+  BatchMutantOutcomeResult,
   BatchMutantResultsSchema,
   ContentSha256,
   ErrorReasonMessage,
@@ -109,6 +110,18 @@ describe("MutationCache contract schemas", () => {
       ]),
     )
     expect(batchDecoded).toHaveLength(4)
+    for (const outcome of batchDecoded.map((entry) => entry.result)) {
+      const roundTripped = Schema.decodeSync(BatchMutantOutcomeResult)(
+        Schema.encodeSync(BatchMutantOutcomeResult)(outcome),
+      )
+      expect(roundTripped._tag).toBe(outcome._tag)
+      match(roundTripped)
+        .with({ _tag: "Exited" }, (v) => expect(v.exitCode).toBe(1))
+        .with({ _tag: "Signaled" }, (v) => expect(v.signal).toBe("SIGTERM"))
+        .with({ _tag: "TimedOut" }, (v) => expect(v.stderr).toBe("timed out"))
+        .with({ _tag: "SpawnFailed" }, (v) => expect(v.spawnError).toBe("ENOENT"))
+        .exhaustive()
+    }
 
     const decision = Schema.decodeSync(MutationCacheLookupDecision)({
       hitKeys: [sampleSha],

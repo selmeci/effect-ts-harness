@@ -702,5 +702,42 @@ describe("harness_review_route MCP tool", () => {
     expect(diagRaw.warnings.length).toBeGreaterThan(0)
     expect(diagRaw.plan._tag).toBe("ActiveReviewPlan")
     expect(diagRaw.reviewSlices).toHaveLength(1)
+    expect(
+      diagRaw.reviewSlices?.[0]?.selections.some(
+        (s) => s.reviewer === ReviewerId.make("effect-architecture-reviewer"),
+      ),
+    ).toBe(true)
+
+    await expectSchemaRejection(
+      {
+        changedFiles: ["docs/notes.md"],
+        changedLineCount: 2,
+        repoRoot: "adapters\0bad",
+      },
+      REPO_ROOT,
+    )
+
+    const subdirRaw = await executeTool(
+      "harness_review_route",
+      {
+        changedFiles: ["SKILL.md"],
+        diffSummary: "Update skill doc",
+        changedLineCount: 5,
+        repoRoot: path.join(REPO_ROOT, "adapters/claude-code/skills/effect-code-review"),
+      },
+      {
+        repoRoot: REPO_ROOT,
+        graph,
+        skipOmnigraphSpawn: true,
+        skipTelemetry: true,
+        skipActiveWorkspaceLookup: true,
+        decisionLayer: makeMockDecisionModelLayer({ reviewDepthLabel: ReviewDepth.make("skip") }),
+      },
+    )
+    const subdirOut = Schema.decodeUnknownSync(ReviewRouteToolOutput)(subdirRaw)
+    expect(subdirOut.plan._tag).toBe("ActiveReviewPlan")
+    expect(subdirOut.signals.changedFiles).toEqual([
+      "adapters/claude-code/skills/effect-code-review/SKILL.md",
+    ])
   })
 })

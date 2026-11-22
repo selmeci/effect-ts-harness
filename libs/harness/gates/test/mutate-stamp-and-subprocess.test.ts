@@ -1579,15 +1579,59 @@ if (id === "m-sigterm") {
     }
   })
 
+  it("isMarkdownDocPath rejects markdown files inside executable/test/adapter directories per ADR-0019", () => {
+    for (const nonDocPath of [
+      "adapters/antigravity/README.md",
+      "adapters/claude-code/skills/effect-lfg/SKILL.md",
+      "agent-patterns/planning.md",
+      "libs/harness/gates/src/notes.md",
+      "libs/harness/gates/test/fixtures/sample.mdx",
+      "libs/harness/gates/tests/sample.md",
+      "libs/harness/gates/__tests__/sample.md",
+      "apps/web/src/fixtures/demo.md",
+    ]) {
+      expect(isMarkdownDocPath(nonDocPath), nonDocPath).toBe(false)
+    }
+    for (const docPath of ["README.md", "docs/adr/0019.md", "libs/harness/docs/spec.mdx"]) {
+      expect(isMarkdownDocPath(docPath), docPath).toBe(true)
+    }
+  })
+
   it.prop(
-    "isMarkdownDocPath property: recognizes .md/.mdx case-insensitively and rejects code extensions",
+    "isMarkdownDocPath property: recognizes .md/.mdx case-insensitively outside non-doc directories and rejects code extensions",
     {
-      stem: Schema.String.check(Schema.isPattern(/^[a-z0-9/_-]{1,20}$/)),
+      prefixDir: Schema.Literals([
+        "",
+        "docs/",
+        "libs/harness/docs/",
+        "adapters/",
+        "agent-patterns/",
+        "libs/demo/src/",
+        "libs/demo/test/",
+        "libs/demo/tests/",
+        "libs/demo/__tests__/",
+        "libs/demo/fixtures/",
+      ]),
+      fileName: Schema.Literals(["README", "0019-note", "design-spec"]),
+      leadingDotSlash: Schema.Boolean,
+      useBackslash: Schema.Boolean,
       ext: Schema.Literals([".md", ".MD", ".mdx", ".MDX", ".ts", ".tsx", ".json"]),
     },
-    ({ stem, ext }) => {
+    ({ prefixDir, fileName, leadingDotSlash, useBackslash, ext }) => {
       const lower = ext.toLowerCase()
-      expect(isMarkdownDocPath(`${stem}${ext}`)).toBe(lower === ".md" || lower === ".mdx")
+      const excludedPrefixes = new Set([
+        "adapters/",
+        "agent-patterns/",
+        "libs/demo/src/",
+        "libs/demo/test/",
+        "libs/demo/tests/",
+        "libs/demo/__tests__/",
+        "libs/demo/fixtures/",
+      ])
+      const rawRel = `${leadingDotSlash ? "./" : ""}${prefixDir}${fileName}${ext}`
+      const rel = useBackslash ? rawRel.replace(/\//g, "\\") : rawRel
+      const isDocExt = lower === ".md" || lower === ".mdx"
+      expect(isMarkdownDocPath(rel)).toBe(isDocExt && !excludedPrefixes.has(prefixDir))
     },
   )
 })

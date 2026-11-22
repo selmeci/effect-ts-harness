@@ -59,6 +59,8 @@ import {
   InvalidPlanWorkflowGraphError,
   InvalidReviewRouteInputError,
   LeaseEpoch,
+  LeaseFilePath,
+  LeaseHolderId,
   McpToolName,
   NonNegativeCount,
   NxScopeTag,
@@ -106,10 +108,13 @@ import {
   SubprocessArg,
   SubprocessCommand,
   SubprocessExitCode,
+  SubprocessMaxBufferBytes,
   SubprocessOutput,
   TaskRunAbortedError,
   TierTopologyMessage,
   TierTopologyRuleId,
+  UnitEscalation,
+  UnitOutcome,
   WORKFLOW_GQ_QUERY_NAMES,
   WaveIndex,
   WorkUnitDraft,
@@ -118,6 +123,7 @@ import {
   WorkflowAttemptVerdict,
   WorkflowCompileReason,
   WorkflowCompleteRequest,
+  WorkflowCompleteResponse,
   WorkflowExecutionId,
   WorkflowGqQueryName,
   WorkflowLevel,
@@ -125,6 +131,7 @@ import {
   WorkflowProjectionStatus,
   WorkflowRebuiltRunCount,
   WorkflowResumeRequest,
+  WorkflowResumeResponse,
   WorkflowRpcEnvelope,
   WorkflowRpcErrorEnvelope,
   WorkflowRpcRequestId,
@@ -166,7 +173,10 @@ import {
   resolveDefaultDecisionCachePath,
   sanitizeWorktreeIdSegment,
   selectActivePersistedAstCacheEntries,
+  toCompilerOverlayErrorReason,
+  toCompilerRepoRootInput,
   toErrorReasonMessage,
+  toMcpToolInputName,
   validateSubprocessInput,
   wavesOf,
 } from "../src/index.js"
@@ -813,6 +823,14 @@ describe("@harness/contract schemas", () => {
     expect(toErrorReasonMessage({ message: "   " }, "  fallback msg  ")).toBe("fallback msg")
     expect(toErrorReasonMessage("", "   ")).toBe("Unknown error")
     expect(toErrorReasonMessage(Object.create(null), "null-proto")).toBe("null-proto")
+
+    expect(Schema.is(SubprocessMaxBufferBytes)(1024)).toBe(true)
+    expect(Schema.is(SubprocessMaxBufferBytes)(16_777_216)).toBe(true)
+    expect(Schema.is(SubprocessMaxBufferBytes)(16_777_217)).toBe(false)
+    expect(toMcpToolInputName("t".repeat(300))).toHaveLength(256)
+    expect(toCompilerRepoRootInput("/".repeat(5000))).toHaveLength(4096)
+    expect(toCompilerOverlayErrorReason("e".repeat(9000))).toHaveLength(8192)
+    expect(toCompilerOverlayErrorReason("", "fallback")).toBe("fallback")
 
     const report = makeVerdictReport([], {
       inspectedFileCount: NonNegativeCount.make(3),
@@ -1629,5 +1647,90 @@ describe("@harness/contract schemas", () => {
         status: statusSummary,
       }),
     ).toThrow()
+  })
+
+  it("round-trips all closed WorkflowTerminalError, WorkflowCompleteResponse, and WorkflowResumeResponse variants", () => {
+    const { runId, treeHash, runRecord } = makeWf3Fixtures()
+    const executionId = runRecord.executionId
+    const unitId = WorkUnitId.make("unit-a")
+    const roundtrip = <A, E>(schema: Schema.Codec<A, E, never, never>, value: A): A => {
+      const encoded = Schema.encodeSync(schema)(value)
+      const decoded = Schema.decodeSync(schema)(encoded)
+      expect(decoded).toEqual(value)
+      return decoded
+    }
+
+    const terminalVariants: ReadonlyArray<WorkflowTerminalError> = [
+      WorkflowTerminalError.cases.Aborted.make({
+        runId,
+        escalation: UnitEscalation.cases.AuthRequired.make({
+          runner: RunnerId.make("claude-code"),
+        }),
+      }),
+      WorkflowTerminalError.cases.OperatorAborted.make({
+        runId,
+        reason: WorkflowStoreFailureReason.make("cancelled by operator"),
+      }),
+      WorkflowTerminalError.cases.WorkspaceFs.make({
+        operation: WorkspaceFsOperation.make("read"),
+        reason: WorkflowStoreFailureReason.make("unreadable snapshot"),
+      }),
+      WorkflowTerminalError.cases.StoreUnavailable.make({
+        operation: WorkflowStoreOperation.make("rebuild"),
+        reason: WorkflowStoreFailureReason.make("daemon store offline"),
+      }),
+      WorkflowTerminalError.cases.LeaseHeld.make({
+        holderId: LeaseHolderId.make("worker-1"),
+        lockFilePath: LeaseFilePath.make("/tmp/repo/.git/harness/daemon.lock"),
+      }),
+      WorkflowTerminalError.cases.LeaseHeld.make({
+        holderId: LeaseHolderId.make("worker-2"),
+        leaseEpoch: LeaseEpoch.make(7),
+        lockFilePath: LeaseFilePath.make("/tmp/repo/.git/harness/daemon.lock"),
+      }),
+      WorkflowTerminalError.cases.Interrupted.make({
+        reason: WorkflowStoreFailureReason.make("fiber interrupted"),
+      }),
+      WorkflowTerminalError.cases.Defect.make({
+        reason: WorkflowStoreFailureReason.make("unexpected fiber defect"),
+      }),
+    ]
+    for (const variant of terminalVariants) {
+      expect(roundtrip(WorkflowTerminalError, variant)._tag).toBe(variant._tag)
+    }
+
+    const completeVariants: ReadonlyArray<WorkflowCompleteResponse> = [
+      WorkflowCompleteResponse.cases.UnitCompleted.make({
+        runId,
+        executionId,
+        outcome: UnitOutcome.cases.Completed.make({
+          unitId,
+          attempt: AttemptNumber.make(1),
+          changedPaths: [],
+          packageStampHash: PackageStampHash.make("b".repeat(64)),
+        }),
+      }),
+      WorkflowCompleteResponse.cases.LlmPhaseCompleted.make({
+        runId,
+        executionId,
+        receipt: { workspaceHash: treeHash, frictionLogCleared: FrictionLogState.make("cleared") },
+      }),
+    ]
+    for (const variant of completeVariants) {
+      expect(roundtrip(WorkflowCompleteResponse, variant)._tag).toBe(variant._tag)
+    }
+
+    const resumeVariants: ReadonlyArray<WorkflowResumeResponse> = [
+      WorkflowResumeResponse.cases.WorkflowResumed.make({ runId, executionId }),
+      WorkflowResumeResponse.cases.EscalationResolved.make({
+        runId,
+        executionId,
+        unitId,
+        decision: EscalationDecision.make("retry"),
+      }),
+    ]
+    for (const variant of resumeVariants) {
+      expect(roundtrip(WorkflowResumeResponse, variant)._tag).toBe(variant._tag)
+    }
   })
 })

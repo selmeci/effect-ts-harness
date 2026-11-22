@@ -408,8 +408,15 @@ export const extractGuardStdinPayload = (
       let combinedCount = 0
       for (const baseDir of baseDirs) {
         for (const childGlob of childGlobs) {
-          if (combinedCount >= 64) break
           if (!childGlob.startsWith("/")) {
+            if (combinedCount >= 64) {
+              return {
+                _tag: "Error" as const,
+                isAntigravity,
+                reason: "guard: hook stdin payload exceeded maximum glob expansion combinations",
+                detail: "fastpath=glob-combination-overflow",
+              }
+            }
             pushNonEmpty(candidatePaths, joinPosixPair(baseDir, childGlob))
             combinedCount += 1
           }

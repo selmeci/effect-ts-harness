@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import * as path from "node:path"
 import { NodeServices } from "@effect/platform-node"
-import { Context, Effect, Exit, Layer, Result, Scope, SynchronizedRef } from "effect"
+import { Context, Effect, Exit, Layer, Result, Schema, Scope, SynchronizedRef } from "effect"
 import { match } from "ts-pattern"
 import {
   AstSourceContent,
@@ -349,9 +349,24 @@ export const handleDaemonAstGatesRequest = (input: {
       if (textOrErr.error !== undefined) {
         return { id: input.requestId, ok: false, error: textOrErr.error }
       }
+      const decodedPathOpt = Schema.decodeOption(AstSourceFilePath)(rel)
+      const decodedContentOpt = Schema.decodeOption(AstSourceContent)(textOrErr.text)
+      const decodedEntry = match([decodedPathOpt, decodedContentOpt] as const)
+        .with([{ _tag: "Some" }, { _tag: "Some" }], ([p, c]) => ({
+          ok: true as const,
+          filePath: p.value,
+          content: c.value,
+        }))
+        .otherwise(() => ({
+          ok: false as const,
+          error: `AST gate target file exceeds bounded size or path limits: ${rel}`,
+        }))
+      if (!decodedEntry.ok) {
+        return { id: input.requestId, ok: false, error: decodedEntry.error }
+      }
       loadedFiles.push({
-        filePath: AstSourceFilePath.make(rel),
-        content: AstSourceContent.make(textOrErr.text),
+        filePath: decodedEntry.filePath,
+        content: decodedEntry.content,
       })
     }
 

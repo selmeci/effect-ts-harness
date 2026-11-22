@@ -14,6 +14,7 @@ import {
   ReviewRawDiffInput,
   ReviewRawFileInput,
   ReviewSignalPath,
+  ReviewSliceId,
   ReviewSummaryText,
   ReviewTimeoutMillis,
   ReviewerId,
@@ -26,9 +27,11 @@ import { makeFailingDecisionModelLayer, makeMockDecisionModelLayer } from "../sr
 import {
   ReviewRouterV1,
   attachReviewSlicesIfThresholdReached,
+  computeFilePathSurfaceFlags,
   decideDeterministicReviewRoute,
   inferReviewDiffSignals,
   normalizeReviewFilePaths,
+  reconcileReviewSlicesWithSelections,
   routeReviewDiff,
 } from "../src/review-router-decision.js"
 import {
@@ -1162,7 +1165,7 @@ describe("ReviewRouterV1 and monotonic hybrid review routing", () => {
   it.effect.prop(
     "SPEC-0030 REQ-1.2 property: >= 12-file slices are disjoint, complete, sorted, order-invariant, and subset-preserving",
     {
-      prefixCount: Schema.Int.check(Schema.isBetween({ minimum: 12, maximum: 18 })),
+      prefixCount: Schema.Int.check(Schema.isBetween({ minimum: 12, maximum: 22 })),
       reverseInput: Schema.Boolean,
     },
     ({ prefixCount, reverseInput }) =>
@@ -1186,6 +1189,10 @@ describe("ReviewRouterV1 and monotonic hybrid review routing", () => {
           "libs/harness/graph/src/l.ts",
           "apps/harness-cli/src/m.ts",
           "CHANGELOG.md",
+          ".github/workflows/ci.yml",
+          ".vscode/settings.json",
+          "_scripts/check.ts",
+          "._:/weird.ts",
         ]
         const selected = universe.slice(0, prefixCount)
         const ordered = reverseInput ? [...selected].reverse() : selected
@@ -1307,6 +1314,120 @@ describe("ReviewRouterV1 and monotonic hybrid review routing", () => {
         )
         expect(minorPlan._tag).toBe("SkipReviewPlan")
         expect(minorPlan.depth).toBe("skip")
+      }),
+  )
+
+  it.effect(
+    "F-01 & F-02: handles dot/underscore/colon slice roots safely, detects libs/*/service, and preserves whole-plan specialist union in reviewSlices",
+    () =>
+      Effect.gen(function* () {
+        const dotAndServiceFiles = [
+          ".github/workflows/ci.yml",
+          "github/workflows/mirror.yml",
+          ".vscode/settings.json",
+          "_scripts/check.ts",
+          "scripts/check.ts",
+          "._:/weird.ts",
+          "libs/sample/service/src/port.ts",
+          "libs/sample/domain/src/a.ts",
+          "libs/sample/domain/src/b.ts",
+          "libs/sample/domain/src/c.ts",
+          "libs/sample/domain/src/d.ts",
+          "libs/sample/domain/src/e.ts",
+        ].map((p) => ReviewRawFileInput.make(p))
+
+        const augmented = yield* routeReviewDiff(
+          ReviewRawDiffInput.make({
+            changedFiles: dotAndServiceFiles,
+            diffSummary: ReviewSummaryText.make("Update oauth pipeline"),
+            changedLineCount: ReviewChangedLines.make(190),
+            touchedTiers: [NxTierTag.make("type:contract")],
+            touchedScopes: [NxScopeTag.make("scope:web")],
+          }),
+        ).pipe(
+          Effect.provide(
+            makeMockDecisionModelLayer({
+              reviewDepthLabel: ReviewDepth.make("full"),
+              needsReliabilityProb: 0.9,
+            }),
+          ),
+        )
+
+        match(augmented)
+          .with({ _tag: "ActiveReviewPlan" }, (active) => {
+            expect(active.reviewSlices?.length ?? 0).toBeGreaterThan(0)
+            const slices = active.reviewSlices!
+            const sliceIds = slices.map((s) => s.sliceId)
+            for (const id of sliceIds) {
+              expect(Schema.is(ReviewSliceId)(id)).toBe(true)
+            }
+            expect(sliceIds).toContain("s-.github")
+            expect(sliceIds).toContain("github")
+            expect(sliceIds).toContain("s-_scripts")
+            expect(sliceIds).toContain("scripts")
+            expect(sliceIds).toContain("s-._:")
+
+            const wholeReviewers = new Set(active.selections.map((s) => s.reviewer))
+            expect(wholeReviewers.has(ReviewerId.make("effect-architecture-reviewer"))).toBe(true)
+            expect(wholeReviewers.has(ReviewerId.make("effect-security-reviewer"))).toBe(true)
+            expect(wholeReviewers.has(ReviewerId.make("effect-web-reviewer"))).toBe(true)
+            expect(wholeReviewers.has(ReviewerId.make("effect-migration-contract-reviewer"))).toBe(
+              true,
+            )
+            expect(wholeReviewers.has(ReviewerId.make("effect-reliability-reviewer"))).toBe(true)
+
+            const sliceUnion = new Set(
+              slices.flatMap((s) => s.selections.map((sel) => sel.reviewer)),
+            )
+            expect(sliceUnion).toEqual(wholeReviewers)
+
+            const serviceOnlySignals = computeFilePathSurfaceFlags(
+              [ReviewSignalPath.make("libs/sample/service/src/port.ts")],
+              new Set(),
+              new Set(),
+              ReviewSummaryText.make(""),
+              ReviewChangedLines.make(0),
+            ).hasArchitectureOrAdapterSurface
+            expect(serviceOnlySignals).toBe(true)
+            expect(reconcileReviewSlicesWithSelections(slices, active.selections)).toBe(slices)
+          })
+          .with({ _tag: "SkipReviewPlan" }, () => {
+            expect.unreachable("Expected ActiveReviewPlan")
+          })
+          .exhaustive()
+
+        const promotedDocPlan = yield* routeReviewDiff(
+          ReviewRawDiffInput.make({
+            changedFiles: Array.from({ length: 12 }, (_, i) =>
+              ReviewRawFileInput.make(`docs/guide/page-${i}.md`),
+            ),
+            diffSummary: ReviewSummaryText.make("Doc sweep"),
+            changedLineCount: ReviewChangedLines.make(10),
+            touchedTiers: [],
+            touchedScopes: [],
+          }),
+        ).pipe(
+          Effect.provide(
+            makeMockDecisionModelLayer({
+              reviewDepthLabel: ReviewDepth.make("focused"),
+              needsSecurityProb: 0.9,
+              needsReliabilityProb: 0.9,
+            }),
+          ),
+        )
+        match(promotedDocPlan)
+          .with({ _tag: "ActiveReviewPlan" }, (active) => {
+            const wholeUnion = new Set(active.selections.map((s) => s.reviewer))
+            const sliceUnion = new Set(
+              (active.reviewSlices ?? []).flatMap((s) => s.selections.map((sel) => sel.reviewer)),
+            )
+            expect(sliceUnion).toEqual(wholeUnion)
+            expect(wholeUnion.size).toBe(2)
+          })
+          .with({ _tag: "SkipReviewPlan" }, () => {
+            expect.unreachable("Expected Skip->Active promotion")
+          })
+          .exhaustive()
       }),
   )
 })

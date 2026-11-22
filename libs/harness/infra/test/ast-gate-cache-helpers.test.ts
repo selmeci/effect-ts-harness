@@ -137,7 +137,14 @@ describe("AstGateCache helper EffectFns", () => {
           )
           match(symExit)
             .with({ _tag: "Failure" }, ({ cause }) => {
-              expect(Cause.hasFails(cause)).toBe(true)
+              match(Cause.findErrorOption(cause))
+                .with({ _tag: "Some" }, ({ value }) => {
+                  expect(value._tag).toBe("WorkspaceFsError")
+                })
+                .with({ _tag: "None" }, () =>
+                  expect.unreachable("Expected WorkspaceFsError on symlink cache path"),
+                )
+                .exhaustive()
             })
             .with({ _tag: "Success" }, () => expect.unreachable("Expected symlink check failure"))
             .exhaustive()

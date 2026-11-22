@@ -122,6 +122,61 @@ describe("hook-matcher-tool-parity (SPEC-0025 REQ-1.1..REQ-1.3)", () => {
     expect(missingConst[0]?.nodeId).toBe(
       "apps/harness-cli/src/commands/hook-guard-payload.ts:ANTIGRAVITY_COMMAND_TOOL_NAMES",
     )
+
+    const wrongCmd = evaluateHookMatcherToolParity({
+      ...base,
+      claudeHooksJson: base.claudeHooksJson.replace(
+        "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard || exit 2",
+        "echo noop",
+      ),
+      antigravityHooksJson: base.antigravityHooksJson.replace(
+        "ingest --format=antigravity",
+        "echo noop",
+      ),
+    })
+    expect(wrongCmd.some((f) => f.nodeId.includes(":hook-command:"))).toBe(true)
+    expect(
+      wrongCmd.some(
+        (f) =>
+          f.nodeId.startsWith("adapters/claude-code/hooks.json:PreToolUse:") &&
+          f.nodeId.includes(":hook-command:"),
+      ),
+    ).toBe(true)
+    expect(
+      wrongCmd.some(
+        (f) =>
+          f.nodeId.startsWith(
+            "adapters/antigravity/plugins/effect-harness/hooks.json:PostToolUse:",
+          ) && f.nodeId.includes(":hook-command:"),
+      ),
+    ).toBe(true)
+
+    const nonCmdAndUnanchored = evaluateHookMatcherToolParity({
+      ...base,
+      claudeHooksJson: base.claudeHooksJson.replace(
+        '"type": "command",\n            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard || exit 2"',
+        '"type": "prompt",\n            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard || exit 2"',
+      ),
+      antigravityHooksJson: base.antigravityHooksJson.replace(
+        "apps/harness-cli/src/hook-entry.ts guard",
+        "echo guard",
+      ),
+    })
+    expect(
+      nonCmdAndUnanchored.some(
+        (f) =>
+          f.nodeId.startsWith("adapters/claude-code/hooks.json:PreToolUse:") &&
+          f.nodeId.includes(":hook-command:"),
+      ),
+    ).toBe(true)
+    expect(
+      nonCmdAndUnanchored.some(
+        (f) =>
+          f.nodeId.startsWith(
+            "adapters/antigravity/plugins/effect-harness/hooks.json:PreToolUse:",
+          ) && f.nodeId.includes(":hook-command:"),
+      ),
+    ).toBe(true)
   })
 
   it("detects adapter README PreToolUse / PostToolUse matcher and inline tool list drift", () => {
@@ -150,6 +205,27 @@ describe("hook-matcher-tool-parity (SPEC-0025 REQ-1.1..REQ-1.3)", () => {
       "adapters/claude-code/README.md:PreToolUse:missing-matcher:Read|Grep|Glob|LS|Find",
     )
     expect(ids).toContain("adapters/claude-code/README.md:PostToolUse")
+
+    const missingMatcherDocs = evaluateHookMatcherToolParity({
+      ...base,
+      antigravityReadme: base.antigravityReadme.replace(
+        "Intercepts tool calls (",
+        "Intercepts calls without matcher (",
+      ),
+      claudeReadme: base.claudeReadme.replaceAll("Matcher `", "Matches `"),
+    })
+    expect(
+      missingMatcherDocs.some(
+        (f) =>
+          f.nodeId ===
+          "adapters/antigravity/plugins/effect-harness/README.md:PreToolUse:missing-matcher-doc",
+      ),
+    ).toBe(true)
+    expect(
+      missingMatcherDocs.some(
+        (f) => f.nodeId === "adapters/claude-code/README.md:PreToolUse:missing-matcher-doc",
+      ),
+    ).toBe(true)
   })
 
   it("checkHookMatcherToolParity handles filesystem fixtures and fails closed if an adapter file disappears", () => {

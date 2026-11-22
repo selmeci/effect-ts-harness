@@ -59,22 +59,29 @@ const isD1Database = (value: unknown): value is D1DatabaseBinding =>
 const isAlbumCounterStore = (value: unknown): value is AlbumCounterStore =>
   value != null && typeof value === "object" && AlbumCounterStoreTypeId in value
 
+const MAX_ERROR_MESSAGE_LENGTH = 8192
+
+const toBoundedErrorMessage = (err: unknown): string => {
+  const raw = err instanceof Error ? err.message : String(err)
+  return raw.length > MAX_ERROR_MESSAGE_LENGTH ? raw.slice(0, MAX_ERROR_MESSAGE_LENGTH) : raw
+}
+
 const toPhotoStorageError = (operation: string, err: unknown): PhotoStorageError =>
   new PhotoStorageError({
     operation: StorageOperationName.make(operation),
-    message: StorageErrorMessage.make(err instanceof Error ? err.message : String(err)),
+    message: StorageErrorMessage.make(toBoundedErrorMessage(err)),
   })
 
 const toCounterStorageError = (operation: string, err: unknown): AlbumCounterStorageError =>
   new AlbumCounterStorageError({
     operation: StorageOperationName.make(operation),
-    message: StorageErrorMessage.make(err instanceof Error ? err.message : String(err)),
+    message: StorageErrorMessage.make(toBoundedErrorMessage(err)),
   })
 
 const toProtocolError = (status: number, err: unknown): AlbumCounterProtocolError =>
   new AlbumCounterProtocolError({
     status: HttpStatusCode.make(status),
-    message: ProtocolErrorMessage.make(err instanceof Error ? err.message : String(err)),
+    message: ProtocolErrorMessage.make(toBoundedErrorMessage(err)),
   })
 
 export const logToConsole = Effect.fn("Sample.logToConsole")(function* (message: GreetingMessage) {
@@ -184,10 +191,7 @@ const _makePhotoRepoD1Layer = (d1OrSql: D1DatabaseBinding | SqlClient): Layer.La
     .with(P.when(isSqlClient), (sql) => Layer.succeed(PhotoRepo, _makePhotoRepoSql(sql)))
     .otherwise((db) => PhotoRepoD1Layer.pipe(Layer.provide(D1Client.layer({ db })), Layer.orDie))
 
-export {
-  _makePhotoRepoSql as makePhotoRepoSql,
-  _makePhotoRepoD1Layer as makePhotoRepoD1Layer,
-}
+export { _makePhotoRepoSql as makePhotoRepoSql, _makePhotoRepoD1Layer as makePhotoRepoD1Layer }
 
 // PhotoCounterDO stores per-album counters in DO SQLite via SqliteMigrator,
 // while D1 stores `photos` + fallback `album_counters` via `migrations/0001_photos_and_counters.sql`.
@@ -299,7 +303,9 @@ const _makeAlbumCounterStoreSql = (sql: SqlClient): AlbumCounterStore => ({
         WHERE album_counters.count < ${MAX_PHOTOS_PER_ALBUM}
         RETURNING count
       `.pipe(
-        Effect.mapError((err) => toCounterStorageError("AlbumCounterStore.incrementWithQuota", err)),
+        Effect.mapError((err) =>
+          toCounterStorageError("AlbumCounterStore.incrementWithQuota", err),
+        ),
       )
       const firstRow = rows[0]
       if (firstRow === undefined) {
@@ -639,7 +645,13 @@ const _makeAlbumCounterRpcClient = (
       if (traceparent) {
         req = HttpClientRequest.setHeader(req, "traceparent", traceparent)
       }
-      return yield* client.execute(req).pipe(Effect.mapError((err) => toProtocolError(502, err)))
+      return yield* client.execute(req).pipe(
+        Effect.mapError((err) => toProtocolError(502, err)),
+        Effect.timeoutOrElse({
+          duration: "10 seconds",
+          orElse: () => Effect.fail(toProtocolError(504, `RPC action '${action}' timed out`)),
+        }),
+      )
     })
 
   const decodeSuccessCount = (

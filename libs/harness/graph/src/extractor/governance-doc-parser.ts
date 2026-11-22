@@ -29,9 +29,12 @@ const isEarsStatusValue = (value: string | undefined): value is EarsStatus =>
   value === "draft" || isAdrStatusValue(value)
 
 const stripFmQuotes = (val: string): string => {
-  let t = val.trim()
-  if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
-    t = t.slice(1, -1).trim()
+  const t = val.trim()
+  if (
+    t.length >= 2 &&
+    ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))
+  ) {
+    return t.slice(1, -1).trim()
   }
   const hashIdx = t.indexOf("#")
   return hashIdx !== -1 ? t.slice(0, hashIdx).trim() : t

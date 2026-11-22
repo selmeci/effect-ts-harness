@@ -393,9 +393,11 @@ describe("GraphGc untested-union-variant gate (SPEC-0028 REQ-3.2)", () => {
           "  FixtureOnly: {},",
           "})",
         ].join("\n")
-        const test = ["// CommentOnly only appears inside a comment", 'const q = "Queued"'].join(
-          "\n",
-        )
+        const test = [
+          'import { JobState } from "../src/index.js"',
+          "// CommentOnly only appears inside a comment",
+          'const q = "Queued"',
+        ].join("\n")
         const fixture = 'export const fx = { _tag: "FixtureOnly" }'
         const dir = writeContractUnionWorkspace(contract, test, fixture)
         try {
@@ -450,7 +452,10 @@ describe("GraphGc untested-union-variant gate (SPEC-0028 REQ-3.2)", () => {
         if (coverAlpha) tested.push('"Alpha"')
         if (coverBeta) tested.push('"Beta"')
         if (coverGamma) tested.push('"Gamma"')
-        const test = `export const covered = [${tested.join(", ")}]`
+        const test = [
+          'import { PropUnion } from "../src/index.js"',
+          `export const covered = [${tested.join(", ")}]`,
+        ].join("\n")
         const dir = writeContractUnionWorkspace(contract, test)
         try {
           const report = yield* decideGraphEntropy({
@@ -468,6 +473,59 @@ describe("GraphGc untested-union-variant gate (SPEC-0028 REQ-3.2)", () => {
             .map((f) => f.nodeId)
             .sort()
           expect(actual).toEqual(expectedMissing)
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      }),
+  )
+
+  it.effect(
+    "F-15: unwraps pipe(Schema.TaggedUnion(...), ...) and ignores unrelated test files containing matching literals without importing the union",
+    () =>
+      Effect.gen(function* () {
+        const contract = [
+          'import { pipe, Schema } from "effect"',
+          "export const RunStatus = pipe(",
+          "  Schema.TaggedUnion({ Failed: {}, Ok: {} }),",
+          '  Schema.annotate({ title: "RunStatus" }),',
+          ")",
+          "export const RunEnvelope = Schema.Struct({ status: RunStatus })",
+        ].join("\n")
+        const unrelatedTest = [
+          'import { describe, expect, it } from "vitest"',
+          'const msg = "Failed"',
+          'it("unrelated", () => { expect(msg).toBe("Failed") })',
+        ].join("\n")
+        const dir = writeContractUnionWorkspace(contract, unrelatedTest)
+        try {
+          const report = yield* decideGraphEntropy({
+            graph: buildHarnessGraph({}),
+            workspaceRoot: dir,
+            hostIo: testHostIo,
+          })
+          const missing = report.findings
+            .filter((f) => f.kind === "untested-union-variant")
+            .map((f) => f.nodeId)
+            .sort()
+          expect(missing).toEqual(["RunStatus.Failed", "RunStatus.Ok"])
+
+          const wrapperTest = [
+            'import { RunEnvelope } from "../src/index.js"',
+            'export const sample = [RunEnvelope, "Failed", "Ok"]',
+          ].join("\n")
+          const coveredDir = writeContractUnionWorkspace(contract, wrapperTest)
+          try {
+            const coveredReport = yield* decideGraphEntropy({
+              graph: buildHarnessGraph({}),
+              workspaceRoot: coveredDir,
+              hostIo: testHostIo,
+            })
+            expect(
+              coveredReport.findings.filter((f) => f.kind === "untested-union-variant"),
+            ).toEqual([])
+          } finally {
+            rmSync(coveredDir, { recursive: true, force: true })
+          }
         } finally {
           rmSync(dir, { recursive: true, force: true })
         }

@@ -7,11 +7,13 @@ import { describe, expect, it } from "vitest"
 import {
   buildHarnessGraph,
   checkEffectGraph,
+  createTypeScriptProgramSession,
   decideEffectGraphPolicy,
   diffHarnessGraphs,
   extractWorkspaceTypeAwareGraph,
   findCallees,
   findCallers,
+  type HarnessGraph,
   loadWorkspaceGovernanceDocs,
   loadWorkspaceGovernanceDocsWithViolations,
   parseGovernanceDocFile,
@@ -627,6 +629,51 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
         })
         .exhaustive()
     })
+
+    it("F-07: preserves quoted '#' qualnames in frontmatter while stripping unquoted inline comments", () => {
+      const parsed = parseGovernanceDocFileChecked(
+        "libs/sample/docs/specs/quoted-hash.md",
+        [
+          "---",
+          'id: "sample:SPEC-HASH"',
+          'title: "Quoted # Title"',
+          "status: accepted # unquoted inline comment",
+          "enforced_by: [\"libs/sample/domain/src/index.ts#uploadPhoto\", 'libs/sample/domain/src/other.ts#savePhoto']",
+          "spans:",
+          '  - "libs/sample/domain/src/index.ts#uploadPhoto"',
+          "  - 'libs/sample/domain/src/other.ts#savePhoto'",
+          "  - Sample.cleanSpan # trailing unquoted comment",
+          "services:",
+          "  - PhotoRepo # inline service comment",
+          "errors:",
+          '  - "Photo#CustomError"',
+          "---",
+        ].join("\n"),
+      )
+
+      match(parsed)
+        .with({ _tag: "Ok" }, ({ node }) => {
+          expect(node._tag).toBe("EarsSpec")
+          expect(node.id).toBe("sample:SPEC-HASH")
+          expect(node.title).toBe("Quoted # Title")
+          expect(node.status).toBe("accepted")
+          expect(node.enforcedByFiles).toEqual([
+            "libs/sample/domain/src/index.ts#uploadPhoto",
+            "libs/sample/domain/src/other.ts#savePhoto",
+          ])
+          expect(node.referencedSpans).toEqual([
+            "libs/sample/domain/src/index.ts#uploadPhoto",
+            "libs/sample/domain/src/other.ts#savePhoto",
+            "Sample.cleanSpan",
+          ])
+          expect(node.referencedServices).toEqual(["PhotoRepo"])
+          expect(node.referencedErrors).toEqual(["Photo#CustomError"])
+        })
+        .with({ _tag: "Skip" }, { _tag: "InvalidStatus" }, () => {
+          expect.unreachable("Expected Ok when parsing quoted '#' qualnames")
+        })
+        .exhaustive()
+    })
   })
 
   describe("diffHarnessGraphs and diffPlanAndImplGraphs with governance edges", () => {
@@ -793,6 +840,115 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
       const specNode = resolveNode(graph, "sample:SPEC-0001")
       expect(specNode).toBeDefined()
       expect(specNode?._tag).toBe("EarsSpec")
+    })
+
+    it("F-06: preserves governance status violations across topology snapshot hit and invalidates when test, pattern, or gov map size shrinks", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "harness-f06-warm-session-"))
+      try {
+        mkdirSync(join(tempDir, "libs/sample/infra/src"), { recursive: true })
+        mkdirSync(join(tempDir, "libs/sample/infra/test"), { recursive: true })
+        mkdirSync(join(tempDir, "libs/sample/docs/specs"), { recursive: true })
+        mkdirSync(join(tempDir, "libs/sample/docs/adr"), { recursive: true })
+        mkdirSync(join(tempDir, "agent-patterns"), { recursive: true })
+        writeFileSync(join(tempDir, "pnpm-workspace.yaml"), "packages:\n  - 'libs/**'\n")
+        writeFileSync(
+          join(tempDir, "libs/sample/infra/src/index.ts"),
+          "export const infraValue = 1\n",
+        )
+        writeFileSync(
+          join(tempDir, "libs/sample/infra/test/sample.test.ts"),
+          'import { expect, it } from "vitest"\nit("ok", () => { expect(1).toBe(1) })\n',
+        )
+        writeFileSync(
+          join(tempDir, "libs/sample/docs/specs/2026-11-22-bogus.md"),
+          "---\nid: harness:SPEC-9999\ntitle: Bogus\nstatus: bogus\n---\n",
+        )
+        writeFileSync(
+          join(tempDir, "libs/sample/docs/adr/0001-valid.md"),
+          "---\nid: sample:ADR-0001\ntitle: Valid ADR\nstatus: accepted\n---\n",
+        )
+        writeFileSync(
+          join(tempDir, "agent-patterns/sample-pattern.md"),
+          "# Sample Pattern\nPattern summary.\n",
+        )
+
+        const session = createTypeScriptProgramSession(tempDir, testHostIo)
+        const hasBogusStatusViolation = (graph: HarnessGraph) =>
+          (graph.branchingViolations ?? []).some(
+            (v) =>
+              v.rule === "unmapped-spec-symbol" &&
+              v.enclosingSymbol === "harness:SPEC-9999" &&
+              v.message.includes("bogus"),
+          )
+
+        const run1 = Effect.runSync(
+          extractWorkspaceTypeAwareGraph(tempDir, testHostIo, { session }),
+        )
+        expect(hasBogusStatusViolation(run1)).toBe(true)
+        expect(resolveNode(run1, "sample-pattern")?._tag).toBe("PatternDoc")
+        expect(resolveNode(run1, "libs/sample/infra/test/sample.test.ts::suite")?._tag).toBe(
+          "VitestCase",
+        )
+        expect(resolveNode(run1, "sample:ADR-0001")?._tag).toBe("AdrDoc")
+
+        // (a) Edit non-governance infra .ts comment via overlay -> checkWorkspaceSnapshotMatch misses, checkTopologySnapshotMatch hits
+        const commentOverlay = {
+          "libs/sample/infra/src/index.ts": "export const infraValue = 1\n// comment-only edit\n",
+        }
+        const run2 = Effect.runSync(
+          extractWorkspaceTypeAwareGraph(tempDir, testHostIo, {
+            session,
+            overlays: commentOverlay,
+          }),
+        )
+        expect(run2.graph).toBe(run1.graph)
+        expect(hasBogusStatusViolation(run2)).toBe(true)
+        const policy2 = Effect.runSync(decideEffectGraphPolicy(run2))
+        expect(policy2.ok).toBe(false)
+        expect(
+          policy2.violations.some(
+            (v) => v.rule === "unmapped-spec-symbol" && v.message.includes("bogus"),
+          ),
+        ).toBe(true)
+
+        // (b.1) Delete pattern doc -> patternShaMap.size shrinks -> topology snapshot invalidates
+        rmSync(join(tempDir, "agent-patterns/sample-pattern.md"))
+        const run3 = Effect.runSync(
+          extractWorkspaceTypeAwareGraph(tempDir, testHostIo, {
+            session,
+            overlays: commentOverlay,
+          }),
+        )
+        expect(run3.graph).not.toBe(run2.graph)
+        expect(resolveNode(run3, "sample-pattern")).toBeUndefined()
+        expect(hasBogusStatusViolation(run3)).toBe(true)
+
+        // (b.2) Delete test file -> testShaMap.size shrinks -> topology snapshot invalidates
+        rmSync(join(tempDir, "libs/sample/infra/test/sample.test.ts"))
+        const run4 = Effect.runSync(
+          extractWorkspaceTypeAwareGraph(tempDir, testHostIo, {
+            session,
+            overlays: commentOverlay,
+          }),
+        )
+        expect(run4.graph).not.toBe(run3.graph)
+        expect(resolveNode(run4, "libs/sample/infra/test/sample.test.ts::suite")).toBeUndefined()
+        expect(hasBogusStatusViolation(run4)).toBe(true)
+
+        // (b.3) Delete valid governance doc -> govShaMap.size shrinks -> topology snapshot invalidates
+        rmSync(join(tempDir, "libs/sample/docs/adr/0001-valid.md"))
+        const run5 = Effect.runSync(
+          extractWorkspaceTypeAwareGraph(tempDir, testHostIo, {
+            session,
+            overlays: commentOverlay,
+          }),
+        )
+        expect(run5.graph).not.toBe(run4.graph)
+        expect(resolveNode(run5, "sample:ADR-0001")).toBeUndefined()
+        expect(hasBogusStatusViolation(run5)).toBe(true)
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
     })
   })
 })

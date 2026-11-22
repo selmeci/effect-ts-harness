@@ -161,4 +161,38 @@ describe("Harness daemon shared AST gate cache", () => {
       fs.rmSync(tmpRuleRoot, { recursive: true, force: true })
     }
   })
+
+  it("F-21: ast-gates returns structured ok: false error when source file exceeds 4MiB AstSourceContent bound", async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "harness-daemon-oversized-"))
+    try {
+      const srcDir = path.join(tmpRoot, "libs", "sample", "domain", "src")
+      fs.mkdirSync(srcDir, { recursive: true })
+      fs.writeFileSync(path.join(srcDir, "huge.ts"), `// ${"a".repeat(4_194_310)}\n`, "utf8")
+
+      const handle = await startHarnessDaemonServer(tmpRoot)
+      try {
+        const socketPath = DaemonSocketPath.make(handle.socketPath)
+        const req = JSON.stringify({
+          id: "req-oversized",
+          command: "ast-gates",
+          files: ["libs/sample/domain/src/huge.ts"],
+        })
+        const raw = await Effect.runPromise(
+          queryUnixSocketLine(socketPath, req, 5000).pipe(Effect.provide(UnixSocketDaemonLive)),
+        )
+        const res = JSON.parse(Option.getOrThrow(raw)) as {
+          readonly id: string
+          readonly ok: boolean
+          readonly error?: string
+        }
+        expect(res.id).toBe("req-oversized")
+        expect(res.ok).toBe(false)
+        expect(res.error).toContain("exceeds bounded size")
+      } finally {
+        await handle.close()
+      }
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+  })
 })

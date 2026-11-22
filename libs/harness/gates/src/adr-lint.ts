@@ -257,12 +257,15 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
       })
     }
     if (
-      !/\b(?:do not|cannot|can't|does not|doesn't|never)\s+prove\b|\binstead of claiming tests prove\b/i.test(
+      !/\b(?:do not|cannot|can't|does not|doesn't|never)\s+prove\b|\binstead of claiming [^.\n]{0,40}proves?\b/i.test(
         rawLine,
       ) &&
-      /\b(?:unit|property(?:-based)?|integration|regression)\s+(?:(?:and|or|,)\s+(?:unit|property(?:-based)?|integration|regression)\s+)*tests?\b[^.\n]{0,100}\bproves?\b/i.test(
+      (/(?:\b(?:unit|property(?:-based)?|integration|regression)\s+(?:(?:and|or|,)\s+(?:unit|property(?:-based)?|integration|regression)\s+)*tests?\b|`[^`]+\.(?:test|spec)\.[cm]?tsx?`|\b[A-Za-z0-9_.-]+\.(?:test|spec)\.[cm]?tsx?\b)[^.\n]{0,100}\bproves?\b/i.test(
         rawLine,
-      )
+      ) ||
+        /\bproves?\b[^.\n]{0,60}\bvia\b[^.\n]{0,60}(?:`[^`]+\.(?:test|spec)\.[cm]?tsx?`|\b(?:unit|property(?:-based)?|integration)\s+tests?\b)/i.test(
+          rawLine,
+        ))
     ) {
       findings.push({
         line: lineNum,

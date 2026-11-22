@@ -3,14 +3,18 @@ import {
   extractDetailedCommandSegments,
   normalizeShellLineContinuations,
   toCommandView,
+  unwrapCommandSegment,
   type DetailedCommandSegment,
 } from "./policy-shell-parser.js"
 
 export const PROTECTED_HARNESS_FILE_WRITE_PATTERN: RegExp =
-  /(^|\/)(?:[^/]*\.git\/harness(\/|$)|[^/]*common-dir\/harness(\/|$)|(?:harness\/)?workflow-backups(\/|$)|(?:auth-tokens\.json|daemon\.(?:sock|lock)|pending-workflow-restore\.json)(\/|$))/
+  /(^|\/)(?:[^/]*\.git\/harne(?:ss|[*?[\]{}][^/]*)(\/|$)|[^/]*common-dir\/harness(\/|$)|(?:harness\/)?workflow-backups(\/|$)|(?:auth-tokens?(?:\*|[*?[\]{}][^/]*)?\.json|daemon\.(?:sock|lock)|pending-workflow-restore\.json)(\/|$))/
 
 const PROTECTED_HARNESS_SHELL_PATH_PATTERN: RegExp =
-  /(?:^|[\s=:/<>|('"`,({[])(?:[^\s;|&)<>'"`,)}\]]*(?:\.git|common-dir)\/harness(?:\/[^\s;|&)<>'"`,)}\]]*)?|(?:[^\s;|&)<>'"`,)}\]]*\/)?(?:harness\/)?workflow-backups(?:\/[^\s;|&)<>'"`,)}\]]*)?|(?:[^\s;|&)<>'"`,)}\]]*\/)?(?:auth-tokens\.json|daemon\.(?:sock|lock)|pending-workflow-restore\.json))(?=$|[\s/;|&)<>'"`,)}\]])/
+  /(?:^|[\s=:/<>|('"`,({[])(?:[^\s;|&)<>'"`,)}\]]*(?:\.git|common-dir)\/harne(?:ss|[^\s;|&)<>'"`,)}\]*?]*[*?[\]{}][^\s;|&)<>'"`,)}\]]*)(?:\/[^\s;|&)<>'"`,)}\]]*)?|(?:[^\s;|&)<>'"`,)}\]]*\/)?(?:harness\/)?workflow-backups(?:\/[^\s;|&)<>'"`,)}\]]*)?|(?:[^\s;|&)<>'"`,)}\]]*\/)?(?:auth-tokens?(?:[*?[\]{}][^\s;|&)<>'"`,)}\]]*)?\.json|daemon\.(?:sock|lock)|pending-workflow-restore\.json))(?=$|[\s/;|&)<>'"`,)}\]])/
+
+const PROTECTED_MUTATION_ONLY_SHELL_PATH_PATTERN: RegExp =
+  /(?:^|[\s=:/<>|('"`,({[])(?:[^\s;|&)<>'"`,)}\]]*\.harness\/(?:worktrees\/[^\s/;|&)<>'"`,)}\]]+\/)?(?:(?:verify|mutate)-stamp\.json|cache\/mutation-cache-v\d+\.(?:json(?:\.corrupt)?|corrupt))|(?:[^\s;|&)<>'"`,)}\]]*\/)?repos\/(?:effect|alchemy)(?:\/[^\s;|&)<>'"`,)}\]]*)?|(?:[^\s;|&)<>'"`,)}\]]*\/)?\.oxlintrc\.json|(?:[^\s;|&)<>'"`,)}\]]*\/)?tools\/oxlint(?:\/[^\s;|&)<>'"`,)}\]]*)?)(?=$|[\s/;|&)<>'"`,)}\]])/
 
 const HARNESS_CMD_SUBST_PATTERN: RegExp =
   /(?:\$\([^)]*--git-(?:common-)?dir[^)]*\)|`[^`]*--git-(?:common-)?dir[^`]*`)["']?(?:\/+(?:\.\/)*harness)(?=$|[\s/;|&)<>'"`,)}\]])/
@@ -98,26 +102,38 @@ const matchesProtectedHarnessTokens = (
   text: string,
   commonDirs: ReadonlyArray<string>,
   commandHasCommonDirSubst: boolean,
+  includeMutationOnly = false,
 ): boolean => {
   if (
     PROTECTED_HARNESS_SHELL_PATH_PATTERN.test(text) ||
     HARNESS_CMD_SUBST_PATTERN.test(text) ||
+    (includeMutationOnly && PROTECTED_MUTATION_ONLY_SHELL_PATH_PATTERN.test(text)) ||
     (commandHasCommonDirSubst && VAR_HARNESS_PATH_PATTERN.test(text))
   ) {
     return true
   }
-  return text.split(/[\s=:'"`(),{}[\]]+/).some((tok) => {
-    if (tok.length === 0) return false
-    const unescaped = tok.includes("\\") ? tok.replace(/\\(.)/g, "$1") : undefined
-    const candidates =
-      unescaped === undefined
-        ? [tok, path.posix.normalize(tok)]
-        : [tok, path.posix.normalize(tok), unescaped, path.posix.normalize(unescaped)]
-    return candidates.some(
-      (cand) =>
-        PROTECTED_HARNESS_SHELL_PATH_PATTERN.test(cand) ||
-        matchesExplicitCommonDirHarness(cand, commonDirs),
-    )
+  const checkCand = (cand: string): boolean =>
+    PROTECTED_HARNESS_SHELL_PATH_PATTERN.test(cand) ||
+    (includeMutationOnly && PROTECTED_MUTATION_ONLY_SHELL_PATH_PATTERN.test(cand)) ||
+    matchesExplicitCommonDirHarness(cand, commonDirs)
+
+  return text.split(/[\s=:'"`()]+/).some((rawTok) => {
+    if (rawTok.length === 0) return false
+    const splitSubToks = rawTok.split(/[,{}[\]]+/).filter(Boolean)
+    const allToks = splitSubToks.includes(rawTok) ? splitSubToks : [rawTok, ...splitSubToks]
+    return allToks.some((tok) => {
+      const unescaped = tok.includes("\\") ? tok.replace(/\\(.)/g, "$1") : tok
+      const unglobbed = unescaped.replace(/\[([^\]!^-])\]/g, "$1")
+      const candidates = [
+        tok,
+        path.posix.normalize(tok),
+        unescaped,
+        path.posix.normalize(unescaped),
+        unglobbed,
+        path.posix.normalize(unglobbed),
+      ]
+      return candidates.some(checkCand)
+    })
   })
 }
 
@@ -125,6 +141,7 @@ const rawSegmentHasProtectedTimeOutput = (
   rawWords: ReadonlyArray<string>,
   commonDirs: ReadonlyArray<string>,
   commandHasCommonDirSubst: boolean,
+  includeMutationOnly = false,
 ): boolean => {
   for (let i = 0; i < rawWords.length; i++) {
     const w = rawWords[i]!
@@ -133,7 +150,14 @@ const rawSegmentHasProtectedTimeOutput = (
       const arg = rawWords[j]!
       if (arg === "--") break
       if ((arg === "-o" || arg === "--output") && j + 1 < rawWords.length) {
-        if (matchesProtectedHarnessTokens(rawWords[j + 1]!, commonDirs, commandHasCommonDirSubst)) {
+        if (
+          matchesProtectedHarnessTokens(
+            rawWords[j + 1]!,
+            commonDirs,
+            commandHasCommonDirSubst,
+            includeMutationOnly,
+          )
+        ) {
           return true
         }
         j++
@@ -141,7 +165,14 @@ const rawSegmentHasProtectedTimeOutput = (
       }
       if (arg.startsWith("--output=") || (arg.startsWith("-o") && arg.length > 2)) {
         const val = arg.startsWith("--output=") ? arg.slice("--output=".length) : arg.slice(2)
-        if (matchesProtectedHarnessTokens(val, commonDirs, commandHasCommonDirSubst)) {
+        if (
+          matchesProtectedHarnessTokens(
+            val,
+            commonDirs,
+            commandHasCommonDirSubst,
+            includeMutationOnly,
+          )
+        ) {
           return true
         }
         continue
@@ -180,15 +211,28 @@ const matchesProtectedSegmentPaths = (
   tokenWords: ReadonlyArray<string>,
   commonDirs: ReadonlyArray<string>,
   commandHasCommonDirSubst: boolean,
+  includeMutationOnly = false,
 ): boolean => {
-  if (matchesProtectedHarnessTokens(tokenWords.join(" "), commonDirs, commandHasCommonDirSubst)) {
+  if (
+    matchesProtectedHarnessTokens(
+      tokenWords.join(" "),
+      commonDirs,
+      commandHasCommonDirSubst,
+      includeMutationOnly,
+    )
+  ) {
     return true
   }
   if (seg.wrapperDirs.length === 0) {
     return false
   }
   if (
-    matchesProtectedHarnessTokens(seg.wrapperDirs.join(" "), commonDirs, commandHasCommonDirSubst)
+    matchesProtectedHarnessTokens(
+      seg.wrapperDirs.join(" "),
+      commonDirs,
+      commandHasCommonDirSubst,
+      includeMutationOnly,
+    )
   ) {
     return true
   }
@@ -200,17 +244,84 @@ const matchesProtectedSegmentPaths = (
           path.posix.join(dir, tok),
           commonDirs,
           commandHasCommonDirSubst,
+          includeMutationOnly,
         ),
     ),
   )
+}
+
+const isMutatingOrProbingBinArgs = (bin: string, args: ReadonlyArray<string>): boolean =>
+  HARNESS_STATE_MUTATING_BINARIES.has(bin) ||
+  HARNESS_SOCKET_OR_SCRIPT_BINARIES.has(bin) ||
+  (bin === "sed" && args.some((w) => /^-[^-]*i|^--in-place(?:=|$)/.test(w))) ||
+  (bin === "find" && args.some((w) => FIND_MUTATING_FLAG_PATTERN.test(w))) ||
+  (bin === "sort" && args.some((w) => /^-[^-]*o|^--output(?:=|$)/.test(w))) ||
+  (bin === "git" && args.some((w) => /^--output(?:=|$)/.test(w))) ||
+  (bin === "rg" && args.some((w) => /^--(?:pre|pre-glob|hostname-bin)(?:=|\s|$)/.test(w)))
+
+const unwrapXargsTargetWords = (args: ReadonlyArray<string>): ReadonlyArray<string> => {
+  const valueFlags = new Set([
+    "-a",
+    "--arg-file",
+    "-d",
+    "--delimiter",
+    "-E",
+    "--eof",
+    "-I",
+    "--replace",
+    "-L",
+    "--max-lines",
+    "-n",
+    "--max-args",
+    "-P",
+    "--max-procs",
+    "-s",
+    "--max-chars",
+  ])
+  let i = 0
+  while (i < args.length) {
+    const a = args[i]!
+    if (a === "--") {
+      i++
+      break
+    }
+    if (valueFlags.has(a)) {
+      i += 2
+      continue
+    }
+    if (a.startsWith("-")) {
+      i++
+      continue
+    }
+    break
+  }
+  return args.slice(i)
+}
+
+const resolveXargsTargetWords = (initialArgs: ReadonlyArray<string>): ReadonlyArray<string> => {
+  let words = unwrapXargsTargetWords(initialArgs)
+  for (let depth = 0; depth < 6 && words.length > 0; depth++) {
+    const nextUnwrapped = unwrapCommandSegment(words).commandWords
+    const nextWords =
+      nextUnwrapped[0] !== undefined && binaryBasename(nextUnwrapped[0]) === "xargs"
+        ? unwrapXargsTargetWords(nextUnwrapped.slice(1))
+        : nextUnwrapped
+    if (nextWords.length === words.length && nextWords.every((w, idx) => w === words[idx])) {
+      words = nextWords
+      break
+    }
+    words = nextWords
+  }
+  return words
 }
 
 const isHarnessStateMutatingSegment = (
   seg: DetailedCommandSegment,
   commonDirs: ReadonlyArray<string>,
   commandHasCommonDirSubst: boolean,
+  candidateAllProtectedTokensText?: string,
 ): boolean => {
-  if (rawSegmentHasProtectedTimeOutput(seg.rawWords, commonDirs, commandHasCommonDirSubst)) {
+  if (rawSegmentHasProtectedTimeOutput(seg.rawWords, commonDirs, commandHasCommonDirSubst, true)) {
     return true
   }
   const rawBin = seg.commandWords[0]
@@ -219,16 +330,31 @@ const isHarnessStateMutatingSegment = (
   }
   const bin = binaryBasename(rawBin)
   const args = seg.commandWords.slice(1)
-  const isMutatingOrProbingBin =
-    HARNESS_STATE_MUTATING_BINARIES.has(bin) ||
-    HARNESS_SOCKET_OR_SCRIPT_BINARIES.has(bin) ||
-    (bin === "sed" && args.some((w) => /^-[^-]*i|^--in-place(?:=|$)/.test(w))) ||
-    (bin === "find" && args.some((w) => FIND_MUTATING_FLAG_PATTERN.test(w))) ||
-    (bin === "sort" && args.some((w) => /^(?:-o|--output(?:=|$))/.test(w))) ||
-    (bin === "git" && args.some((w) => /^--output(?:=|$)/.test(w)))
+  if (bin === "xargs") {
+    const targetWords = resolveXargsTargetWords(args)
+    const targetBin = targetWords[0] !== undefined ? binaryBasename(targetWords[0]) : undefined
+    if (targetBin !== undefined && isMutatingOrProbingBinArgs(targetBin, targetWords.slice(1))) {
+      return (
+        matchesProtectedSegmentPaths(
+          seg,
+          targetWords.slice(1),
+          commonDirs,
+          commandHasCommonDirSubst,
+          true,
+        ) ||
+        (candidateAllProtectedTokensText !== undefined &&
+          matchesProtectedHarnessTokens(
+            candidateAllProtectedTokensText,
+            commonDirs,
+            commandHasCommonDirSubst,
+            true,
+          ))
+      )
+    }
+  }
   return (
-    isMutatingOrProbingBin &&
-    matchesProtectedSegmentPaths(seg, args, commonDirs, commandHasCommonDirSubst)
+    isMutatingOrProbingBinArgs(bin, args) &&
+    matchesProtectedSegmentPaths(seg, args, commonDirs, commandHasCommonDirSubst, true)
   )
 }
 
@@ -259,6 +385,7 @@ const isHarnessStateAccessSegment = (
     [...seg.envAssignments, ...seg.commandWords],
     commonDirs,
     commandHasCommonDirSubst,
+    false,
   )
 }
 
@@ -282,9 +409,12 @@ export const isHarnessStateMutationCommand = (command: string): boolean => {
     const commandHasCommonDirSubst = segments.some((seg) =>
       GIT_COMMON_DIR_SUBST_PATTERN.test([...seg.envAssignments, ...seg.commandWords].join(" ")),
     )
+    const allSegTokens = segments
+      .flatMap((s) => [...s.envAssignments, ...s.commandWords, ...s.wrapperDirs])
+      .join(" ")
     if (
       segments.some((seg) =>
-        isHarnessStateMutatingSegment(seg, commonDirs, commandHasCommonDirSubst),
+        isHarnessStateMutatingSegment(seg, commonDirs, commandHasCommonDirSubst, allSegTokens),
       )
     ) {
       return true
@@ -297,6 +427,7 @@ export const isHarnessStateMutationCommand = (command: string): boolean => {
           toCommandView(part.cmd).argv,
           commonDirs,
           commandHasCommonDirSubst,
+          true,
         ),
     )
   })
@@ -325,10 +456,18 @@ const VAR_DECL_BUILTINS: ReadonlySet<string> = new Set(
 
 const findBalancedParenEnd = (text: string, openIdx: number): number => {
   let depth = 1
-  let quote: "'" | '"' | undefined
+  let quote: "'" | '"' | "$'" | undefined
   for (let i = openIdx + 1; i < text.length; i++) {
     const ch = text[i]!
     if (quote === "'") {
+      if (ch === "'") quote = undefined
+      continue
+    }
+    if (quote === "$'") {
+      if (ch === "\\") {
+        i++
+        continue
+      }
       if (ch === "'") quote = undefined
       continue
     }
@@ -341,6 +480,11 @@ const findBalancedParenEnd = (text: string, openIdx: number): number => {
       continue
     }
     if (ch === "\\") {
+      i++
+      continue
+    }
+    if (ch === "$" && text[i + 1] === "'") {
+      quote = "$'"
       i++
       continue
     }
@@ -371,14 +515,27 @@ const findClosingBacktick = (text: string, openIdx: number): number => {
 
 export const extractExecutedShellSnippets = (command: string): ReadonlyArray<string> => {
   const snippets: Array<string> = []
-  let quote: "'" | '"' | undefined
+  let quote: "'" | '"' | "$'" | undefined
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!
     if (quote === "'") {
       if (ch === "'") quote = undefined
       continue
     }
+    if (quote === "$'") {
+      if (ch === "\\") {
+        i++
+        continue
+      }
+      if (ch === "'") quote = undefined
+      continue
+    }
     if (ch === "\\") {
+      i++
+      continue
+    }
+    if (quote === undefined && ch === "$" && command[i + 1] === "'") {
+      quote = "$'"
       i++
       continue
     }
@@ -415,14 +572,27 @@ export const extractExecutedShellSnippets = (command: string): ReadonlyArray<str
 }
 
 export const hasUnexpandedShellVariable = (text: string): boolean => {
-  let quote: "'" | '"' | undefined
+  let quote: "'" | '"' | "$'" | undefined
   for (let i = 0; i < text.length; i++) {
     const ch = text[i]!
     if (quote === "'") {
       if (ch === "'") quote = undefined
       continue
     }
+    if (quote === "$'") {
+      if (ch === "\\") {
+        i++
+        continue
+      }
+      if (ch === "'") quote = undefined
+      continue
+    }
     if (ch === "\\") {
+      i++
+      continue
+    }
+    if (quote === undefined && ch === "$" && text[i + 1] === "'") {
+      quote = "$'"
       i++
       continue
     }
@@ -489,7 +659,7 @@ const expandShellVariablesOnce = (
   vars: ReadonlyMap<string, string>,
 ): { readonly text: string; readonly overflowed: boolean } => {
   let out = ""
-  let quote: "'" | '"' | undefined
+  let quote: "'" | '"' | "$'" | undefined
   for (let i = 0; i < command.length; i++) {
     if (out.length > MAX_EXPANDED_COMMAND_LENGTH) return { text: out, overflowed: true }
     const ch = command[i]!
@@ -498,8 +668,27 @@ const expandShellVariablesOnce = (
       out += ch
       continue
     }
+    if (quote === "$'") {
+      if (ch === "'") {
+        quote = undefined
+        out += ch
+        continue
+      }
+      if (ch === "\\") {
+        out += ch + (i + 1 < command.length ? command[++i]! : "")
+        continue
+      }
+      out += ch
+      continue
+    }
     if (ch === "\\") {
       out += ch + (i + 1 < command.length ? command[++i]! : "")
+      continue
+    }
+    if (quote === undefined && ch === "$" && command[i + 1] === "'") {
+      quote = "$'"
+      out += "$'"
+      i++
       continue
     }
     if (quote === undefined && ch === "'") {
@@ -543,7 +732,7 @@ export const expandCommandVariables = (
   let current = command
   for (let pass = 0; pass < MAX_VAR_EXPANSION_PASSES; pass++) {
     const vars = collectShellVariableAssignments(extractDetailedCommandSegments(current))
-    if (vars.size === 0) break
+    if (vars.size === 0 && (pass > 0 || !current.includes("${"))) break
     const expanded = expandShellVariablesOnce(current, vars)
     if (expanded.overflowed || expanded.text === current) {
       return { text: expanded.text, overflowed: expanded.overflowed }

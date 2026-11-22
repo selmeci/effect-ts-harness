@@ -172,6 +172,7 @@ export {
   attachReviewSlicesIfThresholdReached,
   normalizeReviewFilePaths,
   inferReviewDiffSignals,
+  reconcileReviewSlicesWithSelections,
   decideDeterministicReviewRoute,
   routeReviewDiff,
 } from "./review-router-decision.js"

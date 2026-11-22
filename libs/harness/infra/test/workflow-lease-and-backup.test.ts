@@ -13,7 +13,7 @@ import {
 import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { Effect } from "effect"
+import { Effect, Fiber, Schema } from "effect"
 import { match } from "ts-pattern"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import {
@@ -22,6 +22,7 @@ import {
   BackupFileHash,
   encodeSeqKey,
   GitCommonDirPath,
+  isPureInterruptCause,
   LeaseFilePath,
   MessageKey,
   ReplyKey,
@@ -39,6 +40,7 @@ import {
   runOfflineWorkflowMaintenance,
   withAdvisoryFlock,
 } from "../src/index.js"
+import { isLocalPidAlive } from "../src/writer-lease.js"
 import { makeWorkflowGraphBackupLayer } from "../src/workflow-graph-backup.js"
 
 const graphConfigDir = resolve(import.meta.dirname, "../../graph")
@@ -836,4 +838,95 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
       .exhaustive()
     expect(existsSync(stubLog)).toBe(false)
   }, 45_000)
+
+  it("F-22: runOmnigraphCli interruption escalates SIGTERM -> SIGKILL and awaits child termination BEFORE force-unlock or fiber interrupt resolves", async () => {
+    const stubRoot = mkdtempSync(join(tmpdir(), "wf2-maint-interrupt-"))
+    tempDirs.push(stubRoot)
+    const stubGit = GitCommonDirPath.make(join(stubRoot, ".git"))
+    const stubCluster = join(stubRoot, "cluster")
+    const stubClusterMeta = join(stubCluster, "__cluster")
+    const stubLockJson = join(stubClusterMeta, "lock.json")
+    const stubBackupDir = BackupDirPath.make(join(stubRoot, "backups"))
+    const startedFile = join(stubRoot, "started.pid")
+    const unlockEventFile = join(stubRoot, "unlock-event.json")
+    mkdirSync(stubGit, { recursive: true })
+    mkdirSync(stubClusterMeta, { recursive: true })
+
+    const stubBin = join(stubRoot, "omnigraph-slow-stub.mjs")
+    writeFileSync(
+      stubBin,
+      [
+        `#!${process.execPath}`,
+        'import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs"',
+        "const args = process.argv.slice(2)",
+        'if (args[0] === "export") {',
+        '  process.on("SIGTERM", () => {})',
+        `  writeFileSync(${JSON.stringify(stubLockJson)}, JSON.stringify({ lock_id: "adm-interrupt-1" }), "utf8")`,
+        `  writeFileSync(${JSON.stringify(startedFile)}, String(process.pid), "utf8")`,
+        "  setInterval(() => {}, 1000)",
+        '} else if (args[0] === "cluster" && args[1] === "force-unlock") {',
+        `  const pidRaw = existsSync(${JSON.stringify(startedFile)}) ? Number(readFileSync(${JSON.stringify(startedFile)}, "utf8").trim()) : 0`,
+        "  let childAliveAtUnlock = false",
+        "  if (Number.isInteger(pidRaw) && pidRaw > 0) {",
+        "    try { process.kill(pidRaw, 0); childAliveAtUnlock = true } catch { childAliveAtUnlock = false }",
+        "  }",
+        `  writeFileSync(${JSON.stringify(unlockEventFile)}, JSON.stringify({ childAliveAtUnlock, lockId: args[2] }), "utf8")`,
+        `  rmSync(${JSON.stringify(stubLockJson)}, { force: true })`,
+        "  process.exit(0)",
+        "} else {",
+        "  process.exit(0)",
+        "}",
+      ].join("\n"),
+      "utf8",
+    )
+    chmodSync(stubBin, 0o755)
+
+    const exit = await Effect.runPromise(
+      Effect.gen(function* () {
+        const fiber = yield* runOfflineWorkflowMaintenance({
+          repoRoot: AbsoluteRepoRoot.make(stubRoot),
+          commonGitDir: stubGit,
+          backupDir: stubBackupDir,
+          omnigraphBin: stubBin,
+          clusterDir: stubCluster,
+        }).pipe(Effect.forkChild)
+
+        for (let i = 0; i < 100; i += 1) {
+          if (existsSync(startedFile)) break
+          yield* Effect.sleep("25 millis")
+        }
+        expect(existsSync(startedFile)).toBe(true)
+        const childPid = Number(readFileSync(startedFile, "utf8").trim())
+        expect(childPid).toBeGreaterThan(0)
+        expect(isLocalPidAlive(childPid)).toBe(true)
+
+        yield* Fiber.interrupt(fiber)
+        // Child MUST already be dead the instant Fiber.interrupt resolves (no zombie race).
+        expect(isLocalPidAlive(childPid)).toBe(false)
+        return yield* Fiber.await(fiber)
+      }),
+    )
+
+    match(exit)
+      .with({ _tag: "Failure" }, ({ cause }) => {
+        expect(isPureInterruptCause(cause)).toBe(true)
+      })
+      .with({ _tag: "Success" }, () => {
+        expect.unreachable("Expected pure interrupt exit")
+      })
+      .exhaustive()
+
+    expect(existsSync(unlockEventFile)).toBe(true)
+    const unlockEvent = Schema.decodeSync(
+      Schema.fromJsonString(
+        Schema.Struct({
+          childAliveAtUnlock: Schema.Boolean,
+          lockId: Schema.String,
+        }),
+      ),
+    )(readFileSync(unlockEventFile, "utf8"))
+    expect(unlockEvent.childAliveAtUnlock).toBe(false)
+    expect(unlockEvent.lockId).toBe("adm-interrupt-1")
+    expect(existsSync(stubLockJson)).toBe(false)
+  }, 15_000)
 })

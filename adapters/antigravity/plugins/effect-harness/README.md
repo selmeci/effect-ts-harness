@@ -48,7 +48,7 @@ The plugin registers four lifecycle hooks to enforce safety constraints and inde
    - When `HARNESS_UNIT_WORKER=1` is set on unit worker invocations (automatic runner spawning lands in WF-5), blocks recursive `harness workflow start|resume|abort|doctor|complete --phase llm`, `harness done`, and direct access to `daemon.sock` or `auth-tokens.json`.
    - Requires explicit human approval for `alchemy deploy` and `alchemy destroy`.
 3. **`PostToolUse` (`harness ingest --format=antigravity`):**
-   Executes immediately following file write or replacement operations. Incrementally parses modified TypeScript ASTs, EARS specifications, and ADR documents into `.harness/index.sqlite` and the resident Omnigraph property graph.
+   Matcher `edit_file|write_file|replace_file_content|multi_replace_file_content|write_to_file` — executes immediately following file write or replacement operations. Incrementally parses modified TypeScript ASTs, EARS specifications, and ADR documents into `.harness/index.sqlite` and the resident Omnigraph property graph.
 4. **`Stop` (`harness done --format=antigravity`):**
    Executes when the agent attempts to stop or complete a task. Verifies that `.harness/verify-stamp.json` matches current `HEAD` commit and tree hash. Blocks exit if verification has not passed.
 

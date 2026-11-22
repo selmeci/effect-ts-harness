@@ -230,7 +230,7 @@ export const extractWorkspaceTypeAwareGraph = Effect.fnUntraced(function* (
     session.lastWorkspaceSnapshot = {
       inputShaMap, testShaMap, govShaMap, patternShaMap, baseTopologyHash: computeBaseTopologyHash(session),
       domainContractInputHash: sha256Hex(inputs.filter((i) => i.packageTag === "contract" || i.packageTag === "domain").map((i) => `${i.filePath}:${inputShaMap.get(i.filePath) ?? ""}`).join("|")),
-      unassertedStateViolations, nodeSqliteTestViolations, graph: resultGraph,
+      unassertedStateViolations, nodeSqliteTestViolations, governanceStatusViolations, graph: resultGraph,
     }
     return resultGraph
   })
