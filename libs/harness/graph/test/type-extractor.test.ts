@@ -23,7 +23,7 @@ import {
   resolveNode,
   stripCommentsAndTestTitles,
 } from "../src/index.js"
-import { loadFileGraphFragmentsFromDisk } from "../src/extractor/compiler-session.js"
+import { loadFileGraphFragmentsFromDisk, ts } from "../src/extractor/compiler-session.js"
 import { testHostIo } from "./helpers/test-host-io.js"
 import {
   type EffectFnNode,
@@ -320,10 +320,18 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
         expect(n.file).toBe("libs/sample/contract/src/errors.ts")
       })
       .with(
-        { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" },
-        { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
-        { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
-        { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" },
+        { _tag: "EffectFn" },
+        { _tag: "ServiceTag" },
+        { _tag: "ServiceLayer" },
+        { _tag: "SchemaDef" },
+        { _tag: "VitestCase" },
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
         { _tag: "MigrationTuple" },
         () => expect.unreachable("Expected TaggedError node"),
       )
@@ -1143,7 +1151,11 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
     try {
       const domainDir = path.join(tmpRoot, "libs", "sample", "domain", "src")
       fs.mkdirSync(domainDir, { recursive: true })
-      fs.writeFileSync(path.join(domainDir, "index.ts"), "export const okValue: number = 1\n", "utf-8")
+      fs.writeFileSync(
+        path.join(domainDir, "index.ts"),
+        "export const okValue: number = 1\n",
+        "utf-8",
+      )
 
       const session = createTypeScriptProgramSession(tmpRoot, testHostIo)
       const brokenDiags = evaluateOverlayDiagnostics(
@@ -1156,12 +1168,17 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
       // Subsequent check with another file (removing index.ts overlay) must read disk index.ts, not stale overlay AST
       const cleanDiags = evaluateOverlayDiagnostics(
         tmpRoot,
-        { "libs/sample/domain/src/extra.ts": 'import { okValue } from "./index.js"\nexport const doubled: number = okValue * 2\n' },
+        {
+          "libs/sample/domain/src/extra.ts":
+            'import { okValue } from "./index.js"\nexport const doubled: number = okValue * 2\n',
+        },
         session,
       )
       expect(cleanDiags.filter((d) => d.severity === "error")).toEqual([])
 
-      const g1 = await Effect.runPromise(extractWorkspaceTypeAwareGraph(tmpRoot, testHostIo, { session }))
+      const g1 = await Effect.runPromise(
+        extractWorkspaceTypeAwareGraph(tmpRoot, testHostIo, { session }),
+      )
       expect(session.lastWorkspaceSnapshot?.baseTopologyHash).toBe(computeBaseTopologyHash(session))
       expect(g1.nodeIndexByKey).toBeInstanceOf(Map)
       expect(g1.branchingViolations).toEqual([])
@@ -1235,10 +1252,42 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
         }),
       )
       const nodes = Array.from(Graph.nodes(graph.graph)).map(([, n]) => n)
-      expect(nodes.some((n) => n._tag === "EffectFn" && n.spanName === "Sample.runLogic")).toBe(true)
+      expect(nodes.some((n) => n._tag === "EffectFn" && n.spanName === "Sample.runLogic")).toBe(
+        true,
+      )
       expect(nodes.some((n) => "file" in n && String(n.file).endsWith(".spec.ts"))).toBe(false)
     } finally {
       fs.rmSync(tmpRoot, { recursive: true, force: true })
     }
+  })
+
+  it("emitDeclarationSignatureText captures typed stub<A,E,R>, Effect.fnUntraced (curried and direct), and preserves non-Effect wrappers verbatim", () => {
+    const sf = ts.createSourceFile(
+      "decl-sig.ts",
+      [
+        "export const withStub = (x: string): string => {",
+        "  const ignored = helper<number>(x)",
+        "  const untyped = stub()",
+        "  return stub<string, never, never>(x)",
+        "}",
+        'export const curriedUntraced = Effect.fnUntraced("Span.u")(function* (id: string): Generator<never, string> { return id })',
+        'export const otherCurried = customWrap("Span.x")(function* (id: string): Generator<never, string> { return id })',
+        "export const directUntraced = Effect.fnUntraced(function* (id: string): Generator<never, string> { return id })",
+        "export const directOther = customSingle(function* (id: string): Generator<never, string> { return id })",
+      ].join("\n"),
+      ts.ScriptTarget.Latest,
+      true,
+    )
+    const sig = emitDeclarationSignatureText(sf)
+    expect(sig).toContain("export const withStub = ((x: string): string[stub<string,never,never>])")
+    expect(sig).not.toContain("stub<number>")
+    expect(sig).toContain(
+      'export const curriedUntraced = Effect.fnUntraced("Span.u")((id: string): Generator<never, string>)',
+    )
+    expect(sig).toContain('export const otherCurried = customWrap("Span.x")(function*')
+    expect(sig).toContain(
+      "export const directUntraced = Effect.fnUntraced((id: string): Generator<never, string>)",
+    )
+    expect(sig).toContain("export const directOther = customSingle(function*")
   })
 })
