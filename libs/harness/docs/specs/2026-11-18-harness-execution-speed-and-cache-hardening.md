@@ -7,7 +7,14 @@ date: 2026-11-18
 owners:
   - "@harness/architecture"
 scope: harness
+informed_by:
+  - harness:ADR-0026
 enforced_by:
+  - tools/mutant-coverage-setup.mjs
+  - tools/package-vitest-batch.mjs
+  - tools/parallel-vitest-batch.mjs
+  - tools/vitest-pool-helpers.mjs
+  - tools/warm-vitest-worker.mjs
   - libs/harness/contract/src/mutation-cache.ts
   - libs/harness/contract/src/index.ts
   - libs/harness/decision/src/guard-decision.ts
@@ -73,7 +80,7 @@ Telemetry analysis of multi-hour review and verification runs revealed four comp
 
 ## Goal
 
-Every hook invocation avoids eager `typescript` and `@harness/graph` barrel loads with a warm in-process handler fast-path (`< 50ms`) while serving clean `PreInvocation` state from a fingerprint-validated fast-path cache, `harness mutate --strict` executes reaching tests fail-fast (`--bail=1`) backed by an HMAC-authenticated `.harness/cache/mutation-cache-v2.json` cache and modular `<= 2,000`-line test files, `classifyCommand` blocks unapproved Nx cache bypasses, and Vitest test suites leave live `.harness/telemetry-log.jsonl` and `.harness/friction-log.jsonl` untouched.
+Every hook invocation avoids eager `typescript` and `@harness/graph` barrel loads with a warm in-process handler fast-path (`< 50ms`) while serving clean `PreInvocation` state from a fingerprint-validated fast-path cache, `harness mutate --strict` executes reaching tests fail-fast (`--bail=1`) backed by warm package Vitest worker pools, coverage-guided per-test targeting, reverse-import partitioning (`harness:ADR-0026`), an HMAC-authenticated `.harness/cache/mutation-cache-v2.json` cache, and modular `<= 1,500`-line, `<= 30`-test, domain-focused test files (`harness:SPEC-0028`), `classifyCommand` blocks unapproved Nx cache bypasses, and Vitest test suites leave live `.harness/telemetry-log.jsonl` and `.harness/friction-log.jsonl` untouched.
 
 ## How to read the requirements
 
@@ -110,7 +117,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | ID      | Pattern            | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Effect Symbol         | Verification |
 | ------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- | ------------ |
 | REQ-3.1 | Unwanted behaviour | **If** a shell command invokes `nx` or an Nx-wrapping runner script with `--skip-nx-cache`, `--skipNxCache`, `NX_SKIP_NX_CACHE`, or `NX_DISABLE_NX_CACHE`, **then** `classifyCommand` **shall** return `"deny"` by default (`"ask"` with a friction audit event when `HARNESS_ALLOW_SKIP_NX_CACHE=1`), `explainCommandDenyReason` **shall** supply `SKIP_NX_CACHE_BANNED_REASON`, and `Harness.triageFailure` **shall** triage the denial deterministically in `0ms`. | Harness.triageFailure | UnitTest     |
-| REQ-3.2 | State-driven       | **While** `@harness/gates` test suites are partitioned across `libs/harness/gates/test/*.test.ts`, every `.test.ts` file in `libs/harness/gates/test/` **shall** remain at or below `2,000` lines so `partitionReachingTestFiles` isolates reaching Vitest runs by module concern.                                                                                                                                                                                    | MutationCheck.decide  | UnitTest     |
+| REQ-3.2 | State-driven       | **While** workspace test suites are partitioned across `libs/harness/gates/test/*.test.ts`, every `.test.ts` file in `libs/harness/gates/test/` **shall** remain at or below `1,500` lines (`MAX_TEST_FILE_LINES`, cross-enforced workspace-wide with `max-test-file-lines`, `max-tests-per-file`, and `test-domain-sprawl` under `harness:SPEC-0028`) so `partitionReachingTestFiles` isolates reaching Vitest runs by module concern.                               | MutationCheck.decide  | UnitTest     |
 
 ### 4 · Live Workspace Telemetry & Friction Isolation Under Vitest
 

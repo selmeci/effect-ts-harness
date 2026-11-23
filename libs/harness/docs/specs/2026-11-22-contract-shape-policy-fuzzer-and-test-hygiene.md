@@ -25,13 +25,18 @@ enforced_by:
   - libs/harness/gates/test/gc-test-and-decider.test.ts
   - libs/harness/gates/test/policy-adversarial-property.test.ts
   - libs/harness/gates/test/self-dogfooding-plugin-harness.test.ts
+  - libs/harness/gates/test/session-handoff-and-budget.test.ts
   - libs/harness/decision/test/guard-decision-property.test.ts
+  - libs/harness/graph/src/extractor/extractor-path-and-text-helpers.ts
+  - libs/harness/graph/src/extractor/extractor-types-and-helpers.ts
+  - libs/harness/graph/test/type-extractor.test.ts
 spans:
   - AstGateCache.decide
   - SyntaxBans.decide
   - TestIntegrity.decide
   - GraphGc.decide
   - Harness.decideGuardCommand
+  - TypeExtractor.extractWorkspace
 services: []
 errors: []
 ---
@@ -78,18 +83,20 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 **Source (`libs/harness/gates/src/plugins/ast-gate-visitors.ts`, `libs/harness/gates/src/plugins/gc/gc-test-and-decider.plugin.ts`, `tools/oxlint/syntax-bans.js`):** Keeps Vitest test cases and suites domain-focused and compact while catching unexercised `Schema.TaggedUnion` variants in `@harness/contract`.
 
-| ID      | Pattern            | Requirement                                                                                                                                                                                                                                                               | Effect Symbol          | Verification |
-| ------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- | ------------ |
-| REQ-3.1 | Unwanted behaviour | **If** a Vitest `it(...)`, `it.effect(...)`, `it.live(...)`, or `it.prop(...)` callback body spans more than `200` source lines, **then** `TestIntegrity.decide` and `harness/test-integrity` **shall** report a `max-test-case-lines` violation.                         | `TestIntegrity.decide` | `AstGate`    |
-| REQ-3.2 | Unwanted behaviour | **If** an exported closed `Schema.TaggedUnion` variant from `type:contract` has zero references across workspace `test/` files, **then** `GraphGc.decide` **shall** report an `untested-union-variant` finding.                                                           | `GraphGc.decide`       | `UnitTest`   |
-| REQ-3.3 | Unwanted behaviour | **If** a workspace Vitest test file spans more than `1500` source lines or registers more than `30` Vitest `it` or `test` cases, **then** `TestIntegrity.decide` and `harness/test-integrity` **shall** report a `max-test-file-lines` or `max-tests-per-file` violation. | `TestIntegrity.decide` | `AstGate`    |
-| REQ-3.4 | Unwanted behaviour | **If** a non-fixture workspace Vitest test file spans at least `300` source lines and imports runtime symbols resolving across more than `6` distinct production source domains, **then** `GraphGc.decide` **shall** report a `test-domain-sprawl` finding.               | `GraphGc.decide`       | `UnitTest`   |
+| ID      | Pattern            | Requirement                                                                                                                                                                                                                                                                                                                                                  | Effect Symbol                    | Verification |
+| ------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------- | ------------ |
+| REQ-3.1 | Unwanted behaviour | **If** a Vitest `it(...)`, `it.effect(...)`, `it.live(...)`, or `it.prop(...)` callback body spans more than `200` source lines, **then** `TestIntegrity.decide` and `harness/test-integrity` **shall** report a `max-test-case-lines` violation.                                                                                                            | `TestIntegrity.decide`           | `AstGate`    |
+| REQ-3.2 | Unwanted behaviour | **If** an exported closed `Schema.TaggedUnion` variant from `type:contract` has zero references across workspace `test/` files, **then** `GraphGc.decide` **shall** report an `untested-union-variant` finding.                                                                                                                                              | `GraphGc.decide`                 | `UnitTest`   |
+| REQ-3.3 | Unwanted behaviour | **If** a workspace Vitest test file spans more than `1500` source lines or registers more than `30` Vitest `it` or `test` cases, **then** `TestIntegrity.decide` and `harness/test-integrity` **shall** report a `max-test-file-lines` or `max-tests-per-file` violation.                                                                                    | `TestIntegrity.decide`           | `AstGate`    |
+| REQ-3.4 | Unwanted behaviour | **If** a non-fixture workspace Vitest test file spans at least `300` source lines and imports runtime symbols resolving across more than `6` distinct production source domains, **then** `GraphGc.decide` **shall** report a `test-domain-sprawl` finding.                                                                                                  | `GraphGc.decide`                 | `UnitTest`   |
+| REQ-3.5 | Event-driven       | **When** `stripCommentsAndTestTitles` strips comments, template literals, and Vitest `describe`, `it`, or `test` titles during `TypeExtractor.extractWorkspace` reachability extraction, the extractor **shall** parse syntax spans with the TypeScript AST parser so glob tokens such as `/*` inside string literals never erase downstream function calls. | `TypeExtractor.extractWorkspace` | `UnitTest`   |
 
 ## Assumptions
 
 - **REQ-1.1:** Pre-existing raw JSON-row boundary schemas in `workflow-storage.ts` / `workflow-rpc.ts` are inspected carefully and either tightened or documented in an explicit narrow wire-codec exemption set so internal domain contracts never accept arbitrary `Unknown` property maps.
 - **REQ-3.2:** Variant usage scanning inspects exported `Schema.TaggedUnion` member keys in `libs/*/contract/src/*.ts` against non-fixture workspace `test/**/*.test.ts` files via AST/symbol matching.
-- **REQ-3.4:** Domain sprawl analysis inspects runtime imports in non-fixture workspace `test/**/*.test.ts(x)` files at or above `300` lines, transitively resolving barrel re-exports under `libs|apps/**/src/**` while ignoring type-only imports and pure helper modules, against `MAX_TEST_SOURCE_DOMAINS = 6`.
+- **REQ-3.4:** Domain sprawl analysis inspects runtime imports in non-fixture workspace `test/**/*.test.ts(x)` files at or above `300` lines, transitively resolving barrel re-exports under `libs|apps/**/src/**` while ignoring type-only imports and pure helper modules, against `MAX_TEST_SOURCE_DOMAINS = 6`, while monolithic splits isolate dedicated per-decider property suites such as `SessionHandoff.decide` in `libs/harness/gates/test/session-handoff-and-budget.test.ts`.
+- **REQ-3.5:** `extractor-path-and-text-helpers.ts` hosts `stripCommentsAndTestTitles` and path helpers re-exported by `extractor-types-and-helpers.ts` so every extractor module stays under the 499-line `SelfDogfooding.decide` budget.
 
 ## Out of scope
 
