@@ -32,6 +32,7 @@ import {
   saveGraphSnapshot,
   syncToOmnigraphAndSnapshot,
   toOmnigraphNdjson,
+  toOmnigraphServerNdjsonResult,
   writeGraphHeadMeta,
 } from "../src/index.js"
 import { testHostIo } from "./helpers/test-host-io.js"
@@ -74,6 +75,7 @@ describe("Omnigraph 0.14.0 schema.pg and queries/harness.gq", () => {
           "node PatternDoc",
           "node AdrDoc",
           "node EarsSpec",
+          "node EarsRequirement",
           "node EffectSignature",
           "node LayerFlow",
           "node TraceabilityTuple",
@@ -104,6 +106,7 @@ describe("Omnigraph 0.14.0 schema.pg and queries/harness.gq", () => {
           "edge PlaysRequiredServiceRole: LayerFlow -> ServiceTag",
           "edge PlaysGoverningAdrRole: TraceabilityTuple -> AdrDoc",
           "edge PlaysSpecifyingEarsRole: TraceabilityTuple -> EarsSpec",
+          "edge PlaysSpecifiedRequirementRole: TraceabilityTuple -> EarsRequirement",
           "edge PlaysExercisingTestRole: TraceabilityTuple -> VitestCase",
           "edge PlaysExercisedSpanRole: TraceabilityTuple -> EffectFn",
         ]
@@ -114,10 +117,13 @@ describe("Omnigraph 0.14.0 schema.pg and queries/harness.gq", () => {
         expect(schema).toContain("archimateRelation: String @index")
         expect(schema).toContain("node GraphPolicy")
         expect(schema).toContain("@instruction(")
-        expect(schema).toContain("Vector(768)? @embed(")
+        const vectorFields = [...schema.matchAll(/(\w+):\s*Vector\(4096\)\?\s*@embed\(/g)].map(
+          (m) => m[1],
+        )
+        expect(vectorFields).toEqual(["summaryEmbedding", "searchEmbedding", "clauseEmbedding"])
 
         const edgeMatches = [...schema.matchAll(/edge\s+(Plays\w+Role):[\s\S]*?\{([\s\S]*?)\}/g)]
-        expect(edgeMatches).toHaveLength(32)
+        expect(edgeMatches).toHaveLength(33)
         for (const [, edgeName, edgeBody] of edgeMatches) {
           expect(edgeBody, `${edgeName} must declare @key(@src, @dst, role)`).toContain(
             "@key(@src, @dst, role)",
@@ -126,18 +132,19 @@ describe("Omnigraph 0.14.0 schema.pg and queries/harness.gq", () => {
       }),
   )
 
-  it.effect("declares all 14 canonical GQ queries in queries/harness.gq", () =>
-    Effect.gen(function* () {
+  it.effect("declares all 20 canonical GQ queries in queries/harness.gq", () => {
+    return Effect.gen(function* () {
       yield* Effect.void
       const gqSource = fs.readFileSync(queriesPath, "utf8")
+      expect(HARNESS_GQ_QUERY_NAMES).toHaveLength(20)
 
       for (const queryName of HARNESS_GQ_QUERY_NAMES) {
         expect(gqSource).toContain(`query ${queryName}`)
         expect(HARNESS_GQ_QUERIES[queryName]).toBeDefined()
         expect(HARNESS_GQ_QUERIES[queryName].name).toBe(queryName)
       }
-    }),
-  )
+    })
+  })
 })
 
 describe("Deterministic in-memory GQ query execution and fallback", () => {
@@ -321,6 +328,87 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
       expect(patternRows).toHaveLength(1)
       expect(patternRows[0]?.slug).toBe("planning")
 
+      const patternVecRows = executeNamedGqQueryInMemory(
+        sampleGraph,
+        "rank_patterns_vector_hybrid",
+        {
+          vectorQuery: [1, 0, 0, 0],
+          textQuery: "skeleton",
+          targetLayer: "*",
+        },
+      )
+      expect(patternVecRows.map((r) => r["slug"])).toContain("planning")
+
+      const patternBm25Rows = executeNamedGqQueryInMemory(sampleGraph, "rank_patterns_bm25", {
+        query: "skeleton",
+        targetLayer: "*",
+      })
+      expect(patternBm25Rows.map((r) => r["slug"])).toContain("planning")
+
+      const blankPatternRows = executeNamedGqQueryInMemory(sampleGraph, "rank_patterns_bm25", {
+        query: "   ",
+        targetLayer: "*",
+      })
+      expect(blankPatternRows).toEqual([])
+
+      const stopwordTrapRows = executeNamedGqQueryInMemory(sampleGraph, "rank_patterns_bm25", {
+        query: "step",
+        targetLayer: "*",
+      })
+      expect(stopwordTrapRows).toEqual([])
+
+      const oneCharFuzzyRows = executeNamedGqQueryInMemory(sampleGraph, "resolve_effect_fn_fuzzy", {
+        query: "a",
+      })
+      expect(oneCharFuzzyRows).toEqual([])
+
+      const adrVecRows = executeNamedGqQueryInMemory(sampleGraph, "search_adrs_vector_hybrid", {
+        vectorQuery: [1, 0, 0, 0],
+        textQuery: "persistence",
+        status: "accepted",
+      })
+      expect(adrVecRows.map((r) => r["id"])).toContain("sample:ADR-0001")
+
+      const adrBm25Rows = executeNamedGqQueryInMemory(sampleGraph, "search_adrs_bm25", {
+        query: "persistence",
+        status: "*",
+      })
+      expect(adrBm25Rows.map((r) => r["id"])).toContain("sample:ADR-0001")
+
+      const reqGraph = buildHarnessGraph({
+        earsRequirements: [
+          {
+            id: "sample:SPEC-0001::REQ-1.1",
+            specId: "sample:SPEC-0001",
+            requirementId: "REQ-1.1",
+            area: "Gallery",
+            pattern: "Event-driven",
+            clauseText: "When uploading photos, system persists metadata deterministically.",
+            effectSymbol: "Sample.greet",
+            verification: "UnitTest",
+            path: "docs/specs/0001.md",
+            line: 12,
+            status: "accepted",
+          },
+        ],
+      })
+      const reqVecRows = executeNamedGqQueryInMemory(
+        reqGraph,
+        "search_requirements_vector_hybrid",
+        {
+          vectorQuery: [1, 0, 0, 0],
+          textQuery: "uploading photos",
+          status: "accepted",
+        },
+      )
+      expect(reqVecRows.map((r) => r["id"])).toContain("sample:SPEC-0001::REQ-1.1")
+
+      const reqBm25Rows = executeNamedGqQueryInMemory(reqGraph, "search_requirements_bm25", {
+        query: "photos",
+        status: "*",
+      })
+      expect(reqBm25Rows.map((r) => r["id"])).toContain("sample:SPEC-0001::REQ-1.1")
+
       const stubSvcRows = executeNamedGqQueryInMemory(
         sampleGraph,
         "rank_candidate_services_for_stub",
@@ -338,6 +426,40 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
       )
       expect(policyUnverifiedRows).toHaveLength(1)
       expect(policyUnverifiedRows[0]?.spanName).toBe("Sample.untested")
+
+      const linkedSigGraph = buildHarnessGraph({
+        fns: [
+          {
+            qualname: "libs/sample/domain/src/index.ts#linked",
+            spanName: "Sample.linked",
+            file: "libs/sample/domain/src/index.ts",
+            line: 4,
+            packageTag: "domain",
+            successType: "void",
+            isStub: false,
+          },
+        ],
+        services: [
+          {
+            tagId: "LinkedSvc",
+            name: "LinkedSvc",
+            packageTag: "service",
+            file: "libs/sample/service/src/index.ts",
+          },
+        ],
+        requiresService: [
+          {
+            fnQualname: "libs/sample/domain/src/index.ts#linked",
+            tagId: "LinkedSvc",
+          },
+        ],
+      })
+      expect(
+        Array.from(Graph.nodes(linkedSigGraph.graph)).some(([, n]) => n._tag === "EffectSignature"),
+      ).toBe(true)
+      expect(
+        executeNamedGqQueryInMemory(linkedSigGraph, "policy_orphan_effect_signatures"),
+      ).toEqual([])
 
       const baseOrphanGraph = buildHarnessGraph({ fns: [] })
       const graphWithOrphanSig = {
@@ -365,7 +487,38 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
     }),
   )
 
-  it.effect("falls back to memory-fallback across all 8 queries when Omnigraph is offline", () =>
+  it.effect(
+    "emits null for missing embeddings when embeddingsByNodeKey is provided so merge clears stale vectors",
+    () =>
+      Effect.gen(function* () {
+        yield* Effect.void
+        const ndjsonRes = toOmnigraphServerNdjsonResult(
+          sampleGraph,
+          new Map([["AdrDoc:sample:ADR-0001", [0.25, 0.75]]]),
+        )
+        const ndjson = match(ndjsonRes)
+          .with({ _tag: "Success" }, ({ success }) => success)
+          .with({ _tag: "Failure" }, ({ failure }) => expect.unreachable(String(failure)))
+          .exhaustive()
+        const lines = ndjson
+          .split("\n")
+          .filter((l) => l.trim().length > 0)
+          .map(
+            (l) =>
+              JSON.parse(l) as {
+                readonly type: string
+                readonly id: string
+                readonly data: Record<string, unknown>
+              },
+          )
+        const patternLine = lines.find((l) => l.type === "PatternDoc" && l.id === "planning")
+        const adrLine = lines.find((l) => l.type === "AdrDoc" && l.id === "sample:ADR-0001")
+        expect(patternLine?.data["summaryEmbedding"]).toBeNull()
+        expect(adrLine?.data["searchEmbedding"]).toEqual([0.25, 0.75])
+      }),
+  )
+
+  it.effect("falls back to memory-fallback across all 20 queries when Omnigraph is offline", () =>
     Effect.gen(function* () {
       const offlineFetch: FetchLike = () =>
         Promise.resolve(

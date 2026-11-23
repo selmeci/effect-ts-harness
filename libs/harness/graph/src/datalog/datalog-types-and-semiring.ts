@@ -1,7 +1,4 @@
-import {
-  MessageType,
-  type Message,
-} from "@electric-sql/d2ts"
+import { MessageType, type Message } from "@electric-sql/d2ts"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
 import {
@@ -452,30 +449,60 @@ export const extractEdbTuplesFromGraph = (
     const key = getNodeKey(node)
     match(node)
       .with({ _tag: "EffectFn" }, (n) => {
-        fnsByKey.set(key, n); fnQualnameByKey.set(key, n.qualname); allEntityKeys.add(key)
+        fnsByKey.set(key, n)
+        fnQualnameByKey.set(key, n.qualname)
+        allEntityKeys.add(key)
       })
       .with({ _tag: "ServiceTag" }, (n) => {
-        servicesByKey.set(key, n); svcTagIdByKey.set(key, n.tagId); allEntityKeys.add(key)
+        servicesByKey.set(key, n)
+        svcTagIdByKey.set(key, n.tagId)
+        allEntityKeys.add(key)
       })
       .with({ _tag: "ServiceLayer" }, (n) => {
-        layersByKey.set(key, n); layerQualnameByKey.set(key, n.qualname); allEntityKeys.add(key)
+        layersByKey.set(key, n)
+        layerQualnameByKey.set(key, n.qualname)
+        allEntityKeys.add(key)
       })
       .with({ _tag: "TaggedError" }, (n) => {
-        errorsByKey.set(key, n); errTagByKey.set(key, n.errorTag); allEntityKeys.add(key)
+        errorsByKey.set(key, n)
+        errTagByKey.set(key, n.errorTag)
+        allEntityKeys.add(key)
       })
-      .with({ _tag: "SchemaDef" }, (n) => { schemasByKey.set(key, n); allEntityKeys.add(key) })
-      .with({ _tag: "VitestCase" }, (n) => { testsByKey.set(key, n); allEntityKeys.add(key) })
-      .with({ _tag: "AdrDoc" }, (n) => { adrsByKey.set(key, n); allEntityKeys.add(key) })
-      .with({ _tag: "EarsSpec" }, (n) => { specsByKey.set(key, n); allEntityKeys.add(key) })
-      .with({ _tag: "PatternDoc" }, () => { allEntityKeys.add(key) })
-      .with({ _tag: "EffectSignature" }, (n) => { if (!sigRoles.has(n.relationId)) sigRoles.set(n.relationId, new Map()) })
-      .with({ _tag: "LayerFlow" }, (n) => { if (!layerFlowRoles.has(n.relationId)) layerFlowRoles.set(n.relationId, new Map()) })
-      .with({ _tag: "TraceabilityTuple" }, (n) => { if (!traceRoles.has(n.relationId)) traceRoles.set(n.relationId, new Map()) })
+      .with({ _tag: "SchemaDef" }, (n) => {
+        schemasByKey.set(key, n)
+        allEntityKeys.add(key)
+      })
+      .with({ _tag: "VitestCase" }, (n) => {
+        testsByKey.set(key, n)
+        allEntityKeys.add(key)
+      })
+      .with({ _tag: "AdrDoc" }, (n) => {
+        adrsByKey.set(key, n)
+        allEntityKeys.add(key)
+      })
+      .with({ _tag: "EarsSpec" }, (n) => {
+        specsByKey.set(key, n)
+        allEntityKeys.add(key)
+      })
+      .with({ _tag: "EarsRequirement" }, { _tag: "PatternDoc" }, () => {
+        allEntityKeys.add(key)
+      })
+      .with({ _tag: "EffectSignature" }, (n) => {
+        if (!sigRoles.has(n.relationId)) sigRoles.set(n.relationId, new Map())
+      })
+      .with({ _tag: "LayerFlow" }, (n) => {
+        if (!layerFlowRoles.has(n.relationId)) layerFlowRoles.set(n.relationId, new Map())
+      })
+      .with({ _tag: "TraceabilityTuple" }, (n) => {
+        if (!traceRoles.has(n.relationId)) traceRoles.set(n.relationId, new Map())
+      })
       .with({ _tag: "MigrationTuple" }, (n) => {
         migrationsById.set(n.relationId, n)
         if (!migrationRoles.has(n.relationId)) migrationRoles.set(n.relationId, new Map())
       })
-      .with({ _tag: "HttpEndpointTuple" }, (n) => { if (!httpRoles.has(n.relationId)) httpRoles.set(n.relationId, new Map()) })
+      .with({ _tag: "HttpEndpointTuple" }, (n) => {
+        if (!httpRoles.has(n.relationId)) httpRoles.set(n.relationId, new Map())
+      })
       .exhaustive()
   }
 
@@ -565,10 +592,7 @@ export const extractEdbTuplesFromGraph = (
   const existingSpecToTargetPairs: Array<[string, string]> = []
   for (const [relId, roles] of traceRoles.entries()) {
     const tests = Array.from(
-      new Set([
-        ...(roles.get("verifying-test") ?? []),
-        ...(roles.get("exercising-test") ?? []),
-      ]),
+      new Set([...(roles.get("verifying-test") ?? []), ...(roles.get("exercising-test") ?? [])]),
     ).sort()
     const targets = Array.from(
       new Set([

@@ -40,7 +40,11 @@ export const WORKFLOW_OMNIGRAPH_GRAPH_ID = "harness-workflows" as const
 
 export class OmnigraphLoadError extends Data.TaggedError("OmnigraphLoadError")<{
   readonly cause: unknown
-}> {}
+}> {
+  override get message(): string {
+    return toErrorReasonMessage(this.cause, "Omnigraph operation failed")
+  }
+}
 
 export interface OmnigraphConnectionOptions {
   readonly baseUrl?: OmnigraphBaseUrl | string | undefined
@@ -635,45 +639,84 @@ export const executeStatBlob = (
     ),
   )
 
+export const DEFAULT_OMNIGRAPH_LOAD_CHUNK_BYTES = 1_048_576
+const UTF8_ENCODER = new TextEncoder()
+
+/** Splits an NDJSON payload on line boundaries so each chunk fits within `maxChunkBytes` UTF-8 bytes. */
+export const splitNdjsonIntoByteChunks = (
+  ndjson: string,
+  maxChunkBytes: number = DEFAULT_OMNIGRAPH_LOAD_CHUNK_BYTES,
+): ReadonlyArray<string> => {
+  const limit = Math.max(1, Math.floor(maxChunkBytes))
+  if (UTF8_ENCODER.encode(ndjson).byteLength <= limit) return [ndjson]
+  const lines = ndjson.split("\n").filter((line) => line.length > 0)
+  if (lines.length <= 1) return [ndjson]
+  const chunks: Array<string> = []
+  let current: Array<string> = []
+  let currentBytes = 0
+  for (const line of lines) {
+    const lineBytes = UTF8_ENCODER.encode(line).byteLength + 1
+    if (current.length > 0 && currentBytes + lineBytes > limit) {
+      chunks.push(current.join("\n"))
+      current = []
+      currentBytes = 0
+    }
+    current.push(line)
+    currentBytes += lineBytes
+  }
+  if (current.length > 0) chunks.push(current.join("\n"))
+  return chunks
+}
+
 export interface OmnigraphLoadWithReforkInput {
   readonly branch: string
   readonly from?: string | undefined
   readonly mode: "overwrite" | "append" | "merge"
   readonly data: string
+  readonly maxChunkBytes?: number | undefined
 }
+
+const runSingleLoad = (
+  og: Omnigraph,
+  branch: string,
+  mode: "overwrite" | "append" | "merge",
+  data: string,
+  from?: string,
+): Effect.Effect<Ingest, OmnigraphLoadError> =>
+  Effect.tryPromise({
+    try: () => og.load({ branch, mode, data, ...(from !== undefined ? { from } : {}) }),
+    catch: (cause) => new OmnigraphLoadError({ cause }),
+  })
 
 export const executeLoadWithStaleRefork = (
   og: Omnigraph,
   input: OmnigraphLoadWithReforkInput,
 ): Effect.Effect<Ingest, OmnigraphLoadError> =>
   Effect.gen(function* () {
-    const runLoad = (): Effect.Effect<Ingest, OmnigraphLoadError> =>
-      Effect.tryPromise({
-        try: () =>
-          og.load({
-            branch: input.branch,
-            ...(input.from !== undefined ? { from: input.from } : {}),
-            mode: input.mode,
-            data: input.data,
-          }),
-        catch: (cause) => new OmnigraphLoadError({ cause }),
-      })
-
-    const initialRes = yield* runLoad()
-    const isOverwrite = match(input.mode)
-      .with("overwrite", () => true)
-      .with("append", "merge", () => false)
+    const chunks = splitNdjsonIntoByteChunks(input.data, input.maxChunkBytes)
+    const { isOverwrite, nextMode } = match(input.mode)
+      .with("overwrite", () => ({ isOverwrite: true, nextMode: "merge" as const }))
+      .with("merge", () => ({ isOverwrite: false, nextMode: "merge" as const }))
+      .with("append", () => ({ isOverwrite: false, nextMode: "append" as const }))
       .exhaustive()
+    const runChunkedLoad = Effect.gen(function* () {
+      const firstData = chunks[0] ?? input.data
+      const firstRes = yield* runSingleLoad(og, input.branch, input.mode, firstData, input.from)
+      let lastRes = firstRes
+      for (let i = 1; i < chunks.length; i++) {
+        lastRes = yield* runSingleLoad(og, input.branch, nextMode, chunks[i] ?? "")
+      }
+      return { firstCreated: firstRes.branchCreated, lastRes }
+    })
 
-    if (
-      initialRes.branchCreated !== false ||
+    const initial = yield* runChunkedLoad
+    const skipRefork =
+      initial.firstCreated !== false ||
       !isOverwrite ||
       input.branch === "main" ||
       input.from === undefined ||
       input.from === input.branch
-    ) {
-      return initialRes
-    }
+    if (skipRefork) return initial.lastRes
 
     const fromBranch = input.from
     const mergeBaseRes = yield* Effect.tryPromise({
@@ -681,37 +724,21 @@ export const executeLoadWithStaleRefork = (
       catch: (cause) => new OmnigraphLoadError({ cause }),
     })
     if (mergeBaseRes.mergeBase.graphCommitId === mergeBaseRes.targetCommitId) {
-      return initialRes
+      return initial.lastRes
     }
-
     const hasConflict = yield* Effect.tryPromise({
-      try: () =>
-        og.branches.merge({
-          source: input.branch,
-          target: fromBranch,
-          dryRun: true,
-        }),
+      try: () => og.branches.merge({ source: input.branch, target: fromBranch, dryRun: true }),
       catch: (cause) => new OmnigraphLoadError({ cause }),
     }).pipe(
       Effect.as(false),
-      Effect.catchIf(
-        (err) => err.cause instanceof ConflictError,
-        () => Effect.succeed(true),
-      ),
+      Effect.catchIf((err) => err.cause instanceof ConflictError, () => Effect.succeed(true)),
     )
-    if (!hasConflict) {
-      return initialRes
-    }
+    if (!hasConflict) return initial.lastRes
 
     yield* Effect.tryPromise({
       try: () => og.branches.delete(input.branch),
       catch: (cause) => new OmnigraphLoadError({ cause }),
-    }).pipe(
-      Effect.catchIf(
-        (err) => err.cause instanceof NotFoundError,
-        () => Effect.void,
-      ),
-    )
+    }).pipe(Effect.catchIf((err) => err.cause instanceof NotFoundError, () => Effect.void))
 
-    return yield* runLoad()
+    return (yield* runChunkedLoad).lastRes
   })

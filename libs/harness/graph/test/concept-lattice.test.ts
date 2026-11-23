@@ -744,6 +744,7 @@ describe("ConceptLattice.decide (PERA Polymorphic Concept Hierarchy)", () => {
           "PatternDoc",
           "AdrDoc",
           "EarsSpec",
+          "EarsRequirement",
         ] as const
 
         const RELATION_TAGS = [

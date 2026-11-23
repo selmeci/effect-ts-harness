@@ -12,14 +12,11 @@ import {
   SubprocessOutput,
   validateSubprocessInput,
   WorkspaceFileContent,
+  WorkspaceFilePath,
   WorkspaceFsError,
   WorkspaceFsOperation,
 } from "@harness/contract"
-import {
-  ActiveMutantContext,
-  HarnessSubprocessRunner,
-  WorkspaceFs,
-} from "@harness/service"
+import { ActiveMutantContext, HarnessSubprocessRunner, WorkspaceFs } from "@harness/service"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { getActiveMutantId, setActiveMutantId } from "../../src/services/active-mutant-context.js"
 
@@ -72,6 +69,20 @@ export const makeWorkspaceFsHostIoLayer = (hostIo: SyncHostIo): Layer.Layer<Work
         )
       }),
     exists: (filePath) => Effect.sync(() => hostIo.existsSync(filePath)),
+    realPath: (filePath) =>
+      Effect.try({
+        try: () => WorkspaceFilePath.make(hostIo.realpathSync(filePath)),
+        catch: (err) =>
+          new WorkspaceFsError({
+            filePath,
+            operation: WorkspaceFsOperation.make("stat"),
+            reason: ErrorReasonMessage.make(
+              err instanceof Error && err.message.trim().length > 0
+                ? err.message
+                : "Realpath failed",
+            ),
+          }),
+      }),
   })
 
 export const makeWorkspaceFsMemoryLayer = (
@@ -101,6 +112,7 @@ export const makeWorkspaceFsMemoryLayer = (
             store.set(filePath, content)
           }),
         exists: (filePath) => Effect.sync(() => store.has(filePath)),
+        realPath: (filePath) => Effect.succeed(filePath),
       }
     }),
   )

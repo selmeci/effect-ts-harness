@@ -26,6 +26,7 @@ export {
   DpoRuleSpec,
   ENTITY_NODE_TAGS,
   EarsPatternKind,
+  EarsRequirementNode,
   EarsSpecNode,
   EarsStatus,
   EffectFnNode,
@@ -288,6 +289,7 @@ export {
   OmnigraphReconcileInput,
   OmnigraphReconcileReason,
   decideOmnigraphReconcile,
+  deriveClusterOmnigraphPort,
   deriveRepoOmnigraphPort,
   readGraphHeadMeta,
   readGraphHeadMetaState,
@@ -378,6 +380,25 @@ export {
   type BatchVerificationOutcome,
   type GraphProjectorInput,
 } from "./graph-projector.js"
+export {
+  buildGovernanceCatalog,
+  inspectDocTree,
+  parseMarkdownTree,
+  type DocTreeInspectRequest,
+} from "./doc-tree.js"
+export {
+  embedGraphDelta,
+  syncGraphEmbeddings,
+  type GraphEmbeddingSyncInput,
+  type GraphEmbeddingSyncOutcome,
+} from "./embedding-sync.js"
+export { scoreLexicalBm25Lite, tokenizeRetrievalText } from "./gq-retrieval-memory.js"
+export {
+  extractAdrSearchText,
+  extractEarsRequirements,
+  extractGovernanceSummary,
+  type ExtractedEarsRequirementRow,
+} from "./extractor/governance-body-extractor.js"
 export {
   CompilerOverlayErrorReason,
   CompilerRepoRootInput,

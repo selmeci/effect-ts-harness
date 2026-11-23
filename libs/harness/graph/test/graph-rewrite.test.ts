@@ -128,160 +128,156 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
       ],
     })
 
-  it.effect(
-    "REQ-2.1: enforces the Bipartite Levi Relation Preservation Law (V_R in K)",
-    () =>
-      Effect.gen(function* () {
-        const graph = makeOrderGluingGraph()
+  it.effect("REQ-2.1: enforces the Bipartite Levi Relation Preservation Law (V_R in K)", () =>
+    Effect.gen(function* () {
+      const graph = makeOrderGluingGraph()
 
-        // 1. Valid DPO rewrite (REP-01) preserves EffectSignature in K and keeps input-schema, output-schema, fails-with intact
-        const outcome = yield* decideGraphRewrite(graph, "auto-repair")
-        expect(Option.isSome(outcome.result.recommendedCandidate)).toBe(true)
-        const rec = Option.getOrThrow(outcome.result.recommendedCandidate)
-        const rep01Patch = rec.patches.find((p) => p.ruleId === RewriteRuleId.make("REP-01"))
-        expect(rep01Patch).toBeDefined()
-        const sigKey = NodeKey.make("EffectSignature:libs/sample/domain/src/order.ts#checkout")
-        expect(rep01Patch?.preservedInterfaceKeys).toContain(sigKey)
-        expect(rep01Patch?.deletedRelationIds).not.toContain(RelationId.make(sigKey))
+      // 1. Valid DPO rewrite (REP-01) preserves EffectSignature in K and keeps input-schema, output-schema, fails-with intact
+      const outcome = yield* decideGraphRewrite(graph, "auto-repair")
+      expect(Option.isSome(outcome.result.recommendedCandidate)).toBe(true)
+      const rec = Option.getOrThrow(outcome.result.recommendedCandidate)
+      const rep01Patch = rec.patches.find((p) => p.ruleId === RewriteRuleId.make("REP-01"))
+      expect(rep01Patch).toBeDefined()
+      const sigKey = NodeKey.make("EffectSignature:libs/sample/domain/src/order.ts#checkout")
+      expect(rep01Patch?.preservedInterfaceKeys).toContain(sigKey)
+      expect(rep01Patch?.deletedRelationIds).not.toContain(RelationId.make(sigKey))
 
-        // Check that input-schema, output-schema, and fails-with edges remain attached to EffectSignature in targetGraph
-        const sigIdx = outcome.targetGraph.nodeIndexByKey.get(sigKey)
-        expect(sigIdx).toBeDefined()
-        const remainingRoles = new Set<string>()
-        for (const [, edge] of Graph.edges(outcome.targetGraph.graph)) {
-          if (edge.source === sigIdx) {
-            remainingRoles.add(`${edge.data.role}->${edge.data.entityKey}`)
-          }
+      // Check that input-schema, output-schema, and fails-with edges remain attached to EffectSignature in targetGraph
+      const sigIdx = outcome.targetGraph.nodeIndexByKey.get(sigKey)
+      expect(sigIdx).toBeDefined()
+      const remainingRoles = new Set<string>()
+      for (const [, edge] of Graph.edges(outcome.targetGraph.graph)) {
+        if (edge.source === sigIdx) {
+          remainingRoles.add(`${edge.data.role}->${edge.data.entityKey}`)
         }
-        expect(remainingRoles.has("input-schema->SchemaDef:CheckoutInput")).toBe(true)
-        expect(remainingRoles.has("output-schema->SchemaDef:CheckoutResult")).toBe(true)
-        expect(remainingRoles.has("fails-with->TaggedError:OrderDeclinedError")).toBe(true)
-        expect(remainingRoles.has("requires-service->ServiceTag:SqlClientPort")).toBe(true)
-        expect(remainingRoles.has("requires-service->ServiceTag:SqlClient")).toBe(false)
+      }
+      expect(remainingRoles.has("input-schema->SchemaDef:CheckoutInput")).toBe(true)
+      expect(remainingRoles.has("output-schema->SchemaDef:CheckoutResult")).toBe(true)
+      expect(remainingRoles.has("fails-with->TaggedError:OrderDeclinedError")).toBe(true)
+      expect(remainingRoles.has("requires-service->ServiceTag:SqlClientPort")).toBe(true)
+      expect(remainingRoles.has("requires-service->ServiceTag:SqlClient")).toBe(false)
 
-        // 2. Attempting to delete a relation node that still has undeleted incident role edges fails with bipartite-relation-deleted
-        const illegalRelationDeleteExit = yield* Effect.exit(
-          verifyDpoGluingCondition(graph, {
-            ruleId: RewriteRuleId.make("REP-01"),
-            phase: "REPAIR_ARCH",
-            ruleCategory: "auto-repair",
-            primaryNodeKey: NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#checkout"),
-            description: "Illegal deletion of EffectSignature",
-            preservedInterfaceKeys: [
-              NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#checkout"),
-            ],
-            deletedEntityKeys: [],
-            deletedRelationIds: [RelationId.make(sigKey)],
-            deletedRoleEdges: [],
-            insertedEntityNodes: [],
-            insertedRelationNodes: [],
-            insertedRoleEdges: [],
-          }),
-        )
-        match(illegalRelationDeleteExit)
-          .with({ _tag: "Failure" }, () => {
-            const failure = Exit.findErrorOption(illegalRelationDeleteExit)
-            match(failure)
-              .with({ _tag: "Some" }, (someErr) => {
-                expect(someErr.value.reason).toBe("bipartite-relation-deleted")
-              })
-              .with({ _tag: "None" }, () => {
-                expect.unreachable("expected error in cause")
-              })
-              .exhaustive()
-          })
-          .with({ _tag: "Success" }, () => {
-            expect.unreachable("expected gluing condition to fail")
-          })
-          .exhaustive()
+      // 2. Attempting to delete a relation node that still has undeleted incident role edges fails with bipartite-relation-deleted
+      const illegalRelationDeleteExit = yield* Effect.exit(
+        verifyDpoGluingCondition(graph, {
+          ruleId: RewriteRuleId.make("REP-01"),
+          phase: "REPAIR_ARCH",
+          ruleCategory: "auto-repair",
+          primaryNodeKey: NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#checkout"),
+          description: "Illegal deletion of EffectSignature",
+          preservedInterfaceKeys: [
+            NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#checkout"),
+          ],
+          deletedEntityKeys: [],
+          deletedRelationIds: [RelationId.make(sigKey)],
+          deletedRoleEdges: [],
+          insertedEntityNodes: [],
+          insertedRelationNodes: [],
+          insertedRoleEdges: [],
+        }),
+      )
+      match(illegalRelationDeleteExit)
+        .with({ _tag: "Failure" }, () => {
+          const failure = Exit.findErrorOption(illegalRelationDeleteExit)
+          match(failure)
+            .with({ _tag: "Some" }, (someErr) => {
+              expect(someErr.value.reason).toBe("bipartite-relation-deleted")
+            })
+            .with({ _tag: "None" }, () => {
+              expect.unreachable("expected error in cause")
+            })
+            .exhaustive()
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("expected gluing condition to fail")
+        })
+        .exhaustive()
 
-        // 3. Attempting to delete a PlaysRoleEdge without keeping its source relation in K fails with bipartite-relation-deleted
-        const missingFromKExit = yield* Effect.exit(
-          verifyDpoGluingCondition(graph, {
-            ruleId: RewriteRuleId.make("REP-01"),
-            phase: "REPAIR_ARCH",
-            ruleCategory: "auto-repair",
-            primaryNodeKey: NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#checkout"),
-            description: "Missing relation in K",
-            preservedInterfaceKeys: [
-              NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#checkout"),
-            ],
-            deletedEntityKeys: [],
-            deletedRelationIds: [],
-            deletedRoleEdges: [
-              {
-                _tag: "PlaysRole",
-                role: RoleName.make("requires-service"),
-                relationId: RelationId.make(sigKey),
-                entityKey: NodeKey.make("ServiceTag:SqlClient"),
-              },
-            ],
-            insertedEntityNodes: [],
-            insertedRelationNodes: [],
-            insertedRoleEdges: [],
-          }),
-        )
-        match(missingFromKExit)
-          .with({ _tag: "Failure" }, () => {
-            const failure = Exit.findErrorOption(missingFromKExit)
-            match(failure)
-              .with({ _tag: "Some" }, (someErr) => {
-                expect(someErr.value._tag).toBe("GraphRewriteError")
-                expect(someErr.value.reason).toBe("bipartite-relation-deleted")
-              })
-              .with({ _tag: "None" }, () => {
-                expect.unreachable("expected error in cause")
-              })
-              .exhaustive()
-          })
-          .with({ _tag: "Success" }, () => {
-            expect.unreachable("expected gluing condition to fail")
-          })
-          .exhaustive()
-      }),
+      // 3. Attempting to delete a PlaysRoleEdge without keeping its source relation in K fails with bipartite-relation-deleted
+      const missingFromKExit = yield* Effect.exit(
+        verifyDpoGluingCondition(graph, {
+          ruleId: RewriteRuleId.make("REP-01"),
+          phase: "REPAIR_ARCH",
+          ruleCategory: "auto-repair",
+          primaryNodeKey: NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#checkout"),
+          description: "Missing relation in K",
+          preservedInterfaceKeys: [
+            NodeKey.make("EffectFn:libs/sample/domain/src/order.ts#checkout"),
+          ],
+          deletedEntityKeys: [],
+          deletedRelationIds: [],
+          deletedRoleEdges: [
+            {
+              _tag: "PlaysRole",
+              role: RoleName.make("requires-service"),
+              relationId: RelationId.make(sigKey),
+              entityKey: NodeKey.make("ServiceTag:SqlClient"),
+            },
+          ],
+          insertedEntityNodes: [],
+          insertedRelationNodes: [],
+          insertedRoleEdges: [],
+        }),
+      )
+      match(missingFromKExit)
+        .with({ _tag: "Failure" }, () => {
+          const failure = Exit.findErrorOption(missingFromKExit)
+          match(failure)
+            .with({ _tag: "Some" }, (someErr) => {
+              expect(someErr.value._tag).toBe("GraphRewriteError")
+              expect(someErr.value.reason).toBe("bipartite-relation-deleted")
+            })
+            .with({ _tag: "None" }, () => {
+              expect.unreachable("expected error in cause")
+            })
+            .exhaustive()
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("expected gluing condition to fail")
+        })
+        .exhaustive()
+    }),
   )
 
-  it.effect(
-    "REQ-2.3: enforces the Dangling Condition (Dangling(m) = empty)",
-    () =>
-      Effect.gen(function* () {
-        const graph = makeOrderGluingGraph()
-        const sigKey = NodeKey.make("EffectSignature:libs/sample/domain/src/order.ts#checkout")
+  it.effect("REQ-2.3: enforces the Dangling Condition (Dangling(m) = empty)", () =>
+    Effect.gen(function* () {
+      const graph = makeOrderGluingGraph()
+      const sigKey = NodeKey.make("EffectSignature:libs/sample/domain/src/order.ts#checkout")
 
-        // Attempting to delete an entity node while leaving an incident PlaysRoleEdge fails with dangling-edge
-        const illegalEntityDeleteExit = yield* Effect.exit(
-          verifyDpoGluingCondition(graph, {
-            ruleId: RewriteRuleId.make("REP-11"),
-            phase: "CLEANUP",
-            ruleCategory: "cleanup",
-            primaryNodeKey: NodeKey.make("ServiceTag:SqlClient"),
-            description: "Illegal deletion of ServiceTag without deleting incident edge",
-            preservedInterfaceKeys: [sigKey],
-            deletedEntityKeys: [NodeKey.make("ServiceTag:SqlClient")],
-            deletedRelationIds: [],
-            deletedRoleEdges: [],
-            insertedEntityNodes: [],
-            insertedRelationNodes: [],
-            insertedRoleEdges: [],
-          }),
-        )
-        match(illegalEntityDeleteExit)
-          .with({ _tag: "Failure" }, () => {
-            const failure = Exit.findErrorOption(illegalEntityDeleteExit)
-            match(failure)
-              .with({ _tag: "Some" }, (someErr) => {
-                expect(someErr.value.reason).toBe("dangling-edge")
-              })
-              .with({ _tag: "None" }, () => {
-                expect.unreachable("expected error in cause")
-              })
-              .exhaustive()
-          })
-          .with({ _tag: "Success" }, () => {
-            expect.unreachable("expected gluing condition to fail")
-          })
-          .exhaustive()
-      }),
+      // Attempting to delete an entity node while leaving an incident PlaysRoleEdge fails with dangling-edge
+      const illegalEntityDeleteExit = yield* Effect.exit(
+        verifyDpoGluingCondition(graph, {
+          ruleId: RewriteRuleId.make("REP-11"),
+          phase: "CLEANUP",
+          ruleCategory: "cleanup",
+          primaryNodeKey: NodeKey.make("ServiceTag:SqlClient"),
+          description: "Illegal deletion of ServiceTag without deleting incident edge",
+          preservedInterfaceKeys: [sigKey],
+          deletedEntityKeys: [NodeKey.make("ServiceTag:SqlClient")],
+          deletedRelationIds: [],
+          deletedRoleEdges: [],
+          insertedEntityNodes: [],
+          insertedRelationNodes: [],
+          insertedRoleEdges: [],
+        }),
+      )
+      match(illegalEntityDeleteExit)
+        .with({ _tag: "Failure" }, () => {
+          const failure = Exit.findErrorOption(illegalEntityDeleteExit)
+          match(failure)
+            .with({ _tag: "Some" }, (someErr) => {
+              expect(someErr.value.reason).toBe("dangling-edge")
+            })
+            .with({ _tag: "None" }, () => {
+              expect.unreachable("expected error in cause")
+            })
+            .exhaustive()
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("expected gluing condition to fail")
+        })
+        .exhaustive()
+    }),
   )
 
   it.effect(
@@ -979,10 +975,19 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
         const validateSpan = match(validateNode)
           .with({ _tag: "EffectFn" }, (n) => n.spanName)
           .with(
-            { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
-            { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
-            { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
-            { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" },
+            { _tag: "ServiceTag" },
+            { _tag: "ServiceLayer" },
+            { _tag: "TaggedError" },
+            { _tag: "SchemaDef" },
+            { _tag: "VitestCase" },
+            { _tag: "PatternDoc" },
+            { _tag: "AdrDoc" },
+            { _tag: "EarsSpec" },
+            { _tag: "EarsRequirement" },
+            { _tag: "EffectSignature" },
+            { _tag: "LayerFlow" },
+            { _tag: "TraceabilityTuple" },
+            { _tag: "HttpEndpointTuple" },
             { _tag: "MigrationTuple" },
             () => undefined,
           )
@@ -990,10 +995,19 @@ describe("GraphRewrite.decide (Double-Pushout Algebraic Graph Rewriting Engine â
         const decideSpan = match(decideNode)
           .with({ _tag: "EffectFn" }, (n) => n.spanName)
           .with(
-            { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
-            { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
-            { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
-            { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" },
+            { _tag: "ServiceTag" },
+            { _tag: "ServiceLayer" },
+            { _tag: "TaggedError" },
+            { _tag: "SchemaDef" },
+            { _tag: "VitestCase" },
+            { _tag: "PatternDoc" },
+            { _tag: "AdrDoc" },
+            { _tag: "EarsSpec" },
+            { _tag: "EarsRequirement" },
+            { _tag: "EffectSignature" },
+            { _tag: "LayerFlow" },
+            { _tag: "TraceabilityTuple" },
+            { _tag: "HttpEndpointTuple" },
             { _tag: "MigrationTuple" },
             () => undefined,
           )

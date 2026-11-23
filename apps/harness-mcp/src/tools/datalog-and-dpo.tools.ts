@@ -151,20 +151,16 @@ const resolveDecisionPriors = Effect.fn("HarnessMcp.resolveDecisionPriors")(func
             candidateEntities.push(n)
           }
         })
-        .with(
-          { _tag: "ServiceTag" },
-          { _tag: "TaggedError" },
-          { _tag: "SchemaDef" },
-          (n) => {
-            candidateEntities.push(n)
-          },
-        )
+        .with({ _tag: "ServiceTag" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" }, (n) => {
+          candidateEntities.push(n)
+        })
         .with(
           { _tag: "ServiceLayer" },
           { _tag: "VitestCase" },
           { _tag: "PatternDoc" },
           { _tag: "AdrDoc" },
           { _tag: "EarsSpec" },
+          { _tag: "EarsRequirement" },
           () => undefined,
         )
         .exhaustive()
@@ -186,6 +182,7 @@ const resolveDecisionPriors = Effect.fn("HarnessMcp.resolveDecisionPriors")(func
               { _tag: "PatternDoc" },
               { _tag: "AdrDoc" },
               { _tag: "EarsSpec" },
+              { _tag: "EarsRequirement" },
               { _tag: "EffectSignature" },
               { _tag: "LayerFlow" },
               { _tag: "TraceabilityTuple" },
@@ -210,6 +207,7 @@ const resolveDecisionPriors = Effect.fn("HarnessMcp.resolveDecisionPriors")(func
             { _tag: "PatternDoc" },
             { _tag: "AdrDoc" },
             { _tag: "EarsSpec" },
+            { _tag: "EarsRequirement" },
             { _tag: "EffectSignature" },
             { _tag: "LayerFlow" },
             { _tag: "TraceabilityTuple" },
@@ -248,6 +246,7 @@ const resolveDecisionPriors = Effect.fn("HarnessMcp.resolveDecisionPriors")(func
           { _tag: "PatternDoc" },
           { _tag: "AdrDoc" },
           { _tag: "EarsSpec" },
+          { _tag: "EarsRequirement" },
           () => candKey,
         )
         .exhaustive()

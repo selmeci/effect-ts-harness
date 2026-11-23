@@ -202,7 +202,7 @@ export const computeGraphMeasure = (
       })
       .with(
         { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
-        { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" },
+        { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsRequirement" },
         { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
         { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
         () => undefined,
@@ -509,7 +509,7 @@ export const indexHarnessGraph = (graph: HarnessGraph): IndexedHarnessGraph => {
       .with({ _tag: "SchemaDef" }, (n) => { schemasByKey.set(key, n) })
       .with({ _tag: "VitestCase" }, (n) => { testsByKey.set(key, n) })
       .with({ _tag: "EarsSpec" }, (n) => { specsByKey.set(key, n) })
-      .with({ _tag: "PatternDoc" }, { _tag: "AdrDoc" }, () => undefined)
+      .with({ _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsRequirement" }, () => undefined)
       .with({ _tag: "EffectSignature" }, (n) => {
         sigRelationsById.set(n.relationId, n); sigRelationsById.set(key, n)
       })
@@ -622,7 +622,7 @@ export const scoreDraftPatch = (
         .with(
           { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
           { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
-          { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
+          { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EarsRequirement" }, { _tag: "EffectSignature" },
           { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" },
           { _tag: "MigrationTuple" },
           () => false,

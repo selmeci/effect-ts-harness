@@ -828,10 +828,12 @@ describe("@harness/contract schemas", () => {
     expect(() => Schema.decodeUnknownSync(NxTierTag)("type:unknown")).toThrow()
   })
 
-  it("validates review routing contracts, branded literals, and 17 canonical MCP tool names", () => {
-    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(17)
+  it("validates review routing contracts, branded literals, and 19 canonical MCP tool names", () => {
+    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(19)
     expect(CANONICAL_MCP_TOOL_NAMES).toContain(McpToolName.make("harness_review_route"))
     expect(CANONICAL_MCP_TOOL_NAMES).toContain(McpToolName.make("harness_git_diff"))
+    expect(CANONICAL_MCP_TOOL_NAMES).toContain(McpToolName.make("harness_search_knowledge"))
+    expect(CANONICAL_MCP_TOOL_NAMES).toContain(McpToolName.make("harness_doc_tree"))
     const gitDiffErr = new GitDiffExecutionError({
       reason: GitDiffErrorReason.make("Invalid base ref"),
     })

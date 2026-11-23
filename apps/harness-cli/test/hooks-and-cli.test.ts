@@ -14,6 +14,7 @@ import { CLEF_SYSTEMONE_ONLY_BANNED_REASON, DstSeed, writeVerifyStamp } from "@h
 import { resolveOmnigraphClusterDir } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 import { runWithTestTracer } from "@harness/ingest"
+import { CLUSTER_SCHEMA_EPOCH } from "../src/commands/omnigraph-auth-and-drift.js"
 import {
   ensureLocalOmnigraphReady,
   isLoopbackOmnigraphUrl,
@@ -887,7 +888,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         const doneClusterDir = resolveOmnigraphClusterDir(doneSigRepo, nodeSyncHostIo)
         mkdirSync(doneClusterDir, { recursive: true })
         writeFileSync(join(doneClusterDir, ".config-stamp"), "name: test\n\n---\n\n---\n")
-        writeFileSync(join(doneClusterDir, ".cluster-schema-epoch"), "rfc-0009-v2")
+        writeFileSync(join(doneClusterDir, ".cluster-schema-epoch"), CLUSTER_SCHEMA_EPOCH)
         writeVerifyStamp(doneSigRepo, nodeSyncHostIo, "impl/test", {
           dstSeed: DstSeed.make(1),
           dstSeedsRun: 1,

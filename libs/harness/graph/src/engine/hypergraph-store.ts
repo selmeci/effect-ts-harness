@@ -10,6 +10,7 @@ import {
   type AdrDocNode,
   type BranchingViolation,
   type ConceptLatticeResult,
+  type EarsRequirementNode,
   type EarsSpecNode,
   type EffectFnNode,
   type EffectSignatureRelation,
@@ -56,6 +57,7 @@ export interface BuildHarnessGraphInput {
   readonly patternDocs?: ReadonlyArray<Omit<PatternDocNode, "_tag">> | undefined
   readonly adrDocs?: ReadonlyArray<Omit<AdrDocNode, "_tag">> | undefined
   readonly earsSpecs?: ReadonlyArray<Omit<EarsSpecNode, "_tag">> | undefined
+  readonly earsRequirements?: ReadonlyArray<Omit<EarsRequirementNode, "_tag">> | undefined
   readonly effectSignatures?: ReadonlyArray<Omit<EffectSignatureRelation, "_tag">> | undefined
   readonly layerFlows?: ReadonlyArray<Omit<LayerFlowRelation, "_tag">> | undefined
   readonly traceabilityTuples?: ReadonlyArray<Omit<TraceabilityTupleRelation, "_tag">> | undefined
@@ -88,6 +90,7 @@ const ROLE_EDGE_MAP: Readonly<Record<string, string>> = {
   "TraceabilityTuple:AdrDoc:governing-adr": "PlaysGoverningAdrRole",
   "TraceabilityTuple:EarsSpec:specifying-ears": "PlaysSpecifyingEarsRole",
   "TraceabilityTuple:EarsSpec:specifying-spec": "PlaysSpecifyingEarsRole",
+  "TraceabilityTuple:EarsRequirement:specified-requirement": "PlaysSpecifiedRequirementRole",
   "TraceabilityTuple:VitestCase:verifying-test": "PlaysVerifyingTestRole",
   "TraceabilityTuple:PatternDoc:enforcing-pattern": "PlaysEnforcingPatternRole",
   "TraceabilityTuple:VitestCase:exercising-test": "PlaysExercisingTestRole",
@@ -162,6 +165,7 @@ export const matchesNodeTarget = (node: EntityNode, targetKey: string): boolean 
     .with({ _tag: "PatternDoc" }, (n) => n.slug === targetKey || n.path === targetKey)
     .with({ _tag: "AdrDoc" }, (n) => n.id === targetKey)
     .with({ _tag: "EarsSpec" }, (n) => n.id === targetKey)
+    .with({ _tag: "EarsRequirement" }, (n) => n.id === targetKey || n.requirementId === targetKey)
     .exhaustive()
 
 /**
@@ -220,6 +224,7 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
     for (const doc of input.patternDocs ?? []) addOrGetNode({ _tag: "PatternDoc", title: doc.title ?? doc.summary, ...doc })
     for (const adr of input.adrDocs ?? []) addOrGetNode({ _tag: "AdrDoc", ...adr })
     for (const spec of input.earsSpecs ?? []) addOrGetNode({ _tag: "EarsSpec", ...spec })
+    for (const req of input.earsRequirements ?? []) addOrGetNode({ _tag: "EarsRequirement", ...req })
 
     const resolveTargetEntityKey = (
       targetKey: string,
@@ -245,7 +250,7 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
           ? [preferredTag]
           : [
               "EffectFn", "ServiceTag", "TaggedError", "ServiceLayer",
-              "SchemaDef", "VitestCase", "PatternDoc", "AdrDoc", "EarsSpec",
+              "SchemaDef", "VitestCase", "PatternDoc", "AdrDoc", "EarsSpec", "EarsRequirement",
             ]
       for (const prefix of prefixes) {
         const candidate = `${prefix}:${targetKey}`
@@ -368,7 +373,7 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
           }
         })
         .with(
-          { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+          { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EarsRequirement" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
           () => {},
         )
         .exhaustive()
@@ -595,7 +600,7 @@ export const buildHarnessGraph = (input: BuildHarnessGraphInput): HarnessGraph =
             }
           })
           .with(
-            { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+            { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsRequirement" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
             () => {},
           )
           .exhaustive()

@@ -42,10 +42,20 @@ export const diffHarnessGraphs = (
         implFnsByFileAndSpan.set(`${fn.file}::${fn.spanName}`, fn)
       })
       .with(
-        { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" },
-        { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" },
-        { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
-        { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+        { _tag: "ServiceTag" },
+        { _tag: "ServiceLayer" },
+        { _tag: "TaggedError" },
+        { _tag: "SchemaDef" },
+        { _tag: "VitestCase" },
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
         () => {},
       )
       .exhaustive()
@@ -57,7 +67,9 @@ export const diffHarnessGraphs = (
     const key = getNodeKey(planNode)
     const implIdx = implGraph.nodeIndexByKey.get(key)
     let implNode =
-      implIdx !== undefined ? Option.getOrUndefined(Graph.getNode(implGraph.graph, implIdx)) : undefined
+      implIdx !== undefined
+        ? Option.getOrUndefined(Graph.getNode(implGraph.graph, implIdx))
+        : undefined
 
     if (implNode === undefined) {
       implNode = match(planNode)
@@ -72,10 +84,20 @@ export const diffHarnessGraphs = (
           return matchedBySpan
         })
         .with(
-          { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" },
-          { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" },
-          { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
-          { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+          { _tag: "ServiceTag" },
+          { _tag: "ServiceLayer" },
+          { _tag: "TaggedError" },
+          { _tag: "SchemaDef" },
+          { _tag: "VitestCase" },
+          { _tag: "PatternDoc" },
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          { _tag: "EarsRequirement" },
+          { _tag: "EffectSignature" },
+          { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
           () => undefined,
         )
         .exhaustive()
@@ -88,9 +110,17 @@ export const diffHarnessGraphs = (
         .with({ _tag: "ServiceLayer" }, (n) => missingLayers.push(n.qualname))
         .with({ _tag: "TaggedError" }, (n) => missingErrors.push(n.errorTag))
         .with(
-          { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" },
-          { _tag: "EarsSpec" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" },
-          { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+          { _tag: "SchemaDef" },
+          { _tag: "VitestCase" },
+          { _tag: "PatternDoc" },
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          { _tag: "EarsRequirement" },
+          { _tag: "EffectSignature" },
+          { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
           () => {},
         )
         .exhaustive()
@@ -100,10 +130,20 @@ export const diffHarnessGraphs = (
           if (fn.isStub === true) remainingStubs.push(fn.qualname)
         })
         .with(
-          { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" },
-          { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" },
-          { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
-          { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+          { _tag: "ServiceTag" },
+          { _tag: "ServiceLayer" },
+          { _tag: "TaggedError" },
+          { _tag: "SchemaDef" },
+          { _tag: "VitestCase" },
+          { _tag: "PatternDoc" },
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          { _tag: "EarsRequirement" },
+          { _tag: "EffectSignature" },
+          { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
           () => {},
         )
         .exhaustive()
@@ -118,10 +158,20 @@ export const diffHarnessGraphs = (
         }
       })
       .with(
-        { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" },
-        { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" },
-        { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
-        { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+        { _tag: "ServiceTag" },
+        { _tag: "ServiceLayer" },
+        { _tag: "TaggedError" },
+        { _tag: "SchemaDef" },
+        { _tag: "VitestCase" },
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
         () => {},
       )
       .exhaustive()
@@ -201,7 +251,11 @@ export const verifySubgraphMonomorphism = (
   const extractedFnsByFileAndSpan = new Map<string, Array<string>>()
   const extractedEntitiesByTail = new Map<string, Array<string>>()
 
-  const pushCandidate = (map: Map<string, Array<string>>, lookupKey: string, nodeKey: string): void => {
+  const pushCandidate = (
+    map: Map<string, Array<string>>,
+    lookupKey: string,
+    nodeKey: string,
+  ): void => {
     let arr = map.get(lookupKey)
     if (arr === undefined) {
       arr = []
@@ -259,6 +313,9 @@ export const verifySubgraphMonomorphism = (
         .with({ _tag: "EarsSpec" }, (spec) => {
           pushCandidate(extractedEntitiesByTail, `EarsSpec::${spec.id}`, key)
         })
+        .with({ _tag: "EarsRequirement" }, (req) => {
+          pushCandidate(extractedEntitiesByTail, `EarsRequirement::${req.id}`, key)
+        })
         .exhaustive()
     } else {
       extractedRelationsById.set(node.relationId, node)
@@ -299,7 +356,11 @@ export const verifySubgraphMonomorphism = (
 
   const pickUnusedEntity = (candidates: ReadonlyArray<string | undefined>): string | undefined => {
     for (const cand of candidates) {
-      if (cand !== undefined && extractedEntitiesByKey.has(cand) && !usedExtractedEntityKeys.has(cand)) {
+      if (
+        cand !== undefined &&
+        extractedEntitiesByKey.has(cand) &&
+        !usedExtractedEntityKeys.has(cand)
+      ) {
         return cand
       }
     }
@@ -359,9 +420,22 @@ export const verifySubgraphMonomorphism = (
               ...(extractedEntitiesByTail.get(`VitestCase::${vc.testFile}::${vc.testName}`) ?? []),
               ...(extractedEntitiesByTail.get(`VitestCase::${vc.testFile}`) ?? []),
             ])
-            .with({ _tag: "PatternDoc" }, (doc) => extractedEntitiesByTail.get(`PatternDoc::${doc.path}`) ?? [])
-            .with({ _tag: "AdrDoc" }, (doc) => extractedEntitiesByTail.get(`AdrDoc::${doc.id}`) ?? [])
-            .with({ _tag: "EarsSpec" }, (spec) => extractedEntitiesByTail.get(`EarsSpec::${spec.id}`) ?? [])
+            .with(
+              { _tag: "PatternDoc" },
+              (doc) => extractedEntitiesByTail.get(`PatternDoc::${doc.path}`) ?? [],
+            )
+            .with(
+              { _tag: "AdrDoc" },
+              (doc) => extractedEntitiesByTail.get(`AdrDoc::${doc.id}`) ?? [],
+            )
+            .with(
+              { _tag: "EarsSpec" },
+              (spec) => extractedEntitiesByTail.get(`EarsSpec::${spec.id}`) ?? [],
+            )
+            .with(
+              { _tag: "EarsRequirement" },
+              (req) => extractedEntitiesByTail.get(`EarsRequirement::${req.id}`) ?? [],
+            )
             .exhaustive()
 
     const chosen = pickUnusedEntity(candidateKeys)
@@ -408,9 +482,17 @@ export const verifySubgraphMonomorphism = (
         key,
         ...(extractedEntitiesByTail.get(`VitestCase::${vc.testFile}`) ?? []),
       ])
-      .with({ _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, () => [key])
+      .with(
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
+        () => [key],
+      )
       .exhaustive()
-    const matchAny = fallbackCandidates.find((c) => c !== undefined && extractedEntitiesByKey.has(c))
+    const matchAny = fallbackCandidates.find(
+      (c) => c !== undefined && extractedEntitiesByKey.has(c),
+    )
     if (matchAny !== undefined) {
       entityKeyMap.set(key, matchAny)
     }
@@ -430,7 +512,8 @@ export const verifySubgraphMonomorphism = (
     allowReuse: boolean,
   ): RelationNode | undefined => {
     const relId = targetRel.relationId
-    const direct = extractedRelationsById.get(relId) ?? extractedRelationsById.get(getNodeKey(targetRel))
+    const direct =
+      extractedRelationsById.get(relId) ?? extractedRelationsById.get(getNodeKey(targetRel))
     if (
       direct !== undefined &&
       direct._tag === targetRel._tag &&
@@ -446,17 +529,22 @@ export const verifySubgraphMonomorphism = (
 
       const candEdges = extractedEdgesByRelId.get(cand.relationId) ?? []
       const matchesKindSpecific = match(targetRel)
-        .with({ _tag: "MigrationTuple" }, (mig) =>
-          cand._tag === "MigrationTuple" && cand.migrationId === mig.migrationId,
+        .with(
+          { _tag: "MigrationTuple" },
+          (mig) => cand._tag === "MigrationTuple" && cand.migrationId === mig.migrationId,
         )
-        .with({ _tag: "HttpEndpointTuple" }, (http) =>
-          cand._tag === "HttpEndpointTuple" &&
-          cand.method === http.method &&
-          cand.path === http.path,
+        .with(
+          { _tag: "HttpEndpointTuple" },
+          (http) =>
+            cand._tag === "HttpEndpointTuple" &&
+            cand.method === http.method &&
+            cand.path === http.path,
         )
         .with({ _tag: "EffectSignature" }, (sig) => {
           const callerEdge = targetIncident.find((e) =>
-            match<string>(e.role).with("caller", () => true).otherwise(() => false),
+            match<string>(e.role)
+              .with("caller", () => true)
+              .otherwise(() => false),
           )
           const mappedCaller =
             callerEdge !== undefined
@@ -466,8 +554,9 @@ export const verifySubgraphMonomorphism = (
             (mappedCaller !== undefined &&
               candEdges.some(
                 (e) =>
-                  match<string>(e.role).with("caller", () => true).otherwise(() => false) &&
-                  e.entityKey === mappedCaller,
+                  match<string>(e.role)
+                    .with("caller", () => true)
+                    .otherwise(() => false) && e.entityKey === mappedCaller,
               )) ||
             (cand._tag === "EffectSignature" &&
               cand.callerQualname.split("#").pop() === sig.callerQualname.split("#").pop())
@@ -475,7 +564,9 @@ export const verifySubgraphMonomorphism = (
         })
         .with({ _tag: "LayerFlow" }, (lf) => {
           const provEdge = targetIncident.find((e) =>
-            match<string>(e.role).with("provider-layer", () => true).otherwise(() => false),
+            match<string>(e.role)
+              .with("provider-layer", () => true)
+              .otherwise(() => false),
           )
           const mappedProv =
             provEdge !== undefined
@@ -485,8 +576,9 @@ export const verifySubgraphMonomorphism = (
             (mappedProv !== undefined &&
               candEdges.some(
                 (e) =>
-                  match<string>(e.role).with("provider-layer", () => true).otherwise(() => false) &&
-                  e.entityKey === mappedProv,
+                  match<string>(e.role)
+                    .with("provider-layer", () => true)
+                    .otherwise(() => false) && e.entityKey === mappedProv,
               )) ||
             (cand._tag === "LayerFlow" &&
               cand.layerQualname.split("#").pop() === lf.layerQualname.split("#").pop())
@@ -494,7 +586,9 @@ export const verifySubgraphMonomorphism = (
         })
         .with({ _tag: "TraceabilityTuple" }, (tr) => {
           const symEdge = targetIncident.find((e) =>
-            match<string>(e.role).with("realizing-symbol", "exercised-span", () => true).otherwise(() => false),
+            match<string>(e.role)
+              .with("realizing-symbol", "exercised-span", () => true)
+              .otherwise(() => false),
           )
           const mappedSym =
             symEdge !== undefined
@@ -504,8 +598,9 @@ export const verifySubgraphMonomorphism = (
             (mappedSym !== undefined &&
               candEdges.some(
                 (e) =>
-                  match<string>(e.role).with("realizing-symbol", "exercised-span", () => true).otherwise(() => false) &&
-                  e.entityKey === mappedSym,
+                  match<string>(e.role)
+                    .with("realizing-symbol", "exercised-span", () => true)
+                    .otherwise(() => false) && e.entityKey === mappedSym,
               )) ||
             (cand._tag === "TraceabilityTuple" &&
               cand.targetSymbolQualname === tr.targetSymbolQualname)
@@ -554,7 +649,9 @@ export const verifySubgraphMonomorphism = (
         ? extractedRoleTriples.has(`${mappedRelation}::${edgeData.role}::${mappedEntity}`) ||
           extractedRoleTriples.has(`${mappedRelation}::${edgeData.role}::${edgeData.entityKey}`)
         : extractedRoleTriples.has(`${edgeData.relationId}::${edgeData.role}::${mappedEntity}`) ||
-          extractedRoleTriples.has(`${edgeData.relationId}::${edgeData.role}::${edgeData.entityKey}`)
+          extractedRoleTriples.has(
+            `${edgeData.relationId}::${edgeData.role}::${edgeData.entityKey}`,
+          )
 
     if (!hasRelationPreservingEdge) {
       missingRoleEdges.push(edgeData)

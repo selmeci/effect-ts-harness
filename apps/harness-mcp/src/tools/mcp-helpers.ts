@@ -7,6 +7,8 @@ import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import {
   CANONICAL_MCP_TOOL_NAMES,
+  DocTreePathError,
+  EmbeddingProviderError,
   GitDiffErrorReason,
   GitDiffExecutionError,
   InvalidReviewRouteInputError,
@@ -15,6 +17,7 @@ import {
   type ReviewTimeoutMillis,
   UnknownToolError,
 } from "@harness/contract"
+import type { EmbeddingClient, WorkspaceFs } from "@harness/service"
 import {
   appendTelemetryEvent,
   type TelemetryCategory,
@@ -30,6 +33,7 @@ import {
   type HarnessGraph,
   loadGraphSnapshotEffect,
   type OmnigraphLoadError,
+  type OmnigraphSync,
   readGraphHeadMeta,
   resolveGitHeadState,
   saveGraphSnapshot,
@@ -68,6 +72,8 @@ export type McpToolExecutionError =
   | GraphRewriteError
   | GraphProjectorError
   | OmnigraphLoadError
+  | DocTreePathError
+  | EmbeddingProviderError
 
 export type McpToolInputSchema = Schema.Decoder<Readonly<Record<string, unknown>>> & Schema.Top
 
@@ -97,6 +103,9 @@ export interface ServerOptions {
   readonly graph?: HarnessGraph
   readonly snapshotPath?: string
   readonly decisionLayer?: Layer.Layer<DecisionModel.DecisionModel>
+  readonly embeddingClientLayer?: Layer.Layer<EmbeddingClient>
+  readonly workspaceFsLayer?: Layer.Layer<WorkspaceFs>
+  readonly omnigraphSyncLayer?: Layer.Layer<OmnigraphSync>
   readonly extraLayer?: Layer.Layer<never>
   readonly repoRoot?: string
   readonly reviewRouteTimeoutMs?: ReviewTimeoutMillis | undefined
@@ -490,6 +499,14 @@ export const recordMcpToolTelemetry = (
         ? ("omnigraph" as const)
         : ("memory-fallback" as const),
     )
+    .with("harness_search_knowledge", () =>
+      typeof result === "object" &&
+      result !== null &&
+      "retrievalMode" in result &&
+      (result.retrievalMode === "hybrid-rrf" || result.retrievalMode === "bm25-only")
+        ? ("omnigraph" as const)
+        : ("memory-fallback" as const),
+    )
     .with(
       "harness_route",
       "harness_review_route",
@@ -499,7 +516,8 @@ export const recordMcpToolTelemetry = (
     .otherwise(() => "local" as const)
 
   const outcome: TelemetryOutcome =
-    toolName === "harness_gq_query" && engineSource === "memory-fallback"
+    (toolName === "harness_gq_query" || toolName === "harness_search_knowledge") &&
+    engineSource === "memory-fallback"
       ? "fallback"
       : toolName === "harness_lsp_diagnostics" &&
           typeof result === "object" &&
@@ -554,6 +572,18 @@ export const formatMcpToolExit = (
       if (squashed instanceof InvalidReviewRouteInputError) {
         return {
           content: [{ type: "text" as const, text: squashed.reason }],
+          isError: true,
+        }
+      }
+      if (squashed instanceof DocTreePathError) {
+        return {
+          content: [{ type: "text" as const, text: `${squashed._tag}: ${squashed.reason}` }],
+          isError: true,
+        }
+      }
+      if (squashed instanceof EmbeddingProviderError) {
+        return {
+          content: [{ type: "text" as const, text: `${squashed._tag}: ${squashed.reason}` }],
           isError: true,
         }
       }

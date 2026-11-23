@@ -19,6 +19,7 @@ import {
 import { handleGc } from "../src/commands/gc-and-ontology.command.js"
 import { syncOmnigraphOnDone } from "../src/commands/done-omnigraph-helpers.js"
 import { handleRoute } from "../src/commands/guard-and-route.command.js"
+import { CLUSTER_SCHEMA_EPOCH } from "../src/commands/omnigraph-auth-and-drift.js"
 import { stopStaleOmnigraphClusterBeforeDelete } from "../src/commands/omnigraph-lifecycle.js"
 import { handlePlanCheck } from "../src/commands/plan-and-repair.command.js"
 import {
@@ -82,7 +83,7 @@ describe("Omnigraph & Verify Delta Gates (extracted from index.test.ts)", () => 
       const clusterRootDir = join(dir, ".harness", "omnigraph-cluster")
       mkdirSync(clusterRootDir, { recursive: true })
       writeFileSync(join(clusterRootDir, ".config-stamp"), "name: test\n\n---\n\n---\n", "utf-8")
-      writeFileSync(join(clusterRootDir, ".cluster-schema-epoch"), "rfc-0009-v2", "utf-8")
+      writeFileSync(join(clusterRootDir, ".cluster-schema-epoch"), CLUSTER_SCHEMA_EPOCH, "utf-8")
 
       const localBinDir = join(homeDir, ".local", "bin")
       mkdirSync(localBinDir, { recursive: true })
@@ -1070,7 +1071,7 @@ describe("PR #28 Round 4 security & correctness fixes", () => {
     const clusterRootDir = join(dir, ".harness", "omnigraph-cluster")
     mkdirSync(clusterRootDir, { recursive: true })
     writeFileSync(join(clusterRootDir, ".config-stamp"), "name: test\n\n---\n\n---\n", "utf8")
-    writeFileSync(join(clusterRootDir, ".cluster-schema-epoch"), "rfc-0009-v2", "utf8")
+    writeFileSync(join(clusterRootDir, ".cluster-schema-epoch"), CLUSTER_SCHEMA_EPOCH, "utf8")
     return dir
   }
 

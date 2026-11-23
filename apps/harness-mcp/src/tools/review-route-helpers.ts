@@ -142,7 +142,10 @@ export const collectManifestTagsForFiles = (
 
         for (const manifestName of ["project.json", "package.json"] as const) {
           const manifestPath = path.join(currDir, manifestName)
-          if (isPathInsideRoot(resolvedRoot, manifestPath) && nodeSyncHostIo.existsSync(manifestPath)) {
+          if (
+            isPathInsideRoot(resolvedRoot, manifestPath) &&
+            nodeSyncHostIo.existsSync(manifestPath)
+          ) {
             const relManifest = path.relative(resolvedRoot, manifestPath).replaceAll("\\", "/")
             const readOutcome = yield* Effect.try(() =>
               nodeSyncHostIo.readTextSync(manifestPath),
@@ -177,10 +180,7 @@ export const collectManifestTagsForFiles = (
                   )
                 })
                 .with({ _tag: "DecodeOk" }, ({ decoded }) => {
-                  const candidateTags = [
-                    ...(decoded.tags ?? []),
-                    ...(decoded.nx?.tags ?? []),
-                  ]
+                  const candidateTags = [...(decoded.tags ?? []), ...(decoded.nx?.tags ?? [])]
                   if (candidateTags.length > 0) {
                     const parsed = parseManifestTags(candidateTags)
                     for (const t of parsed.nxTags) tiers.add(t)
@@ -341,6 +341,7 @@ export const buildReviewGraphContextBundle = (
             "SchemaDef",
             "VitestCase",
             "PatternDoc",
+            "EarsRequirement",
             "EffectSignature",
             "LayerFlow",
             "TraceabilityTuple",

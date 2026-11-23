@@ -10,7 +10,8 @@ import {
   OmnigraphTcpPort,
   WorkspaceFilePath,
 } from "@harness/contract"
-import { nodeSyncHostIo } from "@harness/infra"
+import { nodeSyncHostIo, OllamaEmbeddingClientLive } from "@harness/infra"
+import { EmbeddingClient } from "@harness/service"
 import {
   ensureOmnigraphEndpointTokens,
   killOmnigraphServerPidIfAlive,
@@ -35,12 +36,41 @@ import {
 const DEFAULT_EMBEDDING_API_KEY = "ollama-local"
 const DEFAULT_EMBEDDINGS_MOCK = "1"
 
+export const resolveDesiredOmnigraphEmbeddingsMode: Effect.Effect<"mock" | "live"> = Effect.gen(
+  function* () {
+    const explicitMock = process.env.OMNIGRAPH_EMBEDDINGS_MOCK
+    if (explicitMock !== undefined) {
+      const normalized = explicitMock.trim().toLowerCase()
+      return normalized === "1" || normalized === "true" ? "mock" : "live"
+    }
+    const hasExplicitEmbeddingKey =
+      typeof process.env.OMNIGRAPH_EMBEDDING_API_KEY === "string" &&
+      process.env.OMNIGRAPH_EMBEDDING_API_KEY.length > 0
+    if (hasExplicitEmbeddingKey) {
+      return "live"
+    }
+    const availability = yield* Effect.gen(function* () {
+      const client = yield* EmbeddingClient
+      return yield* client.checkAvailability
+    }).pipe(Effect.provide(OllamaEmbeddingClientLive))
+    return match(availability)
+      .with("available", () => "live" as const)
+      .with("unavailable", () => "mock" as const)
+      .exhaustive()
+  },
+)
+
 const decodeOmnigraphServerMeta = Schema.decodeOption(
   Schema.fromJsonString(OmnigraphServerMetaSchema),
 )
 
 export type ClusterSetupRes =
-  | { readonly ok: true; readonly pid: number; readonly appliedCluster: boolean }
+  | {
+      readonly ok: true
+      readonly pid: number
+      readonly appliedCluster: boolean
+      readonly embeddingsMode: "mock" | "live"
+    }
   | { readonly ok: false }
 
 export interface ServerMetaReadResult {
@@ -149,130 +179,145 @@ export const setupAndSpawnOmnigraphCluster = (options: {
   readonly hasPolicies: boolean
   readonly applyCluster: boolean
 }): Effect.Effect<ClusterSetupRes> =>
-  Effect.try({
-    try: (): ClusterSetupRes => {
-      if (!nodeSyncHostIo.existsSync(options.clusterRootDir)) {
-        nodeSyncHostIo.mkdirRecursiveSync(options.clusterRootDir)
-      }
-      const tokensOutcome = options.hasPolicies
-        ? match(ensureOmnigraphEndpointTokens(options.clusterRootDir))
-            .with({ _tag: "Success" }, ({ success }) => ({
-              ok: true as const,
-              tokens: success,
-            }))
-            .with({ _tag: "Failure" }, ({ failure }) => {
-              process.stderr.write(`[harness:omnigraph] ${failure.message}\n`)
-              return { ok: false as const, tokens: undefined }
-            })
-            .exhaustive()
-        : { ok: true as const, tokens: undefined }
-      if (!tokensOutcome.ok) {
-        return { ok: false }
-      }
-      const tokens = tokensOutcome.tokens
-      const preUnlock = unlockOmnigraphClusterIfNeeded(options.omnigraphBin, options.clusterRootDir)
-      if (!preUnlock.ok) {
-        return { ok: false }
-      }
-      let appliedCluster = false
-      const graphOmniDir = join(options.clusterRootDir, "graphs", "harness.omni")
-      if (options.applyCluster || !nodeSyncHostIo.existsSync(graphOmniDir)) {
-        const outRes = nodeSyncHostIo.execFileSync(
-          options.omnigraphBin,
-          [
-            "cluster",
-            "apply",
-            "--target",
-            `file://${options.clusterRootDir}`,
-            "--config",
-            options.configDir,
-            "--as",
-            "harness-cli",
-            "--json",
-          ],
-          { cwd: options.clusterRepoRoot, timeoutMs: 30_000 },
-        )
-        const applyStdout = matchExecSyncStdout("Local omnigraph cluster apply failed", outRes)
-        if (applyStdout === undefined) return { ok: false }
-        if (
-          !unlockOmnigraphClusterIfNeeded(options.omnigraphBin, options.clusterRootDir, applyStdout)
-            .ok
-        ) {
+  Effect.gen(function* () {
+    const hasExplicitEmbeddingKey =
+      typeof process.env.OMNIGRAPH_EMBEDDING_API_KEY === "string" &&
+      process.env.OMNIGRAPH_EMBEDDING_API_KEY.length > 0
+    const embeddingsMode = yield* resolveDesiredOmnigraphEmbeddingsMode
+    const shouldWarnMockFallback =
+      process.env.OMNIGRAPH_EMBEDDINGS_MOCK === undefined &&
+      !hasExplicitEmbeddingKey &&
+      embeddingsMode === "mock"
+
+    return yield* Effect.try({
+      try: (): ClusterSetupRes => {
+        if (!nodeSyncHostIo.existsSync(options.clusterRootDir)) {
+          nodeSyncHostIo.mkdirRecursiveSync(options.clusterRootDir)
+        }
+        const tokensOutcome = options.hasPolicies
+          ? match(ensureOmnigraphEndpointTokens(options.clusterRootDir))
+              .with({ _tag: "Success" }, ({ success }) => ({
+                ok: true as const,
+                tokens: success,
+              }))
+              .with({ _tag: "Failure" }, ({ failure }) => {
+                process.stderr.write(`[harness:omnigraph] ${failure.message}\n`)
+                return { ok: false as const, tokens: undefined }
+              })
+              .exhaustive()
+          : { ok: true as const, tokens: undefined }
+        if (!tokensOutcome.ok) {
           return { ok: false }
         }
-        appliedCluster = true
-      }
-      if (!unlockOmnigraphClusterIfNeeded(options.omnigraphBin, options.clusterRootDir).ok) {
-        return { ok: false }
-      }
-      const bindHostPort =
-        options.targetBaseUrl.match(/^https?:\/\/([^/]+)/)?.[1] ??
-        `127.0.0.1:${options.defaultPort}`
-      if (!options.hasPolicies) {
-        process.stderr.write(
-          "[harness:omnigraph] Warning: spawning omnigraph-server with --unauthenticated because cluster.yaml declares no policies:\n",
+        const tokens = tokensOutcome.tokens
+        const preUnlock = unlockOmnigraphClusterIfNeeded(
+          options.omnigraphBin,
+          options.clusterRootDir,
         )
-      }
-      const spawnArgs = [
-        "--cluster",
-        `file://${options.clusterRootDir}`,
-        "--bind",
-        bindHostPort,
-        ...(options.hasPolicies ? [] : ["--unauthenticated"]),
-      ]
-      const hasExplicitEmbeddingKey =
-        typeof process.env.OMNIGRAPH_EMBEDDING_API_KEY === "string" &&
-        process.env.OMNIGRAPH_EMBEDDING_API_KEY.length > 0
-      if (process.env.OMNIGRAPH_EMBEDDINGS_MOCK === undefined && !hasExplicitEmbeddingKey) {
-        process.stderr.write(
-          "[harness:omnigraph] Warning: OMNIGRAPH_EMBEDDING_API_KEY not set; spawning omnigraph-server with deterministic mock embeddings (OMNIGRAPH_EMBEDDINGS_MOCK=1)\n",
-        )
-      }
-      const spawnEnv: Record<string, string | undefined> = {
-        ...process.env,
-        OMNIGRAPH_EMBEDDING_API_KEY:
-          process.env.OMNIGRAPH_EMBEDDING_API_KEY ?? DEFAULT_EMBEDDING_API_KEY,
-      }
-      const mockFlag =
-        process.env.OMNIGRAPH_EMBEDDINGS_MOCK ??
-        (hasExplicitEmbeddingKey ? undefined : DEFAULT_EMBEDDINGS_MOCK)
-      if (mockFlag !== undefined) {
-        spawnEnv.OMNIGRAPH_EMBEDDINGS_MOCK = mockFlag
-      } else {
-        delete spawnEnv.OMNIGRAPH_EMBEDDINGS_MOCK
-      }
-      if (tokens !== undefined) {
-        spawnEnv.OMNIGRAPH_SERVER_BEARER_TOKENS_JSON = JSON.stringify({
-          "harness-cli": tokens.cliToken,
-          "agent-mcp": tokens.mcpToken,
-        })
-      }
-      const spawnRes = nodeSyncHostIo.spawnDetached(options.omnigraphServerBin, spawnArgs, {
-        cwd: options.clusterRepoRoot,
-        stderrLogPath: join(options.clusterRootDir, "omnigraph-spawn.stderr.log"),
-        env: spawnEnv,
-      })
-      return match(spawnRes)
-        .with({ _tag: "SpawnFailed" }, ({ spawnError }): ClusterSetupRes => {
-          process.stderr.write(
-            `[harness:omnigraph] Failed to spawn omnigraph-server: ${spawnError}\n`,
-          )
+        if (!preUnlock.ok) {
           return { ok: false }
+        }
+        let appliedCluster = false
+        const graphOmniDir = join(options.clusterRootDir, "graphs", "harness.omni")
+        if (options.applyCluster || !nodeSyncHostIo.existsSync(graphOmniDir)) {
+          const outRes = nodeSyncHostIo.execFileSync(
+            options.omnigraphBin,
+            [
+              "cluster",
+              "apply",
+              "--target",
+              `file://${options.clusterRootDir}`,
+              "--config",
+              options.configDir,
+              "--as",
+              "harness-cli",
+              "--json",
+            ],
+            { cwd: options.clusterRepoRoot, timeoutMs: 30_000 },
+          )
+          const applyStdout = matchExecSyncStdout("Local omnigraph cluster apply failed", outRes)
+          if (applyStdout === undefined) return { ok: false }
+          if (
+            !unlockOmnigraphClusterIfNeeded(
+              options.omnigraphBin,
+              options.clusterRootDir,
+              applyStdout,
+            ).ok
+          ) {
+            return { ok: false }
+          }
+          appliedCluster = true
+        }
+        if (!unlockOmnigraphClusterIfNeeded(options.omnigraphBin, options.clusterRootDir).ok) {
+          return { ok: false }
+        }
+        const bindHostPort =
+          options.targetBaseUrl.match(/^https?:\/\/([^/]+)/)?.[1] ??
+          `127.0.0.1:${options.defaultPort}`
+        if (!options.hasPolicies) {
+          process.stderr.write(
+            "[harness:omnigraph] Warning: spawning omnigraph-server with --unauthenticated because cluster.yaml declares no policies:\n",
+          )
+        }
+        const spawnArgs = [
+          "--cluster",
+          `file://${options.clusterRootDir}`,
+          "--bind",
+          bindHostPort,
+          ...(options.hasPolicies ? [] : ["--unauthenticated"]),
+        ]
+        if (shouldWarnMockFallback) {
+          process.stderr.write(
+            "[harness:omnigraph] Warning: OMNIGRAPH_EMBEDDING_API_KEY not set and local Ollama qwen3-embedding:8b not detected; spawning omnigraph-server with deterministic mock embeddings (OMNIGRAPH_EMBEDDINGS_MOCK=1)\n",
+          )
+        }
+        const spawnEnv: Record<string, string | undefined> = {
+          ...process.env,
+          OMNIGRAPH_EMBEDDING_API_KEY:
+            process.env.OMNIGRAPH_EMBEDDING_API_KEY ?? DEFAULT_EMBEDDING_API_KEY,
+        }
+        const mockFlag =
+          process.env.OMNIGRAPH_EMBEDDINGS_MOCK ??
+          (embeddingsMode === "mock" ? DEFAULT_EMBEDDINGS_MOCK : undefined)
+        if (mockFlag !== undefined) {
+          spawnEnv.OMNIGRAPH_EMBEDDINGS_MOCK = mockFlag
+        } else {
+          delete spawnEnv.OMNIGRAPH_EMBEDDINGS_MOCK
+        }
+        if (tokens !== undefined) {
+          spawnEnv.OMNIGRAPH_SERVER_BEARER_TOKENS_JSON = JSON.stringify({
+            "harness-cli": tokens.cliToken,
+            "agent-mcp": tokens.mcpToken,
+          })
+        }
+        const spawnRes = nodeSyncHostIo.spawnDetached(options.omnigraphServerBin, spawnArgs, {
+          cwd: options.clusterRepoRoot,
+          stderrLogPath: join(options.clusterRootDir, "omnigraph-spawn.stderr.log"),
+          env: spawnEnv,
         })
-        .with({ _tag: "Spawned" }, ({ pid }): ClusterSetupRes => ({
-          ok: true,
-          pid,
-          appliedCluster,
-        }))
-        .exhaustive()
-    },
-    catch: (err): ClusterSetupRes => {
-      process.stderr.write(
-        `[harness:omnigraph] Local omnigraph setup/spawn failed: ${err instanceof Error ? err.message : String(err)}\n`,
-      )
-      return { ok: false }
-    },
-  }).pipe(Effect.orElseSucceed((): ClusterSetupRes => ({ ok: false })))
+        return match(spawnRes)
+          .with({ _tag: "SpawnFailed" }, ({ spawnError }): ClusterSetupRes => {
+            process.stderr.write(
+              `[harness:omnigraph] Failed to spawn omnigraph-server: ${spawnError}\n`,
+            )
+            return { ok: false }
+          })
+          .with({ _tag: "Spawned" }, ({ pid }): ClusterSetupRes => ({
+            ok: true,
+            pid,
+            appliedCluster,
+            embeddingsMode,
+          }))
+          .exhaustive()
+      },
+      catch: (err): ClusterSetupRes => {
+        process.stderr.write(
+          `[harness:omnigraph] Local omnigraph setup/spawn failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        )
+        return { ok: false }
+      },
+    }).pipe(Effect.orElseSucceed((): ClusterSetupRes => ({ ok: false })))
+  })
 
 export const waitForSpawnedOmnigraphReady = (options: {
   readonly clusterRepoRoot: string
@@ -284,6 +329,7 @@ export const waitForSpawnedOmnigraphReady = (options: {
   readonly defaultPort: number
   readonly spawnedPid: number
   readonly appliedCluster: boolean
+  readonly embeddingsMode: "mock" | "live"
   readonly workflowBackup: WorkflowBeforeRebuildResult | undefined
   readonly verifyEmptyBeforeRestore: boolean
   readonly driftActionTag: "NoOp" | "LiveClusterApply"
@@ -329,6 +375,7 @@ export const waitForSpawnedOmnigraphReady = (options: {
             baseUrl: OmnigraphBaseUrl.make(options.targetBaseUrl),
             canonicalRepoRoot: WorkspaceFilePath.make(options.canonicalRepoRoot),
             updatedAt: OmnigraphIsoTimestamp.make(new Date().toISOString()),
+            embeddingsMode: options.embeddingsMode,
           }),
         )
           .with({ _tag: "Success" }, () => undefined)

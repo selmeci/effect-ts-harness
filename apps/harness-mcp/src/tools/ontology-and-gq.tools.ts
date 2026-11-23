@@ -1,21 +1,48 @@
-import { Cause, Effect, Schema } from "effect"
-import { isPureInterruptCause } from "@harness/contract"
+import * as Graph from "effect/Graph"
+import { Cause, Effect, Layer, Schema } from "effect"
+import { match } from "ts-pattern"
+import {
+  ConflictPairLimit,
+  EarsClauseText,
+  EarsEffectSymbol,
+  EmbeddingComponent,
+  EmbeddingNodeKey,
+  GovernanceDocIdentifier,
+  isPureInterruptCause,
+  type RequirementEmbeddingItem,
+  RequirementId,
+  SimilarityScore,
+  WorkspaceFilePath,
+} from "@harness/contract"
 import {
   HARNESS_GQ_QUERY_NAMES,
+  type HarnessGraph,
   invokeOmnigraphNamedQuery,
   makeOmnigraphSyncLayer,
   projectOntologyLayers,
   queryOntologyImpact,
   queryOntologyWhy,
+  syncGraphEmbeddings,
 } from "@harness/graph"
 import {
   decideOntologyInvariants,
+  decideSemanticConflictPairs,
   evaluateOntologyConflictsWithStatus,
   extractOntologyConflictPairs,
   type OntologyConflictEvaluationReport,
+  type OntologyConflictInput,
 } from "@harness/decision"
-import { loadGovernanceDocsChecked } from "@harness/gates"
-import { LocalDecisionModel, nodeSyncHostIo } from "@harness/infra"
+import {
+  decideEmbeddingSyncPlan,
+  type GovernanceDocReference,
+  loadGovernanceDocsChecked,
+} from "@harness/gates"
+import {
+  FileEmbeddingCacheLive,
+  LocalDecisionModel,
+  nodeSyncHostIo,
+  OllamaEmbeddingClientLive,
+} from "@harness/infra"
 import {
   graphStatusMeta,
   McpToolName,
@@ -26,22 +53,17 @@ import {
 } from "./mcp-helpers.js"
 
 const BoundedNonEmptyString = (max: number) =>
-  Schema.String.pipe(
-    Schema.check(Schema.isTrimmed()),
-    Schema.check(Schema.isBetweenLength(1, max)),
-  )
+  Schema.String.pipe(Schema.check(Schema.isTrimmed()), Schema.check(Schema.isBetweenLength(1, max)))
 
-const BoundedParamsRecord = Schema.Record(
-  Schema.String,
-  Schema.Unknown,
-).pipe(
+const BoundedParamsRecord = Schema.Record(Schema.String, Schema.Unknown).pipe(
   Schema.check(Schema.isPropertyNames(BoundedNonEmptyString(128))),
   Schema.check(Schema.isMaxProperties(64)),
 )
 
 export const OntologyWhyInputSchema = Schema.Struct({
   symbolOrSpan: BoundedNonEmptyString(512).annotate({
-    description: "Symbol, service, layer, error, or span name to trace upward to Motivation (EARS & ADR)",
+    description:
+      "Symbol, service, layer, error, or span name to trace upward to Motivation (EARS & ADR)",
   }),
   repoRoot: Schema.optional(
     BoundedNonEmptyString(1024).annotate({
@@ -102,6 +124,116 @@ const decodeOntologyImpactInput = Schema.decodeUnknownEffect(OntologyImpactInput
 const decodeOntologyCheckInput = Schema.decodeUnknownEffect(OntologyCheckInputSchema)
 const decodeGqQueryInput = Schema.decodeUnknownEffect(GqQueryInputSchema)
 
+const collectMcpSemanticConflictPairs = (
+  repoRoot: string,
+  graph: HarnessGraph,
+  docs: ReadonlyArray<GovernanceDocReference>,
+  existingPairs: ReadonlyArray<OntologyConflictInput>,
+  options?: ServerOptions,
+): Effect.Effect<ReadonlyArray<OntologyConflictInput>> =>
+  Effect.gen(function* () {
+    if (
+      docs.length === 0 ||
+      (options?.skipOmnigraphSpawn === true && options?.embeddingClientLayer === undefined)
+    ) {
+      return []
+    }
+    const embeddingLayer = options?.embeddingClientLayer ?? OllamaEmbeddingClientLive
+    const vectors = yield* syncGraphEmbeddings({
+      graph,
+      repoRoot: WorkspaceFilePath.make(repoRoot),
+      decidePlan: decideEmbeddingSyncPlan,
+    }).pipe(
+      Effect.provide(Layer.mergeAll(embeddingLayer, FileEmbeddingCacheLive)),
+      Effect.map((outcome) => outcome.vectorsByNodeKey),
+      Effect.catchCause((cause) =>
+        isPureInterruptCause(cause)
+          ? Effect.interrupt
+          : Effect.succeed(
+              new Map<
+                EmbeddingNodeKey,
+                { readonly components: ReadonlyArray<EmbeddingComponent> }
+              >(),
+            ),
+      ),
+    )
+    if (vectors.size === 0) return []
+
+    const activeDocIds = new Set(
+      docs
+        .filter((d) =>
+          match(d.status)
+            .with("accepted", "proposed", () => true)
+            .with("deprecated", "superseded", () => false)
+            .exhaustive(),
+        )
+        .map((d) => d.id),
+    )
+    const items: Array<RequirementEmbeddingItem> = []
+    for (const [, node] of Graph.nodes(graph.graph)) {
+      match(node)
+        .with({ _tag: "EarsRequirement" }, (req) => {
+          if (!activeDocIds.has(req.specId)) return
+          const nodeKey = EmbeddingNodeKey.make(`EarsRequirement:${req.id}`)
+          const vec = vectors.get(nodeKey)
+          if (vec === undefined || vec.components.length === 0) return
+          items.push({
+            nodeKey,
+            specId: GovernanceDocIdentifier.make(req.specId),
+            requirementId: RequirementId.make(req.requirementId),
+            clauseText: EarsClauseText.make(req.clauseText),
+            effectSymbol: EarsEffectSymbol.make(req.effectSymbol),
+            vector: { components: vec.components.map((c) => EmbeddingComponent.make(c)) },
+          })
+        })
+        .with(
+          { _tag: "EffectFn" },
+          { _tag: "ServiceTag" },
+          { _tag: "ServiceLayer" },
+          { _tag: "TaggedError" },
+          { _tag: "SchemaDef" },
+          { _tag: "VitestCase" },
+          { _tag: "PatternDoc" },
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          { _tag: "EffectSignature" },
+          { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
+          () => undefined,
+        )
+        .exhaustive()
+    }
+    if (items.length < 2) return []
+
+    const pairResult = yield* decideSemanticConflictPairs({
+      items,
+      minSimilarity: SimilarityScore.make(0.84),
+      maxPairs: ConflictPairLimit.make(4),
+    })
+    const seenKeys = new Set<string>()
+    for (const p of existingPairs) {
+      seenKeys.add(`${p.sourceId}<->${p.targetId}`)
+      seenKeys.add(`${p.targetId}<->${p.sourceId}`)
+    }
+    const extraPairs: Array<OntologyConflictInput> = []
+    for (const candidate of pairResult.candidates) {
+      const sourceId = `${candidate.sourceId}#${candidate.sourceRequirementId}`
+      const targetId = `${candidate.targetId}#${candidate.targetRequirementId}`
+      if (seenKeys.has(`${sourceId}<->${targetId}`)) continue
+      seenKeys.add(`${sourceId}<->${targetId}`)
+      extraPairs.push({
+        sourceId,
+        sourceText: candidate.sourceText,
+        targetId,
+        targetText: candidate.targetText,
+        sharedSymbol: `semantic-similarity:${candidate.similarity.toFixed(2)}`,
+      })
+    }
+    return extraPairs
+  })
+
 export const buildOntologyAndGqToolDescriptors = (
   options?: ServerOptions,
 ): ReadonlyArray<McpToolPluginDescriptor> => [
@@ -122,7 +254,8 @@ export const buildOntologyAndGqToolDescriptors = (
   },
   {
     name: McpToolName.make("harness_ontology_impact"),
-    description: "Analyze cross-layer ArchiMate impact for a symbol, service, layer, error, or span",
+    description:
+      "Analyze cross-layer ArchiMate impact for a symbol, service, layer, error, or span",
     inputSchema: OntologyImpactInputSchema,
     execute: (args) =>
       Effect.gen(function* () {
@@ -175,7 +308,15 @@ export const buildOntologyAndGqToolDescriptors = (
           graph,
           governanceDocs: docs,
         })
-        const pairs = yield* extractOntologyConflictPairs(docs, scope)
+        const deterministicPairs = yield* extractOntologyConflictPairs(docs, scope)
+        const semanticCandidatePairs = yield* collectMcpSemanticConflictPairs(
+          root,
+          graph,
+          docs,
+          deterministicPairs,
+          options,
+        )
+        const pairs = [...deterministicPairs, ...semanticCandidatePairs]
         const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
         const semanticReport = yield* evaluateOntologyConflictsWithStatus(pairs).pipe(
           Effect.provide(decisionLayer),

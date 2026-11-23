@@ -20,6 +20,7 @@ import {
   checkTopologySnapshotMatch, checkWorkspaceSnapshotMatch, computeBaseTopologyHash,
   createTypeScriptProgramSession, findWorkspaceSrcFiles, findWorkspaceTestFiles, loadFileGraphFragmentsFromDisk,
 } from "./extractor/compiler-session.js"
+import { buildGovAndPatternShaMaps } from "./extractor/file-graph-cache.js"
 import { checkPass0ZeroToleranceAst, runAstPolicyChecks } from "./extractor/ast-policy-extractor.js"
 import { checkBrandedDomainTypesAndPrimitiveBoundaries, checkSchemaBooleanStateAndBrandedFields, extractSchemaDefinitions } from "./extractor/schema-and-brand-extractor.js"
 import { autoRegisterReferencedEntities, commitSessionFragments, extractLayers, extractServicesAndErrors, syncSessionCacheAndProject } from "./extractor/service-and-layer-extractor.js"
@@ -190,10 +191,8 @@ export const extractWorkspaceTypeAwareGraph = Effect.fnUntraced(function* (
       const content = overlays.get(rel) ?? hostIo.readTextSync(path.join(root, rel))
       testShaMap.set(rel, sha256Hex(content)); testContentMap.set(rel, content)
     }
-    const governanceDocs = loadWorkspaceGovernanceDocs(root, hostIo), govShaMap = new Map<string, string>()
-    for (const d of governanceDocs) govShaMap.set(d.path, sha256Hex(`${d.id}:${d.title}:${d.status}:${(d.referencedSpans ?? []).join(",")}:${(d.referencedServices ?? []).join(",")}:${(d.referencedErrors ?? []).join(",")}`))
-    const patternDocs = loadPatternDocs(root, hostIo), patternShaMap = new Map<string, string>()
-    for (const p of patternDocs) patternShaMap.set(p.path, sha256Hex(`${p.slug}:${p.summary}:${(p.coveredSpans ?? []).join(",")}:${(p.coveredTags ?? []).join(",")}`))
+    const governanceDocs = loadWorkspaceGovernanceDocs(root, hostIo), patternDocs = loadPatternDocs(root, hostIo)
+    const { govShaMap, patternShaMap } = buildGovAndPatternShaMaps(governanceDocs, patternDocs)
     const fastSnap = checkWorkspaceSnapshotMatch(session, testShaMap, govShaMap, patternShaMap, inputShaMap)
     if (fastSnap !== null) return fastSnap
     const baseGraph = extractTypeAwareGraphFromSource(inputs, {
@@ -209,7 +208,7 @@ export const extractWorkspaceTypeAwareGraph = Effect.fnUntraced(function* (
         .with({ _tag: "EffectFn" }, (n) => { effectFns.push(n) })
         .with({ _tag: "ServiceTag" }, (n) => { serviceTags.push(n) })
         .with({ _tag: "TaggedError" }, (n) => { taggedErrors.push(n) })
-        .with({ _tag: "ServiceLayer" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" }, () => undefined)
+        .with({ _tag: "ServiceLayer" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EarsRequirement" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" }, () => undefined)
         .exhaustive()
     }
     const updatedNodeIndexByKey = new Map<string, Graph.NodeIndex>(baseGraph.nodeIndexByKey)

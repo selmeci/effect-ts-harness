@@ -32,6 +32,7 @@ import {
   resolveNxAffectedArgs,
 } from "./daemon-and-omnigraph.service.js"
 import { runOfflineOmnigraphLintGate } from "./omnigraph-auth-and-drift.js"
+import { computeSyncEmbeddingsForGraph } from "./omnigraph-embedding-sync-helper.js"
 import {
   checkPlanEarsConsistency,
   finalizeProjectionCliResult,
@@ -142,6 +143,7 @@ export const handlePlanCheck = (
           { _tag: "PatternDoc" },
           { _tag: "AdrDoc" },
           { _tag: "EarsSpec" },
+          { _tag: "EarsRequirement" },
           { _tag: "EffectSignature" },
           { _tag: "LayerFlow" },
           { _tag: "TraceabilityTuple" },
@@ -175,6 +177,7 @@ export const handlePlanCheck = (
             { _tag: "PatternDoc" },
             { _tag: "AdrDoc" },
             { _tag: "EarsSpec" },
+            { _tag: "EarsRequirement" },
             { _tag: "TraceabilityTuple" },
             { _tag: "MigrationTuple" },
             () => undefined,
@@ -200,6 +203,7 @@ export const handlePlanCheck = (
                     { _tag: "PatternDoc" },
                     { _tag: "AdrDoc" },
                     { _tag: "EarsSpec" },
+                    { _tag: "EarsRequirement" },
                     { _tag: "EffectSignature" },
                     { _tag: "LayerFlow" },
                     { _tag: "TraceabilityTuple" },
@@ -271,11 +275,13 @@ export const handlePlanCheck = (
           }
         }
         const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
+        const embeddingsByNodeKey = yield* computeSyncEmbeddingsForGraph(repoRoot, graph, options)
         const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
           repoRoot: resolveClusterRepoRoot(repoRoot),
           branch: taskBranches.planBranch,
           from: taskBranches.mainBranch,
           snapshotPath,
+          embeddingsByNodeKey,
         }).pipe(
           Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
           Effect.catchCause((cause) => {

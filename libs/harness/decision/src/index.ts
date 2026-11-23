@@ -8,6 +8,8 @@ export {
   validateDecisionLimits,
   type RouteStepSource,
   type RouteStepStatusResult,
+  type PatternCandidateSlug,
+  selectRouteWithHybridCandidates,
   routeStepWithStatus,
   routeStep,
 } from "./idiom-router.js"
@@ -174,3 +176,4 @@ export {
   decideDeterministicReviewRoute,
   routeReviewDiff,
 } from "./review-router-decision.js"
+export { decideSemanticConflictPairs } from "./semantic-conflict-pairer.js"

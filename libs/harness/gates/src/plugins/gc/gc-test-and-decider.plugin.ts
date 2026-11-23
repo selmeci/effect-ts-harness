@@ -47,6 +47,7 @@ export const evaluateTestAndDeciderPlugin = (
         .with(
           { _tag: "AdrDoc" },
           { _tag: "EarsSpec" },
+          { _tag: "EarsRequirement" },
           { _tag: "PatternDoc" },
           { _tag: "SchemaDef" },
           { _tag: "ServiceLayer" },
@@ -99,6 +100,7 @@ export const evaluateTestAndDeciderPlugin = (
         .with(
           { _tag: "AdrDoc" },
           { _tag: "EarsSpec" },
+          { _tag: "EarsRequirement" },
           { _tag: "PatternDoc" },
           { _tag: "SchemaDef" },
           { _tag: "ServiceLayer" },

@@ -2,7 +2,7 @@ import { join, resolve } from "node:path"
 import { Effect } from "effect"
 import { match } from "ts-pattern"
 import {
-  deriveRepoOmnigraphPort,
+  deriveClusterOmnigraphPort,
   resolveCanonicalRepoRoot,
   resolveOmnigraphClusterDir,
 } from "@harness/graph"
@@ -18,6 +18,7 @@ import {
   cleanupSpawnedOmnigraphServer,
   readClusterPoliciesFlag,
   readOmnigraphServerMetaChecked,
+  resolveDesiredOmnigraphEmbeddingsMode,
   restorePendingWorkflowOnLiveServer,
   setupAndSpawnOmnigraphCluster,
   waitForSpawnedOmnigraphReady,
@@ -65,7 +66,9 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
     const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
     const canonicalRepoRoot = resolveCanonicalRepoRoot(clusterRepoRoot, nodeSyncHostIo)
     const clusterRootDir = resolveOmnigraphClusterDir(clusterRepoRoot, nodeSyncHostIo)
-    const defaultPort = deriveRepoOmnigraphPort(canonicalRepoRoot, nodeSyncHostIo)
+    const isSharedCanonicalCluster =
+      resolve(clusterRootDir) === resolve(join(canonicalRepoRoot, ".harness", "omnigraph-cluster"))
+    const defaultPort = deriveClusterOmnigraphPort(clusterRepoRoot, nodeSyncHostIo)
     const explicitEnvUrl =
       process.env.OMNIGRAPH_URL && process.env.OMNIGRAPH_URL !== "http://127.0.0.1:8080"
         ? process.env.OMNIGRAPH_URL
@@ -77,7 +80,12 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
       return false
     }
 
-    const candidateConfigDir = resolveOmnigraphConfigDir(repoRoot, canonicalRepoRoot)
+    const candidateConfigDir = resolveOmnigraphConfigDir(
+      repoRoot,
+      canonicalRepoRoot,
+      process.env.HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD === "1",
+      !isSharedCanonicalCluster,
+    )
     const configDir = nodeSyncHostIo.existsSync(join(candidateConfigDir, "cluster.yaml"))
       ? candidateConfigDir
       : join(CLI_REPO_ROOT, "libs", "harness", "graph")
@@ -175,8 +183,15 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
           Effect.gen(function* () {
             if (
               resolve(clusterRepoRoot) !== resolve(canonicalRepoRoot) &&
+              isSharedCanonicalCluster &&
               process.env.HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD !== "1"
             ) {
+              if (drift.epochMismatch) {
+                process.stderr.write(
+                  `[harness:omnigraph] Error: refusing destructive RequiresCleanRebuild of incompatible shared canonical cluster '${clusterRootDir}' across CLUSTER_SCHEMA_EPOCH mismatch from linked worktree '${repoRoot}' (canonical: '${canonicalRepoRoot}'). Set HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD=1 or rebuild from canonical repo.\n`,
+                )
+                return { _tag: "Done" as const, ok: false }
+              }
               const probe = yield* probeOmnigraphServerReady(targetBaseUrl)
               const alreadyReady = match(probe)
                 .with({ _tag: "Ready" }, () => true)
@@ -215,6 +230,23 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
                 .with({ _tag: "NotReady" }, () => false)
                 .exhaustive()
               if (alreadyReady) {
+                if (
+                  explicitEnvUrl === undefined &&
+                  serverMeta?.embeddingsMode === "mock" &&
+                  serverAlive
+                ) {
+                  const desiredMode = yield* resolveDesiredOmnigraphEmbeddingsMode
+                  if (desiredMode === "live") {
+                    const killed = yield* killOmnigraphServerPidIfAlive(
+                      serverPid,
+                      clusterRootDir,
+                      "embeddings-mode-upgrade",
+                    )
+                    if (killed) {
+                      return { _tag: "Continue" as const }
+                    }
+                  }
+                }
                 const restored = yield* runLockedLiveRestore({
                   clusterRepoRoot,
                   clusterRootDir,
@@ -444,6 +476,7 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
             defaultPort,
             spawnedPid: setupRes.pid,
             appliedCluster: setupRes.appliedCluster,
+            embeddingsMode: setupRes.embeddingsMode,
             workflowBackup: driftHandled.workflowBackup,
             verifyEmptyBeforeRestore: canFallbackProbe,
             driftActionTag: nonRebuildDriftTag,

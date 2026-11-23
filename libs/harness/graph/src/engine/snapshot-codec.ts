@@ -22,7 +22,7 @@ const getOmnigraphVertexQualname = (node: HarnessNode): string =>
     .with({ _tag: "SchemaDef" }, (n) => n.schemaName)
     .with({ _tag: "VitestCase" }, (n) => n.testId)
     .with({ _tag: "PatternDoc" }, (n) => n.slug)
-    .with({ _tag: "AdrDoc" }, { _tag: "EarsSpec" }, (n) => n.id)
+    .with({ _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EarsRequirement" }, (n) => n.id)
     .with(
       { _tag: "EffectSignature" },
       { _tag: "LayerFlow" },
@@ -127,6 +127,7 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
           properties: {
             qualname: n.slug,
             path: n.path,
+            summary: n.summary,
             title: n.title ?? n.summary,
             coveredSpans: n.coveredSpans ? JSON.stringify(n.coveredSpans) : null,
             coveredTags: n.coveredTags ? JSON.stringify(n.coveredTags) : null,
@@ -144,6 +145,7 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
             status: n.status,
             date: n.date ?? "2026-11-06",
             path: n.path,
+            searchText: n.searchText ?? n.title,
             enforcedByFiles: JSON.stringify(n.enforcedByFiles),
           },
         }),
@@ -161,6 +163,26 @@ export const toOmnigraphNdjson = (harnessGraph: HarnessGraph): string => {
             path: n.path,
             enforcedByFiles: JSON.stringify(n.enforcedByFiles),
             informedByAdrs: n.informedByAdrs ? JSON.stringify(n.informedByAdrs) : null,
+          },
+        }),
+      )
+      .with({ _tag: "EarsRequirement" }, (n) =>
+        JSON.stringify({
+          type: "EarsRequirement",
+          key: n.id,
+          properties: {
+            id: n.id,
+            qualname: n.id,
+            specId: n.specId,
+            requirementId: n.requirementId,
+            area: n.area,
+            pattern: n.pattern,
+            clauseText: n.clauseText,
+            effectSymbol: n.effectSymbol,
+            verification: n.verification,
+            path: n.path,
+            line: n.line,
+            status: n.status,
           },
         }),
       )

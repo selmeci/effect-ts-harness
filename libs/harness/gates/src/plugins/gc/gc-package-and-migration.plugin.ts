@@ -151,6 +151,16 @@ export const evaluatePackageAndMigrationPlugin = (
           )
         }),
       exists: (filePath: WorkspaceFilePath) => Effect.sync(() => hostIo.existsSync(filePath)),
+      realPath: (filePath: WorkspaceFilePath) =>
+        Effect.try({
+          try: () => WorkspaceFilePath.make(hostIo.realpathSync(filePath)),
+          catch: (err) =>
+            new WorkspaceFsError({
+              filePath,
+              operation: WorkspaceFsOperation.make("stat"),
+              reason: toErrorReasonMessage(err, "Realpath failed"),
+            }),
+        }),
     }
     const findings: Array<GcFinding> = []
     const tierManifests: Array<PackageTierManifestInput> = []

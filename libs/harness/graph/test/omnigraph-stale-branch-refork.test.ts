@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import { WorkspaceFilePath } from "@harness/contract"
-import { Cause, Effect } from "effect"
+import { Cause, Effect, Schema } from "effect"
 import { type FetchLike, Omnigraph } from "@modernrelay/omnigraph"
 import { match } from "ts-pattern"
 import {
@@ -13,7 +13,11 @@ import {
   readGraphHeadMeta,
   syncToOmnigraphAndSnapshot,
 } from "../src/index.js"
-import { executeLoadWithStaleRefork, OmnigraphLoadError } from "../src/omnigraph-v014-ops.js"
+import {
+  executeLoadWithStaleRefork,
+  OmnigraphLoadError,
+  splitNdjsonIntoByteChunks,
+} from "../src/omnigraph-v014-ops.js"
 import { testHostIo } from "./helpers/test-host-io.js"
 
 const OmnigraphSyncLive = makeOmnigraphSyncLayer(testHostIo)
@@ -661,6 +665,142 @@ describe("OmnigraphSync stale diverged worktree branch self-healing (SPEC-0014 R
         } finally {
           fs.rmSync(repoDir, { recursive: true, force: true })
         }
+      }),
+  )
+
+  it("splitNdjsonIntoByteChunks splits multi-line NDJSON by UTF-8 bytes and handles edge cases", () => {
+    const small = '{"a":1}\n{"b":2}'
+    expect(splitNdjsonIntoByteChunks(small, 1024)).toEqual([small])
+
+    const utf8 = '{"k":"áá"}\n\n{"k":"bb"}\n{"k":"c"}'
+    const chunks = splitNdjsonIntoByteChunks(utf8, 16)
+    expect(chunks.length).toBeGreaterThanOrEqual(2)
+    expect(chunks.every((c) => c.length > 0)).toBe(true)
+    expect(chunks.join("\n").split("\n")).toEqual(['{"k":"áá"}', '{"k":"bb"}', '{"k":"c"}'])
+
+    const hugeSingle = '{"huge":"abcdefghij"}'
+    expect(splitNdjsonIntoByteChunks(hugeSingle, 5)).toEqual([hugeSingle])
+  })
+
+  it.effect(
+    "executeLoadWithStaleRefork loads chunk 0 as overwrite and continuation chunks as merge without spurious refork, and replays all chunks on stale conflict",
+    () =>
+      Effect.gen(function* () {
+        const LoadBodySchema = Schema.fromJsonString(
+          Schema.Struct({
+            branch: Schema.String,
+            mode: Schema.String,
+            data: Schema.String,
+            from: Schema.optional(Schema.String),
+          }),
+        )
+        const loadCalls: Array<{
+          readonly branch: string
+          readonly from: string | null
+          readonly mode: string
+          readonly body: string
+        }> = []
+        let conflictPass = true
+        const chunkFetch: FetchLike = async (urlInput, init) => {
+          const url = toUrlString(urlInput)
+          const method = (init?.method ?? "GET").toUpperCase()
+          const bodyText =
+            typeof init?.body === "string"
+              ? init.body
+              : init?.body instanceof Uint8Array
+                ? new TextDecoder().decode(init.body)
+                : ""
+          if (method === "POST" && url.endsWith("/load")) {
+            const idx = loadCalls.length
+            const decoded = Schema.decodeSync(LoadBodySchema)(bodyText)
+            loadCalls.push({
+              branch: decoded.branch,
+              from: decoded.from ?? null,
+              mode: decoded.mode,
+              body: decoded.data,
+            })
+            const created = conflictPass ? false : idx % 2 === 0
+            return jsonResponse(
+              makeLoadPayload(decoded.branch, created, `commit-${idx}`, decoded.mode),
+            )
+          }
+          if (method === "GET" && url.includes("/branches/merge-base")) {
+            return jsonResponse({
+              merge_base: makeCommitPayload("old-main", "main"),
+              source: "impl/stale-chunked",
+              source_commit_id: "stale-tip",
+              target: "main",
+              target_commit_id: "new-main",
+            })
+          }
+          if (method === "POST" && url.endsWith("/branches/merge")) {
+            return jsonResponse(
+              { code: "conflict", error: "stale conflict", conflicts: [] },
+              409,
+            )
+          }
+          if (method === "DELETE" && url.includes("/branches/")) {
+            return jsonResponse({ deleted: true })
+          }
+          return jsonResponse({ ok: true })
+        }
+
+        const og = new Omnigraph({
+          baseUrl: "http://127.0.0.1:19999",
+          graphId: "harness",
+          fetch: chunkFetch,
+        })
+        const payload = '{"n":1}\n{"n":2}\n{"n":3}'
+
+        // Case 1: Fresh branch on chunk 0 (branchCreated: true), merge on chunks 1..2 (branchCreated: false)
+        conflictPass = false
+        const freshRes = yield* executeLoadWithStaleRefork(og, {
+          branch: "impl/fresh-chunked",
+          from: "main",
+          mode: "overwrite",
+          data: payload,
+          maxChunkBytes: 9,
+        })
+        expect(freshRes.commit?.graphCommitId).toBe("commit-2")
+        expect(loadCalls.map((c) => [c.mode, c.from, c.body])).toEqual([
+          ["overwrite", "main", '{"n":1}'],
+          ["merge", null, '{"n":2}'],
+          ["merge", null, '{"n":3}'],
+        ])
+
+        // Case 2: Stale branch with conflict on pass 1 deletes and replays all 3 chunks cleanly
+        loadCalls.length = 0
+        conflictPass = true
+        let deleteCount = 0
+        const conflictFetch: FetchLike = async (urlInput, init) => {
+          const url = toUrlString(urlInput)
+          const method = (init?.method ?? "GET").toUpperCase()
+          if (method === "DELETE" && url.includes("/branches/")) {
+            deleteCount++
+            conflictPass = false
+          }
+          return chunkFetch(urlInput, init)
+        }
+        const ogConflict = new Omnigraph({
+          baseUrl: "http://127.0.0.1:19999",
+          graphId: "harness",
+          fetch: conflictFetch,
+        })
+        const reforkRes = yield* executeLoadWithStaleRefork(ogConflict, {
+          branch: "impl/stale-chunked",
+          from: "main",
+          mode: "overwrite",
+          data: payload,
+          maxChunkBytes: 9,
+        })
+        expect(deleteCount).toBe(1)
+        expect(loadCalls).toHaveLength(6)
+        expect(loadCalls.slice(3).map((c) => [c.mode, c.from])).toEqual([
+          ["overwrite", "main"],
+          ["merge", null],
+          ["merge", null],
+        ])
+        expect(reforkRes.commit?.graphCommitId).toBe("commit-5")
       }),
   )
 })

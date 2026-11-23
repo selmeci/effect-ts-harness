@@ -1,15 +1,29 @@
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
 import {
-  type BranchingViolation, type EntityNode, type GraphInferenceResult, type HarnessGraph,
-  NodeKey, PlaysRoleEdge, type RelationNode, RewriteRuleId,
+  type BranchingViolation,
+  type EntityNode,
+  type GraphInferenceResult,
+  type HarnessGraph,
+  NodeKey,
+  PlaysRoleEdge,
+  type RelationNode,
+  RewriteRuleId,
 } from "../model.js"
 import { isDeciderSpan, isReducerSpan } from "../policy-check.js"
 import {
-  type DraftGraphPatch, findFnBySpanOrQualname, hasLayerProviderForService,
-  indexHarnessGraph, makeEffectSignatureNode, makeHttpEndpointTupleNode,
-  makeLayerFlowNode, makeMigrationTupleNode, makePlaysRoleEdge,
-  makeTraceabilityTupleNode, makeVitestCaseNode, sanitizeDpoIdentifier,
+  type DraftGraphPatch,
+  findFnBySpanOrQualname,
+  hasLayerProviderForService,
+  indexHarnessGraph,
+  makeEffectSignatureNode,
+  makeHttpEndpointTupleNode,
+  makeLayerFlowNode,
+  makeMigrationTupleNode,
+  makePlaysRoleEdge,
+  makeTraceabilityTupleNode,
+  makeVitestCaseNode,
+  sanitizeDpoIdentifier,
 } from "./dpo-algebra-core.js"
 
 // ============================================================================
@@ -39,7 +53,8 @@ export const findPhase3CodeRepairPatches = (
 
     if (hasUntracedViolation || isUntracedDeciderNode) {
       const symbolTail = fnNode.qualname.split("#").pop() ?? "Domain"
-      const cleanScope = sanitizeDpoIdentifier(symbolTail.replace(/^decide|^evolve/, "")) || "Domain"
+      const cleanScope =
+        sanitizeDpoIdentifier(symbolTail.replace(/^decide|^evolve/, "")) || "Domain"
       const canonicalSpan = isReducerSpan(fnNode.qualname)
         ? `${cleanScope}.evolve`
         : `${cleanScope}.decide`
@@ -58,12 +73,18 @@ export const findPhase3CodeRepairPatches = (
 
       return [
         {
-          ruleId: RewriteRuleId.make("REP-05"), phase: "REPAIR_CODE", ruleCategory: "auto-repair",
+          ruleId: RewriteRuleId.make("REP-05"),
+          phase: "REPAIR_CODE",
+          ruleCategory: "auto-repair",
           description: `Upgrade untraced decider '${fnNode.qualname}' to traced Effect.fn("${canonicalSpan}") while preserving EffectSignature '${sigRelId}' in K.`,
-          primaryNodeKey: NodeKey.make(fnKey), preservedInterfaceKeys: preservedKeys,
-          deletedEntityKeys: [], deletedRelationIds: [], deletedRoleEdges: [],
+          primaryNodeKey: NodeKey.make(fnKey),
+          preservedInterfaceKeys: preservedKeys,
+          deletedEntityKeys: [],
+          deletedRelationIds: [],
+          deletedRoleEdges: [],
           insertedEntityNodes: [{ ...fnNode, spanName: canonicalSpan }],
-          insertedRelationNodes: insertedRelations, insertedRoleEdges: insertedEdges,
+          insertedRelationNodes: insertedRelations,
+          insertedRoleEdges: insertedEdges,
           clearViolationFilter: matchesUntracedViolation,
         },
       ]
@@ -84,12 +105,18 @@ export const findPhase3CodeRepairPatches = (
     if (isUnbrandedContractNode || hasUnbrandedViolation) {
       return [
         {
-          ruleId: RewriteRuleId.make("REP-06"), phase: "REPAIR_CODE", ruleCategory: "auto-repair",
+          ruleId: RewriteRuleId.make("REP-06"),
+          phase: "REPAIR_CODE",
+          ruleCategory: "auto-repair",
           description: `Brand contract SchemaDef '${schemaNode.schemaName}' via Schema.brand("${schemaNode.schemaName}") in K.`,
-          primaryNodeKey: NodeKey.make(schemaKey), preservedInterfaceKeys: [NodeKey.make(schemaKey)],
-          deletedEntityKeys: [], deletedRelationIds: [], deletedRoleEdges: [],
+          primaryNodeKey: NodeKey.make(schemaKey),
+          preservedInterfaceKeys: [NodeKey.make(schemaKey)],
+          deletedEntityKeys: [],
+          deletedRelationIds: [],
+          deletedRoleEdges: [],
           insertedEntityNodes: [{ ...schemaNode, isBranded: true }],
-          insertedRelationNodes: [], insertedRoleEdges: [],
+          insertedRelationNodes: [],
+          insertedRoleEdges: [],
           clearViolationFilter: matchesSchemaViolation,
         },
       ]
@@ -112,11 +139,18 @@ export const findPhase3CodeRepairPatches = (
     const preserved: Array<NodeKey> = targetFn !== undefined ? [primaryKey] : []
     return [
       {
-        ruleId: RewriteRuleId.make("REP-07"), phase: "REPAIR_CODE", ruleCategory: "auto-repair",
+        ruleId: RewriteRuleId.make("REP-07"),
+        phase: "REPAIR_CODE",
+        ruleCategory: "auto-repair",
         description: `Replace ad-hoc '${branchingViolation.rule}' in '${branchingViolation.enclosingSymbol}' with exhaustive ts-pattern match(...).exhaustive().`,
-        primaryNodeKey: primaryKey, preservedInterfaceKeys: preserved,
-        deletedEntityKeys: [], deletedRelationIds: [], deletedRoleEdges: [],
-        insertedEntityNodes: [], insertedRelationNodes: [], insertedRoleEdges: [],
+        primaryNodeKey: primaryKey,
+        preservedInterfaceKeys: preserved,
+        deletedEntityKeys: [],
+        deletedRelationIds: [],
+        deletedRoleEdges: [],
+        insertedEntityNodes: [],
+        insertedRelationNodes: [],
+        insertedRoleEdges: [],
         clearViolationFilter: (v) =>
           v.rule === branchingViolation.rule &&
           v.file === branchingViolation.file &&
@@ -173,11 +207,18 @@ export const findPhase3CodeRepairPatches = (
 
     return [
       {
-        ruleId: RewriteRuleId.make("REP-08"), phase: "REPAIR_CODE", ruleCategory: "auto-repair",
+        ruleId: RewriteRuleId.make("REP-08"),
+        phase: "REPAIR_CODE",
+        ruleCategory: "auto-repair",
         description: `Replace raw brand construction / boundary violation in '${boundaryViolation.enclosingSymbol}' with Schema.decodeUnknownEffect error edge in EffectSignature in K.`,
-        primaryNodeKey: primaryKey, preservedInterfaceKeys: preserved,
-        deletedEntityKeys: [], deletedRelationIds: [], deletedRoleEdges: [],
-        insertedEntityNodes: insertedEntities, insertedRelationNodes: insertedRelations, insertedRoleEdges: insertedEdges,
+        primaryNodeKey: primaryKey,
+        preservedInterfaceKeys: preserved,
+        deletedEntityKeys: [],
+        deletedRelationIds: [],
+        deletedRoleEdges: [],
+        insertedEntityNodes: insertedEntities,
+        insertedRelationNodes: insertedRelations,
+        insertedRoleEdges: insertedEdges,
         clearViolationFilter: (v) =>
           v.rule === boundaryViolation.rule &&
           v.file === boundaryViolation.file &&
@@ -213,11 +254,18 @@ export const findPhase3CodeRepairPatches = (
 
     return [
       {
-        ruleId: RewriteRuleId.make("REP-09"), phase: "REPAIR_CODE", ruleCategory: "auto-repair",
+        ruleId: RewriteRuleId.make("REP-09"),
+        phase: "REPAIR_CODE",
+        ruleCategory: "auto-repair",
         description: `Wrap unmanaged SQL DDL in '${ddlViolation.file}' into numbered MigrationTuple '1_init_tables' under SqliteMigrator.fromRecord.`,
-        primaryNodeKey: primaryKey, preservedInterfaceKeys: preserved,
-        deletedEntityKeys: [], deletedRelationIds: [], deletedRoleEdges: [],
-        insertedEntityNodes: [], insertedRelationNodes: insertedRelations, insertedRoleEdges: insertedEdges,
+        primaryNodeKey: primaryKey,
+        preservedInterfaceKeys: preserved,
+        deletedEntityKeys: [],
+        deletedRelationIds: [],
+        deletedRoleEdges: [],
+        insertedEntityNodes: [],
+        insertedRelationNodes: insertedRelations,
+        insertedRoleEdges: insertedEdges,
         clearViolationFilter: (v) =>
           v.rule === ddlViolation.rule &&
           v.file === ddlViolation.file &&
@@ -298,11 +346,18 @@ export const findPhase3CodeRepairPatches = (
 
       return [
         {
-          ruleId: RewriteRuleId.make("REP-10"), phase: "REPAIR_CODE", ruleCategory: "auto-repair",
+          ruleId: RewriteRuleId.make("REP-10"),
+          phase: "REPAIR_CODE",
+          ruleCategory: "auto-repair",
           description: `Resolve unmapped EARS symbol '${missingSymbol}' for '${specNode.id}' and bind via TraceabilityTuple '${traceRelId}' in K.`,
-          primaryNodeKey: specKey, preservedInterfaceKeys: preserved,
-          deletedEntityKeys: [], deletedRelationIds: [], deletedRoleEdges: [],
-          insertedEntityNodes: insertedEntities, insertedRelationNodes: insertedRelations, insertedRoleEdges: insertedEdges,
+          primaryNodeKey: specKey,
+          preservedInterfaceKeys: preserved,
+          deletedEntityKeys: [],
+          deletedRelationIds: [],
+          deletedRoleEdges: [],
+          insertedEntityNodes: insertedEntities,
+          insertedRelationNodes: insertedRelations,
+          insertedRoleEdges: insertedEdges,
         },
       ]
     }
@@ -352,11 +407,17 @@ export const findPhase3CodeRepairPatches = (
 
     return [
       {
-        ruleId: RewriteRuleId.make("PLAN-04"), phase: "REPAIR_CODE", ruleCategory: "auto-repair",
+        ruleId: RewriteRuleId.make("PLAN-04"),
+        phase: "REPAIR_CODE",
+        ruleCategory: "auto-repair",
         description: `Wire missing ServiceLayer provider '${layerQual}' and LayerFlow '${flowId}' for required service '${svcKey}'.`,
-        primaryNodeKey: svcKey, preservedInterfaceKeys: preserved,
-        deletedEntityKeys: [], deletedRelationIds: [], deletedRoleEdges: [],
-        insertedEntityNodes: insertedEntities, insertedRelationNodes: insertedRelations,
+        primaryNodeKey: svcKey,
+        preservedInterfaceKeys: preserved,
+        deletedEntityKeys: [],
+        deletedRelationIds: [],
+        deletedRoleEdges: [],
+        insertedEntityNodes: insertedEntities,
+        insertedRelationNodes: insertedRelations,
         insertedRoleEdges: [
           makePlaysRoleEdge(flowId, layerKey, "provider-layer"),
           makePlaysRoleEdge(flowId, svcKey, "provided-service"),
@@ -411,11 +472,18 @@ export const findPhase3CodeRepairPatches = (
 
     return [
       {
-        ruleId: RewriteRuleId.make("PLAN-04"), phase: "REPAIR_CODE", ruleCategory: "auto-repair",
+        ruleId: RewriteRuleId.make("PLAN-04"),
+        phase: "REPAIR_CODE",
+        ruleCategory: "auto-repair",
         description: `Attach verifying property test '${testId}' to '${targetKey}' via preserved relation in K.`,
-        primaryNodeKey: targetKey, preservedInterfaceKeys: preserved,
-        deletedEntityKeys: [], deletedRelationIds: [], deletedRoleEdges: [],
-        insertedEntityNodes: insertedEntities, insertedRelationNodes: insertedRelations, insertedRoleEdges: insertedEdges,
+        primaryNodeKey: targetKey,
+        preservedInterfaceKeys: preserved,
+        deletedEntityKeys: [],
+        deletedRelationIds: [],
+        deletedRoleEdges: [],
+        insertedEntityNodes: insertedEntities,
+        insertedRelationNodes: insertedRelations,
+        insertedRoleEdges: insertedEdges,
       },
     ]
   }
@@ -535,11 +603,18 @@ export const findPhase3CodeRepairPatches = (
 
     return [
       {
-        ruleId: RewriteRuleId.make("REP-10"), phase: "REPAIR_CODE", ruleCategory: "auto-repair",
+        ruleId: RewriteRuleId.make("REP-10"),
+        phase: "REPAIR_CODE",
+        ruleCategory: "auto-repair",
         description: `Complete SuggestedEdge (${nextSuggestion.ruleId}) by attaching '${nextSuggestion.role}' -> '${targetEntKey}' on '${relId}'.`,
-        primaryNodeKey: targetEntKey, preservedInterfaceKeys: preserved,
-        deletedEntityKeys: [], deletedRelationIds: [], deletedRoleEdges: [],
-        insertedEntityNodes: insertedEntities, insertedRelationNodes: insertedRelations, insertedRoleEdges: insertedEdges,
+        primaryNodeKey: targetEntKey,
+        preservedInterfaceKeys: preserved,
+        deletedEntityKeys: [],
+        deletedRelationIds: [],
+        deletedRoleEdges: [],
+        insertedEntityNodes: insertedEntities,
+        insertedRelationNodes: insertedRelations,
+        insertedRoleEdges: insertedEdges,
       },
     ]
   }
@@ -565,10 +640,19 @@ export const findPhase4CleanupPatches = (graph: HarnessGraph): ReadonlyArray<Dra
         }
       })
       .with(
-        { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" },
-        { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" },
-        { _tag: "PatternDoc" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" },
-        { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+        { _tag: "EffectFn" },
+        { _tag: "ServiceTag" },
+        { _tag: "ServiceLayer" },
+        { _tag: "TaggedError" },
+        { _tag: "SchemaDef" },
+        { _tag: "VitestCase" },
+        { _tag: "PatternDoc" },
+        { _tag: "EarsRequirement" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
         () => undefined,
       )
       .exhaustive()
@@ -610,11 +694,18 @@ export const findPhase4CleanupPatches = (graph: HarnessGraph): ReadonlyArray<Dra
 
     return [
       {
-        ruleId: RewriteRuleId.make("REP-11"), phase: "CLEANUP", ruleCategory: "cleanup",
+        ruleId: RewriteRuleId.make("REP-11"),
+        phase: "CLEANUP",
+        ruleCategory: "cleanup",
         description: `Prune orphan ServiceTag '${svcNode.name}' (${svcKey}) satisfying NAC_spec (zero incident role edges and unreferenced by EARS/ADR/stubs).`,
-        primaryNodeKey: NodeKey.make(svcKey), preservedInterfaceKeys: [],
-        deletedEntityKeys: [NodeKey.make(svcKey)], deletedRelationIds: [], deletedRoleEdges: [],
-        insertedEntityNodes: [], insertedRelationNodes: [], insertedRoleEdges: [],
+        primaryNodeKey: NodeKey.make(svcKey),
+        preservedInterfaceKeys: [],
+        deletedEntityKeys: [NodeKey.make(svcKey)],
+        deletedRelationIds: [],
+        deletedRoleEdges: [],
+        insertedEntityNodes: [],
+        insertedRelationNodes: [],
+        insertedRoleEdges: [],
       },
     ]
   }

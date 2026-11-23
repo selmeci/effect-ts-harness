@@ -7,7 +7,7 @@ import { Omnigraph } from "@modernrelay/omnigraph"
 import { match } from "ts-pattern"
 import { classifyOntologyEdge, classifyOntologyNode } from "./archimate-ontology.js"
 import {
-  deriveRepoOmnigraphPort,
+  deriveClusterOmnigraphPort,
   resolveCanonicalRepoRoot,
   resolveOmnigraphClusterDir,
 } from "./cluster-resolver.js"
@@ -43,13 +43,16 @@ import {
   type OmnigraphPollChangesInput,
   type OmnigraphProposeMergeInput,
   type OmnigraphPutBlobInput,
+  DEFAULT_OMNIGRAPH_LOAD_CHUNK_BYTES,
   readAuthTokensFromClusterDir,
   resolveOmnigraphGraphId,
+  splitNdjsonIntoByteChunks,
 } from "./omnigraph-v014-ops.js"
 
 export {
   HARNESS_OMNIGRAPH_GRAPH_ID,
   WORKFLOW_OMNIGRAPH_GRAPH_ID,
+  DEFAULT_OMNIGRAPH_LOAD_CHUNK_BYTES,
   decodeStrictOptionalCommitId,
   decodeStrictOptionalCursor,
   executeGetBlobText,
@@ -65,6 +68,7 @@ export {
   OmnigraphLoadError,
   readAuthTokensFromClusterDir,
   resolveOmnigraphGraphId,
+  splitNdjsonIntoByteChunks,
   type OmnigraphBlobSelectorInput,
   type OmnigraphBlobStatResult,
   type OmnigraphChangeFeedResult,
@@ -145,7 +149,7 @@ export const resolveOmnigraphBaseUrl = (
         return baseUrlFromMeta
       }
     }
-    return `http://127.0.0.1:${deriveRepoOmnigraphPort(options.repoRoot, effectiveHostIo)}`
+    return `http://127.0.0.1:${deriveClusterOmnigraphPort(options.repoRoot, effectiveHostIo, effectiveEnv)}`
   }
   return effectiveEnv.OMNIGRAPH_URL ?? "http://127.0.0.1:8080"
 }
@@ -230,6 +234,7 @@ const EDGE_CALL_METRICS_ALLOWED = new Set([
 
 export const toOmnigraphServerNdjsonResult = (
   graph: HarnessGraph,
+  embeddingsByNodeKey?: ReadonlyMap<string, ReadonlyArray<number>>,
 ): Result.Result<string, OmnigraphLoadError> => {
   const nodeLines: Array<string> = []
   const seenNodes = new Set<string>()
@@ -237,6 +242,9 @@ export const toOmnigraphServerNdjsonResult = (
     string,
     { readonly tag: HarnessNode["_tag"]; readonly id: string }
   >()
+
+  const lookupEmbedding = (key: string, id: string): ReadonlyArray<number> | undefined =>
+    embeddingsByNodeKey?.get(key) ?? embeddingsByNodeKey?.get(id)
 
   const pushNode = (type: string, id: string, data: Record<string, unknown>): void => {
     const dedupKey = `${type}::${id}`
@@ -346,6 +354,13 @@ export const toOmnigraphServerNdjsonResult = (
       .with({ _tag: "PatternDoc" }, (n) => {
         if (!n.slug) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.slug })
+        const vec = lookupEmbedding(key, n.slug)
+        const embeddingField =
+          vec !== undefined
+            ? { summaryEmbedding: vec }
+            : embeddingsByNodeKey !== undefined
+              ? { summaryEmbedding: null }
+              : {}
         pushNode("PatternDoc", n.slug, {
           slug: n.slug,
           qualname: n.slug,
@@ -354,12 +369,20 @@ export const toOmnigraphServerNdjsonResult = (
           ...(n.title ? { title: n.title } : {}),
           ...(n.coveredSpans ? { coveredSpans: n.coveredSpans } : {}),
           ...(n.coveredTags ? { coveredTags: n.coveredTags } : {}),
+          ...embeddingField,
           ...archimateFields,
         })
       })
       .with({ _tag: "AdrDoc" }, (n) => {
         if (!n.id) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.id })
+        const vec = lookupEmbedding(key, n.id)
+        const embeddingField =
+          vec !== undefined
+            ? { searchEmbedding: vec }
+            : embeddingsByNodeKey !== undefined
+              ? { searchEmbedding: null }
+              : {}
         pushNode("AdrDoc", n.id, {
           id: n.id,
           qualname: n.id,
@@ -371,6 +394,8 @@ export const toOmnigraphServerNdjsonResult = (
           ...(n.referencedSpans ? { referencedSpans: n.referencedSpans } : {}),
           ...(n.referencedServices ? { referencedServices: n.referencedServices } : {}),
           ...(n.referencedErrors ? { referencedErrors: n.referencedErrors } : {}),
+          ...(n.searchText ? { searchText: n.searchText } : {}),
+          ...embeddingField,
           ...archimateFields,
         })
       })
@@ -389,6 +414,33 @@ export const toOmnigraphServerNdjsonResult = (
           ...(n.referencedSpans ? { referencedSpans: n.referencedSpans } : {}),
           ...(n.referencedServices ? { referencedServices: n.referencedServices } : {}),
           ...(n.referencedErrors ? { referencedErrors: n.referencedErrors } : {}),
+          ...archimateFields,
+        })
+      })
+      .with({ _tag: "EarsRequirement" }, (n) => {
+        if (!n.id) return
+        nodeMetaByKey.set(key, { tag: n._tag, id: n.id })
+        const vec = lookupEmbedding(key, n.id)
+        const embeddingField =
+          vec !== undefined
+            ? { clauseEmbedding: vec }
+            : embeddingsByNodeKey !== undefined
+              ? { clauseEmbedding: null }
+              : {}
+        pushNode("EarsRequirement", n.id, {
+          id: n.id,
+          qualname: n.id,
+          specId: n.specId,
+          requirementId: n.requirementId,
+          area: n.area,
+          pattern: n.pattern,
+          clauseText: n.clauseText,
+          effectSymbol: n.effectSymbol,
+          verification: n.verification,
+          path: n.path,
+          line: n.line,
+          status: n.status,
+          ...embeddingField,
           ...archimateFields,
         })
       })

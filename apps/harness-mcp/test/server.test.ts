@@ -16,11 +16,17 @@ vi.mock("node:fs", async (importOriginal) => {
 })
 import * as DecisionModel from "effect/ai/DecisionModel"
 import * as AiError from "effect/ai/AiError"
-import { isPureInterruptCause } from "@harness/contract"
+import {
+  EmbeddingDimensionCount,
+  EmbeddingModelId,
+  EmbeddingProviderBaseUrl,
+  isPureInterruptCause,
+} from "@harness/contract"
 import { makeMockDecisionModelLayer } from "@harness/decision"
 import { buildHarnessGraph, saveGraphSnapshot } from "@harness/graph"
 import { readTelemetryEvents } from "@harness/gates"
 import { nodeSyncHostIo } from "@harness/infra"
+import { EmbeddingClient } from "@harness/service"
 import { match } from "ts-pattern"
 import {
   createServer,
@@ -386,9 +392,10 @@ describe("harness-mcp tools", () => {
       { planStep: "Define a Greeter service" },
       { decisionLayer },
     )
-    expect(routed).toEqual({
+    expect(routed).toMatchObject({
       block: "services-and-layers",
       patternFile: "agent-patterns/services-and-layers.md",
+      source: "model",
     })
   })
 
@@ -404,9 +411,10 @@ describe("harness-mcp tools", () => {
       { planStep: "Simple effect calculation" },
       { decisionLayer: effectLayer },
     )
-    expect(routedEffect).toEqual({
+    expect(routedEffect).toMatchObject({
       block: "effect",
       patternFile: null,
+      source: "model",
     })
 
     const reviewModel = makeMockDecisionModel({
@@ -420,9 +428,10 @@ describe("harness-mcp tools", () => {
       { planStep: "Ambiguous vague task" },
       { decisionLayer: reviewLayer },
     )
-    expect(routedReview).toEqual({
+    expect(routedReview).toMatchObject({
       block: "review",
       patternFile: null,
+      source: "model",
     })
   })
 
@@ -441,9 +450,10 @@ describe("harness-mcp tools", () => {
       { planStep: "Any step" },
       { decisionLayer: failingLayer },
     )
-    expect(routed).toEqual({
+    expect(routed).toMatchObject({
       block: "review",
       patternFile: null,
+      source: "degraded-fallback",
     })
   })
 
@@ -462,9 +472,10 @@ describe("harness-mcp tools", () => {
       { planStep: "event sourcing decider core" },
       { decisionLayer: failingLayer },
     )
-    expect(routed).toEqual({
+    expect(routed).toMatchObject({
       block: "event-sourcing",
       patternFile: "agent-patterns/event-sourcing.md",
+      source: "deterministic",
     })
   })
 
@@ -1241,7 +1252,7 @@ describe("harness-mcp tools", () => {
     await client.connect(clientTransport)
     try {
       const listed = await client.listTools()
-      expect(listed.tools).toHaveLength(17)
+      expect(listed.tools).toHaveLength(19)
       for (const tool of listed.tools) {
         expect(tool.description?.length).toBeGreaterThan(0)
         expect(tool.inputSchema.type).toBe("object")
@@ -1917,5 +1928,105 @@ describe("harness-mcp tools", () => {
     ]) {
       expect(() => decodeGq(invalidGq)).toThrow()
     }
+  })
+
+  it("exposes harness_search_knowledge and harness_doc_tree over InMemoryTransport wire protocol", async () => {
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js")
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js")
+
+    const graph = buildHarnessGraph({
+      adrDocs: [
+        {
+          id: "harness:ADR-0025",
+          title: "Three-Tier Retrieval",
+          status: "accepted",
+          path: "libs/harness/docs/adr/0025-three-tier-retrieval-embeddings-and-pageindex-lite.md",
+          enforcedByFiles: [],
+          searchText: "Selective embeddings and PageIndex-lite tree inspection",
+          summary: "Selective embeddings and PageIndex-lite",
+        },
+      ],
+    })
+    const unavailableEmbedLayer = Layer.succeed(
+      EmbeddingClient,
+      EmbeddingClient.of({
+        config: {
+          baseUrl: EmbeddingProviderBaseUrl.make("http://127.0.0.1:1/v1"),
+          model: EmbeddingModelId.make("qwen3-embedding:8b"),
+          dimensions: EmbeddingDimensionCount.make(4),
+        },
+        checkAvailability: Effect.succeed("unavailable" as const),
+        embedBatch: () => Effect.succeed([]),
+        embedQuery: () => Effect.die("unused"),
+      }),
+    )
+
+    const srv = createServer({
+      repoRoot: path.resolve(import.meta.dirname, "../../.."),
+      graph,
+      skipTelemetry: true,
+      skipOmnigraphSpawn: true,
+      embeddingClientLayer: unavailableEmbedLayer,
+    })
+    const client = new Client({ name: "retrieval-wire-test-client", version: "1.0.0" })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await srv.connect(serverTransport)
+    await client.connect(clientTransport)
+    await Effect.runPromise(
+      Effect.promise(async () => {
+        const listed = await client.listTools()
+        const names = listed.tools.map((t) => t.name)
+        expect(names).toContain("harness_search_knowledge")
+        expect(names).toContain("harness_doc_tree")
+
+        const searchCall = await client.callTool({
+          name: "harness_search_knowledge",
+          arguments: { query: "PageIndex-lite", limit: 3 },
+        })
+        expect(searchCall.isError).not.toBe(true)
+        const searchBlock = Array.isArray(searchCall.content) ? searchCall.content[0] : undefined
+        expect(searchBlock?.type).toBe("text")
+        if (searchBlock?.type === "text") {
+          const parsed = JSON.parse(searchBlock.text) as {
+            readonly retrievalMode: string
+            readonly hits: ReadonlyArray<{ readonly nodeKey: string }>
+          }
+          expect(parsed.retrievalMode).toBe("lexical-fallback")
+          expect(parsed.hits.map((h) => h.nodeKey)).toContain("AdrDoc:harness:ADR-0025")
+        }
+
+        const docTreeCall = await client.callTool({
+          name: "harness_doc_tree",
+          arguments: {
+            mode: "tree",
+            path: "libs/harness/docs/adr/0025-three-tier-retrieval-embeddings-and-pageindex-lite.md",
+          },
+        })
+        expect(docTreeCall.isError).not.toBe(true)
+        const treeBlock = Array.isArray(docTreeCall.content) ? docTreeCall.content[0] : undefined
+        expect(treeBlock?.type).toBe("text")
+        if (treeBlock?.type === "text") {
+          const parsedTree = JSON.parse(treeBlock.text) as {
+            readonly _tag: string
+            readonly sections: ReadonlyArray<{ readonly sectionId: string }>
+          }
+          expect(parsedTree._tag).toBe("DocumentTree")
+          expect(parsedTree.sections.length).toBeGreaterThan(0)
+        }
+
+        const escapeCall = await client.callTool({
+          name: "harness_doc_tree",
+          arguments: { mode: "catalog", repoRoot: "/outside/root" },
+        })
+        expect(escapeCall.isError).toBe(true)
+      }).pipe(
+        Effect.ensuring(
+          Effect.promise(async () => {
+            await client.close()
+            await srv.close()
+          }),
+        ),
+      ),
+    )
   })
 })

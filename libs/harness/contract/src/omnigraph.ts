@@ -17,7 +17,9 @@ export type OmnigraphCommitId = typeof OmnigraphCommitId.Type
 export const OmnigraphBranchName = TrimmedNonEmptyString.pipe(Schema.brand("OmnigraphBranchName"))
 export type OmnigraphBranchName = typeof OmnigraphBranchName.Type
 
-export const OmnigraphChangeCursor = TrimmedNonEmptyString.pipe(Schema.brand("OmnigraphChangeCursor"))
+export const OmnigraphChangeCursor = TrimmedNonEmptyString.pipe(
+  Schema.brand("OmnigraphChangeCursor"),
+)
 export type OmnigraphChangeCursor = typeof OmnigraphChangeCursor.Type
 
 export const OmnigraphDiagnosticCode = TrimmedNonEmptyString.pipe(
@@ -43,7 +45,9 @@ export type OmnigraphActorToken = typeof OmnigraphActorToken.Type
 export const OmnigraphBaseUrl = TrimmedNonEmptyString.pipe(Schema.brand("OmnigraphBaseUrl"))
 export type OmnigraphBaseUrl = typeof OmnigraphBaseUrl.Type
 
-export const OmnigraphIsoTimestamp = TrimmedNonEmptyString.pipe(Schema.brand("OmnigraphIsoTimestamp"))
+export const OmnigraphIsoTimestamp = TrimmedNonEmptyString.pipe(
+  Schema.brand("OmnigraphIsoTimestamp"),
+)
 export type OmnigraphIsoTimestamp = typeof OmnigraphIsoTimestamp.Type
 
 export const OmnigraphLintStatus = Schema.Literals(["ok", "error"])
@@ -223,7 +227,11 @@ export type OmnigraphSchemaEvolutionAction = typeof OmnigraphSchemaEvolutionActi
 export const OmnigraphDiagnosticSeverity = Schema.Literals(["error", "warning", "info"])
 export type OmnigraphDiagnosticSeverity = typeof OmnigraphDiagnosticSeverity.Type
 
-export const OmnigraphLintPolicy = Schema.Literals(["fail-on-error", "deny-warnings", "report-only"])
+export const OmnigraphLintPolicy = Schema.Literals([
+  "fail-on-error",
+  "deny-warnings",
+  "report-only",
+])
 export type OmnigraphLintPolicy = typeof OmnigraphLintPolicy.Type
 
 export const OmnigraphLintDiagnostic = Schema.Struct({
@@ -273,6 +281,7 @@ export const OmnigraphServerMetaSchema = Schema.Struct({
   baseUrl: OmnigraphBaseUrl,
   canonicalRepoRoot: WorkspaceFilePath,
   updatedAt: Schema.NullOr(OmnigraphIsoTimestamp),
+  embeddingsMode: Schema.optional(Schema.Literals(["mock", "live"])),
 })
 export type OmnigraphServerMeta = typeof OmnigraphServerMetaSchema.Type
 

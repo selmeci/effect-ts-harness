@@ -1,4 +1,5 @@
 import * as path from "node:path"
+import { compareCodeUnits } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
@@ -26,6 +27,12 @@ import {
   resolveRepoRoot,
   stripCommentsAndTestTitles,
 } from "./extractor-types-and-helpers.js"
+import {
+  extractAdrSearchText,
+  extractEarsRequirements,
+  extractGovernanceSummary,
+  linkGovernanceDocsToGraph,
+} from "./governance-body-extractor.js"
 import type { SourceFileInput } from "./compiler-session.js"
 
 export interface PackageJsonEntry {
@@ -153,13 +160,18 @@ export const parseGovernanceDocFile = (
     rawStatus === "accepted" || rawStatus === "proposed" || rawStatus === "superseded" || rawStatus === "deprecated"
       ? rawStatus : "proposed"
 
+  const date = scalars.get("date")
+  const informedByAdrs = lists.get("informed_by") ?? []
   const enforcedByFiles = lists.get("enforced_by") ?? []
   const referencedSpans = lists.get("spans") ?? []
   const referencedServices = lists.get("services") ?? []
   const referencedErrors = lists.get("errors") ?? []
 
-  if (relDocPath.includes("/adr/")) return { _tag: "AdrDoc", id, title, status, path: relDocPath, enforcedByFiles, referencedSpans, referencedServices, referencedErrors }
-  if (relDocPath.includes("/specs/")) return { _tag: "EarsSpec", id, title, status, path: relDocPath, enforcedByFiles, referencedSpans, referencedServices, referencedErrors }
+  if (relDocPath.includes("/adr/")) return { _tag: "AdrDoc", id, title, status, ...(date ? { date } : {}), path: relDocPath, enforcedByFiles, referencedSpans, referencedServices, referencedErrors, searchText: extractAdrSearchText(title, normalized), summary: extractGovernanceSummary("AdrDoc", normalized) }
+  if (relDocPath.includes("/specs/")) {
+    const requirements = extractEarsRequirements(id, relDocPath, status, normalized).map((r) => ({ _tag: "EarsRequirement" as const, ...r }))
+    return { _tag: "EarsSpec", id, title, status, ...(date ? { date } : {}), path: relDocPath, enforcedByFiles, informedByAdrs, referencedSpans, referencedServices, referencedErrors, goalSummary: extractGovernanceSummary("EarsSpec", normalized), requirements }
+  }
   return null
 }
 
@@ -176,7 +188,7 @@ export const loadWorkspaceGovernanceDocs = (
           .readdirSync(path.join(root, p))
           .filter((e) => e.isDirectory)
           .map((e) => e.name)
-          .sort((a, b) => a.localeCompare(b))
+          .sort(compareCodeUnits)
   for (const s of listSubdirs("libs")) candidateRelDirs.push(`libs/${s}/docs/adr`, `libs/${s}/docs/specs`)
   for (const a of listSubdirs("apps")) candidateRelDirs.push(`apps/${a}/docs/adr`, `apps/${a}/docs/specs`)
 
@@ -188,7 +200,7 @@ export const loadWorkspaceGovernanceDocs = (
       .readdirSync(fullDir)
       .filter((e) => e.isFile && e.name.endsWith(".md") && e.name !== "README.md" && e.name !== "TEMPLATE.md")
       .map((e) => e.name)
-      .sort((a, b) => a.localeCompare(b))
+      .sort(compareCodeUnits)
     for (const file of files) {
       const relDocPath = `${relDir}/${file}`
       const parsed = parseGovernanceDocFile(relDocPath, hostIo.readTextSync(path.join(root, relDocPath)))
@@ -442,55 +454,13 @@ export const assembleTestAndGovernanceGraph = (
     }
   }
 
-  for (const docNode of governanceDocs) {
-    const docKey = getNodeKey(docNode), docIdx = Graph.addNode(mutable, docNode)
-    updatedNodeIndexByKey.set(docKey, docIdx)
-    const { kindPrefix, docRole, docArchimate, docIdField } = match(docNode)
-      .with({ _tag: "AdrDoc" }, (d) => ({ kindPrefix: "governs", docRole: "governing-adr", docArchimate: "Influence" as const, docIdField: { adrId: d.id } }))
-      .with({ _tag: "EarsSpec" }, (d) => ({ kindPrefix: "specifies", docRole: "specifying-ears", docArchimate: "Realization" as const, docIdField: { earsSpecId: d.id } }))
-      .exhaustive()
-
-    const addGovernanceTraceability = (targetKey: string, targetIdx: Graph.NodeIndex) => {
-      const relId = RelationId.make(`TraceabilityTuple:${kindPrefix}:${docNode.id}->${targetKey}`)
-      if (!updatedNodeIndexByKey.has(relId)) {
-        const relNode: TraceabilityTupleRelation = {
-          _tag: "TraceabilityTuple", relationId: relId, ...docIdField,
-          targetSymbolQualname: targetKey, verifyingTestQualnames: [],
-        }
-        const relIdx = Graph.addNode(mutable, relNode)
-        updatedNodeIndexByKey.set(relId, relIdx)
-        Graph.addEdge(mutable, relIdx, docIdx, {
-          _tag: "PlaysRole", relationId: relId, entityKey: NodeKey.make(docKey),
-          role: RoleName.make(docRole), archimateRelation: docArchimate,
-        })
-        Graph.addEdge(mutable, relIdx, targetIdx, {
-          _tag: "PlaysRole", relationId: relId, entityKey: NodeKey.make(targetKey),
-          role: RoleName.make("realizing-symbol"), archimateRelation: "Realization",
-        })
-      }
-    }
-
-    const linkGovRefs = <T extends HarnessNode>(items: ReadonlyArray<string> | undefined, nodes: ReadonlyArray<T>, matchFn: (item: string, node: T) => boolean) => {
-      const added = new Set<string>()
-      for (const item of items ?? []) {
-        let found = false
-        for (const n of nodes) {
-          if (matchFn(item, n)) {
-            found = true
-            const k = getNodeKey(n)
-            if (!added.has(k)) {
-              added.add(k)
-              const idx = updatedNodeIndexByKey.get(k)
-              if (idx !== undefined) addGovernanceTraceability(k, idx)
-            }
-          }
-        }
-        if (!found) unresolvedReferences.push({ relationId: `TraceabilityTuple:${kindPrefix}:${docNode.id}->${item}`, role: "realizing-symbol", targetKey: item, file: docNode.path })
-      }
-    }
-
-    linkGovRefs(docNode.referencedSpans, effectFns, (s, n) => n.spanName === s || n.qualname === s || n.qualname.endsWith(`#${s}`))
-    linkGovRefs(docNode.referencedServices, serviceTags, (s, n) => n.tagId === s || n.name === s || n.tagId.endsWith(`#${s}`))
-    linkGovRefs(docNode.referencedErrors, taggedErrors, (s, n) => n.errorTag === s)
-  }
+  linkGovernanceDocsToGraph(
+    mutable,
+    governanceDocs,
+    effectFns,
+    serviceTags,
+    taggedErrors,
+    updatedNodeIndexByKey,
+    unresolvedReferences,
+  )
 }

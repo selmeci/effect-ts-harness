@@ -1005,11 +1005,13 @@ setTimeout(() => process.exit(0), 5000);
     const prevApiKey = process.env.OMNIGRAPH_EMBEDDING_API_KEY
     const prevMock = process.env.OMNIGRAPH_EMBEDDINGS_MOCK
     const prevUrl = process.env.OMNIGRAPH_URL
+    const prevEmbedBaseUrl = process.env.HARNESS_EMBEDDING_BASE_URL
 
     try {
-      // Case 1: policy-gated cluster with unset OMNIGRAPH_EMBEDDING_API_KEY
+      // Case 1: policy-gated cluster with unset OMNIGRAPH_EMBEDDING_API_KEY and unavailable Ollama falls back to OMNIGRAPH_EMBEDDINGS_MOCK="1"
       const policyCase = setupFakeBinRepo("name: test\npolicies:\n  - name: p1\n")
       process.env.HOME = policyCase.fakeHome
+      process.env.HARNESS_EMBEDDING_BASE_URL = "http://127.0.0.1:1/v1"
       Reflect.deleteProperty(process.env, "OMNIGRAPH_EMBEDDING_API_KEY")
       Reflect.deleteProperty(process.env, "OMNIGRAPH_EMBEDDINGS_MOCK")
       Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
@@ -1035,6 +1037,7 @@ setTimeout(() => process.exit(0), 5000);
       expect(statSync(serverJsonPath).mode & 0o777).toBe(0o600)
       const serverMeta = JSON.parse(readFileSync(serverJsonPath, "utf8")) as Record<string, unknown>
       expect(serverMeta.token).toBeUndefined()
+      expect(serverMeta.embeddingsMode).toBe("mock")
       expect(typeof serverMeta.pid).toBe("number")
       if (typeof serverMeta.pid === "number") {
         try {
@@ -1081,6 +1084,115 @@ setTimeout(() => process.exit(0), 5000);
           // ignore
         }
       }
+
+      // Case 3: live local Ollama qwen3-embedding:8b detected on HARNESS_EMBEDDING_BASE_URL omits OMNIGRAPH_EMBEDDINGS_MOCK
+      const ollamaMockServer = createServer((req, res) => {
+        if (req.url === "/api/tags") {
+          res.writeHead(200, { "Content-Type": "application/json" })
+          res.end(
+            JSON.stringify({
+              models: [{ name: "qwen3-embedding:8b", model: "qwen3-embedding:8b" }],
+            }),
+          )
+          return
+        }
+        res.writeHead(404)
+        res.end()
+      })
+      await new Promise<void>((resolveListen) => {
+        ollamaMockServer.listen(0, "127.0.0.1", () => resolveListen())
+      })
+      try {
+        const ollamaAddr = ollamaMockServer.address() as AddressInfo
+        const ollamaCase = setupFakeBinRepo("name: test\npolicies:\n  - name: p1\n")
+        process.env.HOME = ollamaCase.fakeHome
+        process.env.HARNESS_EMBEDDING_BASE_URL = `http://127.0.0.1:${ollamaAddr.port}/v1`
+        Reflect.deleteProperty(process.env, "OMNIGRAPH_EMBEDDING_API_KEY")
+        Reflect.deleteProperty(process.env, "OMNIGRAPH_EMBEDDINGS_MOCK")
+        Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
+
+        const ready3 = await Effect.runPromise(ensureLocalOmnigraphReady(ollamaCase.repoRoot))
+        expect(ready3).toBe(true)
+
+        const cap3 = JSON.parse(readFileSync(ollamaCase.capturePath, "utf8")) as {
+          readonly embeddingsMock: string | null
+          readonly embeddingApiKey: string | null
+        }
+        expect(cap3.embeddingsMock).toBeNull()
+        expect(cap3.embeddingApiKey).toBe("ollama-local")
+
+        const clusterDir3 = resolveOmnigraphClusterDir(ollamaCase.repoRoot, nodeSyncHostIo)
+        const serverMeta3 = JSON.parse(
+          readFileSync(join(clusterDir3, "server.json"), "utf8"),
+        ) as Record<string, unknown>
+        expect(serverMeta3.embeddingsMode).toBe("live")
+        if (typeof serverMeta3.pid === "number") {
+          try {
+            process.kill(serverMeta3.pid, "SIGTERM")
+          } catch {
+            // ignore
+          }
+        }
+
+        // Case 4: NoOp fast-path upgrades running "mock" daemon to "live" when Ollama qwen3-embedding:8b becomes available
+        const upgradeCase = setupFakeBinRepo("name: test\npolicies:\n  - name: p1\n")
+        process.env.HOME = upgradeCase.fakeHome
+        process.env.HARNESS_EMBEDDING_BASE_URL = "http://127.0.0.1:1/v1"
+        Reflect.deleteProperty(process.env, "OMNIGRAPH_EMBEDDING_API_KEY")
+        Reflect.deleteProperty(process.env, "OMNIGRAPH_EMBEDDINGS_MOCK")
+        Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
+
+        const upgradeInitialReady = await Effect.runPromise(
+          ensureLocalOmnigraphReady(upgradeCase.repoRoot),
+        )
+        expect(upgradeInitialReady).toBe(true)
+        const upgradeClusterDir = resolveOmnigraphClusterDir(upgradeCase.repoRoot, nodeSyncHostIo)
+        const mockMeta = JSON.parse(
+          readFileSync(join(upgradeClusterDir, "server.json"), "utf8"),
+        ) as Record<string, unknown>
+        expect(mockMeta.embeddingsMode).toBe("mock")
+        const pid1 = mockMeta.pid
+        expect(typeof pid1).toBe("number")
+
+        try {
+          process.env.HARNESS_EMBEDDING_BASE_URL = `http://127.0.0.1:${ollamaAddr.port}/v1`
+          const upgradeLiveReady = await Effect.runPromise(
+            ensureLocalOmnigraphReady(upgradeCase.repoRoot),
+          )
+          expect(upgradeLiveReady).toBe(true)
+          const liveMeta = JSON.parse(
+            readFileSync(join(upgradeClusterDir, "server.json"), "utf8"),
+          ) as Record<string, unknown>
+          expect(liveMeta.embeddingsMode).toBe("live")
+          expect(typeof liveMeta.pid).toBe("number")
+          expect(liveMeta.pid).not.toBe(pid1)
+          const capUpgrade = JSON.parse(readFileSync(upgradeCase.capturePath, "utf8")) as {
+            readonly embeddingsMock: string | null
+          }
+          expect(capUpgrade.embeddingsMock).toBeNull()
+        } finally {
+          if (typeof pid1 === "number") {
+            try {
+              process.kill(pid1, "SIGTERM")
+            } catch {
+              // ignore
+            }
+          }
+          try {
+            const latestMeta = JSON.parse(
+              readFileSync(join(upgradeClusterDir, "server.json"), "utf8"),
+            ) as Record<string, unknown>
+            if (typeof latestMeta.pid === "number") {
+              process.kill(latestMeta.pid, "SIGTERM")
+            }
+          } catch {
+            // ignore
+          }
+        }
+      } finally {
+        ollamaMockServer.closeAllConnections()
+        ollamaMockServer.close()
+      }
     } finally {
       if (prevHome === undefined) Reflect.deleteProperty(process.env, "HOME")
       else process.env.HOME = prevHome
@@ -1091,6 +1203,9 @@ setTimeout(() => process.exit(0), 5000);
       else process.env.OMNIGRAPH_EMBEDDINGS_MOCK = prevMock
       if (prevUrl === undefined) Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
       else process.env.OMNIGRAPH_URL = prevUrl
+      if (prevEmbedBaseUrl === undefined)
+        Reflect.deleteProperty(process.env, "HARNESS_EMBEDDING_BASE_URL")
+      else process.env.HARNESS_EMBEDDING_BASE_URL = prevEmbedBaseUrl
     }
   })
 
@@ -2291,6 +2406,66 @@ exit 1
     } finally {
       stderrSpy.mockRestore()
       if (prevAllow !== undefined) process.env.HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD = prevAllow
+    }
+  })
+
+  it("F-1.1b: linked worktree fails closed across CLUSTER_SCHEMA_EPOCH mismatch even when canonical daemon responds /readyz", async () => {
+    const canonicalRoot = makeTempRepo("harness-rfc0009-canon-epoch-")
+    const worktreeRoot = makeTempRepo("harness-rfc0009-wt-epoch-")
+    const gitWorktreeDir = join(canonicalRoot, ".git", "worktrees", "wt-epoch")
+    mkdirSync(gitWorktreeDir, { recursive: true })
+    writeFileSync(join(gitWorktreeDir, "commondir"), "../..\n", "utf8")
+    writeFileSync(join(worktreeRoot, ".git"), `gitdir: ${gitWorktreeDir}\n`, "utf8")
+
+    const clusterDir = resolveOmnigraphClusterDir(canonicalRoot, nodeSyncHostIo)
+    mkdirSync(join(clusterDir, "graphs", "harness.omni"), { recursive: true })
+    writeFileSync(join(clusterDir, ".cluster-schema-epoch"), "stale-epoch\n", "utf8")
+
+    let readyzRequests = 0
+    const mockReadyServer = createServer((_req, res) => {
+      readyzRequests += 1
+      res.writeHead(200, { "Content-Type": "application/json", "Omnigraph-Http-Api": "0.14" })
+      res.end(JSON.stringify({ ready: true, status: "serving", ready_graph_count: 1 }))
+    })
+    await new Promise<void>((resolveListen) => {
+      mockReadyServer.listen(0, "127.0.0.1", () => resolveListen())
+    })
+
+    const addr = mockReadyServer.address() as AddressInfo
+    const resolvedCanonical = resolveCanonicalRepoRoot(canonicalRoot, nodeSyncHostIo)
+    writeFileSync(
+      join(clusterDir, "server.json"),
+      JSON.stringify({
+        pid: process.pid,
+        port: addr.port,
+        baseUrl: `http://127.0.0.1:${addr.port}`,
+        canonicalRepoRoot: resolvedCanonical,
+        updatedAt: new Date().toISOString(),
+        embeddingsMode: "mock",
+      }),
+      "utf8",
+    )
+
+    const stderrChunks: Array<string> = []
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderrChunks.push(String(chunk))
+      return true
+    })
+    const prevAllow = process.env.HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD
+    const prevUrl = process.env.OMNIGRAPH_URL
+    Reflect.deleteProperty(process.env, "HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD")
+    Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
+    try {
+      const ready = await Effect.runPromise(ensureLocalOmnigraphReady(worktreeRoot))
+      expect(ready).toBe(false)
+      expect(readyzRequests).toBe(0)
+      expect(stderrChunks.join("")).toContain("CLUSTER_SCHEMA_EPOCH mismatch")
+    } finally {
+      stderrSpy.mockRestore()
+      mockReadyServer.closeAllConnections()
+      mockReadyServer.close()
+      if (prevAllow !== undefined) process.env.HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD = prevAllow
+      if (prevUrl !== undefined) process.env.OMNIGRAPH_URL = prevUrl
     }
   })
 

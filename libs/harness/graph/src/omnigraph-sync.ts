@@ -115,6 +115,7 @@ export interface OmnigraphBranchOpsShape {
       readonly snapshotPath?: string | undefined
       readonly from?: OmnigraphBranchName | string | undefined
       readonly mode?: "overwrite" | "merge" | undefined
+      readonly embeddingsByNodeKey?: ReadonlyMap<string, ReadonlyArray<number>> | undefined
     },
   ) => Effect.Effect<OmnigraphSyncResult>
   readonly mergeBranch: (
@@ -213,7 +214,7 @@ export const makeOmnigraphSyncLayer = (
       sync: (graph, options) =>
         Effect.gen(function* () {
           const snapshotPath = options?.snapshotPath ?? ".harness/graph-snapshot.json"
-          const ndjsonRes = toOmnigraphServerNdjsonResult(graph)
+          const ndjsonRes = toOmnigraphServerNdjsonResult(graph, options?.embeddingsByNodeKey)
           const ndjson = match(ndjsonRes)
             .with({ _tag: "Success" }, ({ success }) => success)
             .with({ _tag: "Failure" }, () => undefined)
@@ -621,6 +622,7 @@ export const syncToOmnigraphAndSnapshot = Effect.fn("OmnigraphSync.sync")(functi
     readonly snapshotPath?: string | undefined
     readonly from?: OmnigraphBranchName | string | undefined
     readonly mode?: "overwrite" | "merge" | undefined
+    readonly embeddingsByNodeKey?: ReadonlyMap<string, ReadonlyArray<number>> | undefined
   },
 ) {
   const service = yield* OmnigraphSync

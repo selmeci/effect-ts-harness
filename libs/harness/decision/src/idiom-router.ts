@@ -24,6 +24,7 @@ export const IDIOM_BLOCKS = [
   "rpc",
   "atom",
   "decision-model",
+  "planning",
   "effect",
 ] as const
 export type IdiomBlock = (typeof IDIOM_BLOCKS)[number]
@@ -91,6 +92,11 @@ export const DETERMINISTIC_ROUTE_RULES: ReadonlyArray<DeterministicRouteRule> = 
       /\b(?:decision[-\s]*model|clef(?:-flash)?|system\s*one|systemone|ai-typesafe|typesafedecisionmodel|typesafeclient)\b/i,
     block: "decision-model",
   },
+  {
+    id: "planning",
+    pattern: /\b(?:plan-check|skeleton|stub<|ears\s+spec|planning\.md)\b/i,
+    block: "planning",
+  },
 ]
 
 /** Versioned decision definition: reviewed data, not a prompt string. */
@@ -124,6 +130,8 @@ export const IdiomRouterV1 = Decision.make({
         atom: "Frontend AtomHttpApi reactive state over the public contract",
         "decision-model":
           "Advisory System One decisions: Decision.make (classify, rate, probability), DecisionModel.decide, @effect/ai-typesafe TypeSafeDecisionModel & TypeSafeClient over POST /v1/systemone",
+        planning:
+          "Two-stage Effect planning: mapping EARS clauses to schemas, Context.Service capabilities, Layer skeletons, and stub<A, E, R>()",
         effect: "Plain sequential effectful logic with Effect.gen / Effect.fn",
       },
     }),
@@ -131,42 +139,82 @@ export const IdiomRouterV1 = Decision.make({
 })
 
 /** Validates Ollama System One limits (1–64 questions per call, 2–26 options per choice/score). */
-export const validateDecisionLimits = Effect.fn("Harness.validateDecisionLimits")(function* (definition: {
-  readonly decisions: Readonly<
-    Record<
-      string,
-      {
-        readonly _tag: string
-        readonly criteria?: Readonly<Record<string, unknown>> | ReadonlyArray<unknown> | undefined
-      }
+export const validateDecisionLimits = Effect.fn("Harness.validateDecisionLimits")(
+  function* (definition: {
+    readonly decisions: Readonly<
+      Record<
+        string,
+        {
+          readonly _tag: string
+          readonly criteria?: Readonly<Record<string, unknown>> | ReadonlyArray<unknown> | undefined
+        }
+      >
     >
-  >
-}): Effect.fn.Return<void> {
-  const entries = Object.entries(definition.decisions)
-  if (entries.length < 1 || entries.length > 64) {
-    return yield* Effect.die(
-      new Error(`Decision definition must have 1..64 questions, got ${entries.length}`),
-    )
-  }
-  for (const [name, question] of entries) {
-    if (question.criteria !== undefined) {
-      const optionCount = Array.isArray(question.criteria)
-        ? question.criteria.length
-        : Object.keys(question.criteria).length
-      if (optionCount < 2 || optionCount > 26) {
-        return yield* Effect.die(
-          new Error(`Decision question "${name}" must have 2..26 options, got ${optionCount}`),
-        )
+  }): Effect.fn.Return<void> {
+    const entries = Object.entries(definition.decisions)
+    if (entries.length < 1 || entries.length > 64) {
+      return yield* Effect.die(
+        new Error(`Decision definition must have 1..64 questions, got ${entries.length}`),
+      )
+    }
+    for (const [name, question] of entries) {
+      if (question.criteria !== undefined) {
+        const optionCount = Array.isArray(question.criteria)
+          ? question.criteria.length
+          : Object.keys(question.criteria).length
+        if (optionCount < 2 || optionCount > 26) {
+          return yield* Effect.die(
+            new Error(`Decision question "${name}" must have 2..26 options, got ${optionCount}`),
+          )
+        }
       }
     }
-  }
-})
+  },
+)
 
-export type RouteStepSource = "deterministic" | "model" | "degraded-fallback"
+export type RouteStepSource = "deterministic" | "model" | "hybrid-retrieval" | "degraded-fallback"
 
 export interface RouteStepStatusResult {
   readonly block: BuildingBlock
   readonly source: RouteStepSource
+}
+
+export interface PatternCandidateSlug {
+  readonly slug: string
+  readonly path?: string | undefined
+  readonly score?: number | undefined
+}
+
+const KNOWN_IDIOM_BLOCK_SET: ReadonlySet<string> = new Set(IDIOM_BLOCKS)
+
+export const selectRouteWithHybridCandidates = (
+  routed: RouteStepStatusResult,
+  candidates: ReadonlyArray<PatternCandidateSlug>,
+): RouteStepStatusResult => {
+  if (routed.source === "deterministic") {
+    return routed
+  }
+  const matchingCandidate = candidates.find(
+    (c) =>
+      KNOWN_IDIOM_BLOCK_SET.has(c.slug) &&
+      c.slug !== "review" &&
+      c.score !== undefined &&
+      Number.isFinite(c.score) &&
+      c.score >= 0.75,
+  )
+  if (routed.block !== "review") {
+    return routed
+  }
+  if (matchingCandidate !== undefined && KNOWN_IDIOM_BLOCK_SET.has(matchingCandidate.slug)) {
+    const matchedBlock = IDIOM_BLOCKS.find((b) => b === matchingCandidate.slug)
+    if (matchedBlock !== undefined) {
+      return {
+        block: matchedBlock,
+        source: "hybrid-retrieval" as const,
+      }
+    }
+  }
+  return routed
 }
 
 export const routeStepWithStatus = Effect.fn("Harness.routeStepWithStatus")(function* (

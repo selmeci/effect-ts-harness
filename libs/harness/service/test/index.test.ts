@@ -44,6 +44,7 @@ describe("@harness/service ports", () => {
         readTextFile: () => Effect.succeed(WorkspaceFileContent.make("hello")),
         writeTextFileAtomic: () => Effect.void,
         exists: () => Effect.succeed(true),
+        realPath: (filePath) => Effect.succeed(filePath),
       }),
     ),
   )
@@ -85,106 +86,111 @@ describe("@harness/service ports", () => {
     ),
   )
 
-  it.effect("resolves AstGateCachePort, DecisionCachePort, and UnixSocketDaemonPort from test layers", () =>
-    Effect.gen(function* () {
-      const astCache = yield* AstGateCachePort
-      const astReport = yield* astCache.evaluateBatch(
-        [],
-        () => [],
-        EvaluatorId.make("custom-evaluator"),
-      )
-      expect(astReport.verdict).toBe("clean")
-      const evalErr = yield* astCache
-        .evaluateBatch([], () => [], EvaluatorId.make("failing-evaluator"))
-        .pipe(Effect.flip)
-      expect(evalErr._tag).toBe("AstGateEvaluationError")
+  it.effect(
+    "resolves AstGateCachePort, DecisionCachePort, and UnixSocketDaemonPort from test layers",
+    () =>
+      Effect.gen(function* () {
+        const astCache = yield* AstGateCachePort
+        const astReport = yield* astCache.evaluateBatch(
+          [],
+          () => [],
+          EvaluatorId.make("custom-evaluator"),
+        )
+        expect(astReport.verdict).toBe("clean")
+        const evalErr = yield* astCache
+          .evaluateBatch([], () => [], EvaluatorId.make("failing-evaluator"))
+          .pipe(Effect.flip)
+        expect(evalErr._tag).toBe("AstGateEvaluationError")
 
-      const decCache = yield* DecisionCachePort
-      const payload = yield* decCache.lookupOrCompute({
-        key: DecisionCacheKey.make("k1"),
-        ttlMillis: DecisionCacheTtlMillis.make(1000),
-        compute: Effect.succeed(DecisionCachePayloadJson.make('{"ok":true}')),
-      })
-      expect(payload).toBe('{"ok":true}')
+        const decCache = yield* DecisionCachePort
+        const payload = yield* decCache.lookupOrCompute({
+          key: DecisionCacheKey.make("k1"),
+          ttlMillis: DecisionCacheTtlMillis.make(1000),
+          compute: Effect.succeed(DecisionCachePayloadJson.make('{"ok":true}')),
+        })
+        expect(payload).toBe('{"ok":true}')
 
-      const daemon = yield* UnixSocketDaemonPort
-      const alive = yield* daemon.isSocketAlive(DaemonSocketPath.make("/tmp/test.sock"))
-      expect(alive).toBe(false)
-    }).pipe(
-      Effect.provideService(AstGateCachePort, {
-        evaluateBatch: (_files, _evaluateFile, evaluatorId) =>
-          evaluatorId === "failing-evaluator"
-            ? Effect.fail(
-                new AstGateEvaluationError({
-                  filePath: AstSourceFilePath.make("libs/a.ts"),
-                  reason: ErrorReasonMessage.make("eval failed"),
-                }),
-              )
-            : Effect.succeed(
-                makeAstGateEvaluationReport({
-                  violations: [],
-                  inspectedFileCount: NonNegativeCount.make(0),
-                  cacheHitCount: NonNegativeCount.make(0),
-                }),
-              ),
-        clearCache: Effect.void,
-        cacheSize: Effect.succeed(NonNegativeCount.make(0)),
-      }),
-      Effect.provideService(DecisionCachePort, {
-        lookup: () => Effect.succeedNone,
-        store: () => Effect.void,
-        lookupOrCompute: (input) => input.compute,
-        clear: Effect.void,
-        stats: Effect.succeed({
-          hits: NonNegativeCount.make(0),
-          misses: NonNegativeCount.make(0),
-          coalescedRequests: NonNegativeCount.make(0),
-          size: NonNegativeCount.make(0),
+        const daemon = yield* UnixSocketDaemonPort
+        const alive = yield* daemon.isSocketAlive(DaemonSocketPath.make("/tmp/test.sock"))
+        expect(alive).toBe(false)
+      }).pipe(
+        Effect.provideService(AstGateCachePort, {
+          evaluateBatch: (_files, _evaluateFile, evaluatorId) =>
+            evaluatorId === "failing-evaluator"
+              ? Effect.fail(
+                  new AstGateEvaluationError({
+                    filePath: AstSourceFilePath.make("libs/a.ts"),
+                    reason: ErrorReasonMessage.make("eval failed"),
+                  }),
+                )
+              : Effect.succeed(
+                  makeAstGateEvaluationReport({
+                    violations: [],
+                    inspectedFileCount: NonNegativeCount.make(0),
+                    cacheHitCount: NonNegativeCount.make(0),
+                  }),
+                ),
+          clearCache: Effect.void,
+          cacheSize: Effect.succeed(NonNegativeCount.make(0)),
         }),
-      }),
-      Effect.provideService(UnixSocketDaemonPort, {
-        startServer: (repoRoot) =>
-          Effect.succeed({
-            socketPath: DaemonSocketPath.make("/tmp/test.sock"),
-            repoRoot,
+        Effect.provideService(DecisionCachePort, {
+          lookup: () => Effect.succeedNone,
+          store: () => Effect.void,
+          lookupOrCompute: (input) => input.compute,
+          clear: Effect.void,
+          stats: Effect.succeed({
+            hits: NonNegativeCount.make(0),
+            misses: NonNegativeCount.make(0),
+            coalescedRequests: NonNegativeCount.make(0),
+            size: NonNegativeCount.make(0),
           }),
-        isSocketAlive: () => Effect.succeed(false),
-      }),
-    ),
+        }),
+        Effect.provideService(UnixSocketDaemonPort, {
+          startServer: (repoRoot) =>
+            Effect.succeed({
+              socketPath: DaemonSocketPath.make("/tmp/test.sock"),
+              repoRoot,
+            }),
+          isSocketAlive: () => Effect.succeed(false),
+        }),
+      ),
   )
 
-  it.effect("allows WorkspaceFs.exists to fail with WorkspaceFsError and exposes SyncHostReader", () =>
-    Effect.gen(function* () {
-      const fs = yield* WorkspaceFs
-      const err = yield* fs.exists(WorkspaceFilePath.make("/restricted")).pipe(Effect.flip)
-      expect(err._tag).toBe("WorkspaceFsError")
-      expect(err.operation).toBe("stat")
+  it.effect(
+    "allows WorkspaceFs.exists to fail with WorkspaceFsError and exposes SyncHostReader",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* WorkspaceFs
+        const err = yield* fs.exists(WorkspaceFilePath.make("/restricted")).pipe(Effect.flip)
+        expect(err._tag).toBe("WorkspaceFsError")
+        expect(err.operation).toBe("stat")
 
-      const reader: SyncHostReader = {
-        getEnv: () => process.env,
-        existsSync: () => true,
-        isFileSync: () => true,
-        isDirectorySync: () => false,
-        isSymbolicLinkSync: () => false,
-        readTextSync: () => "ok",
-        readBytesSync: () => new Uint8Array(),
-        readdirSync: () => [],
-        realpathSync: (p) => p,
-      }
-      expect(reader.existsSync("/restricted")).toBe(true)
-    }).pipe(
-      Effect.provideService(WorkspaceFs, {
-        readTextFile: () => Effect.succeed(WorkspaceFileContent.make("")),
-        writeTextFileAtomic: () => Effect.void,
-        exists: (filePath) =>
-          Effect.fail(
-            new WorkspaceFsError({
-              filePath,
-              operation: WorkspaceFsOperation.make("stat"),
-              reason: ErrorReasonMessage.make("EACCES: permission denied"),
-            }),
-          ),
-      }),
-    ),
+        const reader: SyncHostReader = {
+          getEnv: () => process.env,
+          existsSync: () => true,
+          isFileSync: () => true,
+          isDirectorySync: () => false,
+          isSymbolicLinkSync: () => false,
+          readTextSync: () => "ok",
+          readBytesSync: () => new Uint8Array(),
+          readdirSync: () => [],
+          realpathSync: (p) => p,
+        }
+        expect(reader.existsSync("/restricted")).toBe(true)
+      }).pipe(
+        Effect.provideService(WorkspaceFs, {
+          readTextFile: () => Effect.succeed(WorkspaceFileContent.make("")),
+          writeTextFileAtomic: () => Effect.void,
+          exists: (filePath) =>
+            Effect.fail(
+              new WorkspaceFsError({
+                filePath,
+                operation: WorkspaceFsOperation.make("stat"),
+                reason: ErrorReasonMessage.make("EACCES: permission denied"),
+              }),
+            ),
+          realPath: (filePath) => Effect.succeed(filePath),
+        }),
+      ),
   )
 })

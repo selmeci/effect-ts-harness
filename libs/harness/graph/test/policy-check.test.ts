@@ -2476,6 +2476,7 @@ export const evolveCartV2 = (state: CartState, event: CartEventV2): CartState =>
           { _tag: "PatternDoc" },
           { _tag: "AdrDoc" },
           { _tag: "EarsSpec" },
+          { _tag: "EarsRequirement" },
           { _tag: "EffectSignature" },
           { _tag: "LayerFlow" },
           { _tag: "TraceabilityTuple" },

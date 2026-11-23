@@ -72,9 +72,7 @@ const hasMatchingOmnigraphBinary = (tokens: ReadonlyArray<string>): boolean => {
     return true
   }
   if (isJsRuntimeBasename(first)) {
-    return tokens
-      .slice(1)
-      .some((tok) => !tok.startsWith("-") && isOmnigraphExecutableBasename(tok))
+    return tokens.slice(1).some((tok) => !tok.startsWith("-") && isOmnigraphExecutableBasename(tok))
   }
   return false
 }
@@ -273,7 +271,11 @@ export const clusterYamlDeclaresPolicies = (clusterYaml: string): boolean => {
       if (nextIndent === keyIndent && (trimmedNext === "-" || trimmedNext.startsWith("- "))) {
         return true
       }
-      if (nextIndent <= keyIndent && /^[A-Za-z0-9_.-]+\s*:/.test(trimmedNext) && !trimmedNext.startsWith("-")) {
+      if (
+        nextIndent <= keyIndent &&
+        /^[A-Za-z0-9_.-]+\s*:/.test(trimmedNext) &&
+        !trimmedNext.startsWith("-")
+      ) {
         followedByMappingKey = true
         break
       }
@@ -308,6 +310,7 @@ export const countImplEffectFns = (
         { _tag: "PatternDoc" },
         { _tag: "AdrDoc" },
         { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
         { _tag: "EffectSignature" },
         { _tag: "LayerFlow" },
         { _tag: "TraceabilityTuple" },
@@ -336,6 +339,7 @@ export const collectPlanEffectFnQualnames = (graph: HarnessGraph): ReadonlySet<s
         { _tag: "PatternDoc" },
         { _tag: "AdrDoc" },
         { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
         { _tag: "EffectSignature" },
         { _tag: "LayerFlow" },
         { _tag: "TraceabilityTuple" },
@@ -405,8 +409,10 @@ export const readSpanNameFromImages = (
   return undefined
 }
 
-const BRANCH_NOT_FOUND_CODE_PATTERN = /^(not[_-]?found|branch[_-]?not[_-]?found|unknown[_-]?branch)$/i
-const BRANCH_NOT_FOUND_MESSAGE_PATTERN = /\bbranch\b.*(not\s+found|unknown|does\s+not\s+exist)|(?:not\s+found|unknown|does\s+not\s+exist).*\bbranch\b/i
+const BRANCH_NOT_FOUND_CODE_PATTERN =
+  /^(not[_-]?found|branch[_-]?not[_-]?found|unknown[_-]?branch)$/i
+const BRANCH_NOT_FOUND_MESSAGE_PATTERN =
+  /\bbranch\b.*(not\s+found|unknown|does\s+not\s+exist)|(?:not\s+found|unknown|does\s+not\s+exist).*\bbranch\b/i
 
 export const isBranchNotFoundError = (err: unknown): boolean => {
   const inner =

@@ -89,7 +89,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 | ID      | Pattern      | Requirement                                                                                                                                                                                                                                            | Effect Symbol | Verification |
 | :------ | :----------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------ | :----------- |
-| REQ-2.1 | Ubiquitous   | `schema.pg` **shall** declare `@index` text fields and nullable `Vector(768)? @embed(...)` columns on all 7 embedded node types: `EffectFn`, `ServiceTag`, `TaggedError`, `SchemaDef`, `PatternDoc`, `AdrDoc`, and `EarsSpec`.                         | —             | `GraphCheck` |
+| REQ-2.1 | Ubiquitous   | `schema.pg` **shall** declare `@index` full-text fields on searchable code and governance node types so native BM25 and fuzzy queries execute over indexed text properties (selective vector columns are governed by `harness:ADR-0025` / `harness:SPEC-0031`). | —             | `GraphCheck` |
 | REQ-2.2 | Event-driven | **When** `harness_gq_query` executes `rank_patterns_hybrid`, `rank_candidate_services_for_stub`, or `resolve_effect_fn_fuzzy`, `OmnigraphSync` **shall** rank scope-filtered subgraph matches using `rrf(nearest(...), bm25(...))` or `fuzzy(..., 2)`. | —             | `UnitTest`   |
 
 ### 3 · Branch Diff & Dry-Run Merge Gate (`OMNI-03`)
@@ -165,7 +165,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 ## Assumptions
 
 - **REQ-1.1:** A one-time clean-slate rebuild of `.harness/omnigraph-cluster` (`rfc-0009-v2` epoch) is performed because Omnigraph v0.14.0 refuses adding `@key(...)` to existing unkeyed edge types in place.
-- **REQ-2.1:** By default, local spawned `omnigraph-server` uses deterministic mock embeddings (`OMNIGRAPH_EMBEDDINGS_MOCK=1`) unless `OMNIGRAPH_EMBEDDING_API_KEY` is explicitly provided; nullable `Vector(768)?` columns degrade cleanly to BM25 lexical matching when embeddings are absent.
+- **REQ-2.1:** Local `omnigraph-server` detects local Ollama `qwen3-embedding:8b` (`harness:ADR-0025` / `harness:SPEC-0031`) or falls back to deterministic mock embeddings (`OMNIGRAPH_EMBEDDINGS_MOCK=1`) unless `OMNIGRAPH_EMBEDDING_API_KEY` is explicitly provided; `@index` full-text fields continue supporting BM25 lexical matching when embeddings are absent.
 
 ## Out of scope
 

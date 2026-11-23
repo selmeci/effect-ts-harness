@@ -256,6 +256,8 @@ export const CANONICAL_MCP_TOOL_NAMES: ReadonlyArray<McpToolName> = [
   McpToolName.make("harness_graph_complete"),
   McpToolName.make("harness_graph_rewrite"),
   McpToolName.make("harness_git_diff"),
+  McpToolName.make("harness_search_knowledge"),
+  McpToolName.make("harness_doc_tree"),
 ]
 
 export const McpToolInputName = Schema.String.pipe(Schema.brand("McpToolInputName"))

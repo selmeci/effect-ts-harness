@@ -133,6 +133,7 @@ export const PatternDocNode = Schema.TaggedStruct("PatternDoc", {
   summary: Schema.String,
   patternName: Schema.optional(Schema.String),
   title: Schema.optional(Schema.String),
+  headings: Schema.optional(Schema.Array(Schema.String)),
   coveredSpans: Schema.optional(Schema.Array(Schema.String)),
   coveredTags: Schema.optional(Schema.Array(Schema.String)),
 })
@@ -149,8 +150,25 @@ export const AdrDocNode = Schema.TaggedStruct("AdrDoc", {
   referencedSpans: Schema.optional(Schema.Array(Schema.String)),
   referencedServices: Schema.optional(Schema.Array(Schema.String)),
   referencedErrors: Schema.optional(Schema.Array(Schema.String)),
+  searchText: Schema.optional(Schema.String),
+  summary: Schema.optional(Schema.String),
 })
 export type AdrDocNode = typeof AdrDocNode.Type
+
+export const EarsRequirementNode = Schema.TaggedStruct("EarsRequirement", {
+  id: Schema.String,
+  specId: Schema.String,
+  requirementId: Schema.String,
+  area: Schema.String,
+  pattern: Schema.String,
+  clauseText: Schema.String,
+  effectSymbol: Schema.String,
+  verification: Schema.String,
+  path: Schema.String,
+  line: Schema.Int,
+  status: EarsStatus,
+})
+export type EarsRequirementNode = typeof EarsRequirementNode.Type
 
 export const EarsSpecNode = Schema.TaggedStruct("EarsSpec", {
   id: Schema.String,
@@ -164,6 +182,8 @@ export const EarsSpecNode = Schema.TaggedStruct("EarsSpec", {
   referencedSpans: Schema.optional(Schema.Array(Schema.String)),
   referencedServices: Schema.optional(Schema.Array(Schema.String)),
   referencedErrors: Schema.optional(Schema.Array(Schema.String)),
+  goalSummary: Schema.optional(Schema.String),
+  requirements: Schema.optional(Schema.Array(EarsRequirementNode)),
 })
 export type EarsSpecNode = typeof EarsSpecNode.Type
 
@@ -177,6 +197,7 @@ export const EntityNode = Schema.Union([
   PatternDocNode,
   AdrDocNode,
   EarsSpecNode,
+  EarsRequirementNode,
 ])
 export type EntityNode = typeof EntityNode.Type
 
@@ -288,6 +309,7 @@ export const STANDARD_ROLE_NAMES = [
   "required-service",
   "governing-adr",
   "specifying-ears",
+  "specified-requirement",
   "specified-target",
   "realizing-symbol",
   "verifying-test",
@@ -317,6 +339,7 @@ export const ARCHIMATE_BY_ROLE: Readonly<Record<StandardRoleName, string>> = {
   "required-service": "Serving",
   "governing-adr": "Influence",
   "specifying-ears": "Realization",
+  "specified-requirement": "Realization",
   "specified-target": "Realization",
   "realizing-symbol": "Realization",
   "verifying-test": "Assignment",
@@ -346,6 +369,7 @@ export const ENTITY_NODE_TAGS = [
   "PatternDoc",
   "AdrDoc",
   "EarsSpec",
+  "EarsRequirement",
 ] as const
 
 export const EntityNodeTag = Schema.Literals(ENTITY_NODE_TAGS)
@@ -499,6 +523,7 @@ export const isRelationNode = (node: HarnessNode): node is RelationNode =>
       "PatternDoc",
       "AdrDoc",
       "EarsSpec",
+      "EarsRequirement",
       () => false,
     )
     .exhaustive()
@@ -516,6 +541,7 @@ export const getNodeKey = (node: HarnessNode): NodeKey =>
     .with({ _tag: "PatternDoc" }, (n) => NodeKey.make(`PatternDoc:${n.slug}`))
     .with({ _tag: "AdrDoc" }, (n) => NodeKey.make(`AdrDoc:${n.id}`))
     .with({ _tag: "EarsSpec" }, (n) => NodeKey.make(`EarsSpec:${n.id}`))
+    .with({ _tag: "EarsRequirement" }, (n) => NodeKey.make(`EarsRequirement:${n.id}`))
     .with(
       { _tag: "EffectSignature" },
       { _tag: "LayerFlow" },

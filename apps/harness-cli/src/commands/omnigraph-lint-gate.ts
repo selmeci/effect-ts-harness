@@ -19,6 +19,7 @@ import {
   type makeOmnigraphSyncLayer,
   OmnigraphSync,
   resolveOmnigraphClusterDir,
+  resolveOmnigraphTaskBranches,
 } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 import type { CliResult } from "./hook-format.js"
@@ -45,10 +46,10 @@ const OmnigraphLintJsonSchema = Schema.fromJsonString(
 export const resolveDefaultOmnigraphBin = (): string =>
   join(process.env.HOME ?? "/root", ".local", "bin", "omnigraph")
 
-export const runOmnigraphOptimizeAndCleanup = (
+const runOmnigraphMaintenanceCommands = (
   clusterRootDir: string,
-  omnigraphBin: string = resolveDefaultOmnigraphBin(),
-  includeCleanup = true,
+  omnigraphBin: string,
+  commands: ReadonlyArray<ReadonlyArray<string>>,
 ): void => {
   if (!nodeSyncHostIo.existsSync(clusterRootDir)) {
     return
@@ -59,13 +60,6 @@ export const runOmnigraphOptimizeAndCleanup = (
     )
     return
   }
-  const targetUri = `file://${clusterRootDir}`
-  const commands: ReadonlyArray<ReadonlyArray<string>> = includeCleanup
-    ? [
-        ["optimize", "--target", targetUri, "--graph", "harness"],
-        ["cleanup", "--target", targetUri, "--graph", "harness", "--keep", "5", "--confirm"],
-      ]
-    : [["optimize", "--target", targetUri, "--graph", "harness"]]
   for (const args of commands) {
     const subcommand = args[0] ?? "optimize"
     const execAttempt = Result.try(() =>
@@ -109,6 +103,57 @@ export const runOmnigraphOptimizeAndCleanup = (
   }
 }
 
+export const runOmnigraphRebuildFullTextIndexes = (
+  clusterRootDir: string,
+  omnigraphBin: string = resolveDefaultOmnigraphBin(),
+  branches: ReadonlyArray<string> = ["main"],
+): void => {
+  const targetUri = `file://${clusterRootDir}`
+  const seen = new Set<string>()
+  const commands: Array<ReadonlyArray<string>> = []
+  for (const branch of branches) {
+    const trimmed = branch.trim()
+    if (trimmed.length === 0 || seen.has(trimmed)) continue
+    seen.add(trimmed)
+    commands.push([
+      "rebuild-full-text-indexes",
+      "--target",
+      targetUri,
+      "--graph",
+      "harness",
+      "--branch",
+      trimmed,
+    ])
+  }
+  if (commands.length === 0) {
+    commands.push([
+      "rebuild-full-text-indexes",
+      "--target",
+      targetUri,
+      "--graph",
+      "harness",
+      "--branch",
+      "main",
+    ])
+  }
+  runOmnigraphMaintenanceCommands(clusterRootDir, omnigraphBin, commands)
+}
+
+export const runOmnigraphOptimizeAndCleanup = (
+  clusterRootDir: string,
+  omnigraphBin: string = resolveDefaultOmnigraphBin(),
+  includeCleanup = true,
+): void => {
+  const targetUri = `file://${clusterRootDir}`
+  const commands: ReadonlyArray<ReadonlyArray<string>> = includeCleanup
+    ? [
+        ["optimize", "--target", targetUri, "--graph", "harness"],
+        ["cleanup", "--target", targetUri, "--graph", "harness", "--keep", "5", "--confirm"],
+      ]
+    : [["optimize", "--target", targetUri, "--graph", "harness"]]
+  runOmnigraphMaintenanceCommands(clusterRootDir, omnigraphBin, commands)
+}
+
 export const findFirstVitestCaseId = (graph: HarnessGraph): string | undefined => {
   for (const [, node] of Graph.nodes(graph.graph)) {
     const found = match(node)
@@ -122,6 +167,7 @@ export const findFirstVitestCaseId = (graph: HarnessGraph): string | undefined =
         { _tag: "PatternDoc" },
         { _tag: "AdrDoc" },
         { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
         { _tag: "EffectSignature" },
         { _tag: "LayerFlow" },
         { _tag: "TraceabilityTuple" },
@@ -443,6 +489,12 @@ export const runOmnigraphMaintenance = (
   const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
   const clusterDir = resolveOmnigraphClusterDir(clusterRepoRoot, nodeSyncHostIo)
   if (nodeSyncHostIo.existsSync(clusterDir)) {
+    const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
+    runOmnigraphRebuildFullTextIndexes(clusterDir, undefined, [
+      taskBranches.mainBranch,
+      taskBranches.implBranch,
+      taskBranches.planBranch,
+    ])
     runOmnigraphOptimizeAndCleanup(clusterDir, undefined, options?.includeCleanup ?? true)
   }
 }

@@ -521,3 +521,4 @@ export {
   scanWorkspaceTsFilesChecked,
   type ScanWorkspaceTsFilesResult,
 } from "./workspace-ts-scan.js"
+export { decideEmbeddingSyncPlan } from "./embedding-sync-plan.js"

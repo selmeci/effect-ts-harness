@@ -320,10 +320,19 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
         expect(n.file).toBe("libs/sample/contract/src/errors.ts")
       })
       .with(
-        { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" },
-        { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
-        { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" },
-        { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" },
+        { _tag: "EffectFn" },
+        { _tag: "ServiceTag" },
+        { _tag: "ServiceLayer" },
+        { _tag: "SchemaDef" },
+        { _tag: "VitestCase" },
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
         { _tag: "MigrationTuple" },
         () => expect.unreachable("Expected TaggedError node"),
       )
@@ -1143,7 +1152,11 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
     try {
       const domainDir = path.join(tmpRoot, "libs", "sample", "domain", "src")
       fs.mkdirSync(domainDir, { recursive: true })
-      fs.writeFileSync(path.join(domainDir, "index.ts"), "export const okValue: number = 1\n", "utf-8")
+      fs.writeFileSync(
+        path.join(domainDir, "index.ts"),
+        "export const okValue: number = 1\n",
+        "utf-8",
+      )
 
       const session = createTypeScriptProgramSession(tmpRoot, testHostIo)
       const brokenDiags = evaluateOverlayDiagnostics(
@@ -1156,12 +1169,17 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
       // Subsequent check with another file (removing index.ts overlay) must read disk index.ts, not stale overlay AST
       const cleanDiags = evaluateOverlayDiagnostics(
         tmpRoot,
-        { "libs/sample/domain/src/extra.ts": 'import { okValue } from "./index.js"\nexport const doubled: number = okValue * 2\n' },
+        {
+          "libs/sample/domain/src/extra.ts":
+            'import { okValue } from "./index.js"\nexport const doubled: number = okValue * 2\n',
+        },
         session,
       )
       expect(cleanDiags.filter((d) => d.severity === "error")).toEqual([])
 
-      const g1 = await Effect.runPromise(extractWorkspaceTypeAwareGraph(tmpRoot, testHostIo, { session }))
+      const g1 = await Effect.runPromise(
+        extractWorkspaceTypeAwareGraph(tmpRoot, testHostIo, { session }),
+      )
       expect(session.lastWorkspaceSnapshot?.baseTopologyHash).toBe(computeBaseTopologyHash(session))
       expect(g1.nodeIndexByKey).toBeInstanceOf(Map)
       expect(g1.branchingViolations).toEqual([])
@@ -1235,7 +1253,9 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
         }),
       )
       const nodes = Array.from(Graph.nodes(graph.graph)).map(([, n]) => n)
-      expect(nodes.some((n) => n._tag === "EffectFn" && n.spanName === "Sample.runLogic")).toBe(true)
+      expect(nodes.some((n) => n._tag === "EffectFn" && n.spanName === "Sample.runLogic")).toBe(
+        true,
+      )
       expect(nodes.some((n) => "file" in n && String(n.file).endsWith(".spec.ts"))).toBe(false)
     } finally {
       fs.rmSync(tmpRoot, { recursive: true, force: true })

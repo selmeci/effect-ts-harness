@@ -147,6 +147,7 @@ export const classifyOntologyNode = (node: HarnessNode): OntologyClassifiedNode 
   match(node)
     .with({ _tag: "AdrDoc" }, (n) => ({ key: n.id, label: n.title, nodeTag: n._tag, layer: "Motivation" as const, aspect: "Motivation" as const, elementType: "DriverOrConstraint" as const, file: n.path }))
     .with({ _tag: "EarsSpec" }, (n) => ({ key: n.id, label: n.title, nodeTag: n._tag, layer: "Motivation" as const, aspect: "Motivation" as const, elementType: "Requirement" as const, file: n.path }))
+    .with({ _tag: "EarsRequirement" }, (n) => ({ key: n.id, label: `${n.specId}#${n.requirementId}`, nodeTag: n._tag, layer: "Motivation" as const, aspect: "Motivation" as const, elementType: "Requirement" as const, file: n.path }))
     .with({ _tag: "EffectFn" }, (n) => {
       const isRule = n.spanName.endsWith(".decide") || n.spanName === "decide"
       if (n.packageTag === "domain" || n.packageTag === "contract") {
@@ -181,25 +182,16 @@ export const classifyRoleRelation = (role: string): ArchiMateRelationType => {
   return match(role)
     .with("governing-adr", "enforcing-pattern", () => "Influence" as const)
     .with(
-      "specifying-ears",
-      "realizing-symbol",
-      "provider-layer",
-      "provided-service",
-      "endpoint-handler",
-      "migration-module",
+      "specifying-ears", "specified-requirement", "specified-target", "realizing-symbol",
+      "provider-layer", "provided-service", "endpoint-handler", "migration-module",
       () => "Realization" as const,
     )
     .with("verifying-test", "exercising-test", "exercised-span", () => "Verification" as const)
     .with("requires-service", "required-service", () => "Serving" as const)
     .with("fails-with", "callee", () => "Triggering" as const)
     .with(
-      "caller",
-      "uses-schema",
-      "input-schema",
-      "output-schema",
-      "request-schema",
-      "response-schema",
-      "endpoint-error",
+      "caller", "uses-schema", "input-schema", "output-schema",
+      "request-schema", "response-schema", "endpoint-error",
       () => "Access" as const,
     )
     .otherwise(() => {
@@ -222,19 +214,9 @@ export const classifyRoleRelation = (role: string): ArchiMateRelationType => {
 export const classifyOntologyEdge = (edge: HarnessEdge): ArchiMateRelationType => {
   if (edge.archimateRelation !== undefined) {
     const explicit = match(edge.archimateRelation)
-      .with("Realization", () => "Realization" as const)
-      .with("Serving", () => "Serving" as const)
-      .with("Access", () => "Access" as const)
-      .with("Triggering", () => "Triggering" as const)
-      .with("Flow", () => "Flow" as const)
-      .with("Influence", () => "Influence" as const)
-      .with("Composition", () => "Composition" as const)
-      .with("Association", () => "Association" as const)
-      .with("Verification", () => "Verification" as const)
+      .with("Realization", "Serving", "Access", "Triggering", "Flow", "Influence", "Composition", "Association", "Verification", (rel) => rel)
       .otherwise(() => undefined)
-    if (explicit !== undefined) {
-      return explicit
-    }
+    if (explicit !== undefined) return explicit
   }
   return classifyRoleRelation(edge.role)
 }
@@ -368,6 +350,7 @@ export const queryOntologyWhy = (
   >()
   const upwardChain: Array<OntologyClassifiedNode> = []
   const realizationPaths: Array<ReadonlyArray<string>> = []
+  const pendingRequirementsBySpec = new Map<string, Set<string>>()
 
   const visited = new Set<Graph.NodeIndex>([targetIdx])
   const queue: Array<{
@@ -404,6 +387,11 @@ export const queryOntologyWhy = (
         const via = [...current.keyPath].reverse()
         const existing = specifyingEarsMap.get(spec.id)
         const reqSet = existing ? existing.requirementIds : new Set<string>()
+        const pendingReqs = pendingRequirementsBySpec.get(spec.id)
+        if (pendingReqs !== undefined) {
+          for (const pendingId of pendingReqs) reqSet.add(pendingId)
+          pendingRequirementsBySpec.delete(spec.id)
+        }
         specifyingEarsMap.set(spec.id, {
           id: spec.id,
           title: spec.title,
@@ -422,6 +410,26 @@ export const queryOntologyWhy = (
               visited.add(adrIdx)
               queue.push({ idx: adrIdx, labelPath: [...current.labelPath, adrClassified.label], keyPath: [...current.keyPath, adrClassified.key] })
             }
+          }
+        }
+        return true
+      })
+      .with({ _tag: "EarsRequirement" }, (req) => {
+        const existingEntry = specifyingEarsMap.get(req.specId)
+        if (existingEntry !== undefined) {
+          existingEntry.requirementIds.add(req.requirementId)
+        } else {
+          const pending = pendingRequirementsBySpec.get(req.specId) ?? new Set<string>()
+          pending.add(req.requirementId)
+          pendingRequirementsBySpec.set(req.specId, pending)
+        }
+        const specIdx = harnessGraph.nodeIndexByKey.get(`EarsSpec:${req.specId}`)
+        if (specIdx !== undefined && !visited.has(specIdx)) {
+          const specNode = Option.getOrUndefined(Graph.getNode(harnessGraph.graph, specIdx))
+          if (specNode !== undefined) {
+            const specClassified = classifyOntologyNode(specNode)
+            visited.add(specIdx)
+            queue.push({ idx: specIdx, labelPath: [...current.labelPath, specClassified.label], keyPath: [...current.keyPath, specClassified.key] })
           }
         }
         return true
@@ -450,7 +458,7 @@ export const queryOntologyWhy = (
 
         const canHop =
           (relNode._tag === "TraceabilityTuple" &&
-            (outEdge.data.role === "governing-adr" || outEdge.data.role === "specifying-ears")) ||
+            (outEdge.data.role === "governing-adr" || outEdge.data.role === "specifying-ears" || outEdge.data.role === "specified-requirement")) ||
           (relNode._tag === "EffectSignature" &&
             ((inEdge.data.role === "callee" && outEdge.data.role === "caller") ||
               (inEdge.data.role === "caller" &&
@@ -488,7 +496,7 @@ export const queryOntologyWhy = (
               }
             })
             .with(
-              { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+              { _tag: "EarsRequirement" }, { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
               () => {},
             )
             .exhaustive()
@@ -523,7 +531,7 @@ export const queryOntologyWhy = (
           }
         })
         .with(
-          { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+          { _tag: "EarsRequirement" }, { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
           () => {},
         )
         .exhaustive()
@@ -618,6 +626,21 @@ export const queryOntologyImpact = (
     Implementation: [],
   }
 
+  const specsByInformedAdr = new Map<string, Array<Graph.NodeIndex>>()
+  for (const [nodeIdx, candidate] of Graph.nodes(harnessGraph.graph)) {
+    if (isEntityNode(candidate)) {
+      match(candidate)
+        .with({ _tag: "EarsSpec" }, (spec) => {
+          for (const adrId of spec.informedByAdrs ?? []) {
+            const list = specsByInformedAdr.get(adrId) ?? []
+            list.push(nodeIdx); specsByInformedAdr.set(adrId, list)
+          }
+        })
+        .with({ _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsRequirement" }, () => undefined)
+        .exhaustive()
+    }
+  }
+
   const visited = new Set<Graph.NodeIndex>([sourceIdx])
   const queue: Array<Graph.NodeIndex> = [sourceIdx]
 
@@ -631,31 +654,29 @@ export const queryOntologyImpact = (
       impactByLayer[classified.layer].push(classified)
 
       match(node)
-        .with({ _tag: "AdrDoc" }, (n) => {
-          affectedAdrs.add(n.id)
-        })
-        .with({ _tag: "EarsSpec" }, (n) => {
-          affectedSpecs.add(n.id)
-        })
+        .with({ _tag: "AdrDoc" }, (n) => { affectedAdrs.add(n.id) })
+        .with({ _tag: "EarsSpec" }, (n) => { affectedSpecs.add(n.id) })
+        .with({ _tag: "EarsRequirement" }, (n) => { affectedSpecs.add(n.specId) })
         .with({ _tag: "EffectFn" }, (n) => {
           impactedSpans.add(n.spanName)
-          for (const t of findTestsReaching(harnessGraph, n.qualname)) {
-            impactedTests.add(t.testId)
-          }
+          for (const t of findTestsReaching(harnessGraph, n.qualname)) impactedTests.add(t.testId)
         })
-        .with({ _tag: "ServiceTag" }, (n) => {
-          impactedServices.add(n.tagId)
-        })
-        .with({ _tag: "ServiceLayer" }, (n) => {
-          impactedLayers.add(n.qualname)
-        })
-        .with({ _tag: "TaggedError" }, (n) => {
-          impactedErrors.add(n.errorTag)
-        })
-        .with({ _tag: "VitestCase" }, (n) => {
-          impactedTests.add(n.testId)
-        })
+        .with({ _tag: "ServiceTag" }, (n) => { impactedServices.add(n.tagId) })
+        .with({ _tag: "ServiceLayer" }, (n) => { impactedLayers.add(n.qualname) })
+        .with({ _tag: "TaggedError" }, (n) => { impactedErrors.add(n.errorTag) })
+        .with({ _tag: "VitestCase" }, (n) => { impactedTests.add(n.testId) })
         .with({ _tag: "SchemaDef" }, { _tag: "PatternDoc" }, () => undefined)
+        .exhaustive()
+    }
+
+    const enqueueUnvisited = (idx: Graph.NodeIndex | undefined): void => {
+      if (idx !== undefined && !visited.has(idx)) { visited.add(idx); queue.push(idx) }
+    }
+    if (isEntityNode(node)) {
+      match(node)
+        .with({ _tag: "AdrDoc" }, (adr) => { for (const specIdx of specsByInformedAdr.get(adr.id) ?? []) enqueueUnvisited(specIdx) })
+        .with({ _tag: "EarsSpec" }, (spec) => { for (const req of spec.requirements ?? []) enqueueUnvisited(harnessGraph.nodeIndexByKey.get(`EarsRequirement:${req.id}`)) })
+        .with({ _tag: "EarsRequirement" }, { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, () => undefined)
         .exhaustive()
     }
 

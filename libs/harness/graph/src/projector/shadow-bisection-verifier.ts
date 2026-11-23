@@ -5,12 +5,7 @@ import { match } from "ts-pattern"
 import { decideGraphInference } from "../datalog-engine.js"
 import { buildHarnessGraph, verifySubgraphMonomorphism } from "../graph-engine.js"
 import { applyDpoPatchToGraph } from "../graph-rewrite.js"
-import {
-  type GraphPatch,
-  type HarnessGraph,
-  type PlaysRoleEdge,
-  getNodeKey,
-} from "../model.js"
+import { type GraphPatch, type HarnessGraph, type PlaysRoleEdge, getNodeKey } from "../model.js"
 import {
   type SourceFileInput,
   type TypeScriptProgramSession,
@@ -84,7 +79,9 @@ export const verifyProjectedSubset = (
       .exhaustive()
     const compilerCrashDiags = match(compilerDiagExit)
       .with({ _tag: "Success" }, () => [])
-      .with({ _tag: "Failure" }, (f) => [`Compiler overlay diagnostic evaluation failed: ${String(f.cause)}`])
+      .with({ _tag: "Failure" }, (f) => [
+        `Compiler overlay diagnostic evaluation failed: ${String(f.cause)}`,
+      ])
       .exhaustive()
     const errorDiags = [
       ...compilerCrashDiags,
@@ -122,7 +119,10 @@ export const verifyProjectedSubset = (
       .with({ _tag: "Failure" }, (f) =>
         isPureInterruptCause(f.cause)
           ? Effect.interrupt
-          : Effect.succeed({ ok: false as const, diags: [...errorDiags, `Overlay type-aware extraction failed: ${String(f.cause)}`] }),
+          : Effect.succeed({
+              ok: false as const,
+              diags: [...errorDiags, `Overlay type-aware extraction failed: ${String(f.cause)}`],
+            }),
       )
       .with({ _tag: "Success" }, (s) => Effect.succeed({ ok: true as const, value: s.value }))
       .exhaustive()
@@ -149,7 +149,10 @@ export const verifyProjectedSubset = (
         .with({ _tag: "Failure" }, (f) =>
           isPureInterruptCause(f.cause)
             ? Effect.interrupt
-            : Effect.succeed({ ok: false as const, err: `DPO patch replay failed for rule '${patch.ruleId}': ${String(f.cause)}` }),
+            : Effect.succeed({
+                ok: false as const,
+                err: `DPO patch replay failed for rule '${patch.ruleId}': ${String(f.cause)}`,
+              }),
         )
         .with({ _tag: "Success" }, (s) => {
           currentGraph = s.value
@@ -187,6 +190,7 @@ export const verifyProjectedSubset = (
             { _tag: "PatternDoc" },
             { _tag: "AdrDoc" },
             { _tag: "EarsSpec" },
+            { _tag: "EarsRequirement" },
             () => undefined,
           )
           .exhaustive()
@@ -214,7 +218,9 @@ export const verifyProjectedSubset = (
       .with({ _tag: "Failure" }, (f) =>
         isPureInterruptCause(f.cause)
           ? Effect.interrupt
-          : Effect.succeed([`Datalog verification failed on projected overlay: ${String(f.cause)}`]),
+          : Effect.succeed([
+              `Datalog verification failed on projected overlay: ${String(f.cause)}`,
+            ]),
       )
       .with({ _tag: "Success" }, () => Effect.succeed([] as Array<string>))
       .exhaustive()

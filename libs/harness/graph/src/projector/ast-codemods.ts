@@ -59,7 +59,10 @@ export const applyRep05UntracedDeciderRepair = (
             const initText = init.getText()
             if (initText.startsWith("Effect.fnUntraced")) {
               ensureNamedImport(ctx, norm, "effect", ["Effect"], patch.ruleId, rationale)
-              const nextInit = initText.replace(/^Effect\.fnUntraced/, `Effect.fn("${fnEnt.spanName}")`)
+              const nextInit = initText.replace(
+                /^Effect\.fnUntraced/,
+                `Effect.fn("${fnEnt.spanName}")`,
+              )
               varDecl.setInitializer(nextInit)
               ctx.modifiedFiles.add(norm)
               recordExportedSymbol(ctx, norm, fnIdent)
@@ -103,6 +106,7 @@ export const applyRep05UntracedDeciderRepair = (
         { _tag: "PatternDoc" },
         { _tag: "AdrDoc" },
         { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
         () => undefined,
       )
       .exhaustive()
@@ -142,12 +146,20 @@ export const applyRep07DiscriminantMatchRepair = (
         const literalTag = tagMatch[2]
         const thenNodes = m.getMultipleMatches("THEN")
         const elseNodes = m.getMultipleMatches("ELSE")
-        const thenRaw = thenNodes.map((n) => n.text()).join(" ").trim()
-        const elseRaw = elseNodes.map((n) => n.text()).join(" ").trim()
+        const thenRaw = thenNodes
+          .map((n) => n.text())
+          .join(" ")
+          .trim()
+        const elseRaw = elseNodes
+          .map((n) => n.text())
+          .join(" ")
+          .trim()
         const thenRet =
-          thenRaw.match(/^return\s+(.+?);?$/)?.[1]?.trim() ?? (thenRaw.length > 0 ? thenRaw : "true")
+          thenRaw.match(/^return\s+(.+?);?$/)?.[1]?.trim() ??
+          (thenRaw.length > 0 ? thenRaw : "true")
         const elseRet =
-          elseRaw.match(/^return\s+(.+?);?$/)?.[1]?.trim() ?? (elseRaw.length > 0 ? elseRaw : "false")
+          elseRaw.match(/^return\s+(.+?);?$/)?.[1]?.trim() ??
+          (elseRaw.length > 0 ? elseRaw : "false")
         const replacement =
           elseRaw.length > 0
             ? `return match(${subject}).with({ _tag: "${literalTag}" }, () => ${thenRet}).with(P._, () => ${elseRet}).exhaustive()`
@@ -235,7 +247,9 @@ export const applyRep08DecodeBoundaryRepair = (
 ): void => {
   for (const insEnt of patch.insertedEntityNodes) {
     match(insEnt)
-      .with({ _tag: "TaggedError" }, (errEnt) => projectTaggedErrorNode(ctx, errEnt, patch.ruleId, rationale))
+      .with({ _tag: "TaggedError" }, (errEnt) =>
+        projectTaggedErrorNode(ctx, errEnt, patch.ruleId, rationale),
+      )
       .with(
         { _tag: "EffectFn" },
         { _tag: "ServiceTag" },
@@ -245,6 +259,7 @@ export const applyRep08DecodeBoundaryRepair = (
         { _tag: "PatternDoc" },
         { _tag: "AdrDoc" },
         { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
         () => undefined,
       )
       .exhaustive()
@@ -332,6 +347,7 @@ export const applyRep11DeleteUnusedService = (
                 { _tag: "PatternDoc" },
                 { _tag: "AdrDoc" },
                 { _tag: "EarsSpec" },
+                { _tag: "EarsRequirement" },
                 { _tag: "EffectSignature" },
                 { _tag: "LayerFlow" },
                 { _tag: "TraceabilityTuple" },
@@ -346,7 +362,10 @@ export const applyRep11DeleteUnusedService = (
       }
     }
     if (targetFile.length === 0) targetFile = "libs/service/src/ports.ts"
-    const { sf, norm } = getOrCreateSourceFile(ctx, targetFile, { requireExisting: true, ruleId: patch.ruleId })
+    const { sf, norm } = getOrCreateSourceFile(ctx, targetFile, {
+      requireExisting: true,
+      ruleId: patch.ruleId,
+    })
     const cls = sf.getClass(svcIdent)
     if (cls !== undefined) cls.remove()
     const varDecl = sf.getVariableDeclaration(svcIdent)
@@ -383,8 +402,12 @@ export const coProjectBarrelExports = (
       continue
     }
 
-    const scopedMatch = relFile.match(/^(libs\/[^/]+\/(?:contract|service|domain|core|infra)\/src)\/(.+)\.(?:ts|tsx)$/)
-    const flatMatch = relFile.match(/^(libs\/(?:contract|service|domain|core|infra)\/src)\/(.+)\.(?:ts|tsx)$/)
+    const scopedMatch = relFile.match(
+      /^(libs\/[^/]+\/(?:contract|service|domain|core|infra)\/src)\/(.+)\.(?:ts|tsx)$/,
+    )
+    const flatMatch = relFile.match(
+      /^(libs\/(?:contract|service|domain|core|infra)\/src)\/(.+)\.(?:ts|tsx)$/,
+    )
     const baseSrcDir = scopedMatch?.[1] ?? flatMatch?.[1]
     const subModulePath = scopedMatch?.[2] ?? flatMatch?.[2]
     if (baseSrcDir === undefined || subModulePath === undefined || subModulePath === "index") {
@@ -398,7 +421,8 @@ export const coProjectBarrelExports = (
     const existingExportDecls = barrelSf.getExportDeclarations()
     const hasWildcardReExport = existingExportDecls.some(
       (d) =>
-        (d.getModuleSpecifierValue() === moduleSpecifier || d.getModuleSpecifierValue() === `./${subModulePath}.ts`) &&
+        (d.getModuleSpecifierValue() === moduleSpecifier ||
+          d.getModuleSpecifierValue() === `./${subModulePath}.ts`) &&
         !d.hasNamedExports() &&
         !d.isNamespaceExport(),
     )
@@ -406,7 +430,8 @@ export const coProjectBarrelExports = (
 
     const existingNamedDecl = existingExportDecls.find(
       (d) =>
-        (d.getModuleSpecifierValue() === moduleSpecifier || d.getModuleSpecifierValue() === `./${subModulePath}.ts`) &&
+        (d.getModuleSpecifierValue() === moduleSpecifier ||
+          d.getModuleSpecifierValue() === `./${subModulePath}.ts`) &&
         d.hasNamedExports(),
     )
     const sortedSymbols = Array.from(exportedSymbols).sort()
@@ -432,7 +457,9 @@ export const coProjectBarrelExports = (
         engine: CodeModEngineKind.make("ts-morph"),
         action: CodeModActionKind.make("insert-declaration"),
         targetFile: TargetFilePath.make(barrelNorm),
-        snippet: TypeScriptSnippet.make(`export { ${newlyExported.join(", ")} } from "${moduleSpecifier}"`),
+        snippet: TypeScriptSnippet.make(
+          `export { ${newlyExported.join(", ")} } from "${moduleSpecifier}"`,
+        ),
         rationale: SpecificationRef.make(rationale),
       })
     }
@@ -521,7 +548,13 @@ export const projectPatchesToInMemoryWorkspace = (
       .with({ _tag: "TaggedError" }, (n) => candidateFiles.add(n.file))
       .with({ _tag: "SchemaDef" }, (n) => candidateFiles.add(n.file))
       .with({ _tag: "VitestCase" }, (n) => candidateFiles.add(n.testFile))
-      .with({ _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, () => undefined)
+      .with(
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
+        () => undefined,
+      )
       .exhaustive()
   }
   for (const rel of targetRelationsById.values()) {
@@ -540,7 +573,9 @@ export const projectPatchesToInMemoryWorkspace = (
       const diskContent = readInitialFileContent(repoRoot, norm, existingFiles, hostIo)
       if (diskContent !== undefined) initialContents.set(norm, diskContent)
     }
-    const barrelMatch = norm.match(/^(libs\/(?:[^/]+\/)?(?:contract|service|domain|core|infra)\/src)\//)
+    const barrelMatch = norm.match(
+      /^(libs\/(?:[^/]+\/)?(?:contract|service|domain|core|infra)\/src)\//,
+    )
     if (barrelMatch?.[1] !== undefined) {
       const barrelRel = `${barrelMatch[1]}/index.ts`
       if (!initialContents.has(barrelRel)) {
@@ -587,7 +622,9 @@ export const projectPatchesToInMemoryWorkspace = (
     for (const insEnt of patch.insertedEntityNodes) {
       match(insEnt)
         .with({ _tag: "SchemaDef" }, (n) => projectSchemaDefNode(ctx, n, patch.ruleId, rationale))
-        .with({ _tag: "TaggedError" }, (n) => projectTaggedErrorNode(ctx, n, patch.ruleId, rationale))
+        .with({ _tag: "TaggedError" }, (n) =>
+          projectTaggedErrorNode(ctx, n, patch.ruleId, rationale),
+        )
         .with({ _tag: "ServiceTag" }, (n) => projectServiceTagNode(ctx, n, patch.ruleId, rationale))
         .with(
           { _tag: "EffectFn" },
@@ -596,6 +633,7 @@ export const projectPatchesToInMemoryWorkspace = (
           { _tag: "PatternDoc" },
           { _tag: "AdrDoc" },
           { _tag: "EarsSpec" },
+          { _tag: "EarsRequirement" },
           () => undefined,
         )
         .exhaustive()
@@ -605,10 +643,13 @@ export const projectPatchesToInMemoryWorkspace = (
       match(insEnt)
         .with({ _tag: "EffectFn" }, (n) =>
           projectEffectFnNode(ctx, n, patch.ruleId, rationale, {
-            requireExisting: String(patch.ruleId) === "REP-04a" || String(patch.ruleId) === "REP-04b",
+            requireExisting:
+              String(patch.ruleId) === "REP-04a" || String(patch.ruleId) === "REP-04b",
           }),
         )
-        .with({ _tag: "ServiceLayer" }, (n) => projectServiceLayerNode(ctx, n, patch.ruleId, rationale))
+        .with({ _tag: "ServiceLayer" }, (n) =>
+          projectServiceLayerNode(ctx, n, patch.ruleId, rationale),
+        )
         .with({ _tag: "VitestCase" }, (n) => projectVitestCaseNode(ctx, n, patch.ruleId, rationale))
         .with(
           { _tag: "SchemaDef" },
@@ -617,6 +658,7 @@ export const projectPatchesToInMemoryWorkspace = (
           { _tag: "PatternDoc" },
           { _tag: "AdrDoc" },
           { _tag: "EarsSpec" },
+          { _tag: "EarsRequirement" },
           () => undefined,
         )
         .exhaustive()
@@ -626,16 +668,24 @@ export const projectPatchesToInMemoryWorkspace = (
     for (const edge of [...patch.insertedRoleEdges, ...patch.deletedRoleEdges]) {
       const relEdges = ctx.targetEdgesByRelId.get(edge.relationId) ?? []
       for (const re of relEdges) {
-        match<string>(re.role).with("caller", () => { touchedCallerKeys.add(re.entityKey) }).otherwise(() => {})
+        match<string>(re.role)
+          .with("caller", () => {
+            touchedCallerKeys.add(re.entityKey)
+          })
+          .otherwise(() => {})
       }
     }
     for (const callerKey of touchedCallerKeys) {
       const callerEnt = ctx.targetEntitiesByKey.get(callerKey)
-      if (callerEnt !== undefined && !patch.insertedEntityNodes.some((n) => getNodeKey(n) === callerKey)) {
+      if (
+        callerEnt !== undefined &&
+        !patch.insertedEntityNodes.some((n) => getNodeKey(n) === callerKey)
+      ) {
         match(callerEnt)
           .with({ _tag: "EffectFn" }, (fnEnt) =>
             projectEffectFnNode(ctx, fnEnt, patch.ruleId, rationale, {
-              requireExisting: String(patch.ruleId) === "REP-04a" || String(patch.ruleId) === "REP-04b",
+              requireExisting:
+                String(patch.ruleId) === "REP-04a" || String(patch.ruleId) === "REP-04b",
             }),
           )
           .with(
@@ -647,6 +697,7 @@ export const projectPatchesToInMemoryWorkspace = (
             { _tag: "PatternDoc" },
             { _tag: "AdrDoc" },
             { _tag: "EarsSpec" },
+            { _tag: "EarsRequirement" },
             () => undefined,
           )
           .exhaustive()
@@ -655,7 +706,9 @@ export const projectPatchesToInMemoryWorkspace = (
 
     for (const insRel of patch.insertedRelationNodes) {
       match(insRel)
-        .with({ _tag: "MigrationTuple" }, (migRel) => projectMigrationTupleRelation(ctx, migRel, patch.ruleId, rationale))
+        .with({ _tag: "MigrationTuple" }, (migRel) =>
+          projectMigrationTupleRelation(ctx, migRel, patch.ruleId, rationale),
+        )
         .with(
           { _tag: "EffectSignature" },
           { _tag: "LayerFlow" },
@@ -677,7 +730,10 @@ export const projectPatchesToInMemoryWorkspace = (
     const sf = ctx.project.getSourceFile(`/${relFile}`)
     if (sf === undefined) continue
     const content = sf.getFullText()
-    overlays.push({ targetFile: TargetFilePath.make(relFile), content: TypeScriptSnippet.make(content) })
+    overlays.push({
+      targetFile: TargetFilePath.make(relFile),
+      content: TypeScriptSnippet.make(content),
+    })
     overlayMap[relFile] = content
   }
 

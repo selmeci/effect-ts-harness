@@ -11,10 +11,14 @@ Turn informal feature requests into unambiguous **EARS (Easy Approach to Require
 
 ## Discovery & Interview Sequence
 
-1. **Inspect Existing Graph & Determine Archetype First:** Determine whether the repository/scope is an **application** (business domains in `type:domain`) or a **framework/library** (generic engines/protocols in `type:core`/`type:contract`; business entities like Cart/Inventory belong strictly to `test/fixtures/**` with `scope:fixture`). Call `harness_resolve` and `harness_callers` on related domain symbols (`EffectFn`, `ServiceTag`, `TaggedError`), and call `harness_ontology_why` and `harness_ontology_impact` to trace existing ArchiMate layers (`Motivation -> Business -> Application -> Technology`) and see all governing ADRs and EARS requirements before drafting new requirements. `harness_callers` also returns `GovernsSymbol` (`AdrDoc`) and `SpecifiesSymbol` (`EarsSpec`) edges showing governing ADRs and EARS specs.
+1. **Three-Tier Discovery & Archetype Check First:** Determine whether the repository/scope is an **application** (business domains in `type:domain`) or a **framework/library** (generic engines/protocols in `type:core`/`type:contract`; business entities like Cart/Inventory belong strictly to `test/fixtures/**` with `scope:fixture`). Before drafting or bulk-reading `.md` files:
+   - Call `harness_doc_tree(mode: "catalog")` (omit `scope` when cross-cutting/root ADRs may apply, or pass `scope`) to list all existing `AdrDoc` and `EarsSpec` IDs, statuses, `informed_by` links, and determine the next `SPEC-NNNN` without running `ls` or reading files.
+   - Call `harness_search_knowledge(query)` (optionally filtered by `kinds`, `status`, `limit`) to retrieve related `PatternDoc`, `AdrDoc`, and `EarsRequirement` clauses alongside their hydrated `linkedSymbols`.
+   - When an existing ADR or spec needs deeper detail, call `harness_doc_tree(mode: "tree", path)` for its heading outline and `harness_doc_tree(mode: "section", path, sectionId)` for bounded slices — never bulk-read whole governance documents into context.
+   - Call `harness_resolve` (inspecting its fuzzy `suggestions` on miss) and `harness_callers` on discovered/related domain symbols (`EffectFn`, `ServiceTag`, `TaggedError`), then call `harness_ontology_why` and `harness_ontology_impact` to trace existing ArchiMate layers (`Motivation -> Business -> Application -> Technology`) and `ADR <-informed_by- EarsSpec` chains.
 2. **Apply Specificity Test & Clarify Ambiguities:** Point at the exact words in the user's prompt or graph before drafting requirements. If the source is silent and blocking, ask at most one targeted question per turn (or use `ask_question`). Never smuggle unprompted numbers, fields, or mechanisms into requirements; separate confirmed facts from `## Assumptions` and `## Out of scope`.
 3. **Write EARS Requirements & Run 3-Role Review:** Draft requirements using the canonical template and rules in `references/ears-patterns.md`. Perform the 3-role review (Implementer, `@effect-ears-test-reviewer`, Source Author).
-4. **Persist and Verify Specification:** Save the specification to `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (falling back to root `docs/specs/` only for cross-cutting tasks) with machine-verifiable YAML frontmatter (`id: <scope>:SPEC-NNNN`, `status: proposed`, `archetype: application` | `framework`, `spans`, `services`, `errors`). Verify with `harness gc --strict` and run `harness_ontology_check` (or CLI `harness ontology check --scope=<scope> --strict`) to verify both deterministic cross-layer invariants (`OntologyInvariants.decide`) and `clef-flash` semantic conflict checks (`OntologyConflictV1`).
+4. **Persist and Verify Specification:** Save the specification to `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (falling back to root `docs/specs/` only for cross-cutting tasks) with machine-verifiable YAML frontmatter (`id: <scope>:SPEC-NNNN`, `title`, `status: proposed`, `archetype: application` | `framework`, `date`, `informed_by`, `enforced_by`, `spans`, `services`, `errors`) linking governing `<scope>:ADR-NNNN` IDs discovered in step 1 (use `[]` or omit `informed_by` only if no existing ADR governs; `status: proposed` exempts planned unbuilt symbols from code-existence checks until `accepted`). Verify with `harness gc --strict` and run `harness_ontology_check` (or CLI `harness ontology check --scope=<scope> --strict`) to verify both deterministic cross-layer invariants (`OntologyInvariants.decide`) and hybrid `OntologyConflictV1` semantic conflict pairs (`SemanticConflictPairer.decide`).
 
 ## Output Contract (`libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md`)
 
@@ -27,6 +31,8 @@ title: <Feature Title>
 status: proposed
 archetype: application # or: framework
 date: YYYY-MM-DD
+informed_by:
+  - <scope>:ADR-NNNN
 enforced_by:
   - libs/<scope>/contract/src/index.ts
   - libs/<scope>/service/src/index.ts
@@ -102,17 +108,21 @@ The `Verification` column in the EARS table maps each requirement to its determi
 
 ## Rationalization Table
 
-| Excuse                                                                           | Reality                                                                                                                                                                 |
-| -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| "The user said 'quickly / no time', so I'll invent default assumptions silently" | Silent assumptions cause full rewrites across 5 hexagonal Nx tiers. Put defaults in `## Assumptions` and confirm EARS clauses first.                                    |
-| "I can write a prose Markdown implementation plan instead of EARS"               | Prose plans hide missing `E` (error) and `WHILE` (pure `.decide` over `Schema.TaggedUnion` with `match()...exhaustive()`) channels. EARS maps 1:1 to `Effect<A, E, R>`. |
-| "I don't need `harness_resolve` before asking questions"                         | Asking without checking the graph wastes the user's time on things already defined in `type:contract` or `type:service`.                                                |
-| "I can use 'the system shall' to save time"                                      | Generic subjects fail `EarsSpecLint.decide` (`generic-subject`). Every Effect requirement must name a concrete symbol.                                                  |
-| "I can verify `R = never` or `E = never` with a `UnitTest`"                      | Static type-channel invariants cannot be verified by running a unit test; they must be verified by `GraphCheck` or `AstGate` (`ontology-unverified-requirement`).       |
-| "I can show future error paths in the Mermaid diagram"                           | Any `*Error` in a spec or ADR Mermaid diagram must be declared in frontmatter `errors:` and emitted by an `EffectFn` (`stale-doc-reference` & `dead-tagged-error`).     |
+| Excuse                                                                           | Reality                                                                                                                                                                                                                       |
+| -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| "The user said 'quickly / no time', so I'll invent default assumptions silently" | Silent assumptions cause full rewrites across 5 hexagonal Nx tiers. Put defaults in `## Assumptions` and confirm EARS clauses first.                                                                                          |
+| "I can `ls` / grep and read existing ADRs and specs directly to save tool calls" | Bulk-reading governance docs blows context and misses unlinked decisions. Always start with `harness_doc_tree(mode: "catalog")` + `harness_search_knowledge` and read bounded slices via `harness_doc_tree(mode: "section")`. |
+| "I can skip `informed_by` in frontmatter if I read the ADR"                      | Without `informed_by`, `harness_ontology_why` and `harness_ontology_impact` cannot traverse `ADR <-informed_by- EarsSpec` (`ArchimateOntology`). Always list governing ADRs in `informed_by`.                                 |
+| "I can write a prose Markdown implementation plan instead of EARS"               | Prose plans hide missing `E` (error) and `WHILE` (pure `.decide` over `Schema.TaggedUnion` with `match()...exhaustive()`) channels. EARS maps 1:1 to `Effect<A, E, R>`.                                                       |
+| "I don't need `harness_resolve` before asking questions"                         | Asking without checking the graph wastes the user's time on things already defined in `type:contract` or `type:service` (and `harness_resolve` returns fuzzy `suggestions` on miss).                                          |
+| "I can use 'the system shall' to save time"                                      | Generic subjects fail `EarsSpecLint.decide` (`generic-subject`). Every Effect requirement must name a concrete symbol.                                                                                                        |
+| "I can verify `R = never` or `E = never` with a `UnitTest`"                      | Static type-channel invariants cannot be verified by running a unit test; they must be verified by `GraphCheck` or `AstGate` (`ontology-unverified-requirement`).                                                             |
+| "I can show future error paths in the Mermaid diagram"                           | Any `*Error` in a spec or ADR Mermaid diagram must be declared in frontmatter `errors:` and emitted by an `EffectFn` (`stale-doc-reference` & `dead-tagged-error`).                                                           |
 
 ## Red Flags — STOP
 
+- Reading whole ADR/spec markdown files or running manual `ls`/grep before `harness_doc_tree(mode: "catalog")` and `harness_search_knowledge`
+- Omitting `informed_by` frontmatter when existing ADRs govern the design
 - Starting to edit `.ts` files before EARS clauses (`WHEN`, `IF/THEN`, `WHILE`) are stated and saved to `libs/<scope>/docs/specs/`
 - Using generic subjects like "the system shall" or compound obligations ("and shall")
 - Writing full implementation code inside a `.md` plan file

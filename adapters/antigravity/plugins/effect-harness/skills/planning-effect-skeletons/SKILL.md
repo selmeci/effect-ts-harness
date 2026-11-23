@@ -13,7 +13,10 @@ In this project, the plan IS compilable TypeScript code. Never write long Markdo
 
 ## Step-by-Step Recipe
 
-1. **Route Idioms & Inspect Ontology:** Call `harness_route` for each non-trivial capability (e.g., D1, Durable Object RPC, `HttpApi`, `AtomHttpApi`) and read the matched `agent-patterns/*.md` file. For any existing services or use-cases being modified, call `harness_ontology_why` and `harness_ontology_impact` to inspect cross-layer ArchiMate dependencies and governing ADR/EARS constraints.
+1. **Three-Tier Discovery, Idiom Routing & Bounded Doc Reads:** Before writing `.ts` stubs:
+   - **Tier 3 (`harness_doc_tree` — PageIndex-lite):** Read the triggering EARS spec outline first (`harness_doc_tree({ mode: "tree", path })`), then pull bounded sections (`mode: "section", sectionId`) for `spans`, `services`, `errors`, `informed_by`, and clauses; inspect `harness_doc_tree({ mode: "catalog", scope? })` (e.g. `scope: "harness"`, or omit for all scopes) instead of dumping full 300+ line ADRs.
+   - **Tier 2 (`harness_search_knowledge` & `harness_route` — Hybrid Retrieval):** Call `harness_search_knowledge({ query, kinds?: ("PatternDoc" | "AdrDoc" | "EarsRequirement")[], status?: "accepted" | "proposed" | "superseded" | "deprecated", limit? })` to recall relevant clauses + hydrated `linkedSymbols`. Call `harness_route({ planStep })` (`patternFile`, `candidatePatterns`, `"planning"` block + `clef-flash`) for each non-trivial capability and read long `agent-patterns/*.md` via `tree`/`section`.
+   - **Tier 1 (`harness_resolve` & Ontology — Code Graph):** Call `harness_resolve({ symbolOrSpan })` on uncertain symbols (using fuzzy `suggestions` on miss; fall back to `harness_structural_search` / `harness_gq_query` only if both `suggestions` and `linkedSymbols` miss), then `harness_ontology_why({ symbolOrSpan })` and `harness_ontology_impact({ symbolOrSpan })` to trace `ADR <-informed_by- EarsSpec -> EffectFn` before modifying services/barrels. Use `harness_lsp_diagnostics({ filePath | project })` for fast typechecks on stubs.
 2. **Define Boundary Types (`type:contract` & `type:service` — Enforced by `HarnessTierTopology.decide`):**
    - **Single Canonical `type:*` Tag (`dual-contract-tier-tag`):** Every workspace package declares exactly one `type:*` Nx tag (`type:contract`, `type:service`, `type:core`, `type:domain`, `type:infra`, or `type:app`) — dual `["type:contract", "type:service"]` tags are strictly banned.
    - `WHEN <trigger>` $\rightarrow$ Request/response `Schema.Struct` and `HttpApiEndpoint` / `Rpc` in `type:contract` (`0` workspace dependencies, external `effect` only; `forbidden-contract-dependency`).
@@ -101,6 +104,8 @@ export const deletePhoto = Effect.fn("Sample.deletePhoto")(function* (id: number
 
 | Excuse                                                                             | Reality                                                                                                                                                                              |
 | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| "I'll dump whole 350-line ADRs and specs via read_file before checking sections"   | Full-file reads waste scarce context window. Use `harness_search_knowledge` for semantic recall + hydrated symbols and `harness_doc_tree({ mode: "tree"                              | "section", path, sectionId })`to read only`Decision Outcome` / enforcement sections. |
+| "My symbol name missed in harness_resolve, so I'll grep the whole workspace"       | `harness_resolve({ symbolOrSpan })` already returns top fuzzy `suggestions` on miss, and `harness_search_knowledge` returns `linkedSymbols`. Inspect those first.                    |
 | "I'll write the plan in a `.md` file with code blocks first"                       | Uncompiled Markdown code drifts from `effect@4.0.0` types and burns 2x tokens. Write `.ts` skeletons with `stub<A, E, R>()` instead.                                                 |
 | "I'll use `Effect.die('TODO')` instead of `stub<A, E, R>()`"                       | `Effect.die` erases `A`, `E`, and `R` to `never`, blinding `effect-graph:check`. Always use `stub<A, E, R>(...args)`.                                                                |
 | "I'll put a default `Layer.succeed` in `type:service` or use dual `type:*` tags"   | `HarnessTierTopology.decide` rejects `Layer.*` or `node:*` in `type:service` (`impure-service-tier-import`) and rejects multiple `type:*` tags (`dual-contract-tier-tag`).           |
@@ -113,6 +118,7 @@ export const deletePhoto = Effect.fn("Sample.deletePhoto")(function* (id: number
 
 ## Red Flags — STOP
 
+- Bulk-reading full 300+ line ADRs/specs or grepping blindly before calling `harness_search_knowledge`, `harness_doc_tree` (`catalog`/`tree`/`section`), `harness_route`, and `harness_resolve` (with fuzzy `suggestions`)
 - Creating a `.md` plan with multi-line TypeScript code blocks instead of `.ts` `stub<A, E, R>()` skeletons
 - Writing production `Effect.gen` bodies before `harness plan-check` exits `0`
 - Adding `RequiresService` dependencies to a `*.decide` function (`impure-decider`)

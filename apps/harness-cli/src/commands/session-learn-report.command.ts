@@ -76,7 +76,10 @@ export const handleDoctorOrSession = (
       (suppressLiveWrites || ensureHarnessDirSafe(harnessDirOpt, nodeSyncHostIo))
 
     const isolatedExternal = isIsolatedExternalWorkspace(repoRoot)
-    let omnigraphInitialized = isolatedExternal ? true : yield* ensureLocalOmnigraphReady(repoRoot)
+    const skipOmnigraphReady = isolatedExternal || options?.skipBackgroundDaemons === true
+    let omnigraphInitialized = skipOmnigraphReady
+      ? true
+      : yield* ensureLocalOmnigraphReady(repoRoot)
     let reconcileError: string | undefined
 
     const requireLiveOllama = shouldRequireLiveOllama(options, nodeSyncHostIo)

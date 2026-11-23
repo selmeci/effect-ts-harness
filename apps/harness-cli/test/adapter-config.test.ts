@@ -567,7 +567,7 @@ describe("Antigravity adapter & plugin configuration", () => {
         true,
       )
     }
-    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(17)
+    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(19)
 
     const skillExpectations: ReadonlyArray<{
       readonly relPath: string
@@ -942,7 +942,7 @@ describe("Antigravity adapter & plugin configuration", () => {
     expect(rootReadme).not.toContain("{ writeReport? }")
 
     for (const readme of [agyReadme, claudeReadme]) {
-      expect(readme).toContain("exposing 17 tools")
+      expect(readme).toContain("exposing 19 tools")
       for (const toolName of CANONICAL_MCP_TOOL_NAMES) {
         expect(readme).toContain(toolName)
       }
@@ -1362,5 +1362,36 @@ describe("Antigravity adapter & plugin configuration", () => {
       },
     )
     expect(hookLoadOut).toContain("INFRA_HOOK_OK")
+  })
+
+  it("bans Antigravity-only tool names including read_file across all adapters/claude-code/skills markdown files", () => {
+    const claudeSkillsRoot = resolve(repoRoot, "adapters/claude-code/skills")
+    const collectMarkdownFiles = (dir: string): Array<string> => {
+      const files: Array<string> = []
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const fullPath = join(dir, entry.name)
+        if (entry.isDirectory()) {
+          files.push(...collectMarkdownFiles(fullPath))
+        } else if (entry.name.endsWith(".md")) {
+          files.push(fullPath)
+        }
+      }
+      return files
+    }
+    const markdownFiles = collectMarkdownFiles(claudeSkillsRoot)
+    expect(markdownFiles.length).toBeGreaterThan(0)
+    for (const filePath of markdownFiles) {
+      const content = readFileSync(filePath, "utf8")
+      for (const bannedTool of [
+        "read_file",
+        "write_to_file",
+        "replace_file_content",
+        "multi_replace_file_content",
+        "grep_search",
+        "invoke_subagent",
+      ]) {
+        expect(content, `${filePath} contains ${bannedTool}`).not.toContain(bannedTool)
+      }
+    }
   })
 })

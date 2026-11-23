@@ -391,6 +391,7 @@ export const runDomainMutationSuite = (
     HARNESS_ACTIVE_BACKUP_PATH: resolvedBackupPath,
   }
   delete baseSubprocessEnv["HARNESS_ACTIVE_MUTANT_ID"]
+  delete baseSubprocessEnv["HARNESS_STATE_DIR"]
 
   const globalBypassDiffFilter =
     options?.includeAllLines === true || (isExplicitTarget && options?.diffOnly !== true)

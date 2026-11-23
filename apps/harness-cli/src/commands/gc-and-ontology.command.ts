@@ -30,6 +30,7 @@ import {
   resolveDecisionModelLayer,
 } from "./daemon-and-omnigraph.service.js"
 import { runOmnigraphMaintenance } from "./done-omnigraph-helpers.js"
+import { extractSemanticCandidateConflictPairs } from "./omnigraph-embedding-sync-helper.js"
 
 export const handleGc = (
   argv: ReadonlyArray<string>,
@@ -159,7 +160,17 @@ export const handleOntology = (
             graph,
             governanceDocs: docs,
           })
-          const pairs = yield* extractOntologyConflictPairs(docs, scope)
+          const deterministicPairs = yield* extractOntologyConflictPairs(docs, scope)
+          const semanticCandidatePairs = deterministic
+            ? []
+            : yield* extractSemanticCandidateConflictPairs(
+                repoRoot,
+                graph,
+                docs,
+                deterministicPairs,
+                options,
+              )
+          const pairs = [...deterministicPairs, ...semanticCandidatePairs]
           const semanticReport: OntologyConflictEvaluationReport = deterministic
             ? { conflicts: [], degraded: false }
             : yield* evaluateOntologyConflictsWithStatus(pairs).pipe(

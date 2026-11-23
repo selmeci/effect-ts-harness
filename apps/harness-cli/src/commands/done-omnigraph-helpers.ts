@@ -32,10 +32,8 @@ import {
   recordTelemetry,
   resolveClusterRepoRoot,
 } from "./daemon-and-omnigraph.service.js"
-import {
-  runOmnigraphMaintenance,
-  runVerifyOmnigraphLintCheck,
-} from "./omnigraph-lint-gate.js"
+import { computeSyncEmbeddingsForGraph } from "./omnigraph-embedding-sync-helper.js"
+import { runOmnigraphMaintenance, runVerifyOmnigraphLintCheck } from "./omnigraph-lint-gate.js"
 import {
   countImplEffectFns,
   formatDiffErrorMessage,
@@ -127,7 +125,9 @@ export const runPreMergeOmnigraphBranchVerify = (
           )
         }
         return Effect.sync(() => {
-          process.stderr.write(`[harness:done] Omnigraph branch diff missing merge base: ${formatDiffErrorMessage(err)}\n`)
+          process.stderr.write(
+            `[harness:done] Omnigraph branch diff missing merge base: ${formatDiffErrorMessage(err)}\n`,
+          )
           return { _tag: "MissingMergeBase" }
         })
       }),
@@ -357,11 +357,13 @@ export const syncVerifyImplToOmnigraph = (
     }
     const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
     const syncLayer = makeOmnigraphSyncLayer(nodeSyncHostIo)
+    const embeddingsByNodeKey = yield* computeSyncEmbeddingsForGraph(repoRoot, graph, options)
     const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
       repoRoot: clusterRepoRoot,
       branch: taskBranches.implBranch,
       from: taskBranches.mainBranch,
       snapshotPath,
+      embeddingsByNodeKey,
     }).pipe(
       Effect.provide(syncLayer),
       Effect.catchCause((cause) => {
@@ -383,11 +385,15 @@ export const syncVerifyImplToOmnigraph = (
         process.env,
         commitId !== undefined ? { omnigraphCommitId: commitId } : undefined,
       )
-      if ((headState.headSha !== null || headState.gitBranch !== null || commitId !== undefined) && savedMeta === null) {
+      if (
+        (headState.headSha !== null || headState.gitBranch !== null || commitId !== undefined) &&
+        savedMeta === null
+      ) {
         return {
           exitCode: 1,
           stdout: "",
-          stderr: "Verification failed: could not persist graph head metadata (.harness/graph-head.json)",
+          stderr:
+            "Verification failed: could not persist graph head metadata (.harness/graph-head.json)",
         }
       }
       const blobFail = yield* uploadAndVerifySpanTraceBlob(
@@ -516,12 +522,14 @@ export const syncOmnigraphOnDone = (
         implGraph,
         syncLayer,
       )
+      const doneEmbeddings = yield* computeSyncEmbeddingsForGraph(repoRoot, implGraph, options)
       const reloadRes = yield* syncToOmnigraphAndSnapshot(implGraph, {
         repoRoot: clusterRepoRoot,
         branch: taskBranches.implBranch,
         from: taskBranches.mainBranch,
         mode: "overwrite",
         snapshotPath,
+        embeddingsByNodeKey: doneEmbeddings,
       }).pipe(
         Effect.provide(syncLayer),
         Effect.catchCause((cause) => {
