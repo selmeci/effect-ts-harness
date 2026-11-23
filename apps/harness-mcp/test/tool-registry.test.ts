@@ -44,6 +44,8 @@ describe("HarnessMcp.dispatchTool (SPEC-0011 §4)", () => {
         const registry = yield* McpToolRegistry.pipe(Effect.provide(liveLayer))
         const tools = yield* registry.listTools
         const registeredNames = tools.map((t) => t.name)
+        expect(registeredNames).toHaveLength(18)
+        expect(registeredNames).toContain("harness_workflow_plan")
         expect(registeredNames).toEqual([...CANONICAL_MCP_TOOL_NAMES])
       }),
   )
@@ -98,92 +100,85 @@ describe("HarnessMcp.dispatchTool (SPEC-0011 §4)", () => {
       }),
   )
 
-  it.effect(
-    "REQ-4.3: executes custom tool handler registered via makeMcpToolRegistryLayer",
-    () =>
-      Effect.gen(function* () {
-        const testId = "HarnessMcp.dispatchTool::custom-layer"
-        const emptyFnIndex = new Map<string, IndexedEffectFn>()
+  it.effect("REQ-4.3: executes custom tool handler registered via makeMcpToolRegistryLayer", () =>
+    Effect.gen(function* () {
+      const testId = "HarnessMcp.dispatchTool::custom-layer"
+      const emptyFnIndex = new Map<string, IndexedEffectFn>()
 
-        const customDescriptor: McpToolPluginDescriptor = {
-          name: McpToolName.make("custom_tool"),
-          description: "Custom test tool",
-          inputSchema: Schema.Record(Schema.String, Schema.Unknown),
-          execute: (args) => Effect.succeed({ handled: true, payload: args }),
-        }
+      const customDescriptor: McpToolPluginDescriptor = {
+        name: McpToolName.make("custom_tool"),
+        description: "Custom test tool",
+        inputSchema: Schema.Record(Schema.String, Schema.Unknown),
+        execute: (args) => Effect.succeed({ handled: true, payload: args }),
+      }
 
-        const customLayer = makeMcpToolRegistryLayer([customDescriptor])
+      const customLayer = makeMcpToolRegistryLayer([customDescriptor])
 
-        const { result, spans } = yield* runWithTestTracer(
-          testId,
-          dispatchMcpTool({
-            toolName: "custom_tool",
-            args: { query: "test" },
-          }).pipe(Effect.provide(customLayer)),
-          emptyFnIndex,
-        )
+      const { result, spans } = yield* runWithTestTracer(
+        testId,
+        dispatchMcpTool({
+          toolName: "custom_tool",
+          args: { query: "test" },
+        }).pipe(Effect.provide(customLayer)),
+        emptyFnIndex,
+      )
 
-        expect(result).toEqual({ handled: true, payload: { query: "test" } })
+      expect(result).toEqual({ handled: true, payload: { query: "test" } })
 
-        const dispatchSpan = spans.find((s) => s.name === "HarnessMcp.dispatchTool")
-        expect(dispatchSpan?.name).toBe("HarnessMcp.dispatchTool")
-        expect(dispatchSpan?.exitTag).toBe("Success")
+      const dispatchSpan = spans.find((s) => s.name === "HarnessMcp.dispatchTool")
+      expect(dispatchSpan?.name).toBe("HarnessMcp.dispatchTool")
+      expect(dispatchSpan?.exitTag).toBe("Success")
 
-        const violations = yield* decideSpanBudgets({ spans: toSpanSamples(spans) })
-        expect(violations).toHaveLength(0)
-      }),
+      const violations = yield* decideSpanBudgets({ spans: toSpanSamples(spans) })
+      expect(violations).toHaveLength(0)
+    }),
   )
 
-  it.effect(
-    "REQ-4.4: fails with UnknownToolError when given unregistered tool name",
-    () =>
-      Effect.gen(function* () {
-        const testId = "HarnessMcp.dispatchTool::unregistered"
-        const emptyFnIndex = new Map<string, IndexedEffectFn>()
+  it.effect("REQ-4.4: fails with UnknownToolError when given unregistered tool name", () =>
+    Effect.gen(function* () {
+      const testId = "HarnessMcp.dispatchTool::unregistered"
+      const emptyFnIndex = new Map<string, IndexedEffectFn>()
 
-        const { result: exit, spans } = yield* runWithTestTracer(
-          testId,
-          dispatchMcpTool({
-            toolName: "unknown_nonexistent_tool",
-            args: {},
-          }).pipe(
-            Effect.provide(McpToolRegistryLive),
-            Effect.exit,
-          ),
-          emptyFnIndex,
-        )
+      const { result: exit, spans } = yield* runWithTestTracer(
+        testId,
+        dispatchMcpTool({
+          toolName: "unknown_nonexistent_tool",
+          args: {},
+        }).pipe(Effect.provide(McpToolRegistryLive), Effect.exit),
+        emptyFnIndex,
+      )
 
-        const dispatchSpan = spans.find((s) => s.name === "HarnessMcp.dispatchTool")
-        expect(dispatchSpan?.name).toBe("HarnessMcp.dispatchTool")
-        expect(dispatchSpan?.exitTag).toBe("Failure")
+      const dispatchSpan = spans.find((s) => s.name === "HarnessMcp.dispatchTool")
+      expect(dispatchSpan?.name).toBe("HarnessMcp.dispatchTool")
+      expect(dispatchSpan?.exitTag).toBe("Failure")
 
-        const violations = yield* decideSpanBudgets({
-          spans: toSpanSamples(spans),
-          maxRepeatedChildCalls: 3,
+      const violations = yield* decideSpanBudgets({
+        spans: toSpanSamples(spans),
+        maxRepeatedChildCalls: 3,
+      })
+      expect(violations).toHaveLength(0)
+
+      match(exit)
+        .with({ _tag: "Failure" }, ({ cause }) => {
+          const errOpt = Cause.findErrorOption(cause)
+          match(errOpt)
+            .with({ _tag: "Some" }, ({ value }) => {
+              expect(value).toBeInstanceOf(UnknownToolError)
+              expect(value).toMatchObject({
+                _tag: "UnknownToolError",
+                toolName: "unknown_nonexistent_tool",
+              })
+            })
+            .with({ _tag: "None" }, () => {
+              expect.fail("Expected UnknownToolError in failure cause")
+            })
+            .exhaustive()
         })
-        expect(violations).toHaveLength(0)
-
-        match(exit)
-          .with({ _tag: "Failure" }, ({ cause }) => {
-            const errOpt = Cause.findErrorOption(cause)
-            match(errOpt)
-              .with({ _tag: "Some" }, ({ value }) => {
-                expect(value).toBeInstanceOf(UnknownToolError)
-                expect(value).toMatchObject({
-                  _tag: "UnknownToolError",
-                  toolName: "unknown_nonexistent_tool",
-                })
-              })
-              .with({ _tag: "None" }, () => {
-                expect.fail("Expected UnknownToolError in failure cause")
-              })
-              .exhaustive()
-          })
-          .with({ _tag: "Success" }, () => {
-            expect.fail("Expected dispatchMcpTool to fail for unregistered tool")
-          })
-          .exhaustive()
-      }),
+        .with({ _tag: "Success" }, () => {
+          expect.fail("Expected dispatchMcpTool to fail for unregistered tool")
+        })
+        .exhaustive()
+    }),
   )
 
   it.effect(

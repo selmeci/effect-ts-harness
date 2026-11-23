@@ -34,6 +34,10 @@ import {
   SpanTraceReadError,
 } from "../src/commands/verify-delta-gates.js"
 import {
+  isReadOnlyStopTurn,
+  isSubagentStopContext,
+} from "../src/commands/stop-hook-and-transcript.js"
+import {
   buildOmnigraphClusterKillArgs,
   cleanSubprocessError,
   COMMANDS,
@@ -66,6 +70,7 @@ describe("harness cli baseline", () => {
       "check-migrations",
       "check-event-schemas",
       "scenario",
+      "workflow",
       "help",
     ])
   })
@@ -118,6 +123,7 @@ describe("harness-cli v2 commands", () => {
       const deny = await runCli(["guard", "rm -rf /tmp/outside"])
       expect(deny.exitCode).toBe(2)
       expect(deny.stderr).toContain("Blocked by harness guard")
+      expect(deny.telemetryDetail).toContain("static;verdict=deny;reason=")
 
       const allow = await runCli(["guard", "pnpm test"])
       expect(allow.exitCode).toBe(0)
@@ -196,6 +202,9 @@ describe("harness-cli v2 commands", () => {
         decisionLayer: failingLayer,
       })
       expect(fallbackAsk.exitCode).toBe(0)
+      expect(deny.telemetryDetail).toContain("escalated;verdict=deny;reason=")
+      expect(allow.telemetryDetail).toBe("escalated;verdict=allow")
+      expect(fallbackAsk.telemetryDetail).toContain("escalated;verdict=ask;reason=")
       expect(JSON.parse(fallbackAsk.stdout)).toMatchObject({
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
@@ -697,6 +706,42 @@ enforced_by:
         const payload = JSON.parse(res.stdout)
         expect(payload.decision).toBe("continue")
         expect(payload.reason).toContain("verify")
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it("SPEC-0024 REQ-1.3/1.4: does not misclassify Antigravity worktrees or explicit CLI done as subagents, and reads Path arg in transcripts", async () => {
+      expect(isSubagentStopContext("/home/roan/.gemini/antigravity/worktrees/repo/feat")).toBe(
+        false,
+      )
+      expect(
+        isSubagentStopContext("/repo", {
+          workspacePaths: ["/home/roan/.gemini/antigravity/worktrees/repo/feat"],
+        }),
+      ).toBe(false)
+
+      const dir = mkdtempSync(join(tmpdir(), "harness-cli-subagent-test-explicit-"))
+      try {
+        const cliSubagentDir = join(dir, "subagent-explicit-cli")
+        mkdirSync(cliSubagentDir, { recursive: true })
+        const explicitRes = await runCli(["done"], { repoRoot: cliSubagentDir })
+        expect(explicitRes.telemetryDetail).not.toBe("subagent=true")
+        expect(JSON.parse(explicitRes.stdout).decision).toBe("block")
+
+        const brainTranscript = join(dir, "brain-only.jsonl")
+        writeFileSync(
+          brainTranscript,
+          `${JSON.stringify({ step_index: 0, source: "USER_EXPLICIT", content: "plan" })}\n${JSON.stringify({ step_index: 1, source: "PLANNER_RESPONSE", tool_calls: [{ name: "write_file", args: { Path: "/home/user/.gemini/antigravity/brain/conv-1/task.md" } }] })}\n`,
+        )
+        expect(isReadOnlyStopTurn({ transcriptPath: brainTranscript })).toBe(true)
+
+        const codeTranscript = join(dir, "code-edit.jsonl")
+        writeFileSync(
+          codeTranscript,
+          `${JSON.stringify({ step_index: 0, source: "USER_EXPLICIT", content: "edit" })}\n${JSON.stringify({ step_index: 1, source: "PLANNER_RESPONSE", tool_calls: [{ name: "edit_file", args: { Path: "libs/sample/src/index.ts" } }] })}\n`,
+        )
+        expect(isReadOnlyStopTurn({ transcriptPath: codeTranscript })).toBe(false)
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }

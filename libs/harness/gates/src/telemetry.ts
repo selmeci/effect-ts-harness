@@ -323,6 +323,25 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
   const guardInterventions = input.events.filter(
     (e) => e.category === "guard" && (e.outcome === "deny" || e.outcome === "ask"),
   ).length
+  const otherGateFailures = input.events.filter(
+    (e) => e.category === "gate" && e.toolName !== "verify" && e.outcome === "fail",
+  ).length
+  const guardTimeouts = input.events.filter(
+    (e) =>
+      e.category === "guard" &&
+      ((e.detail?.includes("timeout") ?? false) || (e.outcome === "ask" && e.durationMs >= 1450)),
+  ).length
+  const sessionHookEvents = input.events.filter(
+    (e) => e.surface === "hook" && e.toolName === "session",
+  )
+  const sessionHookFails = sessionHookEvents.filter((e) => e.outcome === "fail").length
+  const sessionCacheMisses = sessionHookEvents.filter((e) => e.detail === "cache=miss").length
+  const ingestHookCalls = input.events.filter(
+    (e) => e.surface === "hook" && e.toolName === "ingest",
+  ).length
+  const hasMutatingGates = input.events.some(
+    (e) => e.toolName === "plan-check" || e.toolName === "verify" || e.toolName === "mutate",
+  )
 
   const isActionableFriction = (f: FrictionEvent): boolean =>
     match(f)
@@ -339,6 +358,9 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
   }
   healthScore -= Math.min(20, prematureDoneAttempts * 10)
   healthScore -= Math.min(20, frictionCount * 5)
+  healthScore -= Math.min(15, otherGateFailures * 5)
+  healthScore -= Math.min(15, guardTimeouts * 5)
+  healthScore -= Math.min(10, sessionHookFails * 5)
   if (graphDiscoveryCalls > 0 && firstPassVerify === true) {
     healthScore += 5
   }
@@ -376,6 +398,31 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
   if (bySurface.mcp === 0 && nonHookCalls >= 3) {
     recommendations.push(
       "Zero harness-mcp tool calls recorded (bySurface.mcp = 0). Prefer in-process MCP tools (harness_route, harness_lsp_diagnostics, harness_ontology_check, harness_resolve) over shell CLI subcommands.",
+    )
+  }
+  if (otherGateFailures > 0) {
+    recommendations.push(
+      "Investigate failing non-verify gates (plan-check, gc, mutate) before running full verification.",
+    )
+  }
+  if (guardTimeouts > 0) {
+    recommendations.push(
+      "Guard escalated to DecisionModel and timed out; allowlist safe command patterns or check local Ollama (clef-flash) latency.",
+    )
+  }
+  if (sessionHookFails > 0) {
+    recommendations.push(
+      "Hook 'session' failed during this session; inspect .harness/telemetry-log.jsonl detail or run 'pnpm harness doctor'.",
+    )
+  }
+  if (sessionHookEvents.length >= 10 && sessionCacheMisses * 4 > sessionHookEvents.length) {
+    recommendations.push(
+      "High PreInvocation 'session' hook cache miss rate (>25%); check workspace readiness and session-preinvocation-cache.json invalidation.",
+    )
+  }
+  if (bySurface.hook > 0 && hasMutatingGates && ingestHookCalls === 0) {
+    recommendations.push(
+      "Zero PostToolUse 'ingest' hook calls recorded during a mutating session; verify adapter hooks.json file-edit matchers cover active write/edit tools.",
     )
   }
 

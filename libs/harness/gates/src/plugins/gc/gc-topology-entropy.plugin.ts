@@ -23,7 +23,7 @@ import {
   type GraphEntropyInput,
   type GraphReachabilityContext,
   IGNORED_ERRORS,
-  IGNORED_SERVICES,
+  isIgnoredServiceTag,
   readdirOrReport,
   readTextOrReport,
 } from "./gc-helpers.js"
@@ -36,12 +36,13 @@ export const checkUnusedContractExports = (
   const libsDir = join(repoRoot, "libs")
   if (!hostIo.existsSync(libsDir)) return []
   const findings: Array<GcFinding> = []
-  const scopes = targetScope !== undefined
-    ? [targetScope]
-    : (readdirOrReport(libsDir, hostIo, repoRoot, findings) ?? [])
-        .filter((e) => e.isDirectory)
-        .map((e) => e.name)
-        .sort((a, b) => a.localeCompare(b))
+  const scopes =
+    targetScope !== undefined
+      ? [targetScope]
+      : (readdirOrReport(libsDir, hostIo, repoRoot, findings) ?? [])
+          .filter((e) => e.isDirectory)
+          .map((e) => e.name)
+          .sort((a, b) => a.localeCompare(b))
 
   for (const scope of scopes) {
     const scopeDir = join(libsDir, scope)
@@ -76,7 +77,8 @@ export const checkUnusedContractExports = (
     const contractFiles = collectWorkspaceTsFiles(contractSrcDir, hostIo, findings, repoRoot)
     const siblingFiles: Array<string> = []
     for (const sibDir of existingSiblingDirs) {
-      if (sibDir.endsWith("/scripts")) siblingFiles.push(...collectWorkspaceAllFiles(sibDir, hostIo, findings, repoRoot))
+      if (sibDir.endsWith("/scripts"))
+        siblingFiles.push(...collectWorkspaceAllFiles(sibDir, hostIo, findings, repoRoot))
       else siblingFiles.push(...collectWorkspaceTsFiles(sibDir, hostIo, findings, repoRoot))
     }
 
@@ -88,7 +90,12 @@ export const checkUnusedContractExports = (
 
     const combinedSiblingContent = siblingFiles
       .map((f) => readTextOrReport(f, hostIo, repoRoot, findings) ?? "")
-      .map((text) => stripCommentsAndStrings(text).replace(/export\s+(?:type\s+)?\{[^}]*\}\s+from\s+["'][^"']*["']/g, ""))
+      .map((text) =>
+        stripCommentsAndStrings(text).replace(
+          /export\s+(?:type\s+)?\{[^}]*\}\s+from\s+["'][^"']*["']/g,
+          "",
+        ),
+      )
       .join("\n")
 
     const nonTestSiblingContent = siblingFiles
@@ -115,7 +122,10 @@ export const checkUnusedContractExports = (
           .replace(new RegExp(`export\\s+class\\s+${escapedSym}\\b[\\s\\S]*?\\{`, "g"), "{")
           .replace(new RegExp(`export\\s+(?:const|function)\\s+${escapedSym}\\b[^\\n]*`, "g"), "")
           .replace(new RegExp(`export\\s+type\\s+${escapedSym}\\s*=[\\s\\S]*?(?:\\n|$)`, "g"), "")
-        if (!symbolRefRegex.test(combinedSiblingContent) && !symbolRefRegex.test(internalStripped)) {
+        if (
+          !symbolRefRegex.test(combinedSiblingContent) &&
+          !symbolRefRegex.test(internalStripped)
+        ) {
           findings.push({
             kind: "unused-contract-export",
             nodeId: `${scope}/contract:${symbolName}`,
@@ -127,12 +137,15 @@ export const checkUnusedContractExports = (
       }
 
       if (!hasActiveStubs && nonTestSiblingContent.trim().length > 0) {
-        const taggedErrorRegex = /export\s+class\s+([A-Za-z_$][\w$]*)\s+extends\s+Schema\.TaggedError/g
+        const taggedErrorRegex =
+          /export\s+class\s+([A-Za-z_$][\w$]*)\s+extends\s+Schema\.TaggedError/g
         let errMatch: RegExpExecArray | null
         while ((errMatch = taggedErrorRegex.exec(strippedContractContent)) !== null) {
           const errName = errMatch[1]!
           const escapedErr = escapeRegex(errName)
-          const constructRegex = new RegExp(`(?:\\bnew\\s+${escapedErr}\\s*\\(|\\b${escapedErr}\\.make\\s*\\()`)
+          const constructRegex = new RegExp(
+            `(?:\\bnew\\s+${escapedErr}\\s*\\(|\\b${escapedErr}\\.make\\s*\\()`,
+          )
           if (!constructRegex.test(nonTestSiblingContent)) {
             findings.push({
               kind: "dead-tagged-error",
@@ -193,7 +206,10 @@ const isLiteralLikeExpr = (expr: ts.Expression): boolean => {
 const astPrinter = ts.createPrinter({ removeComments: true })
 
 const normalizeTargetExpr = (expr: ts.Expression, sourceFile: ts.SourceFile): string =>
-  astPrinter.printNode(ts.EmitHint.Expression, unwrapParens(expr), sourceFile).replace(/\s+/g, " ").trim()
+  astPrinter
+    .printNode(ts.EmitHint.Expression, unwrapParens(expr), sourceFile)
+    .replace(/\s+/g, " ")
+    .trim()
 
 const extractEqualityTargets = (
   expr: ts.Expression,
@@ -249,13 +265,16 @@ export const checkChainedEqualityTernaries = (
     if (content === undefined) continue
 
     const scriptKind = relPath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS
-    const sourceFile = ts.createSourceFile(relPath, content, ts.ScriptTarget.Latest, true, scriptKind)
+    const sourceFile = ts.createSourceFile(
+      relPath,
+      content,
+      ts.ScriptTarget.Latest,
+      true,
+      scriptKind,
+    )
     const reported = new Set<ts.ConditionalExpression>()
 
-    const markMatchingArmChain = (
-      arm: ts.Expression,
-      sharedTarget: string,
-    ): void => {
+    const markMatchingArmChain = (arm: ts.Expression, sharedTarget: string): void => {
       const unwrapped = unwrapParens(arm)
       if (!ts.isConditionalExpression(unwrapped)) return
       const armTargets = extractEqualityTargets(unwrapped.condition, sourceFile)
@@ -283,7 +302,8 @@ export const checkChainedEqualityTernaries = (
               (trueTargets !== undefined && trueTargets.includes(t)),
           )
           if (sharedTarget !== undefined) {
-            const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1
+            const line =
+              sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1
             findings.push({
               kind: "chained-equality-ternary",
               nodeId: `${relPath}:${line}:${sharedTarget}`,
@@ -317,10 +337,15 @@ export const evaluateTopologyEntropyPlugin = (
   for (const [idx, node] of Graph.nodes(g)) {
     match(node)
       .with({ _tag: "ServiceTag" }, (n) => {
-        if (IGNORED_SERVICES.has(n.tagId) || IGNORED_SERVICES.has(n.name)) return
-        const totalConsumers = (ctx.incomingRequires.get(idx) ?? 0) + (ctx.incomingLayerRequires.get(idx) ?? 0)
+        if (isIgnoredServiceTag(n.tagId, n.name)) return
+        const totalConsumers =
+          (ctx.incomingRequires.get(idx) ?? 0) + (ctx.incomingLayerRequires.get(idx) ?? 0)
         if (totalConsumers === 0) {
-          const location = n.file ? (typeof n.line === "number" ? `${n.file}:${n.line}` : n.file) : undefined
+          const location = n.file
+            ? typeof n.line === "number"
+              ? `${n.file}:${n.line}`
+              : n.file
+            : undefined
           findings.push({
             kind: "unused-service",
             nodeId: n.tagId,
@@ -353,10 +378,14 @@ export const evaluateTopologyEntropyPlugin = (
   for (const [idx, node] of Graph.nodes(g)) {
     match(node)
       .with({ _tag: "ServiceTag" }, (n) => {
-        if (IGNORED_SERVICES.has(n.tagId) || IGNORED_SERVICES.has(n.name)) return
+        if (isIgnoredServiceTag(n.tagId, n.name)) return
         const providers = ctx.incomingProvides.get(idx) ?? 0
         if (providers === 0) {
-          const location = n.file ? (typeof n.line === "number" ? `${n.file}:${n.line}` : n.file) : undefined
+          const location = n.file
+            ? typeof n.line === "number"
+              ? `${n.file}:${n.line}`
+              : n.file
+            : undefined
           findings.push({
             kind: "unprovided-service",
             nodeId: n.tagId,
@@ -392,7 +421,11 @@ export const evaluateTopologyEntropyPlugin = (
         if (IGNORED_ERRORS.has(n.errorTag)) return
         const failsWithCount = ctx.incomingFailsWith.get(idx) ?? 0
         if (failsWithCount === 0) {
-          const location = n.file ? (typeof n.line === "number" ? `${n.file}:${n.line}` : n.file) : undefined
+          const location = n.file
+            ? typeof n.line === "number"
+              ? `${n.file}:${n.line}`
+              : n.file
+            : undefined
           findings.push({
             kind: "dead-tagged-error",
             nodeId: n.errorTag,

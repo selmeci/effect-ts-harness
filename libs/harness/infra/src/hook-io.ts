@@ -5,6 +5,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   statSync,
@@ -14,38 +15,20 @@ import * as Option from "effect/Option"
 import * as Result from "effect/Result"
 import * as Schema from "effect/Schema"
 import { match } from "ts-pattern"
+import {
+  type RealPathWithAncestorWalkResult,
+  resolveRealPathWithAncestorWalkLite,
+} from "./hook-io-realpath.js"
 
 const GIT_FINGERPRINT_MAX_BUFFER_BYTES = 16 * 1024 * 1024
 
-const GIT_IGNORED_LS_FILES_ARGS: ReadonlyArray<string> = [
+const GIT_FINGERPRINT_STATUS_ARGS: ReadonlyArray<string> = [
   "--no-optional-locks",
-  "ls-files",
-  "--others",
-  "--ignored",
-  "--exclude-standard",
+  "status",
+  "--porcelain=v1",
   "-z",
-  "--",
-  ".",
-  ":(exclude,top).nx",
-  ":(exclude,top).harness",
-  ":(exclude,top)repos",
-  ":(exclude,top).worktrees",
-  ":(exclude,top).git",
-  ":(exclude,top).superpowers",
-  ":(exclude,top).alchemy",
-  ":(exclude,top).remember",
-  ":(exclude,top).idea",
-  ":(exclude,top).vscode",
-  ":(exclude,top)node_modules",
-  ":(exclude,top)dist",
-  ":(exclude,top)coverage",
-  ":(exclude,top).vite",
-  ":(exclude,glob)apps/*/node_modules/**",
-  ":(exclude,glob)libs/*/node_modules/**",
-  ":(exclude,glob)libs/*/*/node_modules/**",
-  ":(exclude,glob)packages/*/node_modules/**",
-  ":(exclude,glob)adapters/*/node_modules/**",
-  ":(exclude,glob)tools/*/node_modules/**",
+  "--untracked-files=all",
+  "--ignored=matching",
 ]
 
 const GraphHeadMetaLiteSchema = Schema.Struct({
@@ -115,6 +98,7 @@ export interface HookStdinReadOptions {
 }
 
 const PRE_INVOCATION_CACHE_TTL_MS = 300_000
+const DEGRADED_PRE_INVOCATION_CACHE_TTL_MS = 30_000
 
 const PreInvocationCacheLiteSchema = Schema.Struct({
   version: Schema.Literal("session-preinvocation-v1"),
@@ -122,6 +106,7 @@ const PreInvocationCacheLiteSchema = Schema.Struct({
   recordedAtMs: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
   ollamaReady: Schema.Boolean,
   ollamaProbed: Schema.Boolean,
+  degraded: Schema.optional(Schema.Boolean),
   injectSteps: Schema.Array(Schema.String),
   stderr: Schema.String,
 })
@@ -160,9 +145,12 @@ const shouldSuppressLiveRepoTestSideEffectsLite = (
   cliRepoRoot: string,
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): boolean =>
-  (env["HARNESS_DISABLE_LIVE_TELEMETRY"] === "1" || env["HARNESS_TEST_ISOLATION"] === "1") &&
+  (env["HARNESS_DISABLE_LIVE_TELEMETRY"] === "1" ||
+    env["HARNESS_TEST_ISOLATION"] === "1" ||
+    env["VITEST"] === "true" ||
+    env["NODE_ENV"] === "test") &&
   (env["HARNESS_STATE_DIR"] === undefined || env["HARNESS_STATE_DIR"].trim() === "") &&
-  resolve(targetRepoRoot) === resolve(cliRepoRoot)
+  isInsideRootLite(cliRepoRoot, targetRepoRoot)
 
 const resolveHarnessStateDirLite = (
   repoRoot: string,
@@ -512,16 +500,12 @@ const computeFingerprintLite = (
   if (!existsSync(join(repoRoot, ".git"))) return Option.none()
   const statusOut = tryOr(
     () =>
-      execFileSync(
-        "git",
-        ["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
-        {
-          cwd: repoRoot,
-          timeout: 2_000,
-          maxBuffer: GIT_FINGERPRINT_MAX_BUFFER_BYTES,
-          encoding: "utf8",
-        },
-      ),
+      execFileSync("git", GIT_FINGERPRINT_STATUS_ARGS, {
+        cwd: repoRoot,
+        timeout: 2_000,
+        maxBuffer: GIT_FINGERPRINT_MAX_BUFFER_BYTES,
+        encoding: "utf8",
+      }),
     undefined,
   )
   if (statusOut === undefined) return Option.none()
@@ -539,15 +523,55 @@ const computeFingerprintLite = (
     p === ".harness" ||
     p.startsWith(".harness/") ||
     (customRel !== undefined && (p === customRel || p.startsWith(`${customRel}/`)))
+  const isExcludedIgnoredRel = (p: string): boolean =>
+    p.length === 0 ||
+    isHarnessRel(p) ||
+    p === ".env" ||
+    p === ".dev.vars" ||
+    !isStampIncludedLite(p)
   const hash = createHash("sha256")
   hash.update(`branch:${head.gitBranch ?? ""}\nsha:${head.headSha ?? ""}\n`)
   const seen = new Set<string>()
+  const ignoredFiles: Array<string> = []
+  const collectIgnoredDir = (dirRel: string, absDir: string): boolean => {
+    const dirIsSymOrGit =
+      match(lstatNoThrow(absDir))
+        .with({ _tag: "Failure" }, () => true)
+        .with({ _tag: "Success" }, ({ success: st }) => st === undefined || st.isSymbolicLink())
+        .exhaustive() || tryOr(() => existsSync(join(absDir, ".git")), true)
+    if (dirIsSymOrGit) return false
+    const dirEntries = tryOr(() => readdirSync(absDir, { withFileTypes: true }), undefined)
+    if (dirEntries === undefined) return false
+    const sorted = [...dirEntries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    for (const entry of sorted) {
+      const childRel = `${dirRel}/${entry.name}`
+      if (isExcludedIgnoredRel(childRel)) continue
+      const childAbs = join(absDir, entry.name)
+      if (entry.isSymbolicLink() || entry.name === ".git") return false
+      if (entry.isDirectory()) {
+        if (!collectIgnoredDir(childRel, childAbs)) return false
+        continue
+      }
+      ignoredFiles.push(childRel)
+    }
+    return true
+  }
   const entries = statusOut.split("\0")
   for (let i = 0; i < entries.length; i += 1) {
     const entry = entries[i]
     if (entry === undefined || entry.length < 4) continue
     const xy = entry.slice(0, 2)
     const relPath = entry.slice(3)
+    if (xy === "!!") {
+      const trimmedRel = relPath.endsWith("/") ? relPath.slice(0, -1) : relPath
+      if (isExcludedIgnoredRel(trimmedRel)) continue
+      if (relPath.endsWith("/")) {
+        if (!collectIgnoredDir(trimmedRel, join(repoRoot, trimmedRel))) return Option.none()
+      } else {
+        ignoredFiles.push(trimmedRel)
+      }
+      continue
+    }
     if (xy[0] === "R" || xy[1] === "R" || xy[0] === "C" || xy[1] === "C") {
       const orig = entries[i + 1] ?? ""
       i += 1
@@ -559,43 +583,26 @@ const computeFingerprintLite = (
     if (d === undefined) return Option.none()
     hash.update(`dirty:${xy}:${relPath}:${d}\n`)
   }
-  const ignoredOut = tryOr(
-    () =>
-      execFileSync("git", GIT_IGNORED_LS_FILES_ARGS, {
-        cwd: repoRoot,
-        timeout: 2_000,
-        maxBuffer: GIT_FINGERPRINT_MAX_BUFFER_BYTES,
-        encoding: "utf8",
-      }),
-    undefined,
-  )
-  if (ignoredOut === undefined) return Option.none()
-  for (const relPath of ignoredOut.split("\0")) {
-    if (
-      relPath.length === 0 ||
-      seen.has(relPath) ||
-      isHarnessRel(relPath) ||
-      relPath === ".env" ||
-      relPath === ".dev.vars" ||
-      !isStampIncludedLite(relPath)
-    ) {
-      continue
-    }
+  ignoredFiles.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+  let prevIgnored = ""
+  for (const relPath of ignoredFiles) {
+    if (relPath === prevIgnored || seen.has(relPath)) continue
+    prevIgnored = relPath
     const d = digestWorkspaceRelPath(repoRoot, relPath)
     if (d === undefined) return Option.none()
     hash.update(`ignored:${relPath}:${d}\n`)
   }
-  for (const f of [
-    "friction-log.jsonl",
-    "telemetry.jsonl",
-    "verify-stamp.json",
-    "mutate-stamp.json",
-    "plan-graph-snapshot.json",
-    "graph-head.json",
-    "graph-snapshot.json",
-    "last-done.json",
-  ]) {
-    const d = unwrapOpt(digestFileLite(join(harnessDir, f), true))
+  const stateInputs: ReadonlyArray<readonly [string, boolean]> = [
+    ["friction-log.jsonl", true],
+    ["verify-stamp.json", true],
+    ["mutate-stamp.json", true],
+    ["plan-graph-snapshot.json", false],
+    ["graph-head.json", true],
+    ["graph-snapshot.json", false],
+    ["last-done.json", true],
+  ]
+  for (const [f, contentHash] of stateInputs) {
+    const d = unwrapOpt(digestFileLite(join(harnessDir, f), contentHash))
     if (d === undefined) return Option.none()
     hash.update(`state:${f}:${d}\n`)
   }
@@ -719,8 +726,10 @@ const tryReadPreInvocationCacheLite = (
   if (cached === undefined) {
     return { _tag: "Miss", fingerprint: Option.none() }
   }
+  const effectiveTtlMs =
+    cached.degraded === true ? DEGRADED_PRE_INVOCATION_CACHE_TTL_MS : PRE_INVOCATION_CACHE_TTL_MS
   const ageMs = Date.now() - cached.recordedAtMs
-  if (ageMs < 0 || ageMs > PRE_INVOCATION_CACHE_TTL_MS) {
+  if (ageMs < 0 || ageMs > effectiveTtlMs) {
     return { _tag: "Miss", fingerprint: Option.none() }
   }
   const requireOllama =
@@ -747,9 +756,15 @@ const tryReadPreInvocationCacheLite = (
   return { _tag: "Miss", fingerprint: fp }
 }
 
+const resolveRealPathLite = (targetPath: string): Option.Option<string> =>
+  match(Result.try(() => realpathSync(targetPath)))
+    .with({ _tag: "Success" }, ({ success }) => Option.some(success))
+    .with({ _tag: "Failure" }, () => Option.none())
+    .exhaustive()
+
 export {
   GIT_FINGERPRINT_MAX_BUFFER_BYTES,
-  GIT_IGNORED_LS_FILES_ARGS,
+  GIT_FINGERPRINT_STATUS_ARGS,
   appendHookTelemetryLite,
   computeFingerprintLite as computePreInvocationFingerprintLite,
   existsRegularFileLite,
@@ -760,6 +775,9 @@ export {
   readHookStdinCallback,
   resolveGitHeadStateLite,
   resolveHarnessStateDirLite,
+  resolveRealPathLite,
+  resolveRealPathWithAncestorWalkLite,
+  type RealPathWithAncestorWalkResult,
   shouldSuppressLiveRepoTestSideEffectsLite,
   tryReadPreInvocationCacheLite,
 }

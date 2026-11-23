@@ -303,6 +303,16 @@ export const makeLiveCliCommandDescriptors = (
       ),
   },
   {
+    name: CliCommandName.make("workflow"),
+    summary: "Compile, run, inspect, complete, and recover durable HarnessTaskWorkflow runs.",
+    execute: (args) =>
+      lazyImportCliHandler(
+        "workflow",
+        () => import("./workflow.command.js"),
+        (m) => m.handleWorkflow(args, options),
+      ),
+  },
+  {
     name: CliCommandName.make("help"),
     summary: "Display CLI usage help and available commands.",
     execute: () =>

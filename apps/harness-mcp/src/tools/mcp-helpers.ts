@@ -7,6 +7,7 @@ import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import {
   CANONICAL_MCP_TOOL_NAMES,
+  type DaemonProtocolMismatchError,
   GitDiffErrorReason,
   GitDiffExecutionError,
   InvalidReviewRouteInputError,
@@ -14,6 +15,8 @@ import {
   McpToolName,
   type ReviewTimeoutMillis,
   UnknownToolError,
+  type WorkflowStoreUnavailableError,
+  type WorkspaceFsError,
 } from "@harness/contract"
 import {
   appendTelemetryEvent,
@@ -31,6 +34,7 @@ import {
   loadGraphSnapshotEffect,
   type OmnigraphLoadError,
   readGraphHeadMeta,
+  resolveCanonicalRepoRoot,
   resolveGitHeadState,
   saveGraphSnapshot,
   extractWorkspaceTypeAwareGraph,
@@ -68,6 +72,9 @@ export type McpToolExecutionError =
   | GraphRewriteError
   | GraphProjectorError
   | OmnigraphLoadError
+  | WorkflowStoreUnavailableError
+  | WorkspaceFsError
+  | DaemonProtocolMismatchError
 
 export type McpToolInputSchema = Schema.Decoder<Readonly<Record<string, unknown>>> & Schema.Top
 
@@ -123,9 +130,67 @@ export const findRepoRoot = (startDir: string): string => {
 
 const SERVER_REPO_ROOT = findRepoRoot(path.dirname(fileURLToPath(import.meta.url)))
 
+export const shouldSuppressLiveMcpTestSideEffects = (
+  targetRepoRoot: string,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): boolean =>
+  (env["HARNESS_DISABLE_LIVE_TELEMETRY"] === "1" ||
+    env["HARNESS_TEST_ISOLATION"] === "1" ||
+    env["VITEST"] === "true" ||
+    env["NODE_ENV"] === "test") &&
+  (env["HARNESS_STATE_DIR"] === undefined || env["HARNESS_STATE_DIR"].trim() === "") &&
+  isPathInsideRoot(SERVER_REPO_ROOT, targetRepoRoot)
+
 const decodeActiveWorkspace = Schema.decodeUnknownOption(
-  Schema.fromJsonString(Schema.Struct({ repoRoot: Schema.String })),
+  Schema.fromJsonString(
+    Schema.Struct({
+      repoRoot: Schema.String,
+      updatedAt: Schema.optional(Schema.String),
+    }),
+  ),
 )
+
+const warnActiveWorkspace = (msg: string): undefined => {
+  process.stderr.write(`[harness-mcp] Warning: ${msg}\n`)
+  return undefined
+}
+
+const readActiveWorkspaceCandidate = (
+  activeWorkspacePath: string,
+): { readonly repoRoot: string; readonly updatedAtMs: number } | undefined => {
+  if (!nodeSyncHostIo.existsSync(activeWorkspacePath)) return undefined
+  return match(Result.try(() => nodeSyncHostIo.readTextSync(activeWorkspacePath)))
+    .with({ _tag: "Failure" }, ({ failure }) =>
+      warnActiveWorkspace(
+        `failed to read ${activeWorkspacePath}: ${failure instanceof Error ? failure.message : String(failure)}`,
+      ),
+    )
+    .with({ _tag: "Success" }, ({ success: raw }) =>
+      match(decodeActiveWorkspace(raw))
+        .with({ _tag: "None" }, () =>
+          warnActiveWorkspace(`failed to decode ${activeWorkspacePath} as active-workspace.json`),
+        )
+        .with({ _tag: "Some" }, ({ value: parsed }) =>
+          match(Result.try(() => nodeSyncHostIo.existsSync(parsed.repoRoot)))
+            .with({ _tag: "Success" }, ({ success }) => {
+              if (!success) return undefined
+              const parsedTime = parsed.updatedAt !== undefined ? Date.parse(parsed.updatedAt) : 0
+              return {
+                repoRoot: parsed.repoRoot,
+                updatedAtMs: Number.isFinite(parsedTime) ? parsedTime : 0,
+              }
+            })
+            .with({ _tag: "Failure" }, ({ failure }) =>
+              warnActiveWorkspace(
+                `failed to verify active workspace '${parsed.repoRoot}': ${failure instanceof Error ? failure.message : String(failure)}`,
+              ),
+            )
+            .exhaustive(),
+        )
+        .exhaustive(),
+    )
+    .exhaustive()
+}
 
 export const resolveDefaultRepoRoot = (
   args?: Readonly<Record<string, unknown>>,
@@ -155,86 +220,45 @@ export const resolveDefaultRepoRoot = (
         : undefined
   if (candidate !== undefined) {
     const candidateRoot = findRepoRoot(path.dirname(candidate))
-    if (nodeSyncHostIo.existsSync(path.join(candidateRoot, "pnpm-workspace.yaml"))) {
+    if (nodeSyncHostIo.existsSync(path.join(candidateRoot, "pnpm-workspace.yaml")))
       return candidateRoot
-    }
   }
   const cwdRoot = findRepoRoot(process.cwd())
-  if (cwdRoot !== SERVER_REPO_ROOT) {
-    return cwdRoot
-  }
+  if (cwdRoot !== SERVER_REPO_ROOT) return cwdRoot
   if (options?.skipActiveWorkspaceLookup !== true && options?.skipOmnigraphSpawn !== true) {
-    const activeWorkspacePath = path.join(SERVER_REPO_ROOT, ".harness", "active-workspace.json")
-    if (nodeSyncHostIo.existsSync(activeWorkspacePath)) {
-      const readRes = Result.try(() => nodeSyncHostIo.readTextSync(activeWorkspacePath))
-      const resolvedActiveRoot = match(readRes)
-        .with({ _tag: "Failure" }, ({ failure }) => {
-          const msg = failure instanceof Error ? failure.message : String(failure)
-          process.stderr.write(
-            `[harness-mcp] Warning: failed to read ${activeWorkspacePath}: ${msg}\n`,
-          )
-          return undefined
-        })
-        .with({ _tag: "Success" }, ({ success: raw }) =>
-          match(decodeActiveWorkspace(raw))
-            .with({ _tag: "None" }, () => {
-              process.stderr.write(
-                `[harness-mcp] Warning: failed to decode ${activeWorkspacePath} as active-workspace.json\n`,
-              )
-              return undefined
-            })
-            .with({ _tag: "Some" }, ({ value: parsed }) =>
-              match(Result.try(() => nodeSyncHostIo.existsSync(parsed.repoRoot)))
-                .with({ _tag: "Success" }, ({ success }) => (success ? parsed.repoRoot : undefined))
-                .with({ _tag: "Failure" }, ({ failure }) => {
-                  const msg = failure instanceof Error ? failure.message : String(failure)
-                  process.stderr.write(
-                    `[harness-mcp] Warning: failed to verify active workspace '${parsed.repoRoot}': ${msg}\n`,
-                  )
-                  return undefined
-                })
-                .exhaustive(),
-            )
-            .exhaustive(),
-        )
-        .exhaustive()
-      if (resolvedActiveRoot !== undefined) {
-        return resolvedActiveRoot
+    const candidatePaths = [path.join(SERVER_REPO_ROOT, ".harness", "active-workspace.json")]
+    const canonicalRoot = resolveCanonicalRepoRoot(SERVER_REPO_ROOT, nodeSyncHostIo)
+    if (canonicalRoot !== SERVER_REPO_ROOT) {
+      candidatePaths.push(path.join(canonicalRoot, ".harness", "active-workspace.json"))
+    }
+    let best: { readonly repoRoot: string; readonly updatedAtMs: number } | undefined
+    for (const activeWorkspacePath of candidatePaths) {
+      const entry = readActiveWorkspaceCandidate(activeWorkspacePath)
+      if (entry !== undefined && (best === undefined || entry.updatedAtMs > best.updatedAtMs)) {
+        best = entry
       }
     }
+    if (best !== undefined) return best.repoRoot
   }
   return SERVER_REPO_ROOT
 }
 
 const buildEmptyHarnessGraph = (): HarnessGraph =>
-  buildHarnessGraph({
-    fns: [],
-    services: [],
-    layers: [],
-    errors: [],
-    tests: [],
-    patternDocs: [],
-  })
+  buildHarnessGraph({ fns: [], services: [], layers: [], errors: [], tests: [], patternDocs: [] })
 
 const selectSnapshotPath = (
-  root: string,
   verifySnap: string,
   planSnap: string,
   verifyExists: boolean,
   planExists: boolean,
 ): string | undefined => {
   if (verifyExists && planExists) {
-    const verifyMtime = nodeSyncHostIo.statMtimeMsSync(verifySnap) ?? 0
-    const planMtime = nodeSyncHostIo.statMtimeMsSync(planSnap) ?? 0
-    return planMtime > verifyMtime ? planSnap : verifySnap
+    return (nodeSyncHostIo.statMtimeMsSync(planSnap) ?? 0) >
+      (nodeSyncHostIo.statMtimeMsSync(verifySnap) ?? 0)
+      ? planSnap
+      : verifySnap
   }
-  if (verifyExists) {
-    return verifySnap
-  }
-  if (planExists) {
-    return planSnap
-  }
-  return undefined
+  return verifyExists ? verifySnap : planExists ? planSnap : undefined
 }
 
 export interface GraphResolutionStatus {
@@ -287,7 +311,7 @@ export const resolveGraphWithStatus = (
           }
         }
       }
-      snapshotPath = selectSnapshotPath(root, verifySnap, planSnap, verifyExists, planExists)
+      snapshotPath = selectSnapshotPath(verifySnap, planSnap, verifyExists, planExists)
     }
     if (snapshotPath && nodeSyncHostIo.existsSync(snapshotPath)) {
       return yield* loadGraphSnapshotEffect(snapshotPath, nodeSyncHostIo).pipe(
@@ -350,16 +374,12 @@ export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolea
     ? path.resolve(candidatePath)
     : path.resolve(logicalRoot, candidatePath)
   const rel = path.relative(logicalRoot, logicalCandidate)
-  if (rel !== "" && (rel.startsWith("..") || path.isAbsolute(rel))) {
-    return false
-  }
+  if (rel !== "" && (rel.startsWith("..") || path.isAbsolute(rel))) return false
   if (nodeSyncHostIo.existsSync(logicalRoot)) {
     let checkPath = logicalCandidate
     while (!nodeSyncHostIo.existsSync(checkPath)) {
-      if (nodeSyncHostIo.isSymbolicLinkSync(checkPath)) {
-        return false
-      }
-      if (checkPath === logicalRoot) {
+      if (nodeSyncHostIo.isSymbolicLinkSync(checkPath) || checkPath === logicalRoot) {
+        if (nodeSyncHostIo.isSymbolicLinkSync(checkPath)) return false
         break
       }
       const parent = path.dirname(checkPath)
@@ -378,9 +398,7 @@ export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolea
           }),
           () => false,
         )
-        if (!contained) {
-          return false
-        }
+        if (!contained) return false
       }
     }
   }
@@ -419,20 +437,13 @@ export const normalizeProjectPathEffect = (
   return Effect.succeed(resolved)
 }
 
-export const normalizeProjectPath = (
-  repoRoot: string,
-  rawProject: string,
-): Effect.Effect<string, ProjectPathEscapeError> => normalizeProjectPathEffect(repoRoot, rawProject)
+export const normalizeProjectPath = normalizeProjectPathEffect
 
 const extractJsonSchemaProperties = (raw: unknown): Record<string, object> | undefined => {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    return undefined
-  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined
   const props: Record<string, object> = {}
   for (const [key, val] of Object.entries(raw)) {
-    if (typeof val === "object" && val !== null) {
-      props[key] = val
-    }
+    if (typeof val === "object" && val !== null) props[key] = val
   }
   return props
 }
@@ -456,6 +467,26 @@ export const toMcpToolInputJsonSchema = (inputSchema: McpToolInputSchema) => {
   }
 }
 
+const formatLspFailDetail = (
+  toolName: string,
+  outcome: TelemetryOutcome,
+  result: unknown,
+): string | undefined => {
+  if (
+    toolName !== "harness_lsp_diagnostics" ||
+    outcome !== "fail" ||
+    typeof result !== "object" ||
+    result === null
+  ) {
+    return undefined
+  }
+  const summary = Reflect.get(result, "summary")
+  if (typeof summary !== "object" || summary === null) return undefined
+  const errors = Reflect.get(summary, "errors")
+  const warnings = Reflect.get(summary, "warnings")
+  return `errors=${String(typeof errors === "number" ? errors : 0)};warnings=${String(typeof warnings === "number" ? warnings : 0)}`
+}
+
 export const recordMcpToolTelemetry = (
   toolName: string,
   args: Readonly<Record<string, unknown>>,
@@ -470,6 +501,9 @@ export const recordMcpToolTelemetry = (
     return
   }
   const root = options?.repoRoot ?? resolveDefaultRepoRoot(args, options)
+  if (shouldSuppressLiveMcpTestSideEffects(root)) {
+    return
+  }
   const category: TelemetryCategory = match(toolName)
     .with(
       "harness_ontology_why",
@@ -509,6 +543,8 @@ export const recordMcpToolTelemetry = (
         ? "fail"
         : "ok"
 
+  const detail = formatLspFailDetail(toolName, outcome, result)
+
   appendTelemetryEvent(
     root,
     {
@@ -518,6 +554,7 @@ export const recordMcpToolTelemetry = (
       outcome,
       durationMs,
       engineSource,
+      ...(detail !== undefined ? { detail } : {}),
     },
     nodeSyncHostIo,
   )

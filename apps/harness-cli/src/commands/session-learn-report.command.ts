@@ -331,7 +331,8 @@ export const handleDoctorOrSession = (
       if (
         !suppressLiveWrites &&
         harnessDir !== undefined &&
-        ok &&
+        snapshotOk &&
+        (ok || ollamaReady) &&
         reconcileError === undefined &&
         options?.governanceDocs === undefined &&
         options?.planGraph === undefined &&
@@ -346,6 +347,7 @@ export const handleDoctorOrSession = (
           antigravityStderr,
           options,
           nodeSyncHostIo,
+          !ok,
         )
       }
       return {

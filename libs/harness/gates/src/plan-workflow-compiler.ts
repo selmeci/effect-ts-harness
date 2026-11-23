@@ -9,6 +9,7 @@ import {
   DisjointOwnershipViolationError,
   InvalidPlanWorkflowGraphError,
   OwnedRelPath,
+  SHARED_STEP_UNIT_ID,
   UnitDependency,
   WaveIndex,
   WorkUnitDraft,
@@ -63,7 +64,8 @@ const indexWorkUnits = Effect.fnUntraced(function* (
 ): Effect.fn.Return<ReadonlyMap<WorkUnitId, WorkUnitDraft>, InvalidPlanWorkflowGraphError, never> {
   const unitById = new Map<WorkUnitId, WorkUnitDraft>()
   for (const unit of units) {
-    if (unitById.has(unit.unitId)) {
+    // Defense-in-depth: "shared-step" is reserved for the synthetic sequential shared-step unit.
+    if (unit.unitId === SHARED_STEP_UNIT_ID || unitById.has(unit.unitId)) {
       return yield* new InvalidPlanWorkflowGraphError({
         issue: { _tag: "DuplicateWorkUnitId", unitId: unit.unitId },
       })

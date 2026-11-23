@@ -879,4 +879,250 @@ describe("telemetry & session observability", () => {
         )
       }),
   )
+
+  it.effect(
+    "harness:SPEC-0024 REQ-4.2 penalizes non-verify gate failures, guard timeouts, session hook failures/cache misses, and detects missing ingest hooks",
+    () =>
+      Effect.gen(function* () {
+        // 1. Non-verify gate failures (1 fail -> -5, 4 fails -> capped at -15)
+        const oneOtherGateFail = yield* decideSessionReport({
+          events: [
+            {
+              timestamp: "2026-11-20T10:00:00.000Z",
+              surface: "cli",
+              category: "gate",
+              toolName: "gc",
+              outcome: "fail",
+              durationMs: 100,
+            },
+          ],
+        })
+        expect(oneOtherGateFail.healthScore).toBe(95)
+        expect(oneOtherGateFail.recommendations).toContain(
+          "Investigate failing non-verify gates (plan-check, gc, mutate) before running full verification.",
+        )
+
+        const fourOtherGateFails = yield* decideSessionReport({
+          events: Array.from({ length: 4 }, (_, i) => ({
+            timestamp: `2026-11-20T10:00:0${i}.000Z`,
+            surface: "cli" as const,
+            category: "gate" as const,
+            toolName: "mutate",
+            outcome: "fail" as const,
+            durationMs: 100,
+          })),
+        })
+        expect(fourOtherGateFails.healthScore).toBe(85)
+
+        // 2. Guard timeouts: duration boundary 1449 vs 1450 and detail:"timeout" vs non-guard category
+        const belowThresholdGuard = yield* decideSessionReport({
+          events: [
+            {
+              timestamp: "2026-11-20T10:01:00.000Z",
+              surface: "hook",
+              category: "guard",
+              toolName: "guard",
+              outcome: "ask",
+              durationMs: 1449,
+            },
+            {
+              timestamp: "2026-11-20T10:01:01.000Z",
+              surface: "cli",
+              category: "lifecycle",
+              toolName: "doctor",
+              outcome: "ok",
+              durationMs: 2000,
+              detail: "timeout-ignored-for-non-guard",
+            },
+          ],
+        })
+        expect(belowThresholdGuard.healthScore).toBe(100)
+        expect(belowThresholdGuard.recommendations).not.toContain(
+          "Guard escalated to DecisionModel and timed out; allowlist safe command patterns or check local Ollama (clef-flash) latency.",
+        )
+
+        const guardTimeoutsReport = yield* decideSessionReport({
+          events: [
+            {
+              timestamp: "2026-11-20T10:01:00.000Z",
+              surface: "hook",
+              category: "guard",
+              toolName: "guard",
+              outcome: "ask",
+              durationMs: 1450,
+            },
+            {
+              timestamp: "2026-11-20T10:01:01.000Z",
+              surface: "cli",
+              category: "guard",
+              toolName: "guard",
+              outcome: "ok",
+              durationMs: 200,
+              detail: "escalated;reason=timeout",
+            },
+            {
+              timestamp: "2026-11-20T10:01:02.000Z",
+              surface: "hook",
+              category: "guard",
+              toolName: "guard",
+              outcome: "ask",
+              durationMs: 1500,
+            },
+            {
+              timestamp: "2026-11-20T10:01:03.000Z",
+              surface: "hook",
+              category: "guard",
+              toolName: "guard",
+              outcome: "ask",
+              durationMs: 1505,
+            },
+          ],
+        })
+        expect(guardTimeoutsReport.healthScore).toBe(85)
+        expect(guardTimeoutsReport.recommendations).toContain(
+          "Guard escalated to DecisionModel and timed out; allowlist safe command patterns or check local Ollama (clef-flash) latency.",
+        )
+
+        const oneGuardTimeout = yield* decideSessionReport({
+          events: [
+            {
+              timestamp: "2026-11-20T10:01:00.000Z",
+              surface: "hook",
+              category: "guard",
+              toolName: "guard",
+              outcome: "ask",
+              durationMs: 1450,
+            },
+          ],
+        })
+        expect(oneGuardTimeout.healthScore).toBe(95)
+
+        // 3. Hook:session failures (-5 each capped at -10) and cache miss ratio > 25% when >= 10 calls
+        const sessionFails = yield* decideSessionReport({
+          events: [
+            ...Array.from({ length: 3 }, (_, i) => ({
+              timestamp: `2026-11-20T10:02:0${i}.000Z`,
+              surface: "hook" as const,
+              category: "lifecycle" as const,
+              toolName: "session",
+              outcome: "fail" as const,
+              durationMs: 20,
+            })),
+            // cli session fail should NOT count as hook:session
+            {
+              timestamp: "2026-11-20T10:02:05.000Z",
+              surface: "cli",
+              category: "lifecycle",
+              toolName: "session",
+              outcome: "fail",
+              durationMs: 20,
+            },
+          ],
+        })
+        expect(sessionFails.healthScore).toBe(90)
+        expect(sessionFails.recommendations).toContain(
+          "Hook 'session' failed during this session; inspect .harness/telemetry-log.jsonl detail or run 'pnpm harness doctor'.",
+        )
+
+        const missMsg =
+          "High PreInvocation 'session' hook cache miss rate (>25%); check workspace readiness and session-preinvocation-cache.json invalidation."
+
+        // 9 session calls (< 10) all misses -> does NOT fire
+        const nineMisses = yield* decideSessionReport({
+          events: Array.from({ length: 9 }, (_, i) => ({
+            timestamp: `2026-11-20T10:03:0${i}.000Z`,
+            surface: "hook" as const,
+            category: "lifecycle" as const,
+            toolName: "session",
+            outcome: "ok" as const,
+            detail: "cache=miss",
+            durationMs: 50,
+          })),
+        })
+        expect(nineMisses.recommendations).not.toContain(missMsg)
+
+        // 12 session calls with exactly 3 misses (25% -> 3*4 === 12, NOT > 12) -> does NOT fire
+        const exact25Pct = yield* decideSessionReport({
+          events: Array.from({ length: 12 }, (_, i) => ({
+            timestamp: `2026-11-20T10:04:${String(i).padStart(2, "0")}.000Z`,
+            surface: "hook" as const,
+            category: "lifecycle" as const,
+            toolName: "session",
+            outcome: "ok" as const,
+            detail: i < 3 ? "cache=miss" : "cache=hit",
+            durationMs: 50,
+          })),
+        })
+        expect(exact25Pct.recommendations).not.toContain(missMsg)
+
+        // Exact boundary >= 10 with 3/10 misses (30%) -> fires
+        const tenWithThreeMisses = yield* decideSessionReport({
+          events: Array.from({ length: 10 }, (_, i) => ({
+            timestamp: `2026-11-20T10:05:${String(i).padStart(2, "0")}.000Z`,
+            surface: "hook" as const,
+            category: "lifecycle" as const,
+            toolName: "session",
+            outcome: "ok" as const,
+            detail: i < 3 ? "cache=miss" : "cache=hit",
+            durationMs: 50,
+          })),
+        })
+        expect(tenWithThreeMisses.recommendations).toContain(missMsg)
+
+        // 4. Missing hook:ingest detector
+        const missingIngestMsg =
+          "Zero PostToolUse 'ingest' hook calls recorded during a mutating session; verify adapter hooks.json file-edit matchers cover active write/edit tools."
+        const missingIngest = yield* decideSessionReport({
+          events: [
+            {
+              timestamp: "2026-11-20T10:06:00.000Z",
+              surface: "hook",
+              category: "guard",
+              toolName: "guard",
+              outcome: "ok",
+              durationMs: 6,
+            },
+            {
+              timestamp: "2026-11-20T10:06:01.000Z",
+              surface: "cli",
+              category: "gate",
+              toolName: "plan-check",
+              outcome: "ok",
+              durationMs: 200,
+            },
+          ],
+        })
+        expect(missingIngest.recommendations).toContain(missingIngestMsg)
+
+        const withIngest = yield* decideSessionReport({
+          events: [
+            {
+              timestamp: "2026-11-20T10:06:00.000Z",
+              surface: "hook",
+              category: "guard",
+              toolName: "guard",
+              outcome: "ok",
+              durationMs: 6,
+            },
+            {
+              timestamp: "2026-11-20T10:06:00.500Z",
+              surface: "hook",
+              category: "lifecycle",
+              toolName: "ingest",
+              outcome: "ok",
+              durationMs: 8,
+            },
+            {
+              timestamp: "2026-11-20T10:06:01.000Z",
+              surface: "cli",
+              category: "gate",
+              toolName: "mutate",
+              outcome: "ok",
+              durationMs: 200,
+            },
+          ],
+        })
+        expect(withIngest.recommendations).not.toContain(missingIngestMsg)
+      }),
+  )
 })

@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process"
+import { execFile, spawn, spawnSync } from "node:child_process"
 import {
   accessSync,
   appendFileSync,
@@ -24,7 +24,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { delimiter, isAbsolute, join } from "node:path"
-import { Result, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   SubprocessArg,
@@ -486,3 +486,105 @@ export const nodeSyncHostIo: ExtendedHostIo = {
       .exhaustive()
   },
 }
+
+const mapAsyncExecCompletion = (
+  err: unknown,
+  stdout: string,
+  stderr: string,
+  hasTimeout: boolean,
+): SyncHostExecResult => {
+  if (err === null || err === undefined) {
+    return { _tag: "Exited", exitCode: 0, stdout, stderr }
+  }
+  const errObj = typeof err === "object" ? err : {}
+  const killed = "killed" in errObj && errObj.killed === true
+  const rawCode = "code" in errObj ? errObj.code : undefined
+  const rawSignal = "signal" in errObj && typeof errObj.signal === "string" ? errObj.signal : null
+  const errMessage =
+    err instanceof Error
+      ? err.message
+      : typeof err === "string"
+        ? err
+        : "Subprocess execution failed"
+  const errCode = typeof rawCode === "string" ? rawCode : undefined
+
+  if (errCode === "ETIMEDOUT" || (killed && hasTimeout)) {
+    return {
+      _tag: "TimedOut",
+      stdout,
+      stderr,
+      ...(rawSignal !== null ? { signal: rawSignal } : {}),
+      spawnError: errMessage,
+    }
+  }
+  if (typeof rawCode === "number") {
+    return {
+      _tag: "Exited",
+      exitCode: rawCode,
+      stdout,
+      stderr,
+    }
+  }
+  if (rawSignal !== null) {
+    return {
+      _tag: "Signaled",
+      signal: rawSignal,
+      stdout,
+      stderr,
+    }
+  }
+  return {
+    _tag: "SpawnFailed",
+    spawnError: errMessage,
+    ...(errCode !== undefined ? { errorCode: errCode } : {}),
+    stdout,
+    stderr,
+  }
+}
+
+export const execFileAsyncEffect = Effect.fn("NodeHostIo.execFileAsync")(function* (
+  command: string,
+  args: ReadonlyArray<string>,
+  options?: SyncHostExecOptions,
+): Effect.fn.Return<SyncHostExecResult> {
+  const trimmedCommand = command.trim()
+  const normalizedCwd = options?.cwd !== undefined ? options.cwd.trim() : undefined
+  const invalidReason = validateSyncCommandInput(trimmedCommand, args, normalizedCwd)
+  if (invalidReason !== undefined) {
+    return {
+      _tag: "SpawnFailed",
+      spawnError: invalidReason,
+      stdout: "",
+      stderr: invalidReason,
+    }
+  }
+  return yield* Effect.callback<SyncHostExecResult>((resume) => {
+    const child = execFile(
+      trimmedCommand,
+      [...args],
+      {
+        cwd: normalizedCwd,
+        encoding: "utf8",
+        timeout: options?.timeoutMs,
+        maxBuffer: options?.maxBufferBytes,
+        env: options?.env,
+        windowsHide: true,
+      },
+      (err, stdout, stderr) => {
+        resume(
+          Effect.succeed(
+            mapAsyncExecCompletion(
+              err,
+              stdout ?? "",
+              stderr ?? "",
+              options?.timeoutMs !== undefined,
+            ),
+          ),
+        )
+      },
+    )
+    return Effect.sync(() => {
+      child.kill()
+    })
+  })
+})

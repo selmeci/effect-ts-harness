@@ -1,5 +1,6 @@
 import { dirname } from "node:path"
 import { fileURLToPath } from "node:url"
+import * as Schema from "effect/Schema"
 import { match } from "ts-pattern"
 import { classifyCommand, isSkipNxCacheOverrideCommand } from "@harness/gates/policy"
 import {
@@ -17,13 +18,14 @@ import {
   makeGuardDenyResult,
 } from "./hook-format.js"
 import {
-  evaluateFileWriteDecision,
+  evaluateCandidatePaths,
   extractGuardStdinPayload,
   formatCommandDenyReason,
   type GuardVerdictDecision,
   type ParsedGuardCliArgs,
   parseGuardCliArgs,
   pickStrictestDecision,
+  resolveUnitWorkerMode,
   toGuardCliResult,
 } from "./hook-guard-payload.js"
 
@@ -120,48 +122,58 @@ const evaluateGuardPayload = (
       recordGuardTelemetry("ok", startMs, "fastpath=hit")
       writeResultAndExit(toGuardCliResult({ verdict: "allow" }, isAntigravity))
     })
-    .with({ _tag: "Action" }, ({ isAntigravity, candidateCmds, candidatePaths }) => {
-      let combinedDecision: GuardVerdictDecision | undefined
-      for (const filePath of candidatePaths) {
-        const d = evaluateFileWriteDecision(filePath)
-        combinedDecision =
-          combinedDecision === undefined ? d : pickStrictestDecision(combinedDecision, d)
-      }
-      for (const cmd of candidateCmds) {
-        if (isSkipNxCacheOverrideCommand(cmd)) {
-          delegateToFallback(argv, { stdin: rawStdin })
-          return
+    .with(
+      { _tag: "Action" },
+      ({ isAntigravity, isReadOnlyTool, candidateCmds, candidatePaths }) => {
+        const unitWorkerMode = resolveUnitWorkerMode()
+        const policyOptions = unitWorkerMode ? { unitWorkerMode: true } : undefined
+        let combinedDecision = evaluateCandidatePaths(candidatePaths, isReadOnlyTool, policyOptions)
+        for (const cmd of candidateCmds) {
+          if (isSkipNxCacheOverrideCommand(cmd)) {
+            delegateToFallback(argv, { stdin: rawStdin })
+            return
+          }
+          const classification = classifyCommand(cmd, policyOptions)
+          if (classification === "escalate") {
+            delegateToFallback(argv, { stdin: rawStdin })
+            return
+          }
+          const d = match<typeof classification, GuardVerdictDecision>(classification)
+            .with("deny", () => ({
+              verdict: "deny",
+              reason: formatCommandDenyReason(cmd, policyOptions),
+            }))
+            .with("allow", () => ({ verdict: "allow" }))
+            .with("ask", () => ({
+              verdict: "ask",
+              reason: `Command requires human confirmation: ${cmd}`,
+            }))
+            .exhaustive()
+          combinedDecision =
+            combinedDecision === undefined ? d : pickStrictestDecision(combinedDecision, d)
         }
-        const classification = classifyCommand(cmd)
-        if (classification === "escalate") {
-          delegateToFallback(argv, { stdin: rawStdin })
-          return
-        }
-        const d = match<typeof classification, GuardVerdictDecision>(classification)
-          .with("deny", () => ({ verdict: "deny", reason: formatCommandDenyReason(cmd) }))
-          .with("allow", () => ({ verdict: "allow" }))
-          .with("ask", () => ({
-            verdict: "ask",
-            reason: `Command requires human confirmation: ${cmd}`,
-          }))
+
+        const finalDecision: GuardVerdictDecision =
+          combinedDecision !== undefined
+            ? combinedDecision
+            : { verdict: "deny", reason: "guard: empty hook command payload" }
+
+        const outcome = match(finalDecision.verdict)
+          .with("allow", () => "ok" as const)
+          .with("deny", () => "deny" as const)
+          .with("ask", () => "ask" as const)
           .exhaustive()
-        combinedDecision =
-          combinedDecision === undefined ? d : pickStrictestDecision(combinedDecision, d)
-      }
-
-      const finalDecision: GuardVerdictDecision =
-        combinedDecision !== undefined
-          ? combinedDecision
-          : { verdict: "deny", reason: "guard: empty hook command payload" }
-
-      const outcome = match(finalDecision.verdict)
-        .with("allow", () => "ok" as const)
-        .with("deny", () => "deny" as const)
-        .with("ask", () => "ask" as const)
-        .exhaustive()
-      recordGuardTelemetry(outcome, startMs, "fastpath=hit")
-      writeResultAndExit(toGuardCliResult(finalDecision, isAntigravity))
-    })
+        const detail = match(finalDecision)
+          .with({ verdict: "allow" }, () => "fastpath=hit")
+          .with({ verdict: "deny" }, { verdict: "ask" }, ({ verdict, reason }) => {
+            const compactReason = reason.replace(/\s+/g, " ").trim().slice(0, 120)
+            return `fastpath=hit;verdict=${verdict};reason=${compactReason}`
+          })
+          .exhaustive()
+        recordGuardTelemetry(outcome, startMs, detail)
+        writeResultAndExit(toGuardCliResult(finalDecision, isAntigravity))
+      },
+    )
     .exhaustive()
 }
 
@@ -283,6 +295,64 @@ const runSessionFastPath = (argv: ReadonlyArray<string>, startMs: number): void 
     .exhaustive()
 }
 
+const decodeDoneIdleCheck = Schema.decodeOption(
+  Schema.fromJsonString(Schema.Struct({ fullyIdle: Schema.optional(Schema.Boolean) })),
+)
+
+const runDoneFastPath = (argv: ReadonlyArray<string>, startMs: number): void => {
+  if (!isPlainFormatOnlyFlags(parseGuardCliArgs(argv.slice(1))) || process.stdin.isTTY === true) {
+    delegateToFallback(argv)
+    return
+  }
+  const repoRoot = findWorkspaceRootLite(process.cwd(), CLI_REPO_ROOT)
+  readHookStdinCallback({ timeoutMs: STDIN_TIMEOUT_MS, maxBytes: STDIN_MAX_BYTES }, (res) => {
+    match(res)
+      .with({ _tag: "Failed" }, ({ reason }) => {
+        appendHookTelemetryLite({
+          repoRoot,
+          cliRepoRoot: CLI_REPO_ROOT,
+          surface: "hook",
+          category: "lifecycle",
+          toolName: "done",
+          outcome: "fail",
+          durationMs: performance.now() - startMs,
+          detail: "fastpath=stdin-error",
+        })
+        writeResultAndExit(
+          makeDoneBlockResult(
+            hasAntigravityFormat(argv),
+            `done: failed or timed out reading Stop hook stdin (${reason})`,
+          ),
+        )
+      })
+      .with({ _tag: "Ok" }, ({ text }) => {
+        const trimmed = text.trim()
+        if (trimmed.length > 0) {
+          const isFullyIdleFalse = match(decodeDoneIdleCheck(trimmed))
+            .with({ _tag: "Some" }, ({ value }) => value.fullyIdle === false)
+            .with({ _tag: "None" }, () => false)
+            .exhaustive()
+          if (isFullyIdleFalse) {
+            appendHookTelemetryLite({
+              repoRoot,
+              cliRepoRoot: CLI_REPO_ROOT,
+              surface: "hook",
+              category: "lifecycle",
+              toolName: "done",
+              outcome: "ok",
+              durationMs: performance.now() - startMs,
+              detail: "fullyIdle=false",
+            })
+            writeResultAndExit({ exitCode: 0, stdout: "", stderr: "" })
+            return
+          }
+        }
+        delegateToFallback(argv, { stdin: text })
+      })
+      .exhaustive()
+  })
+}
+
 export const runHookEntryFastPath = (argv: ReadonlyArray<string>): void => {
   const startMs = performance.now()
   const subcommand = argv[0]
@@ -296,6 +366,10 @@ export const runHookEntryFastPath = (argv: ReadonlyArray<string>): void => {
   }
   if (subcommand === "session") {
     runSessionFastPath(argv, startMs)
+    return
+  }
+  if (subcommand === "done") {
+    runDoneFastPath(argv, startMs)
     return
   }
   delegateToFallback(argv)

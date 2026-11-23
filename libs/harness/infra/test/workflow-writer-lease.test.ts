@@ -12,7 +12,7 @@ import {
 import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { Effect, Fiber, Option, Tracer } from "effect"
+import { Effect, Fiber, Option, Schema, Tracer } from "effect"
 import { match } from "ts-pattern"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import {
@@ -316,7 +316,9 @@ describe("WfWriterLease (scoped acquireRelease, split-brain fencing, CAS conflic
             })
             .exhaustive()
 
-          // 3. Refresh succeeds on epoch 1, fails with WriterLeaseHeldError on stale epoch 0
+          // 3. F-19.1: LeaseEpoch >= 1 (0 fails validation); refresh succeeds on epoch 1, fails with WriterLeaseHeldError on mismatched epoch
+          expect(Schema.decodeOption(LeaseEpoch)(0)._tag).toBe("None")
+          expect(() => LeaseEpoch.make(0)).toThrow()
           yield* refreshWriterLease({
             commonGitDir,
             lockFilePath,
@@ -331,7 +333,7 @@ describe("WfWriterLease (scoped acquireRelease, split-brain fencing, CAS conflic
             lockFilePath,
             holderId: holder1,
             holderPid: pid,
-            leaseEpoch: LeaseEpoch.make(0),
+            leaseEpoch: LeaseEpoch.make(99),
             repoRoot,
             client,
           }).pipe(Effect.flip)
@@ -1035,7 +1037,7 @@ describe("WfWriterLease (scoped acquireRelease, split-brain fencing, CAS conflic
     match(missingErr)
       .with({ _tag: "WriterLeaseHeldError" }, (err) => {
         expect(err.holderId).toBe("no-active-lease")
-        expect(err.leaseEpoch).toBe(0)
+        expect(err.leaseEpoch).toBeUndefined()
         expect(err.lockFilePath).toBe(lockFilePath)
         expect(err.holderPid).toBeUndefined()
       })

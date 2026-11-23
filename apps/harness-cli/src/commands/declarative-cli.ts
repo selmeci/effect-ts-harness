@@ -12,6 +12,7 @@ import {
   toLazyImportError,
 } from "./command-registry.js"
 import { COMMANDS, type CliEnv, type CliResult, isCommand } from "./daemon-and-omnigraph.service.js"
+import { makeWorkflowSubcommand } from "./declarative-cli-workflow.js"
 import {
   createHookStdinTracker,
   detectAntigravityHookPayload,
@@ -359,6 +360,7 @@ export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.E
       checkMigrationsCommand,
       checkEventSchemasCommand,
       scenarioCommand,
+      makeWorkflowSubcommand(runSubcommand),
       forwardFormatSubcommand("help"),
     ]),
   )

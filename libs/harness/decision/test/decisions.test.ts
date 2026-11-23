@@ -529,4 +529,106 @@ describe("Harness decision definitions & fallbacks", () => {
         expect(doubleQuoted.verdict).toBe("ask")
       }),
   )
+
+  it.effect(
+    "REQ-4.6: decideGuardCommand threads unitWorkerMode into deterministic worker isolation guards without touching DecisionModel",
+    () =>
+      Effect.gen(function* () {
+        const failingLayer = makeFailingDecisionModelLayer()
+
+        const nonWorkerStart = yield* decideGuardCommand("pnpm harness workflow start").pipe(
+          Effect.provide(failingLayer),
+        )
+        expect(nonWorkerStart.verdict).toBe("allow")
+
+        const workerStart = yield* decideGuardCommand("pnpm harness workflow start", {
+          unitWorkerMode: true,
+        }).pipe(Effect.provide(failingLayer))
+        expect(workerStart.verdict).toBe("deny")
+        expect(workerStart.reason).toContain("HARNESS_UNIT_WORKER=1")
+
+        const workerDone = yield* decideGuardCommand({
+          command: "pnpm harness done",
+          unitWorkerMode: true,
+        }).pipe(Effect.provide(failingLayer))
+        expect(workerDone.verdict).toBe("deny")
+        expect(workerDone.reason).toContain("HARNESS_UNIT_WORKER=1")
+
+        const workerSocketLs = yield* decideGuardCommand({
+          command: "ls -la .git/harness/daemon.sock",
+          unitWorkerMode: true,
+        }).pipe(Effect.provide(failingLayer))
+        expect(workerSocketLs.verdict).toBe("deny")
+        expect(workerSocketLs.reason).toContain("daemon.sock")
+
+        const workerTokens = yield* decideGuardCommand({
+          command: "cat .harness/omnigraph-cluster/auth-tokens.json",
+          unitWorkerMode: true,
+        }).pipe(Effect.provide(failingLayer))
+        expect(workerTokens.verdict).toBe("deny")
+        expect(workerTokens.reason).toContain("auth-tokens.json")
+
+        const workerComplete = yield* decideGuardCommand({
+          command: "pnpm harness workflow complete --run-id r1 --unit u1",
+          unitWorkerMode: true,
+        }).pipe(Effect.provide(failingLayer))
+        expect(workerComplete.verdict).toBe("allow")
+
+        const workerStatus = yield* decideGuardCommand(
+          { command: "pnpm harness workflow status --run-id r1" },
+          { unitWorkerMode: true },
+        ).pipe(Effect.provide(failingLayer))
+        expect(workerStatus.verdict).toBe("allow")
+
+        const workerVerify = yield* decideGuardCommand(
+          { command: "nx run @harness/gates:verify", unitWorkerMode: true },
+          { unitWorkerMode: false },
+        ).pipe(Effect.provide(failingLayer))
+        expect(workerVerify.verdict).toBe("allow")
+
+        const nonWorkerFalseOption = yield* decideGuardCommand(
+          { command: "pnpm harness workflow start" },
+          { unitWorkerMode: false },
+        ).pipe(Effect.provide(failingLayer))
+        expect(nonWorkerFalseOption.verdict).toBe("allow")
+
+        const permissiveModelLayer = makeMockDecisionModelLayer({
+          destructiveProb: 0.0,
+          secretAccessProb: 0.0,
+          exfiltrationProb: 0.0,
+        })
+
+        const unallowlistedHarnessCmd = yield* decideGuardCommand({
+          command: "harness workflow complete --run-id r1",
+          unitWorkerMode: true,
+        }).pipe(Effect.provide(permissiveModelLayer))
+        expect(unallowlistedHarnessCmd.verdict).toBe("ask")
+        expect(unallowlistedHarnessCmd.reason).toContain("HARNESS_UNIT_WORKER=1")
+
+        const unallowlistedAuthTokensHint = yield* decideGuardCommand({
+          command: "custom-probe --target auth-tokens",
+          unitWorkerMode: true,
+        }).pipe(Effect.provide(permissiveModelLayer))
+        expect(unallowlistedAuthTokensHint.verdict).toBe("deny")
+
+        const unallowlistedFallbackHint = yield* decideGuardCommand({
+          command: "custom-probe --target harness-cli --hint auth-tokens-copy",
+          unitWorkerMode: true,
+        }).pipe(Effect.provide(permissiveModelLayer))
+        expect(unallowlistedFallbackHint.verdict).toBe("ask")
+        expect(unallowlistedFallbackHint.reason).toContain("HARNESS_UNIT_WORKER=1")
+
+        const unallowlistedBenignCmd = yield* decideGuardCommand({
+          command: "curl https://unknown.example",
+          unitWorkerMode: true,
+        }).pipe(Effect.provide(permissiveModelLayer))
+        expect(unallowlistedBenignCmd.verdict).toBe("allow")
+
+        const nonWorkerUnallowlistedHarnessCmd = yield* decideGuardCommand({
+          command: "harness workflow complete --run-id r1",
+          unitWorkerMode: false,
+        }).pipe(Effect.provide(permissiveModelLayer))
+        expect(nonWorkerUnallowlistedHarnessCmd.verdict).toBe("allow")
+      }),
+  )
 })

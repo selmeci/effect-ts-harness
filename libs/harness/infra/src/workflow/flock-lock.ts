@@ -374,8 +374,13 @@ const acquireOsFlock = (
             .with({ _tag: "Valid" }, ({ meta }) =>
               makeHeldLeaseError(meta.holderId, meta.leaseEpoch, lockFilePath, meta.holderPid),
             )
-            .with({ _tag: "Missing" }, () =>
-              makeHeldLeaseError(UNKNOWN_FLOCK_HOLDER, LeaseEpoch.make(0), lockFilePath, undefined),
+            .with(
+              { _tag: "Missing" },
+              () =>
+                new WriterLeaseHeldError({
+                  holderId: UNKNOWN_FLOCK_HOLDER,
+                  lockFilePath,
+                }),
             )
             .with({ _tag: "Corrupt" }, ({ reason }) =>
               toWorkflowStoreUnavailableError(operation, new Error(reason)),

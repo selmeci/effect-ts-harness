@@ -39,7 +39,7 @@ const HARNESS_SOCKET_OR_SCRIPT_BINARIES: ReadonlySet<string> = new Set(
 const HARNESS_REDIRECTION_OP_PATTERN: RegExp =
   /(?:&>>?|(?<![=&>-])\d*>>?(?![&>])|(?<![=&>-])\d*>&(?![\d-])|<>)(?!\s*\/dev\/null(?:\s|$))/
 
-const binaryBasename = (word: string): string =>
+export const binaryBasename = (word: string): string =>
   word.includes("/") ? word.slice(word.lastIndexOf("/") + 1) : word
 
 const normalizeCommonDir = (rawDir: string): string | undefined => {
@@ -292,4 +292,240 @@ export const isHarnessStateAccessCommand = (command: string): boolean => {
   return segments.some((seg) =>
     isHarnessStateAccessSegment(seg, commonDirs, commandHasCommonDirSubst),
   )
+}
+
+const MAX_VAR_EXPANSION_PASSES = 4
+const MAX_EXPANDED_COMMAND_LENGTH = 65_536
+const VAR_DECL_BUILTINS: ReadonlySet<string> = new Set(
+  "export local readonly declare typeset".split(" "),
+)
+
+const findBalancedParenEnd = (text: string, openIdx: number): number => {
+  let depth = 1
+  let quote: "'" | '"' | undefined
+  for (let i = openIdx + 1; i < text.length; i++) {
+    const ch = text[i]!
+    if (quote === "'") {
+      if (ch === "'") quote = undefined
+      continue
+    }
+    if (quote === '"') {
+      if (ch === "\\") {
+        i++
+        continue
+      }
+      if (ch === '"') quote = undefined
+      continue
+    }
+    if (ch === "\\") {
+      i++
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    if (ch === "(") {
+      depth++
+      continue
+    }
+    if (ch === ")" && --depth === 0) return i
+  }
+  return text.length
+}
+
+const findClosingBacktick = (text: string, openIdx: number): number => {
+  for (let i = openIdx + 1; i < text.length; i++) {
+    const ch = text[i]!
+    if (ch === "\\") {
+      i++
+      continue
+    }
+    if (ch === "`") return i
+  }
+  return text.length
+}
+
+export const extractExecutedShellSnippets = (command: string): ReadonlyArray<string> => {
+  const snippets: Array<string> = []
+  let quote: "'" | '"' | undefined
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!
+    if (quote === "'") {
+      if (ch === "'") quote = undefined
+      continue
+    }
+    if (ch === "\\") {
+      i++
+      continue
+    }
+    if (quote === undefined && (ch === "'" || ch === '"')) {
+      quote = ch
+      continue
+    }
+    if (quote === '"' && ch === '"') {
+      quote = undefined
+      continue
+    }
+    if (quote === undefined && ch === "#" && (i === 0 || /\s/.test(command[i - 1]!))) {
+      while (i < command.length && command[i] !== "\n") i++
+      continue
+    }
+    if (
+      (ch === "$" && command[i + 1] === "(") ||
+      (quote === undefined && (ch === "<" || ch === ">") && command[i + 1] === "(")
+    ) {
+      const end = findBalancedParenEnd(command, i + 1)
+      const inner = command.slice(i + 2, end).trim()
+      if (inner.length > 0) snippets.push(inner)
+      i = end
+      continue
+    }
+    if (ch === "`") {
+      const end = findClosingBacktick(command, i)
+      const inner = command.slice(i + 1, end).trim()
+      if (inner.length > 0) snippets.push(inner)
+      i = end
+    }
+  }
+  return snippets
+}
+
+export const hasUnexpandedShellVariable = (text: string): boolean => {
+  let quote: "'" | '"' | undefined
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!
+    if (quote === "'") {
+      if (ch === "'") quote = undefined
+      continue
+    }
+    if (ch === "\\") {
+      i++
+      continue
+    }
+    if (quote === undefined && ch === "'") {
+      quote = "'"
+      continue
+    }
+    if (ch === '"') {
+      quote = quote === '"' ? undefined : '"'
+      continue
+    }
+    if (
+      ch === "$" &&
+      text[i + 1] !== undefined &&
+      (text[i + 1] === "{" || /[A-Za-z_]/.test(text[i + 1]!))
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+const collectShellVariableAssignments = (
+  segments: ReadonlyArray<DetailedCommandSegment>,
+): ReadonlyMap<string, string> => {
+  const vars = new Map<string, string>()
+  const addAssignment = (entry: string): void => {
+    const eqIdx = entry.indexOf("=")
+    if (eqIdx <= 0) return
+    const name = entry.slice(0, eqIdx)
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) vars.set(name, entry.slice(eqIdx + 1))
+  }
+  for (const seg of segments) {
+    for (const env of seg.envAssignments) addAssignment(env)
+    const rawBin = seg.commandWords[0]
+    if (rawBin !== undefined && VAR_DECL_BUILTINS.has(binaryBasename(rawBin))) {
+      for (const word of seg.commandWords.slice(1)) {
+        if (!word.startsWith("-")) addAssignment(word)
+      }
+    }
+  }
+  return vars
+}
+
+const expandBracedVarExpression = (
+  expr: string,
+  vars: ReadonlyMap<string, string>,
+): string | undefined => {
+  const m = /^([A-Za-z_][A-Za-z0-9_]*)(.*)$/s.exec(expr)
+  if (m === null) return undefined
+  const val = vars.get(m[1]!)
+  const mod = m[2]!
+  if (mod === "") return val
+  if (mod.startsWith(":-") || mod.startsWith("-")) {
+    const fallback = mod.startsWith(":-") ? mod.slice(2) : mod.slice(1)
+    return val !== undefined && (mod.startsWith("-") || val.length > 0) ? val : fallback
+  }
+  if (val === undefined) return undefined
+  return mod === "%/" && val.endsWith("/") ? val.slice(0, -1) : val
+}
+
+const expandShellVariablesOnce = (
+  command: string,
+  vars: ReadonlyMap<string, string>,
+): { readonly text: string; readonly overflowed: boolean } => {
+  let out = ""
+  let quote: "'" | '"' | undefined
+  for (let i = 0; i < command.length; i++) {
+    if (out.length > MAX_EXPANDED_COMMAND_LENGTH) return { text: out, overflowed: true }
+    const ch = command[i]!
+    if (quote === "'") {
+      if (ch === "'") quote = undefined
+      out += ch
+      continue
+    }
+    if (ch === "\\") {
+      out += ch + (i + 1 < command.length ? command[++i]! : "")
+      continue
+    }
+    if (quote === undefined && ch === "'") {
+      quote = "'"
+      out += ch
+      continue
+    }
+    if (ch === '"') {
+      quote = quote === '"' ? undefined : '"'
+      out += ch
+      continue
+    }
+    if (ch === "$" && command[i + 1] === "{") {
+      const closeIdx = command.indexOf("}", i + 2)
+      if (closeIdx !== -1) {
+        const rep = expandBracedVarExpression(command.slice(i + 2, closeIdx), vars)
+        if (rep !== undefined) {
+          out += rep
+          i = closeIdx
+          continue
+        }
+      }
+    }
+    if (ch === "$") {
+      const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(command.slice(i + 1))
+      const rep = m !== null ? vars.get(m[0]) : undefined
+      if (m !== null && rep !== undefined) {
+        out += rep
+        i += m[0].length
+        continue
+      }
+    }
+    out += ch
+  }
+  return { text: out, overflowed: out.length > MAX_EXPANDED_COMMAND_LENGTH }
+}
+
+export const expandCommandVariables = (
+  command: string,
+): { readonly text: string; readonly overflowed: boolean } => {
+  let current = command
+  for (let pass = 0; pass < MAX_VAR_EXPANSION_PASSES; pass++) {
+    const vars = collectShellVariableAssignments(extractDetailedCommandSegments(current))
+    if (vars.size === 0) break
+    const expanded = expandShellVariablesOnce(current, vars)
+    if (expanded.overflowed || expanded.text === current) {
+      return { text: expanded.text, overflowed: expanded.overflowed }
+    }
+    current = expanded.text
+  }
+  return { text: current, overflowed: false }
 }

@@ -18,7 +18,6 @@ import { match } from "ts-pattern"
 import {
   AbsoluteRepoRoot,
   DaemonSocketPath,
-  LeaseEpoch,
   WORKFLOW_DAEMON_PROTOCOL_VERSION,
   WorkflowDaemonCapability,
   WorkflowStoreOperation,
@@ -417,7 +416,7 @@ describe("harness-mcp workflow daemon writer lease & lifecycle (F-1.1, F-20.4)",
           expect(presentMetaErr.holderPid).toBe(process.pid)
         }
 
-        // 2. .meta.json missing -> fallback WriterLeaseHeldError ("active-daemon", epoch 0, lockFilePath, holderPid undefined)
+        // 2. .meta.json missing -> fallback WriterLeaseHeldError ("existing-daemon", epoch undefined, lockFilePath, holderPid undefined)
         unlinkSync(metaPath)
         let missingMetaErr: unknown
         try {
@@ -430,7 +429,7 @@ describe("harness-mcp workflow daemon writer lease & lifecycle (F-1.1, F-20.4)",
         expect(missingMetaErr).toBeInstanceOf(WriterLeaseHeldError)
         if (missingMetaErr instanceof WriterLeaseHeldError) {
           expect(missingMetaErr.holderId).toBe("existing-daemon")
-          expect(missingMetaErr.leaseEpoch).toBe(0)
+          expect(missingMetaErr.leaseEpoch).toBeUndefined()
           expect(missingMetaErr.lockFilePath).toBe(runtimePaths.lockFilePath)
           expect(missingMetaErr.holderPid).toBeUndefined()
         }
@@ -448,7 +447,7 @@ describe("harness-mcp workflow daemon writer lease & lifecycle (F-1.1, F-20.4)",
         expect(symlinkMetaErr).toBeInstanceOf(WriterLeaseHeldError)
         if (symlinkMetaErr instanceof WriterLeaseHeldError) {
           expect(symlinkMetaErr.holderId).toBe("existing-daemon")
-          expect(symlinkMetaErr.leaseEpoch).toBe(0)
+          expect(symlinkMetaErr.leaseEpoch).toBeUndefined()
           expect(symlinkMetaErr.lockFilePath).toBe(runtimePaths.lockFilePath)
           expect(symlinkMetaErr.holderPid).toBeUndefined()
         }
@@ -474,7 +473,6 @@ describe("harness-mcp workflow daemon writer lease & lifecycle (F-1.1, F-20.4)",
                 acquireWorkflowEngineInScope({
                   daemonScope: scope,
                   startupState,
-                  fallbackWriterLeaseEpoch: LeaseEpoch.make(0),
                   workflowEngineOptions: { mode: "disabled" },
                   unixSocketDaemon,
                 }),
@@ -504,7 +502,7 @@ describe("harness-mcp workflow daemon writer lease & lifecycle (F-1.1, F-20.4)",
         workflowEngine: { mode: "auto" },
       })
       try {
-        expect(nonGitDaemon.writerLeaseEpoch).toBe(0)
+        expect(nonGitDaemon.writerLeaseEpoch).toBeUndefined()
         const statusRes = await Effect.runPromise(
           queryWorkflowDaemonCommand({
             socketPath: DaemonSocketPath.make(nonGitDaemon.socketPath),
@@ -514,8 +512,9 @@ describe("harness-mcp workflow daemon writer lease & lifecycle (F-1.1, F-20.4)",
         expect(statusRes).toMatchObject({
           ok: true,
           status: "inactive",
-          writerLeaseEpoch: 0,
+          result: { _tag: "DaemonOffline", outcome: { _tag: "NotFound" } },
         })
+        expect(statusRes.writerLeaseEpoch).toBeUndefined()
       } finally {
         await nonGitDaemon.close()
       }
@@ -528,7 +527,7 @@ describe("harness-mcp workflow daemon writer lease & lifecycle (F-1.1, F-20.4)",
         },
       })
       try {
-        expect(primaryAuto.writerLeaseEpoch).toBe(0)
+        expect(primaryAuto.writerLeaseEpoch).toBeUndefined()
         const secondaryAuto = await startHarnessDaemonServer(repoDir, {
           workflowEngine: {
             mode: "auto",
@@ -548,8 +547,9 @@ describe("harness-mcp workflow daemon writer lease & lifecycle (F-1.1, F-20.4)",
         expect(statusRes).toMatchObject({
           ok: true,
           status: "inactive",
-          writerLeaseEpoch: 0,
+          result: { _tag: "DaemonOffline", outcome: { _tag: "NotFound" } },
         })
+        expect(statusRes.writerLeaseEpoch).toBeUndefined()
       } finally {
         await primaryAuto.close()
       }
