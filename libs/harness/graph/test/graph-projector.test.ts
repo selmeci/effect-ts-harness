@@ -56,7 +56,8 @@ const makePatch = (params: {
   deletedEntityKeys: params.deletedEntityKeys !== undefined ? [...params.deletedEntityKeys] : [],
   deletedRelationIds: [],
   deletedRoleEdges: [],
-  insertedEntityNodes: params.insertedEntityNodes !== undefined ? [...params.insertedEntityNodes] : [],
+  insertedEntityNodes:
+    params.insertedEntityNodes !== undefined ? [...params.insertedEntityNodes] : [],
   insertedRelationNodes:
     params.insertedRelationNodes !== undefined ? [...params.insertedRelationNodes] : [],
   insertedRoleEdges: params.insertedRoleEdges !== undefined ? [...params.insertedRoleEdges] : [],
@@ -114,7 +115,9 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
         expect(result.overlays.length).toBeGreaterThan(0)
         expect(result.operations.length).toBeGreaterThan(0)
 
-        const overlayMap = new Map(result.overlays.map((o) => [String(o.targetFile), String(o.content)]))
+        const overlayMap = new Map(
+          result.overlays.map((o) => [String(o.targetFile), String(o.content)]),
+        )
         const allOverlayContent = Array.from(overlayMap.values()).join("\n")
 
         // 1. schemas.ts contains Schema.brand
@@ -178,7 +181,7 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
           patches: [rep05Patch],
           existingFiles: {
             "libs/sample/domain/src/order.ts":
-              'export const checkout = Effect.fnUntraced(() => Effect.succeed(1))\n',
+              "export const checkout = Effect.fnUntraced(() => Effect.succeed(1))\n",
           },
           verifyRoundTrip: false,
         })
@@ -284,7 +287,7 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
           patches: [rep09Patch],
           existingFiles: {
             "libs/sample/infra/src/migrations.ts":
-              'const createTable = sql`CREATE TABLE orders (id TEXT PRIMARY KEY)`\n',
+              "const createTable = sql`CREATE TABLE orders (id TEXT PRIMARY KEY)`\n",
           },
           verifyRoundTrip: false,
         })
@@ -401,7 +404,8 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
           verifyRoundTrip: false,
         })
 
-        const pkgTag = "packageTag" in node && node.packageTag !== undefined ? node.packageTag : "contract"
+        const pkgTag =
+          "packageTag" in node && node.packageTag !== undefined ? node.packageTag : "contract"
         const barrelFile = `libs/${scope}/${pkgTag}/src/index.ts`
         const barrelOverlay = result.overlays.find((o) => String(o.targetFile) === barrelFile)
         expect(barrelOverlay?.targetFile).toBe(barrelFile)
@@ -410,45 +414,43 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
       }),
   )
 
-  it.effect(
-    "REQ-4.2: Preserves existing exports in src/index.ts when co-projecting barrel",
-    () =>
-      Effect.gen(function* () {
-        const patch = makePatch({
-          ruleId: RewriteRuleId.make("PLAN-01"),
-          phase: "PLAN",
-          primaryNodeKey: NodeKey.make("SchemaDef:PaymentId"),
-          insertedEntityNodes: [
-            {
-              _tag: "SchemaDef",
-              schemaName: "PaymentId",
-              file: "libs/payments/contract/src/schemas.ts",
-              line: 1,
-              packageTag: "contract",
-              isBranded: true,
-            },
-          ],
-        })
-
-        const existingBarrel = "export const PRE_EXISTING_CONSTANT = 999\n"
-        const result = yield* decideGraphProjection({
-          initialGraph: emptyGraph,
-          targetGraph: emptyGraph,
-          patches: [patch],
-          existingFiles: {
-            "libs/payments/contract/src/index.ts": existingBarrel,
+  it.effect("REQ-4.2: Preserves existing exports in src/index.ts when co-projecting barrel", () =>
+    Effect.gen(function* () {
+      const patch = makePatch({
+        ruleId: RewriteRuleId.make("PLAN-01"),
+        phase: "PLAN",
+        primaryNodeKey: NodeKey.make("SchemaDef:PaymentId"),
+        insertedEntityNodes: [
+          {
+            _tag: "SchemaDef",
+            schemaName: "PaymentId",
+            file: "libs/payments/contract/src/schemas.ts",
+            line: 1,
+            packageTag: "contract",
+            isBranded: true,
           },
-          verifyRoundTrip: false,
-        })
+        ],
+      })
 
-        const barrelOverlay = result.overlays.find(
-          (o) => String(o.targetFile) === "libs/payments/contract/src/index.ts",
-        )
-        expect(barrelOverlay).toBeDefined()
-        const content = String(barrelOverlay?.content)
-        expect(content).toContain("PRE_EXISTING_CONSTANT")
-        expect(content).toContain("PaymentId")
-      }),
+      const existingBarrel = "export const PRE_EXISTING_CONSTANT = 999\n"
+      const result = yield* decideGraphProjection({
+        initialGraph: emptyGraph,
+        targetGraph: emptyGraph,
+        patches: [patch],
+        existingFiles: {
+          "libs/payments/contract/src/index.ts": existingBarrel,
+        },
+        verifyRoundTrip: false,
+      })
+
+      const barrelOverlay = result.overlays.find(
+        (o) => String(o.targetFile) === "libs/payments/contract/src/index.ts",
+      )
+      expect(barrelOverlay).toBeDefined()
+      const content = String(barrelOverlay?.content)
+      expect(content).toContain("PRE_EXISTING_CONSTANT")
+      expect(content).toContain("PaymentId")
+    }),
   )
 
   it.effect(
@@ -548,7 +550,8 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
           targetGraph: emptyGraph,
           patches: fivePatches,
           existingFiles: {
-            [targetFile]: 'import { Schema } from "effect"\nexport const sc1 = Schema.NonEmptyString\n',
+            [targetFile]:
+              'import { Schema } from "effect"\nexport const sc1 = Schema.NonEmptyString\n',
           },
           verifyRoundTrip: true,
           forceFailRuleIds: [RewriteRuleId.make("REP-06")],
@@ -1007,13 +1010,7 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
           primaryNodeKey: NodeKey.make("SchemaDef:InterruptedTarget"),
         })
         const fiber = yield* Effect.forkChild(
-          verifyProjectedSubset(
-            process.cwd(),
-            emptyGraph,
-            emptyGraph,
-            [patch],
-            {},
-          ),
+          verifyProjectedSubset(process.cwd(), emptyGraph, emptyGraph, [patch], {}),
         )
         yield* Fiber.interrupt(fiber)
         const exit = yield* Fiber.await(fiber)
@@ -1182,14 +1179,8 @@ describe("GraphProjector.decide (harness:SPEC-0008 Section 4)", () => {
 
   it("F-12.1: isPureInterruptCause preserves composite Fail+Interrupt causes and only matches pure interrupts", () => {
     const pureInt = Cause.interrupt(1)
-    const compositeFailInt = Cause.combine(
-      Cause.fail(new Error("boom")),
-      Cause.interrupt(1),
-    )
-    const compositeDieInt = Cause.combine(
-      Cause.die("defect"),
-      Cause.interrupt(1),
-    )
+    const compositeFailInt = Cause.combine(Cause.fail(new Error("boom")), Cause.interrupt(1))
+    const compositeDieInt = Cause.combine(Cause.die("defect"), Cause.interrupt(1))
     expect(isPureInterruptCause(pureInt)).toBe(true)
     expect(isPureInterruptCause(compositeFailInt)).toBe(false)
     expect(isPureInterruptCause(compositeDieInt)).toBe(false)

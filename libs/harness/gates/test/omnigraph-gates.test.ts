@@ -150,12 +150,12 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
           (v) => v._tag === "unimplemented-stub-remaining",
         )
         expect(stubViolations).toHaveLength(2)
-        expect(
-          extraStubReport.violations.some((v) => v._tag === "planned-effect-fn-dropped"),
-        ).toBe(true)
-        expect(
-          extraStubReport.violations.some((v) => v._tag === "no-effect-fn-implemented"),
-        ).toBe(true)
+        expect(extraStubReport.violations.some((v) => v._tag === "planned-effect-fn-dropped")).toBe(
+          true,
+        )
+        expect(extraStubReport.violations.some((v) => v._tag === "no-effect-fn-implemented")).toBe(
+          true,
+        )
         expect(extraStubReport.conflictCount).toBe(1)
 
         const missingBaseReport = yield* decideOmnigraphBranchVerify({
@@ -311,11 +311,7 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
             .exhaustive(),
         ).length
         const observedImplEffectFnCount = NonNegativeCount.make(
-          missingMergeBase
-            ? 0
-            : zeroObservedImplEffectFnCount
-              ? 0
-              : Math.max(1, activeFnCount),
+          missingMergeBase ? 0 : zeroObservedImplEffectFnCount ? 0 : Math.max(1, activeFnCount),
         )
 
         const report = yield* decideOmnigraphBranchVerify({
@@ -339,9 +335,9 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
 
         if (conflictCount > 0) {
           expect(report.verdict).toBe("violated")
-          expect(
-            report.violations.filter((v) => v._tag === "dry-run-merge-conflict"),
-          ).toHaveLength(conflictCount)
+          expect(report.violations.filter((v) => v._tag === "dry-run-merge-conflict")).toHaveLength(
+            conflictCount,
+          )
         }
 
         if (missingMergeBase) {
@@ -355,7 +351,11 @@ describe("Omnigraph Phase 9A/9B pure deciders", () => {
 
         const hasStubInChanges = diffChanges.some((ch) =>
           match(ch)
-            .with({ _tag: "EffectFnInserted" }, { _tag: "EffectFnUpdated" }, (fnCh) => fnCh.stubAfter)
+            .with(
+              { _tag: "EffectFnInserted" },
+              { _tag: "EffectFnUpdated" },
+              (fnCh) => fnCh.stubAfter,
+            )
             .with({ _tag: "EffectFnDeleted" }, { _tag: "EntityDiffChange" }, () => false)
             .exhaustive(),
         )

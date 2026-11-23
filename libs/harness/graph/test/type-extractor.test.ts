@@ -277,6 +277,9 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
       /* calls Decider.run in block comment */
       describe("Decider.run suite", () => {
         it('tests Decider.run behavior', () => {
+          writeFileSync(p, "packages:\\n  - 'libs/*'\\n")
+          resolveCliInfraLayer("done")
+          /* trailing real comment */
           expect(1).toBe(1)
         })
         test(\`Decider.run template\`, () => {
@@ -289,6 +292,8 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
     expect(stripped).not.toContain("tests Decider.run behavior")
     expect(stripped).not.toContain("Decider.run template")
     expect(stripped).not.toContain("calls Decider.run")
+    expect(stripped).not.toContain("trailing real comment")
+    expect(stripped).toContain('resolveCliInfraLayer("done")')
     expect(stripped).toContain('describe("",')
     expect(stripped).toContain('it("",')
     expect(stripped).toContain('test("",')

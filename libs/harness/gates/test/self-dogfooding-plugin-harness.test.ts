@@ -32,6 +32,7 @@ import { ActiveMutantContext, HarnessSubprocessRunner, WorkspaceFs } from "@harn
 import { NonNegativeCount } from "@harness/graph"
 import { type IndexedEffectFn, runWithTestTracer } from "@harness/ingest"
 import { decideSpanBudgets, type SpanSample } from "../src/span-budget.js"
+import { MAX_TEST_FILE_LINES } from "../src/plugins/ast-contract-and-test-hygiene.js"
 import { type SelfDogfoodingInput } from "../src/plugins/self-dogfooding-contract.js"
 import { decideSelfDogfooding, SelfDogfooding } from "../src/plugins/self-dogfooding-plugin.js"
 import {
@@ -1459,7 +1460,7 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
       }),
   )
 
-  it("enforces <= 2000 line budget on every *.test.ts and *.spec.ts file under libs/harness/gates/test/", () => {
+  it(`enforces <= ${MAX_TEST_FILE_LINES} line budget on every *.test.ts and *.spec.ts file under libs/harness/gates/test/`, () => {
     const testDir = dirname(fileURLToPath(import.meta.url))
     const collectTestFiles = (dir: string): ReadonlyArray<string> => {
       const files: Array<string> = []
@@ -1480,7 +1481,10 @@ describe("Self-Dogfooding Plugin & Capability Harness (SPEC-0011)", () => {
         file: relative(testDir, filePath),
         lines: readFileSync(filePath, "utf8").split("\n").length,
       }))
-      .filter((entry) => entry.lines > 2000)
-    expect(oversized, `Test files exceeding 2000 lines: ${JSON.stringify(oversized)}`).toEqual([])
+      .filter((entry) => entry.lines > MAX_TEST_FILE_LINES)
+    expect(
+      oversized,
+      `Test files exceeding ${MAX_TEST_FILE_LINES} lines: ${JSON.stringify(oversized)}`,
+    ).toEqual([])
   })
 })

@@ -64,7 +64,13 @@ export {
   evaluateBranchingSqliteViolations,
   checkUnusedContractExports,
 } from "./plugins/gc/gc-topology-entropy.plugin.js"
-export { evaluateTestAndDeciderPlugin } from "./plugins/gc/gc-test-and-decider.plugin.js"
+export {
+  MAX_TEST_SOURCE_DOMAINS,
+  MIN_LINES_FOR_DOMAIN_SPRAWL,
+  checkTestDomainSprawl,
+  evaluateTestAndDeciderPlugin,
+  resolveSourceDomainBucket,
+} from "./plugins/gc/gc-test-and-decider.plugin.js"
 export { evaluateGovernanceDocsPlugin } from "./plugins/gc/gc-governance-docs.plugin.js"
 export { evaluatePackageAndMigrationPlugin } from "./plugins/gc/gc-package-and-migration.plugin.js"
 export {

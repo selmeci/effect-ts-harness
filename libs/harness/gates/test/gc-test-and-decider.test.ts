@@ -4,7 +4,15 @@ import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
 import { buildHarnessGraph } from "@harness/graph"
-import { decideGraphEntropy, evaluateTestAndDeciderPlugin } from "../src/index.js"
+import {
+  checkTestDomainSprawl,
+  decideGraphEntropy,
+  evaluateTestAndDeciderPlugin,
+  MAX_TEST_SOURCE_DOMAINS,
+  MIN_LINES_FOR_DOMAIN_SPRAWL,
+  resolveSourceDomainBucket,
+} from "../src/index.js"
+import { checkUntestedContractUnionVariants } from "../src/plugins/gc/gc-test-and-decider.plugin.js"
 import { testHostIo } from "./helpers/test-host-io.js"
 
 const ExecutableTagSchema = Schema.Literals(["domain", "contract", "infra", "app"])
@@ -526,6 +534,245 @@ describe("GraphGc untested-union-variant gate (SPEC-0028 REQ-3.2)", () => {
           } finally {
             rmSync(coveredDir, { recursive: true, force: true })
           }
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      }),
+  )
+})
+
+type SprawlMode =
+  | "direct"
+  | "named-barrel"
+  | "star-barrel"
+  | "dir-barrel"
+  | "bare-src"
+  | "ns-barrel"
+  | "type-only"
+  | "fixture"
+
+const writeDomainSprawlWorkspace = (
+  domainCount: number,
+  lineCount: number,
+  mode: SprawlMode,
+  options?: { readonly includeDirectTypeImport?: boolean },
+): string => {
+  const dir = mkdtempSync(join(tmpdir(), "harness-domain-sprawl-"))
+  const pkgSrcDir = join(dir, "libs", "demo", "domain", "src")
+  const testSubdir =
+    mode === "fixture"
+      ? join(dir, "libs", "demo", "domain", "test", "fixtures")
+      : join(dir, "libs", "demo", "domain", "test")
+  mkdirSync(pkgSrcDir, { recursive: true })
+  mkdirSync(testSubdir, { recursive: true })
+
+  const indexLines: Array<string> = []
+  for (let i = 1; i <= domainCount; i += 1) {
+    writeFileSync(join(pkgSrcDir, `dom_${i}.ts`), `export const domFn${i} = (): number => ${i}\n`)
+    if (mode === "star-barrel" && i === domainCount) {
+      writeFileSync(
+        join(pkgSrcDir, `dom_${i}_star.ts`),
+        `export function domStarFn${i}(): number {\n  return ${i}\n}\n`,
+      )
+      indexLines.push(`export * from "./dom_${i}_star.js"`)
+    } else if (mode === "dir-barrel" && i === domainCount) {
+      const subDir = join(pkgSrcDir, `dom_${i}_dir`)
+      mkdirSync(subDir, { recursive: true })
+      writeFileSync(join(subDir, "index.ts"), `export const domDirFn${i} = (): number => ${i}\n`)
+      indexLines.push(`export { domDirFn${i} } from "./dom_${i}_dir"`)
+    } else {
+      indexLines.push(`export { domFn${i} } from "./dom_${i}.js"`)
+    }
+  }
+  if (options?.includeDirectTypeImport === true) {
+    writeFileSync(join(pkgSrcDir, "dom_type_only.ts"), "export type DomTypeOnly = number\n")
+  }
+  writeFileSync(join(pkgSrcDir, "index.ts"), `${indexLines.join("\n")}\n`)
+
+  const lines: Array<string> = []
+  if (options?.includeDirectTypeImport === true) {
+    lines.push('import { type DomTypeOnly } from "../src/dom_type_only.js"')
+  }
+  const padStartIdx = (() => {
+    if (mode === "direct" || mode === "fixture") {
+      const relPrefix = mode === "fixture" ? "../../src" : "../src"
+      for (let i = 1; i <= domainCount; i += 1) {
+        lines.push(`import { domFn${i} } from "${relPrefix}/dom_${i}.js"`)
+      }
+      lines.push(
+        `export const refs = [${Array.from({ length: domainCount }, (_, idx) => `domFn${idx + 1}`).join(", ")}]`,
+      )
+      return lines.length
+    }
+    if (mode === "named-barrel" || mode === "bare-src") {
+      const syms = Array.from({ length: domainCount }, (_, idx) => `domFn${idx + 1}`).join(", ")
+      const importSpec = mode === "bare-src" ? "../src" : "../src/index.js"
+      lines.push(`import { ${syms} } from "${importSpec}"`)
+      lines.push(`export const refs = [${syms}]`)
+      return lines.length
+    }
+    if (mode === "dir-barrel") {
+      const syms = Array.from({ length: domainCount }, (_, idx) =>
+        idx + 1 === domainCount ? `domDirFn${domainCount}` : `domFn${idx + 1}`,
+      )
+      lines.push(`import { ${syms.join(", ")} } from "../src/index.js"`)
+      lines.push(`export const refs = [${syms.join(", ")}]`)
+      return lines.length
+    }
+    if (mode === "star-barrel") {
+      const syms = Array.from({ length: domainCount }, (_, idx) =>
+        idx + 1 === domainCount ? `domStarFn${domainCount}` : `domFn${idx + 1}`,
+      )
+      lines.push(`import { ${syms.join(", ")} } from "../src/index.js"`)
+      lines.push(`export const refs = [${syms.join(", ")}]`)
+      return lines.length
+    }
+    if (mode === "ns-barrel") {
+      lines.push('import * as DemoPkg from "../src/index.js"')
+      const calls = Array.from({ length: domainCount }, (_, idx) => `DemoPkg.domFn${idx + 1}`).join(
+        ", ",
+      )
+      lines.push(`export const refs = [${calls}]`)
+      return lines.length
+    }
+    const syms = Array.from({ length: domainCount }, (_, idx) => `type domFn${idx + 1}`).join(", ")
+    lines.push(`import { ${syms} } from "../src/index.js"`)
+    lines.push("export type Sample = typeof domFn1")
+    return lines.length
+  })()
+
+  for (let i = padStartIdx; i < lineCount; i += 1) {
+    lines.push(`const pad_${i} = ${i}`)
+  }
+  writeFileSync(join(testSubdir, "suite.test.ts"), lines.join("\n"))
+  return dir
+}
+
+describe("GraphGc test-domain-sprawl gate (SPEC-0028 REQ-3.4)", () => {
+  it("resolveSourceDomainBucket maps nested plugins, commands, subdirectories, and flat modules deterministically", () => {
+    expect(MAX_TEST_SOURCE_DOMAINS).toBe(6)
+    expect(MIN_LINES_FOR_DOMAIN_SPRAWL).toBe(300)
+    expect(resolveSourceDomainBucket("./plugins/gc/gc-helpers.js")).toBe("plugins/gc")
+    expect(resolveSourceDomainBucket("plugins/ast-cache.ts")).toBe("plugins")
+    expect(resolveSourceDomainBucket("commands/verify-and-done.command.js")).toBe(
+      "commands/verify-and-done.command",
+    )
+    expect(resolveSourceDomainBucket("mutation/mutation-cache.ts")).toBe("mutation")
+    expect(resolveSourceDomainBucket("policy.ts")).toBe("policy")
+  })
+
+  it.effect(
+    "allows <= 6 domains and compact < 300 line cross-cutting suites, while flagging 7 domains at 300+ lines",
+    () =>
+      Effect.gen(function* () {
+        const sixDomainsDir = writeDomainSprawlWorkspace(6, 350, "direct", {
+          includeDirectTypeImport: true,
+        })
+        const compactSevenDir = writeDomainSprawlWorkspace(7, 299, "direct")
+        const exactThresholdDir = writeDomainSprawlWorkspace(7, 300, "direct")
+        try {
+          const sixFindings = checkTestDomainSprawl(sixDomainsDir, testHostIo)
+          expect(sixFindings).toEqual([])
+
+          const compactFindings = checkTestDomainSprawl(compactSevenDir, testHostIo)
+          expect(compactFindings).toEqual([])
+
+          const report = yield* decideGraphEntropy({
+            graph: buildHarnessGraph({}),
+            workspaceRoot: exactThresholdDir,
+            hostIo: testHostIo,
+          })
+          const hits = report.findings.filter((f) => f.kind === "test-domain-sprawl")
+          expect(hits).toHaveLength(1)
+          expect(hits[0]?.nodeId).toBe("libs/demo/domain/test/suite.test.ts")
+          expect(hits[0]?.message).toContain("spans 7 distinct production source domains")
+        } finally {
+          rmSync(sixDomainsDir, { recursive: true, force: true })
+          rmSync(compactSevenDir, { recursive: true, force: true })
+          rmSync(exactThresholdDir, { recursive: true, force: true })
+        }
+      }),
+  )
+
+  it("resolves named, star re-export, directory index, bare src, and namespace imports through barrel index.ts while ignoring type-only and fixture imports", () => {
+    const namedDir = writeDomainSprawlWorkspace(7, 320, "named-barrel")
+    const starDir = writeDomainSprawlWorkspace(7, 320, "star-barrel")
+    const dirBarrelDir = writeDomainSprawlWorkspace(7, 320, "dir-barrel")
+    const bareSrcDir = writeDomainSprawlWorkspace(7, 320, "bare-src")
+    const nsDir = writeDomainSprawlWorkspace(7, 320, "ns-barrel")
+    const typeOnlyDir = writeDomainSprawlWorkspace(8, 350, "type-only")
+    const fixtureDir = writeDomainSprawlWorkspace(8, 350, "fixture")
+    try {
+      expect(checkTestDomainSprawl(namedDir, testHostIo)).toHaveLength(1)
+      expect(checkTestDomainSprawl(starDir, testHostIo)).toHaveLength(1)
+      expect(checkTestDomainSprawl(dirBarrelDir, testHostIo)).toHaveLength(1)
+      expect(checkTestDomainSprawl(bareSrcDir, testHostIo)).toHaveLength(1)
+      expect(checkTestDomainSprawl(nsDir, testHostIo)).toHaveLength(1)
+      expect(checkTestDomainSprawl(typeOnlyDir, testHostIo)).toEqual([])
+      expect(checkTestDomainSprawl(fixtureDir, testHostIo)).toEqual([])
+    } finally {
+      rmSync(namedDir, { recursive: true, force: true })
+      rmSync(starDir, { recursive: true, force: true })
+      rmSync(dirBarrelDir, { recursive: true, force: true })
+      rmSync(bareSrcDir, { recursive: true, force: true })
+      rmSync(nsDir, { recursive: true, force: true })
+      rmSync(typeOnlyDir, { recursive: true, force: true })
+      rmSync(fixtureDir, { recursive: true, force: true })
+    }
+  })
+
+  it("checkUntestedContractUnionVariants scans workspace test files directly when preParsedTestFiles is omitted", () => {
+    const unionDir = mkdtempSync(join(tmpdir(), "harness-untested-union-direct-"))
+    try {
+      const contractSrcDir = join(unionDir, "libs", "demo", "contract", "src")
+      const contractTestDir = join(unionDir, "libs", "demo", "contract", "test")
+      mkdirSync(contractSrcDir, { recursive: true })
+      mkdirSync(contractTestDir, { recursive: true })
+      writeFileSync(
+        join(contractSrcDir, "union.ts"),
+        [
+          'import { Schema } from "effect"',
+          "export const MyEvt = Schema.TaggedUnion({",
+          "  Alpha: Schema.Struct({ a: Schema.String }),",
+          "  Beta: Schema.Struct({ b: Schema.String }),",
+          "})",
+        ].join("\n"),
+      )
+      writeFileSync(
+        join(contractTestDir, "union.test.ts"),
+        [
+          'import { MyEvt } from "../src/union.js"',
+          'export const tag = "Alpha"',
+          "void MyEvt",
+        ].join("\n"),
+      )
+      const findings = checkUntestedContractUnionVariants(unionDir, testHostIo)
+      expect(findings).toHaveLength(1)
+      expect(findings[0]?.kind).toBe("untested-union-variant")
+      expect(findings[0]?.nodeId).toBe("MyEvt.Beta")
+    } finally {
+      rmSync(unionDir, { recursive: true, force: true })
+    }
+  })
+
+  it.effect.prop(
+    "property: emits test-domain-sprawl iff lineCount >= 300 and domainCount > 6",
+    {
+      domainCount: Schema.Literals([5, 6, 7, 8]),
+      lineCount: Schema.Literals([250, 299, 300, 350]),
+    },
+    ({ domainCount, lineCount }) =>
+      Effect.sync(() => {
+        const dir = writeDomainSprawlWorkspace(domainCount, lineCount, "named-barrel")
+        try {
+          const findings = checkTestDomainSprawl(dir, testHostIo)
+          const expectedCount =
+            lineCount >= MIN_LINES_FOR_DOMAIN_SPRAWL && domainCount > MAX_TEST_SOURCE_DOMAINS
+              ? 1
+              : 0
+          expect(findings.filter((f) => f.kind === "test-domain-sprawl")).toHaveLength(
+            expectedCount,
+          )
         } finally {
           rmSync(dir, { recursive: true, force: true })
         }

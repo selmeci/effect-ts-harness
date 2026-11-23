@@ -1,521 +1,750 @@
 import { describe, expect, it } from "vitest"
+import { unwrapCommandSegment } from "../src/policy-shell-parser.js"
+import { stripSafeLeadingEnvVarsDetailed } from "../src/policy-command-rules.js"
 import {
   classifyCommand,
   classifyFileRead,
   classifyFileWrite,
-  classifyWorkerFileAccess,
   explainCommandDenyReason,
   explainCommandDenyRule,
-  isWorkerDaemonCredentialShellAccess,
-  isWorkerRecursiveWorkflowCommand,
-  MAX_SUBSHELL_INSPECT_DEPTH,
-  type FileWriteDenyRuleId,
+  SKIP_NX_CACHE_BANNED_REASON,
+  isCommandAllowed,
+  isSkipNxCacheCommand,
 } from "../src/policy.js"
-import { classifyWorkerFileAccess as classifyWorkerFileAccessFromFastpath } from "../src/hook-fastpath.js"
-import { classifyWorkerFileAccess as classifyWorkerFileAccessFromIndex } from "../src/index.js"
 
-describe("worker isolation and workflow worktree policy", () => {
-  it("F-1.1 allows normal source edits inside .harness/workflow-worktrees/<runId>/<unitId>/** while denying stamps, commonGitDir harness state, repos/**, and secret files", () => {
-    expect(classifyFileWrite(".harness/workflow-worktrees/run-1/unit-a/libs/a.ts").verdict).toBe(
-      "allow",
-    )
+describe("guard policy wrapper isolation, glob hardening & worktree mode", () => {
+  it("F-7.4/F-18.1 unwraps process wrappers and bun package-runner commands cleanly without regressing bun script/eval forms", () => {
+    // F-7.4: process wrapper unwrapping for deny, skip-nx-cache, ask, and exempted read-only escalate
+    for (const denied of [
+      { cmd: "timeout 5 rm .git/harness/daemon.lock", ruleId: "harness-state-mutation" },
+      { cmd: "timeout -k 5 10 rm .git/harness/daemon.lock", ruleId: "harness-state-mutation" },
+      {
+        cmd: "timeout --signal=TERM 10s grep foo .git/harness/daemon.lock",
+        ruleId: "harness-state-mutation",
+      },
+      { cmd: "timeout 10 grep foo .git/harness/auth-tokens.json", ruleId: "secret-file-access" },
+      { cmd: "nice -n 10 rm .git/harness/daemon.lock", ruleId: "harness-state-mutation" },
+      {
+        cmd: "nice --adjustment=5 grep foo .git/harness/daemon.lock",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "nohup python3 -c \"open('.git/harness/auth-tokens.json','w')\"",
+        ruleId: "harness-state-mutation",
+      },
+      { cmd: "stdbuf -o0 -e0 rm .git/harness/daemon.lock", ruleId: "harness-state-mutation" },
+      {
+        cmd: "stdbuf -o 0 -e L grep foo .git/harness/daemon.lock",
+        ruleId: "harness-state-mutation",
+      },
+      { cmd: "time -p rm .git/harness/daemon.lock", ruleId: "harness-state-mutation" },
+      { cmd: "time -o .git/harness/daemon.lock ls", ruleId: "harness-state-mutation" },
+      { cmd: "timeout 10 nx test @harness/gates --skip-nx-cache", ruleId: "skip-nx-cache-banned" },
+      {
+        cmd: "nice -n 10 nx run @harness/gates:verify --skip-nx-cache",
+        ruleId: "skip-nx-cache-banned",
+      },
+      { cmd: "time -p pnpm nx test --skip-nx-cache", ruleId: "skip-nx-cache-banned" },
+      {
+        cmd: "stdbuf -o0 -e0 bun nx affected -t verify --skip-nx-cache",
+        ruleId: "skip-nx-cache-banned",
+      },
+    ] as const) {
+      expect(classifyCommand(denied.cmd), denied.cmd).toBe("deny")
+      expect(explainCommandDenyRule(denied.cmd)?.ruleId, denied.cmd).toBe(denied.ruleId)
+    }
+
+    expect(classifyCommand("timeout 5 git reset --hard HEAD~1")).toBe("ask")
     expect(
-      classifyFileWrite("/repo/.harness/workflow-worktrees/run-1/unit-a/libs/a.ts", {
-        unitWorkerMode: true,
-      }).verdict,
-    ).toBe("allow")
-    expect(classifyFileRead(".harness/workflow-worktrees/run-1/unit-a/libs/a.ts").verdict).toBe(
-      "allow",
-    )
+      classifyCommand("HARNESS_ALLOW_SKIP_NX_CACHE=1 timeout 10 nx test --skip-nx-cache"),
+    ).toBe("ask")
+    expect(classifyCommand("timeout 5 ls .git/harness")).toBe("escalate")
+    expect(classifyCommand("nice -n 10 find .git/harness -maxdepth 2")).toBe("escalate")
+    expect(classifyCommand("nohup python3 script.py")).toBe("escalate")
 
-    const worktreeDeniedWrites: ReadonlyArray<{
-      readonly path: string
-      readonly ruleId: FileWriteDenyRuleId
-    }> = [
-      {
-        path: ".harness/workflow-worktrees/run-1/unit-a/.harness/verify-stamp.json",
-        ruleId: "verify-stamp",
-      },
-      {
-        path: ".harness/workflow-worktrees/run-1/unit-a/.harness/worktrees/unit-a/verify-stamp.json",
-        ruleId: "verify-stamp",
-      },
-      {
-        path: ".harness/workflow-worktrees/run-1/unit-a/.harness/mutate-stamp.json",
-        ruleId: "mutate-stamp",
-      },
-      {
-        path: ".harness/workflow-worktrees/run-1/unit-a/repos/effect/LLMS.md",
-        ruleId: "readonly-subtree",
-      },
-      {
-        path: ".harness/workflow-worktrees/run-1/unit-a/.env",
-        ruleId: "secret-file",
-      },
-      {
-        path: ".harness/workflow-worktrees/run-1/unit-a/.git/harness/daemon.sock",
-        ruleId: "harness-common-dir-state",
-      },
-      {
-        path: "/repo/.git/harness/daemon.lock",
-        ruleId: "harness-common-dir-state",
-      },
-      {
-        path: "/repo/.git/harness/workflow-backups/2026-11-20.ndjson",
-        ruleId: "harness-common-dir-state",
-      },
-      {
-        path: "/repo/.git/harness/auth-tokens.json",
-        ruleId: "harness-common-dir-state",
-      },
-    ]
-    for (const c of worktreeDeniedWrites) {
-      const res = classifyFileWrite(c.path)
-      expect(res.verdict, c.path).toBe("deny")
-      expect(res.ruleId, c.path).toBe(c.ruleId)
-    }
-  })
+    expect(
+      unwrapCommandSegment(["timeout", "-k", "5", "10", "rm", ".git/harness/daemon.lock"]),
+    ).toEqual({
+      envAssignments: [],
+      commandWords: ["rm", ".git/harness/daemon.lock"],
+      sawPackageRunner: false,
+    })
+    expect(unwrapCommandSegment(["nice", "-n", "10", "grep", "foo", "bar"])).toEqual({
+      envAssignments: [],
+      commandWords: ["grep", "foo", "bar"],
+      sawPackageRunner: false,
+    })
+    expect(unwrapCommandSegment(["stdbuf", "-o0", "-e0", "cat", "foo"])).toEqual({
+      envAssignments: [],
+      commandWords: ["cat", "foo"],
+      sawPackageRunner: false,
+    })
+    expect(unwrapCommandSegment(["time", "-p", "nx", "test"])).toEqual({
+      envAssignments: [],
+      commandWords: ["nx", "test"],
+      sawPackageRunner: false,
+    })
+    expect(unwrapCommandSegment(["nohup", "python3", "script.py"])).toEqual({
+      envAssignments: [],
+      commandWords: ["python3", "script.py"],
+      sawPackageRunner: false,
+    })
 
-  it("F-4.1 denies secret files and protected <commonGitDir>/harness/** reads in classifyFileRead across all modes", () => {
-    for (const p of [
-      ".env",
-      ".env.local",
-      ".env.production",
-      ".dev.vars",
-      "mutation-hmac-v2.key",
-      "private.pem",
-      ".cache/effect-harness/mutation-hmac-v2.key",
-      ".harness/workflow-worktrees/run-1/unit-a/.env",
+    // F-18.1: bun package-runner unwrapping vs script/eval non-runner preservation
+    for (const bunSkipCmd of [
+      "bun nx affected -t verify --skip-nx-cache",
+      "bun nx run @harness/gates:verify --skip-nx-cache",
+      "bun --bun nx affected -t verify --skip-nx-cache",
+      "bun --cwd apps/cli nx test --skip-nx-cache",
+      "bun --preload ./setup.ts nx test --skip-nx-cache",
+      "bun verify --skip-nx-cache",
     ]) {
-      const res = classifyFileRead(p)
-      expect(res.verdict, p).toBe("deny")
-      expect(res.ruleId, p).toBe("secret-file")
+      expect(isSkipNxCacheCommand(bunSkipCmd), bunSkipCmd).toBe(true)
+      expect(classifyCommand(bunSkipCmd), bunSkipCmd).toBe("deny")
+      expect(explainCommandDenyRule(bunSkipCmd)?.ruleId, bunSkipCmd).toBe("skip-nx-cache-banned")
+      expect(explainCommandDenyReason(bunSkipCmd), bunSkipCmd).toBe(SKIP_NX_CACHE_BANNED_REASON)
     }
 
-    for (const p of [
-      ".git/harness/daemon.sock",
-      ".git/harness/daemon.lock",
-      ".git/harness/workflow-backups/2026-11-20.ndjson",
-      ".git/harness/auth-tokens.json",
-      "/repo/.harness/omnigraph-cluster/auth-tokens.json",
-      "daemon.sock",
+    expect(
+      classifyCommand(
+        "HARNESS_ALLOW_SKIP_NX_CACHE=1 bun nx run @harness/gates:verify --skip-nx-cache",
+      ),
+    ).toBe("ask")
+
+    expect(
+      unwrapCommandSegment(["bun", "nx", "affected", "-t", "verify", "--skip-nx-cache"]),
+    ).toEqual({
+      envAssignments: [],
+      commandWords: ["nx", "affected", "-t", "verify", "--skip-nx-cache"],
+      sawPackageRunner: true,
+    })
+
+    for (const nonRunnerWords of [
+      ["bun", "script.js"],
+      ["bun", "path/to/file.ts"],
+      ["bun", "-e", "console.log(1)"],
+      ["bun", "--eval", "console.log(1)"],
+      ["bun", "-p", "1+1"],
+      ["bun", "--version"],
+      ["bun", "--", "run"],
+      ["bun", "test"],
     ]) {
-      const res = classifyFileRead(p, { unitWorkerMode: false })
-      expect(res.verdict, p).toBe("deny")
-      expect(res.ruleId, p).toBe("harness-common-dir-state")
-    }
-
-    for (const allowed of [
-      "libs/harness/contract/src/workflow.ts",
-      "repos/effect/LLMS.md",
-      ".env.example",
-      ".env.template",
-      ".env.sample",
-      ".harness/workflow-worktrees/run-1/unit-a/libs/a.ts",
-    ]) {
-      expect(classifyFileRead(allowed).verdict, allowed).toBe("allow")
-    }
-  })
-
-  it("SPEC-0023 REQ-4.1 / RFC-0013 REQ-4.6 / F-3.4 blocks recursive workflow orchestration, doctor, complete --phase llm, and harness done under HARNESS_UNIT_WORKER=1", () => {
-    const recursiveDenied: ReadonlyArray<string> = [
-      "harness done",
-      "pnpm harness done",
-      "pnpm run harness done",
-      "pnpm exec harness done",
-      "npx harness done",
-      "pnpx harness workflow start",
-      "bunx harness workflow resume",
-      "bun harness workflow abort",
-      "yarn harness workflow done",
-      "npm exec harness -- workflow start",
-      "harness --cwd /tmp workflow start",
-      "harness --cwd=/tmp -- done",
-      "harness workflow --json --run-id r1 resume",
-      "harness workflow --run-id=r1 abort",
-      "harness workflow -- start",
-      "harness workflow doctor",
-      "pnpm harness workflow doctor --rebuild-views",
-      "pnpm harness workflow complete --run-id r1 --unit u1 --phase llm",
-      "harness workflow complete --phase=llm",
-      "harness workflow --phase llm complete",
-      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts workflow start",
-      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done",
-      "tsx apps/harness-cli/src/index.ts workflow resume",
-      "bun apps/harness-cli/src/index.ts workflow abort",
-      "node -- apps/harness-cli/src/index.ts workflow done",
-      "HARNESS_UNIT_WORKER=1 env -u FOO timeout 10 pnpm harness workflow start",
-      "pnpm test && pnpm harness workflow start",
-      "nx run @harness/gates:verify; harness done",
-      "echo ok | pnpm harness workflow abort",
-      "pnpm harness \\\n  workflow start",
-      "echo $(pnpm harness done)",
-      'echo "$(echo $(harness workflow start))"',
-      "echo `npx harness workflow resume`",
-      'sh -c "pnpm harness workflow abort"',
-      "bash -lc 'harness done'",
-      "bash -c -l 'pnpm harness workflow start'",
-      "bash -c -- 'pnpm harness done'",
-      'eval "harness workflow start"',
-      'git commit -m "fix $(harness done)"',
-      "pnpm --filter harness-cli start workflow start",
-      "pnpm --filter=harness-cli start workflow resume",
-      "pnpm -F harness-cli start done",
-      "pnpm --filter @harness/harness-cli run start -- workflow abort",
-      "pnpm --filter harness-cli exec node src/index.ts workflow start",
-      "tsx --tsconfig tsconfig.base.json apps/harness-cli/src/index.ts workflow start",
-      "node --env-file-if-exists .env.example --watch-path apps --diagnostic-dir /tmp --redirect-warnings /tmp/w apps/harness-cli/src/index.ts workflow done",
-      "deno run --allow-all apps/harness-cli/src/index.ts workflow start",
-      "deno --config deno.json run apps/harness-cli/src/index.ts done",
-      "cat <(pnpm harness workflow start)",
-      "tee >(pnpm harness done)",
-    ]
-    for (const cmd of recursiveDenied) {
-      expect(isWorkerRecursiveWorkflowCommand(cmd), cmd).toBe(true)
-      expect(classifyCommand(cmd, { unitWorkerMode: true }), cmd).toBe("deny")
-      expect(explainCommandDenyRule(cmd, { unitWorkerMode: true })?.ruleId, cmd).toBe(
-        "worker-recursive-workflow-command",
-      )
-      expect(explainCommandDenyReason(cmd, { unitWorkerMode: true }), cmd).toContain(
-        "HARNESS_UNIT_WORKER=1",
+      expect(unwrapCommandSegment(nonRunnerWords).sawPackageRunner, nonRunnerWords.join(" ")).toBe(
+        false,
       )
     }
   })
 
-  it("F-3.3 / F-23.5 blocks nx run harness-cli:start, pnpm --filter @harness/cli start, pnpm exec, extra -- separators, and xargs/exec/env/command wrappers under HARNESS_UNIT_WORKER=1", () => {
-    const bypassDenied: ReadonlyArray<string> = [
-      "nx run harness-cli:start -- workflow abort",
-      "nx run harness-cli:start -- workflow start",
-      "nx run harness-cli:start -- workflow resume",
-      "nx run harness-cli:start -- workflow doctor",
-      "nx run harness-cli:start -- workflow complete --phase llm",
-      "pnpm nx run harness-cli:start -- workflow abort",
-      "pnpm nx run @harness/cli:start -- done",
-      "nx start harness-cli -- workflow start",
-      "pnpm --filter @harness/cli start workflow start",
-      "pnpm --filter=@harness/cli start workflow doctor",
-      "pnpm --filter ...harness-cli start workflow abort",
-      "pnpm --filter @harness/cli exec node src/index.ts workflow complete --phase=llm",
-      "pnpm exec node apps/harness-cli/src/index.ts workflow start",
-      "pnpm exec tsx apps/harness-cli/src/index.ts done",
-      "node apps/harness-cli/src/index.ts -- workflow start",
-      "node apps/harness-cli/src/index.ts -- -- workflow abort",
-      "harness -- done",
-      "harness -- -- workflow start",
-      "harness workflow -- -- doctor",
-      "xargs harness done",
-      "echo workflow start | xargs harness",
-      "echo start | xargs -I{} pnpm harness workflow {}",
-      "printf 'done\\n' | xargs -n 1 harness",
-      "cat cmds.txt | xargs harness",
-      "exec harness workflow start",
-      "exec -a custom pnpm --filter @harness/cli start workflow abort",
-      "env -v harness done",
-      "env -C apps/harness-cli node src/index.ts workflow start",
-      "command -p harness workflow doctor",
-      "exec env -v pnpm exec harness workflow complete --phase llm",
+  it("closes P0/P1/P2 rg and git grep -f/-e/--files/--regexp secret and harness-state bypasses", () => {
+    const deniedCases: ReadonlyArray<{ readonly cmd: string; readonly ruleId: string }> = [
+      {
+        cmd: "rg -f tsconfig.json .git/harness/auth-tokens.json",
+        ruleId: "secret-file-access",
+      },
+      {
+        cmd: "rg -f tsconfig.json .git/harness/server.json",
+        ruleId: "harness-state-mutation",
+      },
+      { cmd: "rg --file=tsconfig.json .env", ruleId: "secret-file-access" },
+      { cmd: "rg -ftsconfig.json .env", ruleId: "secret-file-access" },
+      { cmd: "rg -f.env libs/", ruleId: "secret-file-access" },
+      { cmd: "rg --files .git/harness/auth-tokens.json", ruleId: "secret-file-access" },
+      { cmd: "rg --files .git/harness/daemon.lock.meta.json", ruleId: "harness-state-mutation" },
+      { cmd: "rg --regexp=foo .env", ruleId: "secret-file-access" },
+      {
+        cmd: "git grep -e. --no-index .git/harness/auth-tokens.json",
+        ruleId: "secret-file-access",
+      },
+      {
+        cmd: "git grep -e. --no-index .git/harness/server.json",
+        ruleId: "harness-state-mutation",
+      },
+      { cmd: "git grep --regexp=. --no-index .env", ruleId: "secret-file-access" },
+      { cmd: "git grep --regexp . --no-index .env", ruleId: "secret-file-access" },
+      {
+        cmd: "git grep -f .git/harness/auth-tokens.json --no-index libs/",
+        ruleId: "secret-file-access",
+      },
+      {
+        cmd: "git grep -f .git/harness/server.json --no-index libs/",
+        ruleId: "harness-state-mutation",
+      },
+      { cmd: "git grep --file=.env --no-index libs/", ruleId: "secret-file-access" },
+      { cmd: "git grep -f.env --no-index libs/", ruleId: "secret-file-access" },
     ]
-    for (const cmd of bypassDenied) {
-      expect(isWorkerRecursiveWorkflowCommand(cmd), cmd).toBe(true)
-      expect(classifyCommand(cmd, { unitWorkerMode: true }), cmd).toBe("deny")
-      expect(explainCommandDenyRule(cmd, { unitWorkerMode: true })?.ruleId, cmd).toBe(
-        "worker-recursive-workflow-command",
-      )
+    for (const c of deniedCases) {
+      expect(classifyCommand(c.cmd), c.cmd).toBe("deny")
+      expect(explainCommandDenyRule(c.cmd)?.ruleId, c.cmd).toBe(c.ruleId)
     }
   })
 
-  it("F-3.3 / F-23.5 blocks shell variable indirection and eval targeting workflow orchestration or daemon credentials under HARNESS_UNIT_WORKER=1", () => {
+  it("closes P0/P1/P2 wrapper -C/--dir/--cwd, env -S/-u, time -o, GIT_COMMON_DIR, command -pv cd, and harness --cwd guard bypasses", () => {
+    const deniedCases: ReadonlyArray<{ readonly cmd: string; readonly ruleId: string }> = [
+      {
+        cmd: "pnpm --filter . -C .git/harness/workflow-backups exec rm workflow-backup-123.ndjson",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "pnpm --filter . --dir .git/harness/omnigraph exec truncate -s 0 server.json",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "pnpm --filter . --dir=.git/harness/workflow-backups exec rm snap.ndjson",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "pnpm --filter . -C .git/harness exec cat daemon.lock.meta.json",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "pnpm --filter . -C .git exec rm harness/daemon.lock.meta.json",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "env -C .git/harness/workflow-backups rm snap.ndjson",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "env --chdir=.git/harness/workflow-backups rm snap.ndjson",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "env -C.git/harness/workflow-backups rm snap.ndjson",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "bun --cwd .git/harness rm -f daemon.lock.meta.json",
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "bun --cwd=.git/harness rm -f daemon.lock.meta.json",
+        ruleId: "harness-state-mutation",
+      },
+      { cmd: 'env -S "ls; rm .git/harness/daemon.lock"', ruleId: "harness-state-mutation" },
+      {
+        cmd: 'env -S "pnpm harness status; chmod 777 .git/harness/auth-tokens.json"',
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: 'env -S "pnpm harness status; chmod 777 .git/harness/daemon.lock"',
+        ruleId: "harness-state-mutation",
+      },
+      { cmd: "env -uFOO cd /tmp", ruleId: "cd-command-banned" },
+      { cmd: "command -pv cd /tmp", ruleId: "cd-command-banned" },
+      { cmd: 'pnpm harness --cwd /tmp guard "rm -r dist"', ruleId: "guard-self-invocation" },
+      { cmd: 'pnpm harness --cwd /tmp -- guard "rm -r dist"', ruleId: "guard-self-invocation" },
+      {
+        cmd: 'rm "$(git rev-parse --git-common-dir)//harness/custom.json"',
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: 'COMMON=$(git rev-parse --git-common-dir); rm "${COMMON%/}/harness/custom.json"',
+        ruleId: "harness-state-mutation",
+      },
+      {
+        cmd: "export GIT_COMMON_DIR=/tmp/meta; rm /tmp/meta/harness/custom.json",
+        ruleId: "harness-state-mutation",
+      },
+      { cmd: "time --output=.git/harness/custom.log ls", ruleId: "harness-state-mutation" },
+      { cmd: "time -o.git/harness/custom.log ls", ruleId: "harness-state-mutation" },
+    ]
+    for (const c of deniedCases) {
+      expect(classifyCommand(c.cmd), c.cmd).toBe("deny")
+      expect(explainCommandDenyRule(c.cmd)?.ruleId, c.cmd).toBe(c.ruleId)
+    }
+    expect(
+      classifyCommand("node ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard"),
+    ).toBe("deny")
+    expect(
+      explainCommandDenyRule(
+        "node ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard",
+      )?.ruleId,
+    ).toBe("guard-self-invocation")
+  })
+
+  it("denies git upload-pack/receive-pack/exec and ext:: transfer overrides", () => {
     for (const cmd of [
-      "CMD=harness; $CMD workflow start",
-      'CMD="pnpm harness"; ${CMD} done',
-      "ACT=doctor; harness workflow $ACT",
-      'export CMD="nx run harness-cli:start -- workflow abort"; $CMD',
-      'CMD="harness workflow start"; eval "$CMD"',
-      "eval -- 'harness done'",
-      'eval "$EXTERNAL_CMD"',
-      "harness $UNKNOWN_SUB",
-      "harness workflow $UNKNOWN_ACT",
-      "harness workflow complete --phase $DYN_PHASE",
+      "git ls-remote --upl=touch .",
+      "git ls-remote --upload=touch .",
+      "git ls-remote --upload-pac touch .",
+      "git ls-remote -ubash .",
+      "git ls-remote -u'touch f' .",
+      "git ls-remote --upload-pack=bash .",
+      "git ls-remote --upload-pack='sh -c id' .",
+      "git ls-remote -u bash .",
+      "git fetch --upl=bash",
+      "git clone -u bash repo",
+      "git push --rece=bash origin main",
+      "git archive --exec=bash HEAD",
+      "git ls-remote 'ext::sh -c id'",
+      'git fetch origin "a\nb" --upload-pack=bash',
+      'git push origin "a\nb" --exec=bash',
+      'git push origin "a\nb" --receive-pack=bash',
+      'git fetch origin "a\nb" "ext::sh -c id"',
     ]) {
-      expect(isWorkerRecursiveWorkflowCommand(cmd), cmd).toBe(true)
-      expect(classifyCommand(cmd, { unitWorkerMode: true }), cmd).toBe("deny")
-      expect(explainCommandDenyRule(cmd, { unitWorkerMode: true })?.ruleId, cmd).toBe(
-        "worker-recursive-workflow-command",
-      )
+      expect(classifyCommand(cmd), cmd).toBe("deny")
+      expect(explainCommandDenyRule(cmd)?.ruleId, cmd).toBe("git-pack-exec-override")
     }
+  })
 
-    for (const credCmd of [
-      "SOCK=.git/harness/daemon.sock; cat $SOCK",
-      "TOK=auth-tokens.json; head ${TOK}",
-      "DIR=.harness/omnigraph-cluster; ls $DIR/auth-tokens.json",
-      'CMD="cat .git/harness/daemon.sock"; eval "$CMD"',
+  it("allows safe rg/git/pnpm/env prefixes and rejects unsafe env prefixes and overlong inputs", () => {
+    for (const allowedCmd of [
+      "rg --files libs/",
+      "rg -f tsconfig.json libs/",
+      "git grep '\\.env' -- libs",
+      "git ls-files",
+      "git ls-files libs/harness/gates",
+      "git push -u origin feat",
+      "git fetch -u",
+      "git fetch --update-head-ok",
+      "git fetch --unshallow",
+      "git push --recurse-submodules=check",
+      "pnpm --filter @harness/gates -C libs/harness/gates exec vitest",
+      "TMPDIR=/home/roan/.cache/tmp NX_SOCKET_DIR=/home/roan/.cache/tmp/nx NODE_COMPILE_CACHE=/home/roan/.cache/node NX_DAEMON=false FORCE_COLOR=0 NO_COLOR=1 CI=true pnpm nx run @harness/gates:test",
+      "NX_DAEMON=true FORCE_COLOR=3 NO_COLOR=0 pnpm nx test",
+      "HARNESS_REQUIRE_OLLAMA=1 pnpm test",
+      "HARNESS_WORKTREE_ID=unit-a pnpm nx run @harness/gates:verify",
     ]) {
-      expect(isWorkerDaemonCredentialShellAccess(credCmd), credCmd).toBe(true)
-      expect(classifyCommand(credCmd, { unitWorkerMode: true }), credCmd).toBe("deny")
-      expect(explainCommandDenyRule(credCmd, { unitWorkerMode: true })?.ruleId, credCmd).toBe(
-        "worker-daemon-credential-access",
-      )
+      expect(classifyCommand(allowedCmd), allowedCmd).toBe("allow")
     }
 
-    expect(isWorkerRecursiveWorkflowCommand('eval "echo ok"')).toBe(false)
-    expect(isWorkerRecursiveWorkflowCommand("CMD='harness done'; rg -n '$CMD' libs/")).toBe(false)
-  })
-
-  it("F-3.5 / F-23.5 fails closed when subshell nesting exceeds MAX_SUBSHELL_INSPECT_DEPTH = 4 while allowing depth <= 4 benign commands", () => {
-    expect(MAX_SUBSHELL_INSPECT_DEPTH).toBe(4)
-    const depth5Cmd = "echo $(echo $(echo $(echo $(echo $(echo ok)))))"
-    expect(isWorkerRecursiveWorkflowCommand(depth5Cmd)).toBe(true)
-    expect(isWorkerDaemonCredentialShellAccess(depth5Cmd)).toBe(true)
-    expect(classifyCommand(depth5Cmd, { unitWorkerMode: true })).toBe("deny")
-
-    const depth4Benign = "echo $(echo $(echo $(echo ok)))"
-    expect(isWorkerRecursiveWorkflowCommand(depth4Benign)).toBe(false)
-    expect(isWorkerDaemonCredentialShellAccess(depth4Benign)).toBe(false)
-    expect(classifyCommand(depth4Benign, { unitWorkerMode: true })).toBe("escalate")
-  })
-
-  it("SPEC-0023 REQ-4.1 / RFC-0013 REQ-4.6 / F-3.4 keeps workflow complete --phase unit, workflow status, verify, and non-worker mode allowed", () => {
-    const nonRecursiveAllowed: ReadonlyArray<{
-      readonly cmd: string
-      readonly expectedVerdict: "allow" | "escalate"
-    }> = [
-      { cmd: "harness workflow complete --run-id r1 --unit u1", expectedVerdict: "escalate" },
-      {
-        cmd: "pnpm harness workflow complete --run-id r1 --unit u1 --phase unit",
-        expectedVerdict: "allow",
-      },
-      {
-        cmd: "nx run harness-cli:start -- workflow complete --run-id r1 --unit u1",
-        expectedVerdict: "allow",
-      },
-      { cmd: "pnpm harness workflow status --run-id r1 --json", expectedVerdict: "allow" },
-      { cmd: "harness workflow status", expectedVerdict: "escalate" },
-      {
-        cmd: "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts workflow complete --run-id r1",
-        expectedVerdict: "allow",
-      },
-      {
-        cmd: "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts workflow status",
-        expectedVerdict: "allow",
-      },
-      { cmd: "harness workflow --run-id start status", expectedVerdict: "escalate" },
-      { cmd: "harness workflow complete --unit start --phase done", expectedVerdict: "escalate" },
-      { cmd: "pnpm harness verify", expectedVerdict: "allow" },
-      { cmd: "nx run @harness/gates:verify", expectedVerdict: "allow" },
-      { cmd: "pnpm --filter @harness/gates run test", expectedVerdict: "allow" },
-      {
-        cmd: "pnpm --filter harness-cli start workflow complete --run-id r1",
-        expectedVerdict: "allow",
-      },
-      { cmd: "pnpm --filter harness-cli start workflow status", expectedVerdict: "allow" },
-      { cmd: "pnpm --filter harness-cli test", expectedVerdict: "allow" },
-      { cmd: "deno eval \"console.log('harness done')\"", expectedVerdict: "escalate" },
-    ]
-    expect(isWorkerRecursiveWorkflowCommand("")).toBe(false)
-    expect(isWorkerRecursiveWorkflowCommand("   ")).toBe(false)
-    for (const entry of nonRecursiveAllowed) {
-      expect(isWorkerRecursiveWorkflowCommand(entry.cmd), entry.cmd).toBe(false)
-      expect(classifyCommand(entry.cmd, { unitWorkerMode: true }), entry.cmd).toBe(
-        entry.expectedVerdict,
-      )
-    }
-    expect(isWorkerRecursiveWorkflowCommand("node -e \"console.log('harness done')\"")).toBe(false)
-    expect(isWorkerRecursiveWorkflowCommand('git commit -m "chore: harness done"')).toBe(false)
-    expect(isWorkerRecursiveWorkflowCommand('rg "harness workflow start" libs/')).toBe(false)
-    expect(isWorkerRecursiveWorkflowCommand("rg -n 'hello $(harness done)' libs/")).toBe(false)
-    expect(isWorkerRecursiveWorkflowCommand("git commit -m '$(harness done)'")).toBe(false)
-    expect(classifyCommand("pnpm harness workflow start", { unitWorkerMode: false })).toBe("allow")
-    expect(classifyCommand("pnpm harness done")).toBe("allow")
-  })
-
-  it("SPEC-0023 REQ-4.1 / RFC-0013 REQ-4.6 blocks daemon socket and auth-tokens shell/file access under HARNESS_UNIT_WORKER=1", () => {
-    expect(classifyWorkerFileAccessFromFastpath("auth-tokens.json", true).verdict).toBe("deny")
-    expect(classifyWorkerFileAccessFromIndex("daemon.sock", true).verdict).toBe("deny")
-
-    const daemonCredentialDenied: ReadonlyArray<string> = [
-      "cat .git/harness/auth-tokens.json",
-      "head -n 5 .harness/omnigraph-cluster/auth-tokens.json",
-      "tail -f /tmp/common-dir/harness/daemon.sock",
-      "grep token auth-tokens.json",
-      "rg -n foo .git/harness/daemon.sock",
-      "rg -f auth-tokens.json libs/",
-      "jq . .harness/omnigraph-cluster/auth-tokens.json",
-      "ls -la .git/harness/daemon.sock",
-      "stat /tmp/common-dir/harness/daemon.sock",
-      "strings .git/harness/auth-tokens.json",
-      "base64 auth-tokens.json",
-      "curl --unix-socket /tmp/common-dir/harness/daemon.sock http://localhost/status",
-      "nc -U .git/harness/daemon.sock",
-      "socat - UNIX-CONNECT:.git/harness/daemon.sock",
-      "python3 -c 'open(\".harness/omnigraph-cluster/auth-tokens.json\").read()'",
-      'node -e \'require("fs").readFileSync("auth-tokens.json")\'',
-      'sh -c "cat .git/harness/daemon.sock"',
-      "cat <.git/harness/auth-tokens.json",
-      "echo hi > .git/harness/daemon.sock",
-      "HARNESS_SOCK=/tmp/common-dir/harness/daemon.sock env",
-      "pnpm --dir .git/harness exec ls daemon.sock",
-      "cat .git/harness/sub/../auth-tokens.json",
-      "cat '.git\\harness\\daemon.sock'",
-      "echo $(cat .git/harness/auth-tokens.json)",
-      "cat .harness/omnigraph-cluster/auth-tokens.*",
-      "rg -u . .harness/omnigraph-cluster",
-      "head .harness/omnigraph-cluster/*",
-      "Read .harness/omnigraph-cluster",
-      "cat .git/harness/daemon.soc*",
-      "cat .git/harness/daemon.soc[k]",
-      "cat .git/harness/auth-tokens*",
-      "cat <(cat .harness/omnigraph-cluster/auth-tokens.json)",
-      "bash -c -l 'cat .harness/omnigraph-cluster/*'",
-    ]
-    for (const cmd of daemonCredentialDenied) {
-      expect(isWorkerDaemonCredentialShellAccess(cmd), cmd).toBe(true)
-      expect(classifyCommand(cmd, { unitWorkerMode: true }), cmd).toBe("deny")
-      expect(explainCommandDenyRule(cmd, { unitWorkerMode: true })?.ruleId, cmd).toBe(
-        "worker-daemon-credential-access",
-      )
-    }
-
-    expect(classifyCommand("ls -la .git/harness/daemon.sock")).toBe("allow")
-    expect(isWorkerDaemonCredentialShellAccess("")).toBe(false)
-    expect(isWorkerDaemonCredentialShellAccess('rg -n "daemon.sock" libs/')).toBe(false)
-    expect(isWorkerDaemonCredentialShellAccess('git commit -m "guard daemon.sock"')).toBe(false)
-    expect(isWorkerDaemonCredentialShellAccess("cat daemon.sock.md")).toBe(false)
-    expect(classifyCommand("ls -la libs/harness/gates/src", { unitWorkerMode: true })).toBe("allow")
-
-    expect(classifyWorkerFileAccess("auth-tokens.json").verdict).toBe("allow")
-    expect(classifyWorkerFileAccess("auth-tokens.json", false).verdict).toBe("allow")
-    expect(classifyWorkerFileAccess("   ", true).verdict).toBe("allow")
-    expect(classifyWorkerFileAccess("libs/harness/gates/src/policy.ts", true).verdict).toBe("allow")
-    expect(classifyWorkerFileAccess(".harness/omnigraph-cluster/auth-tokens.json", true)).toEqual(
-      expect.objectContaining({ verdict: "deny", ruleId: "worker-daemon-credential-access" }),
-    )
-    expect(classifyWorkerFileAccess("/tmp/common-dir/harness/daemon.sock", true)).toEqual(
-      expect.objectContaining({ verdict: "deny", ruleId: "worker-daemon-credential-access" }),
-    )
-    expect(classifyWorkerFileAccess("C:\\repo\\.git\\harness\\daemon.sock", true).verdict).toBe(
-      "deny",
-    )
-    expect(classifyWorkerFileAccess(".git/harness/sub/../auth-tokens.json", true).verdict).toBe(
-      "deny",
-    )
-    expect(classifyWorkerFileAccess(".harness/omnigraph-cluster", true)).toEqual(
-      expect.objectContaining({ verdict: "deny", ruleId: "worker-daemon-credential-access" }),
-    )
-    expect(classifyWorkerFileAccess(".harness/omnigraph-cluster/*", true).verdict).toBe("deny")
-    expect(classifyWorkerFileAccess(".harness/omnigraph-cluster", false).verdict).toBe("allow")
-    expect(classifyWorkerFileAccess(".git/harness/auth-tokens.*", true).verdict).toBe("deny")
-    expect(classifyWorkerFileAccess(".git/harness/daemon.soc*", true).verdict).toBe("deny")
-
-    expect(classifyFileWrite("auth-tokens.json").ruleId).toBe("harness-common-dir-state")
-    expect(classifyFileWrite("auth-tokens.json", { unitWorkerMode: true }).ruleId).toBe(
-      "worker-daemon-credential-access",
-    )
-    expect(classifyFileWrite(".git/harness/daemon.sock", { unitWorkerMode: true }).ruleId).toBe(
-      "worker-daemon-credential-access",
-    )
+    expect(classifyCommand("git ls-remote origin main")).toBe("escalate")
+    expect(classifyCommand("git ls-files-evil")).toBe("escalate")
+    expect(classifyCommand("git ls-remote-evil")).toBe("escalate")
+    expect(classifyCommand("git ls-remote origin main ; rm -rf /")).toBe("deny")
     expect(
-      classifyFileWrite("libs/order/domain/src/order.ts", { unitWorkerMode: true }).verdict,
-    ).toBe("allow")
+      classifyCommand(
+        "TMPDIR=/home/roan/.cache/tmp git status && TMPDIR=/home/roan/.cache/tmp git push origin main",
+      ),
+    ).toBe("escalate")
+
+    for (const nonAllowedEnvCmd of [
+      "TMPDIR=/tmp/../etc pnpm nx test",
+      "TMPDIR=relative/path pnpm nx test",
+      "NX_SOCKET_DIR=nx/sock pnpm nx test",
+      "TMPDIR=/tmp/$(whoami) pnpm nx test",
+      'TMPDIR="/tmp/ok" pnpm nx test',
+      "TMPDIR='/tmp/ok' pnpm nx test",
+      "NODE_OPTIONS=--inspect pnpm nx test",
+      "GIT_COMMON_DIR=/tmp/g pnpm nx test",
+      "GIT_DIR=/tmp/g pnpm nx test",
+      "HARNESS_STATE_DIR=/tmp/h pnpm nx test",
+      "HARNESS_SUBAGENT=1 pnpm harness done",
+      "HARNESS_WORKTREE_ID=fake pnpm harness done",
+      "HARNESS_WORKTREE_ID=unit-a pnpm harness done",
+      "HARNESS_GIT_BRANCH=main pnpm harness done",
+      "CI=${HARNESS_STATE_DIR:=/tmp/evil} pnpm test",
+      "CI=yes pnpm nx test",
+      "NX_INTERACTIVE=maybe pnpm nx test",
+      "HARNESS_PLAN_CHECK=2 pnpm nx test",
+      "HARNESS_REQUIRE_OLLAMA=true pnpm nx test",
+      "HARNESS_LOG_LEVEL=verbose pnpm nx test",
+      "HARNESS_WORKTREE_ID=../bad pnpm nx test",
+      "HARNESS_WORKTREE_ID=a/b pnpm nx test",
+      "HARNESS_WORKTREE_ID=.hidden pnpm nx test",
+      "TMPDIR=/repo/.git/hooks pnpm test",
+      "NODE_COMPILE_CACHE=/repo/repos/effect pnpm test",
+      "TMPDIR=/tmp/.harness pnpm nx test",
+      "TMPDIR=/tmp/.env pnpm nx test",
+      "TMPDIR=/tmp/.git/harness pnpm nx test",
+      "TMPDIR=/tmp/secret pnpm nx test",
+      "TMPDIR=/tmp/ok ",
+      "NX_DAEMON=maybe pnpm nx test",
+      "FORCE_COLOR=9 pnpm nx test",
+      "NO_COLOR=2 pnpm nx test",
+    ]) {
+      expect(isCommandAllowed(nonAllowedEnvCmd), nonAllowedEnvCmd).toBe(false)
+      expect(classifyCommand(nonAllowedEnvCmd), nonAllowedEnvCmd).not.toBe("allow")
+    }
+
+    const longStart = performance.now()
+    expect(classifyCommand("CI=1 ".repeat(50_000) + "curl x")).toBe("ask")
+    expect(performance.now() - longStart).toBeLessThan(200)
+    expect(classifyCommand("CI=1 ".repeat(33) + "pnpm test")).toBe("escalate")
+    expect(classifyCommand("NX_SKIP_NX_CACHE=1 pnpm nx test")).toBe("deny")
+    expect(classifyCommand("TMPDIR=/home/roan/.cache/tmp rm -rf /")).toBe("deny")
   })
 
-  it("blocks nx run-many/affected, pnpm --filter globs, glob obfuscations, and shell .harness inspection under HARNESS_UNIT_WORKER=1", () => {
-    const recursiveDenied: ReadonlyArray<string> = [
-      "nx run-many -t start -- workflow start --plan plan.json",
-      "pnpm nx run-many --targets=start,lint -p harness-cli -- workflow abort --run-id r1",
-      'nx run-many -t start -p "harness-*" -- workflow start',
-      'nx run-many -t start -p "tag:type:app" -- done',
-      "nx affected -t start -- workflow abort --run-id r1",
-      "nx run-many -tstart -pharness-cli -- workflow start",
-      "nx --exclude foo run harness-cli:start -- workflow abort --run-id r1",
-      'pnpm --filter "harness-*" start workflow start',
-      'pnpm --filter "./apps/*" start done',
-      'pnpm --filter "!@harness/gates" start workflow abort --run-id r1',
-      'pnpm --filter "harness-*" run start workflow start',
-    ]
-    for (const cmd of recursiveDenied) {
-      expect(isWorkerRecursiveWorkflowCommand(cmd), cmd).toBe(true)
-      expect(classifyCommand(cmd, { unitWorkerMode: true }), cmd).toBe("deny")
-      expect(explainCommandDenyRule(cmd, { unitWorkerMode: true })?.ruleId, cmd).toBe(
-        "worker-recursive-workflow-command",
-      )
+  it("harness:SPEC-0024 strips validated env -u / --unset wrappers and allows read-only df, git worktree list, and wc/rg filters", () => {
+    expect(
+      stripSafeLeadingEnvVarsDetailed("env -u HARNESS_WORKTREE_ID pnpm harness verify"),
+    ).toEqual({ rest: "pnpm harness verify", sawWorktreeId: false })
+    expect(
+      stripSafeLeadingEnvVarsDetailed("CI=true env -u HARNESS_WORKTREE_ID -u NX_DAEMON pnpm test"),
+    ).toEqual({ rest: "pnpm test", sawWorktreeId: false })
+    expect(stripSafeLeadingEnvVarsDetailed("env --unset=HARNESS_WORKTREE_ID pnpm test")).toEqual({
+      rest: "pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env CI=true pnpm test")).toEqual({
+      rest: "pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env HARNESS_WORKTREE_ID=wt1 pnpm test")).toEqual({
+      rest: "pnpm test",
+      sawWorktreeId: true,
+    })
+    expect(
+      stripSafeLeadingEnvVarsDetailed(
+        "HARNESS_WORKTREE_ID=wt1 env -u HARNESS_WORKTREE_ID pnpm harness verify",
+      ),
+    ).toEqual({ rest: "pnpm harness verify", sawWorktreeId: true })
+    expect(stripSafeLeadingEnvVarsDetailed("env -u HARNESS_WORKTREE_ID")).toEqual({
+      rest: "",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env pnpm test")).toEqual({
+      rest: "env pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env -u PATH pnpm test")).toEqual({
+      rest: "env -u PATH pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env --unset=PATH pnpm test")).toEqual({
+      rest: "env --unset=PATH pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env -i pnpm test")).toEqual({
+      rest: "env -i pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env PATH=/tmp pnpm test")).toEqual({
+      rest: "env PATH=/tmp pnpm test",
+      sawWorktreeId: false,
+    })
+    expect(stripSafeLeadingEnvVarsDetailed("env -u")).toEqual({
+      rest: "env -u",
+      sawWorktreeId: false,
+    })
+
+    for (const allowedCmd of [
+      "env -u HARNESS_WORKTREE_ID pnpm harness verify",
+      "env -u HARNESS_WORKTREE_ID CI=true pnpm harness verify && env -u HARNESS_WORKTREE_ID CI=true pnpm harness done",
+      "env -u HARNESS_WORKTREE_ID -u NX_DAEMON pnpm test",
+      "env --unset=HARNESS_WORKTREE_ID pnpm --filter @harness/gates run test",
+      "df -ih /tmp",
+      "df",
+      "git worktree list",
+      "git worktree list --porcelain",
+      "git status | rg policy | wc",
+      "ls -la libs/harness | rg -n telemetry",
+    ]) {
+      expect(classifyCommand(allowedCmd), allowedCmd).toBe("allow")
+    }
+
+    for (const nonAllowed of [
+      { cmd: "env -u PATH pnpm test", verdict: "escalate" },
+      { cmd: "env --unset=PATH pnpm test", verdict: "escalate" },
+      { cmd: "env -i pnpm test", verdict: "escalate" },
+      { cmd: "env pnpm test", verdict: "escalate" },
+      { cmd: "env -u HARNESS_WORKTREE_ID", verdict: "escalate" },
+      { cmd: "env HARNESS_WORKTREE_ID=wt1 pnpm harness verify", verdict: "escalate" },
+      {
+        cmd: "HARNESS_WORKTREE_ID=wt1 env -u HARNESS_WORKTREE_ID pnpm harness verify",
+        verdict: "escalate",
+      },
+      { cmd: "env -u HARNESS_WORKTREE_ID git push --force", verdict: "deny" },
+      { cmd: "git worktree remove /tmp/wt-1", verdict: "escalate" },
+      { cmd: "dfx build", verdict: "escalate" },
+      { cmd: "pnpm --filter @harness/gates exec rm a.ts", verdict: "escalate" },
+      { cmd: "pnpm --filter @harness/gates dlx foo", verdict: "escalate" },
+      { cmd: "nx exec -- echo hi", verdict: "escalate" },
+      { cmd: "rg --pre sh daemon libs/", verdict: "escalate" },
+      { cmd: "rg --pre sh daemon .harness/verify-stamp.json", verdict: "deny" },
+      { cmd: "sort -o .harness/verify-stamp.json a.txt", verdict: "deny" },
+      { cmd: "git diff --output .harness/verify-stamp.json", verdict: "deny" },
+      { cmd: "find libs -fprint .harness/verify-stamp.json", verdict: "deny" },
+    ] as const) {
+      expect(classifyCommand(nonAllowed.cmd), nonAllowed.cmd).toBe(nonAllowed.verdict)
+    }
+
+    for (const safeCmd of [
+      "pnpm --filter @harness/gates exec vitest run test/policy.test.ts",
+      "CI=true pnpm --filter @harness/gates exec nx show projects",
+      "cat .oxlintrc.json",
+      "rg pattern tools/oxlint",
+    ]) {
+      expect(classifyCommand(safeCmd), safeCmd).toBe("allow")
+    }
+  })
+
+  it("SPEC-0030 2nd-pass: closes ANSI-C alignment/NUL, flagged pnpm/nx, bundled filter flags, multiline args, empty-prefix braces, unset var fallback, xargs env, and glob brackets", () => {
+    for (const deniedCmd of [
+      "echo $'\\x41\\x42\\x43\\x44'; rm .harness/verify-stamp.json",
+      "echo $'\\x41'; cd /tmp",
+      "echo $'a\\'b' .e\\\nnv",
+      "echo $'a\\'b' $(rm .env)",
+      "A=.env; echo $'a\\'b' $A",
+      "cat $'.env\\x00ignored'",
+      "cat ${UNSET:-.env}",
+      "echo .harness/verify-stamp.json | xargs env rm",
+    ]) {
+      expect(classifyCommand(deniedCmd), deniedCmd).toBe("deny")
+    }
+
+    for (const escalatedCmd of [
+      "pnpm --filter @harness/gates --silent exec sh",
+      "pnpm --filter @harness/gates --silent dlx evil-pkg",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter @harness/gates --silent harness done",
+      "nx --verbose exec -- cat /etc/passwd",
+      "sort -uo out.txt",
+      "ls | sort -uo out.txt",
+      'ls | sort "-o" out.txt',
+      "ls | rg '--pre' evil",
+      'git diff "foo\nbar" --output=/tmp/out',
+      'find . -name "a\nb" -delete',
+      'sort "a\nb" -o out.txt',
+      'rg "a\nb" --pre sh foo',
+      "cat .{,e}nv",
+    ]) {
+      expect(classifyCommand(escalatedCmd), escalatedCmd).toBe("escalate")
+    }
+
+    expect(
+      isCommandAllowed("HARNESS_WORKTREE_ID=u1 pnpm --filter @harness/gates --silent harness done"),
+    ).toBe(false)
+
+    for (const allowedCmd of [
+      "pnpm --filter @harness/gates --silent exec -- vitest run",
+      "git status | rg policy | wc",
+      "git status | grep foo | wc",
+    ]) {
+      expect(classifyCommand(allowedCmd), allowedCmd).toBe("allow")
+    }
+
+    for (const secretPath of [
+      ".env?",
+      ".dev.vars?",
+      ".e[mn][uv]",
+      ".[abcde]nv",
+      ".[a-z]nv",
+      ".[!x]nv",
+      "*.k[d-f]y",
+      "auth-tok[d-f]ns.json",
+    ]) {
+      expect(classifyFileRead(secretPath).verdict, `read ${secretPath}`).toBe("deny")
+      expect(classifyFileWrite(secretPath).verdict, `write ${secretPath}`).toBe("deny")
+    }
+    expect(classifyFileWrite(".harness/veri[fghij]y-stamp.json").verdict).toBe("deny")
+
+    for (const routePath of [
+      "apps/web/routes/[accountId]/page.tsx",
+      "apps/web/routes/[...catchall].tsx",
+    ]) {
+      expect(classifyFileRead(routePath).verdict, `read ${routePath}`).toBe("allow")
+      expect(classifyFileWrite(routePath).verdict, `write ${routePath}`).toBe("allow")
+    }
+  })
+
+  it("F-3.1: blocks all harness-cli and start invocations under HARNESS_WORKTREE_ID across nx and pnpm forms while allowing scoped package verify", () => {
+    for (const blockedCmd of [
+      "HARNESS_WORKTREE_ID=u1 nx harness-cli:start -- done",
+      "HARNESS_WORKTREE_ID=u1 nx start harness-cli",
+      "HARNESS_WORKTREE_ID=u1 nx start",
+      "HARNESS_WORKTREE_ID=u1 nx run-many -t start -p harness-cli",
+      "HARNESS_WORKTREE_ID=u1 nx run-many -t start",
+      "HARNESS_WORKTREE_ID=u1 nx affected --target=start",
+      "HARNESS_WORKTREE_ID=u1 nx run-many --targets=build,start",
+      "HARNESS_WORKTREE_ID=u1 nx run-many -t verify -p @harness/gates,harness-cli",
+      "HARNESS_WORKTREE_ID=u1 pnpm nx harness-cli:start -- done",
+      "HARNESS_WORKTREE_ID=u1 pnpm nx start harness-cli",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter harness-cli start",
+      "HARNESS_WORKTREE_ID=u1 pnpm -F harness-cli run verify",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter @harness/gates start",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter @harness/gates run start",
+      "HARNESS_WORKTREE_ID=u1 pnpm exec nx run harness-cli:start",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter @harness/gates exec nx run harness-cli:start",
+      "pnpm exec HARNESS_WORKTREE_ID=u1 nx run harness-cli:start",
+      "HARNESS_WORKTREE_ID=u1 node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done",
+    ]) {
+      expect(isCommandAllowed(blockedCmd), blockedCmd).toBe(false)
+      expect(classifyCommand(blockedCmd), blockedCmd).not.toBe("allow")
     }
 
     for (const allowedCmd of [
-      "nx affected -t verify",
-      'pnpm --filter "harness-*" run test',
-      "nx run-many -t start -p unrelated-pkg -- workflow start",
+      "HARNESS_WORKTREE_ID=u1 pnpm nx run @harness/gates:verify",
+      "HARNESS_WORKTREE_ID=u1 nx test @harness/gates",
+      "HARNESS_WORKTREE_ID=u1 nx run-many -t verify -p @harness/gates",
+      "HARNESS_WORKTREE_ID=u1 nx affected -t verify",
+      "HARNESS_WORKTREE_ID=u1 nx run @harness/gates:test -- harness-cli",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter @harness/gates test -- harness-cli",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter @harness/gates exec vitest run",
     ]) {
-      expect(isWorkerRecursiveWorkflowCommand(allowedCmd), allowedCmd).toBe(false)
-      expect(classifyCommand(allowedCmd, { unitWorkerMode: true }), allowedCmd).toBe("allow")
-    }
-
-    for (const credCmd of [
-      "rg -uu . .harness",
-      "grep -rn . .harness/",
-      "cat .harness/omnigraph*/*",
-      "head .harness/*/auth*",
-    ]) {
-      expect(isWorkerDaemonCredentialShellAccess(credCmd), credCmd).toBe(true)
-      expect(classifyCommand(credCmd, { unitWorkerMode: true }), credCmd).toBe("deny")
-      expect(explainCommandDenyRule(credCmd, { unitWorkerMode: true })?.ruleId, credCmd).toBe(
-        "worker-daemon-credential-access",
-      )
-    }
-    expect(
-      classifyCommand("cat .harness/workflow-worktrees/run-1/u-1/src/a.ts", {
-        unitWorkerMode: true,
-      }),
-    ).toBe("allow")
-
-    for (const obfuscatedSecret of ["**/.[e]nv*", "**/{.env,.dev.vars}"]) {
-      expect(
-        classifyFileRead(obfuscatedSecret, { unitWorkerMode: true }),
-        obfuscatedSecret,
-      ).toEqual(expect.objectContaining({ verdict: "deny", ruleId: "secret-file" }))
-    }
-    for (const obfuscatedCred of [
-      "**/auth*tokens*",
-      "**/daemon.sock*",
-      "**/*omnigraph-cluster*",
-      ".harness/[o]mnigraph-cluster/auth-tokens.json",
-    ]) {
-      expect(classifyFileRead(obfuscatedCred, { unitWorkerMode: true }), obfuscatedCred).toEqual(
-        expect.objectContaining({ verdict: "deny", ruleId: "worker-daemon-credential-access" }),
-      )
+      expect(classifyCommand(allowedCmd), allowedCmd).toBe("allow")
     }
   })
 
-  it("SPEC-0030 2nd-pass: denies piped xargs inspect, wrapper -C .git, and .git/h* / .harness/o* globs while allowing workflow worktrees", () => {
-    for (const credCmd of [
-      "pnpm -C .git exec ls",
-      "env -C .git ls",
-      "echo .git | xargs ls",
-      "printf '%s\\n' .git/h* | xargs env cat",
-      "echo .harness/o* | xargs -I{} sh -c 'cat {}'",
+  it("F-9.1: allows non-sensitive harness bracket globs, asks on benign glob complexity overflows, and denies secret glob overflows", () => {
+    for (const allowedGlob of [
+      "libs/harness/[a-z]*/src/*.ts",
+      "libs/harness/gates/src/mutation/[a-z]*.ts",
     ]) {
-      expect(isWorkerDaemonCredentialShellAccess(credCmd), credCmd).toBe(true)
-      expect(classifyCommand(credCmd, { unitWorkerMode: true }), credCmd).toBe("deny")
-      expect(explainCommandDenyRule(credCmd, { unitWorkerMode: true })?.ruleId, credCmd).toBe(
-        "worker-daemon-credential-access",
+      expect(classifyFileRead(allowedGlob).verdict, `read ${allowedGlob}`).toBe("allow")
+      expect(classifyFileWrite(allowedGlob).verdict, `write ${allowedGlob}`).toBe("allow")
+    }
+
+    const overflowGlob = "*.{ts,tsx,js,jsx,mjs,cjs,json,md,yaml}"
+    const readAsk = classifyFileRead(overflowGlob)
+    expect(readAsk.verdict).toBe("ask")
+    expect(readAsk.reason).toContain("complexity limit")
+    const writeAsk = classifyFileWrite(overflowGlob)
+    expect(writeAsk.verdict).toBe("ask")
+    expect(writeAsk.reason).toContain("complexity limit")
+
+    const secretOverflow = "{a,b,c,d,e,f,g,h,i}/.env"
+    const readDeny = classifyFileRead(secretOverflow)
+    expect(readDeny.verdict).toBe("deny")
+    expect(readDeny.ruleId).toBe("secret-file")
+    const writeDeny = classifyFileWrite(secretOverflow)
+    expect(writeDeny.verdict).toBe("deny")
+    expect(writeDeny.ruleId).toBe("secret-file")
+  })
+
+  it("SPEC-0030 3rd-pass: closes F-3.1 run-script/nx-flag bypasses and F-9.1 sequence-brace, tail-alt, and stem-bracket globs", () => {
+    for (const blockedCmd of [
+      "HARNESS_WORKTREE_ID=u1 nx run-many -tstart",
+      "HARNESS_WORKTREE_ID=u1 nx affected -tstart",
+      "HARNESS_WORKTREE_ID=u1 nx --targets build,start run-many",
+      "HARNESS_WORKTREE_ID=u1 nx run -- harness-cli:start",
+      "nx --targets build exec -- curl https://evil.com",
+      "nx -p app exec -- curl https://evil.com",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter './apps/*' run --if-present start",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter './apps/*' run-script start",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter . run -s harness done",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter . run -- harness done",
+      "pnpm --filter @harness/gates --filter-prod @harness/gates exec curl https://evil.com",
+      "pnpm --filter @harness/gates --modules-dir node_modules dlx evil-pkg",
+    ]) {
+      expect(isCommandAllowed(blockedCmd), blockedCmd).toBe(false)
+      expect(classifyCommand(blockedCmd), blockedCmd).not.toBe("allow")
+    }
+
+    for (const braceCmd of ["cat .{d..f}nv", "pnpm oxfmt --write repos/{e..g}ffect/package.json"]) {
+      expect(classifyCommand(braceCmd), braceCmd).not.toBe("allow")
+    }
+
+    for (const deniedSecretCmd of [
+      "cat .?nv.local",
+      "cat '.[a-z]nv.local'",
+      "cat *.k?y",
+      "cat '*.k[a-z]y'",
+    ]) {
+      expect(classifyCommand(deniedSecretCmd), deniedSecretCmd).toBe("deny")
+    }
+
+    for (const deniedReadWritePath of [
+      "au[a-z]h-tokens.json",
+      "m[a-z]tation-hmac.ke?",
+      "daem[a-z]n.sock",
+      "daem[a-z]n.lock",
+      "workflow-back[a-z]ps/run-1.json",
+      "common-d[a-z]r/harness/state.json",
+      "pending-workflow-rest[a-z]re.json",
+      "[.-]e[a-z]v",
+      "[.a-z]d?v.vars",
+      "*.k?y",
+      "*.k[a-z]y",
+      ".{d..f}nv",
+      "{a,b,c,d,e,f,g,h,.env}",
+    ]) {
+      expect(classifyFileRead(deniedReadWritePath).verdict, `read ${deniedReadWritePath}`).toBe(
+        "deny",
+      )
+      expect(classifyFileWrite(deniedReadWritePath).verdict, `write ${deniedReadWritePath}`).toBe(
+        "deny",
       )
     }
 
-    for (const globPath of [".git/h*", ".harness/o*"]) {
-      expect(classifyFileRead(globPath, { unitWorkerMode: true }), globPath).toEqual(
-        expect.objectContaining({ verdict: "deny", ruleId: "worker-daemon-credential-access" }),
-      )
-      expect(classifyFileWrite(globPath, { unitWorkerMode: true }), globPath).toEqual(
-        expect.objectContaining({ verdict: "deny", ruleId: "worker-daemon-credential-access" }),
+    for (const deniedWriteSubtree of [
+      "rep[a-z]s/effect/package.json",
+      "re[k-p][m-r]s/effect/package.json",
+      "repos/{e..g}ffect/package.json",
+    ]) {
+      expect(classifyFileWrite(deniedWriteSubtree).verdict, `write ${deniedWriteSubtree}`).toBe(
+        "deny",
       )
     }
 
-    const worktreeFile = ".harness/workflow-worktrees/run-1/u1/src/foo.ts"
-    expect(classifyFileRead(worktreeFile, { unitWorkerMode: true }).verdict).toBe("allow")
-    expect(classifyFileWrite(worktreeFile, { unitWorkerMode: true }).verdict).toBe("allow")
-    expect(isWorkerDaemonCredentialShellAccess(`echo ${worktreeFile} | xargs ls`)).toBe(false)
-    expect(classifyCommand(`echo ${worktreeFile} | xargs ls`, { unitWorkerMode: true })).not.toBe(
-      "deny",
+    for (const governancePath of [
+      "tools/oxl[a-z]nt/syntax-bans.js",
+      "tools/ox[g-l][d-i]nt/syntax-bans.js",
+    ]) {
+      expect(classifyFileWrite(governancePath).verdict, `write ${governancePath}`).toBe("ask")
+      expect(classifyFileRead(governancePath).verdict, `read ${governancePath}`).toBe("allow")
+    }
+
+    for (const workerCredPath of ["au[a-z]h-tokens.json", "daem[a-z]n.sock", "daem[a-z]n.lock"]) {
+      const workerRead = classifyFileRead(workerCredPath, { unitWorkerMode: true })
+      expect(workerRead.verdict, workerCredPath).toBe("deny")
+      expect(workerRead.ruleId, workerCredPath).toBe("worker-daemon-credential-access")
+    }
+
+    expect(classifyFileRead("*.json").verdict).toBe("allow")
+    expect(classifyFileWrite("*.json").verdict).toBe("allow")
+  })
+
+  it("closes quoted-glob secret/state bypasses, pnpm --shell-mode, nx -- positional tasks, and >64-alt brace tails (F-9.1, F-3.1)", () => {
+    const quotedSecretGlobCmds: ReadonlyArray<string> = [
+      "rg --no-ignore --hidden -g '{.env,foo}' . .",
+      "rg --no-ignore --hidden -g '.e[a-z]v' . .",
+      "find . -name '.e[a-z]v'",
+      "rg --no-ignore --hidden -g '.en[a-z]' . .",
+      "find . -name '.dev.[a-z]ars'",
+      "rg --no-ignore --hidden -g '*.[a-z]ey' . .",
+      "find . -name '*.[a-z]ey'",
+      "rg --no-ignore --hidden -g '*.p*m' . .",
+      "find . -name '*.p*m'",
+      "rg --no-ignore --hidden -g 'mutation-hma[a-z].ke[x-z]' . .",
+      "rg --no-ignore --hidden --iglob '*.P*M' . .",
+      "cat '.[e]nv'",
+    ]
+    for (const cmd of quotedSecretGlobCmds) {
+      expect(classifyCommand(cmd), cmd).toBe("deny")
+      expect(explainCommandDenyRule(cmd)?.ruleId, cmd).toBe("secret-file-access")
+    }
+
+    expect(classifyCommand("find . -name 'daem[a-z]n.sock'")).toBe("deny")
+    expect(explainCommandDenyRule("find . -name 'daem[a-z]n.sock'")?.ruleId).toBe(
+      "harness-state-mutation",
     )
-    expect(classifyCommand(`cat ${worktreeFile}`, { unitWorkerMode: true })).toBe("allow")
+
+    for (const allowedGlobCmd of [
+      "rg --no-ignore --hidden -g '*.ts' foo .",
+      "find . -name '*.{ts,tsx}'",
+      "rg -g '*.json' foo .",
+    ]) {
+      expect(classifyCommand(allowedGlobCmd), allowedGlobCmd).toBe("allow")
+    }
+
+    expect(classifyCommand("pnpm --filter . --shell-mode exec -- bash -c id")).not.toBe("allow")
+    expect(classifyCommand("pnpm --filter . --shell-mode dlx evil-pkg")).not.toBe("allow")
+    expect(
+      classifyCommand("HARNESS_WORKTREE_ID=u1 pnpm --filter . run --shell-mode harness done"),
+    ).toBe("escalate")
+    expect(classifyCommand("HARNESS_WORKTREE_ID=u1 nx run -c prod -- harness-cli:start")).toBe(
+      "escalate",
+    )
+    expect(classifyCommand("HARNESS_WORKTREE_ID=u1 nx -- harness-cli:start")).toBe("escalate")
+    expect(
+      classifyCommand("HARNESS_WORKTREE_ID=u1 nx run @harness/gates:test -- harness-cli"),
+    ).toBe("allow")
+    expect(
+      classifyCommand("HARNESS_WORKTREE_ID=u1 nx run -c prod @harness/gates:test -- harness-cli"),
+    ).toBe("allow")
+
+    expect(classifyFileWrite("{a,b,c,d,e,f,g,h,repos}/{e,f}ffect/package.json")).toEqual({
+      verdict: "deny",
+      ruleId: "readonly-subtree",
+      reason: expect.stringContaining("{a,b,c"),
+    })
+    const alts64 = Array.from({ length: 64 }, (_, i) => `a${String(i + 1).padStart(2, "0")}`).join(
+      ",",
+    )
+    const brace65Secret = `{${alts64},.env}`
+    expect(classifyFileWrite(brace65Secret).verdict).toBe("deny")
+    expect(classifyFileWrite(brace65Secret).ruleId).toBe("secret-file")
+    expect(classifyFileRead(brace65Secret).verdict).toBe("deny")
+    expect(classifyFileRead(brace65Secret).ruleId).toBe("secret-file")
   })
 })

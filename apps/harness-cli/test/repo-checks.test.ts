@@ -1,4 +1,12 @@
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { match } from "ts-pattern"
@@ -53,18 +61,27 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
     const opts = { repoRoot: tmpDir, skipBackgroundDaemons: true }
 
     const writeRes = await Effect.runPromise(
-      runCheckOpenApi(["check-openapi", "--module", "openapi-mod.mjs", "--out", "openapi.json", "--write"], opts),
+      runCheckOpenApi(
+        ["check-openapi", "--module", "openapi-mod.mjs", "--out", "openapi.json", "--write"],
+        opts,
+      ),
     )
     expect(writeRes.exitCode).toBe(0)
 
     const freshRes = await Effect.runPromise(
-      runCheckOpenApi(["check-openapi", "--module", "openapi-mod.mjs", "--out", "openapi.json"], opts),
+      runCheckOpenApi(
+        ["check-openapi", "--module", "openapi-mod.mjs", "--out", "openapi.json"],
+        opts,
+      ),
     )
     expect(freshRes.exitCode).toBe(0)
 
     writeFileSync(outPath, JSON.stringify({ openapi: "3.1.0", paths: {} }), "utf8")
     const staleRes = await Effect.runPromise(
-      runCheckOpenApi(["check-openapi", "--module", "openapi-mod.mjs", "--out", "openapi.json"], opts),
+      runCheckOpenApi(
+        ["check-openapi", "--module", "openapi-mod.mjs", "--out", "openapi.json"],
+        opts,
+      ),
     )
     expect(staleRes.exitCode).toBe(1)
   })
@@ -73,9 +90,7 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
     const tmpDir = makeTempDir("harness-cli-migrations-")
     const opts = { repoRoot: tmpDir, skipBackgroundDaemons: true }
 
-    const missingRes = await Effect.runPromise(
-      runCheckMigrations(["check-migrations"], opts),
-    )
+    const missingRes = await Effect.runPromise(runCheckMigrations(["check-migrations"], opts))
     expect(missingRes.exitCode).toBe(1)
 
     const migrationsDir = join(tmpDir, "libs", "sample", "infra", "migrations")
@@ -85,19 +100,11 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
       "CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY NOT NULL);\n",
       "utf8",
     )
-    const cleanRes = await Effect.runPromise(
-      runCheckMigrations(["check-migrations"], opts),
-    )
+    const cleanRes = await Effect.runPromise(runCheckMigrations(["check-migrations"], opts))
     expect(cleanRes.exitCode).toBe(0)
 
-    writeFileSync(
-      join(migrationsDir, "0002_drop.sql"),
-      "DROP TABLE items;\n",
-      "utf8",
-    )
-    const destructiveRes = await Effect.runPromise(
-      runCheckMigrations(["check-migrations"], opts),
-    )
+    writeFileSync(join(migrationsDir, "0002_drop.sql"), "DROP TABLE items;\n", "utf8")
+    const destructiveRes = await Effect.runPromise(runCheckMigrations(["check-migrations"], opts))
     expect(destructiveRes.exitCode).toBe(2)
     expect(destructiveRes.stderr).toContain("ESCALATE")
   })
@@ -191,7 +198,9 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
       runBenchmarkCompare(["benchmark", "--out", "bench-out.json"], opts),
     )
     expect(passRes.exitCode).toBe(0)
-    expect(readFileSync(join(tmpDir, "bench-out.json"), "utf8")).toContain('"passedAcceptance": true')
+    expect(readFileSync(join(tmpDir, "bench-out.json"), "utf8")).toContain(
+      '"passedAcceptance": true',
+    )
 
     const brokenRes = await Effect.runPromise(
       runBenchmarkCompare(["benchmark", "--baseline", "missing-baseline.json"], opts),
@@ -313,7 +322,10 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
     expect(existsSync(join(outsideDir, "out.json"))).toBe(false)
 
     const outControl = await Effect.runPromise(
-      runCheckOpenApi(["check-openapi", "--module", "openapi-mod.mjs", "--out", "openapi.json"], opts),
+      runCheckOpenApi(
+        ["check-openapi", "--module", "openapi-mod.mjs", "--out", "openapi.json"],
+        opts,
+      ),
     )
     expect(outControl.exitCode).toBe(0)
 
@@ -339,10 +351,7 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
 
     // --snapshot (escape + positive in-root control)
     const snapEscape = await Effect.runPromise(
-      runCheckEventSchemas(
-        ["check-event-schemas", "--snapshot", "sym-escape/snap.json"],
-        opts,
-      ),
+      runCheckEventSchemas(["check-event-schemas", "--snapshot", "sym-escape/snap.json"], opts),
     )
     expect(snapEscape.exitCode).toBe(1)
     expect(snapEscape.stderr).toMatch(/escapes repository root/)
@@ -426,7 +435,10 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
     expect(evSnapTrav.stderr).toMatch(/escapes (?:repository )?root/)
 
     const evOutTrav = await Effect.runPromise(
-      runCheckEventSchemas(["check-event-schemas", "--module", "events-control.mjs", "--out", "../../etc/passwd"], opts),
+      runCheckEventSchemas(
+        ["check-event-schemas", "--module", "events-control.mjs", "--out", "../../etc/passwd"],
+        opts,
+      ),
     )
     expect(evOutTrav.exitCode).toBe(1)
     expect(evOutTrav.stderr).toMatch(/escapes (?:repository )?root/)
@@ -445,7 +457,10 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
 
     // 2. Dangling symlinks
     const openApiDanglingOut = await Effect.runPromise(
-      runCheckOpenApi(["check-openapi", "--out", "dangling-out.json", "--write", "--module", "openapi-mod.mjs"], opts),
+      runCheckOpenApi(
+        ["check-openapi", "--out", "dangling-out.json", "--write", "--module", "openapi-mod.mjs"],
+        opts,
+      ),
     )
     expect(openApiDanglingOut.exitCode).toBe(1)
     expect(openApiDanglingOut.stderr).toMatch(/escapes (?:repository )?root/)
@@ -460,21 +475,37 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
     // Positive in-root control for check-event-schemas
     const evUpdate = await Effect.runPromise(
       runCheckEventSchemas(
-        ["check-event-schemas", "--module", "events-control.mjs", "--snapshot", "in-root-snap.json", "--update"],
+        [
+          "check-event-schemas",
+          "--module",
+          "events-control.mjs",
+          "--snapshot",
+          "in-root-snap.json",
+          "--update",
+        ],
         opts,
       ),
     )
     expect(evUpdate.exitCode).toBe(0)
     const evControl = await Effect.runPromise(
       runCheckEventSchemas(
-        ["check-event-schemas", "--module", "events-control.mjs", "--snapshot", "in-root-snap.json"],
+        [
+          "check-event-schemas",
+          "--module",
+          "events-control.mjs",
+          "--snapshot",
+          "in-root-snap.json",
+        ],
         opts,
       ),
     )
     expect(evControl.exitCode).toBe(0)
 
     const evDanglingOut = await Effect.runPromise(
-      runCheckEventSchemas(["check-event-schemas", "--module", "events-control.mjs", "--out", "dangling-snap.json"], opts),
+      runCheckEventSchemas(
+        ["check-event-schemas", "--module", "events-control.mjs", "--out", "dangling-snap.json"],
+        opts,
+      ),
     )
     expect(evDanglingOut.exitCode).toBe(1)
     expect(evDanglingOut.stderr).toMatch(/escapes (?:repository )?root/)
@@ -567,11 +598,19 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
       }),
       "utf8",
     )
-    writeFileSync(join(tmpDir, "libs", "sample", "contract", "src", "index.ts"), "export const x = 1\n", "utf8")
+    writeFileSync(
+      join(tmpDir, "libs", "sample", "contract", "src", "index.ts"),
+      "export const x = 1\n",
+      "utf8",
+    )
 
     const msgs = await Effect.runPromise(collectHarnessTierTopologyViolationMessages(tmpDir))
     expect(msgs.some((m) => m.includes("package.json") && m.includes("drizzle-kit"))).toBe(true)
-    expect(msgs.some((m) => m.includes("libs/sample/contract/package.json") && m.includes("drizzle-kit"))).toBe(true)
+    expect(
+      msgs.some(
+        (m) => m.includes("libs/sample/contract/package.json") && m.includes("drizzle-kit"),
+      ),
+    ).toBe(true)
     expect(msgs.some((m) => m.includes("vitest"))).toBe(false)
 
     const gcFindings = await Effect.runPromise(
@@ -581,14 +620,23 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
         hostIo: nodeSyncHostIo,
       }),
     )
-    expect(gcFindings.some((f) => f.location === "package.json" && f.message.includes("drizzle-kit"))).toBe(true)
     expect(
-      gcFindings.some((f) => f.location === "libs/sample/contract/package.json" && f.message.includes("drizzle-kit")),
+      gcFindings.some((f) => f.location === "package.json" && f.message.includes("drizzle-kit")),
+    ).toBe(true)
+    expect(
+      gcFindings.some(
+        (f) =>
+          f.location === "libs/sample/contract/package.json" && f.message.includes("drizzle-kit"),
+      ),
     ).toBe(true)
 
     writeFileSync(join(tmpDir, "package.json"), "{malformed-json", "utf8")
-    const malformedMsgs = await Effect.runPromise(collectHarnessTierTopologyViolationMessages(tmpDir))
-    expect(malformedMsgs.some((m) => m.includes("[invalid-package-manifest] package.json"))).toBe(true)
+    const malformedMsgs = await Effect.runPromise(
+      collectHarnessTierTopologyViolationMessages(tmpDir),
+    )
+    expect(malformedMsgs.some((m) => m.includes("[invalid-package-manifest] package.json"))).toBe(
+      true,
+    )
     const malformedGc = await Effect.runPromise(
       evaluatePackageAndMigrationPlugin({
         graph: buildHarnessGraph({}),
@@ -605,7 +653,11 @@ describe("repo-checks.command behavioral suite (F-7.1, F-9.1b)", () => {
 
     // 1. Empty package with zero migrations -> fail closed (exitCode 1)
     mkdirSync(join(tmpDir, "libs", "empty", "infra", "src"), { recursive: true })
-    writeFileSync(join(tmpDir, "libs", "empty", "infra", "src", "index.ts"), "export const x = 1\n", "utf8")
+    writeFileSync(
+      join(tmpDir, "libs", "empty", "infra", "src", "index.ts"),
+      "export const x = 1\n",
+      "utf8",
+    )
     const emptyPkgRes = await Effect.runPromise(
       runCheckMigrations(["check-migrations", "--package", "libs/empty/infra"], opts),
     )

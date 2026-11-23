@@ -2528,6 +2528,9 @@ const CONTRACT_SCHEMA_CHAIN_METHODS = new Set(["pipe", "check", "annotate"])
 const CONTRACT_STRING_BOUND_CALLS = new Set(["isTrimmed", "isPattern", "isMaxLength"])
 const VITEST_HYGIENE_BASE_NAMES = new Set(["it", "test"])
 const VITEST_HYGIENE_CURRIED_NAMES = new Set(["each", "for", "skipIf", "runIf"])
+const VITEST_HYGIENE_NON_REGISTRATION_METHODS = new Set([...VITEST_HYGIENE_CURRIED_NAMES, "extend"])
+const MAX_TEST_FILE_LINES = 1500
+const MAX_TESTS_PER_FILE = 30
 
 function walkEstreeChildren(node, fn) {
   if (node == null || typeof node !== "object") return
@@ -2919,6 +2922,64 @@ function checkMaxTestCaseLinesEstree(programNode, filename, report) {
     walkEstreeChildren(node, visit)
   }
   visit(programNode)
+}
+
+function isEstreeVitestTestRegistrationCall(node) {
+  if (
+    node == null ||
+    node.type !== "CallExpression" ||
+    !isEstreeVitestChain(node.callee) ||
+    !Array.isArray(node.arguments) ||
+    node.arguments.length < 2
+  ) {
+    return false
+  }
+  const u = unwrapEstreeTop(node.callee)
+  if (
+    u != null &&
+    u.type === "MemberExpression" &&
+    u.computed !== true &&
+    u.property?.type === "Identifier" &&
+    VITEST_HYGIENE_NON_REGISTRATION_METHODS.has(u.property.name)
+  ) {
+    return false
+  }
+  return true
+}
+
+function checkMaxTestFileLinesEstree(programNode, text, filename, report) {
+  if (typeof filename !== "string" || !/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(filename)) return
+  if (typeof text !== "string" || text.length === 0) return
+  const lineCount = text.split(/\r?\n/).length
+  if (lineCount > MAX_TEST_FILE_LINES) {
+    report(
+      programNode,
+      `[max-test-file-lines] Test file '${filename}' has ${lineCount} lines (max ${MAX_TEST_FILE_LINES}) — split tests by domain into focused *.test.ts files.`,
+    )
+  }
+}
+
+function checkMaxTestsPerFileEstree(programNode, filename, report) {
+  if (typeof filename !== "string" || !/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(filename)) return
+  let count = 0
+  let overflowNode = null
+  const visit = (node) => {
+    if (node == null || typeof node !== "object") return
+    if (isEstreeVitestTestRegistrationCall(node)) {
+      count += 1
+      if (count === MAX_TESTS_PER_FILE + 1) {
+        overflowNode = node
+      }
+    }
+    walkEstreeChildren(node, visit)
+  }
+  visit(programNode)
+  if (count > MAX_TESTS_PER_FILE) {
+    report(
+      overflowNode ?? programNode,
+      `[max-tests-per-file] Test file '${filename}' declares ${count} test cases (max ${MAX_TESTS_PER_FILE}) — split suites by domain into focused *.test.ts files for Vitest parallelism and targeted mutation reachability.`,
+    )
+  }
 }
 
 const syntaxBans = {
@@ -4694,6 +4755,12 @@ const testIntegrity = {
           context.report({ node: target, message })
         })
         checkMaxTestCaseLinesEstree(node, normalized, (target, message) => {
+          context.report({ node: target, message })
+        })
+        checkMaxTestFileLinesEstree(node, text, normalized, (target, message) => {
+          context.report({ node: target, message })
+        })
+        checkMaxTestsPerFileEstree(node, normalized, (target, message) => {
           context.report({ node: target, message })
         })
       },

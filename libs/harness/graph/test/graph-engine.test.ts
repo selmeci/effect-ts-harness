@@ -4,7 +4,6 @@ import * as path from "node:path"
 import { Cause, Effect } from "effect"
 import { match } from "ts-pattern"
 import { describe, expect, it } from "vitest"
-import * as GraphApi from "../src/index.js"
 import {
   buildHarnessGraph,
   deserializeGraphSnapshotEffect,
@@ -15,97 +14,40 @@ import {
   GraphSnapshotError,
   isHarnessGraph,
   loadGraphSnapshotEffect,
-  makeOmnigraphSyncLayer,
   NodeKey,
-  OmnigraphSync,
   RelationId,
   renderMermaid,
   resolveNode,
   RoleName,
   saveGraphSnapshot,
   serializeGraphSnapshot,
-  structuralSearch,
   toOmnigraphNdjson,
   type SerializedGraphSnapshot,
 } from "../src/index.js"
 import { testHostIo } from "./helpers/test-host-io.js"
+import { makeSampleGraph } from "./helpers/graph-engine-fixture.js"
 
-describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
-  const sampleGraph = buildHarnessGraph({
-    fns: [
-      {
-        qualname: "libs/sample/domain/src/index.ts#greet",
-        spanName: "Sample.greet",
-        file: "libs/sample/domain/src/index.ts",
-        line: 4,
-        packageTag: "domain",
-        successType: "string",
-        isStub: false,
-      },
-      {
-        qualname: "libs/sample/infra/src/index.ts#PhotoRepo.insert",
-        spanName: "PhotoRepo.insert",
-        file: "libs/sample/infra/src/index.ts",
-        line: 10,
-        packageTag: "infra",
-        successType: "Photo",
-        isStub: false,
-      },
-    ],
-    services: [],
-    layers: [],
-    errors: [],
-    tests: [
-      {
-        testId: "libs/sample/domain/test/index.test.ts::greets by name",
-        testFile: "libs/sample/domain/test/index.test.ts",
-        testName: "greets by name",
-        lastTreeHash: "abc123",
-      },
-    ],
-    patternDocs: [],
-    requiresService: [],
-    failsWith: [],
-    providesService: [],
-    layerRequires: [],
-    tracedCalls: [
-      {
-        callerQualname: "libs/sample/domain/src/index.ts#greet",
-        calleeQualname: "libs/sample/infra/src/index.ts#PhotoRepo.insert",
-        callCount: 1,
-        receiverLayer: "PhotoRepoLive",
-      },
-    ],
-    exercisesSpans: [
-      {
-        testId: "libs/sample/domain/test/index.test.ts::greets by name",
-        calleeQualname: "libs/sample/domain/src/index.ts#greet",
-        callCount: 1,
-        receiverLayer: null,
-      },
-    ],
-  })
-
+describe("HarnessGraph (effect/Graph + snapshots + roles)", () => {
   it("resolves tests_reaching transitively from leaf and downstream spans", () => {
-    const direct = findTestsReaching(sampleGraph, "Sample.greet")
+    const direct = findTestsReaching(makeSampleGraph(), "Sample.greet")
     expect(direct.map((t) => t.testId)).toEqual([
       "libs/sample/domain/test/index.test.ts::greets by name",
     ])
 
-    const transitive = findTestsReaching(sampleGraph, "PhotoRepo.insert")
+    const transitive = findTestsReaching(makeSampleGraph(), "PhotoRepo.insert")
     expect(transitive.map((t) => t.testId)).toEqual([
       "libs/sample/domain/test/index.test.ts::greets by name",
     ])
   })
 
   it("resolves callees and callers with receiverLayer metadata", () => {
-    expect(findCallees(sampleGraph, "Sample.greet")).toEqual([
+    expect(findCallees(makeSampleGraph(), "Sample.greet")).toEqual([
       expect.objectContaining({
         qualname: "libs/sample/infra/src/index.ts#PhotoRepo.insert",
         receiverLayer: "PhotoRepoLive",
       }),
     ])
-    expect(findCallers(sampleGraph, "PhotoRepo.insert")).toEqual([
+    expect(findCallers(makeSampleGraph(), "PhotoRepo.insert")).toEqual([
       expect.objectContaining({
         qualname: "libs/sample/domain/src/index.ts#greet",
       }),
@@ -113,9 +55,9 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
   })
 
   it("renders a Mermaid diagram via Graph.toMermaid and exports Omnigraph NDJSON", () => {
-    const mermaid = renderMermaid(sampleGraph)
+    const mermaid = renderMermaid(makeSampleGraph())
     expect(mermaid).toContain("flowchart")
-    const ndjson = toOmnigraphNdjson(sampleGraph)
+    const ndjson = toOmnigraphNdjson(makeSampleGraph())
     expect(ndjson.split("\n").length).toBeGreaterThanOrEqual(5)
   })
 
@@ -123,7 +65,7 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-snapshot-roundtrip-"))
     try {
       const snapshotPath = path.join(tmpDir, "test-snapshot.json")
-      saveGraphSnapshot(sampleGraph, snapshotPath, testHostIo)
+      saveGraphSnapshot(makeSampleGraph(), snapshotPath, testHostIo)
       expect(fs.existsSync(snapshotPath)).toBe(true)
 
       const loaded = Effect.runSync(loadGraphSnapshotEffect(snapshotPath, testHostIo))
@@ -274,13 +216,15 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
   })
 
   it("resolves nodes across different identifier types via resolveNode", () => {
-    expect(resolveNode(sampleGraph, "Sample.greet")?._tag).toBe("EffectFn")
-    expect(resolveNode(sampleGraph, "libs/sample/domain/src/index.ts#greet")?._tag).toBe("EffectFn")
-    expect(resolveNode(sampleGraph, "greet")?._tag).toBe("EffectFn")
+    expect(resolveNode(makeSampleGraph(), "Sample.greet")?._tag).toBe("EffectFn")
+    expect(resolveNode(makeSampleGraph(), "libs/sample/domain/src/index.ts#greet")?._tag).toBe(
+      "EffectFn",
+    )
+    expect(resolveNode(makeSampleGraph(), "greet")?._tag).toBe("EffectFn")
     expect(
-      resolveNode(sampleGraph, "libs/sample/domain/test/index.test.ts::greets by name")?._tag,
+      resolveNode(makeSampleGraph(), "libs/sample/domain/test/index.test.ts::greets by name")?._tag,
     ).toBe("VitestCase")
-    expect(resolveNode(sampleGraph, "nonexistent")).toBeUndefined()
+    expect(resolveNode(makeSampleGraph(), "nonexistent")).toBeUndefined()
   })
 
   it("diffs plan graph and implementation graph via diffHarnessGraphs", () => {
@@ -369,40 +313,6 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
     expect(diff2.missingServices).toHaveLength(0)
     expect(diff2.remainingStubs).toHaveLength(0)
     expect(diff2.missingEdges).toHaveLength(0)
-  })
-
-  it("finds TypeScript ast-grep matches via structuralSearch", () => {
-    const results = structuralSearch({
-      pattern: "export const $NAME = $_",
-      hostIo: testHostIo,
-      subDirs: ["libs/harness/graph/src"],
-    })
-    expect(results.length).toBeGreaterThan(0)
-    const match = results.find((r) => r.text.includes("buildHarnessGraph"))
-    expect(match).toBeDefined()
-    expect(match?.file).toContain("engine/hypergraph-store.ts")
-    expect(match?.line).toBeGreaterThan(0)
-  })
-
-  it("writes snapshot and handles offline server gracefully via OmnigraphSync", async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "graph-engine-sync-"))
-    const testSnapshotPath = path.join(tmpDir, ".harness", "sync-test-snapshot.json")
-    try {
-      const program = Effect.gen(function* () {
-        const syncService = yield* OmnigraphSync
-        return yield* syncService.sync(sampleGraph, {
-          snapshotPath: testSnapshotPath,
-          baseUrl: "http://127.0.0.1:9999", // Unreachable port
-        })
-      }).pipe(Effect.provide(makeOmnigraphSyncLayer(testHostIo)))
-
-      const result = await Effect.runPromise(program)
-      expect(result.snapshotPath).toBe(testSnapshotPath)
-      expect(result.syncedToOmnigraph).toBe(false)
-      expect(fs.existsSync(testSnapshotPath)).toBe(true)
-    } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true })
-    }
   })
 
   describe("F-1: Graph snapshot error handling and validation", () => {
@@ -764,9 +674,9 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
     })
 
     it("isHarnessGraph returns true for graphs built via buildHarnessGraph or deserializeGraphSnapshotEffect and false for plain objects", () => {
-      expect(isHarnessGraph(sampleGraph)).toBe(true)
+      expect(isHarnessGraph(makeSampleGraph())).toBe(true)
 
-      const snapshot = serializeGraphSnapshot(sampleGraph)
+      const snapshot = serializeGraphSnapshot(makeSampleGraph())
       const restored = Effect.runSync(deserializeGraphSnapshotEffect(snapshot))
       expect(isHarnessGraph(restored)).toBe(true)
 
@@ -775,29 +685,6 @@ describe("HarnessGraph (effect/Graph + Omnigraph NDJSON)", () => {
       expect(isHarnessGraph(undefined)).toBe(false)
       expect(isHarnessGraph("plain string")).toBe(false)
       expect(isHarnessGraph(12345)).toBe(false)
-    })
-  })
-
-  describe("F-4: Public export surface guard", () => {
-    it("ensures internal helper symbols are not leaked on public GraphApi while core exports are defined", () => {
-      // Internal helpers must not be exposed on the public package index
-      expect(GraphApi).not.toHaveProperty("pushUnique")
-      expect(GraphApi).not.toHaveProperty("sha256Hex")
-      expect(GraphApi).not.toHaveProperty("makeProofRegistrar")
-      expect(GraphApi).not.toHaveProperty("addEntityNodeIfMissing")
-      expect(GraphApi).not.toHaveProperty("addViolation")
-      expect(GraphApi).not.toHaveProperty("decodePackageJson")
-
-      // Core public APIs must be exported
-      expect(GraphApi.buildHarnessGraph).toBeDefined()
-      expect(GraphApi.resolveNode).toBeDefined()
-      expect(GraphApi.findCallers).toBeDefined()
-      expect(GraphApi.extractWorkspaceTypeAwareGraph).toBeDefined()
-      expect(GraphApi.decideGraphInference).toBeDefined()
-      expect(GraphApi.decideGraphRewrite).toBeDefined()
-      expect(GraphApi.decideGraphProjection).toBeDefined()
-      expect(GraphApi.loadGraphSnapshotEffect).toBeDefined()
-      expect(GraphApi.DatalogSession).toBeDefined()
     })
   })
 })

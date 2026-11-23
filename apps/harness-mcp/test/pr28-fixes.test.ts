@@ -70,9 +70,9 @@ describe("PR #28 harness-mcp fixes (F-6.1, F-20.1b)", () => {
         ),
       )) as { readonly block: string }
       expect(routeResult.block).toBe("review")
-      expect(
-        stderrChunks.some((line) => line.includes("[harness-mcp] decision fallback:")),
-      ).toBe(true)
+      expect(stderrChunks.some((line) => line.includes("[harness-mcp] decision fallback:"))).toBe(
+        true,
+      )
 
       stderrChunks.length = 0
       const completeResult = (await Effect.runPromise(
@@ -89,14 +89,11 @@ describe("PR #28 harness-mcp fixes (F-6.1, F-20.1b)", () => {
         ),
       )) as { readonly suggestedEdges: ReadonlyArray<unknown> }
       expect(Array.isArray(completeResult.suggestedEdges)).toBe(true)
-      expect(
-        stderrChunks.some((line) => line.includes("[harness-mcp] decision fallback:")),
-      ).toBe(true)
-
-      const interruptDecisionLayer = Layer.effect(
-        DecisionModel.DecisionModel,
-        Effect.interrupt,
+      expect(stderrChunks.some((line) => line.includes("[harness-mcp] decision fallback:"))).toBe(
+        true,
       )
+
+      const interruptDecisionLayer = Layer.effect(DecisionModel.DecisionModel, Effect.interrupt)
 
       const routeExit = await Effect.runPromiseExit(
         executeToolEffect(

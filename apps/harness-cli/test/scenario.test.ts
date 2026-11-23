@@ -1,5 +1,14 @@
 import { execFileSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -133,11 +142,10 @@ describe("scenario.command behavioral suite (F-7.2)", () => {
 
     expect(statSync(join(worktreeDir, ".git")).isFile()).toBe(true)
 
-    const gitExcludePath = execFileSync(
-      "git",
-      ["rev-parse", "--git-path", "info/exclude"],
-      { cwd: worktreeDir, encoding: "utf8" },
-    ).trim()
+    const gitExcludePath = execFileSync("git", ["rev-parse", "--git-path", "info/exclude"], {
+      cwd: worktreeDir,
+      encoding: "utf8",
+    }).trim()
     mkdirSync(join(gitExcludePath, ".."), { recursive: true })
     writeFileSync(gitExcludePath, "# initial exclude\n", "utf8")
 
@@ -165,9 +173,19 @@ describe("scenario.command behavioral suite (F-7.2)", () => {
   it("T-8: recovers orphan _stashed-scenarios without current.json, cleans up on end failure, and handles dual-directory collision", async () => {
     // 1. Orphan _stashed-scenarios without current.json recovered by `scenario end`
     const orphanDir = makeTempDir("harness-cli-scenario-orphan-")
-    const stashedOrphan = join(orphanDir, ".harness", "scenario-runs", "_stashed-scenarios", "orphan-case")
+    const stashedOrphan = join(
+      orphanDir,
+      ".harness",
+      "scenario-runs",
+      "_stashed-scenarios",
+      "orphan-case",
+    )
     mkdirSync(stashedOrphan, { recursive: true })
-    writeFileSync(join(stashedOrphan, "expectations.json"), JSON.stringify({ title: "Orphan", checks: [] }), "utf8")
+    writeFileSync(
+      join(stashedOrphan, "expectations.json"),
+      JSON.stringify({ title: "Orphan", checks: [] }),
+      "utf8",
+    )
     const orphanEnd = await Effect.runPromise(
       runScenarioCommand(["scenario", "end"], { repoRoot: orphanDir, skipBackgroundDaemons: true }),
     )
@@ -179,7 +197,9 @@ describe("scenario.command behavioral suite (F-7.2)", () => {
     const failedDir = makeTempDir("harness-cli-scenario-fail-end-")
     seedScenarioWorkspace(failedDir, "fail-case", "Fail End")
     const opts = { repoRoot: failedDir, skipBackgroundDaemons: true }
-    const startRes = await Effect.runPromise(runScenarioCommand(["scenario", "start", "fail-case"], opts))
+    const startRes = await Effect.runPromise(
+      runScenarioCommand(["scenario", "start", "fail-case"], opts),
+    )
     expect(startRes.exitCode).toBe(0)
     expect(existsSync(join(failedDir, ".harness", "scenario-runs", "current.json"))).toBe(true)
     const endErrRes = await Effect.runPromise(
@@ -244,7 +264,10 @@ describe("scenario.command behavioral suite (F-7.2)", () => {
     const badTranscriptDir = join(defectDir, "dir-as-transcript.jsonl")
     mkdirSync(badTranscriptDir, { recursive: true })
     const defectExit = await Effect.runPromiseExit(
-      runScenarioCommand(["scenario", "end", "--transcript", "dir-as-transcript.jsonl"], defectOpts),
+      runScenarioCommand(
+        ["scenario", "end", "--transcript", "dir-as-transcript.jsonl"],
+        defectOpts,
+      ),
     )
     match(defectExit)
       .with({ _tag: "Success" }, () => {
@@ -272,7 +295,9 @@ describe("scenario.command behavioral suite (F-7.2)", () => {
     )
     symlinkSync(outsideTx, join(tmpDir, "sym-transcript.jsonl"))
 
-    const startRes = await Effect.runPromise(runScenarioCommand(["scenario", "start", "tx-case"], opts))
+    const startRes = await Effect.runPromise(
+      runScenarioCommand(["scenario", "start", "tx-case"], opts),
+    )
     expect(startRes.exitCode).toBe(0)
 
     // 1. Absolute outside-root path

@@ -3,7 +3,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { buildHarnessGraph } from "@harness/graph"
-import { checkVerifyStamp, computeWorkspaceTreeHash, diffPlanAndImplGraphs, writeVerifyStamp } from "../src/index.js"
+import {
+  checkVerifyStamp,
+  computeWorkspaceTreeHash,
+  diffPlanAndImplGraphs,
+  writeVerifyStamp,
+} from "../src/index.js"
 import { testHostIo } from "./helpers/test-host-io.js"
 
 describe("verify-stamp and plan/impl graph diff", () => {
