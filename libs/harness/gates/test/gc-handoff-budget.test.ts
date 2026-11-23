@@ -1104,6 +1104,18 @@ status: accepted
     )
     expect(invalidStatus._tag).toBe("Err")
 
+    const draftSpec = parseGovernanceDocFrontmatterChecked(
+      "libs/harness/docs/specs/SPEC-9999.md",
+      "---\nid: harness:SPEC-9999\ntitle: Draft Backlog\nstatus: draft\n---\n",
+    )
+    expect(draftSpec._tag).toBe("Ok")
+
+    const draftAdr = parseGovernanceDocFrontmatterChecked(
+      "libs/harness/docs/adr/0099-draft.md",
+      "---\nid: harness:ADR-0099\ntitle: Draft ADR\nstatus: draft\n---\n",
+    )
+    expect(draftAdr._tag).toBe("Err")
+
     // Strict YAML frontmatter rejections & # preservation inside quotes
     expect(
       parseGovernanceDocFrontmatterChecked(

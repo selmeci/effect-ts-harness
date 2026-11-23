@@ -8,7 +8,12 @@ import { match } from "ts-pattern"
 import { AstSourceContent, AstSourceFilePath } from "@harness/contract"
 import { ts } from "@harness/graph"
 import type { SyncHostExecResult, SyncHostIo } from "@harness/service/host-io"
-import { SelfDogfooding, writeVerifyStamp } from "../src/index.js"
+import {
+  SelfDogfooding,
+  classifyMutationModulePurity,
+  isPureMutationCandidate,
+  writeVerifyStamp,
+} from "../src/index.js"
 import { runDomainMutationSuite } from "../src/mutation-check.js"
 import {
   compileMutantSchemaModule,
@@ -20,6 +25,8 @@ import {
 import { extractGitDiffModifiedLinesChecked } from "../src/mutation/mutation-backup.js"
 import {
   findDomainFiles,
+  findDomainFilesChecked,
+  findReachingTestFiles,
   findUnclassifiedModifiedLibFiles,
   partitionReachingTestFiles,
   resolveLibPackageClassification,
@@ -231,128 +238,172 @@ describe("mutant-ast-generator: expression wrapping, multi-mutant same line, AST
   )
 })
 
+const seedMixedTierDiscoveryWorkspace = (dir: string): string => {
+  const gatesPkg = writePkg(dir, "harness", "gates", {
+    type: "package.json",
+    name: "@harness/gates",
+    tags: ["type:core"],
+  })
+  writeFileSync(
+    join(gatesPkg, "src", "gate.ts"),
+    "export const g = (x: number) => x >= 1\n",
+    "utf8",
+  )
+  const graphPkg = writePkg(dir, "harness", "graph", {
+    type: "package.json",
+    name: "@harness/graph",
+    tags: ["type:core"],
+  })
+  writeFileSync(join(graphPkg, "src", "gr.ts"), "export const gr = (x: number) => x >= 1\n", "utf8")
+  const decPkg = writePkg(dir, "harness", "decision", {
+    type: "package.json",
+    name: "@harness/decision",
+    tags: ["type:core"],
+  })
+  writeFileSync(join(decPkg, "src", "dec.ts"), "export const d = (x: number) => x >= 1\n", "utf8")
+  const ingPkg = writePkg(dir, "harness", "ingest", {
+    type: "package.json",
+    name: "@harness/ingest",
+    tags: ["type:core"],
+  })
+  writeFileSync(join(ingPkg, "src", "ing.ts"), "export const i = (x: number) => x >= 1\n", "utf8")
+  const domPkg = writePkg(dir, "demo", "billing", {
+    type: "project.json",
+    name: "demo-billing",
+    tags: ["type:domain"],
+  })
+  writeFileSync(join(domPkg, "src", "bill.ts"), "export const b = (x: number) => x >= 1\n", "utf8")
+  const conPkg = writePkg(dir, "demo", "proto", {
+    type: "package.json",
+    name: "@demo/proto",
+    tags: ["type:contract"],
+  })
+  writeFileSync(
+    join(conPkg, "src", "helper.ts"),
+    "export const isOk = (x: number) => x === 1\n",
+    "utf8",
+  )
+  const svcPkg = writePkg(dir, "demo", "svc", {
+    type: "package.json",
+    name: "@demo/svc",
+    tags: ["type:service"],
+  })
+  writeFileSync(join(svcPkg, "src", "svc.ts"), "export const s = 1\n", "utf8")
+  const infPkg = writePkg(dir, "demo", "inf", {
+    type: "package.json",
+    name: "@demo/inf",
+    tags: ["type:infra"],
+  })
+  writeFileSync(
+    join(infPkg, "src", "inf.ts"),
+    'import { readFileSync } from "node:fs"\nexport const i = (p: string) => readFileSync(p, "utf8")\n',
+    "utf8",
+  )
+  writeFileSync(
+    join(infPkg, "src", "pure-codec.ts"),
+    'import type { Stats } from "node:fs"\nexport const isNonNeg = (n: number): boolean => n >= 0\nexport type StatShape = Stats\n',
+    "utf8",
+  )
+  const appPkg = writePkg(dir, "demo", "app", {
+    type: "package.json",
+    name: "@demo/app",
+    tags: ["type:app"],
+  })
+  writeFileSync(
+    join(appPkg, "src", "app.ts"),
+    'import { execFileSync } from "node:child_process"\nexport const a = () => execFileSync("git", ["--version"])\n',
+    "utf8",
+  )
+
+  const demoCliPath = join(dir, "apps", "demo-cli")
+  mkdirSync(join(demoCliPath, "src"), { recursive: true })
+  mkdirSync(join(demoCliPath, "test"), { recursive: true })
+  writeFileSync(
+    join(demoCliPath, "package.json"),
+    JSON.stringify({ name: "demo-cli", nx: { tags: ["type:app"] } }),
+    "utf8",
+  )
+  writeFileSync(
+    join(demoCliPath, "src", "pure-helper.ts"),
+    "export const clampPositive = (n: number): number => (n > 0 ? n : 0)\n",
+    "utf8",
+  )
+  writeFileSync(
+    join(demoCliPath, "src", "impure-entry.ts"),
+    'import { existsSync } from "node:fs"\nexport const hasFile = (p: string) => existsSync(p)\n',
+    "utf8",
+  )
+  const demoCliTest = join(demoCliPath, "test", "pure-helper.test.ts")
+  writeFileSync(demoCliTest, "export const ok = true\n", "utf8")
+
+  const demoWebPath = join(dir, "apps", "demo-web")
+  mkdirSync(join(demoWebPath, "src"), { recursive: true })
+  writeFileSync(
+    join(demoWebPath, "package.json"),
+    JSON.stringify({ name: "demo-web", nx: { tags: ["type:app", "scope:web"] } }),
+    "utf8",
+  )
+  writeFileSync(join(demoWebPath, "src", "ui.ts"), "export const ui = 1\n", "utf8")
+
+  const noManDom = writePkg(dir, "nom", "domain", null)
+  writeFileSync(join(noManDom, "src", "nd.ts"), "export const nd = 1\n", "utf8")
+  const noManCore = writePkg(dir, "nom", "core", null)
+  writeFileSync(join(noManCore, "src", "nc.ts"), "export const nc = 1\n", "utf8")
+  const noManContract = writePkg(dir, "nom", "contract", null)
+  writeFileSync(join(noManContract, "src", "ncon.ts"), "export const ncon = 1\n", "utf8")
+  const noManUnknown = writePkg(dir, "nom", "mystery", null)
+  writeFileSync(join(noManUnknown, "src", "unk.ts"), "export const unk = 1\n", "utf8")
+  expect(resolveLibPackageClassification(noManUnknown, "mystery", testHostIo)).toBe("unclassified")
+  return demoCliTest
+}
+
 describe("mutation-target-discovery: tag classification, scope/target filtering, reaching test partitioning, and live workspace dogfooding", () => {
   it("classifies type:core in non-core folders, type:domain, type:contract, excludes service/infra/app, and handles manifest-less fallback", () => {
     const dir = mkdtempSync(join(tmpdir(), "mut-disc-tags-"))
     try {
-      const gatesPkg = writePkg(dir, "harness", "gates", {
-        type: "package.json",
-        name: "@harness/gates",
-        tags: ["type:core"],
-      })
-      writeFileSync(
-        join(gatesPkg, "src", "gate.ts"),
-        "export const g = (x: number) => x >= 1\n",
-        "utf8",
-      )
-
-      const graphPkg = writePkg(dir, "harness", "graph", {
-        type: "package.json",
-        name: "@harness/graph",
-        tags: ["type:core"],
-      })
-      writeFileSync(
-        join(graphPkg, "src", "gr.ts"),
-        "export const gr = (x: number) => x >= 1\n",
-        "utf8",
-      )
-
-      const decPkg = writePkg(dir, "harness", "decision", {
-        type: "package.json",
-        name: "@harness/decision",
-        tags: ["type:core"],
-      })
-      writeFileSync(
-        join(decPkg, "src", "dec.ts"),
-        "export const d = (x: number) => x >= 1\n",
-        "utf8",
-      )
-
-      const ingPkg = writePkg(dir, "harness", "ingest", {
-        type: "package.json",
-        name: "@harness/ingest",
-        tags: ["type:core"],
-      })
-      writeFileSync(
-        join(ingPkg, "src", "ing.ts"),
-        "export const i = (x: number) => x >= 1\n",
-        "utf8",
-      )
-
-      const domPkg = writePkg(dir, "demo", "billing", {
-        type: "project.json",
-        name: "demo-billing",
-        tags: ["type:domain"],
-      })
-      writeFileSync(
-        join(domPkg, "src", "bill.ts"),
-        "export const b = (x: number) => x >= 1\n",
-        "utf8",
-      )
-
-      const conPkg = writePkg(dir, "demo", "proto", {
-        type: "package.json",
-        name: "@demo/proto",
-        tags: ["type:contract"],
-      })
-      writeFileSync(
-        join(conPkg, "src", "helper.ts"),
-        "export const isOk = (x: number) => x === 1\n",
-        "utf8",
-      )
-
-      const svcPkg = writePkg(dir, "demo", "svc", {
-        type: "package.json",
-        name: "@demo/svc",
-        tags: ["type:service"],
-      })
-      writeFileSync(join(svcPkg, "src", "svc.ts"), "export const s = 1\n", "utf8")
-
-      const infPkg = writePkg(dir, "demo", "inf", {
-        type: "package.json",
-        name: "@demo/inf",
-        tags: ["type:infra"],
-      })
-      writeFileSync(join(infPkg, "src", "inf.ts"), "export const i = 1\n", "utf8")
-
-      const appPkg = writePkg(dir, "demo", "app", {
-        type: "package.json",
-        name: "@demo/app",
-        tags: ["type:app"],
-      })
-      writeFileSync(join(appPkg, "src", "app.ts"), "export const a = 1\n", "utf8")
-
-      // No manifests: domain/core/contract fallback vs unknown folder
-      const noManDom = writePkg(dir, "nom", "domain", null)
-      writeFileSync(join(noManDom, "src", "nd.ts"), "export const nd = 1\n", "utf8")
-      const noManCore = writePkg(dir, "nom", "core", null)
-      writeFileSync(join(noManCore, "src", "nc.ts"), "export const nc = 1\n", "utf8")
-      const noManContract = writePkg(dir, "nom", "contract", null)
-      writeFileSync(join(noManContract, "src", "ncon.ts"), "export const ncon = 1\n", "utf8")
-      const noManUnknown = writePkg(dir, "nom", "mystery", null)
-      writeFileSync(join(noManUnknown, "src", "unk.ts"), "export const unk = 1\n", "utf8")
-
-      expect(resolveLibPackageClassification(noManUnknown, "mystery", testHostIo)).toBe(
-        "unclassified",
-      )
-
+      const demoCliTest = seedMixedTierDiscoveryWorkspace(dir)
       const all = findDomainFiles(dir, testHostIo)
       const rels = all.map((f) => f.relFile)
-      expect(rels).toContain("libs/harness/gates/src/gate.ts")
-      expect(rels).toContain("libs/harness/graph/src/gr.ts")
-      expect(rels).toContain("libs/harness/decision/src/dec.ts")
-      expect(rels).toContain("libs/harness/ingest/src/ing.ts")
-      expect(rels).toContain("libs/demo/billing/src/bill.ts")
-      expect(rels).toContain("libs/demo/proto/src/helper.ts")
-      expect(rels).toContain("libs/nom/domain/src/nd.ts")
-      expect(rels).toContain("libs/nom/core/src/nc.ts")
-      expect(rels).toContain("libs/nom/contract/src/ncon.ts")
-      expect(rels).not.toContain("libs/demo/svc/src/svc.ts")
-      expect(rels).not.toContain("libs/demo/inf/src/inf.ts")
-      expect(rels).not.toContain("libs/demo/app/src/app.ts")
-      expect(rels).not.toContain("libs/nom/mystery/src/unk.ts")
+      for (const expectedIncluded of [
+        "libs/harness/gates/src/gate.ts",
+        "libs/harness/graph/src/gr.ts",
+        "libs/harness/decision/src/dec.ts",
+        "libs/harness/ingest/src/ing.ts",
+        "libs/demo/billing/src/bill.ts",
+        "libs/demo/proto/src/helper.ts",
+        "libs/demo/inf/src/pure-codec.ts",
+        "apps/demo-cli/src/pure-helper.ts",
+        "libs/nom/domain/src/nd.ts",
+        "libs/nom/core/src/nc.ts",
+        "libs/nom/contract/src/ncon.ts",
+      ]) {
+        expect(rels).toContain(expectedIncluded)
+      }
+      for (const expectedExcluded of [
+        "libs/demo/svc/src/svc.ts",
+        "libs/demo/inf/src/inf.ts",
+        "libs/demo/app/src/app.ts",
+        "apps/demo-cli/src/impure-entry.ts",
+        "apps/demo-web/src/ui.ts",
+        "libs/nom/mystery/src/unk.ts",
+      ]) {
+        expect(rels).not.toContain(expectedExcluded)
+      }
+      const demoCliEntry = all.find((f) => f.relFile === "apps/demo-cli/src/pure-helper.ts")!
+      expect(demoCliEntry.tier).toBe("app-pure")
+      expect(findReachingTestFiles(dir, demoCliEntry, testHostIo)).toEqual([demoCliTest])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 
-      // Scope filters
+  it("filters domain files by scope strings, normalized targetFiles, and handles empty results", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mut-disc-filters-"))
+    try {
+      seedMixedTierDiscoveryWorkspace(dir)
+      expect(findDomainFiles(dir, testHostIo, "demo-cli").map((f) => f.relFile)).toEqual([
+        "apps/demo-cli/src/pure-helper.ts",
+      ])
       expect(findDomainFiles(dir, testHostIo, "harness").map((f) => f.pkgDir)).toEqual([
         "decision",
         "gates",
@@ -375,8 +426,6 @@ describe("mutation-target-discovery: tag classification, scope/target filtering,
         "ingest",
       ])
       expect(findDomainFiles(dir, testHostIo, "nonexistent")).toEqual([])
-
-      // targetFiles filtering with backslash and leading ./
       const targeted = findDomainFiles(dir, testHostIo, undefined, [
         "./libs\\harness\\gates\\src\\gate.ts",
       ])
@@ -499,7 +548,7 @@ describe("mutation-target-discovery: tag classification, scope/target filtering,
     }
   })
 
-  it("live dogfooding: findDomainFiles discovers @harness/gates plan-workflow-compiler.ts and @harness/contract repo-identity.ts & workflow.ts", () => {
+  it("live dogfooding: findDomainFiles discovers gates/contract and pure infra/app modules while excluding impure IO modules", () => {
     const gatesFiles = findDomainFiles(REAL_REPO_ROOT, testHostIo, "@harness/gates").map(
       (f) => f.relFile,
     )
@@ -510,7 +559,181 @@ describe("mutation-target-discovery: tag classification, scope/target filtering,
     )
     expect(contractFiles).toContain("libs/harness/contract/src/repo-identity.ts")
     expect(contractFiles).toContain("libs/harness/contract/src/workflow.ts")
+
+    const infraFiles = findDomainFiles(REAL_REPO_ROOT, testHostIo, "@harness/infra").map(
+      (f) => f.relFile,
+    )
+    expect(infraFiles).not.toContain(
+      "libs/harness/infra/src/workflow/read-model-rebuild-journal.ts",
+    )
+    expect(infraFiles).toContain("libs/harness/infra/src/workflow/writer-lease-codec.ts")
+    expect(infraFiles).toContain("libs/harness/infra/src/workflow/workflow-store-codec.ts")
+    expect(infraFiles).toContain("libs/harness/infra/src/workflow/message-storage-codec.ts")
+    expect(infraFiles).not.toContain("libs/harness/infra/src/cache-helpers.ts")
+    expect(infraFiles).not.toContain("libs/harness/infra/src/node-host-io.ts")
+    expect(infraFiles).not.toContain("libs/harness/infra/src/omnigraph-workflow-store.ts")
+
+    const cliFiles = findDomainFiles(REAL_REPO_ROOT, testHostIo, "harness-cli").map(
+      (f) => f.relFile,
+    )
+    expect(cliFiles).toContain("apps/harness-cli/src/commands/workflow-command-helpers.ts")
+    expect(cliFiles).toContain("apps/harness-cli/src/commands/hook-format.ts")
+
+    const mcpFiles = findDomainFiles(REAL_REPO_ROOT, testHostIo, "harness-mcp").map(
+      (f) => f.relFile,
+    )
+    expect(mcpFiles).not.toContain("apps/harness-mcp/src/daemon/unix-socket-daemon.ts")
+    expect(mcpFiles).not.toContain(
+      "apps/harness-mcp/src/daemon/workflow-rpc-complete-validation.ts",
+    )
   })
+
+  it("SPEC-0026 REQ-2.2 & REQ-2.3: classifyMutationModulePurity excludes runtime I/O while permitting type-only imports and failing strict mode on 0 reaching tests", () => {
+    const pureSource = [
+      'import type { Stats } from "node:fs"',
+      'import type { OmnigraphClient } from "@harness/graph"',
+      'import { Schema } from "effect"',
+      "export interface ClientHolder { readonly client?: OmnigraphClient; readonly stats?: Stats }",
+      "export const addOne = (x: number): number => x + 1",
+    ].join("\n")
+    expect(classifyMutationModulePurity("libs/demo/inf/src/pure.ts", pureSource)).toEqual({
+      _tag: "Pure",
+    })
+    expect(isPureMutationCandidate("libs/demo/inf/src/pure.ts", pureSource)).toBe(true)
+
+    const impureCases: ReadonlyArray<readonly [string, string]> = [
+      [
+        "libs/demo/inf/src/a.ts",
+        'import { readFileSync } from "node:fs"\nexport const f = () => readFileSync("a", "utf8")\n',
+      ],
+      ["libs/demo/inf/src/b.ts", 'export const run = () => import("node:child_process")\n'],
+      [
+        "libs/demo/inf/src/c.ts",
+        'import { SqlClient } from "effect/sql/SqlClient"\nexport const s = SqlClient\n',
+      ],
+      [
+        "libs/demo/inf/src/d.ts",
+        'import { Layer } from "effect"\nexport const l = Layer.effect({} as never, () => {})\n',
+      ],
+      ["libs/demo/inf/src/e.ts", 'export const env = () => process.env["HOME"]\n'],
+      ["libs/demo/inf/src/f.ts", 'export const req = () => fetch("http://127.0.0.1")\n'],
+      [
+        "apps/demo-cli/src/g.ts",
+        'import { nodeSyncHostIo } from "@harness/infra"\nexport const io = nodeSyncHostIo\n',
+      ],
+      ["apps/demo-cli/src/index.ts", "export const x = 1\n"],
+      [
+        "libs/demo/inf/src/only-types.ts",
+        'export type OnlyType = string\nexport * from "./a.js"\n',
+      ],
+      [
+        "libs/demo/inf/src/cluster-runtime.ts",
+        'import { Sharding } from "effect/cluster"\nexport const s = Sharding\n',
+      ],
+      [
+        "libs/demo/inf/src/fs-alias.ts",
+        'import { FileSystem as FS } from "effect"\nexport const f = FS\n',
+      ],
+      [
+        "libs/demo/inf/src/async-hooks.ts",
+        'import { AsyncLocalStorage } from "node:async_hooks"\nexport const als = new AsyncLocalStorage()\n',
+      ],
+      [
+        "libs/demo/inf/src/timers-prom.ts",
+        'import { setTimeout } from "timers/promises"\nexport const t = setTimeout\n',
+      ],
+      [
+        "libs/demo/inf/src/proc-bracket.ts",
+        'export const envBracket = () => process["env"]["HOME"]\n',
+      ],
+      [
+        "libs/demo/inf/src/proc-destruct.ts",
+        "export const envDestruct = () => { const { env } = process; return env.HOME }\n",
+      ],
+      [
+        "libs/demo/inf/src/proc-alias.ts",
+        "export const procAlias = () => { const p = process; return p.cwd() }\n",
+      ],
+    ]
+    for (const [relPath, src] of impureCases) {
+      expect(classifyMutationModulePurity(relPath, src)._tag).toBe("Excluded")
+      expect(isPureMutationCandidate(relPath, src)).toBe(false)
+    }
+
+    const clusterCodecSrc =
+      'import { ClusterError, ShardId, type Envelope } from "effect/cluster"\nexport const makeErr = (cause: unknown) => new ClusterError.PersistenceError({ cause })\nexport const shard = ShardId\nexport type Env = Envelope\n'
+    expect(
+      classifyMutationModulePurity("libs/demo/inf/src/cluster-codec.ts", clusterCodecSrc),
+    ).toEqual({
+      _tag: "Pure",
+    })
+
+    // SPEC-0026 REQ-2.3: pure infra module with 0 reaching test files fails strict mutation check, and
+    // locally pure module importing relative impure module is transitively excluded
+    const dir = mkdtempSync(join(tmpdir(), "mut-pure-untested-"))
+    try {
+      const infPkg = writePkg(dir, "demo", "inf", {
+        type: "package.json",
+        name: "@demo/inf",
+        tags: ["type:infra"],
+      })
+      writeFileSync(
+        join(infPkg, "src", "codec.ts"),
+        "export const isNonNegative = (x: number): boolean => x >= 0\n",
+        "utf8",
+      )
+      writeFileSync(
+        join(infPkg, "src", "impure-helper.ts"),
+        'export const readEnv = (): string | undefined => process["env"]["HOME"]\n',
+        "utf8",
+      )
+      writeFileSync(
+        join(infPkg, "src", "transitive-wrapper.ts"),
+        'import { readEnv } from "./impure-helper.js"\nexport const hasEnv = (): boolean => readEnv() !== undefined\n',
+        "utf8",
+      )
+      const strictReport = runDomainMutationSuite(dir, testHostIo, {
+        enforcementMode: "strict",
+        includeAllLines: true,
+      })
+      expect(strictReport.passed).toBe(false)
+      expect(
+        (strictReport.untestedFiles ?? []).some((u) => u.file === "libs/demo/inf/src/codec.ts"),
+      ).toBe(true)
+      expect(
+        (strictReport.untestedFiles ?? []).some(
+          (u) => u.file === "libs/demo/inf/src/transitive-wrapper.ts",
+        ),
+      ).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it.effect.prop(
+    "classifyMutationModulePurity property: type-only node:* imports preserve Pure whereas runtime disallowed imports always yield Excluded",
+    {
+      nodeMod: Schema.Literals(["node:fs", "node:child_process", "node:net", "node:os"]),
+      isTypeOnly: Schema.Boolean,
+    },
+    ({ nodeMod, isTypeOnly }) =>
+      Effect.sync(() => {
+        const src = isTypeOnly
+          ? `import type * as M from "${nodeMod}"\nexport const ok = (x: number): boolean => x >= 0\nexport type Used = typeof M\n`
+          : `import * as M from "${nodeMod}"\nexport const ok = (x: number): boolean => Boolean(M) && x >= 0\n`
+        const res = classifyMutationModulePurity("libs/demo/inf/src/prop-codec.ts", src)
+        match(res)
+          .with({ _tag: "Pure" }, () => {
+            expect(isTypeOnly).toBe(true)
+            expect(isPureMutationCandidate("libs/demo/inf/src/prop-codec.ts", src)).toBe(true)
+          })
+          .with({ _tag: "Excluded" }, ({ reason }) => {
+            expect(isTypeOnly).toBe(false)
+            expect(reason).toContain("Node I/O builtin")
+          })
+          .exhaustive()
+      }),
+  )
 })
 
 describe("mutation-backup: untracked files, branch-base fallback, explicitBaseRef, and fail-closed git errors", () => {
@@ -671,6 +894,50 @@ describe("mutation-check: strict fail-closed modes and primary/fallback test par
       const unclassReport = runDomainMutationSuite(dir, gitHostIo, { enforcementMode: "strict" })
       expect(unclassReport.passed).toBe(false)
       expect(unclassReport.diagnostic).toContain("Unclassified modified lib file")
+
+      // S-5.1: findDomainFilesChecked surfaces unclassifiedPackages and advisory mode emits stderr diagnostic
+      const corePkg = writePkg(dir, "demo", "core", {
+        type: "package.json",
+        name: "@demo/core",
+        tags: ["type:core"],
+      })
+      writeFileSync(join(corePkg, "src", "c.ts"), "export const c = 1\n", "utf8")
+      const checkedAll = findDomainFilesChecked(dir, testHostIo)
+      match(checkedAll)
+        .with({ _tag: "Ok" }, ({ files, unclassifiedPackages }) => {
+          expect(files.map((f) => f.relFile)).toEqual(["libs/demo/core/src/c.ts"])
+          expect(unclassifiedPackages).toEqual(["libs/demo/mystery"])
+        })
+        .with({ _tag: "Error" }, ({ reason }) =>
+          expect.unreachable(`Expected Ok discovery result, got Error: ${reason}`),
+        )
+        .exhaustive()
+
+      const checkedScoped = findDomainFilesChecked(dir, testHostIo, "@demo/core")
+      match(checkedScoped)
+        .with({ _tag: "Ok" }, ({ unclassifiedPackages }) => {
+          expect(unclassifiedPackages).toEqual([])
+        })
+        .with({ _tag: "Error" }, ({ reason }) =>
+          expect.unreachable(`Expected Ok scoped discovery result, got Error: ${reason}`),
+        )
+        .exhaustive()
+
+      const stderrChunks: Array<string> = []
+      const origStderrWrite = process.stderr.write.bind(process.stderr)
+      process.stderr.write = ((chunk: string | Uint8Array) => {
+        stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+        return true
+      }) as typeof process.stderr.write
+      try {
+        const advisoryRes = runDomainMutationSuite(dir, testHostIo, { enforcementMode: "advisory" })
+        expect(advisoryRes.passed).toBe(true)
+      } finally {
+        process.stderr.write = origStderrWrite
+      }
+      expect(stderrChunks.join("")).toContain(
+        "Skipped unclassified library package(s): libs/demo/mystery",
+      )
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -798,6 +1065,50 @@ describe("mutation-check: strict fail-closed modes and primary/fallback test par
         /EACCES: rename denied/,
       )
       expect(testHostIo.existsSync(tmpStampPath)).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("SPEC-0030 2nd-pass: classifyMutationModulePurity excludes globalThis.process, (process), dynamic template imports/require, (fetch), re-exports from effect, and transitively excludes dot relative imports", () => {
+    const impure2ndPassCases: ReadonlyArray<readonly [string, string]> = [
+      ["libs/demo/inf/src/gproc.ts", 'export const g = () => globalThis.process.env["HOME"]\n'],
+      ["libs/demo/inf/src/pproc.ts", "export const p = () => (process).exit(1)\n"],
+      ["libs/demo/inf/src/dynimp.ts", "export const d = () => import(`node:fs`)\n"],
+      ["libs/demo/inf/src/dynreq.ts", "export const r = () => require(`node:fs`)\n"],
+      ["libs/demo/inf/src/pfetch.ts", 'export const f = () => (fetch)("http://127.0.0.1:1234")\n'],
+      ["libs/demo/inf/src/reexp.ts", 'export { FileSystem } from "effect"\n'],
+    ]
+    for (const [relPath, src] of impure2ndPassCases) {
+      expect(classifyMutationModulePurity(relPath, src)._tag, relPath).toBe("Excluded")
+      expect(isPureMutationCandidate(relPath, src), relPath).toBe(false)
+    }
+
+    const dir = mkdtempSync(join(tmpdir(), "mut-dot-imp-"))
+    try {
+      const infPkg = writePkg(dir, "demo", "inf", {
+        type: "package.json",
+        name: "@demo/inf",
+        tags: ["type:infra"],
+      })
+      writeFileSync(
+        join(infPkg, "src", "index.ts"),
+        'export const a = process["env"]["HOME"]\n',
+        "utf8",
+      )
+      writeFileSync(
+        join(infPkg, "src", "dotimp.ts"),
+        'import { a } from "."\nexport const v = a\n',
+        "utf8",
+      )
+      writeFileSync(
+        join(infPkg, "src", "pure.ts"),
+        "export const addOne = (x: number): number => x + 1\n",
+        "utf8",
+      )
+      const discovered = findDomainFiles(dir, testHostIo).map((f) => f.relFile)
+      expect(discovered).toContain("libs/demo/inf/src/pure.ts")
+      expect(discovered).not.toContain("libs/demo/inf/src/dotimp.ts")
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

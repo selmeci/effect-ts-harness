@@ -341,68 +341,68 @@ describe("nondeterministic-workflow-body AST & oxlint gates", () => {
     expect(violations).toEqual([])
   })
 
-  it("mirrors point-free, Reflect, globalThis.crypto, bare Date(), and negative false-positive guards in tools/oxlint/syntax-bans.js", async () => {
+  const wfEstreeImport = {
+    type: "ImportDeclaration",
+    importKind: "value",
+    source: { type: "Literal", value: "effect/workflow" },
+    specifiers: [
+      {
+        type: "ImportSpecifier",
+        importKind: "value",
+        imported: { type: "Identifier", name: "Workflow" },
+        local: { type: "Identifier", name: "Workflow" },
+      },
+      {
+        type: "ImportSpecifier",
+        importKind: "value",
+        imported: { type: "Identifier", name: "Activity" },
+        local: { type: "Identifier", name: "Activity" },
+      },
+    ],
+  }
+
+  const wfEstreeDecl = {
+    type: "VariableDeclaration",
+    declarations: [
+      {
+        type: "VariableDeclarator",
+        id: { type: "Identifier", name: "Wf" },
+        init: {
+          type: "CallExpression",
+          callee: {
+            type: "MemberExpression",
+            computed: false,
+            object: { type: "Identifier", name: "Workflow" },
+            property: { type: "Identifier", name: "make" },
+          },
+          arguments: [
+            { type: "Literal", value: "Wf" },
+            { type: "ObjectExpression", properties: [] },
+          ],
+        },
+      },
+    ],
+  }
+
+  const runWorkflowBodyEstree = async (body: ReadonlyArray<Record<string, unknown>>) => {
     const plugin = await loadSyntaxBansPlugin()
     const syntaxBans = plugin.rules["syntax-bans"]
+    const reports: Array<{ readonly message: string }> = []
+    const visitor = syntaxBans.create({
+      filename: "/repo/libs/sample/core/src/wf.ts",
+      sourceCode: { text: "// synthetic-estree-fixture" },
+      report: (r: { readonly message: string }) => {
+        reports.push(r)
+      },
+    })
+    visitor.Program?.({ type: "Program", body })
+    return reports
+  }
 
-    const runEstree = (body: ReadonlyArray<Record<string, unknown>>) => {
-      const reports: Array<{ readonly message: string }> = []
-      const visitor = syntaxBans.create({
-        filename: "/repo/libs/sample/core/src/wf.ts",
-        sourceCode: { text: "// synthetic-estree-fixture" },
-        report: (r: { readonly message: string }) => {
-          reports.push(r)
-        },
-      })
-      visitor.Program?.({ type: "Program", body })
-      return reports
-    }
-
-    const wfImport = {
-      type: "ImportDeclaration",
-      importKind: "value",
-      source: { type: "Literal", value: "effect/workflow" },
-      specifiers: [
-        {
-          type: "ImportSpecifier",
-          importKind: "value",
-          imported: { type: "Identifier", name: "Workflow" },
-          local: { type: "Identifier", name: "Workflow" },
-        },
-        {
-          type: "ImportSpecifier",
-          importKind: "value",
-          imported: { type: "Identifier", name: "Activity" },
-          local: { type: "Identifier", name: "Activity" },
-        },
-      ],
-    }
-    const wfDecl = {
-      type: "VariableDeclaration",
-      declarations: [
-        {
-          type: "VariableDeclarator",
-          id: { type: "Identifier", name: "Wf" },
-          init: {
-            type: "CallExpression",
-            callee: {
-              type: "MemberExpression",
-              computed: false,
-              object: { type: "Identifier", name: "Workflow" },
-              property: { type: "Identifier", name: "make" },
-            },
-            arguments: [
-              { type: "Literal", value: "Wf" },
-              { type: "ObjectExpression", properties: [] },
-            ],
-          },
-        },
-      ],
-    }
-
-    const posReports = runEstree([
-      wfImport,
-      wfDecl,
+  it("mirrors point-free, Reflect, globalThis.crypto, and bare Date() workflow body checks in tools/oxlint/syntax-bans.js", async () => {
+    const posReports = await runWorkflowBodyEstree([
+      wfEstreeImport,
+      wfEstreeDecl,
       {
         type: "FunctionDeclaration",
         id: { type: "Identifier", name: "helper" },
@@ -511,10 +511,12 @@ describe("nondeterministic-workflow-body AST & oxlint gates", () => {
     expect(posMsg).toContain('Reflect.get(process, "env")')
     expect(posMsg).toContain("Date (Reflect.construct)")
     expect(posMsg).toContain("crypto.randomUUID")
+  })
 
-    const negReports = runEstree([
-      wfImport,
-      wfDecl,
+  it("preserves negative false-positive guards for Activity.make and unrelated toLayer handlers in tools/oxlint/syntax-bans.js", async () => {
+    const negReports = await runWorkflowBodyEstree([
+      wfEstreeImport,
+      wfEstreeDecl,
       {
         type: "FunctionDeclaration",
         id: { type: "Identifier", name: "actClock" },

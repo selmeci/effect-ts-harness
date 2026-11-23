@@ -7,6 +7,7 @@ import {
   ErrorReasonMessage,
   NxScopeTag,
   NxTierTag,
+  RemediationReviewContext,
   ReviewDepth,
   ReviewGraphContextBundle,
   type ReviewRoutingPlan,
@@ -19,10 +20,14 @@ import {
   toErrorReasonMessage,
 } from "@harness/contract"
 import { type HarnessGraph, findTestsReaching } from "@harness/graph"
+import { reconcileReviewSlicesWithSelections } from "@harness/decision"
 import { nodeSyncHostIo } from "@harness/infra"
 import { type GraphResolutionStatus, isPathInsideRoot, type ServerOptions } from "./mcp-helpers.js"
 
-const BoundedRepoRoot = Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 1024)))
+const BoundedRepoRoot = Schema.String.pipe(
+  Schema.check(Schema.isBetweenLength(1, 1024)),
+  Schema.check(Schema.isPattern(/^[^\0]+$/)),
+)
 
 export const ReviewRouteInputSchema = Schema.Struct({
   changedFiles: Schema.Array(Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 512))))
@@ -55,6 +60,12 @@ export const ReviewRouteInputSchema = Schema.Struct({
   timeoutMs: Schema.optional(
     ReviewTimeoutMillis.annotate({
       description: "Optional DecisionModel timeout in milliseconds (100..30000)",
+    }),
+  ),
+  remediationContext: Schema.optional(
+    RemediationReviewContext.annotate({
+      description:
+        "Optional prior finding context enforcing second-pass specialist remediation re-audit",
     }),
   ),
   repoRoot: Schema.optional(
@@ -134,7 +145,7 @@ export const collectManifestTagsForFiles = (
 
     for (const relFile of changedFiles) {
       let currDir = path.dirname(path.resolve(resolvedRoot, relFile))
-      while (isPathInsideRoot(resolvedRoot, currDir) && currDir !== resolvedRoot) {
+      while (isPathInsideRoot(resolvedRoot, currDir)) {
         if (visitedDirs.has(currDir)) {
           break
         }
@@ -142,7 +153,10 @@ export const collectManifestTagsForFiles = (
 
         for (const manifestName of ["project.json", "package.json"] as const) {
           const manifestPath = path.join(currDir, manifestName)
-          if (isPathInsideRoot(resolvedRoot, manifestPath) && nodeSyncHostIo.existsSync(manifestPath)) {
+          if (
+            isPathInsideRoot(resolvedRoot, manifestPath) &&
+            nodeSyncHostIo.existsSync(manifestPath)
+          ) {
             const relManifest = path.relative(resolvedRoot, manifestPath).replaceAll("\\", "/")
             const readOutcome = yield* Effect.try(() =>
               nodeSyncHostIo.readTextSync(manifestPath),
@@ -177,10 +191,7 @@ export const collectManifestTagsForFiles = (
                   )
                 })
                 .with({ _tag: "DecodeOk" }, ({ decoded }) => {
-                  const candidateTags = [
-                    ...(decoded.tags ?? []),
-                    ...(decoded.nx?.tags ?? []),
-                  ]
+                  const candidateTags = [...(decoded.tags ?? []), ...(decoded.nx?.tags ?? [])]
                   if (candidateTags.length > 0) {
                     const parsed = parseManifestTags(candidateTags)
                     for (const t of parsed.nxTags) tiers.add(t)
@@ -197,6 +208,9 @@ export const collectManifestTagsForFiles = (
                 .exhaustive()
             }
           }
+        }
+        if (currDir === resolvedRoot) {
+          break
         }
         currDir = path.dirname(currDir)
       }
@@ -249,11 +263,16 @@ export const escalatePlanOnDiagnostics = (plan: ReviewRoutingPlan): ReviewRoutin
           : active.depth === "lite"
             ? ReviewDepth.make("focused")
             : active.depth
+      const reviewSlices =
+        active.reviewSlices !== undefined
+          ? reconcileReviewSlicesWithSelections(active.reviewSlices, nextSelections)
+          : undefined
       return ActiveReviewPlan.make({
         depth: nextDepth,
         source: active.source,
         ...(active.degradedReason !== undefined ? { degradedReason: active.degradedReason } : {}),
         selections: nextSelections,
+        ...(reviewSlices !== undefined ? { reviewSlices } : {}),
       })
     })
     .exhaustive()

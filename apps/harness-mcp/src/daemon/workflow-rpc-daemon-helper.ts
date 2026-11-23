@@ -5,9 +5,11 @@ import {
   type CompiledPlan,
   type LeaseEpoch,
   SHARED_STEP_UNIT_ID,
+  WORKFLOW_TIMEOUT_BUDGETS,
   WorkflowAbortRequest,
   type WorkflowAbortResponse,
   WorkflowDaemonCapability,
+  type WorkflowPollBudget,
   WorkflowResumeRequest,
   WorkflowResumeResponse,
   type WorkflowRpcEnvelope,
@@ -53,8 +55,10 @@ export {
   handleDaemonWorkflowStatusRpcRequest,
 }
 
-const ABORT_SETTLE_MAX_ATTEMPTS = 200
-const ABORT_SETTLE_INTERVAL_MS = 50
+const ABORT_SETTLE_BUDGET: WorkflowPollBudget = {
+  maxAttempts: WORKFLOW_TIMEOUT_BUDGETS.abortSettleMaxAttempts,
+  intervalMs: WORKFLOW_TIMEOUT_BUDGETS.abortSettleIntervalMs,
+}
 const START_COMMAND = WorkflowDaemonCapability.make("workflow.start")
 const RESUME_COMMAND = WorkflowDaemonCapability.make("workflow.resume")
 const ABORT_COMMAND = WorkflowDaemonCapability.make("workflow.abort")
@@ -308,8 +312,8 @@ export const handleDaemonWorkflowResumeRequest = Effect.fn("WorkflowRpcDaemon.ha
                           runtime,
                           target.executionId,
                           `Timed out waiting for aborted workflow run '${target.runId}' to settle`,
-                          ABORT_SETTLE_MAX_ATTEMPTS,
-                          ABORT_SETTLE_INTERVAL_MS,
+                          ABORT_SETTLE_BUDGET.maxAttempts,
+                          ABORT_SETTLE_BUDGET.intervalMs,
                         ),
                       )
                       .with("retry", () =>
@@ -419,8 +423,8 @@ export const handleDaemonWorkflowAbortRequest = Effect.fn("WorkflowRpcDaemon.han
                   runtime,
                   target.executionId,
                   `Timed out waiting for workflow run '${target.runId}' interrupt to reach terminal state`,
-                  ABORT_SETTLE_MAX_ATTEMPTS,
-                  ABORT_SETTLE_INTERVAL_MS,
+                  ABORT_SETTLE_BUDGET.maxAttempts,
+                  ABORT_SETTLE_BUDGET.intervalMs,
                 )
               }
 

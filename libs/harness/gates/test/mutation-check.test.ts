@@ -1,9 +1,17 @@
 import { spawnSync } from "node:child_process"
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Result } from "effect"
+import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import { AstSourceFilePath, computeContentSha256, SourceLineNumber } from "@harness/contract"
 import type { SyncHostExecResult, SyncHostIo } from "@harness/service/host-io"
@@ -16,8 +24,11 @@ import {
 } from "../src/mutation-subprocess-helpers.js"
 import { isAssertionFailure } from "../src/mutation/mutant-ast-generator.js"
 import {
+  BackupSchema,
   extractGitDiffModifiedLinesChecked,
   recoverStartupBackup,
+  unlinkBackupChecked,
+  writeMutationBackup,
 } from "../src/mutation/mutation-backup.js"
 import { testHostIo } from "./helpers/test-host-io.js"
 
@@ -832,6 +843,55 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
       expect(recoverStartupBackup(repoRoot, backupPath, testHostIo)).toBeUndefined()
       expect(readFileSync(domainFile, "utf8")).toBe(source)
       expect(existsSync(backupPath)).toBe(false)
+
+      // Case 4: refuse symlink backupPath and symlink resolvedTarget; atomic write cleans .tmp.*
+      writeFileSync(
+        backupPath,
+        JSON.stringify({ filePath: domainFile, originalSource: source }),
+        "utf8",
+      )
+      const symlinkBackupIo: SyncHostIo = {
+        ...testHostIo,
+        isSymbolicLinkSync: (p) => (p === backupPath ? true : testHostIo.isSymbolicLinkSync(p)),
+      }
+      const symBackupErr = recoverStartupBackup(repoRoot, backupPath, symlinkBackupIo)
+      expect(symBackupErr).toContain("Refusing symlink")
+      expect(existsSync(backupPath)).toBe(true)
+
+      const symlinkTargetIo: SyncHostIo = {
+        ...testHostIo,
+        isSymbolicLinkSync: (p) => (p === domainFile ? true : testHostIo.isSymbolicLinkSync(p)),
+      }
+      const symTargetErr = recoverStartupBackup(repoRoot, backupPath, symlinkTargetIo)
+      expect(symTargetErr).toContain("Refusing symlink")
+      expect(existsSync(backupPath)).toBe(true)
+
+      expect(recoverStartupBackup(repoRoot, backupPath, testHostIo)).toBeUndefined()
+      expect(existsSync(`${domainFile}.tmp.${process.pid}`)).toBe(false)
+
+      // F-15.1: BackupSchema rejects empty/incomplete objects while accepting current & legacy payloads
+      expect(Schema.decodeOption(BackupSchema)("{}")._tag).toBe("None")
+      expect(
+        Schema.decodeOption(BackupSchema)(JSON.stringify({ filePath: "libs/a.ts" }))._tag,
+      ).toBe("None")
+      expect(Schema.decodeOption(BackupSchema)(JSON.stringify({ content: "x" }))._tag).toBe("None")
+      expect(
+        Schema.decodeOption(BackupSchema)(JSON.stringify({ filePath: "", content: "x" }))._tag,
+      ).toBe("None")
+      expect(
+        Schema.decodeOption(BackupSchema)(JSON.stringify({ filePath: "libs/a.ts", content: "" }))
+          ._tag,
+      ).toBe("Some")
+      expect(
+        Schema.decodeOption(BackupSchema)(
+          JSON.stringify({ filePath: "libs/a.ts", originalSource: "x" }),
+        )._tag,
+      ).toBe("Some")
+
+      writeFileSync(backupPath, "{}", "utf8")
+      expect(recoverStartupBackup(repoRoot, backupPath, testHostIo)).toContain(
+        "Backup JSON failed schema decoding",
+      )
     } finally {
       rmSync(repoRoot, { recursive: true, force: true })
     }
@@ -1177,5 +1237,65 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
     expect(normalizePriorMillis(850)).toBe(850)
     expect(normalizePriorMillis(1000)).toBe(1000)
     expect(normalizePriorMillis(1500)).toBe(1000)
+  })
+
+  it("SPEC-0030 2nd-pass: unlinkBackupChecked and writeMutationBackup fail closed on symlinks and clean up temp files on write/rename failure", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mut-backup-2nd-pass-"))
+    try {
+      const danglingLink = join(dir, "dangling-backup.json")
+      symlinkSync("/nonexistent/dangling-target", danglingLink)
+      expect(unlinkBackupChecked(danglingLink, testHostIo)).toContain("Refusing symlink")
+
+      const backupDir = join(dir, ".harness", "backups")
+      const backupPath = join(backupDir, "unit.backup.json")
+      mkdirSync(backupDir, { recursive: true })
+      symlinkSync("/nonexistent/sym-dir", join(dir, ".harness", "sym-backup-dir"))
+      const symDirErr = writeMutationBackup(
+        dir,
+        join(dir, ".harness", "sym-backup-dir", "unit.backup.json"),
+        "libs/sample/domain/src/logic.ts",
+        "export const a = 1",
+        "export const a = 2",
+        testHostIo,
+      )
+      expect(symDirErr).toContain("Refusing symlink")
+
+      const writeFailIo: SyncHostIo = {
+        ...testHostIo,
+        writeTextSync: (p, content) => {
+          testHostIo.writeTextSync(p, content)
+          throw new Error("disk full during write")
+        },
+      }
+      const writeFailErr = writeMutationBackup(
+        dir,
+        backupPath,
+        "libs/sample/domain/src/logic.ts",
+        "export const a = 1",
+        "export const a = 2",
+        writeFailIo,
+      )
+      expect(writeFailErr).toContain("disk full during write")
+      expect(existsSync(backupPath)).toBe(false)
+
+      const unlinkFailIo: SyncHostIo = {
+        ...writeFailIo,
+        unlinkSync: () => {
+          throw new Error("unlink temp denied")
+        },
+      }
+      const combinedErr = writeMutationBackup(
+        dir,
+        backupPath,
+        "libs/sample/domain/src/logic.ts",
+        "export const a = 1",
+        "export const a = 2",
+        unlinkFailIo,
+      )
+      expect(combinedErr).toContain("disk full during write")
+      expect(combinedErr).toContain("cleanup unlink failed: unlink temp denied")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

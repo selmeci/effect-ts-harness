@@ -1,7 +1,7 @@
-import { basename, resolve } from "node:path"
+import { basename, join, resolve } from "node:path"
 import { Cause, Effect, Graph, Result, Schema } from "effect"
 import { match } from "ts-pattern"
-import { OmnigraphSpanName } from "@harness/contract"
+import { isPureInterruptCause, OmnigraphSpanName } from "@harness/contract"
 import { type HarnessGraph, loadGraphSnapshotEffect } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 import type { SyncHostIo } from "@harness/service/host-io"
@@ -72,9 +72,7 @@ const hasMatchingOmnigraphBinary = (tokens: ReadonlyArray<string>): boolean => {
     return true
   }
   if (isJsRuntimeBasename(first)) {
-    return tokens
-      .slice(1)
-      .some((tok) => !tok.startsWith("-") && isOmnigraphExecutableBasename(tok))
+    return tokens.slice(1).some((tok) => !tok.startsWith("-") && isOmnigraphExecutableBasename(tok))
   }
   return false
 }
@@ -273,7 +271,11 @@ export const clusterYamlDeclaresPolicies = (clusterYaml: string): boolean => {
       if (nextIndent === keyIndent && (trimmedNext === "-" || trimmedNext.startsWith("- "))) {
         return true
       }
-      if (nextIndent <= keyIndent && /^[A-Za-z0-9_.-]+\s*:/.test(trimmedNext) && !trimmedNext.startsWith("-")) {
+      if (
+        nextIndent <= keyIndent &&
+        /^[A-Za-z0-9_.-]+\s*:/.test(trimmedNext) &&
+        !trimmedNext.startsWith("-")
+      ) {
         followedByMappingKey = true
         break
       }
@@ -348,21 +350,37 @@ export const collectPlanEffectFnQualnames = (graph: HarnessGraph): ReadonlySet<s
   return qualnames
 }
 
+export type PlanEffectFnQualnamesLoadResult =
+  | { readonly _tag: "Ok"; readonly qualnames: ReadonlySet<string> }
+  | { readonly _tag: "Corrupt"; readonly reason: string }
+
 export const loadPlanEffectFnQualnames = (
   planSnapshotPath: string,
   hostIo: SyncHostIo,
-): Effect.Effect<ReadonlySet<string> | undefined> =>
-  Effect.map(Effect.exit(loadGraphSnapshotEffect(planSnapshotPath, hostIo)), (loadExit) =>
-    match(loadExit)
-      .with({ _tag: "Success" }, ({ value }) => collectPlanEffectFnQualnames(value))
+): Effect.Effect<PlanEffectFnQualnamesLoadResult> =>
+  Effect.gen(function* () {
+    const loadExit = yield* Effect.exit(loadGraphSnapshotEffect(planSnapshotPath, hostIo))
+    return yield* match(loadExit)
+      .with({ _tag: "Success" }, ({ value }) =>
+        Effect.succeed<PlanEffectFnQualnamesLoadResult>({
+          _tag: "Ok",
+          qualnames: collectPlanEffectFnQualnames(value),
+        }),
+      )
       .with({ _tag: "Failure" }, ({ cause }) => {
-        process.stderr.write(
-          `[harness:done] Warning: failed to decode plan snapshot '${planSnapshotPath}': ${Cause.pretty(cause)}\n`,
-        )
-        return undefined
+        if (isPureInterruptCause(cause)) {
+          return Effect.failCause(
+            Cause.fromReasons<never>(cause.reasons.filter(Cause.isInterruptReason)),
+          )
+        }
+        const reason = `Failed to decode plan snapshot '${planSnapshotPath}': ${Cause.pretty(cause)}`
+        return Effect.sync(() => {
+          process.stderr.write(`[harness:done] Error: ${reason}\n`)
+          return { _tag: "Corrupt" as const, reason }
+        })
       })
-      .exhaustive(),
-  )
+      .exhaustive()
+  })
 
 export const readIsStubFromImage = (
   image: { readonly properties: unknown } | null | undefined,
@@ -405,8 +423,10 @@ export const readSpanNameFromImages = (
   return undefined
 }
 
-const BRANCH_NOT_FOUND_CODE_PATTERN = /^(not[_-]?found|branch[_-]?not[_-]?found|unknown[_-]?branch)$/i
-const BRANCH_NOT_FOUND_MESSAGE_PATTERN = /\bbranch\b.*(not\s+found|unknown|does\s+not\s+exist)|(?:not\s+found|unknown|does\s+not\s+exist).*\bbranch\b/i
+const BRANCH_NOT_FOUND_CODE_PATTERN =
+  /^(not[_-]?found|branch[_-]?not[_-]?found|unknown[_-]?branch)$/i
+const BRANCH_NOT_FOUND_MESSAGE_PATTERN =
+  /\bbranch\b.*(not\s+found|unknown|does\s+not\s+exist)|(?:not\s+found|unknown|does\s+not\s+exist).*\bbranch\b/i
 
 export const isBranchNotFoundError = (err: unknown): boolean => {
   const inner =
@@ -441,11 +461,11 @@ const decodeReadyzBody = Schema.decodeUnknownOption(ReadyzBodySchema)
 
 export function probeOmnigraphServerReady(baseUrl: string): Effect.Effect<ReadyzProbeResult> {
   return Effect.tryPromise({
-    try: () =>
+    try: (fiberSignal) =>
       globalThis
         .fetch(`${baseUrl}/readyz`, {
           method: "GET",
-          signal: AbortSignal.timeout(3000),
+          signal: AbortSignal.any([fiberSignal, AbortSignal.timeout(3000)]),
         })
         .then((r): Promise<ReadyzProbeResult> =>
           match(r.status)
@@ -505,3 +525,82 @@ export const formatDiffErrorMessage = (err: unknown): string => {
   }
   return err instanceof Error ? err.message : String(err)
 }
+
+const extractStructuredErrorCode = (err: unknown): string | undefined => {
+  let curr: unknown = err
+  for (let depth = 0; depth < 4 && typeof curr === "object" && curr !== null; depth++) {
+    const code: unknown = Reflect.get(curr, "code")
+    if (typeof code === "string") return code
+    curr = "cause" in curr ? Reflect.get(curr, "cause") : undefined
+  }
+  return undefined
+}
+
+const isEnoentErr = (err: unknown): boolean => {
+  const code = extractStructuredErrorCode(err)
+  if (code !== undefined) {
+    return code === "ENOENT"
+  }
+  return /^ENOENT(?::|\s|$)/.test(formatDiffErrorMessage(err))
+}
+
+export const cleanupStalePlanSnapshotAfterDone = (
+  repoRoot: string,
+  hostIo: SyncHostIo = nodeSyncHostIo,
+): string | undefined => {
+  const harnessDir = join(repoRoot, ".harness")
+  const snapshotPath = join(harnessDir, "plan-graph-snapshot.json")
+  const checkRes = Result.try({
+    try: () => ({
+      dirExists: hostIo.existsSync(harnessDir),
+      dirSym: hostIo.isSymbolicLinkSync(harnessDir),
+      fileSym: hostIo.isSymbolicLinkSync(snapshotPath),
+      fileExists: hostIo.existsSync(snapshotPath),
+    }),
+    catch: (err) => err,
+  })
+  return match(checkRes)
+    .with({ _tag: "Failure" }, ({ failure }) =>
+      isEnoentErr(failure) ? undefined : formatDiffErrorMessage(failure),
+    )
+    .with({ _tag: "Success" }, ({ success: s }) => {
+      if (!s.dirExists || (!s.fileExists && !s.fileSym)) return undefined
+      if (s.dirSym || s.fileSym) {
+        return `Refusing symlink while cleaning '${snapshotPath}'`
+      }
+      return match(
+        Result.try({
+          try: () => {
+            const realDir = hostIo.realpathSync(harnessDir)
+            const realFile = hostIo.realpathSync(snapshotPath)
+            if (!realFile.startsWith(`${realDir}/`)) {
+              return `Snapshot '${snapshotPath}' resolves outside '${realDir}'`
+            }
+            hostIo.unlinkSync(snapshotPath)
+            return undefined
+          },
+          catch: (err) => (isEnoentErr(err) ? undefined : formatDiffErrorMessage(err)),
+        }),
+      )
+        .with({ _tag: "Success" }, ({ success }) => success)
+        .with({ _tag: "Failure" }, ({ failure }) => failure)
+        .exhaustive()
+    })
+    .exhaustive()
+}
+
+export const formatPlanSnapshotCleanupFailure = (
+  cleanupErr: string | undefined,
+  failExitCode: number,
+  blockDecision: string,
+) =>
+  cleanupErr === undefined
+    ? undefined
+    : {
+        exitCode: failExitCode,
+        stdout: JSON.stringify({
+          decision: blockDecision,
+          reason: `Failed to clean stale .harness/plan-graph-snapshot.json: ${cleanupErr}`,
+        }),
+        stderr: `[GATE FAILURE] done:plan-snapshot-cleanup\n${cleanupErr}`,
+      }

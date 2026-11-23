@@ -1,18 +1,19 @@
 import { resolve } from "node:path"
 import type { SyncHostIo } from "@harness/service/host-io"
-import { Cause, Context, Effect, Layer, Semaphore } from "effect"
+import { Context, Effect, Layer, Semaphore } from "effect"
 import {
   CompilerOverlayErrorReason,
   CompilerRepoRootInput,
   CompilerRepoRootPath,
-  isPureInterruptCause,
+  toCompilerOverlayErrorReason,
+  toCompilerRepoRootInput,
   TsCompilerOverlayError,
 } from "@harness/contract"
 import { type HarnessGraph } from "../model.js"
 import {
   createTypeScriptProgramSession as createWarmProgramSession,
   type ExtractTypeGraphOptions,
-  extractTypeGraph,
+  extractTypeGraphChecked,
   type TypeScriptProgramSession,
 } from "../type-extractor.js"
 
@@ -41,24 +42,47 @@ export class TsCompilerOverlayService extends Context.Service<
   TsCompilerOverlayServiceShape
 >()("@harness/graph/TsCompilerOverlayService") {}
 
+const makeOverlayError = (
+  repoRoot: string,
+  reason: string,
+  fallback?: string,
+): TsCompilerOverlayError =>
+  new TsCompilerOverlayError({
+    repoRoot: toCompilerRepoRootInput(repoRoot),
+    reason: toCompilerOverlayErrorReason(reason, fallback),
+  })
+
 export const makeTsCompilerOverlayLayer = (
   hostIo: SyncHostIo,
 ): Layer.Layer<TsCompilerOverlayService> =>
   Layer.effect(
     TsCompilerOverlayService,
     Effect.gen(function* () {
-      const scopedSessions = yield* Effect.acquireRelease(
-        Effect.sync(() => new Map<string, TypeScriptProgramSession>()),
-        (sessions) =>
+      const registry = yield* Effect.acquireRelease(
+        Effect.sync(() => ({
+          byHost: new WeakMap<SyncHostIo, Map<string, TypeScriptProgramSession>>(),
+          all: new Set<TypeScriptProgramSession>(),
+        })),
+        (state) =>
           Effect.sync(() => {
-            for (const session of sessions.values()) {
+            for (const session of state.all) {
               session.sourceFileCache.clear()
               session.fileFragmentCache.clear()
               session.reverseImportsByFile.clear()
+              session.oldProgram = undefined
+              session.project = undefined
+              session.lastWorkspaceSnapshot = undefined
             }
-            sessions.clear()
+            state.all.clear()
           }),
       )
+      const getHostSessions = (targetHostIo: SyncHostIo): Map<string, TypeScriptProgramSession> => {
+        const existing = registry.byHost.get(targetHostIo)
+        if (existing !== undefined) return existing
+        const created = new Map<string, TypeScriptProgramSession>()
+        registry.byHost.set(targetHostIo, created)
+        return created
+      }
       const sem = yield* Semaphore.make(1)
       return {
         getSession: (repoRoot) =>
@@ -66,42 +90,36 @@ export const makeTsCompilerOverlayLayer = (
             const trimmed = repoRoot.trim()
             if (trimmed.length === 0) {
               return Effect.fail(
-                new TsCompilerOverlayError({
-                  repoRoot: CompilerRepoRootInput.make(repoRoot),
-                  reason: CompilerOverlayErrorReason.make("Repository root path must be non-empty."),
-                }),
+                makeOverlayError(repoRoot, "Repository root path must be non-empty."),
               )
             }
             const resolvedRoot = resolve(trimmed)
             if (!hostIo.existsSync(resolvedRoot) || !hostIo.isDirectorySync(resolvedRoot)) {
               return Effect.fail(
-                new TsCompilerOverlayError({
-                  repoRoot: CompilerRepoRootInput.make(repoRoot),
-                  reason: CompilerOverlayErrorReason.make(
-                    `Repository root path does not exist or is not a directory: ${trimmed}`,
-                  ),
-                }),
+                makeOverlayError(
+                  repoRoot,
+                  `Repository root path does not exist or is not a directory: ${trimmed}`,
+                ),
               )
             }
-            const existing = scopedSessions.get(resolvedRoot)
+            const hostSessions = getHostSessions(hostIo)
+            const existing = hostSessions.get(resolvedRoot)
             if (existing !== undefined) {
               return Effect.succeed(existing)
             }
             return Effect.try({
               try: () => {
                 const created = createWarmProgramSession(resolvedRoot, hostIo)
-                scopedSessions.set(resolvedRoot, created)
+                hostSessions.set(resolvedRoot, created)
+                registry.all.add(created)
                 return created
               },
               catch: (err) =>
-                new TsCompilerOverlayError({
-                  repoRoot: CompilerRepoRootInput.make(repoRoot),
-                  reason: CompilerOverlayErrorReason.make(
-                    err instanceof Error && err.message.trim().length > 0
-                      ? err.message
-                      : "Failed to initialize TypeScript compiler session.",
-                  ),
-                }),
+                makeOverlayError(
+                  repoRoot,
+                  err instanceof Error && err.message.trim().length > 0 ? err.message : "",
+                  "Failed to initialize TypeScript compiler session.",
+                ),
             })
           }),
         extractGraphWithOverlays: (options) =>
@@ -109,66 +127,57 @@ export const makeTsCompilerOverlayLayer = (
             Effect.gen(function* () {
               const trimmed = options.repoRoot.trim()
               if (trimmed.length === 0) {
-                return yield* new TsCompilerOverlayError({
-                  repoRoot: CompilerRepoRootInput.make(options.repoRoot),
-                  reason: CompilerOverlayErrorReason.make("Repository root path must be non-empty."),
-                })
-              }
-              const resolvedRoot = resolve(trimmed)
-              if (!hostIo.existsSync(resolvedRoot) || !hostIo.isDirectorySync(resolvedRoot)) {
-                return yield* new TsCompilerOverlayError({
-                  repoRoot: CompilerRepoRootInput.make(options.repoRoot),
-                  reason: CompilerOverlayErrorReason.make(
-                    `Repository root path does not exist or is not a directory: ${trimmed}`,
-                  ),
-                })
+                return yield* makeOverlayError(
+                  options.repoRoot,
+                  "Repository root path must be non-empty.",
+                )
               }
               const activeHostIo = options.hostIo ?? hostIo
+              const resolvedRoot = resolve(trimmed)
+              if (
+                !activeHostIo.existsSync(resolvedRoot) ||
+                !activeHostIo.isDirectorySync(resolvedRoot)
+              ) {
+                return yield* makeOverlayError(
+                  options.repoRoot,
+                  `Repository root path does not exist or is not a directory: ${trimmed}`,
+                )
+              }
+              const hostSessions = getHostSessions(activeHostIo)
               let session: TypeScriptProgramSession
               if (options.session !== undefined) {
                 session = options.session
               } else {
-                const existing = scopedSessions.get(resolvedRoot)
+                const existing = hostSessions.get(resolvedRoot)
                 if (existing !== undefined) {
                   session = existing
                 } else {
                   session = yield* Effect.try({
                     try: () => createWarmProgramSession(resolvedRoot, activeHostIo),
                     catch: (err) =>
-                      new TsCompilerOverlayError({
-                        repoRoot: CompilerRepoRootInput.make(options.repoRoot),
-                        reason: CompilerOverlayErrorReason.make(
-                          err instanceof Error && err.message.trim().length > 0
-                            ? err.message
-                            : "Failed to initialize TypeScript compiler session.",
-                        ),
-                      }),
+                      makeOverlayError(
+                        options.repoRoot,
+                        err instanceof Error && err.message.trim().length > 0 ? err.message : "",
+                        "Failed to initialize TypeScript compiler session.",
+                      ),
                   })
-                  scopedSessions.set(resolvedRoot, session)
+                  hostSessions.set(resolvedRoot, session)
+                  registry.all.add(session)
                 }
               }
-              return yield* extractTypeGraph({
+              return yield* extractTypeGraphChecked({
                 ...options,
                 repoRoot: resolvedRoot,
                 hostIo: activeHostIo,
                 session,
               }).pipe(
-                Effect.catchCause((cause) => {
-                  if (isPureInterruptCause(cause)) {
-                    return Effect.failCause(cause)
-                  }
-                  const defectMsg = Cause.pretty(cause)
-                  return Effect.fail(
-                    new TsCompilerOverlayError({
-                      repoRoot: CompilerRepoRootInput.make(options.repoRoot),
-                      reason: CompilerOverlayErrorReason.make(
-                        defectMsg.trim().length > 0
-                          ? defectMsg
-                          : "TypeGraph.extract failed with an unexpected error.",
-                      ),
-                    }),
-                  )
-                }),
+                Effect.mapError((reason) =>
+                  makeOverlayError(
+                    options.repoRoot,
+                    reason,
+                    "TypeGraph.extract failed with an unexpected error.",
+                  ),
+                ),
               )
             }),
           ),

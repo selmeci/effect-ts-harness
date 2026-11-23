@@ -17,6 +17,7 @@ import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
 import { computePreInvocationFingerprintLite } from "@harness/infra/hook-io"
 import { tryFastPathIngest } from "../src/commands/ingest-fastpath.js"
 import { computePreInvocationFingerprint } from "../src/commands/session-fastpath.js"
+import { evaluateFileReadDecision, toGuardCliResult } from "../src/commands/hook-guard-payload.js"
 
 const REPO_ROOT = resolve(import.meta.dirname, "../../..")
 const RESOLVER_PATH = join(REPO_ROOT, "tools", "node-ts-resolver.mjs")
@@ -657,6 +658,31 @@ describe("hook-entry.ts fast-path", () => {
         )
       }
     })
+
+    it("F-9.1: evaluateFileReadDecision routes truncated benign glob overflows to ask in both Claude Code and Antigravity formats", () => {
+      const decision = evaluateFileReadDecision("*.{ts,tsx,js,jsx,mjs,cjs,json,md,yaml}")
+      expect(decision).toEqual({
+        verdict: "ask",
+        reason: expect.stringContaining("complexity limit"),
+      })
+
+      const claudeRes = toGuardCliResult(decision, false)
+      expect(claudeRes.exitCode).toBe(0)
+      expect(JSON.parse(claudeRes.stdout)).toEqual({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "ask",
+          permissionDecisionReason: expect.stringContaining("complexity limit"),
+        },
+      })
+
+      const agyRes = toGuardCliResult(decision, true)
+      expect(agyRes.exitCode).toBe(0)
+      expect(JSON.parse(agyRes.stdout)).toEqual({
+        decision: "ask",
+        reason: expect.stringContaining("complexity limit"),
+      })
+    })
   })
 
   describe("ingest --format=antigravity", () => {
@@ -1045,7 +1071,7 @@ describe("hook-entry.ts fast-path", () => {
         expect(fastRes.stdout.trim()).toBe(fullRes.stdout.trim())
         expect(fastRes.stderr).toContain("HARNESS_UNIT_WORKER=1")
       }
-    })
+    }, 15_000) // spawns multiple Node guard and full-entry subprocesses across test vectors
 
     it("resolves symlinks pointing to .harness/omnigraph-cluster/auth-tokens.json and denies with fast-path parity", () => {
       const dir = mkdtempSync(join(tmpdir(), "harness-worker-symlink-"))
@@ -1116,7 +1142,7 @@ describe("hook-entry.ts fast-path", () => {
         expect(JSON.parse(fastRes.stdout.trim())).toEqual({ decision: "allow" })
         expect(fullRes.stdout.trim()).toBe(fastRes.stdout.trim())
       }
-    })
+    }, 15_000) // spawns multiple Node guard and full-entry subprocesses for worker allow cases
 
     it("F-4.1: denies Read .env and <commonGitDir>/harness/** reads in non-worker mode with fast-path parity", () => {
       const env = { HARNESS_UNIT_WORKER: "0" }
@@ -1151,7 +1177,7 @@ describe("hook-entry.ts fast-path", () => {
       })
       expect(agyEnvRes.status).toBe(0)
       expect(JSON.parse(agyEnvRes.stdout.trim())).toMatchObject({ decision: "deny" })
-    })
+    }, 15_000) // spawns multiple Node guard and full-entry subprocesses for .env/.git/harness parity
 
     it("F-3.6: walks ancestors to resolve non-existent files under symlinked dirs and fails closed on symlink loops", () => {
       const dir = mkdtempSync(join(tmpdir(), "harness-f36-ancestor-"))
@@ -1270,7 +1296,7 @@ describe("hook-entry.ts fast-path", () => {
         expect(fullRes.status, deniedInput).toBe(0)
         expect(JSON.parse(fullRes.stdout.trim()), deniedInput).toMatchObject({ decision: "deny" })
       }
-    })
+    }, 15_000) // spawns multiple Node guard and full-entry subprocesses across Glob/Grep/read_file vectors
   })
 
   describe("done --format=antigravity fast-path", () => {
@@ -1297,6 +1323,60 @@ describe("hook-entry.ts fast-path", () => {
       expect(fullInspect.status).toBe(0)
       expect(JSON.parse(fullInspect.stdout.trim())).toMatchObject({ decision: "continue" })
       expect(fullInspect.loadedUrls.some((u) => u.includes("hook-fallback.ts"))).toBe(true)
+    })
+
+    it("F-12 & F-9.1: asks on benign glob-expansion overflow while failing closed on combinatorial/secret glob overflow across fast-path and index", () => {
+      const manyGlobs = JSON.stringify({
+        tool_name: "Glob",
+        tool_input: {
+          path: "/repo/{a,b,c,d}/{e,f,g,h}/{i,j,k,l}/{m,n,o,p}",
+          pattern: "*.ts",
+        },
+      })
+      const fastRes = runHookEntry(["guard", "--format=antigravity"], { input: manyGlobs })
+      const fullRes = runEntry(INDEX_PATH, ["guard", "--format=antigravity"], { input: manyGlobs })
+      expect(fastRes.status).toBe(0)
+      expect(fullRes.status).toBe(0)
+      expect(JSON.parse(fastRes.stdout.trim())).toMatchObject({
+        decision: "ask",
+        reason: expect.stringContaining("Glob"),
+      })
+      expect(fullRes.stdout.trim()).toBe(fastRes.stdout.trim())
+
+      const comboOverflow = JSON.stringify({
+        tool_name: "Grep",
+        tool_input: {
+          path: "dir0",
+          glob: Array.from({ length: 65 }, (_, i) => `*.t${i}`),
+        },
+      })
+      const fastComboRes = runHookEntry(["guard", "--format=antigravity"], { input: comboOverflow })
+      const fullComboRes = runEntry(INDEX_PATH, ["guard", "--format=antigravity"], {
+        input: comboOverflow,
+      })
+      expect(fastComboRes.status).toBe(0)
+      expect(fullComboRes.status).toBe(0)
+      expect(JSON.parse(fastComboRes.stdout.trim())).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining("glob expansion combinations"),
+      })
+      expect(fullComboRes.stdout.trim()).toBe(fastComboRes.stdout.trim())
+
+      const secretOverflow = JSON.stringify({
+        tool_name: "Glob",
+        tool_input: {
+          path: "{a,b,c,d,e,f,g,h,i}/.env",
+          pattern: "*",
+        },
+      })
+      const fastSecretRes = runHookEntry(["guard", "--format=antigravity"], {
+        input: secretOverflow,
+      })
+      expect(fastSecretRes.status).toBe(0)
+      expect(JSON.parse(fastSecretRes.stdout.trim())).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining(".env"),
+      })
     })
   })
 })

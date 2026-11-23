@@ -13,7 +13,19 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { NodeServices } from "@effect/platform-node"
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Deferred, Effect, Fiber, Layer, Logger, Option, Result, Schema } from "effect"
+import {
+  Cause,
+  Deferred,
+  Effect,
+  Fiber,
+  FileSystem,
+  Layer,
+  Logger,
+  Option,
+  Path,
+  Result,
+  Schema,
+} from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import * as HttpClient from "effect/http/HttpClient"
@@ -1978,5 +1990,84 @@ describe("@harness/infra live adapters", () => {
           ).toThrow()
         }),
       ),
+  )
+
+  it.effect(
+    "F-21: maps >16_777_216-char WorkspaceFileContent and SubprocessOutput overflows to typed errors without SchemaError defects",
+    () =>
+      Effect.gen(function* () {
+        const oversizedText = "a".repeat(16_777_217)
+        const targetPath = WorkspaceFilePath.make("/tmp/f21-oversized.txt")
+
+        const mockFsLayer = makeWorkspaceFsLayer().pipe(
+          Layer.provide(
+            Layer.merge(
+              FileSystem.layerNoop({
+                readFileString: () => Effect.succeed(oversizedText),
+              }),
+              Path.layer,
+            ),
+          ),
+        )
+        const fsExit = yield* Effect.exit(
+          Effect.gen(function* () {
+            const fs = yield* WorkspaceFs
+            return yield* fs.readTextFile(targetPath)
+          }).pipe(Effect.provide(mockFsLayer)),
+        )
+        match(fsExit)
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            match(Cause.findErrorOption(cause))
+              .with({ _tag: "Some" }, ({ value }) => {
+                expect(value._tag).toBe("WorkspaceFsError")
+                expect(value.operation).toBe("read")
+              })
+              .with({ _tag: "None" }, () =>
+                expect.unreachable("Expected typed WorkspaceFsError instead of SchemaError defect"),
+              )
+              .exhaustive()
+          })
+          .with({ _tag: "Success" }, () =>
+            expect.unreachable("Expected WorkspaceFsError for >16_777_216-char file"),
+          )
+          .exhaustive()
+
+        const oversizedHostIo = {
+          ...nodeSyncHostIo,
+          execFileSync: () => ({
+            _tag: "Exited" as const,
+            exitCode: 0,
+            stdout: oversizedText,
+            stderr: "",
+          }),
+        }
+        const subExit = yield* Effect.exit(
+          Effect.gen(function* () {
+            const runner = yield* HarnessSubprocessRunner
+            return yield* runner.exec({
+              command: SubprocessCommand.make("echo"),
+              args: [],
+            })
+          }).pipe(Effect.provide(makeHarnessSubprocessRunnerHostIoLayer(oversizedHostIo))),
+        )
+        match(subExit)
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            match(Cause.findErrorOption(cause))
+              .with({ _tag: "Some" }, ({ value }) => {
+                expect(value._tag).toBe("HarnessSubprocessError")
+                expect(value.failureKind).toBe("max-buffer")
+              })
+              .with({ _tag: "None" }, () =>
+                expect.unreachable(
+                  "Expected typed HarnessSubprocessError instead of SchemaError defect",
+                ),
+              )
+              .exhaustive()
+          })
+          .with({ _tag: "Success" }, () =>
+            expect.unreachable("Expected HarnessSubprocessError for >16_777_216-char stdout"),
+          )
+          .exhaustive()
+      }),
   )
 })

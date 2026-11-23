@@ -582,26 +582,22 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
   )
 
   it.effect(
-    "handles rejected decide writing nothing, no-op on empty stream returning NoStream, aggregate_name isolation, out-of-order insertion sorting, and non-contiguous stream corruption detection",
+    "handles rejected decide writing nothing, no-op on empty stream returning NoStream, and aggregate_name isolation",
     () =>
       Effect.gen(function* () {
         yield* initializeAggregateTables()
         yield* initCartViewTable
         const sql = yield* SqlClient
 
-        // 1. Rejected decide writes nothing
         const rejectedCartId = aid("cart-rejected")
-        const rejectedAttempt = handleAggregateCommand(
-          rejectedCartId,
-          {
-            _tag: "Checkout",
-            cartId: cid("cart-rejected"),
-            orderId: oid("ord-1"),
-          },
-          cmdId("cmd-rejected"),
-          cartAggregateConfig,
+        const domainErr = yield* Effect.flip(
+          handleAggregateCommand(
+            rejectedCartId,
+            { _tag: "Checkout", cartId: cid("cart-rejected"), orderId: oid("ord-1") },
+            cmdId("cmd-rejected"),
+            cartAggregateConfig,
+          ),
         )
-        const domainErr = yield* Effect.flip(rejectedAttempt)
         match(domainErr)
           .with({ _tag: "EmptyCartCheckoutError" }, (err) => {
             expect(err.cartId).toBe("cart-rejected")
@@ -614,7 +610,6 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           yield* sql<CountRow>`SELECT count(*) as cnt FROM es_commands WHERE command_id = 'cmd-rejected'`
         expect(rejectedCmdCnt[0]?.cnt).toBe(0)
 
-        // 2. No-op decision on an empty stream reports NoStream (not CreatedStream)
         const noOpDecider = Decider.make<CartCommand, CartEvent, CartState, never>({
           initialState: initialCartState,
           evolve: evolveCart,
@@ -641,7 +636,6 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
         expect(noOpRes.result.creationStatus._tag).toBe("NoStream")
         expect(noOpRes.result.nextExpectedStreamVersion).toBe(0)
 
-        // Retry no-op command on empty stream
         const noOpRetry = yield* handleAggregateCommand(
           noOpId,
           {
@@ -657,7 +651,6 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
         expect(noOpRetry.result.creationStatus._tag).toBe("NoStream")
         expect(noOpRetry.result.nextExpectedStreamVersion).toBe(0)
 
-        // 3. Two different AggregateNames sharing the same AggregateId have isolated streams
         const sharedId = aid("shared-id-1")
         yield* handleAggregateCommand(
           sharedId,
@@ -672,8 +665,17 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
         )
         const otherAggregateLoaded = yield* loadAggregate(sharedId, noOpConfig)
         expect(otherAggregateLoaded.currentVersion).toBe(0)
+      }).pipe(Effect.provide(SqlClientMemoryLayer)),
+  )
 
-        // 4. Out-of-insertion-order rows are folded in stream_version ASC order, and non-contiguous gaps fail with EventStreamCorruptionError
+  it.effect(
+    "handles out-of-order insertion sorting and non-contiguous, float, and mismatched-metadata stream corruption detection",
+    () =>
+      Effect.gen(function* () {
+        yield* initializeAggregateTables()
+        yield* initCartViewTable
+        const sql = yield* SqlClient
+
         const outOfOrderId = aid("cart-out-of-order")
         const now = Date.now()
         const ev1 = JSON.stringify({ _tag: "CartCreated", cartId: "cart-out-of-order", version: 1 })
@@ -696,7 +698,6 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           commandId: "c2",
           timestamp: now,
         })
-        // Insert version 2 BEFORE version 1
         yield* sql`
           INSERT INTO es_events (aggregate_name, aggregate_id, stream_version, command_id, event_type, payload, metadata, created_at)
           VALUES
@@ -713,7 +714,6 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
             expect.unreachable("expected ActiveCart")
           })
 
-        // Insert version 4 (skipping version 3) -> must fail with EventStreamCorruptionError
         const meta4 = JSON.stringify({
           aggregateId: "cart-out-of-order",
           streamVersion: 4,
@@ -734,7 +734,6 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
             expect.unreachable("expected EventStreamCorruptionError")
           })
 
-        // Float stream_version (1.5) in es_events must fail with EventStreamCorruptionError instead of dying
         const floatId = aid("cart-float-ver")
         yield* sql`
           INSERT INTO es_events (aggregate_name, aggregate_id, stream_version, command_id, event_type, payload, metadata, created_at)
@@ -751,7 +750,6 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
             expect.unreachable("expected EventStreamCorruptionError")
           })
 
-        // Mismatched metadata.aggregateId in es_events must fail with EventStreamCorruptionError
         const mismatchMetaId = aid("cart-meta-mismatch")
         yield* sql`
           INSERT INTO es_events (aggregate_name, aggregate_id, stream_version, command_id, event_type, payload, metadata, created_at)
@@ -767,19 +765,36 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
           .otherwise(() => {
             expect.unreachable("expected EventStreamCorruptionError")
           })
+      }).pipe(Effect.provide(SqlClientMemoryLayer)),
+  )
 
-        // Corrupt empty aggregate_name in es_commands must fail with EventStreamCorruptionError instead of dying
+  it.effect(
+    "detects corrupt command/payload rows and fails with EventSerializationError on unencodable events",
+    () =>
+      Effect.gen(function* () {
+        yield* initializeAggregateTables()
+        yield* initCartViewTable
+        const sql = yield* SqlClient
+        const now = Date.now()
+        const meta1 = JSON.stringify({
+          aggregateId: "cart-invalid-payload",
+          streamVersion: 1,
+          commandId: "c-bad-json",
+          timestamp: now,
+        })
+
         const corruptCmdId = cmdId("cmd-corrupt-row")
+        const targetId = aid("cart-corrupt-cmd-id")
         yield* sql`
           INSERT INTO es_commands (command_id, aggregate_name, aggregate_id, stream_version, result_json, created_at)
-          VALUES (${corruptCmdId}, '', ${floatId}, -1, '{}', ${now})
+          VALUES (${corruptCmdId}, '', ${targetId}, -1, '{}', ${now})
         `
         const corruptCmdErr = yield* Effect.flip(
           handleAggregateCommand(
-            floatId,
+            targetId,
             {
               _tag: "AddItem",
-              cartId: cid("cart-float-ver"),
+              cartId: cid("cart-corrupt-cmd-id"),
               itemId: iid("item-1"),
               quantity: positiveInt(1),
             },
@@ -796,7 +811,6 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
             expect.unreachable("expected EventStreamCorruptionError")
           })
 
-        // 5. Invalid event JSON payload in es_events fails loadAggregate with EventStreamCorruptionError and defined reason
         const invalidPayloadId = aid("cart-invalid-payload")
         yield* sql`
           INSERT INTO es_events (aggregate_name, aggregate_id, stream_version, command_id, event_type, payload, metadata, created_at)
@@ -814,7 +828,6 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
             expect.unreachable("expected EventStreamCorruptionError for invalid json payload")
           })
 
-        // 6. Corrupt cached result_json in es_commands fails handleAggregateCommand with EventStreamCorruptionError and defined reason
         const corruptResultCmdId = cmdId("cmd-corrupt-result-json")
         const validCartId = aid("cart-corrupt-result")
         yield* sql`
@@ -844,24 +857,23 @@ describe("Aggregate Engine, Local Projections, and Command Idempotency", () => {
             expect.unreachable("expected EventStreamCorruptionError for corrupt result_json")
           })
 
-        // 7. Unencodable new event fails handleAggregateCommand with EventSerializationError and defined reason
         const unencodableConfig = {
           ...cartAggregateConfig,
           eventSchema: CartEvent.check(Schema.makeFilter(() => "Serialization disallowed")),
         }
-        const unencodableId = aid("cart-unencodable")
-        const unencodableAttempt = handleAggregateCommand(
-          unencodableId,
-          {
-            _tag: "AddItem",
-            cartId: cid("cart-unencodable"),
-            itemId: iid("item-1"),
-            quantity: positiveInt(1),
-          },
-          cmdId("cmd-unencodable"),
-          unencodableConfig,
+        const serErr = yield* Effect.flip(
+          handleAggregateCommand(
+            aid("cart-unencodable"),
+            {
+              _tag: "AddItem",
+              cartId: cid("cart-unencodable"),
+              itemId: iid("item-1"),
+              quantity: positiveInt(1),
+            },
+            cmdId("cmd-unencodable"),
+            unencodableConfig,
+          ),
         )
-        const serErr = yield* Effect.flip(unencodableAttempt)
         match(serErr)
           .with({ _tag: "EventSerializationError" }, (err) => {
             expect(err.reason).toBeDefined()

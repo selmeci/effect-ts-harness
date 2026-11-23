@@ -188,6 +188,7 @@ export type ResolveSuiteTargetsResult =
       readonly _tag: "Ok"
       readonly domainFiles: ReadonlyArray<DomainFile>
       readonly targets: ReadonlyArray<DomainFile>
+      readonly unclassifiedPackages: ReadonlyArray<string>
     }
   | { readonly _tag: "Abort"; readonly diagnostic: string }
 
@@ -211,18 +212,22 @@ export const resolveTargetsForSuite = (input: {
       diagnostic: "[mutation-check] Explicit targetFiles (--file) was provided but empty.",
     }
   }
-  const domainFiles = match(
+  const discoveredRes = match(
     findDomainFilesChecked(input.repoRoot, input.hostIo, input.scope, input.targetFiles),
   )
-    .with({ _tag: "Ok" }, ({ files }) => files)
+    .with({ _tag: "Ok" }, ({ files, unclassifiedPackages }) => ({
+      files,
+      unclassifiedPackages,
+    }))
     .with({ _tag: "Error" }, ({ reason }) => reason)
     .exhaustive()
-  if (typeof domainFiles === "string") {
+  if (typeof discoveredRes === "string") {
     return {
       _tag: "Abort",
-      diagnostic: `[mutation-check] Target discovery failed: ${domainFiles}`,
+      diagnostic: `[mutation-check] Target discovery failed: ${discoveredRes}`,
     }
   }
+  const { files: domainFiles, unclassifiedPackages } = discoveredRes
   const domainByRel = new Map(domainFiles.map((f) => [f.relFile, f]))
   const targets: Array<DomainFile> = []
   if (input.hasOverlays) {
@@ -232,11 +237,22 @@ export const resolveTargetsForSuite = (input: {
         targets.push(existing)
         continue
       }
+      const appParts = /^apps\/([^/]+)\//.exec(relFile)
+      if (appParts !== null) {
+        targets.push({
+          scope: "apps",
+          pkgDir: appParts[1]!,
+          tier: "app-pure",
+          fullPath: join(input.repoRoot, relFile),
+          relFile,
+        })
+        continue
+      }
       const parts = /^libs\/([^/]+)\/([^/]+)\//.exec(relFile)
       if (parts === null) {
         return {
           _tag: "Abort",
-          diagnostic: `[mutation-check] Invalid overlay path '${relFile}': expected 'libs/<scope>/<pkg>/...'`,
+          diagnostic: `[mutation-check] Invalid overlay path '${relFile}': expected 'libs/<scope>/<pkg>/...' or 'apps/<app>/...'`,
         }
       }
       const scope = parts[1]!
@@ -274,7 +290,7 @@ export const resolveTargetsForSuite = (input: {
       diagnostic: `[mutation-check] No domain/core/contract files matched scope '${input.scope}' in strict mode.`,
     }
   }
-  return { _tag: "Ok", domainFiles, targets }
+  return { _tag: "Ok", domainFiles, targets, unclassifiedPackages }
 }
 
 export type PreparePackageBaselinesResult =

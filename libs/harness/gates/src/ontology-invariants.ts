@@ -3,6 +3,7 @@ import { match } from "ts-pattern"
 import * as Graph from "effect/Graph"
 import {
   decideGraphInference,
+  type EffectFnNode,
   getNodeKey,
   type HarnessGraph,
   queryOntologyWhy,
@@ -304,11 +305,19 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(f
               }
             })
             .with(
-              { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" },
-              { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" },
-              { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EffectSignature" },
-              { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
-              { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+              { _tag: "EffectFn" },
+              { _tag: "ServiceTag" },
+              { _tag: "ServiceLayer" },
+              { _tag: "TaggedError" },
+              { _tag: "SchemaDef" },
+              { _tag: "VitestCase" },
+              { _tag: "PatternDoc" },
+              { _tag: "AdrDoc" },
+              { _tag: "EffectSignature" },
+              { _tag: "LayerFlow" },
+              { _tag: "TraceabilityTuple" },
+              { _tag: "HttpEndpointTuple" },
+              { _tag: "MigrationTuple" },
               () => {},
             )
             .exhaustive()
@@ -326,7 +335,7 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(f
   const isActiveDocStatus = (status: GovernanceDocReference["status"]): boolean =>
     match(status)
       .with("accepted", "proposed", () => true)
-      .with("superseded", "deprecated", () => false)
+      .with("draft", "superseded", "deprecated", () => false)
       .exhaustive()
 
   // Rule 1: ontology-while-decider-mismatch
@@ -369,7 +378,9 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(f
                                         .with({ _tag: "None" }, () => {})
                                         .with({ _tag: "Some" }, ({ value: outEdge }) => {
                                           match<string>(outEdge.data.role)
-                                            .with("requires-service", () => { hasOutgoingRequires = true })
+                                            .with("requires-service", () => {
+                                              hasOutgoingRequires = true
+                                            })
                                             .otherwise(() => {})
                                         })
                                         .exhaustive()
@@ -424,7 +435,7 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(f
                 { _tag: "LayerFlow" },
                 { _tag: "TraceabilityTuple" },
                 { _tag: "HttpEndpointTuple" },
-                                { _tag: "MigrationTuple" },
+                { _tag: "MigrationTuple" },
                 () => {},
               )
               .exhaustive()
@@ -594,6 +605,7 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(f
 
   // Rule 4: ontology-broken-realization-chain
   const governedScopes = new Set<string>()
+  const domainNonStubFns: Array<EffectFnNode> = []
   for (const [, node] of Graph.nodes(g)) {
     match(node)
       .with({ _tag: "EarsSpec", status: "accepted" }, (earsNode) => {
@@ -604,45 +616,45 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(f
           }
         }
       })
+      .with({ _tag: "EffectFn", packageTag: "domain", isStub: false }, (fnNode) => {
+        domainNonStubFns.push(fnNode)
+      })
       .with(
-        { _tag: "EarsSpec", status: "proposed" }, { _tag: "EarsSpec", status: "superseded" },
-        { _tag: "EarsSpec", status: "deprecated" }, { _tag: "EffectFn" },
-        { _tag: "ServiceTag" }, { _tag: "ServiceLayer" }, { _tag: "TaggedError" },
-        { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" },
-        { _tag: "AdrDoc" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" },
-        { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
+        { _tag: "EarsSpec" },
+        { _tag: "EffectFn" },
+        { _tag: "ServiceTag" },
+        { _tag: "ServiceLayer" },
+        { _tag: "TaggedError" },
+        { _tag: "SchemaDef" },
+        { _tag: "VitestCase" },
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
         () => {},
       )
       .exhaustive()
   }
 
-  for (const [, node] of Graph.nodes(g)) {
-    match(node)
-      .with({ _tag: "EffectFn", packageTag: "domain", isStub: false }, (fnNode) => {
-        const inGovernedScope = Array.from(governedScopes).some(
-          (scope) => fnNode.file.includes(`libs/${scope}/`) || fnNode.file.includes(`packages/${scope}/`),
-        )
+  for (const fnNode of domainNonStubFns) {
+    const inGovernedScope = Array.from(governedScopes).some(
+      (scope) =>
+        fnNode.file.includes(`libs/${scope}/`) || fnNode.file.includes(`packages/${scope}/`),
+    )
 
-        if (inGovernedScope) {
-          const why = queryOntologyWhy(input.graph, fnNode.qualname)
-          if (!why.justified) {
-            findings.push({
-              kind: "ontology-broken-realization-chain",
-              nodeId: fnNode.spanName,
-              message: `Domain function '${fnNode.spanName}' (${fnNode.qualname}) in governed scope is not justified by any accepted ADR or EARS spec.`,
-            })
-          }
-        }
-      })
-      .with(
-        { _tag: "EffectFn" }, { _tag: "ServiceTag" }, { _tag: "ServiceLayer" },
-        { _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" },
-        { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" },
-        { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" },
-        { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" },
-        () => {},
-      )
-      .exhaustive()
+    if (inGovernedScope) {
+      const why = queryOntologyWhy(input.graph, fnNode.qualname)
+      if (!why.justified) {
+        findings.push({
+          kind: "ontology-broken-realization-chain",
+          nodeId: fnNode.spanName,
+          message: `Domain function '${fnNode.spanName}' (${fnNode.qualname}) in governed scope is not justified by any accepted ADR or EARS spec.`,
+        })
+      }
+    }
   }
 
   // Rule 4b: ontology-broken-realization-chain for HttpEndpointTuple
@@ -703,84 +715,71 @@ export const decideOntologyInvariants = Effect.fn("OntologyInvariants.decide")(f
 
   // Rule 5: ontology-unverified-requirement
   for (const spec of parsedSpecs) {
-    if (isActiveDocStatus(spec.doc.status)) {
-      for (const row of spec.requirements) {
-        const verif = row.verification.trim().toLowerCase()
-        if (/\bR\s*=\s*never\b/.test(row.requirement) && verif === "unittest") {
-          findings.push({
-            kind: "ontology-unverified-requirement",
-            nodeId: `${spec.doc.id}:${row.id}`,
-            message: `Requirement ${row.id} specifies a static type-channel invariant (R = never) with UnitTest verification — use GraphCheck or AstGate instead.`,
-          })
-        }
+    if (!isActiveDocStatus(spec.doc.status)) continue
+    for (const row of spec.requirements) {
+      const verifTokens = row.verification
+        .replace(/[*_`]/g, "")
+        .split(/[,/]/)
+        .map((t) => t.trim().toLowerCase())
+        .filter((t) => t.length > 0)
+      if (
+        /\bR\s*=\s*never\b/.test(row.requirement) &&
+        verifTokens.includes("unittest") &&
+        !verifTokens.some((t) => t === "graphcheck" || t === "astgate")
+      ) {
+        findings.push({
+          kind: "ontology-unverified-requirement",
+          nodeId: `${spec.doc.id}:${row.id}`,
+          message: `Requirement ${row.id} specifies a static type-channel invariant (R = never) with UnitTest verification — use GraphCheck or AstGate instead.`,
+        })
       }
-    }
-  }
-
-  if (hasVitestCases) {
-    for (const spec of parsedSpecs) {
-      if (isActiveDocStatus(spec.doc.status)) {
-        for (const row of spec.requirements) {
-          const verif = row.verification.trim().toLowerCase()
-          if (
-            (verif === "unittest" ||
-              verif === "propertytest" ||
-              verif === "tracetest" ||
-              verif === "test") &&
-            row.effectSymbol !== undefined &&
-            row.effectSymbol.length > 0
-          ) {
-            const resolved = resolveNode(input.graph, row.effectSymbol)
-            if (resolved !== undefined) {
-              match(resolved)
-                .with({ _tag: "EffectFn", isStub: false }, (resolvedFn) => {
-                  const resolvedKey = getNodeKey(resolvedFn)
-                  const nodeIdx = input.graph.nodeIndexByKey.get(resolvedKey)
-                  const propTestCount =
-                    nodeIdx !== undefined ? (incomingPropertyTests.get(nodeIdx) ?? 0) : 0
-                  const testOrCallCount =
-                    nodeIdx !== undefined ? (incomingTestOrCall.get(nodeIdx) ?? 0) : 0
-
-                  if (verif === "propertytest") {
-                    if (propTestCount === 0) {
-                      findings.push({
-                        kind: "ontology-unverified-requirement",
-                        nodeId: `${spec.doc.id}:${row.id}`,
-                        message: `Requirement ${row.id} claims PropertyTest verification for '${row.effectSymbol}' but 0 property tests exercise it.`,
-                      })
-                    }
-                  } else {
-                    if (testOrCallCount === 0) {
-                      findings.push({
-                        kind: "ontology-unverified-requirement",
-                        nodeId: `${spec.doc.id}:${row.id}`,
-                        message: `Requirement ${row.id} claims ${row.verification} verification for '${row.effectSymbol}' but 0 tests exercise it.`,
-                      })
-                    }
-                  }
-                })
-                .with(
-                  { _tag: "EffectFn" },
-                  { _tag: "ServiceTag" },
-                  { _tag: "ServiceLayer" },
-                  { _tag: "TaggedError" },
-                  { _tag: "SchemaDef" },
-                  { _tag: "VitestCase" },
-                  { _tag: "PatternDoc" },
-                  { _tag: "AdrDoc" },
-                  { _tag: "EarsSpec" },
-                  { _tag: "EffectSignature" },
-                  { _tag: "LayerFlow" },
-                  { _tag: "TraceabilityTuple" },
-                  { _tag: "HttpEndpointTuple" },
-                  { _tag: "MigrationTuple" },
-                  () => {},
-                )
-                .exhaustive()
-            }
+      const hasPropertyVerif = verifTokens.includes("propertytest")
+      const hasExecVerif = verifTokens.some(
+        (t) => t === "unittest" || t === "tracetest" || t === "test",
+      )
+      if (!hasVitestCases || (!hasPropertyVerif && !hasExecVerif) || !row.effectSymbol) continue
+      const resolved = resolveNode(input.graph, row.effectSymbol)
+      if (resolved === undefined) continue
+      match(resolved)
+        .with({ _tag: "EffectFn", isStub: false }, (resolvedFn) => {
+          const nodeIdx = input.graph.nodeIndexByKey.get(getNodeKey(resolvedFn))
+          const propTestCount =
+            nodeIdx !== undefined ? (incomingPropertyTests.get(nodeIdx) ?? 0) : 0
+          const testOrCallCount = nodeIdx !== undefined ? (incomingTestOrCall.get(nodeIdx) ?? 0) : 0
+          if (hasPropertyVerif && propTestCount === 0) {
+            findings.push({
+              kind: "ontology-unverified-requirement",
+              nodeId: `${spec.doc.id}:${row.id}`,
+              message: `Requirement ${row.id} claims PropertyTest verification for '${row.effectSymbol}' but 0 property tests exercise it.`,
+            })
+            return
           }
-        }
-      }
+          if (hasExecVerif && testOrCallCount === 0) {
+            findings.push({
+              kind: "ontology-unverified-requirement",
+              nodeId: `${spec.doc.id}:${row.id}`,
+              message: `Requirement ${row.id} claims ${row.verification} verification for '${row.effectSymbol}' but 0 tests exercise it.`,
+            })
+          }
+        })
+        .with(
+          { _tag: "EffectFn" },
+          { _tag: "ServiceTag" },
+          { _tag: "ServiceLayer" },
+          { _tag: "TaggedError" },
+          { _tag: "SchemaDef" },
+          { _tag: "VitestCase" },
+          { _tag: "PatternDoc" },
+          { _tag: "AdrDoc" },
+          { _tag: "EarsSpec" },
+          { _tag: "EffectSignature" },
+          { _tag: "LayerFlow" },
+          { _tag: "TraceabilityTuple" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
+          () => {},
+        )
+        .exhaustive()
     }
   }
 

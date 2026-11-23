@@ -8,13 +8,17 @@ import {
   type LlmPhaseReceipt,
   SHARED_STEP_UNIT_ID,
   type UnitOutcome,
+  WORKFLOW_TIMEOUT_BUDGETS,
   type WorkUnitId,
   WorkflowCompleteRequest,
   WorkflowCompleteResponse,
   WorkflowDaemonCapability,
   type WorkflowExecutionId,
+  type WorkflowPollAttempts,
+  type WorkflowPollBudget,
   type WorkflowRpcEnvelope,
   type WorkflowStoreFailureReason,
+  type WorkflowTimeoutMs,
   toBoundedReason,
 } from "@harness/contract"
 import {
@@ -44,16 +48,18 @@ import {
   withRunLock,
 } from "./workflow-rpc-shared.js"
 
-const POLL_SETTLE_MAX_ATTEMPTS = 80
-const POLL_SETTLE_INTERVAL_MS = 25
+const POLL_SETTLE_BUDGET: WorkflowPollBudget = {
+  maxAttempts: WORKFLOW_TIMEOUT_BUDGETS.pollSettleMaxAttempts,
+  intervalMs: WORKFLOW_TIMEOUT_BUDGETS.pollSettleIntervalMs,
+}
 const COMPLETE_COMMAND = WorkflowDaemonCapability.make("workflow.complete")
 
 const decodeWorkflowCompleteRequest = Schema.decodeUnknownEffect(WorkflowCompleteRequest)
 
 export const waitBoundedUntil = <A, E = never>(
   check: Effect.Effect<Option.Option<A>, E>,
-  maxAttempts: number = POLL_SETTLE_MAX_ATTEMPTS,
-  intervalMs: number = POLL_SETTLE_INTERVAL_MS,
+  maxAttempts: WorkflowPollAttempts | number = POLL_SETTLE_BUDGET.maxAttempts,
+  intervalMs: WorkflowTimeoutMs | number = POLL_SETTLE_BUDGET.intervalMs,
 ): Effect.Effect<Option.Option<A>, E> =>
   Effect.gen(function* () {
     for (let i = 0; i < maxAttempts; i += 1) {
@@ -79,8 +85,8 @@ export const waitForWorkflowCompletion = (
   runtime: WorkflowDaemonRuntime,
   executionId: WorkflowExecutionId,
   timeoutMessage: string,
-  maxAttempts: number = POLL_SETTLE_MAX_ATTEMPTS,
-  intervalMs: number = POLL_SETTLE_INTERVAL_MS,
+  maxAttempts: WorkflowPollAttempts | number = POLL_SETTLE_BUDGET.maxAttempts,
+  intervalMs: WorkflowTimeoutMs | number = POLL_SETTLE_BUDGET.intervalMs,
 ): Effect.Effect<void, WorkflowStoreFailureReason> =>
   waitBoundedUntil(
     pollExecution(runtime, executionId).pipe(

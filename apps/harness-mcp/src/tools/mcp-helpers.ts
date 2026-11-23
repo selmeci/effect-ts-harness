@@ -14,6 +14,7 @@ import {
   McpToolInputName,
   McpToolName,
   type ReviewTimeoutMillis,
+  toMcpToolInputName,
   UnknownToolError,
   type WorkflowStoreUnavailableError,
   type WorkspaceFsError,
@@ -49,6 +50,7 @@ export {
   GitDiffExecutionError,
   McpToolInputName,
   McpToolName,
+  toMcpToolInputName,
   UnknownToolError,
 }
 

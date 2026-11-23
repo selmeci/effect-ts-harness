@@ -16,7 +16,7 @@ import {
   decodeJsonFieldSafely,
   makeMintReplyKey,
   type WorkflowStoreAttemptFailure,
-} from "../omnigraph-workflow-store.js"
+} from "./workflow-store-codec.js"
 
 const MAX_PRIMARY_KEY_PLAINTEXT_LEN = 255
 

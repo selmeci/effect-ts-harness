@@ -103,23 +103,23 @@ export const ASKLIST: ReadonlyArray<string> = [
 
 export const SHELL_OPERATORS: ReadonlyArray<string> = ["&&", "||", ";", "|", "\n"]
 
-/** REQ-3.1: a dotenv file, mutation-hmac key, `.cache/effect-harness` state/key path, or
+/** SPEC-0001 REQ-3.1: a dotenv file, mutation-hmac key, `.cache/effect-harness` state/key path, or
  * wildcard `*.key` token referenced as a path token, including multi-dot names
  * (`.env.development.local`), globs/character classes/braces (`.env*`, `mutation-hmac*.key`,
- * `mutation-hmac-v[0-9].key`, `mutation-hmac-{v1,v2}.key`, `*.key`). It does not match
- * identifiers (`process.env`, `import.meta.env`), plugin dirs (`plugins/effect-harness`),
- * or templates (`.env.example`, `.env.template`, `.env.sample`) — REQ-3.2.
+ * `mutation-hmac-v[0-9].key`, `mutation-hmac-{v1,v2}.key`, `*.key`, `*.k?y`, `*.k[a-z]y`). It does
+ * not match identifiers (`process.env`, `import.meta.env`), plugin dirs (`plugins/effect-harness`),
+ * or templates (`.env.example`, `.env.template`, `.env.sample`) — SPEC-0001 REQ-3.2.
  * Evaluated on `CommandView.argv`. */
 export const SECRET_FILE_PATTERN: RegExp =
-  /(?:^|[\s=:/<>(])(?:\.env(?:\.(?!(?:example|template|sample)(?:$|[\s/]))[\w*?-]+)*\*?|mutation-hmac[^\s;|&)<>]*(?:\.key|\*|\?|\]|\})|[^\s;|&)<>]*\.cache\/effect-harness(?:\/[^\s;|&)<>]*)?|[^\s=:/<>()]*(?:\*|\?|\[[^\]\s]+\]|\{[^}\s]+\})[^\s;|&)<>]*\.key|(?:[^\s;|&)<>]*\/)?auth-tokens\.json)(?=$|[\s/;|&)<>])/
+  /(?:^|[\s=:/<>('"`,{])(?:\.(?:env|en\?|e\?v|\?nv|\[[^\]\s]{2,}\]nv|dev\.vars|dev\.var\?)(?:\.(?!(?:example|template|sample)(?:$|[\s/'"`,]))[\w*?-]+)*\*?|mutation-hma[c*?][^\s;|&)<>'"`,]*(?:\.ke?[y*?]?|\*|\?|\]|\})|[^\s;|&)<>'"`,]*\.cache\/effect-harness(?:\/[^\s;|&)<>'"`,]*)?|[^\s=:/<>()'"`,]*(?:\*|\?|\[[^\]\s]+\]|\{[^}\s]+\})[^\s;|&)<>'"`,]*\.(?:k(?:e|\?|\[[^\]\s]+\]|\*)(?:y|\?|\[[^\]\s]+\]|\*)?|p(?:e|\?|\[[^\]\s]+\])(?:m|\?|\[[^\]\s]+\]))|(?:[^\s;|&)<>'"`,]*\/)?auth-tokens?(?:\*|[*?[\]{}][^\s;|&)<>'"`,]*)?\.json)(?=$|[\s/;|&)<>'"`,}])/
 
-/** REQ-2.1: the agent must not use the guard as an oracle to test candidate commands.
+/** SPEC-0001 REQ-2.1: the agent must not use the guard as an oracle to test candidate commands.
  * Hooks invoke the guard directly from the IDE, never through an agent shell command.
  * Flags (and flag values such as `--cwd /tmp`) or `--` before `guard` are tolerated. */
 export const GUARD_SELF_INVOCATION_PATTERN: RegExp =
   /(?:(?:^|\s)harness|harness-cli\/src\/(?:index|hook-entry)\.ts)(?:\s+(?:--(?=\s|$)|-\S+(?:\s+(?!guard\b)[^\s;|&)<>]+)?))*\s+guard\b/
 
-/** REQ-1.2: git commands that irreversibly discard work. Always a human decision —
+/** SPEC-0001 REQ-1.2: git commands that irreversibly discard work. Always a human decision —
  * clef rated `git checkout -- .` only destructive=0.26 (would auto-allow). */
 export const GIT_DISCARD_PATTERNS: ReadonlyArray<GuardPatternRule> = [
   {
@@ -147,21 +147,43 @@ export const GIT_DISCARD_PATTERNS: ReadonlyArray<GuardPatternRule> = [
   },
 ]
 
-/** REQ-1.1 / REQ-1.4: find actions that delete or execute, and mutating flags on gh api.
+/** SPEC-0001 REQ-1.1 / SPEC-0001 REQ-1.4: find actions that delete or execute, and mutating flags on gh api.
  * Evaluated on `CommandView.argv`, so quoted flags (`'-delete'`, `'-X' 'DELETE'`) are caught.
  * Checked BEFORE the prefix allowlist. */
 export const DESTRUCTIVE_ARGUMENT_PATTERNS: ReadonlyArray<GuardPatternRule> = [
   {
-    pattern: /\bfind\b.*\s-(?:delete|exec|execdir|ok|okdir)\b/,
-    reason: "find action that deletes or executes",
+    pattern: /\bfind\b.*\s-(?:delete|exec|execdir|ok|okdir|fls|fprint0?|fprintf)\b/s,
+    reason: "find action that deletes, executes, or writes files",
+  },
+  {
+    pattern: /\bsort\b.*(?:\s-[^\s-]*o|\s--output(?:=|\s|$))/s,
+    reason: "sort writing output to file",
+  },
+  {
+    pattern: /\bgit\s+(?:diff|log|show)\b.*\s--output(?:=|\s|$)/s,
+    reason: "git output flag writing to file",
+  },
+  {
+    pattern: /\brg\b.*\s--(?:pre|pre-glob|hostname-bin)(?:=|\s|$)/s,
+    reason: "rg preprocessor/helper command execution",
   },
   {
     pattern:
-      /\bgh\s+api\b.*(?:\s-(?:X|f|F)[A-Za-z0-9_=-]*|\s--(?:method|field|raw-field|input)(?:=|\s|$))/,
+      /\bnx\s+(?:(?:-c|--configuration|--output-style|--runner|-p|--project|--projects|--exclude|-t|--target|--targets|--args|--files|--base|--head|--parallel)(?:=\S+|\s+\S+)\s+|-(?!(?:c|p|t|-configuration|-output-style|-runner|-project|-projects|-exclude|-target|-targets|-args|-files|-base|-head|-parallel)(?:\s|=|$))\S+\s+)*exec(?:\s|$)/s,
+    reason: "nx exec executes arbitrary shell commands",
+  },
+  {
+    pattern:
+      /\bpnpm\s+(?:(?:-F|--filter|--filter-prod|-C|--dir|--cwd|--prefix|-p|--package|--loglevel|--reporter|--store-dir|--cache-dir|--modules-dir|--lockfile-dir|--virtual-store-dir|-c|--config|--userconfig|--globalconfig|--script-shell|--workspace-concurrency)(?:=\S+|\s+\S+)\s+|-(?!(?:F|C|p|c|-filter|-filter-prod|-dir|-cwd|-prefix|-package|-loglevel|-reporter|-store-dir|-cache-dir|-modules-dir|-lockfile-dir|-virtual-store-dir|-config|-userconfig|-globalconfig|-script-shell|-workspace-concurrency)(?:\s|=|$))\S+\s+)*dlx(?:\s|$)/s,
+    reason: "pnpm dlx executes arbitrary remote packages",
+  },
+  {
+    pattern:
+      /\bgh\s+api\b.*(?:\s-(?:X|f|F)[A-Za-z0-9_=-]*|\s--(?:method|field|raw-field|input)(?:=|\s|$))/s,
     reason: "gh api mutating request method or body field",
   },
   {
-    pattern: /\bomnigraph\s+cleanup\b.*--keep(?:=|\s+)0(?:\s|$)/,
+    pattern: /\bomnigraph\s+cleanup\b.*--keep(?:=|\s+)0(?:\s|$)/s,
     reason: "omnigraph cleanup with --keep 0 deletes all history",
   },
   {
@@ -174,12 +196,12 @@ export const DESTRUCTIVE_ARGUMENT_PATTERNS: ReadonlyArray<GuardPatternRule> = [
   },
 ]
 
-/** REQ-1.3: `>`, `>>`, `N>`, `&>`, `&>>`, `>& file` into a file. Not stream duplication
+/** SPEC-0001 REQ-1.3: `>`, `>>`, `N>`, `&>`, `&>>`, `>& file` into a file. Not stream duplication
  * (`2>&1`, `>&2`), not `/dev/null`, not `=>` / `->`. Evaluated on `CommandView.unquoted`. */
 export const FILE_REDIRECTION_PATTERN: RegExp =
   /(?:&>>?|(?<![=&>-])\d*>>?(?![&>])|(?<![=&>-])\d*>&(?![\d-]))\s*(?!\/dev\/null(?:\s|$))\S/
 
-/** REQ-3.3: a word or path split by a character-class glob (`[e]nv`, `v[0-9]`, `[.]env`)
+/** SPEC-0001 REQ-3.3: a word or path split by a character-class glob (`[e]nv`, `v[0-9]`, `[.]env`)
  * or by empty quotes (`r''m`, `.''env`) — the forms used to slip past substring rules.
  * Evaluated on the raw command. */
 export const OBFUSCATION_PATTERNS: ReadonlyArray<GuardPatternRule> = [
@@ -291,8 +313,7 @@ const isSafeLeadingEnvAssignment = (name: string, value: string): boolean => {
 const LEADING_ENV_TOKEN_PATTERN = /([A-Za-z_][A-Za-z0-9_]*)=([^\s;|&]+)(?=\s|$)/y
 const LEADING_ENV_CMD_PATTERN = /env(?=\s|$)/y
 const ENV_WORD_PATTERN = /([^\s;|&]+)/y
-const WORKTREE_ID_BLOCKED_HARNESS_PATTERN =
-  /^pnpm\s+(?:run\s+)?harness\b|^CI=true\s+pnpm\s+harness\b|^node\b.*apps\/harness-cli\/src\//
+const WORKTREE_ID_BLOCKED_HARNESS_PATTERN = /^node\b.*apps\/harness-cli\/src\//
 
 export interface StripLeadingEnvResult {
   readonly rest: string
@@ -438,11 +459,307 @@ export const stripSafeLeadingEnvVarsDetailed = (command: string): StripLeadingEn
 export const stripSafeLeadingEnvVars = (command: string): string =>
   stripSafeLeadingEnvVarsDetailed(command).rest
 
+const splitCommandTokens = (command: string): ReadonlyArray<string> => {
+  const tokens: Array<string> = []
+  let current = ""
+  let inToken = false
+  let quote: "'" | '"' | undefined
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!
+    if (quote !== undefined) {
+      if (ch === quote) {
+        quote = undefined
+        continue
+      }
+      if (quote === '"' && ch === "\\" && i + 1 < command.length) {
+        current += command[++i]!
+        continue
+      }
+      current += ch
+      continue
+    }
+    if (/\s/.test(ch)) {
+      if (inToken) {
+        tokens.push(current)
+        current = ""
+        inToken = false
+      }
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      inToken = true
+      continue
+    }
+    if (ch === "\\" && i + 1 < command.length) {
+      current += command[++i]!
+      inToken = true
+      continue
+    }
+    current += ch
+    inToken = true
+  }
+  if (inToken) {
+    tokens.push(current)
+  }
+  return tokens
+}
+
+const PNPM_VALUE_FLAGS: ReadonlySet<string> = new Set([
+  "-F",
+  "--filter",
+  "--filter-prod",
+  "--test-pattern",
+  "--changed-files-ignore-pattern",
+  "-C",
+  "--dir",
+  "--cwd",
+  "--prefix",
+  "-p",
+  "--package",
+  "--loglevel",
+  "--reporter",
+  "--store-dir",
+  "--cache-dir",
+  "--modules-dir",
+  "--lockfile-dir",
+  "--virtual-store-dir",
+  "-c",
+  "--config",
+  "--userconfig",
+  "--globalconfig",
+  "--script-shell",
+  "--workspace-concurrency",
+])
+
+const inspectPnpmTokens = (
+  tokens: ReadonlyArray<string>,
+): { readonly subcommand: string | undefined; readonly restStartIdx: number } => {
+  let i = 1
+  while (i < tokens.length) {
+    const tok = tokens[i]!
+    if (tok === "--") {
+      i++
+      return { subcommand: tokens[i], restStartIdx: i + 1 }
+    }
+    if (PNPM_VALUE_FLAGS.has(tok)) {
+      i += 2
+      continue
+    }
+    if (tok.startsWith("-")) {
+      i++
+      continue
+    }
+    return { subcommand: tok, restStartIdx: i + 1 }
+  }
+  return { subcommand: undefined, restStartIdx: tokens.length }
+}
+
+const NX_VALUE_FLAGS: ReadonlySet<string> = new Set([
+  "-c",
+  "--configuration",
+  "--output-style",
+  "--runner",
+  "-p",
+  "--project",
+  "--projects",
+  "--exclude",
+  "-t",
+  "--target",
+  "--targets",
+  "--args",
+  "--files",
+  "--base",
+  "--head",
+  "--parallel",
+])
+
+const inspectNxTokens = (
+  tokens: ReadonlyArray<string>,
+): {
+  readonly subcommand: string | undefined
+  readonly hasTaskBeforeDash: boolean
+} => {
+  const dashDashIdx = tokens.indexOf("--")
+  const preEnd = dashDashIdx === -1 ? tokens.length : dashDashIdx
+  const positionalBeforeDash: Array<string> = []
+  let i = 1
+  while (i < preEnd) {
+    const tok = tokens[i]!
+    if (NX_VALUE_FLAGS.has(tok)) {
+      i += 2
+      continue
+    }
+    if (tok.startsWith("-")) {
+      i++
+      continue
+    }
+    positionalBeforeDash.push(tok)
+    i++
+  }
+  const firstBeforeDash = positionalBeforeDash[0]
+  if (firstBeforeDash !== undefined) {
+    const hasTaskBeforeDash = firstBeforeDash === "run" ? positionalBeforeDash.length >= 2 : true
+    return { subcommand: firstBeforeDash, hasTaskBeforeDash }
+  }
+  if (dashDashIdx !== -1) {
+    return { subcommand: tokens[dashDashIdx + 1], hasTaskBeforeDash: false }
+  }
+  return { subcommand: undefined, hasTaskBeforeDash: false }
+}
+
+const SAFE_PNPM_EXEC_PREFIXES: ReadonlyArray<string> = [
+  "vitest",
+  "tsc",
+  "oxlint",
+  "oxfmt",
+  "effect-tsgo",
+  "nx run ",
+  "nx affected",
+  "nx test",
+  "nx typecheck",
+  "nx lint",
+  "nx build",
+  "nx format",
+  "nx show",
+]
+
+const PNPM_FILTER_EXEC_PATTERN =
+  /^pnpm\s+(?:(?:(?:-F|--filter|--filter-prod|-C|--dir)(?:=\S+|\s+\S+))\s+)+exec(?:\s+--)?(?:\s+(.*))?$/s
+
+const PNPM_FILTER_DLX_PATTERN =
+  /^pnpm\s+(?:(?:(?:-F|--filter|--filter-prod|-C|--dir)(?:=\S+|\s+\S+))\s+)+dlx(?:\s|$)/
+
+const hasTokenReferencingHarnessCli = (tokens: ReadonlyArray<string>): boolean =>
+  tokens.some((tok) => /(?:^|[=,/:.{*'"@])harness-cli(?:$|[=,/:.}*'"@])/.test(tok))
+
+const hasNxStartTarget = (tokens: ReadonlyArray<string>): boolean => {
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i]!
+    if (tok === "-t" || tok === "--target" || tok === "--targets") {
+      const val = tokens[i + 1]
+      if (val !== undefined && val.split(",").includes("start")) return true
+      continue
+    }
+    const eqMatch = /^-(?:t|-targets?)=(.+)$/.exec(tok)
+    if (eqMatch !== null && eqMatch[1]!.split(",").includes("start")) return true
+    if (tok.startsWith("-t") && tok.length > 2 && tok.slice(2).split(",").includes("start")) {
+      return true
+    }
+  }
+  return false
+}
+
+const isWorktreeIdBlockedNxTokens = (nxTokens: ReadonlyArray<string>): boolean => {
+  const nxInfo = inspectNxTokens(nxTokens)
+  if (nxInfo.subcommand === "start") return true
+  const dashDashIdx = nxTokens.indexOf("--")
+  const preDash =
+    dashDashIdx === -1 || !nxInfo.hasTaskBeforeDash
+      ? nxTokens.slice(1)
+      : nxTokens.slice(1, dashDashIdx)
+  if (hasTokenReferencingHarnessCli(preDash)) return true
+  if (
+    (nxInfo.subcommand === "run-many" || nxInfo.subcommand === "affected") &&
+    hasNxStartTarget(preDash)
+  ) {
+    return true
+  }
+  return false
+}
+
+const findPnpmRunScript = (tokens: ReadonlyArray<string>, startIdx: number): string | undefined => {
+  for (let i = startIdx; i < tokens.length; i++) {
+    const tok = tokens[i]!
+    if (tok === "--") continue
+    if (PNPM_VALUE_FLAGS.has(tok)) {
+      i++
+      continue
+    }
+    if (tok.startsWith("-")) continue
+    return tok
+  }
+  return undefined
+}
+
+const isSafePnpmExecTarget = (rawTarget: string | undefined, sawWorktreeId = false): boolean => {
+  if (rawTarget === undefined) return false
+  const { rest: stripped, sawWorktreeId: innerSawWorktreeId } = stripSafeLeadingEnvVarsDetailed(
+    rawTarget.trim(),
+  )
+  if (stripped === "") return false
+  const effectiveSawWorktreeId = sawWorktreeId || innerSawWorktreeId
+  const targetTokens = splitCommandTokens(stripped)
+  if (targetTokens[0] === "nx") {
+    const nxInfo = inspectNxTokens(targetTokens)
+    if (nxInfo.subcommand === "exec") return false
+    if (effectiveSawWorktreeId && isWorktreeIdBlockedNxTokens(targetTokens)) {
+      return false
+    }
+  }
+  return SAFE_PNPM_EXEC_PREFIXES.some((prefix) =>
+    prefix.endsWith(" ")
+      ? stripped.startsWith(prefix)
+      : stripped === prefix || stripped.startsWith(prefix + " "),
+  )
+}
+
 export const isCommandAllowed = (command: string): boolean => {
   const { rest: trimmed, sawWorktreeId } = stripSafeLeadingEnvVarsDetailed(command)
   if (trimmed === "") return false
   if (sawWorktreeId && WORKTREE_ID_BLOCKED_HARNESS_PATTERN.test(trimmed)) {
     return false
+  }
+  const tokens = splitCommandTokens(trimmed)
+  const head = tokens[0]
+  if (head === "nx") {
+    const nxInfo = inspectNxTokens(tokens)
+    if (nxInfo.subcommand === "exec") return false
+    if (sawWorktreeId && isWorktreeIdBlockedNxTokens(tokens)) {
+      return false
+    }
+  }
+  if (head === "pnpm") {
+    const pnpmInfo = inspectPnpmTokens(tokens)
+    if (pnpmInfo.subcommand === "dlx") return false
+    const pnpmDashDashIdx = tokens.indexOf("--")
+    const pnpmPreDash = pnpmDashDashIdx === -1 ? tokens.slice(1) : tokens.slice(1, pnpmDashDashIdx)
+    const runScript =
+      pnpmInfo.subcommand === "run" || pnpmInfo.subcommand === "run-script"
+        ? findPnpmRunScript(tokens, pnpmInfo.restStartIdx)
+        : undefined
+    if (
+      sawWorktreeId &&
+      (pnpmInfo.subcommand === "harness" ||
+        pnpmInfo.subcommand === "start" ||
+        runScript === "harness" ||
+        runScript === "start" ||
+        hasTokenReferencingHarnessCli(pnpmPreDash))
+    ) {
+      return false
+    }
+    if (pnpmInfo.subcommand === "nx") {
+      const nxTokens = ["nx", ...tokens.slice(pnpmInfo.restStartIdx)]
+      const nxInfo = inspectNxTokens(nxTokens)
+      if (nxInfo.subcommand === "exec") return false
+      if (sawWorktreeId && isWorktreeIdBlockedNxTokens(nxTokens)) {
+        return false
+      }
+    }
+    if (pnpmInfo.subcommand === "exec") {
+      let targetStart = pnpmInfo.restStartIdx
+      if (tokens[targetStart] === "--") {
+        targetStart++
+      }
+      return isSafePnpmExecTarget(tokens.slice(targetStart).join(" "), sawWorktreeId)
+    }
+  }
+  if (/^nx\s+exec(?:\s|$)/.test(trimmed) || PNPM_FILTER_DLX_PATTERN.test(trimmed)) {
+    return false
+  }
+  const execMatch = PNPM_FILTER_EXEC_PATTERN.exec(trimmed)
+  if (execMatch !== null) {
+    return isSafePnpmExecTarget(execMatch[1], sawWorktreeId)
   }
   return ALLOWLIST.some((prefix) => {
     if (trimmed === prefix) return true

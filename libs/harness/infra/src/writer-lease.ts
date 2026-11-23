@@ -8,8 +8,10 @@ import {
   type LeaseFilePath,
   LeaseHolderId,
   type LeaseHolderPid,
+  WORKFLOW_TIMEOUT_BUDGETS,
   WorkflowStoreOperation,
   type WorkflowStoreUnavailableError,
+  type WorkflowTimeoutMs,
   WriterLeaseHeldError,
 } from "@harness/contract"
 import type { OmnigraphClient } from "@harness/graph"
@@ -45,7 +47,8 @@ import {
 type Omnigraph = InstanceType<typeof OmnigraphClient>
 
 /** Fallback heartbeat TTL (ms) when local PID liveness of a previous holder is indeterminate. */
-export const WRITER_LEASE_HEARTBEAT_TTL_MS = 45_000
+export const WRITER_LEASE_HEARTBEAT_TTL_MS: WorkflowTimeoutMs =
+  WORKFLOW_TIMEOUT_BUDGETS.writerLeaseHeartbeatTtlMs
 
 export interface WriterLeaseAcquireInput {
   readonly commonGitDir: GitCommonDirPath

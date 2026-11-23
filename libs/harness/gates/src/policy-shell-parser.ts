@@ -1,3 +1,7 @@
+import { decodeAnsiCEscape, normalizeShellLineContinuations } from "./policy-ansi-c.js"
+
+export { normalizeShellLineContinuations }
+
 /** Two views of a command used by the pattern rules (harness:SPEC-0001 · 4).
  * - `argv`: shell words after quote and backslash removal, joined by single spaces, with
  *   data arguments dropped (commit messages, grep patterns) — REQ-4.1 / REQ-4.2.
@@ -67,63 +71,6 @@ const RG_VALUE_FLAGS: ReadonlySet<string> = new Set(
 const binaryBasename = (word: string): string =>
   word.includes("/") ? word.slice(word.lastIndexOf("/") + 1) : word
 
-export const normalizeShellLineContinuations = (command: string): string => {
-  let out = ""
-  let quote: "'" | '"' | undefined
-  for (let i = 0; i < command.length; i++) {
-    const ch = command[i]!
-    if (quote === "'") {
-      if (ch === "'") quote = undefined
-      out += ch
-      continue
-    }
-    if (quote === '"') {
-      if (ch === '"') {
-        quote = undefined
-        out += ch
-        continue
-      }
-      if (ch === "\\") {
-        if (command[i + 1] === "\n") {
-          i += 1
-          continue
-        }
-        if (command[i + 1] === "\r" && command[i + 2] === "\n") {
-          i += 2
-          continue
-        }
-        if (i + 1 < command.length) {
-          out += ch + command[++i]!
-          continue
-        }
-      }
-      out += ch
-      continue
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch
-      out += ch
-      continue
-    }
-    if (ch === "\\") {
-      if (command[i + 1] === "\n") {
-        i += 1
-        continue
-      }
-      if (command[i + 1] === "\r" && command[i + 2] === "\n") {
-        i += 2
-        continue
-      }
-      if (i + 1 < command.length) {
-        out += ch + command[++i]!
-        continue
-      }
-    }
-    out += ch
-  }
-  return out
-}
-
 const splitShellWords = (
   command: string,
 ): {
@@ -137,6 +84,7 @@ const splitShellWords = (
   let current = ""
   let inWord = false
   let quote: "'" | '"' | "$'" | undefined
+  let ansiCNulTruncated = false
   let unquoted = ""
   let hasDoubleQuotedSubstitution = false
   let hasAnsiCQuote = false
@@ -154,14 +102,27 @@ const splitShellWords = (
       if (quote === "$'") {
         if (ch === "'") {
           quote = undefined
+          ansiCNulTruncated = false
           continue
         }
-        if (ch === "\\" && i + 1 < command.length) {
-          current += command[++i]!
-          unquoted += " "
+        if (ch === "\\") {
+          const decoded = decodeAnsiCEscape(command, i)
+          if (!ansiCNulTruncated) {
+            const nulIdx = decoded.text.indexOf("\0")
+            if (nulIdx !== -1) {
+              current += decoded.text.slice(0, nulIdx)
+              ansiCNulTruncated = true
+            } else {
+              current += decoded.text
+            }
+          }
+          unquoted += " ".repeat(decoded.consumed - 1)
+          i += decoded.consumed - 1
           continue
         }
-        current += ch
+        if (!ansiCNulTruncated) {
+          current += ch
+        }
         continue
       }
       if (ch === quote) {

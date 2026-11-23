@@ -1,22 +1,20 @@
-import { randomInt } from "node:crypto"
-import { Effect, Result, Schema, Semaphore } from "effect"
-import { match, P } from "ts-pattern"
+import { Effect, Schema, Semaphore } from "effect"
+import { match } from "ts-pattern"
 import {
   type AbsoluteRepoRoot,
   encodeSeqKey,
-  ErrorReasonMessage,
   LeaseEpoch,
   LeaseFilePath,
   LeaseHolderId,
   MessageKey,
-  ReplyKey,
+  WORKFLOW_TIMEOUT_BUDGETS,
   toBoundedReason,
-  toErrorReasonMessage,
   type WorkflowGqParamsMap,
   type WorkflowGqQueryName,
   type WorkflowStoreFailureReason,
   WorkflowStoreOperation,
   WorkflowStoreUnavailableError,
+  type WorkflowTimeoutMs,
   WriterLeaseHeldError,
 } from "@harness/contract"
 import {
@@ -27,6 +25,13 @@ import {
 } from "@harness/graph"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { nodeSyncHostIo } from "./node-host-io.js"
+import {
+  decodeJsonFieldSafely,
+  makeMintReplyKey,
+  parseFiniteNumberOrString,
+  toWorkflowStoreUnavailableError,
+  type WorkflowStoreAttemptFailure,
+} from "./workflow/workflow-store-codec.js"
 import { decodeWriterLeaseRow, makeHeldLeaseError } from "./workflow/writer-lease-codec.js"
 
 type Omnigraph = InstanceType<typeof OmnigraphClient>
@@ -38,7 +43,8 @@ export const WORKFLOW_MAX_CONCURRENT_HTTP = 12
 export const WORKFLOW_MAX_OCC_RETRIES = 48
 
 /** Per-HTTP request timeout (ms) enforced via `AbortSignal.timeout` on GQ store calls. */
-export const WORKFLOW_HTTP_TIMEOUT_MS = 15_000
+export const WORKFLOW_HTTP_TIMEOUT_MS: WorkflowTimeoutMs =
+  WORKFLOW_TIMEOUT_BUDGETS.httpRequestTimeoutMs
 
 const DEFAULT_FENCE_LOCK_PATH = LeaseFilePath.make("/harness/daemon.lock")
 const NO_ACTIVE_LEASE_HOLDER = LeaseHolderId.make("no-active-lease")
@@ -110,25 +116,6 @@ export interface WorkflowStoreQueryWithMetaResult {
   readonly graphCommitId: string | null
   readonly affectedNodes: number
   readonly affectedEdges: number
-}
-
-export interface WorkflowStoreAttemptFailure {
-  readonly _tag: "WorkflowStoreAttemptFailure"
-  readonly operation: WorkflowStoreOperation
-  readonly cause: unknown
-}
-
-const toWorkflowStoreUnavailableError = (
-  operation: WorkflowStoreOperation,
-  cause: unknown,
-): WorkflowStoreUnavailableError => {
-  if (cause instanceof WorkflowStoreUnavailableError) {
-    return cause
-  }
-  return new WorkflowStoreUnavailableError({
-    operation,
-    reason: toBoundedReason(cause, "Workflow store request failed"),
-  })
 }
 
 const isRetryableWorkflowStoreCause = (
@@ -441,27 +428,6 @@ export const invokeWorkflowStoreQuery = Effect.fn("WorkflowStore.invoke")(functi
   return res.rows
 })
 
-/**
- * Safely decodes a JSON string against an Effect `Schema` without throwing,
- * returning a `Result` so individual corrupt storage rows can be isolated without
- * throwing raw `SchemaError` defects.
- */
-const decodeJsonFieldSafely = <
-  S extends Schema.Top & { readonly DecodingServices: never; readonly EncodingServices: never },
->(
-  raw: string,
-  schema: S,
-): Result.Result<S["Type"], ErrorReasonMessage> => {
-  const jsonSchema = Schema.fromJsonString(schema)
-  const res = Schema.decodeResult(jsonSchema)(raw)
-  return match(res)
-    .with({ _tag: "Success" }, ({ success }) => Result.succeed(success))
-    .with({ _tag: "Failure" }, ({ failure }) =>
-      Result.fail(ErrorReasonMessage.make(toErrorReasonMessage(failure, "Invalid JSON field"))),
-    )
-    .exhaustive()
-}
-
 export interface QuarantineOrphanEntityMessagesInput {
   readonly repoRoot: AbsoluteRepoRoot
   readonly knownEntityTypes: ReadonlyArray<string>
@@ -469,6 +435,7 @@ export interface QuarantineOrphanEntityMessagesInput {
   readonly hostIo?: SyncHostIo | undefined
   readonly env?: Readonly<Record<string, string | undefined>> | undefined
   readonly expectedLeaseEpoch?: LeaseEpoch | undefined
+  readonly expectedLeaseOwner?: string | undefined
   readonly lockFilePath?: LeaseFilePath | undefined
 }
 
@@ -478,19 +445,6 @@ export interface QuarantineOrphanEntityMessagesResult {
 }
 
 export const MAX_ORPHAN_QUARANTINE_BATCHES = 128
-
-const parseFiniteNumberOrString = (raw: unknown): number | undefined =>
-  match(raw)
-    .with(P.number, (num) => (Number.isFinite(num) ? num : undefined))
-    .with(P.string, (str) => {
-      const trimmed = str.trim()
-      if (trimmed.length === 0) {
-        return undefined
-      }
-      const parsed = Number(trimmed)
-      return Number.isFinite(parsed) ? parsed : undefined
-    })
-    .otherwise(() => undefined)
 
 /**
  * Scans `harness-workflows` for unprocessed `WfMessage` rows whose `entityType` is
@@ -597,6 +551,7 @@ export const quarantineOrphanEntityMessages = Effect.fn("WorkflowStore.quarantin
           },
           expectMutation: true,
           expectedLeaseEpoch: input.expectedLeaseEpoch,
+          expectedLeaseOwner: input.expectedLeaseOwner,
           lockFilePath: input.lockFilePath,
           client: input.client,
           hostIo: input.hostIo,
@@ -611,6 +566,7 @@ export const quarantineOrphanEntityMessages = Effect.fn("WorkflowStore.quarantin
         params: { messageKeys },
         expectMutation: true,
         expectedLeaseEpoch: input.expectedLeaseEpoch,
+        expectedLeaseOwner: input.expectedLeaseOwner,
         lockFilePath: input.lockFilePath,
         client: input.client,
         hostIo: input.hostIo,
@@ -652,30 +608,6 @@ export const quarantineOrphanEntityMessages = Effect.fn("WorkflowStore.quarantin
   },
 )
 
-/**
- * Creates a strictly monotonic 64-bit decimal `ReplyKey` minter without module-level
- * mutable state, mixing in a per-instance random salt to prevent intra-millisecond collisions.
- */
-const makeMintReplyKey = (): (() => ReplyKey) => {
-  let lastMs = 0n
-  let lastSeq = 0n
-  const randomSalt = BigInt(randomInt(0, 1000))
-  return (): ReplyKey => {
-    const nowMs = BigInt(Date.now())
-    if (nowMs > lastMs) {
-      lastMs = nowMs
-      lastSeq = 0n
-    } else {
-      lastSeq += 1n
-      if (lastSeq >= 1000n) {
-        lastMs += 1n
-        lastSeq = 0n
-      }
-    }
-    return ReplyKey.make(((lastMs * 1000n + lastSeq) * 1000n + randomSalt).toString())
-  }
-}
-
 export {
   computeWorkflowRetryDelayMs,
   decodeJsonFieldSafely,
@@ -687,4 +619,5 @@ export {
   retryWorkflowStoreAttempt,
   toWorkflowStoreUnavailableError,
   withWorkflowHttpPermit,
+  type WorkflowStoreAttemptFailure,
 }

@@ -2,9 +2,14 @@ import { Effect, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   type AbsoluteRepoRoot,
+  AgentFailureReason,
+  type AttemptNumber,
   CompiledPlan,
+  type EscalationOrdinal,
   PlanJsonPayload,
   SHARED_STEP_UNIT_ID,
+  UnitOutcome,
+  UnitRejection,
   WaveIndex,
   type WorkUnitId,
   type WorkflowAttemptKey,
@@ -18,11 +23,14 @@ import {
   type WorkflowUnitStatus,
   type WriterLeaseHeldError,
   compareCodeUnits,
+  decodeWorkflowActivityName,
+  decodeWorkflowDeferredName,
+  makeWorkflowAttemptKey,
   makeWorkflowUnitKey,
   toBoundedReason,
   wavesOf,
 } from "@harness/contract"
-import { toWorkflowStoreUnavailableError } from "../omnigraph-workflow-store.js"
+import { toWorkflowStoreUnavailableError } from "./workflow-store-codec.js"
 import {
   type RebuiltRunBundle,
   type WorkflowReadModelOptions,
@@ -32,16 +40,15 @@ import {
   decodeDeferredPayloadOption,
   decodeEscalationResolutionOption,
   decodeExecutionIdOption,
-  decodeMatchedWorkUnitId,
   decodeMergeOutcomeOption,
   decodeRunPayloadOption,
+  decodeUnitAgentDispatchResultOption,
   findSliceByBranch,
   moveRunningToWaiting,
   moveWaitingToRunning,
   optionalNonEmptyString,
-  parseCycleTuple,
-  parseVerifyActivity,
   recordUnitOutcome,
+  runnerOfMode,
   scanAllJournalRows,
   unwrapOption,
 } from "./read-model-rebuild.js"
@@ -51,7 +58,7 @@ const replayActivityMessage = Effect.fnUntraced(function* (params: {
   readonly plan: CompiledPlan
   readonly activityName: string
   readonly actReplyStr: string | undefined
-  readonly hasRunReply: boolean
+  readonly hasTerminalRunReply: boolean
   readonly nowValue: WorkflowTimestampMs
   readonly unitStatusMap: Map<WorkUnitId, WorkflowUnitStatus>
   readonly attemptsMap: Map<WorkflowAttemptKey, WorkflowAttemptRecord>
@@ -59,7 +66,8 @@ const replayActivityMessage = Effect.fnUntraced(function* (params: {
   readonly getRunState: () => WorkflowRunState
   readonly setRunState: (state: WorkflowRunState) => void
 }): Effect.fn.Return<void, WorkflowStoreUnavailableError> {
-  const { operation, plan, activityName, actReplyStr, hasRunReply, unitStatusMap } = params
+  const { operation, plan, activityName, actReplyStr, hasTerminalRunReply, unitStatusMap } = params
+  const runner = runnerOfMode(plan.mode)
   const actReply = yield* classifyWorkflowResultReply(
     actReplyStr,
     operation,
@@ -67,130 +75,294 @@ const replayActivityMessage = Effect.fnUntraced(function* (params: {
   )
   const actExitVal = unwrapOption(actReply.successValue)
 
-  const dispatchMatch =
-    /^(?:DispatchUnitAgent|ProjectUnitDispatched)\/([^/]+)\/([1-3])(?:\/r(\d+))?$/.exec(
-      activityName,
-    )
-  if (dispatchMatch !== null && dispatchMatch[1] !== undefined) {
-    const unitId = yield* decodeMatchedWorkUnitId(operation, dispatchMatch[1], activityName)
-    if (unitStatusMap.get(unitId) === "pending") {
-      unitStatusMap.set(unitId, "dispatched")
-    }
-  }
-
-  const escMatch = /^ProjectUnitEscalated\/([^/]+)\/(\d+)$/.exec(activityName)
-  if (escMatch !== null && escMatch[1] !== undefined) {
-    const unitId = yield* decodeMatchedWorkUnitId(operation, escMatch[1], activityName)
-    if (unitStatusMap.has(unitId)) {
-      unitStatusMap.set(unitId, "escalated")
-    }
-    params.setRunState(moveRunningToWaiting(params.getRunState()))
-  }
-
-  const retryMatch = /^ProjectUnitEscalationRetried\/([^/]+)\/(\d+)$/.exec(activityName)
-  if (retryMatch !== null && retryMatch[1] !== undefined) {
-    const unitId = yield* decodeMatchedWorkUnitId(operation, retryMatch[1], activityName)
-    if (unitStatusMap.has(unitId)) {
-      unitStatusMap.set(unitId, "dispatched")
-    }
-    params.setRunState(moveWaitingToRunning(params.getRunState(), hasRunReply))
-  }
-
-  if (/^ProjectWaveMergeEscalated\/\d+\/\d+$/.test(activityName)) {
-    params.setRunState(moveRunningToWaiting(params.getRunState()))
-  }
-  if (/^ProjectWaveMergeRetried\/\d+\/\d+$/.test(activityName)) {
-    params.setRunState(moveWaitingToRunning(params.getRunState(), hasRunReply))
-  }
-  if (activityName === "ProjectRunWaitingLlmPhase") {
-    params.setRunState(moveRunningToWaiting(params.getRunState()))
-  }
-  if (activityName === "ProjectRunCompleted" && params.getRunState() !== "aborted") {
-    params.setRunState("completed")
-  }
-  if (/^ProjectRunAborted(?:\/|$)/.test(activityName)) {
-    params.setRunState(abortUnlessCompleted(params.getRunState()))
-  }
-
-  if (/^MergeSliceWave\/\d+(?:\/r\d+)?$/.test(activityName) && actExitVal !== undefined) {
-    yield* match(decodeMergeOutcomeOption(actExitVal))
-      .with({ _tag: "None" }, () =>
-        Effect.fail(
-          new WorkflowStoreUnavailableError({
-            operation,
-            reason: toBoundedReason(
-              `Undecodable MergeSliceWaveOutcome for '${activityName}' in run '${plan.runId}'`,
-            ),
-          }),
-        ),
-      )
-      .with({ _tag: "Some" }, ({ value: outcome }) =>
-        Effect.sync(() => {
-          match(outcome)
-            .with({ _tag: "Conflict" }, ({ branch }) => {
-              const slice = findSliceByBranch(plan, branch)
-              if (slice !== undefined) {
-                unitStatusMap.set(slice.unitId, "escalated")
-                params.mergeConflictUnits.add(slice.unitId)
-              }
-              params.setRunState(moveRunningToWaiting(params.getRunState()))
-            })
-            .with({ _tag: "Merged" }, ({ mergedBranches }) => {
-              for (const branch of mergedBranches) {
-                const slice = findSliceByBranch(plan, branch)
-                if (
-                  slice !== undefined &&
-                  (unitStatusMap.get(slice.unitId) === "escalated" ||
-                    params.mergeConflictUnits.has(slice.unitId))
-                ) {
-                  unitStatusMap.set(slice.unitId, "completed")
-                  params.mergeConflictUnits.delete(slice.unitId)
-                }
-              }
-            })
-            .exhaustive()
-        }),
-      )
-      .exhaustive()
-  }
-
-  const verifyParsed = parseVerifyActivity(activityName)
-  yield* match(verifyParsed)
-    .with({ _tag: "NotVerify" }, () => Effect.void)
-    .with({ _tag: "Invalid" }, ({ reason }) =>
+  const decodedActivity = yield* match(decodeWorkflowActivityName(activityName))
+    .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))
+    .with({ _tag: "Failure" }, ({ failure }) =>
       Effect.fail(
         new WorkflowStoreUnavailableError({
           operation,
-          reason: toBoundedReason(reason),
+          reason: toBoundedReason(failure),
         }),
       ),
     )
-    .with({ _tag: "Parsed" }, (parsed) =>
+    .exhaustive()
+
+  const ensureNonEmptyCompleteSuccess = (
+    actReplyStr: string | undefined,
+    actState: WorkflowRunState,
+    actExitVal: unknown,
+    operation: WorkflowStoreOperation,
+    reason: string,
+  ): Effect.Effect<void, WorkflowStoreUnavailableError> =>
+    actReplyStr === undefined || actExitVal !== undefined
+      ? Effect.void
+      : match(actState)
+          .with("completed", () =>
+            Effect.fail(
+              new WorkflowStoreUnavailableError({
+                operation,
+                reason: toBoundedReason(reason),
+              }),
+            ),
+          )
+          .with("running", "waiting", "aborted", () => Effect.void)
+          .exhaustive()
+
+  const replayVerifyActivity = (
+    targetUnitId: WorkUnitId,
+    attempt: AttemptNumber,
+    escalationOrdinal: EscalationOrdinal,
+  ): Effect.Effect<void, WorkflowStoreUnavailableError> =>
+    Effect.gen(function* () {
+      if (!unitStatusMap.has(targetUnitId)) {
+        return yield* new WorkflowStoreUnavailableError({
+          operation,
+          reason: toBoundedReason(
+            `Verify activity '${activityName}' targets unknown unit '${targetUnitId}' in run '${plan.runId}'`,
+          ),
+        })
+      }
+      if (unitStatusMap.get(targetUnitId) === "pending") {
+        unitStatusMap.set(targetUnitId, "dispatched")
+      }
+      yield* ensureNonEmptyCompleteSuccess(
+        actReplyStr,
+        actReply.state,
+        actExitVal,
+        operation,
+        `Verify activity '${activityName}' recorded Complete.Success without payload in run '${plan.runId}'`,
+      )
+      if (actExitVal !== undefined) {
+        yield* recordUnitOutcome({
+          operation,
+          runId: plan.runId,
+          attempt,
+          escalationOrdinal,
+          runner,
+          rawOutcome: actExitVal,
+          nowValue: params.nowValue,
+          unitStatusMap,
+          attemptsMap: params.attemptsMap,
+          contextLabel: `activity '${activityName}'`,
+        })
+      }
+    })
+
+  yield* match(decodedActivity)
+    .with({ _tag: "ProjectUnitDispatched" }, ({ unitId, attempt, escalationOrdinal }) =>
+      Effect.sync(() => {
+        if (unitStatusMap.get(unitId) === "pending") {
+          unitStatusMap.set(unitId, "dispatched")
+        }
+        if (unitStatusMap.has(unitId)) {
+          const attemptKey = makeWorkflowAttemptKey(plan.runId, unitId, attempt, escalationOrdinal)
+          if (!params.attemptsMap.has(attemptKey)) {
+            params.attemptsMap.set(attemptKey, {
+              attemptKey,
+              runId: plan.runId,
+              unitId,
+              attempt,
+              verdict: "dispatched",
+              ...(runner !== undefined ? { runner } : {}),
+              updatedMs: params.nowValue,
+            })
+          }
+        }
+      }),
+    )
+    .with({ _tag: "DispatchUnitAgent" }, ({ unitId, attempt, escalationOrdinal }) =>
       Effect.gen(function* () {
-        if (!unitStatusMap.has(parsed.unitId)) {
+        if (!unitStatusMap.has(unitId)) {
           return yield* new WorkflowStoreUnavailableError({
             operation,
             reason: toBoundedReason(
-              `Verify activity '${activityName}' targets unknown unit '${parsed.unitId}' in run '${plan.runId}'`,
+              `Dispatch activity '${activityName}' targets unknown unit '${unitId}' in run '${plan.runId}'`,
             ),
           })
         }
-        if (unitStatusMap.get(parsed.unitId) === "pending") {
-          unitStatusMap.set(parsed.unitId, "dispatched")
+        if (unitStatusMap.get(unitId) === "pending") {
+          unitStatusMap.set(unitId, "dispatched")
         }
-        if (actExitVal !== undefined) {
-          yield* recordUnitOutcome({
-            operation,
-            runId: plan.runId,
-            escalationOrdinal: parsed.escalationOrdinal,
-            rawOutcome: actExitVal,
-            nowValue: params.nowValue,
-            unitStatusMap,
-            attemptsMap: params.attemptsMap,
-            contextLabel: `activity '${activityName}'`,
-          })
+        yield* ensureNonEmptyCompleteSuccess(
+          actReplyStr,
+          actReply.state,
+          actExitVal,
+          operation,
+          `Dispatch activity '${activityName}' recorded Complete.Success without payload in run '${plan.runId}'`,
+        )
+        if (actExitVal === undefined) {
+          return
+        }
+        yield* match(decodeUnitAgentDispatchResultOption(actExitVal))
+          .with({ _tag: "Some" }, ({ value: dispatchRes }) =>
+            match(dispatchRes)
+              .with({ _tag: "Completed" }, () => Effect.void)
+              .with({ _tag: "Failed" }, ({ reason }) =>
+                recordUnitOutcome({
+                  operation,
+                  runId: plan.runId,
+                  escalationOrdinal,
+                  runner,
+                  rawOutcome: UnitOutcome.cases.Rejected.make({
+                    unitId,
+                    attempt,
+                    rejection: UnitRejection.cases.AgentFailed.make({ reason }),
+                  }),
+                  nowValue: params.nowValue,
+                  unitStatusMap,
+                  attemptsMap: params.attemptsMap,
+                  contextLabel: `activity '${activityName}'`,
+                }),
+              )
+              .with({ _tag: "AuthRequired" }, ({ runner: authRunner }) =>
+                recordUnitOutcome({
+                  operation,
+                  runId: plan.runId,
+                  escalationOrdinal,
+                  runner,
+                  rawOutcome: UnitOutcome.cases.Rejected.make({
+                    unitId,
+                    attempt,
+                    rejection: UnitRejection.cases.AgentFailed.make({
+                      reason: AgentFailureReason.make(
+                        `Authentication required for runner '${authRunner}'`,
+                      ),
+                    }),
+                  }),
+                  nowValue: params.nowValue,
+                  unitStatusMap,
+                  attemptsMap: params.attemptsMap,
+                  contextLabel: `activity '${activityName}'`,
+                }),
+              )
+              .exhaustive(),
+          )
+          .with({ _tag: "None" }, () =>
+            recordUnitOutcome({
+              operation,
+              runId: plan.runId,
+              escalationOrdinal,
+              runner,
+              rawOutcome: actExitVal,
+              nowValue: params.nowValue,
+              unitStatusMap,
+              attemptsMap: params.attemptsMap,
+              contextLabel: `activity '${activityName}'`,
+            }),
+          )
+          .exhaustive()
+      }),
+    )
+    .with({ _tag: "ProjectUnitEscalated" }, ({ unitId }) =>
+      Effect.sync(() => {
+        if (unitStatusMap.has(unitId)) {
+          unitStatusMap.set(unitId, "escalated")
+        }
+        params.setRunState(moveRunningToWaiting(params.getRunState()))
+      }),
+    )
+    .with({ _tag: "ProjectUnitEscalationRetried" }, ({ unitId }) =>
+      Effect.sync(() => {
+        if (unitStatusMap.has(unitId)) {
+          unitStatusMap.set(unitId, "dispatched")
+        }
+        params.setRunState(moveWaitingToRunning(params.getRunState(), hasTerminalRunReply))
+      }),
+    )
+    .with({ _tag: "ProjectWaveMergeEscalated" }, () =>
+      Effect.sync(() => {
+        params.setRunState(moveRunningToWaiting(params.getRunState()))
+      }),
+    )
+    .with({ _tag: "ProjectWaveMergeRetried" }, () =>
+      Effect.sync(() => {
+        params.setRunState(moveWaitingToRunning(params.getRunState(), hasTerminalRunReply))
+      }),
+    )
+    .with({ _tag: "ProjectRunWaitingLlmPhase" }, () =>
+      Effect.sync(() => {
+        params.setRunState(moveRunningToWaiting(params.getRunState()))
+      }),
+    )
+    .with({ _tag: "ProjectRunCompleted" }, () =>
+      Effect.sync(() => {
+        if (params.getRunState() !== "aborted") {
+          params.setRunState("completed")
         }
       }),
+    )
+    .with({ _tag: "ProjectRunAborted" }, () =>
+      Effect.sync(() => {
+        params.setRunState(abortUnlessCompleted(params.getRunState()))
+      }),
+    )
+    .with({ _tag: "MergeSliceWave" }, () =>
+      Effect.gen(function* () {
+        yield* ensureNonEmptyCompleteSuccess(
+          actReplyStr,
+          actReply.state,
+          actExitVal,
+          operation,
+          `MergeSliceWave activity '${activityName}' recorded Complete.Success without payload in run '${plan.runId}'`,
+        )
+        if (actExitVal === undefined) {
+          return
+        }
+        yield* match(decodeMergeOutcomeOption(actExitVal))
+          .with({ _tag: "None" }, () =>
+            Effect.fail(
+              new WorkflowStoreUnavailableError({
+                operation,
+                reason: toBoundedReason(
+                  `Undecodable MergeSliceWaveOutcome for '${activityName}' in run '${plan.runId}'`,
+                ),
+              }),
+            ),
+          )
+          .with({ _tag: "Some" }, ({ value: outcome }) =>
+            Effect.sync(() => {
+              match(outcome)
+                .with({ _tag: "Conflict" }, ({ branch }) => {
+                  const slice = findSliceByBranch(plan, branch)
+                  if (slice !== undefined) {
+                    unitStatusMap.set(slice.unitId, "escalated")
+                    params.mergeConflictUnits.add(slice.unitId)
+                  }
+                  params.setRunState(moveRunningToWaiting(params.getRunState()))
+                })
+                .with({ _tag: "Merged" }, ({ mergedBranches }) => {
+                  for (const branch of mergedBranches) {
+                    const slice = findSliceByBranch(plan, branch)
+                    if (
+                      slice !== undefined &&
+                      (unitStatusMap.get(slice.unitId) === "escalated" ||
+                        params.mergeConflictUnits.has(slice.unitId))
+                    ) {
+                      unitStatusMap.set(slice.unitId, "completed")
+                      params.mergeConflictUnits.delete(slice.unitId)
+                    }
+                  }
+                })
+                .exhaustive()
+            }),
+          )
+          .exhaustive()
+      }),
+    )
+    .with({ _tag: "VerifyUnit" }, ({ unitId, attempt, escalationOrdinal }) =>
+      replayVerifyActivity(unitId, attempt, escalationOrdinal),
+    )
+    .with({ _tag: "VerifySharedStep" }, ({ attempt, escalationOrdinal }) =>
+      replayVerifyActivity(SHARED_STEP_UNIT_ID, attempt, escalationOrdinal),
+    )
+    .with(
+      { _tag: "ProvisionWorktrees" },
+      { _tag: "ProjectRunStarted" },
+      { _tag: "RouteReview" },
+      { _tag: "ProjectUnitCompleted" },
+      { _tag: "ProjectUnitRejected" },
+      { _tag: "ProjectUnitAttemptEscalated" },
+      () => Effect.void,
     )
     .exhaustive()
 
@@ -342,6 +514,9 @@ const reconstructJournalViews = (
         operation,
         `run '${plan.runId}'`,
       )
+      const hasTerminalRunReply =
+        classifiedRunReply.state === "completed" || classifiedRunReply.state === "aborted"
+      const planRunner = runnerOfMode(plan.mode)
       let runState: WorkflowRunState = classifiedRunReply.state
 
       const unitStatusMap = new Map<WorkUnitId, WorkflowUnitStatus>()
@@ -379,110 +554,106 @@ const reconstructJournalViews = (
               ),
             })
           }
-          if (deferred.name === "Workflow/InterruptSignal") {
-            runState = abortUnlessCompleted(runState)
-            continue
-          }
-          if (deferred.name === "llm-phase-done") {
-            runState = moveWaitingToRunning(runState, runReplyPayload !== undefined)
-            continue
-          }
+          const decodedDeferred = yield* match(decodeWorkflowDeferredName(deferred.name))
+            .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))
+            .with({ _tag: "Failure" }, ({ failure }) =>
+              Effect.fail(
+                new WorkflowStoreUnavailableError({
+                  operation,
+                  reason: toBoundedReason(failure),
+                }),
+              ),
+            )
+            .exhaustive()
           const deferredVal = unwrapOption(
             match(deferred.exit)
               .with({ _tag: "Success" }, ({ value }) => Option.some(value))
               .with({ _tag: "Failure" }, () => Option.none())
               .exhaustive(),
           )
-          if (deferred.name.startsWith("unit/")) {
-            const unitMatch = /^unit\/([^/]+)\/([1-3])(?:\/r(\d+))?$/.exec(deferred.name)
-            if (unitMatch === null || unitMatch[1] === undefined || unitMatch[2] === undefined) {
-              return yield* new WorkflowStoreUnavailableError({
-                operation,
-                reason: toBoundedReason(
-                  `Malformed unit deferred name '${deferred.name}' in workflow run '${plan.runId}'`,
-                ),
-              })
-            }
-            const parsedUnit = parseCycleTuple(unitMatch[1], unitMatch[2], unitMatch[3])
-            if (parsedUnit === undefined || !unitStatusMap.has(parsedUnit.unitId)) {
-              return yield* new WorkflowStoreUnavailableError({
-                operation,
-                reason: toBoundedReason(
-                  `Unit deferred '${deferred.name}' targets unknown or invalid unit in run '${plan.runId}'`,
-                ),
-              })
-            }
-            if (deferredVal === undefined) {
-              return yield* new WorkflowStoreUnavailableError({
-                operation,
-                reason: toBoundedReason(
-                  `Unit deferred '${deferred.name}' recorded unexpected Failure exit in run '${plan.runId}'`,
-                ),
-              })
-            }
-            yield* recordUnitOutcome({
-              operation,
-              runId: plan.runId,
-              escalationOrdinal: parsedUnit.escalationOrdinal,
-              rawOutcome: deferredVal,
-              nowValue,
-              unitStatusMap,
-              attemptsMap,
-              contextLabel: `deferred '${deferred.name}'`,
-            })
-            continue
-          }
-          if (deferred.name.startsWith("escalation/")) {
-            const escMatch = /^escalation\/([^/]+)\/(\d+)$/.exec(deferred.name)
-            if (escMatch === null || escMatch[1] === undefined) {
-              return yield* new WorkflowStoreUnavailableError({
-                operation,
-                reason: toBoundedReason(
-                  `Malformed escalation deferred name '${deferred.name}' in workflow run '${plan.runId}'`,
-                ),
-              })
-            }
-            const targetUnitId = yield* decodeMatchedWorkUnitId(
-              operation,
-              escMatch[1],
-              deferred.name,
-            )
-            if (deferredVal === undefined) {
-              return yield* new WorkflowStoreUnavailableError({
-                operation,
-                reason: toBoundedReason(
-                  `Escalation deferred '${deferred.name}' recorded unexpected Failure exit in run '${plan.runId}'`,
-                ),
-              })
-            }
-            const resolution = unwrapOption(decodeEscalationResolutionOption(deferredVal))
-            if (resolution === undefined) {
-              return yield* new WorkflowStoreUnavailableError({
-                operation,
-                reason: toBoundedReason(
-                  `Undecodable EscalationResolution on deferred '${deferred.name}' in run '${plan.runId}'`,
-                ),
-              })
-            }
-            match(resolution.decision)
-              .with("abort", () => {
-                if (unitStatusMap.has(targetUnitId)) {
-                  unitStatusMap.set(targetUnitId, "escalated")
-                }
+          yield* match(decodedDeferred)
+            .with({ _tag: "InterruptSignal" }, () =>
+              Effect.sync(() => {
                 runState = abortUnlessCompleted(runState)
-              })
-              .with("retry", () => {
-                if (unitStatusMap.has(targetUnitId)) {
-                  const nextStatus = mergeConflictUnits.has(targetUnitId)
-                    ? ("completed" as const)
-                    : ("dispatched" as const)
-                  unitStatusMap.set(targetUnitId, nextStatus)
+              }),
+            )
+            .with({ _tag: "LlmPhaseDone" }, () =>
+              Effect.sync(() => {
+                runState = moveWaitingToRunning(runState, hasTerminalRunReply)
+              }),
+            )
+            .with({ _tag: "UnitCompletion" }, ({ unitId, attempt, escalationOrdinal }) =>
+              Effect.gen(function* () {
+                if (!unitStatusMap.has(unitId)) {
+                  return yield* new WorkflowStoreUnavailableError({
+                    operation,
+                    reason: toBoundedReason(
+                      `Unit deferred '${deferred.name}' targets unknown unit '${unitId}' in run '${plan.runId}'`,
+                    ),
+                  })
                 }
-                mergeConflictUnits.delete(targetUnitId)
-                runState = moveWaitingToRunning(runState, runReplyPayload !== undefined)
-              })
-              .exhaustive()
-          }
+                if (deferredVal === undefined) {
+                  return yield* new WorkflowStoreUnavailableError({
+                    operation,
+                    reason: toBoundedReason(
+                      `Unit deferred '${deferred.name}' recorded unexpected Failure exit in run '${plan.runId}'`,
+                    ),
+                  })
+                }
+                yield* recordUnitOutcome({
+                  operation,
+                  runId: plan.runId,
+                  attempt,
+                  escalationOrdinal,
+                  runner: planRunner,
+                  rawOutcome: deferredVal,
+                  nowValue,
+                  unitStatusMap,
+                  attemptsMap,
+                  contextLabel: `deferred '${deferred.name}'`,
+                })
+              }),
+            )
+            .with({ _tag: "UnitEscalation" }, ({ unitId }) =>
+              Effect.gen(function* () {
+                if (deferredVal === undefined) {
+                  return yield* new WorkflowStoreUnavailableError({
+                    operation,
+                    reason: toBoundedReason(
+                      `Escalation deferred '${deferred.name}' recorded unexpected Failure exit in run '${plan.runId}'`,
+                    ),
+                  })
+                }
+                const resolution = unwrapOption(decodeEscalationResolutionOption(deferredVal))
+                if (resolution === undefined) {
+                  return yield* new WorkflowStoreUnavailableError({
+                    operation,
+                    reason: toBoundedReason(
+                      `Undecodable EscalationResolution on deferred '${deferred.name}' in run '${plan.runId}'`,
+                    ),
+                  })
+                }
+                match(resolution.decision)
+                  .with("abort", () => {
+                    if (unitStatusMap.has(unitId)) {
+                      unitStatusMap.set(unitId, "escalated")
+                    }
+                    runState = abortUnlessCompleted(runState)
+                  })
+                  .with("retry", () => {
+                    if (unitStatusMap.has(unitId)) {
+                      const nextStatus = mergeConflictUnits.has(unitId)
+                        ? ("completed" as const)
+                        : ("dispatched" as const)
+                      unitStatusMap.set(unitId, nextStatus)
+                    }
+                    mergeConflictUnits.delete(unitId)
+                    runState = moveWaitingToRunning(runState, hasTerminalRunReply)
+                  })
+                  .exhaustive()
+              }),
+            )
+            .exhaustive()
           continue
         }
 
@@ -508,7 +679,7 @@ const reconstructJournalViews = (
             plan,
             activityName: activity.name,
             actReplyStr,
-            hasRunReply: runReplyPayload !== undefined,
+            hasTerminalRunReply,
             nowValue,
             unitStatusMap,
             attemptsMap,

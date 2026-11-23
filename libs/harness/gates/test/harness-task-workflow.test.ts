@@ -410,7 +410,7 @@ const makeWorkflowTestLayer = (spy: SpyState, handlers: FakeHandlers = {}) => {
 
 describe("HarnessTaskWorkflow", () => {
   it.live(
-    "REQ-3.1 replay determinism: memoises provision/unit/review/projection activities across DurableDeferred suspensions",
+    "SPEC-0023 REQ-1.2 / RFC-0013 REQ-3.1 replay determinism: memoises provision/unit/review/projection activities across DurableDeferred suspensions",
     () =>
       Effect.gen(function* () {
         const spy = makeSpyState()

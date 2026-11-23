@@ -3,10 +3,17 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
+import { CANONICAL_CLI_COMMAND_NAMES, CANONICAL_MCP_TOOL_NAMES } from "@harness/contract"
 import { buildHarnessGraph } from "@harness/graph"
 import { AST_GATE_RULE_SOURCE_FILES } from "../src/ast-cache.js"
-import { evaluateDocTruthPlugin } from "../src/plugins/gc/gc-doc-truth.plugin.js"
+import {
+  ADAPTER_SKILL_PARITY_CLAUSES,
+  auditAdapterSkillParityPair,
+  auditCatalogDocTruthInContent,
+  evaluateDocTruthPlugin,
+} from "../src/plugins/gc/gc-doc-truth.plugin.js"
+import { extractMarkdownSubsection } from "../src/plugins/gc/gc-adapter-skill-parity.js"
 import { evaluatePackageAndMigrationPlugin } from "../src/plugins/gc/gc-package-and-migration.plugin.js"
 import {
   checkAstGateRuleClosure,
@@ -225,7 +232,7 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
     }
   })
 
-  it("F-14.1: emits hook-bootstrap-fail-closed when guard/done hooks lack || exit 2 or antigravity decision JSON fallback", () => {
+  it("F-14.1: emits hook-bootstrap-fail-closed when guard/done hooks lack || exit 2 or use fail-open antigravity fallback", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "harness-doc-truth-bootstrap-"))
     try {
       const claudeHooks = join(tempDir, "adapters/claude-code/hooks.json")
@@ -312,7 +319,6 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
         ),
       ).toBe(false)
 
-      // Fail-open decisions ("allow" on guard, "stop" on done) must also be rejected
       writeFileSync(
         agyHooks,
         JSON.stringify({
@@ -355,8 +361,18 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
             f.nodeId === "adapters/antigravity/plugins/effect-harness/hooks.json:Stop",
         ),
       ).toBe(true)
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
 
-      // hook-entry.ts guard/done must also enforce || exit 2 and antigravity fallback JSON
+  it("F-14.1: enforces fail-closed fallback on hook-entry.ts and flag-before-subcommand forms, plus Claude terminology isolation", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "harness-doc-truth-hookentry-"))
+    try {
+      const claudeHooks = join(tempDir, "adapters/claude-code/hooks.json")
+      const agyHooks = join(tempDir, "adapters/antigravity/plugins/effect-harness/hooks.json")
+      mkdirSync(dirname(claudeHooks), { recursive: true })
+      mkdirSync(dirname(agyHooks), { recursive: true })
       writeFileSync(
         claudeHooks,
         JSON.stringify({
@@ -438,7 +454,6 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
         ),
       ).toBe(false)
 
-      // Flag-before-subcommand hook-entry.ts --format=antigravity guard without fail-closed fallback
       writeFileSync(
         agyHooks,
         JSON.stringify({
@@ -475,7 +490,6 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
         ),
       ).toBe(true)
 
-      // Claude Code resolving-effect-review-feedback must not leak Antigravity terminology
       const claudeReviewSkill = join(
         tempDir,
         "adapters/claude-code/skills/resolving-effect-review-feedback/SKILL.md",
@@ -782,6 +796,392 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
       expect(closureFindings[0]?.kind).toBe("architecture-policy-violation")
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it("SPEC-0029 REQ-1.1/REQ-1.2: validates MCP tool counts, unknown harness_* backticks, mermaid blocks, and headings", () => {
+    const validCount = CANONICAL_MCP_TOOL_NAMES.length
+    const validDoc = [
+      "### 8.4 MCP Tools",
+      "```mermaid",
+      `flowchart LR\n  MCP["harness-mcp (${validCount} tools)"]`,
+      "```",
+      `Exposes ${validCount} MCP tools including \`${CANONICAL_MCP_TOOL_NAMES[0]}\`.`,
+      "```ts",
+      "// inside code fence: 99 MCP tools and `harness_fake_in_code` are ignored",
+      "```",
+      "",
+    ].join("\n")
+    expect(auditCatalogDocTruthInContent("README.md", validDoc)).toEqual([])
+
+    const wrongCount = validCount - 1
+    const driftedDoc = [
+      "```mermaid",
+      `MCP["harness-mcp (${wrongCount} MCP tools)"]`,
+      "```",
+      `harness-mcp exposes ${wrongCount} tools and \`harness_nonexistent_tool\` twice \`harness_nonexistent_tool\`.`,
+      "```ts",
+      "`harness_ignored_inside_ts`",
+      "```",
+      `Trailing ${wrongCount} MCP tools after closed fence.`,
+    ].join("\n")
+    const findings = auditCatalogDocTruthInContent("README.md", driftedDoc)
+    expect(findings.every((f) => f.kind === "doc-mcp-tool-count-truth")).toBe(true)
+    expect(findings.filter((f) => f.nodeId.includes(":mcp-count:"))).toHaveLength(3)
+    expect(findings.some((f) => f.location === "README.md:2")).toBe(true)
+    expect(findings.some((f) => f.location === "README.md:8")).toBe(true)
+    expect(
+      findings.filter((f) => f.nodeId === "README.md:mcp:harness_nonexistent_tool"),
+    ).toHaveLength(1)
+    expect(findings.some((f) => f.nodeId.includes("harness_ignored_inside_ts"))).toBe(false)
+  })
+
+  it("SPEC-0029 REQ-2.1/REQ-2.2: validates CLI subcommands in prose and bash fences plus CLI counts", () => {
+    const validCount = CANONICAL_CLI_COMMAND_NAMES.length
+    const validDoc = [
+      `Uses ${validCount} CLI commands on harness-cli:`,
+      "```bash",
+      "pnpm harness verify",
+      "pnpm harness <cmd>",
+      "pnpm harness --help",
+      "```",
+    ].join("\n")
+    expect(auditCatalogDocTruthInContent("README.md", validDoc)).toEqual([])
+
+    const wrongCount = validCount - 2
+    const driftedDoc = [
+      `Uses ${wrongCount} CLI commands while harness-cli exposes ${wrongCount} subcommands.`,
+      "```bash",
+      "pnpm harness bogus-cmd",
+      "```",
+      "Repeat `pnpm harness bogus-cmd` and also `pnpm harness another-fake`.",
+    ].join("\n")
+    const findings = auditCatalogDocTruthInContent("AGENTS.md", driftedDoc)
+    expect(findings.every((f) => f.kind === "doc-cli-command-truth")).toBe(true)
+    expect(findings.filter((f) => f.nodeId.includes(":cli-count:"))).toHaveLength(1)
+    expect(findings.filter((f) => f.nodeId === "AGENTS.md:cli:bogus-cmd")).toHaveLength(1)
+    expect(findings.filter((f) => f.nodeId === "AGENTS.md:cli:another-fake")).toHaveLength(1)
+  })
+
+  it("SPEC-0029 REQ-1.1/REQ-2.1/REQ-4.2: scans live catalog docs, ignores docs/plans, and exempts draft specs from doc-missing-file-path", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "harness-catalog-draft-"))
+    try {
+      mkdirSync(join(tempDir, "libs/harness/docs/specs"), { recursive: true })
+      mkdirSync(join(tempDir, "adapters/claude-code"), { recursive: true })
+      mkdirSync(join(tempDir, "docs/plans"), { recursive: true })
+      writeFileSync(
+        join(tempDir, "README.md"),
+        "Using `harness_bogus_mcp` and `pnpm harness unknown-subcmd`.\n",
+      )
+      writeFileSync(
+        join(tempDir, "adapters/claude-code/README.md"),
+        "Exposes `harness_other_fake` tool.\n",
+      )
+      writeFileSync(
+        join(tempDir, "docs/plans/historical.md"),
+        "Historical 17 MCP tools and `harness_historical_tool` and pnpm harness old-cmd.\n",
+      )
+      writeFileSync(
+        join(tempDir, "libs/harness/docs/specs/2026-11-22-draft-future.md"),
+        "---\nid: harness:SPEC-9991\ntitle: Draft\nstatus: draft\nspans:\n  - Future.decide\n---\n\nSee `libs/harness/gates/src/nonexistent-draft-module.ts`.\n",
+      )
+      writeFileSync(
+        join(tempDir, "libs/harness/docs/specs/2026-11-22-proposed-missing.md"),
+        "---\nid: harness:SPEC-9992\ntitle: Proposed\nstatus: proposed\nspans:\n  - Future.decide\n---\n\nSee `libs/harness/gates/src/nonexistent-proposed-module.ts`.\n",
+      )
+
+      const findings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: tempDir,
+        hostIo: testHostIo,
+      })
+      expect(
+        findings.some((f) => f.kind === "doc-mcp-tool-count-truth" && f.location === "README.md:1"),
+      ).toBe(true)
+      expect(
+        findings.some(
+          (f) =>
+            f.kind === "doc-mcp-tool-count-truth" &&
+            f.location === "adapters/claude-code/README.md:1",
+        ),
+      ).toBe(true)
+      expect(findings.some((f) => f.kind === "doc-cli-command-truth")).toBe(true)
+      expect(findings.some((f) => f.location?.startsWith("docs/plans/historical.md"))).toBe(false)
+      expect(
+        findings.some(
+          (f) =>
+            f.kind === "doc-missing-file-path" &&
+            f.location === "libs/harness/docs/specs/2026-11-22-draft-future.md",
+        ),
+      ).toBe(false)
+      expect(
+        findings.some(
+          (f) =>
+            f.kind === "doc-missing-file-path" &&
+            f.location === "libs/harness/docs/specs/2026-11-22-proposed-missing.md",
+        ),
+      ).toBe(true)
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it.effect.prop(
+    "SPEC-0029 property: wrong MCP/CLI counts and fabricated catalog names always emit exact findings",
+    {
+      delta: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 9 })),
+      suffix: Schema.Literals(["alpha", "beta", "gamma"]),
+    },
+    ({ delta, suffix }) =>
+      Effect.sync(() => {
+        const badMcpCount = CANONICAL_MCP_TOOL_NAMES.length + delta
+        const badCliCount = CANONICAL_CLI_COMMAND_NAMES.length + delta
+        const doc = [
+          `Exposes ${badMcpCount} MCP tools (\`harness_fake_${suffix}\`).`,
+          `Runs ${badCliCount} CLI commands (\`pnpm harness fake-${suffix}\`).`,
+        ].join("\n")
+        const findings = auditCatalogDocTruthInContent("README.md", doc)
+        expect(findings.some((f) => f.kind === "doc-mcp-tool-count-truth")).toBe(true)
+        expect(findings.some((f) => f.kind === "doc-cli-command-truth")).toBe(true)
+      }),
+  )
+
+  it("SPEC-0030 REQ-2.2: auditAdapterSkillParityPair validates symmetric headings, required tokens, and cross-adapter equality", () => {
+    const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..")
+    for (const clause of ADAPTER_SKILL_PARITY_CLAUSES) {
+      const agy = testHostIo.readTextSync(
+        join(
+          repoRoot,
+          `adapters/antigravity/plugins/effect-harness/skills/${clause.skillName}/SKILL.md`,
+        ),
+      )
+      const claude = testHostIo.readTextSync(
+        join(repoRoot, `adapters/claude-code/skills/${clause.skillName}/SKILL.md`),
+      )
+      expect(auditAdapterSkillParityPair(clause, agy, claude)).toEqual([])
+      expect(extractMarkdownSubsection(agy, clause.heading)).toBeDefined()
+    }
+    expect(extractMarkdownSubsection("### Heading\nBody", "### Heading")).toBe("### Heading\nBody")
+
+    const seamClause = ADAPTER_SKILL_PARITY_CLAUSES[0]!
+    const validDoc = [
+      "## Overview",
+      seamClause.heading,
+      seamClause.requiredMarkers.join(" "),
+      "---",
+      "### After",
+    ].join("\n")
+
+    expect(
+      auditAdapterSkillParityPair(seamClause, "No heading\n", validDoc).map((f) => f.nodeId),
+    ).toEqual([
+      `adapters/antigravity/plugins/effect-harness/skills/${seamClause.skillName}/SKILL.md:missing-heading`,
+    ])
+    expect(
+      auditAdapterSkillParityPair(seamClause, validDoc, "No heading\n").map((f) => f.nodeId),
+    ).toEqual([`adapters/claude-code/skills/${seamClause.skillName}/SKILL.md:missing-heading`])
+
+    const missingMarkerDoc = `${seamClause.heading}\nIncomplete text\n`
+    const agyMissing = auditAdapterSkillParityPair(seamClause, missingMarkerDoc, validDoc)
+    expect(
+      agyMissing.some((f) => f.kind === "adapter-skill-parity" && f.nodeId.includes(":missing:")),
+    ).toBe(true)
+    const claudeMissing = auditAdapterSkillParityPair(seamClause, validDoc, missingMarkerDoc)
+    expect(
+      claudeMissing.some(
+        (f) => f.kind === "adapter-skill-parity" && f.nodeId.includes(":missing:"),
+      ),
+    ).toBe(true)
+
+    const driftedDoc = `${validDoc.replace("---", "\nExtra drifted note\n---")}`
+    const driftFindings = auditAdapterSkillParityPair(seamClause, validDoc, driftedDoc)
+    expect(driftFindings).toEqual([
+      expect.objectContaining({
+        kind: "adapter-skill-parity",
+        nodeId: `adapter-skill-parity:${seamClause.skillName}`,
+      }),
+    ])
+  })
+
+  it("F-17: ignores alternate ~~~ / 4-backtick fences in catalog truth audit and extractMarkdownSubsection", () => {
+    const nestedBackticksInFour = [
+      "# Docs",
+      "````markdown",
+      "Exposes 99 MCP tools (`harness_bogus_tool`).",
+      "```",
+      "```",
+      "Still inside outer fence: 99 CLI commands and `harness_nested_fake`.",
+      "````",
+      "~~~bash",
+      "Using `harness_tilde_fake` and 99 MCP tools.",
+      "~~~",
+      "```inline```",
+      "After fences: `harness_after_close_fake` and 99 MCP tools.",
+    ].join("\n")
+    const afterFenceFindings = auditCatalogDocTruthInContent("README.md", nestedBackticksInFour)
+    expect(afterFenceFindings.map((f) => f.nodeId)).toEqual([
+      "README.md:mcp:harness_after_close_fake",
+      "README.md:L12:mcp-count:99",
+    ])
+
+    const mdWithFencedHeadingsAndRules = [
+      "## Top",
+      "### Target Section",
+      "Intro line.",
+      "```inline```",
+      "````md",
+      "```",
+      "### Four-Backtick Nested Heading",
+      "---",
+      "```",
+      "After inner close inside four-backtick.",
+      "````",
+      "~~~text",
+      "### Tilde Nested Heading",
+      "~~~",
+      "Trailing section line.",
+      "---",
+      "### Real Next Section",
+      "Should not appear.",
+    ].join("\n")
+    const extracted = extractMarkdownSubsection(mdWithFencedHeadingsAndRules, "### Target Section")
+    expect(extracted).toContain("```inline```")
+    expect(extracted).toContain("### Four-Backtick Nested Heading")
+    expect(extracted).toContain("After inner close inside four-backtick.")
+    expect(extracted).toContain("### Tilde Nested Heading")
+    expect(extracted).toContain("Trailing section line.")
+    expect(extracted).not.toContain("### Real Next Section")
+  })
+
+  it("SPEC-0030 REQ-2.2: evaluateDocTruthPlugin detects missing adapter skill counterparts and skips unrelated repos", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "harness-adapter-skill-parity-"))
+    try {
+      const agySkill = join(
+        tempDir,
+        "adapters/antigravity/plugins/effect-harness/skills/effect-lfg/SKILL.md",
+      )
+      mkdirSync(dirname(agySkill), { recursive: true })
+      writeFileSync(agySkill, "### Swarm Seam Checklist (Pre-Review)\nWORKFLOW_TIMEOUT_BUDGETS\n")
+
+      const findings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: tempDir,
+        hostIo: testHostIo,
+      })
+      expect(
+        findings.some(
+          (f) =>
+            f.kind === "adapter-skill-parity" &&
+            f.nodeId === "adapters/claude-code/skills/effect-lfg/SKILL.md:missing-counterpart",
+        ),
+      ).toBe(true)
+
+      const claudeOnlySkill = join(
+        tempDir,
+        "adapters/claude-code/skills/effect-code-review/SKILL.md",
+      )
+      mkdirSync(dirname(claudeOnlySkill), { recursive: true })
+      writeFileSync(
+        claudeOnlySkill,
+        "### Mandatory Second-Pass Remediation Re-Audit\nremediationContext\n",
+      )
+      const secondFindings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: tempDir,
+        hostIo: testHostIo,
+      })
+      expect(
+        secondFindings.some(
+          (f) =>
+            f.kind === "adapter-skill-parity" &&
+            f.nodeId ===
+              "adapters/antigravity/plugins/effect-harness/skills/effect-code-review/SKILL.md:missing-counterpart",
+        ),
+      ).toBe(true)
+
+      const agyExec = join(
+        tempDir,
+        "adapters/antigravity/plugins/effect-harness/skills/executing-effect-stubs/SKILL.md",
+      )
+      const claudeExec = join(
+        tempDir,
+        "adapters/claude-code/skills/executing-effect-stubs/SKILL.md",
+      )
+      mkdirSync(dirname(agyExec), { recursive: true })
+      mkdirSync(dirname(claudeExec), { recursive: true })
+      writeFileSync(agyExec, "### Swarm Seam Checklist (Pre-Review)\nWORKFLOW_TIMEOUT_BUDGETS\n")
+      writeFileSync(claudeExec, "### Swarm Seam Checklist (Pre-Review)\nWORKFLOW_TIMEOUT_BUDGETS\n")
+      const readablePairFindings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: tempDir,
+        hostIo: testHostIo,
+      })
+      expect(
+        readablePairFindings.some(
+          (f) =>
+            f.kind === "adapter-skill-parity" &&
+            f.location === "adapters/claude-code/skills/executing-effect-stubs/SKILL.md",
+        ),
+      ).toBe(true)
+      const failClaudeReadIo = {
+        ...testHostIo,
+        readTextSync: (target: string): string => {
+          if (target.endsWith("claude-code/skills/executing-effect-stubs/SKILL.md")) {
+            throw new Error("EACCES: permission denied")
+          }
+          return testHostIo.readTextSync(target)
+        },
+      }
+      const unreadableFindings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: tempDir,
+        hostIo: failClaudeReadIo,
+      })
+      expect(unreadableFindings.some((f) => f.kind === "unreadable-workspace-file")).toBe(true)
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it("F-5.2: emits adapter-skill-parity:both-missing in harness repos when all skill pairs are deleted, while skipping unrelated repos", () => {
+    const unrelatedDir = mkdtempSync(join(tmpdir(), "harness-unrelated-skill-parity-"))
+    try {
+      writeFileSync(join(unrelatedDir, "README.md"), "# Unrelated\n", "utf8")
+      const unrelatedFindings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: unrelatedDir,
+        hostIo: testHostIo,
+      })
+      expect(unrelatedFindings.filter((f) => f.kind === "adapter-skill-parity")).toEqual([])
+    } finally {
+      rmSync(unrelatedDir, { recursive: true, force: true })
+    }
+
+    const harnessCliDir = mkdtempSync(join(tmpdir(), "harness-cli-both-missing-"))
+    try {
+      mkdirSync(join(harnessCliDir, "apps/harness-cli"), { recursive: true })
+      writeFileSync(join(harnessCliDir, "apps/harness-cli/package.json"), "{}\n", "utf8")
+      const cliFindings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: harnessCliDir,
+        hostIo: testHostIo,
+      })
+      for (const clause of ADAPTER_SKILL_PARITY_CLAUSES) {
+        const bothMissing = cliFindings.find(
+          (f) =>
+            f.kind === "adapter-skill-parity" &&
+            f.nodeId === `adapter-skill-parity:${clause.skillName}:both-missing`,
+        )
+        expect(bothMissing, clause.skillName).toBeDefined()
+        expect(bothMissing?.message).toContain(
+          `adapters/antigravity/plugins/effect-harness/skills/${clause.skillName}/SKILL.md`,
+        )
+        expect(bothMissing?.message).toContain(
+          `adapters/claude-code/skills/${clause.skillName}/SKILL.md`,
+        )
+      }
+    } finally {
+      rmSync(harnessCliDir, { recursive: true, force: true })
     }
   })
 })

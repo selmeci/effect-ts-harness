@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import * as path from "node:path"
 import { NodeServices } from "@effect/platform-node"
-import { Context, Effect, Exit, Layer, Result, Scope, SynchronizedRef } from "effect"
+import { Cause, Context, Effect, Exit, Layer, Result, Schema, Scope, SynchronizedRef } from "effect"
 import { match } from "ts-pattern"
 import {
   AstSourceContent,
@@ -303,6 +303,46 @@ export const verifyWorktreeRuleVersionConsistency = (input: {
     return { _tag: "Match", ruleVersion: validRuleVersion }
   })
 
+const validateAstSourceFilePath = (rel: string): Result.Result<AstSourceFilePath, string> =>
+  match(Schema.decodeExit(AstSourceFilePath)(rel))
+    .with({ _tag: "Failure" }, ({ cause }) =>
+      Result.fail(
+        `AST gate target file has invalid relative path '${rel}': ${Cause.pretty(cause)}`,
+      ),
+    )
+    .with({ _tag: "Success" }, ({ value }) => Result.succeed(value))
+    .exhaustive()
+
+const loadValidatedAstSourceContent = (
+  resolvedRoot: string,
+  filePath: AstSourceFilePath,
+): Result.Result<
+  { readonly filePath: AstSourceFilePath; readonly content: AstSourceContent },
+  string
+> => {
+  const abs = path.resolve(resolvedRoot, filePath)
+  if (!nodeSyncHostIo.existsSync(abs)) {
+    return Result.fail(`AST gate target file unavailable: ${filePath} (file does not exist)`)
+  }
+  return match(Result.try(() => nodeSyncHostIo.readTextSync(abs)))
+    .with({ _tag: "Failure" }, ({ failure }) =>
+      Result.fail(
+        `AST gate target file unavailable: ${filePath} (${failure instanceof Error ? failure.message : String(failure)})`,
+      ),
+    )
+    .with({ _tag: "Success" }, ({ success: text }) =>
+      match(Schema.decodeExit(AstSourceContent)(text))
+        .with({ _tag: "Failure" }, ({ cause }) =>
+          Result.fail(
+            `AST gate target file exceeds bounded size (${filePath}): ${Cause.pretty(cause)}`,
+          ),
+        )
+        .with({ _tag: "Success" }, ({ value: content }) => Result.succeed({ filePath, content }))
+        .exhaustive(),
+    )
+    .exhaustive()
+}
+
 export const handleDaemonAstGatesRequest = (input: {
   readonly requestId: string
   readonly baseRoot: string
@@ -315,7 +355,20 @@ export const handleDaemonAstGatesRequest = (input: {
 }): Effect.Effect<Record<string, unknown>> =>
   Effect.gen(function* () {
     const cachePath = resolveAstGateCachePath(input.resolvedRoot)
+    const validatedPaths: Array<AstSourceFilePath> = []
+    let pathError: string | undefined
     for (const rel of input.requestedRelPaths) {
+      match(validateAstSourceFilePath(rel))
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          pathError = failure
+        })
+        .with({ _tag: "Success" }, ({ success: filePath }) => {
+          validatedPaths.push(filePath)
+        })
+        .exhaustive()
+      if (pathError !== undefined) {
+        return { id: input.requestId, ok: false, error: pathError }
+      }
       const resolvedAbs = path.resolve(input.resolvedRoot, rel)
       if (!isPathInsideRoot(input.resolvedRoot, resolvedAbs)) {
         return {
@@ -329,30 +382,19 @@ export const handleDaemonAstGatesRequest = (input: {
       readonly filePath: AstSourceFilePath
       readonly content: AstSourceContent
     }> = []
-    for (const rel of input.requestedRelPaths) {
-      const abs = path.resolve(input.resolvedRoot, rel)
-      if (!nodeSyncHostIo.existsSync(abs)) {
-        return {
-          id: input.requestId,
-          ok: false,
-          error: `AST gate target file unavailable: ${rel} (file does not exist)`,
-        }
-      }
-      const readRes = Result.try(() => nodeSyncHostIo.readTextSync(abs))
-      const textOrErr = match(readRes)
-        .with({ _tag: "Success" }, ({ success }) => ({ text: success, error: undefined }))
-        .with({ _tag: "Failure" }, ({ failure }) => ({
-          text: undefined,
-          error: `AST gate target file unavailable: ${rel} (${failure instanceof Error ? failure.message : String(failure)})`,
-        }))
+    let loadError: string | undefined
+    for (const filePath of validatedPaths) {
+      match(loadValidatedAstSourceContent(input.resolvedRoot, filePath))
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          loadError = failure
+        })
+        .with({ _tag: "Success" }, ({ success }) => {
+          loadedFiles.push(success)
+        })
         .exhaustive()
-      if (textOrErr.error !== undefined) {
-        return { id: input.requestId, ok: false, error: textOrErr.error }
+      if (loadError !== undefined) {
+        return { id: input.requestId, ok: false, error: loadError }
       }
-      loadedFiles.push({
-        filePath: AstSourceFilePath.make(rel),
-        content: AstSourceContent.make(textOrErr.text),
-      })
     }
 
     const versionCheck = yield* verifyWorktreeRuleVersionConsistency({

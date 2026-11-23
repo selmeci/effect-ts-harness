@@ -12,23 +12,27 @@ import {
   unwrapCommandSegment,
   type DetailedCommandSegment,
 } from "./policy-shell-parser.js"
+import {
+  classifyWorkerFileAccess,
+  isProtectedDotHarnessInspectArg,
+  isWorkerDaemonCredentialFilePath,
+  matchesWorkerDaemonCredentialText,
+  type WorkerFileAccessDenyRuleId,
+  type WorkerFileAccessResult,
+} from "./policy-worker-paths.js"
+
+export {
+  classifyWorkerFileAccess,
+  isWorkerDaemonCredentialFilePath,
+  type WorkerFileAccessDenyRuleId,
+  type WorkerFileAccessResult,
+}
 
 export interface PolicyGuardOptions {
   readonly unitWorkerMode?: boolean | undefined
 }
 
-export type WorkerFileAccessDenyRuleId = "worker-daemon-credential-access"
-
-export interface WorkerFileAccessResult {
-  readonly verdict: "allow" | "deny"
-  readonly ruleId?: WorkerFileAccessDenyRuleId | undefined
-  readonly reason?: string | undefined
-}
-
 export const MAX_SUBSHELL_INSPECT_DEPTH = 4
-
-const WORKER_DAEMON_CREDENTIAL_FILE_PATTERN: RegExp =
-  /(^|\/)(?:\.harness\/(?:omnigraph-cluster|omnigraph[*?[\]{}][^\s/]*|\*\/(?:auth|omnigraph|\*)[^\s/]*|\*\*?\/\*?(?:auth|omnigraph|tokens|sock)[^\s/]*)(?:\/|$)|[^\s/]*omnigraph-cluster(?:[*?[\]{}.][^\s/]*)?(?:\/|$)|[^\s/]*auth[*?[\]{}.-]*tokens(?:[*?[\]{}.][^\s/]*)?(?:\/|$)|(?:[^\s/]*[*?[\]{}][^\s/]*\.sock|daemon\.(?:sock(?:[*?[\]{}][^\s/]*)?|s?[*?[\]{}][^\s/]*|soc[*?[\]{}][^\s/]*))(?:\/|$))/
 const HARNESS_INSPECT_BINARIES: ReadonlySet<string> = new Set(
   "rg grep egrep fgrep ag ack fd find ls tree cat head tail less more bat sed awk strings xxd od hexdump base64 tar zip cp mv".split(
     " ",
@@ -242,7 +246,10 @@ const unwrapEnvWords = (
     }
     break
   }
-  return i > 1 ? words.slice(i) : undefined
+  if (i < words.length && words[i]!.startsWith("-")) {
+    return undefined
+  }
+  return words.slice(i)
 }
 
 const unwrapWorkerCommandWords = (seg: DetailedCommandSegment): UnwrappedWorkerWords => {
@@ -254,7 +261,7 @@ const unwrapWorkerCommandWords = (seg: DetailedCommandSegment): UnwrappedWorkerW
   let words: ReadonlyArray<string> = [...seg.commandWords]
   if (words[0]?.startsWith("-") === true && seg.rawWords.some((w) => binaryBasename(w) === "env")) {
     const strippedEnv = unwrapEnvWords(["env", ...words], wrapperDirs)
-    if (strippedEnv !== undefined) words = strippedEnv
+    if (strippedEnv !== undefined && strippedEnv.length < words.length) words = strippedEnv
   }
   let sawPackageRunner = seg.sawPackageRunner
   let sawXargs = false
@@ -300,7 +307,9 @@ const unwrapWorkerCommandWords = (seg: DetailedCommandSegment): UnwrappedWorkerW
   }
 }
 
-const extractEmbeddedCommandPayloads = (words: ReadonlyArray<string>): ReadonlyArray<string> => {
+export const extractEmbeddedCommandPayloads = (
+  words: ReadonlyArray<string>,
+): ReadonlyArray<string> => {
   const rawBin = words[0]
   if (rawBin === undefined) return []
   const bin = binaryBasename(rawBin)
@@ -684,56 +693,32 @@ const hasWorkerRecursiveWorkflowCommandAtDepth = (command: string, depth: number
 export const isWorkerRecursiveWorkflowCommand = (command: string): boolean =>
   hasWorkerRecursiveWorkflowCommandAtDepth(command, 0)
 
-const deobfuscateWorkerToken = (tok: string): string =>
-  tok.replace(/\\(.)/g, "$1").replace(/\[([^\]!^-])\]/g, "$1")
-
-const isProtectedDotHarnessInspectArg = (tok: string): boolean => {
-  const norm = path.posix
-    .normalize(deobfuscateWorkerToken(tok).replace(/\\/g, "/"))
-    .replace(/\/+$/, "")
-  return (
-    norm === ".harness" ||
-    norm.endsWith("/.harness") ||
-    /(?:^|\/)\.harness\/(?:[*?[\]{}]+(?:\/|$)|omnigraph)/.test(norm)
-  )
-}
-
-const matchesWorkerDaemonCredentialToken = (tok: string): boolean => {
-  if (tok.length === 0) return false
-  const stripped = deobfuscateWorkerToken(tok)
-  const normTok = path.posix.normalize(stripped)
-  return (
-    WORKER_DAEMON_CREDENTIAL_FILE_PATTERN.test(tok) ||
-    WORKER_DAEMON_CREDENTIAL_FILE_PATTERN.test(stripped) ||
-    WORKER_DAEMON_CREDENTIAL_FILE_PATTERN.test(normTok)
-  )
-}
-
-const matchesWorkerDaemonCredentialText = (text: string): boolean => {
-  const cleanedText = text.replace(/\\/g, "/")
-  if (WORKER_DAEMON_CREDENTIAL_FILE_PATTERN.test(cleanedText)) return true
-  return (
-    cleanedText.split(/[\s=:'"`()<>;|&,]+/).some(matchesWorkerDaemonCredentialToken) ||
-    cleanedText.split(/[\s=:'"`(),{}[\]<>;|&]+/).some(matchesWorkerDaemonCredentialToken)
-  )
-}
-
-const matchesWorkerDaemonCredentialSegment = (seg: DetailedCommandSegment): boolean => {
-  const tokens = [...seg.envAssignments, ...seg.commandWords, ...seg.wrapperDirs]
+const matchesWorkerDaemonCredentialSegment = (
+  seg: DetailedCommandSegment,
+  unwrapped: UnwrappedWorkerWords,
+): boolean => {
+  const tokens = [
+    ...seg.envAssignments,
+    ...seg.commandWords,
+    ...seg.wrapperDirs,
+    ...unwrapped.wrapperDirs,
+    ...unwrapped.commandWords,
+  ]
   if (tokens.some(matchesWorkerDaemonCredentialText)) return true
-  const rawBin = seg.commandWords[0]
+  const rawBin = unwrapped.commandWords[0]
   if (rawBin !== undefined && HARNESS_INSPECT_BINARIES.has(binaryBasename(rawBin))) {
     if (
-      seg.commandWords
+      unwrapped.commandWords
         .slice(1)
-        .some((w) => !w.startsWith("-") && isProtectedDotHarnessInspectArg(w))
+        .some((w) => !w.startsWith("-") && isProtectedDotHarnessInspectArg(w)) ||
+      unwrapped.wrapperDirs.some((d) => isProtectedDotHarnessInspectArg(d))
     ) {
       return true
     }
   }
-  if (seg.wrapperDirs.length === 0) return false
-  return seg.wrapperDirs.some((dir) =>
-    seg.commandWords.some(
+  if (unwrapped.wrapperDirs.length === 0) return false
+  return unwrapped.wrapperDirs.some((dir) =>
+    unwrapped.commandWords.some(
       (tok) => !tok.startsWith("-") && matchesWorkerDaemonCredentialText(path.posix.join(dir, tok)),
     ),
   )
@@ -746,9 +731,25 @@ const hasWorkerDaemonCredentialShellAccessAtDepth = (command: string, depth: num
   const expanded = expandCommandVariables(norm)
   if (expanded.overflowed) return true
 
-  for (const seg of extractDetailedCommandSegments(expanded.text)) {
-    if (matchesWorkerDaemonCredentialSegment(seg)) return true
+  const segments = extractDetailedCommandSegments(expanded.text)
+  let hasXargsInspectOrExec = false
+  for (const seg of segments) {
     const unwrapped = unwrapWorkerCommandWords(seg)
+    if (matchesWorkerDaemonCredentialSegment(seg, unwrapped)) return true
+    if (unwrapped.sawXargs) {
+      const targetBin =
+        unwrapped.commandWords[0] !== undefined
+          ? binaryBasename(unwrapped.commandWords[0])
+          : undefined
+      if (
+        targetBin !== undefined &&
+        (HARNESS_INSPECT_BINARIES.has(targetBin) ||
+          JS_RUNTIME_BINARIES.has(targetBin) ||
+          SHELL_EXEC_BINARIES.has(targetBin))
+      ) {
+        hasXargsInspectOrExec = true
+      }
+    }
     if (
       extractEmbeddedCommandPayloads(unwrapped.commandWords).some((payload) =>
         hasWorkerDaemonCredentialShellAccessAtDepth(payload, depth + 1),
@@ -757,6 +758,16 @@ const hasWorkerDaemonCredentialShellAccessAtDepth = (command: string, depth: num
       return true
     }
   }
+  if (
+    hasXargsInspectOrExec &&
+    segments.some((seg) =>
+      [...seg.commandWords, ...seg.envAssignments, ...seg.wrapperDirs].some((tok) =>
+        isProtectedDotHarnessInspectArg(tok),
+      ),
+    )
+  ) {
+    return true
+  }
   return extractExecutedShellSnippets(expanded.text).some((snippet) =>
     hasWorkerDaemonCredentialShellAccessAtDepth(snippet, depth + 1),
   )
@@ -764,29 +775,3 @@ const hasWorkerDaemonCredentialShellAccessAtDepth = (command: string, depth: num
 
 export const isWorkerDaemonCredentialShellAccess = (command: string): boolean =>
   hasWorkerDaemonCredentialShellAccessAtDepth(command, 0)
-
-export const isWorkerDaemonCredentialFilePath = (filePath: string): boolean => {
-  const rawNorm = filePath.replace(/\\/g, "/").trim()
-  if (rawNorm === "") return false
-  const stripped = deobfuscateWorkerToken(rawNorm)
-  const norm = path.posix.normalize(stripped)
-  return (
-    WORKER_DAEMON_CREDENTIAL_FILE_PATTERN.test(rawNorm) ||
-    WORKER_DAEMON_CREDENTIAL_FILE_PATTERN.test(stripped) ||
-    WORKER_DAEMON_CREDENTIAL_FILE_PATTERN.test(norm)
-  )
-}
-
-export const classifyWorkerFileAccess = (
-  filePath: string,
-  unitWorkerMode = false,
-): WorkerFileAccessResult => {
-  if (!unitWorkerMode || !isWorkerDaemonCredentialFilePath(filePath)) {
-    return { verdict: "allow" }
-  }
-  return {
-    verdict: "deny",
-    ruleId: "worker-daemon-credential-access",
-    reason: `Worker isolation mode (HARNESS_UNIT_WORKER=1) denies access to daemon socket or auth tokens: ${filePath}`,
-  }
-}

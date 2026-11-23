@@ -55,9 +55,13 @@ export {
   VerifyStampSchema,
   checkMutateStamp,
   checkVerifyStamp,
+  computeMutableTreeHash,
+  computeMutableTreeHashChecked,
   computeWorkspaceTreeHash,
   computeWorkspaceTreeHashChecked,
+  isMarkdownDocPath,
   parseDstSeedEnv,
+  readExistingVerifyStamp,
   removeMutateStamp,
   type CheckMutateStampResult,
   type CheckVerifyStampResult,
@@ -113,7 +117,6 @@ export {
   GraphGcReport,
   IGNORED_ERRORS,
   IGNORED_SERVICES,
-  IGNORED_UNTESTED_FNS,
   augmentReachabilityWithInference,
   buildGraphReachabilityContext,
   checkUnusedContractExports,
@@ -128,6 +131,9 @@ export {
   evaluatePackageAndMigrationPlugin,
   evaluateTestAndDeciderPlugin,
   evaluateTopologyEntropyPlugin,
+  ADAPTER_SKILL_PARITY_CLAUSES,
+  auditAdapterSkillParityPair,
+  auditCatalogDocTruthInContent,
   DOC_TRUTH_RULE_ID_SOURCES,
   checkAstGateRuleClosure,
   extractBalancedBraces,
@@ -226,6 +232,11 @@ export {
   type TraceSpanObservation,
   type UntestedMutationFile,
 } from "./mutation-check.js"
+export {
+  classifyMutationModulePurity,
+  isPureMutationCandidate,
+  type PureModuleClassification,
+} from "./mutation/mutation-pure-module-classifier.js"
 export {
   decideEarsSpecLint,
   decideEarsSpecQuality,
@@ -446,6 +457,14 @@ export {
   computePercentileMillis,
   decideHarnessBench,
 } from "./bench-check.js"
+export {
+  MAX_TEST_CASE_LINES,
+  collectContractShapeViolations,
+  collectWorkflowNameAccessViolations,
+  collectMaxTestCaseLineViolations,
+  type AstHygieneFinding,
+  type AstHygieneRuleId,
+} from "./plugins/ast-contract-and-test-hygiene.js"
 export { SelfDogfoodingFileInput, SelfDogfoodingInput } from "./plugins/self-dogfooding-contract.js"
 export {
   SelfDogfooding,

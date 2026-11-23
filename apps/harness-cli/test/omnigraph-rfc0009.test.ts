@@ -1583,7 +1583,7 @@ setTimeout(() => process.exit(0), 5000);
     }
   })
 
-  it("handleGc --strict runs optimize only, syncVerifyImplToOmnigraph uploads and stats blob, lifecycle helpers guard unsafe PIDs, and isolated done skips omnigraph:merge-main telemetry", async () => {
+  it("handleGc --strict runs optimize only while runOmnigraphMaintenance includeCleanup runs optimize + cleanup", async () => {
     // gc --strict invokes optimize only (without destructive cleanup) on non-isolated cluster dir
     const gcRepo = makeTempRepo("harness-rfc0009-gc-")
     const gcClusterDir = resolveOmnigraphClusterDir(gcRepo, nodeSyncHostIo)
@@ -1617,6 +1617,15 @@ setTimeout(() => process.exit(0), 5000);
       else process.env.HOME = prevHome
     }
 
+    // killOmnigraphServerPidIfAlive refuses unsafe PID (current vitest PID) & stopStaleOmnigraphClusterBeforeDelete
+    expect(
+      await Effect.runPromise(killOmnigraphServerPidIfAlive(process.pid, gcClusterDir, "test")),
+    ).toBe(false)
+    expect(stopStaleOmnigraphClusterBeforeDelete(gcClusterDir, undefined)).toBe(true)
+  })
+
+  it("syncVerifyImplToOmnigraph uploads and stats blob and isolated done skips omnigraph:merge-main telemetry", async () => {
+    const prevHome = process.env.HOME
     // syncVerifyImplToOmnigraph sends putBlob + statBlob when spans.jsonl + VitestCase exist
     const verifyRepo = makeTempRepo("harness-rfc0009-putblob-")
     const verifyClusterDir = resolveOmnigraphClusterDir(verifyRepo, nodeSyncHostIo)
@@ -1778,12 +1787,6 @@ setTimeout(() => process.exit(0), 5000);
       if (prevHome === undefined) Reflect.deleteProperty(process.env, "HOME")
       else process.env.HOME = prevHome
     }
-
-    // killOmnigraphServerPidIfAlive refuses unsafe PID (current vitest PID) & stopStaleOmnigraphClusterBeforeDelete
-    expect(
-      await Effect.runPromise(killOmnigraphServerPidIfAlive(process.pid, gcClusterDir, "test")),
-    ).toBe(false)
-    expect(stopStaleOmnigraphClusterBeforeDelete(gcClusterDir, undefined)).toBe(true)
 
     // Isolated workspace syncOmnigraphOnDone does not record omnigraph:merge-main telemetry
     const isoDir = mkdtempSync(join(tmpdir(), "harness-rfc0009-iso-"))

@@ -850,6 +850,51 @@ describe("OmnigraphMessageStorage fencing, fail-closed guards, corrupt-row seman
       },
     })
 
+    const orphanMsgId = MessageKey.make(String(mintSnowflake()))
+    await client.queries.invoke("wf_insert_request_message", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        messageKey: orphanMsgId,
+        seqKey: unwrapSeqKey(orphanMsgId),
+        primaryKeyHash: null,
+        shardId: "default:0",
+        entityType: "UnlistedOrphanForFenceTest",
+        entityId: "orphan-1",
+        tag: "Run",
+        payload: "{}",
+        headers: "{}",
+        traceId: null,
+        spanId: null,
+        sampled: null,
+        requestId: orphanMsgId,
+        deliverAtMs: null,
+      },
+    })
+
+    const quarantineOwnerMismatch = await Effect.runPromise(
+      quarantineOrphanEntityMessages({
+        repoRoot,
+        knownEntityTypes: ["OwnerFenceEntity", "Workflow/-/DurableClock"],
+        expectedLeaseEpoch: LeaseEpoch.make(4),
+        expectedLeaseOwner: "impostor-daemon#9999",
+        lockFilePath: lockPath,
+        client,
+      }).pipe(Effect.flip),
+    )
+    expect(quarantineOwnerMismatch._tag).toBe("WriterLeaseHeldError")
+
+    const orphanBeforeOwnerMatch = await Effect.runPromise(
+      invokeWorkflowStoreQuery({
+        repoRoot,
+        operation: WorkflowStoreOperation.make("test.checkOrphanStillUnprocessed"),
+        queryName: "wf_messages_by_keys",
+        params: { messageKeys: [orphanMsgId] },
+        client,
+      }),
+    )
+    expect(orphanBeforeOwnerMatch[0]?.processed).toBe(false)
+
     await Effect.runPromise(
       Effect.gen(function* () {
         const res = yield* invokeWorkflowStoreQueryWithMeta({
@@ -882,6 +927,9 @@ describe("OmnigraphMessageStorage fencing, fail-closed guards, corrupt-row seman
         yield* quarantineOrphanEntityMessages({
           repoRoot,
           knownEntityTypes: ["OwnerFenceEntity", "Workflow/-/DurableClock"],
+          expectedLeaseEpoch: LeaseEpoch.make(4),
+          expectedLeaseOwner: expectedOwner,
+          lockFilePath: lockPath,
           client,
         })
         yield* repairDanglingProcessedRequests({

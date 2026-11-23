@@ -1,22 +1,12 @@
 import { Effect } from "effect"
 import { match, P } from "ts-pattern"
+import {
+  type AdrLintFinding,
+  type AdrLintFindingKind,
+  validateAdrDeterministicEnforcementTable,
+} from "./adr-enforcement-table-lint.js"
 
-export type AdrLintFindingKind =
-  | "adr-frontmatter-invalid"
-  | "adr-section-structure"
-  | "adr-missing-drivers-or-options"
-  | "adr-missing-chosen-option"
-  | "adr-rejected-alternative-structure"
-  | "adr-missing-enforcement-table"
-  | "adr-unfilled-placeholder"
-  | "adr-enforcement-mismatch"
-  | "adr-overstated-proof-claim"
-
-export interface AdrLintFinding {
-  readonly line: number
-  readonly kind: AdrLintFindingKind
-  readonly message: string
-}
+export type { AdrLintFinding, AdrLintFindingKind }
 
 export interface AdrDocLintInput {
   readonly docPath: string
@@ -38,15 +28,6 @@ export const CANONICAL_ADR_SECTIONS = [
   "Consequences and Enforcement",
 ] as const
 
-const EXPECTED_ENFORCEMENT_TABLE_COLS = [
-  "rule",
-  "enforced by",
-  "gate / mechanism",
-  "governed symbols",
-] as const
-
-const stripMarkup = (text: string): string => text.replace(/[*_`]/g, "").trim()
-
 const stripQuotes = (val: string): string => {
   let trimmed = val.trim()
   if (
@@ -60,20 +41,6 @@ const stripQuotes = (val: string): string => {
     trimmed = trimmed.slice(0, hashIdx).trim()
   }
   return trimmed
-}
-
-const isTableRow = (line: string): boolean => {
-  const trimmed = line.trim()
-  return trimmed.startsWith("|") && trimmed.includes("|", 1)
-}
-
-const parseTableRow = (line: string): Array<string> => {
-  const trimmed = line.trim()
-  if (!trimmed.startsWith("|")) return []
-  const parts = trimmed.split("|")
-  const sliceStart = 1
-  const sliceEnd = parts[parts.length - 1] === "" ? parts.length - 1 : parts.length
-  return parts.slice(sliceStart, sliceEnd).map((s) => s.trim())
 }
 
 interface ParsedFrontmatter {
@@ -290,10 +257,15 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
       })
     }
     if (
-      !/\b(?:do not|cannot|can't|does not|doesn't|never)\s+prove\b|\binstead of claiming tests prove\b/i.test(rawLine) &&
-      /\b(?:unit|property(?:-based)?|integration|regression)\s+(?:(?:and|or|,)\s+(?:unit|property(?:-based)?|integration|regression)\s+)*tests?\b[^.\n]{0,100}\bproves?\b/i.test(
+      !/\b(?:do not|cannot|can't|does not|doesn't|never)\s+prove\b|\binstead of claiming [^.\n]{0,40}proves?\b/i.test(
         rawLine,
-      )
+      ) &&
+      (/(?:\b(?:unit|property(?:-based)?|integration|regression)\s+(?:(?:and|or|,)\s+(?:unit|property(?:-based)?|integration|regression)\s+)*tests?\b|`[^`]+\.(?:test|spec)\.[cm]?tsx?`|\b[A-Za-z0-9_.-]+\.(?:test|spec)\.[cm]?tsx?\b)[^.\n]{0,100}\bproves?\b/i.test(
+        rawLine,
+      ) ||
+        /\bproves?\b[^.\n]{0,60}\bvia\b[^.\n]{0,60}(?:`[^`]+\.(?:test|spec)\.[cm]?tsx?`|\b(?:unit|property(?:-based)?|integration)\s+tests?\b)/i.test(
+          rawLine,
+        ))
     ) {
       findings.push({
         line: lineNum,
@@ -570,7 +542,6 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
 
     const detEnforcement = subMap.get("Deterministic Enforcement")
     if (detEnforcement) {
-      // Find end line of Deterministic Enforcement subsection
       let detEndIdx = consequencesInfo.sec.endLineIdx
       for (const item of consequencesInfo.lines) {
         if (item.idx > detEnforcement.idx && /^###\s+/.test(item.text)) {
@@ -579,163 +550,16 @@ export const decideAdrDocQuality = Effect.fn("AdrDocLint.decide")(function* (
         }
       }
 
-      let validTableFound = false
-      for (let i = detEnforcement.idx + 1; i < detEndIdx; i++) {
-        if (isCodeBlock[i]) continue
-        const line = rawLines[i]!
-        if (isTableRow(line)) {
-          const cells = parseTableRow(line)
-          const cleanCols = cells.map((c) => stripMarkup(c).toLowerCase())
-          if (
-            cleanCols.length === EXPECTED_ENFORCEMENT_TABLE_COLS.length &&
-            cleanCols.every((col, cIdx) => col === EXPECTED_ENFORCEMENT_TABLE_COLS[cIdx])
-          ) {
-            // Found matching header, check separator next
-            let sepIdx = i + 1
-            while (sepIdx < detEndIdx && !isCodeBlock[sepIdx] && rawLines[sepIdx]!.trim() === "") {
-              sepIdx++
-            }
-            if (sepIdx < detEndIdx && !isCodeBlock[sepIdx]) {
-              const sepCells = parseTableRow(rawLines[sepIdx]!)
-              if (sepCells.length > 0 && sepCells.every((c) => /^:?-+:?$/.test(c))) {
-                // Count data rows
-                let dataRowCount = 0
-                for (let r = sepIdx + 1; r < detEndIdx; r++) {
-                  if (isCodeBlock[r]) break
-                  const rowLine = rawLines[r]!
-                  if (!isTableRow(rowLine)) {
-                    if (rowLine.trim() === "") continue
-                    break
-                  }
-                  const rowCells = parseTableRow(rowLine)
-                  if (
-                    rowCells.some((c) => c.length > 0) &&
-                    !rowCells.every((c) => /^:?-+:?$/.test(c))
-                  ) {
-                    dataRowCount++
-
-                    const lineNum = r + 1
-
-                    // a) Check that none of the 4 cells (Rule, Enforced By, Gate / Mechanism, Governed Symbols) in a data row is empty or - / N/A
-                    const isCellEmptyOrPlaceholder = (cell: string | undefined): boolean => {
-                      if (cell === undefined) return true
-                      const clean = stripMarkup(cell).trim().toLowerCase()
-                      return (
-                        clean === "" ||
-                        clean === "-" ||
-                        clean === "n/a" ||
-                        clean === "na" ||
-                        clean === "none" ||
-                        clean === "tbd"
-                      )
-                    }
-
-                    const ruleCell = rowCells[0]
-                    const enforcedByCell = rowCells[1]
-                    const gateCell = rowCells[2]
-                    const governedSymbolsCell = rowCells[3]
-
-                    if (
-                      rowCells.length < 4 ||
-                      isCellEmptyOrPlaceholder(ruleCell) ||
-                      isCellEmptyOrPlaceholder(enforcedByCell) ||
-                      isCellEmptyOrPlaceholder(gateCell) ||
-                      isCellEmptyOrPlaceholder(governedSymbolsCell)
-                    ) {
-                      findings.push({
-                        line: lineNum,
-                        kind: "adr-enforcement-mismatch",
-                        message: `Row at line ${lineNum} in 'Deterministic Enforcement' table contains empty or placeholder cell.`,
-                      })
-                    }
-
-                    // b) Verify Enforced By file paths are declared in frontmatter
-                    if (enforcedByCell) {
-                      const extractedPaths: Array<string> = []
-                      const backticks = Array.from(enforcedByCell.matchAll(/`([^`]+)`/g)).map((m) =>
-                        m[1]!.trim(),
-                      )
-                      for (const b of backticks) {
-                        if (
-                          b.includes("/") &&
-                          /\.(?:ts|tsx|js|mjs|md|json|cedar)$/.test(b) &&
-                          !extractedPaths.includes(b)
-                        ) {
-                          extractedPaths.push(b)
-                        }
-                      }
-                      const tokens = enforcedByCell.replace(/`([^`]+)`/g, " $1 ").split(/[,\s]+/)
-                      for (const t of tokens) {
-                        const trimmed = t.trim()
-                        if (
-                          trimmed.includes("/") &&
-                          /\.(?:ts|tsx|js|mjs|md|json|cedar)$/.test(trimmed) &&
-                          !extractedPaths.includes(trimmed)
-                        ) {
-                          extractedPaths.push(trimmed)
-                        }
-                      }
-
-                      for (const p of extractedPaths) {
-                        if (declaredEnforcedBy.size > 0 && !declaredEnforcedBy.has(p)) {
-                          findings.push({
-                            line: lineNum,
-                            kind: "adr-enforcement-mismatch",
-                            message: `Enforced By file '${p}' at line ${lineNum} is not declared in ADR frontmatter 'enforced_by'.`,
-                          })
-                        }
-                      }
-                    }
-
-                    // c) Collect all governed symbols declared in the ADR frontmatter (spans, services, errors).
-                    // If the frontmatter declares at least one symbol, verify that every backtick-enclosed identifier
-                    // in the Governed Symbols column (that is not a file path containing / or .ts and not a wildcard *)
-                    // matches one of the frontmatter spans, services, or errors (or ends with #<symbol>).
-                    if (declaredSymbols.size > 0 && governedSymbolsCell) {
-                      const backtickMatches = Array.from(
-                        governedSymbolsCell.matchAll(/`([^`]+)`/g),
-                      ).map((m) => m[1]!.trim())
-
-                      for (const sym of backtickMatches) {
-                        if (sym === "*" || sym.includes("/") || sym.includes(".ts")) {
-                          continue
-                        }
-
-                        const matches =
-                          declaredSymbols.has(sym) ||
-                          Array.from(declaredSymbols).some(
-                            (ds) => ds.endsWith(`#${sym}`) || sym.endsWith(`#${ds}`),
-                          )
-
-                        if (!matches) {
-                          findings.push({
-                            line: lineNum,
-                            kind: "adr-enforcement-mismatch",
-                            message: `Governed symbol '${sym}' at line ${lineNum} is not declared in ADR frontmatter spans, services, or errors.`,
-                          })
-                        }
-                      }
-                    }
-                  }
-                }
-                if (dataRowCount >= 1) {
-                  validTableFound = true
-                  break
-                }
-              }
-            }
-          }
-        }
-      }
-
-      if (!validTableFound) {
-        findings.push({
-          line: detEnforcement.line,
-          kind: "adr-missing-enforcement-table",
-          message:
-            "Subsection '### Deterministic Enforcement' must contain a table with columns ['Rule', 'Enforced By', 'Gate / Mechanism', 'Governed Symbols'] and at least 1 data row.",
-        })
-      }
+      validateAdrDeterministicEnforcementTable({
+        rawLines,
+        isCodeBlock,
+        detEnforcementLine: detEnforcement.line,
+        detEnforcementIdx: detEnforcement.idx,
+        detEndIdx,
+        declaredEnforcedBy,
+        declaredSymbols,
+        findings,
+      })
     }
   }
 

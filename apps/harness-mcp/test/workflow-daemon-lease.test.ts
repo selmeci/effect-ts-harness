@@ -13,15 +13,23 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Scope } from "effect"
+import { vi } from "vitest"
+import { Effect, Exit, Scope } from "effect"
 import { match } from "ts-pattern"
 import {
   AbsoluteRepoRoot,
   DaemonSocketPath,
+  GitCommonDirPath,
+  LeaseEpoch,
+  LeaseFilePath,
+  LeaseHolderId,
+  LeaseHolderPid,
   WORKFLOW_DAEMON_PROTOCOL_VERSION,
+  WORKFLOW_TIMEOUT_BUDGETS,
   WorkflowDaemonCapability,
   WorkflowStoreOperation,
   WorkflowStoreUnavailableError,
+  WorkflowTimeoutMs,
   WriterLeaseHeldError,
 } from "@harness/contract"
 import { OmnigraphClient } from "@harness/graph"
@@ -35,7 +43,11 @@ import {
 import { type IndexedEffectFn, runWithTestTracer } from "@harness/ingest"
 import { UnixSocketDaemonPort } from "@harness/service"
 import { startHarnessDaemonServer } from "../src/daemon/unix-socket-daemon.js"
-import { acquireWorkflowEngineInScope } from "../src/daemon/workflow-engine-daemon-helper.js"
+import {
+  acquireWorkflowEngineInScope,
+  forkWorkflowLeaseWatchers,
+  validateWorkflowDaemonTimeoutBudgets,
+} from "../src/daemon/workflow-engine-daemon-helper.js"
 
 interface InMemoryLeaseRow {
   readonly name: string
@@ -47,6 +59,8 @@ interface InMemoryLeaseRow {
 interface FakeLeaseHarness {
   readonly client: InstanceType<typeof OmnigraphClient>
   readonly getRefreshCount: () => number
+  readonly getRefreshFailureCount: () => number
+  readonly setRefreshFailuresRemaining: (count: number) => void
   readonly supersedeLease: (owner: string, leaseEpoch: number) => void
 }
 
@@ -54,6 +68,8 @@ const makeInMemoryWorkflowLeaseClient = (): FakeLeaseHarness => {
   let leaseRow: InMemoryLeaseRow | null = null
   let commitSeq = 1
   let refreshCount = 0
+  let refreshFailureCount = 0
+  let refreshFailuresRemaining = 0
 
   const baseClient = new OmnigraphClient({
     baseUrl: "http://127.0.0.1:1",
@@ -113,6 +129,11 @@ const makeInMemoryWorkflowLeaseClient = (): FakeLeaseHarness => {
           }
         })
         .with("wf_refresh_writer_lease", () => {
+          if (refreshFailuresRemaining > 0) {
+            refreshFailuresRemaining -= 1
+            refreshFailureCount += 1
+            return Promise.reject(new Error("Simulated transient Omnigraph store outage"))
+          }
           refreshCount += 1
           const paramOwner = typeof params.owner === "string" ? params.owner : ""
           if (
@@ -181,6 +202,10 @@ const makeInMemoryWorkflowLeaseClient = (): FakeLeaseHarness => {
   return {
     client: proxiedClient,
     getRefreshCount: () => refreshCount,
+    getRefreshFailureCount: () => refreshFailureCount,
+    setRefreshFailuresRemaining: (count: number) => {
+      refreshFailuresRemaining = count
+    },
     supersedeLease: (owner: string, leaseEpoch: number) => {
       leaseRow = {
         name: "engine",
@@ -339,7 +364,7 @@ describe("harness-mcp workflow daemon writer lease & lifecycle (F-1.1, F-20.4)",
         workflowEngine: {
           mode: "required",
           client: fakeLease.client,
-          heartbeatIntervalMs: 60_000,
+          heartbeatIntervalMs: 30_000,
           onLeaseLost: (reason) => {
             leaseLostReasons.push(reason)
           },
@@ -553,6 +578,288 @@ describe("harness-mcp workflow daemon writer lease & lifecycle (F-1.1, F-20.4)",
       } finally {
         await primaryAuto.close()
       }
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("shuts down fail-closed after 3 consecutive WorkflowStoreUnavailableError heartbeat failures while resetting streak on recovery", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "hmcp-wl-store-err-"))
+    try {
+      const repoDir = initCanonicalGitRepo(tmpDir)
+      const fakeLease = makeInMemoryWorkflowLeaseClient()
+      fakeLease.setRefreshFailuresRemaining(1)
+      const leaseLostReasons: Array<string> = []
+
+      const handle = await startHarnessDaemonServer(repoDir, {
+        workflowEngine: {
+          mode: "required",
+          client: fakeLease.client,
+          heartbeatIntervalMs: 30,
+          onLeaseLost: (reason) => {
+            leaseLostReasons.push(reason)
+          },
+        },
+      })
+
+      try {
+        await pollUntil(
+          () => fakeLease.getRefreshFailureCount() === 1 && fakeLease.getRefreshCount() >= 2,
+        )
+        expect(existsSync(handle.socketPath)).toBe(true)
+        expect(leaseLostReasons).toEqual([])
+
+        fakeLease.setRefreshFailuresRemaining(3)
+        await pollUntil(() => leaseLostReasons.length >= 1 && !existsSync(handle.socketPath))
+        expect(fakeLease.getRefreshFailureCount()).toBe(4)
+        expect(leaseLostReasons[0]).toContain("Simulated transient Omnigraph store outage")
+      } finally {
+        await handle.close()
+      }
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("F-1.1: unexpected heartbeat defect (readProcessStartTime throwing) shuts down daemon, logs diagnostic, and notifies onLeaseLost", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "hmcp-wl-hb-defect-"))
+    const stderrChunks: Array<string> = []
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderrChunks.push(String(chunk))
+      return true
+    })
+    try {
+      const repoDir = initCanonicalGitRepo(tmpDir)
+      const fakeLease = makeInMemoryWorkflowLeaseClient()
+      const leaseLostReasons: Array<string> = []
+      let failRefreshWithDefect = false
+
+      const handle = await startHarnessDaemonServer(repoDir, {
+        workflowEngine: {
+          mode: "required",
+          client: fakeLease.client,
+          heartbeatIntervalMs: 30,
+          readProcessStartTime: () => {
+            if (failRefreshWithDefect) {
+              throw new Error("Simulated readProcessStartTime defect")
+            }
+            return "12345"
+          },
+          onLeaseLost: (reason) => {
+            leaseLostReasons.push(reason)
+          },
+        },
+      })
+
+      try {
+        await pollUntil(() => fakeLease.getRefreshCount() >= 1)
+        failRefreshWithDefect = true
+        await pollUntil(() => leaseLostReasons.length >= 1 && !existsSync(handle.socketPath))
+        expect(leaseLostReasons).toHaveLength(1)
+        expect(leaseLostReasons[0]).toContain("Simulated readProcessStartTime defect")
+        expect(stderrChunks.join("")).toContain(
+          "Workflow writer lease heartbeat failed unexpectedly",
+        )
+        expect(stderrChunks.join("")).toContain("Simulated readProcessStartTime defect")
+      } finally {
+        await handle.close()
+      }
+    } finally {
+      stderrSpy.mockRestore()
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("F-1.1: waitForFlockLoss failure triggers shutdown, stderr diagnostic, and onLeaseLost while pure interrupt stays silent", async () => {
+    const stderrChunks: Array<string> = []
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderrChunks.push(String(chunk))
+      return true
+    })
+    try {
+      const repoRoot = AbsoluteRepoRoot.make("/tmp/hmcp-flock-watcher-repo")
+      const commonGitDir = GitCommonDirPath.make("/tmp/hmcp-flock-watcher-repo/.git")
+      const lockFilePath = LeaseFilePath.make(
+        "/tmp/hmcp-flock-watcher-repo/.git/harness/daemon.lock",
+      )
+
+      // 1. waitForFlockLoss failure triggers shutdown + stderr + onLeaseLost
+      let shutdownCalls = 0
+      const lostReasons: Array<string> = []
+      const failScope = Scope.makeUnsafe()
+      await Effect.runPromise(
+        forkWorkflowLeaseWatchers({
+          daemonScope: failScope,
+          activeState: {
+            repoRoot,
+            commonGitDir,
+            lockFilePath,
+            lease: {
+              holderId: LeaseHolderId.make("test-holder"),
+              holderPid: LeaseHolderPid.make(process.pid),
+              lockFilePath,
+              leaseEpoch: LeaseEpoch.make(1),
+              owner: "test-holder#1",
+              waitForFlockLoss: Effect.die(new Error("Simulated flock watcher crash")),
+            },
+          },
+          options: {
+            heartbeatIntervalMs: 30_000,
+            onLeaseLost: (reason) => {
+              lostReasons.push(reason)
+            },
+          },
+          triggerShutdown: () => {
+            shutdownCalls += 1
+          },
+        }),
+      )
+      await pollUntil(() => shutdownCalls >= 1 && lostReasons.length >= 1)
+      await Effect.runPromise(Scope.close(failScope, Exit.void))
+      expect(shutdownCalls).toBe(1)
+      expect(lostReasons[0]).toContain("Simulated flock watcher crash")
+      expect(stderrChunks.join("")).toContain("OS flock watcher failed unexpectedly")
+
+      // 2. Normal scope close (pure interrupt) does NOT call triggerShutdown or onLeaseLost
+      stderrChunks.length = 0
+      let cleanShutdownCalls = 0
+      const cleanLostReasons: Array<string> = []
+      const cleanScope = Scope.makeUnsafe()
+      await Effect.runPromise(
+        forkWorkflowLeaseWatchers({
+          daemonScope: cleanScope,
+          activeState: {
+            repoRoot,
+            commonGitDir,
+            lockFilePath,
+            lease: {
+              holderId: LeaseHolderId.make("test-holder"),
+              holderPid: LeaseHolderPid.make(process.pid),
+              lockFilePath,
+              leaseEpoch: LeaseEpoch.make(1),
+              owner: "test-holder#1",
+              waitForFlockLoss: Effect.never,
+            },
+          },
+          options: {
+            heartbeatIntervalMs: 30_000,
+            onLeaseLost: (reason) => {
+              cleanLostReasons.push(reason)
+            },
+          },
+          triggerShutdown: () => {
+            cleanShutdownCalls += 1
+          },
+        }),
+      )
+      await Effect.runPromise(Scope.close(cleanScope, Exit.void))
+      expect(cleanShutdownCalls).toBe(0)
+      expect(cleanLostReasons).toEqual([])
+      expect(stderrChunks.join("")).toBe("")
+    } finally {
+      stderrSpy.mockRestore()
+    }
+  })
+
+  it("F-6.1: throwing onLeaseLost callback logs error to stderr without blocking daemon shutdown", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "hmcp-wl-cb-throw-"))
+    const stderrChunks: Array<string> = []
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderrChunks.push(String(chunk))
+      return true
+    })
+    try {
+      const repoDir = initCanonicalGitRepo(tmpDir)
+      const fakeLease = makeInMemoryWorkflowLeaseClient()
+      let callbackInvoked = false
+
+      const handle = await startHarnessDaemonServer(repoDir, {
+        workflowEngine: {
+          mode: "required",
+          client: fakeLease.client,
+          heartbeatIntervalMs: 30,
+          onLeaseLost: () => {
+            callbackInvoked = true
+            throw new Error("Boom inside onLeaseLost callback")
+          },
+        },
+      })
+
+      try {
+        await pollUntil(() => fakeLease.getRefreshCount() >= 1)
+        fakeLease.supersedeLease("rival-daemon#777", 2)
+        await pollUntil(() => callbackInvoked && !existsSync(handle.socketPath))
+        expect(existsSync(handle.socketPath)).toBe(false)
+        expect(stderrChunks.join("")).toContain("onLeaseLost callback error")
+        expect(stderrChunks.join("")).toContain("Boom inside onLeaseLost callback")
+      } finally {
+        await handle.close()
+      }
+    } finally {
+      stderrSpy.mockRestore()
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("F-13.1: acquireWorkflowEngineInScope and validateWorkflowDaemonTimeoutBudgets fail closed on invalid timeout budgets or heartbeatIntervalMs >= TTL", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "hmcp-wl-budget-"))
+    try {
+      const repoDir = initCanonicalGitRepo(tmpDir)
+      const validated = await Effect.runPromise(
+        validateWorktreeRepoRoot(AbsoluteRepoRoot.make(repoDir)),
+      )
+      const startupState = { _tag: "Valid" as const, worktree: validated }
+
+      const invalidHeartbeatErr = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const unixSocketDaemon = yield* UnixSocketDaemonPort
+            const scope = yield* Scope.Scope
+            return yield* acquireWorkflowEngineInScope({
+              daemonScope: scope,
+              startupState,
+              workflowEngineOptions: {
+                mode: "required",
+                heartbeatIntervalMs: WORKFLOW_TIMEOUT_BUDGETS.writerLeaseHeartbeatTtlMs,
+              },
+              unixSocketDaemon,
+            })
+          }),
+        ).pipe(Effect.provide(UnixSocketDaemonLive), Effect.flip),
+      )
+      expect(invalidHeartbeatErr).toBeInstanceOf(WorkflowStoreUnavailableError)
+      expect(invalidHeartbeatErr.message).toContain("heartbeatIntervalMs")
+
+      const nonPositiveHeartbeatErr = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const unixSocketDaemon = yield* UnixSocketDaemonPort
+            const scope = yield* Scope.Scope
+            return yield* acquireWorkflowEngineInScope({
+              daemonScope: scope,
+              startupState,
+              workflowEngineOptions: {
+                mode: "auto",
+                heartbeatIntervalMs: 0,
+              },
+              unixSocketDaemon,
+            })
+          }),
+        ).pipe(Effect.provide(UnixSocketDaemonLive), Effect.flip),
+      )
+      expect(nonPositiveHeartbeatErr).toBeInstanceOf(WorkflowStoreUnavailableError)
+      expect(nonPositiveHeartbeatErr.message).toContain("heartbeatIntervalMs")
+
+      const invalidBudgetErr = await Effect.runPromise(
+        validateWorkflowDaemonTimeoutBudgets(undefined, {
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          workflowServerSocketMs: WorkflowTimeoutMs.make(
+            WORKFLOW_TIMEOUT_BUDGETS.workflowCompleteIpcMs,
+          ),
+        }).pipe(Effect.flip),
+      )
+      expect(invalidBudgetErr).toBeInstanceOf(WorkflowStoreUnavailableError)
+      expect(invalidBudgetErr.message).toContain("Invalid workflow timeout budgets")
     } finally {
       rmSync(tmpDir, { recursive: true, force: true })
     }

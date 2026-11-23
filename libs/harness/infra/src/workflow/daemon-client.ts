@@ -7,9 +7,10 @@ import {
   DaemonHandshakeResponse,
   DaemonProtocolMismatchDetail,
   DaemonProtocolMismatchError,
-  type DaemonSocketPath,
+  DaemonSocketPath,
   type GitCommonDirPath,
   WORKFLOW_DAEMON_PROTOCOL_VERSION,
+  WORKFLOW_TIMEOUT_BUDGETS,
   WorkflowAbortRequest,
   WorkflowAbortResponse,
   WorkflowCompleteRequest,
@@ -27,6 +28,7 @@ import {
   type WorkflowStoreFailureReason,
   WorkflowStoreOperation,
   WorkflowStoreUnavailableError,
+  type WorkflowTimeoutMs,
   toBoundedReason,
 } from "@harness/contract"
 import { nodeSyncHostIo } from "../node-host-io.js"
@@ -43,10 +45,12 @@ const canonicalPathOrRaw = (filePath: string): string =>
     .exhaustive()
 
 /** Dedicated workflow daemon IPC timeout (decoupled from the 5 s LSP query socket timeout). */
-export const WORKFLOW_DAEMON_IPC_TIMEOUT_MS = 30_000
+export const WORKFLOW_DAEMON_IPC_TIMEOUT_MS: WorkflowTimeoutMs =
+  WORKFLOW_TIMEOUT_BUDGETS.workflowIpcMs
 
 /** Extended workflow daemon IPC timeout for `workflow.complete` (exceeds 120 s package verify timeout). */
-export const WORKFLOW_COMPLETE_IPC_TIMEOUT_MS = 150_000
+export const WORKFLOW_COMPLETE_IPC_TIMEOUT_MS: WorkflowTimeoutMs =
+  WORKFLOW_TIMEOUT_BUDGETS.workflowCompleteIpcMs
 
 const HANDSHAKE_OPERATION = WorkflowStoreOperation.make("HarnessDaemonClient.handshake")
 const QUERY_COMMAND_OPERATION = WorkflowStoreOperation.make("HarnessDaemonClient.queryCommand")
@@ -607,13 +611,27 @@ export const doctorWorkflowViaDaemon = Effect.fn("HarnessDaemonClient.doctorWork
   WorkflowDoctorResponse,
   DaemonProtocolMismatchError | WorkflowStoreUnavailableError
 > {
+  const doctorPolicy = match(request.mode)
+    .with("rebuild", () => ({
+      defaultRequireActiveLease: true,
+      options: {
+        ...options,
+        timeoutMs: options?.timeoutMs ?? WORKFLOW_COMPLETE_IPC_TIMEOUT_MS,
+      },
+    }))
+    .with("check-only", () => ({
+      defaultRequireActiveLease: false,
+      options,
+    }))
+    .exhaustive()
+
   return yield* invokeWorkflowDaemonRpc({
     command: "workflow.doctor",
     operation: DOCTOR_WORKFLOW_OPERATION,
     request,
     requestSchema: WorkflowDoctorRequest,
     responseSchema: WorkflowDoctorResponse,
-    defaultRequireActiveLease: false,
-    options,
+    defaultRequireActiveLease: doctorPolicy.defaultRequireActiveLease,
+    options: doctorPolicy.options,
   })
 })

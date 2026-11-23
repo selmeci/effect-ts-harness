@@ -32,13 +32,12 @@ import {
   recordTelemetry,
   resolveClusterRepoRoot,
 } from "./daemon-and-omnigraph.service.js"
+import { runOmnigraphMaintenance, runVerifyOmnigraphLintCheck } from "./omnigraph-lint-gate.js"
 import {
-  runOmnigraphMaintenance,
-  runVerifyOmnigraphLintCheck,
-} from "./omnigraph-lint-gate.js"
-import {
+  cleanupStalePlanSnapshotAfterDone,
   countImplEffectFns,
   formatDiffErrorMessage,
+  formatPlanSnapshotCleanupFailure,
   isBranchNotFoundError,
   loadPlanEffectFnQualnames,
   readEffectFnStubAfterFromImage,
@@ -49,6 +48,9 @@ import {
 } from "./omnigraph-safety-helpers.js"
 
 export { isBranchNotFoundError, runOmnigraphMaintenance, runVerifyOmnigraphLintCheck }
+
+const failPureInterruptCause = <E>(cause: Cause.Cause<E>): Effect.Effect<never> =>
+  Effect.failCause(Cause.fromReasons(cause.reasons.filter(Cause.isInterruptReason)))
 
 export const runPreMergeOmnigraphBranchVerify = (
   repoRoot: string,
@@ -68,6 +70,22 @@ export const runPreMergeOmnigraphBranchVerify = (
     const syncLayer = makeOmnigraphSyncLayer(nodeSyncHostIo)
     const surface = isAntigravity ? "hook" : "cli"
     const failExitCode = isAntigravity ? 0 : 1
+    const failPreMergeVerify = (gateTag: string, reason: string, detail: string): CliResult => {
+      recordTelemetry(options, {
+        surface,
+        category: "graph_query",
+        toolName: "omnigraph:merge-main",
+        outcome: "fail",
+        durationMs: Math.max(0, Date.now() - startedAtMs),
+        engineSource: "omnigraph",
+        detail,
+      })
+      return {
+        exitCode: failExitCode,
+        stdout: JSON.stringify({ decision: blockDecision, reason }),
+        stderr: `[GATE FAILURE] ${gateTag}\n${detail}`,
+      }
+    }
     const hasPlanSnapshot = nodeSyncHostIo.existsSync(
       join(repoRoot, ".harness", "plan-graph-snapshot.json"),
     )
@@ -127,32 +145,22 @@ export const runPreMergeOmnigraphBranchVerify = (
           )
         }
         return Effect.sync(() => {
-          process.stderr.write(`[harness:done] Omnigraph branch diff missing merge base: ${formatDiffErrorMessage(err)}\n`)
+          process.stderr.write(
+            `[harness:done] Omnigraph branch diff missing merge base: ${formatDiffErrorMessage(err)}\n`,
+          )
           return { _tag: "MissingMergeBase" }
         })
       }),
     )
 
     const diffFailureResult: CliResult | undefined = match(branchDiffOpt)
-      .with({ _tag: "DiffFailed" }, ({ message }) => {
-        recordTelemetry(options, {
-          surface,
-          category: "graph_query",
-          toolName: "omnigraph:merge-main",
-          outcome: "fail",
-          durationMs: Math.max(0, Date.now() - startedAtMs),
-          engineSource: "omnigraph",
-          detail: message,
-        })
-        return {
-          exitCode: failExitCode,
-          stdout: JSON.stringify({
-            decision: blockDecision,
-            reason: `Omnigraph branch diff failed: ${message}`,
-          }),
-          stderr: `[GATE FAILURE] done:omnigraph-branch-diff\n${message}`,
-        }
-      })
+      .with({ _tag: "DiffFailed" }, ({ message }) =>
+        failPreMergeVerify(
+          "done:omnigraph-branch-diff",
+          `Omnigraph branch diff failed: ${message}`,
+          message,
+        ),
+      )
       .with({ _tag: "MissingMergeBase" }, { _tag: "Ok" }, () => undefined)
       .exhaustive()
     if (diffFailureResult !== undefined) {
@@ -175,12 +183,29 @@ export const runPreMergeOmnigraphBranchVerify = (
       .with({ _tag: "DiffFailed" }, { _tag: "MissingMergeBase" }, () => false)
       .exhaustive()
 
-    const planEffectFnQualnames = shouldLoadPlanSnapshot
-      ? yield* loadPlanEffectFnQualnames(
-          join(repoRoot, ".harness", "plan-graph-snapshot.json"),
-          nodeSyncHostIo,
+    let planEffectFnQualnames: ReadonlySet<string> | undefined
+    if (shouldLoadPlanSnapshot) {
+      const planQualnamesRes = yield* loadPlanEffectFnQualnames(
+        join(repoRoot, ".harness", "plan-graph-snapshot.json"),
+        nodeSyncHostIo,
+      )
+      const planSnapshotFailure = match(planQualnamesRes)
+        .with({ _tag: "Ok" }, ({ qualnames }) => {
+          planEffectFnQualnames = qualnames
+          return undefined
+        })
+        .with({ _tag: "Corrupt" }, ({ reason }) =>
+          failPreMergeVerify(
+            "done:omnigraph-plan-snapshot",
+            `Omnigraph plan snapshot decode failed: ${reason}`,
+            reason,
+          ),
         )
-      : undefined
+        .exhaustive()
+      if (planSnapshotFailure !== undefined) {
+        return planSnapshotFailure
+      }
+    }
 
     const diffState = match(branchDiffOpt)
       .with({ _tag: "DiffFailed" }, { _tag: "MissingMergeBase" }, () => ({
@@ -275,25 +300,15 @@ export const runPreMergeOmnigraphBranchVerify = (
     )
 
     return yield* match(dryRunOutcome)
-      .with({ _tag: "LoadErr" }, ({ message }) => {
-        recordTelemetry(options, {
-          surface,
-          category: "graph_query",
-          toolName: "omnigraph:merge-main",
-          outcome: "fail",
-          durationMs: Math.max(0, Date.now() - startedAtMs),
-          engineSource: "omnigraph",
-          detail: message,
-        })
-        return Effect.succeed<CliResult | undefined>({
-          exitCode: failExitCode,
-          stdout: JSON.stringify({
-            decision: blockDecision,
-            reason: `Omnigraph dry-run merge failed: ${message}`,
-          }),
-          stderr: `[GATE FAILURE] done:omnigraph-dry-run-merge\n${message}`,
-        })
-      })
+      .with({ _tag: "LoadErr" }, ({ message }) =>
+        Effect.succeed<CliResult | undefined>(
+          failPreMergeVerify(
+            "done:omnigraph-dry-run-merge",
+            `Omnigraph dry-run merge failed: ${message}`,
+            message,
+          ),
+        ),
+      )
       .with({ _tag: "Ok" }, { _tag: "Conflicts" }, ({ conflicts }) =>
         Effect.gen(function* () {
           const verifyReport = yield* decideOmnigraphBranchVerify({
@@ -307,24 +322,12 @@ export const runPreMergeOmnigraphBranchVerify = (
           return match(verifyReport)
             .with({ verdict: "clean" }, () => undefined)
             .with({ verdict: "violated" }, ({ violations }) => {
-              const reason = violations.map((v) => `[${v._tag}] ${v.message}`).join("; ")
-              recordTelemetry(options, {
-                surface,
-                category: "graph_query",
-                toolName: "omnigraph:merge-main",
-                outcome: "fail",
-                durationMs: Math.max(0, Date.now() - startedAtMs),
-                engineSource: "omnigraph",
-                detail: reason,
-              })
-              return {
-                exitCode: failExitCode,
-                stdout: JSON.stringify({
-                  decision: blockDecision,
-                  reason: `Omnigraph branch verification failed: ${reason}`,
-                }),
-                stderr: `[GATE FAILURE] done:omnigraph-branch-verify\n${reason}`,
-              } satisfies CliResult
+              const detail = violations.map((v) => `[${v._tag}] ${v.message}`).join("; ")
+              return failPreMergeVerify(
+                "done:omnigraph-branch-verify",
+                `Omnigraph branch verification failed: ${detail}`,
+                detail,
+              )
             })
             .exhaustive()
         }),
@@ -383,11 +386,15 @@ export const syncVerifyImplToOmnigraph = (
         process.env,
         commitId !== undefined ? { omnigraphCommitId: commitId } : undefined,
       )
-      if ((headState.headSha !== null || headState.gitBranch !== null || commitId !== undefined) && savedMeta === null) {
+      if (
+        (headState.headSha !== null || headState.gitBranch !== null || commitId !== undefined) &&
+        savedMeta === null
+      ) {
         return {
           exitCode: 1,
           stdout: "",
-          stderr: "Verification failed: could not persist graph head metadata (.harness/graph-head.json)",
+          stderr:
+            "Verification failed: could not persist graph head metadata (.harness/graph-head.json)",
         }
       }
       const blobFail = yield* uploadAndVerifySpanTraceBlob(
@@ -437,6 +444,22 @@ export const syncOmnigraphOnDone = (
     const startedAtMs = Date.now()
     const surface = isAntigravity ? "hook" : "cli"
     const failExitCode = isAntigravity ? 0 : 1
+    const failMergeBlock = (reason: string, stderr: string, detail?: string): CliResult => {
+      recordTelemetry(options, {
+        surface,
+        category: "graph_query",
+        toolName: "omnigraph:merge-main",
+        outcome: "fail",
+        durationMs: Math.max(0, Date.now() - startedAtMs),
+        engineSource: "omnigraph",
+        ...(detail !== undefined ? { detail } : {}),
+      })
+      return {
+        exitCode: failExitCode,
+        stdout: JSON.stringify({ decision: blockDecision, reason }),
+        stderr,
+      }
+    }
     if (isIsolatedExternalWorkspace(repoRoot)) {
       const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
       const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
@@ -455,23 +478,7 @@ export const syncOmnigraphOnDone = (
 
     const isReady = yield* ensureLocalOmnigraphReady(repoRoot)
     if (!isReady) {
-      recordTelemetry(options, {
-        surface,
-        category: "graph_query",
-        toolName: "omnigraph:merge-main",
-        outcome: "fail",
-        durationMs: Math.max(0, Date.now() - startedAtMs),
-        engineSource: "omnigraph",
-        detail: "omnigraph-server-not-ready",
-      })
-      return {
-        exitCode: failExitCode,
-        stdout: JSON.stringify({
-          decision: blockDecision,
-          reason: "Omnigraph server is not ready",
-        }),
-        stderr: "",
-      }
+      return failMergeBlock("Omnigraph server is not ready", "", "omnigraph-server-not-ready")
     }
 
     const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
@@ -482,31 +489,21 @@ export const syncOmnigraphOnDone = (
     const snapshotPath = join(repoRoot, ".harness", "graph-snapshot.json")
     if (nodeSyncHostIo.existsSync(snapshotPath)) {
       const loadExit = yield* Effect.exit(loadGraphSnapshotEffect(snapshotPath, nodeSyncHostIo))
-      const loaded = match(loadExit)
-        .with({ _tag: "Success" }, ({ value }) => ({ ok: true as const, graph: value }))
-        .with({ _tag: "Failure" }, ({ cause }) => ({
-          ok: false as const,
-          message: Cause.pretty(cause),
-        }))
+      const loaded = yield* match(loadExit)
+        .with({ _tag: "Success" }, ({ value }) =>
+          Effect.succeed({ ok: true as const, graph: value }),
+        )
+        .with({ _tag: "Failure" }, ({ cause }) => {
+          if (isPureInterruptCause(cause)) return failPureInterruptCause(cause)
+          return Effect.succeed({ ok: false as const, message: Cause.pretty(cause) })
+        })
         .exhaustive()
       if (!loaded.ok) {
-        recordTelemetry(options, {
-          surface,
-          category: "graph_query",
-          toolName: "omnigraph:merge-main",
-          outcome: "fail",
-          durationMs: Math.max(0, Date.now() - startedAtMs),
-          engineSource: "omnigraph",
-          detail: loaded.message,
-        })
-        return {
-          exitCode: failExitCode,
-          stdout: JSON.stringify({
-            decision: blockDecision,
-            reason: `Failed to load .harness/graph-snapshot.json: ${loaded.message}`,
-          }),
-          stderr: `[GATE FAILURE] done:omnigraph-snapshot-load\n${loaded.message}`,
-        }
+        return failMergeBlock(
+          `Failed to load .harness/graph-snapshot.json: ${loaded.message}`,
+          `[GATE FAILURE] done:omnigraph-snapshot-load\n${loaded.message}`,
+          loaded.message,
+        )
       }
       implGraph = loaded.graph
       const preservedBlob = yield* readExistingSpanTraceBlobIfSpansMissing(
@@ -535,23 +532,11 @@ export const syncOmnigraphOnDone = (
       )
       if (!reloadRes.syncedToOmnigraph) {
         const errMsg = reloadRes.error ?? "unknown sync error"
-        recordTelemetry(options, {
-          surface,
-          category: "graph_query",
-          toolName: "omnigraph:merge-main",
-          outcome: "fail",
-          durationMs: Math.max(0, Date.now() - startedAtMs),
-          engineSource: "omnigraph",
-          detail: errMsg,
-        })
-        return {
-          exitCode: failExitCode,
-          stdout: JSON.stringify({
-            decision: blockDecision,
-            reason: `Failed to reload .harness/graph-snapshot.json to Omnigraph branch '${taskBranches.implBranch}': ${errMsg}`,
-          }),
-          stderr: `[GATE FAILURE] done:omnigraph-snapshot-sync\n${errMsg}`,
-        }
+        return failMergeBlock(
+          `Failed to reload .harness/graph-snapshot.json to Omnigraph branch '${taskBranches.implBranch}': ${errMsg}`,
+          `[GATE FAILURE] done:omnigraph-snapshot-sync\n${errMsg}`,
+          errMsg,
+        )
       }
       const doneBlobFail = yield* uploadAndVerifySpanTraceBlob(
         repoRoot,
@@ -576,9 +561,7 @@ export const syncOmnigraphOnDone = (
       startedAtMs,
       implGraph,
     )
-    if (verifyFailure !== undefined) {
-      return verifyFailure
-    }
+    if (verifyFailure !== undefined) return verifyFailure
 
     const mergeExit = yield* Effect.exit(
       mergeOmnigraphBranch({
@@ -588,19 +571,23 @@ export const syncOmnigraphOnDone = (
         cleanupBranches: [taskBranches.implBranch, taskBranches.planBranch],
       }).pipe(Effect.provide(syncLayer)),
     )
-    const mergeOutcome = match(mergeExit)
-      .with({ _tag: "Success" }, () => ({
-        ok: true,
-        detail: undefined,
-      }))
+    const mergeOutcome = yield* match(mergeExit)
+      .with({ _tag: "Success" }, () => Effect.succeed({ ok: true, detail: undefined }))
       .with({ _tag: "Failure" }, ({ cause }) => {
+        if (isPureInterruptCause(cause)) return failPureInterruptCause(cause)
         const pretty = Cause.pretty(cause)
         process.stderr.write(`[harness:done] Omnigraph branch merge failed: ${pretty}\n`)
-        return { ok: false, detail: pretty }
+        return Effect.succeed({ ok: false, detail: pretty })
       })
       .exhaustive()
 
     if (mergeOutcome.ok) {
+      const cleanupFail = formatPlanSnapshotCleanupFailure(
+        cleanupStalePlanSnapshotAfterDone(repoRoot, nodeSyncHostIo),
+        failExitCode,
+        blockDecision,
+      )
+      if (cleanupFail !== undefined) return cleanupFail
       const headState = resolveGitHeadState(repoRoot, nodeSyncHostIo)
       const savedMeta = writeGraphHeadMeta(repoRoot, nodeSyncHostIo, headState)
       if ((headState.headSha !== null || headState.gitBranch !== null) && savedMeta === null) {

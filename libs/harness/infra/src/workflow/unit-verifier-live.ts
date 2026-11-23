@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import { constants } from "node:os"
 import { Effect, Layer, Result, Schema } from "effect"
@@ -14,6 +13,8 @@ import {
   SHARED_STEP_UNIT_ID,
   UnitOutcome,
   UnitRejection,
+  WORKFLOW_TIMEOUT_BUDGETS,
+  type WorkflowTimeoutMs,
   WorkspaceFilePath,
   WorkspaceFsError,
   WorkspaceFsOperation,
@@ -26,6 +27,7 @@ import { checkVerifyStamp, computeWorkspaceTreeHashChecked } from "@harness/gate
 import { UnitVerifier, type UnitVerifierShape } from "@harness/service"
 import type { ExtendedHostIo, SyncHostExecResult, SyncHostIo } from "@harness/service/host-io"
 import { nodeSyncHostIo } from "../node-host-io.js"
+import { spawnVerifyCommand } from "./verify-child-process.js"
 
 /** Optional host/command overrides injected into `UnitVerifierLive` for tests. */
 export interface UnitVerifierOptions {
@@ -46,7 +48,7 @@ export interface UnitVerifierOptions {
     | undefined
 }
 
-const DEFAULT_VERIFY_TIMEOUT_MS = 120_000
+const DEFAULT_VERIFY_TIMEOUT_MS: WorkflowTimeoutMs = WORKFLOW_TIMEOUT_BUDGETS.unitVerifyMs
 
 const HARNESS_STAMP_ARTIFACTS: ReadonlySet<string> = new Set([
   ".harness/verify-stamp.json",
@@ -189,48 +191,7 @@ const gatherChangedPaths = Effect.fnUntraced(function* (
   }
 })
 
-const MAX_CAPTURE_BYTES = 64 * 1024
-const STDIO_DRAIN_GRACE_MS = 100
-const KILL_GRACE_MS = 500
 const MAX_VERIFY_DETAIL_CHARS = 2048
-
-interface BoundedTailBuffer {
-  chunks: Array<Buffer>
-  totalBytes: number
-}
-
-const createBoundedTailBuffer = (): BoundedTailBuffer => ({
-  chunks: [],
-  totalBytes: 0,
-})
-
-const appendBoundedTailChunk = (state: BoundedTailBuffer, chunk: Buffer | string): void => {
-  const buf = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk
-  if (buf.length === 0) {
-    return
-  }
-  if (buf.length >= MAX_CAPTURE_BYTES) {
-    state.chunks = [buf.subarray(buf.length - MAX_CAPTURE_BYTES)]
-    state.totalBytes = MAX_CAPTURE_BYTES
-    return
-  }
-  state.chunks.push(buf)
-  state.totalBytes += buf.length
-  while (state.totalBytes > MAX_CAPTURE_BYTES && state.chunks.length > 0) {
-    const overflow = state.totalBytes - MAX_CAPTURE_BYTES
-    const head = state.chunks[0]!
-    if (head.length <= overflow) {
-      state.chunks.shift()
-      state.totalBytes -= head.length
-    } else {
-      state.chunks[0] = head.subarray(overflow)
-      state.totalBytes -= overflow
-    }
-  }
-}
-
-const readBoundedTailText = (state: BoundedTailBuffer): string =>
-  state.totalBytes === 0 ? "" : Buffer.concat(state.chunks, state.totalBytes).toString("utf8")
 
 const toPackageVerifyFailureDetail = (stderr: string): PackageVerifyFailureDetail | undefined => {
   const trimmed = stderr.trim()
@@ -257,163 +218,6 @@ const resolveSignaledExitCode = (signal: string): GateExitCode => {
   }
   return GateExitCode.make(1)
 }
-
-const spawnVerifyCommand = (
-  cmd: string,
-  args: ReadonlyArray<string>,
-  opts: {
-    readonly cwd: string
-    readonly env: Readonly<Record<string, string | undefined>>
-    readonly timeoutMs: number
-  },
-): Effect.Effect<SyncHostExecResult, WorkspaceFsError> =>
-  Effect.callback<SyncHostExecResult, WorkspaceFsError>((resume) => {
-    let settled = false
-    let timedOut = false
-    const stdoutBuf = createBoundedTailBuffer()
-    const stderrBuf = createBoundedTailBuffer()
-    let killGraceTimer: ReturnType<typeof setTimeout> | undefined = undefined
-    let stdioDrainTimer: ReturnType<typeof setTimeout> | undefined = undefined
-
-    const child = spawn(cmd, args, {
-      cwd: opts.cwd,
-      env: opts.env,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    })
-
-    child.stdout?.on("data", (chunk: Buffer | string) => {
-      appendBoundedTailChunk(stdoutBuf, chunk)
-    })
-    child.stderr?.on("data", (chunk: Buffer | string) => {
-      appendBoundedTailChunk(stderrBuf, chunk)
-    })
-
-    const terminateChild = (): void => {
-      if (child.killed || child.exitCode !== null || child.signalCode !== null) {
-        return
-      }
-      child.kill("SIGTERM")
-      killGraceTimer = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) {
-          child.kill("SIGKILL")
-        }
-      }, KILL_GRACE_MS)
-      killGraceTimer.unref()
-    }
-
-    const timeoutTimer =
-      opts.timeoutMs > 0
-        ? setTimeout(() => {
-            timedOut = true
-            terminateChild()
-          }, opts.timeoutMs)
-        : undefined
-    if (timeoutTimer !== undefined) {
-      timeoutTimer.unref()
-    }
-
-    const cleanupTimers = (): void => {
-      if (timeoutTimer !== undefined) {
-        clearTimeout(timeoutTimer)
-      }
-      if (killGraceTimer !== undefined) {
-        clearTimeout(killGraceTimer)
-      }
-      if (stdioDrainTimer !== undefined) {
-        clearTimeout(stdioDrainTimer)
-      }
-    }
-
-    const destroyStdio = (): void => {
-      child.stdout?.removeAllListeners()
-      child.stdout?.destroy()
-      child.stderr?.removeAllListeners()
-      child.stderr?.destroy()
-    }
-
-    const settleWithExit = (code: number | null, signal: NodeJS.Signals | null): void => {
-      if (settled) {
-        return
-      }
-      settled = true
-      cleanupTimers()
-      destroyStdio()
-      const stdout = readBoundedTailText(stdoutBuf)
-      const stderr = readBoundedTailText(stderrBuf)
-      if (timedOut) {
-        resume(
-          Effect.succeed({
-            _tag: "TimedOut",
-            stdout,
-            stderr,
-            ...(signal !== null ? { signal } : {}),
-          }),
-        )
-        return
-      }
-      if (signal !== null) {
-        resume(
-          Effect.succeed({
-            _tag: "Signaled",
-            signal,
-            stdout,
-            stderr,
-          }),
-        )
-        return
-      }
-      resume(
-        Effect.succeed({
-          _tag: "Exited",
-          exitCode: code ?? 1,
-          stdout,
-          stderr,
-        }),
-      )
-    }
-
-    child.once("error", (err) => {
-      if (settled) {
-        return
-      }
-      settled = true
-      cleanupTimers()
-      destroyStdio()
-      resume(
-        Effect.succeed({
-          _tag: "SpawnFailed",
-          spawnError: err.message,
-          stdout: readBoundedTailText(stdoutBuf),
-          stderr: readBoundedTailText(stderrBuf),
-        }),
-      )
-    })
-
-    child.once("exit", (code, signal) => {
-      if (timeoutTimer !== undefined) {
-        clearTimeout(timeoutTimer)
-      }
-      if (settled || stdioDrainTimer !== undefined) {
-        return
-      }
-      stdioDrainTimer = setTimeout(() => {
-        settleWithExit(code, signal)
-      }, STDIO_DRAIN_GRACE_MS)
-      stdioDrainTimer.unref()
-    })
-
-    child.once("close", (code, signal) => {
-      settleWithExit(code, signal)
-    })
-
-    return Effect.sync(() => {
-      settled = true
-      cleanupTimers()
-      terminateChild()
-      destroyStdio()
-    })
-  })
 
 const decodeChangedPaths = (
   rawPaths: ReadonlyArray<string>,
@@ -693,7 +497,7 @@ export const completeUnitImpl = Effect.fn("Harness.completeUnit")(function* (
     .exhaustive()
 })
 
-/** Verifies sequential `sharedStepPaths` changes on canonical checkout (`REQ-1.4`). */
+/** Verifies sequential `sharedStepPaths` changes on canonical checkout (`SPEC-0023 REQ-2.1` / `RFC-0013 REQ-1.4`). */
 export const completeSharedStepImpl = Effect.fn("Harness.completeSharedStep")(function* (
   input: CompleteSharedStepInput,
   options?: UnitVerifierOptions,

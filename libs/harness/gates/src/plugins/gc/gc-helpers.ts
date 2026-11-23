@@ -75,27 +75,6 @@ export const IGNORED_ERRORS = new Set([
   "OutboxPublishError",
 ])
 
-export const IGNORED_UNTESTED_FNS = new Set([
-  "Friction.decide",
-  "GraphGc.decide",
-  "MigrationSafety.decide",
-  "MutationCheck.decide",
-  "SessionHandoff.decide",
-  "SpanBudget.decide",
-  "Harness.decideGuardCommand",
-  "Harness.routeStep",
-  "Harness.proposeLearningAction",
-  "Harness.checkPlanStepCoverage",
-  "Harness.triageFailure",
-  "EarsSpecLint.decide",
-  "AdrDocLint.decide",
-  "OntologyInvariants.decide",
-  "SessionReport.decide",
-  "Harness.checkOntologyPairConflict",
-  "Harness.evaluateOntologyConflicts",
-  "HarnessMcp.executeTool",
-])
-
 export interface GraphReachabilityContext {
   readonly nodeByIndex: ReadonlyMap<Graph.NodeIndex, HarnessNode>
   readonly nodeIndexById: ReadonlyMap<string, Graph.NodeIndex>

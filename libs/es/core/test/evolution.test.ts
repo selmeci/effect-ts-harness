@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect, Schema } from "effect"
+import { Cause, Effect, Exit, Schema } from "effect"
 import {
   EventSchemaEvolutionInput,
   EventSchemaVersion,
@@ -256,300 +256,208 @@ describe("EventSchemaEvolution & Upcasting", () => {
         .exhaustive()
     })
 
-    it.effect("cartDeciderV2 evolves and decides over CartEventV2 and CartCommandV2", () =>
+    const expectCartV2Failure = <A, E>(
+      exit: Exit.Exit<A, E>,
+      predicate: (err: E) => boolean,
+    ): void => {
+      match(exit)
+        .with({ _tag: "Failure" }, (f) => {
+          const err = Cause.findErrorOption(f.cause)
+          match(err)
+            .with({ _tag: "Some" }, (s) => {
+              expect(predicate(s.value)).toBe(true)
+            })
+            .with({ _tag: "None" }, () => {
+              expect.unreachable("Expected typed error")
+            })
+            .exhaustive()
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("Expected failure")
+        })
+        .exhaustive()
+    }
+
+    it.effect(
+      "cartDeciderV2 evolves and decides happy-path AddItem/CheckoutV2 and no-op transitions",
+      () =>
+        Effect.gen(function* () {
+          const cartId = CartId.make("cart-v2-1")
+          const itemId = ItemId.make("item-abc")
+          const orderId = OrderId.make("order-xyz")
+          const channel = CheckoutChannel.make("kiosk")
+
+          const addCmd = AddItem.make({ cartId, itemId, quantity: PositiveInt.make(2) })
+          const events1 = yield* cartDeciderV2.decide(addCmd, initialCartStateV2)
+          expect(events1.length).toBe(2)
+          expect(events1[0]?._tag).toBe("CartCreated")
+          expect(events1[1]?._tag).toBe("ItemAdded")
+
+          const state1 = events1.reduce(cartDeciderV2.evolve, initialCartStateV2)
+          match(state1)
+            .with({ _tag: "ActiveCart" }, (s) => {
+              expect(s.cartId).toBe(cartId)
+              expect(s.itemCount).toBe(2)
+              expect(s.items).toEqual([{ itemId, quantity: PositiveInt.make(2) }])
+            })
+            .with({ _tag: "EmptyCart" }, () => {
+              expect.unreachable("Expected ActiveCart")
+            })
+            .with({ _tag: "CheckedOutCart" }, () => {
+              expect.unreachable("Expected ActiveCart")
+            })
+            .exhaustive()
+
+          const checkoutCmd = CheckoutV2.make({ cartId, orderId, channel })
+          const events2 = yield* cartDeciderV2.decide(checkoutCmd, state1)
+          expect(events2.length).toBe(1)
+          expect(events2[0]?._tag).toBe("CartCheckedOut")
+          expect(events2[0]?.version).toBe(2)
+
+          const state2 = events2.reduce(cartDeciderV2.evolve, state1)
+          match(state2)
+            .with({ _tag: "CheckedOutCart" }, (s) => {
+              expect(s.cartId).toBe(cartId)
+              expect(s.orderId).toBe(orderId)
+              expect(s.channel).toBe(channel)
+              expect(s.totalItems).toBe(2)
+            })
+            .with({ _tag: "ActiveCart" }, () => {
+              expect.unreachable("Expected CheckedOutCart")
+            })
+            .with({ _tag: "EmptyCart" }, () => {
+              expect.unreachable("Expected CheckedOutCart")
+            })
+            .exhaustive()
+
+          expect(cartDeciderV2.evolve(state1, { _tag: "CartCreated", cartId, version: 1 })).toEqual(
+            state1,
+          )
+          expect(cartDeciderV2.evolve(state2, { _tag: "CartCreated", cartId, version: 1 })).toEqual(
+            state2,
+          )
+          expect(
+            cartDeciderV2.evolve(state1, {
+              _tag: "ItemAdded",
+              cartId: CartId.make("other-cart"),
+              itemId,
+              quantity: PositiveInt.make(1),
+              version: 1,
+            }),
+          ).toEqual(state1)
+          expect(
+            cartDeciderV2.evolve(initialCartStateV2, {
+              _tag: "ItemAdded",
+              cartId,
+              itemId,
+              quantity: PositiveInt.make(1),
+              version: 1,
+            }),
+          ).toEqual(initialCartStateV2)
+          expect(
+            cartDeciderV2.evolve(state2, {
+              _tag: "ItemAdded",
+              cartId,
+              itemId,
+              quantity: PositiveInt.make(1),
+              version: 1,
+            }),
+          ).toEqual(state2)
+          expect(
+            cartDeciderV2.evolve(state1, {
+              _tag: "CartCheckedOut",
+              cartId: CartId.make("other-cart"),
+              orderId,
+              channel,
+              version: 2,
+            }),
+          ).toEqual(state1)
+          expect(
+            cartDeciderV2.evolve(initialCartStateV2, {
+              _tag: "CartCheckedOut",
+              cartId,
+              orderId,
+              channel,
+              version: 2,
+            }),
+          ).toEqual(initialCartStateV2)
+          expect(
+            cartDeciderV2.evolve(state2, {
+              _tag: "CartCheckedOut",
+              cartId,
+              orderId,
+              channel,
+              version: 2,
+            }),
+          ).toEqual(state2)
+        }),
+    )
+
+    it.effect("cartDeciderV2 enforces typed errors and CartIdMismatchError precedence", () =>
       Effect.gen(function* () {
         const cartId = CartId.make("cart-v2-1")
         const itemId = ItemId.make("item-abc")
         const orderId = OrderId.make("order-xyz")
         const channel = CheckoutChannel.make("kiosk")
+        const addCmd = AddItem.make({ cartId, itemId, quantity: PositiveInt.make(2) })
+        const checkoutCmd = CheckoutV2.make({ cartId, orderId, channel })
 
-        // 1. AddItem on EmptyCart
-        const addCmd = AddItem.make({
-          cartId,
-          itemId,
-          quantity: PositiveInt.make(2),
-        })
         const events1 = yield* cartDeciderV2.decide(addCmd, initialCartStateV2)
-        expect(events1.length).toBe(2)
-        expect(events1[0]?._tag).toBe("CartCreated")
-        expect(events1[1]?._tag).toBe("ItemAdded")
-
         const state1 = events1.reduce(cartDeciderV2.evolve, initialCartStateV2)
-        match(state1)
-          .with({ _tag: "ActiveCart" }, (s) => {
-            expect(s.cartId).toBe(cartId)
-            expect(s.itemCount).toBe(2)
-            expect(s.items).toEqual([{ itemId, quantity: PositiveInt.make(2) }])
-          })
-          .with({ _tag: "EmptyCart" }, () => {
-            expect.unreachable("Expected ActiveCart")
-          })
-          .with({ _tag: "CheckedOutCart" }, () => {
-            expect.unreachable("Expected ActiveCart")
-          })
-          .exhaustive()
-
-        // 2. CheckoutV2 on ActiveCart
-        const checkoutCmd = CheckoutV2.make({
-          cartId,
-          orderId,
-          channel,
-        })
-        const events2 = yield* cartDeciderV2.decide(checkoutCmd, state1)
-        expect(events2.length).toBe(1)
-        expect(events2[0]?._tag).toBe("CartCheckedOut")
-        expect(events2[0]?.version).toBe(2)
-
-        const state2 = events2.reduce(cartDeciderV2.evolve, state1)
-        match(state2)
-          .with({ _tag: "CheckedOutCart" }, (s) => {
-            expect(s.cartId).toBe(cartId)
-            expect(s.orderId).toBe(orderId)
-            expect(s.channel).toBe(channel)
-            expect(s.totalItems).toBe(2)
-          })
-          .with({ _tag: "ActiveCart" }, () => {
-            expect.unreachable("Expected CheckedOutCart")
-          })
-          .with({ _tag: "EmptyCart" }, () => {
-            expect.unreachable("Expected CheckedOutCart")
-          })
-          .exhaustive()
-
-        // 2b. Verify evolveCartV2 preserves state on no-op/mismatched/terminal transitions
-        expect(cartDeciderV2.evolve(state1, { _tag: "CartCreated", cartId, version: 1 })).toEqual(
+        const state2 = (yield* cartDeciderV2.decide(checkoutCmd, state1)).reduce(
+          cartDeciderV2.evolve,
           state1,
         )
-        expect(cartDeciderV2.evolve(state2, { _tag: "CartCreated", cartId, version: 1 })).toEqual(
-          state2,
-        )
-        expect(
-          cartDeciderV2.evolve(state1, {
-            _tag: "ItemAdded",
-            cartId: CartId.make("other-cart"),
-            itemId,
-            quantity: PositiveInt.make(1),
-            version: 1,
-          }),
-        ).toEqual(state1)
-        expect(
-          cartDeciderV2.evolve(initialCartStateV2, {
-            _tag: "ItemAdded",
-            cartId,
-            itemId,
-            quantity: PositiveInt.make(1),
-            version: 1,
-          }),
-        ).toEqual(initialCartStateV2)
-        expect(
-          cartDeciderV2.evolve(state2, {
-            _tag: "ItemAdded",
-            cartId,
-            itemId,
-            quantity: PositiveInt.make(1),
-            version: 1,
-          }),
-        ).toEqual(state2)
-        expect(
-          cartDeciderV2.evolve(state1, {
-            _tag: "CartCheckedOut",
-            cartId: CartId.make("other-cart"),
-            orderId,
-            channel,
-            version: 2,
-          }),
-        ).toEqual(state1)
-        expect(
-          cartDeciderV2.evolve(initialCartStateV2, {
-            _tag: "CartCheckedOut",
-            cartId,
-            orderId,
-            channel,
-            version: 2,
-          }),
-        ).toEqual(initialCartStateV2)
-        expect(
-          cartDeciderV2.evolve(state2, {
-            _tag: "CartCheckedOut",
-            cartId,
-            orderId,
-            channel,
-            version: 2,
-          }),
-        ).toEqual(state2)
 
-        // 3. CartIdMismatchError on AddItem and CheckoutV2
         const wrongCartAdd = AddItem.make({
           cartId: CartId.make("wrong-cart"),
           itemId,
           quantity: PositiveInt.make(1),
         })
-        const addMismatchExit = yield* Effect.exit(cartDeciderV2.decide(wrongCartAdd, state1))
-        match(addMismatchExit)
-          .with({ _tag: "Failure" }, (f) => {
-            const err = Cause.findErrorOption(f.cause)
-            match(err)
-              .with({ _tag: "Some" }, (s) => {
-                expect(s.value instanceof CartIdMismatchError).toBe(true)
-              })
-              .with({ _tag: "None" }, () => {
-                expect.unreachable("Expected typed error")
-              })
-              .exhaustive()
-          })
-          .with({ _tag: "Success" }, () => {
-            expect.unreachable("Expected failure")
-          })
-          .exhaustive()
+        expectCartV2Failure(
+          yield* Effect.exit(cartDeciderV2.decide(wrongCartAdd, state1)),
+          (e) => e instanceof CartIdMismatchError,
+        )
 
         const wrongCartCheckout = CheckoutV2.make({
           cartId: CartId.make("wrong-cart"),
           orderId,
           channel,
         })
-        const checkoutMismatchExit = yield* Effect.exit(
-          cartDeciderV2.decide(wrongCartCheckout, state1),
+        expectCartV2Failure(
+          yield* Effect.exit(cartDeciderV2.decide(wrongCartCheckout, state1)),
+          (e) => e instanceof CartIdMismatchError,
         )
-        match(checkoutMismatchExit)
-          .with({ _tag: "Failure" }, (f) => {
-            const err = Cause.findErrorOption(f.cause)
-            match(err)
-              .with({ _tag: "Some" }, (s) => {
-                expect(s.value instanceof CartIdMismatchError).toBe(true)
-              })
-              .with({ _tag: "None" }, () => {
-                expect.unreachable("Expected typed error")
-              })
-              .exhaustive()
-          })
-          .with({ _tag: "Success" }, () => {
-            expect.unreachable("Expected failure")
-          })
-          .exhaustive()
-
-        // 4. EmptyCartCheckoutError on EmptyCart and on ActiveCart with zero items
-        const emptyCheckoutExit = yield* Effect.exit(
-          cartDeciderV2.decide(checkoutCmd, initialCartStateV2),
+        expectCartV2Failure(
+          yield* Effect.exit(cartDeciderV2.decide(checkoutCmd, initialCartStateV2)),
+          (e) => e instanceof EmptyCartCheckoutError,
         )
-        match(emptyCheckoutExit)
-          .with({ _tag: "Failure" }, (f) => {
-            const err = Cause.findErrorOption(f.cause)
-            match(err)
-              .with({ _tag: "Some" }, (s) => {
-                expect(s.value instanceof EmptyCartCheckoutError).toBe(true)
-              })
-              .with({ _tag: "None" }, () => {
-                expect.unreachable("Expected typed error")
-              })
-              .exhaustive()
-          })
-          .with({ _tag: "Success" }, () => {
-            expect.unreachable("Expected failure")
-          })
-          .exhaustive()
 
         const zeroItemsActiveState = cartDeciderV2.evolve(initialCartStateV2, {
           _tag: "CartCreated",
           cartId,
           version: 1,
         })
-        const zeroItemsCheckoutExit = yield* Effect.exit(
-          cartDeciderV2.decide(checkoutCmd, zeroItemsActiveState),
+        expectCartV2Failure(
+          yield* Effect.exit(cartDeciderV2.decide(checkoutCmd, zeroItemsActiveState)),
+          (e) => e instanceof EmptyCartCheckoutError,
         )
-        match(zeroItemsCheckoutExit)
-          .with({ _tag: "Failure" }, (f) => {
-            const err = Cause.findErrorOption(f.cause)
-            match(err)
-              .with({ _tag: "Some" }, (s) => {
-                expect(s.value instanceof EmptyCartCheckoutError).toBe(true)
-              })
-              .with({ _tag: "None" }, () => {
-                expect.unreachable("Expected typed error")
-              })
-              .exhaustive()
-          })
-          .with({ _tag: "Success" }, () => {
-            expect.unreachable("Expected failure")
-          })
-          .exhaustive()
-
-        // 5. CartAlreadyCheckedOutError when already checked out
-        const checkoutAgainExit = yield* Effect.exit(cartDeciderV2.decide(checkoutCmd, state2))
-        match(checkoutAgainExit)
-          .with({ _tag: "Failure" }, (f) => {
-            const err = Cause.findErrorOption(f.cause)
-            match(err)
-              .with({ _tag: "Some" }, (s) => {
-                expect(s.value instanceof CartAlreadyCheckedOutError).toBe(true)
-              })
-              .with({ _tag: "None" }, () => {
-                expect.unreachable("Expected typed error")
-              })
-              .exhaustive()
-          })
-          .with({ _tag: "Success" }, () => {
-            expect.unreachable("Expected failure")
-          })
-          .exhaustive()
-
-        const addAfterCheckoutExit = yield* Effect.exit(cartDeciderV2.decide(addCmd, state2))
-        match(addAfterCheckoutExit)
-          .with({ _tag: "Failure" }, (f) => {
-            const err = Cause.findErrorOption(f.cause)
-            match(err)
-              .with({ _tag: "Some" }, (s) => {
-                expect(s.value instanceof CartAlreadyCheckedOutError).toBe(true)
-              })
-              .with({ _tag: "None" }, () => {
-                expect.unreachable("Expected typed error")
-              })
-              .exhaustive()
-          })
-          .with({ _tag: "Success" }, () => {
-            expect.unreachable("Expected failure")
-          })
-          .exhaustive()
-
-        // 6. Error precedence: CartIdMismatchError beats EmptyCartCheckoutError (on zero-item ActiveCart) and CartAlreadyCheckedOutError (on CheckedOutCart)
-        const mismatchOnZeroItemsExit = yield* Effect.exit(
-          cartDeciderV2.decide(wrongCartCheckout, zeroItemsActiveState),
+        expectCartV2Failure(
+          yield* Effect.exit(cartDeciderV2.decide(checkoutCmd, state2)),
+          (e) => e instanceof CartAlreadyCheckedOutError,
         )
-        match(mismatchOnZeroItemsExit)
-          .with({ _tag: "Failure" }, (f) => {
-            const err = Cause.findErrorOption(f.cause)
-            match(err)
-              .with({ _tag: "Some" }, (s) => {
-                expect(s.value instanceof CartIdMismatchError).toBe(true)
-              })
-              .with({ _tag: "None" }, () => {
-                expect.unreachable("Expected typed error")
-              })
-              .exhaustive()
-          })
-          .with({ _tag: "Success" }, () => {
-            expect.unreachable("Expected failure")
-          })
-          .exhaustive()
-
-        const mismatchOnCheckedOutExit = yield* Effect.exit(
-          cartDeciderV2.decide(wrongCartCheckout, state2),
+        expectCartV2Failure(
+          yield* Effect.exit(cartDeciderV2.decide(addCmd, state2)),
+          (e) => e instanceof CartAlreadyCheckedOutError,
         )
-        match(mismatchOnCheckedOutExit)
-          .with({ _tag: "Failure" }, (f) => {
-            const err = Cause.findErrorOption(f.cause)
-            match(err)
-              .with({ _tag: "Some" }, (s) => {
-                expect(s.value instanceof CartIdMismatchError).toBe(true)
-              })
-              .with({ _tag: "None" }, () => {
-                expect.unreachable("Expected typed error")
-              })
-              .exhaustive()
-          })
-          .with({ _tag: "Success" }, () => {
-            expect.unreachable("Expected failure")
-          })
-          .exhaustive()
+        expectCartV2Failure(
+          yield* Effect.exit(cartDeciderV2.decide(wrongCartCheckout, zeroItemsActiveState)),
+          (e) => e instanceof CartIdMismatchError,
+        )
+        expectCartV2Failure(
+          yield* Effect.exit(cartDeciderV2.decide(wrongCartCheckout, state2)),
+          (e) => e instanceof CartIdMismatchError,
+        )
       }),
     )
   })

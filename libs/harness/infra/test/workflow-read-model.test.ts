@@ -31,6 +31,7 @@ import {
   type SeqKey,
   SliceBranchName,
   StubSymbolKey,
+  UnitEscalation,
   UnitOutcome,
   UnitRejection,
   WaveIndex,
@@ -774,22 +775,19 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
     )
   })
 
-  it("rebuildWorkflowReadModelViews reconstructs sharedStepPaths, /r2 cycles, MergeSliceWave conflicts, InterruptSignal, and Failure exits", async () => {
-    const client = createClient()
-    const layer = makeWorkflowReadModelQueryLayer({ repoRoot, client })
-    const autoRunId = WorkflowRunId.make("run-adv-auto-1")
-    const mergeRunId = WorkflowRunId.make("run-adv-merge-2")
-    const escFailRunId = WorkflowRunId.make("run-adv-esc-3")
+  const makeAdvancedReadModelPlans = (params: {
+    readonly autoRunId: WorkflowRunId
+    readonly mergeRunId: WorkflowRunId
+    readonly escFailRunId: WorkflowRunId
+    readonly unit1: WorkUnitId
+    readonly unit10: WorkUnitId
+    readonly sliceUnit: WorkUnitId
+    readonly sliceBranch: SliceBranchName
+    readonly escUnit: WorkUnitId
+  }) => {
     const baseSha = GitCommitSha.make("e".repeat(40))
-    const stampHash = PackageStampHash.make("a".repeat(64))
-    const unit1 = WorkUnitId.make("u-1")
-    const unit10 = WorkUnitId.make("u-10")
-    const sliceUnit = WorkUnitId.make("u-slice-conflict")
-    const sliceBranch = SliceBranchName.make("slice/u-conflict")
-    const escUnit = WorkUnitId.make("u-esc")
-
     const autoPlan: CompiledPlan = {
-      runId: autoRunId,
+      runId: params.autoRunId,
       level: "slice",
       planSha: PlanSha256.make("3".repeat(64)),
       baseSha,
@@ -801,7 +799,7 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
       units: [
         {
           _tag: "PackageUnit",
-          unitId: unit1,
+          unitId: params.unit1,
           projectName: NxProjectName.make("@harness/u1"),
           waveIndex: WaveIndex.make(0),
           dependsOn: [],
@@ -812,7 +810,7 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
         },
         {
           _tag: "PackageUnit",
-          unitId: unit10,
+          unitId: params.unit10,
           projectName: NxProjectName.make("@harness/u10"),
           waveIndex: WaveIndex.make(0),
           dependsOn: [],
@@ -825,7 +823,7 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
       sharedStepPaths: [OwnedRelPath.make("libs/shared")],
     }
     const mergePlan: CompiledPlan = {
-      runId: mergeRunId,
+      runId: params.mergeRunId,
       level: "epic",
       planSha: PlanSha256.make("4".repeat(64)),
       baseSha,
@@ -833,8 +831,8 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
       units: [
         {
           _tag: "SliceUnit",
-          unitId: sliceUnit,
-          branch: sliceBranch,
+          unitId: params.sliceUnit,
+          branch: params.sliceBranch,
           waveIndex: WaveIndex.make(0),
           dependsOn: [],
           ownedRelPaths: [OwnedRelPath.make("libs/beta")],
@@ -844,7 +842,7 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
       sharedStepPaths: [],
     }
     const escPlan: CompiledPlan = {
-      runId: escFailRunId,
+      runId: params.escFailRunId,
       level: "slice",
       planSha: PlanSha256.make("5".repeat(64)),
       baseSha,
@@ -852,7 +850,7 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
       units: [
         {
           _tag: "PackageUnit",
-          unitId: escUnit,
+          unitId: params.escUnit,
           projectName: NxProjectName.make("@harness/esc"),
           waveIndex: WaveIndex.make(0),
           dependsOn: [],
@@ -864,152 +862,202 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
       ],
       sharedStepPaths: [],
     }
+    return { autoPlan, mergePlan, escPlan }
+  }
+
+  const seedAdvancedReadModelJournal = (
+    client: ReturnType<typeof createClient>,
+    params: {
+      readonly autoRunId: WorkflowRunId
+      readonly mergeRunId: WorkflowRunId
+      readonly escFailRunId: WorkflowRunId
+      readonly unit10: WorkUnitId
+      readonly sliceBranch: SliceBranchName
+      readonly escUnit: WorkUnitId
+      readonly autoPlan: CompiledPlan
+      readonly mergePlan: CompiledPlan
+      readonly escPlan: CompiledPlan
+    },
+  ) =>
+    Effect.gen(function* () {
+      const stampHash = PackageStampHash.make("a".repeat(64))
+      const autoRunMsg = yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.autoRunId,
+        tag: "run",
+        payload: JSON.stringify({ plan: params.autoPlan }),
+      })
+      yield* insertJournalReplyExit(client, autoRunMsg, {
+        _tag: "Success",
+        value: { _tag: "Suspended" },
+      })
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.autoRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: `DispatchUnitAgent/${params.unit10}/1` }),
+      })
+      const v1Msg = yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.autoRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: `VerifyUnit/${params.unit10}/1`, attempt: 1 }),
+      })
+      yield* insertJournalReplyExit(client, v1Msg, {
+        _tag: "Success",
+        value: {
+          _tag: "Complete",
+          exit: {
+            _tag: "Success",
+            value: UnitOutcome.cases.Rejected.make({
+              unitId: params.unit10,
+              attempt: AttemptNumber.make(1),
+              rejection: UnitRejection.cases.AgentFailed.make({
+                reason: AgentFailureReason.make("cycle 1 rejected"),
+              }),
+            }),
+          },
+        },
+      })
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.autoRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: `ProjectUnitEscalated/${params.unit10}/1` }),
+      })
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.autoRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: `ProjectUnitEscalationRetried/${params.unit10}/1` }),
+      })
+      const v2Msg = yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.autoRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: `VerifyUnit/${params.unit10}/1/r2`, attempt: 1 }),
+      })
+      yield* insertJournalReplyExit(client, v2Msg, {
+        _tag: "Success",
+        value: {
+          _tag: "Complete",
+          exit: {
+            _tag: "Success",
+            value: UnitOutcome.cases.Completed.make({
+              unitId: params.unit10,
+              attempt: AttemptNumber.make(1),
+              changedPaths: [OwnedRelPath.make("libs/u10/a.ts")],
+              packageStampHash: stampHash,
+            }),
+          },
+        },
+      })
+      const sharedMsg = yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.autoRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: "VerifySharedStep/1", attempt: 1 }),
+      })
+      yield* insertJournalReplyExit(client, sharedMsg, {
+        _tag: "Success",
+        value: {
+          _tag: "Complete",
+          exit: {
+            _tag: "Success",
+            value: UnitOutcome.cases.Completed.make({
+              unitId: SHARED_STEP_UNIT_ID,
+              attempt: AttemptNumber.make(1),
+              changedPaths: [OwnedRelPath.make("libs/shared/index.ts")],
+              packageStampHash: stampHash,
+            }),
+          },
+        },
+      })
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.autoRunId,
+        tag: "deferred",
+        payload: JSON.stringify({
+          name: "Workflow/InterruptSignal",
+          exit: { _tag: "Success", value: null },
+        }),
+      })
+
+      const mergeRunMsg = yield* insertJournalMessage(client, {
+        shardId: "default:1",
+        entityId: params.mergeRunId,
+        tag: "run",
+        payload: JSON.stringify({ plan: params.mergePlan }),
+      })
+      yield* insertJournalReplyExit(client, mergeRunMsg, {
+        _tag: "Success",
+        value: { _tag: "Suspended" },
+      })
+      const mergeWaveMsg = yield* insertJournalMessage(client, {
+        shardId: "default:1",
+        entityId: params.mergeRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: "MergeSliceWave/0" }),
+      })
+      yield* insertJournalReplyExit(client, mergeWaveMsg, {
+        _tag: "Success",
+        value: {
+          _tag: "Complete",
+          exit: {
+            _tag: "Success",
+            value: MergeSliceWaveOutcome.cases.Conflict.make({ branch: params.sliceBranch }),
+          },
+        },
+      })
+
+      const escRunMsg = yield* insertJournalMessage(client, {
+        shardId: "default:2",
+        entityId: params.escFailRunId,
+        tag: "run",
+        payload: JSON.stringify({ plan: params.escPlan }),
+      })
+      yield* insertJournalReplyExit(client, escRunMsg, { _tag: "Failure" })
+      yield* insertJournalMessage(client, {
+        shardId: "default:2",
+        entityId: params.escFailRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: `ProjectUnitEscalated/${params.escUnit}/1` }),
+      })
+    })
+
+  it("rebuildWorkflowReadModelViews reconstructs sharedStepPaths, /r2 cycles, MergeSliceWave conflicts, InterruptSignal, and Failure exits", async () => {
+    const client = createClient()
+    const layer = makeWorkflowReadModelQueryLayer({ repoRoot, client })
+    const autoRunId = WorkflowRunId.make("run-adv-auto-1")
+    const mergeRunId = WorkflowRunId.make("run-adv-merge-2")
+    const escFailRunId = WorkflowRunId.make("run-adv-esc-3")
+    const unit1 = WorkUnitId.make("u-1")
+    const unit10 = WorkUnitId.make("u-10")
+    const sliceUnit = WorkUnitId.make("u-slice-conflict")
+    const sliceBranch = SliceBranchName.make("slice/u-conflict")
+    const escUnit = WorkUnitId.make("u-esc")
+    const plans = makeAdvancedReadModelPlans({
+      autoRunId,
+      mergeRunId,
+      escFailRunId,
+      unit1,
+      unit10,
+      sliceUnit,
+      sliceBranch,
+      escUnit,
+    })
 
     await Effect.runPromise(
       Effect.gen(function* () {
         const query = yield* WorkflowReadModelQuery
-
-        const autoRunMsg = yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: autoRunId,
-          tag: "run",
-          payload: JSON.stringify({ plan: autoPlan }),
-        })
-        yield* insertJournalReplyExit(client, autoRunMsg, {
-          _tag: "Success",
-          value: { _tag: "Suspended" },
-        })
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: autoRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: `DispatchUnitAgent/${unit10}/1` }),
-        })
-        const v1Msg = yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: autoRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: `VerifyUnit/${unit10}/1`, attempt: 1 }),
-        })
-        yield* insertJournalReplyExit(client, v1Msg, {
-          _tag: "Success",
-          value: {
-            _tag: "Complete",
-            exit: {
-              _tag: "Success",
-              value: UnitOutcome.cases.Rejected.make({
-                unitId: unit10,
-                attempt: AttemptNumber.make(1),
-                rejection: UnitRejection.cases.AgentFailed.make({
-                  reason: AgentFailureReason.make("cycle 1 rejected"),
-                }),
-              }),
-            },
-          },
-        })
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: autoRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: `ProjectUnitEscalated/${unit10}/1` }),
-        })
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: autoRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: `ProjectUnitEscalationRetried/${unit10}/1` }),
-        })
-        const v2Msg = yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: autoRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: `VerifyUnit/${unit10}/1/r2`, attempt: 1 }),
-        })
-        yield* insertJournalReplyExit(client, v2Msg, {
-          _tag: "Success",
-          value: {
-            _tag: "Complete",
-            exit: {
-              _tag: "Success",
-              value: UnitOutcome.cases.Completed.make({
-                unitId: unit10,
-                attempt: AttemptNumber.make(1),
-                changedPaths: [OwnedRelPath.make("libs/u10/a.ts")],
-                packageStampHash: stampHash,
-              }),
-            },
-          },
-        })
-        const sharedMsg = yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: autoRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: "VerifySharedStep/1", attempt: 1 }),
-        })
-        yield* insertJournalReplyExit(client, sharedMsg, {
-          _tag: "Success",
-          value: {
-            _tag: "Complete",
-            exit: {
-              _tag: "Success",
-              value: UnitOutcome.cases.Completed.make({
-                unitId: SHARED_STEP_UNIT_ID,
-                attempt: AttemptNumber.make(1),
-                changedPaths: [OwnedRelPath.make("libs/shared/index.ts")],
-                packageStampHash: stampHash,
-              }),
-            },
-          },
-        })
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: autoRunId,
-          tag: "deferred",
-          payload: JSON.stringify({
-            name: "Workflow/InterruptSignal",
-            exit: { _tag: "Success", value: null },
-          }),
-        })
-
-        const mergeRunMsg = yield* insertJournalMessage(client, {
-          shardId: "default:1",
-          entityId: mergeRunId,
-          tag: "run",
-          payload: JSON.stringify({ plan: mergePlan }),
-        })
-        yield* insertJournalReplyExit(client, mergeRunMsg, {
-          _tag: "Success",
-          value: { _tag: "Suspended" },
-        })
-        const mergeWaveMsg = yield* insertJournalMessage(client, {
-          shardId: "default:1",
-          entityId: mergeRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: "MergeSliceWave/0" }),
-        })
-        yield* insertJournalReplyExit(client, mergeWaveMsg, {
-          _tag: "Success",
-          value: {
-            _tag: "Complete",
-            exit: {
-              _tag: "Success",
-              value: MergeSliceWaveOutcome.cases.Conflict.make({ branch: sliceBranch }),
-            },
-          },
-        })
-
-        const escRunMsg = yield* insertJournalMessage(client, {
-          shardId: "default:2",
-          entityId: escFailRunId,
-          tag: "run",
-          payload: JSON.stringify({ plan: escPlan }),
-        })
-        yield* insertJournalReplyExit(client, escRunMsg, { _tag: "Failure" })
-        yield* insertJournalMessage(client, {
-          shardId: "default:2",
-          entityId: escFailRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: `ProjectUnitEscalated/${escUnit}/1` }),
+        yield* seedAdvancedReadModelJournal(client, {
+          autoRunId,
+          mergeRunId,
+          escFailRunId,
+          unit10,
+          sliceBranch,
+          escUnit,
+          ...plans,
         })
 
         const rebuiltTotal = yield* rebuildWorkflowReadModelViews(repoRoot, {
@@ -1113,7 +1161,7 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
               kind: "request",
               tag: "activity",
               payload: JSON.stringify({
-                name: idx === 1029 ? `DispatchUnitAgent/${unitId}/1` : `NoopTick/${idx}`,
+                name: idx === 1029 ? `DispatchUnitAgent/${unitId}/1` : "ProvisionWorktrees",
               }),
               headers: "{}",
               requestId: key,
@@ -1453,6 +1501,348 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
     )
   })
 
+  const ensureTestWriterLease = (
+    client: Omnigraph,
+    owner: string,
+    targetEpoch: LeaseEpoch,
+  ): Effect.Effect<void, WorkflowStoreUnavailableError> =>
+    Effect.gen(function* () {
+      const existing = yield* invokeWorkflowStoreQuery({
+        repoRoot,
+        client,
+        operation: WorkflowStoreOperation.make("test.getLease"),
+        queryName: "wf_get_writer_lease",
+        params: { name: "engine" },
+        expectMutation: false,
+      })
+      const row = existing[0]
+      if (row === undefined) {
+        yield* invokeWorkflowStoreQuery({
+          repoRoot,
+          client,
+          operation: WorkflowStoreOperation.make("test.insertLease"),
+          queryName: "wf_insert_writer_lease",
+          params: {
+            name: "engine",
+            owner,
+            leaseEpoch: targetEpoch,
+            heartbeatMs: Date.now(),
+          },
+          expectMutation: true,
+        })
+        return
+      }
+      const currentEpoch = LeaseEpoch.make(Number(row.leaseEpoch))
+      yield* invokeWorkflowStoreQuery({
+        repoRoot,
+        client,
+        operation: WorkflowStoreOperation.make("test.casLease"),
+        queryName: "wf_cas_writer_lease",
+        params: {
+          name: "engine",
+          expectedEpoch: currentEpoch,
+          owner,
+          nextEpoch: targetEpoch,
+          heartbeatMs: Date.now(),
+        },
+        expectMutation: true,
+      })
+    })
+
+  it("F-24: writer, query, and rebuild reject ownerId or expectedLeaseOwner mismatch with WriterLeaseHeldError", async () => {
+    const baseClient = createClient()
+    const lockFilePath = LeaseFilePath.make("/tmp/wf3-owner-mismatch-test.lock")
+    const activeHolder = LeaseHolderId.make("daemon-owner-ok")
+    const activeOwner = `${activeHolder}#2001`
+    const wrongHolder = LeaseHolderId.make("daemon-owner-wrong")
+    const wrongPidOwner = `${activeHolder}#9999`
+    const runId = WorkflowRunId.make("run-owner-mismatch-1")
+    const baseSha = GitCommitSha.make("e".repeat(40))
+    const epoch = LeaseEpoch.make(10)
+
+    await Effect.runPromise(ensureTestWriterLease(baseClient, activeOwner, epoch))
+
+    const checkRejected = (opts: {
+      readonly ownerId: LeaseHolderId
+      readonly expectedLeaseOwner?: string
+    }) => {
+      const fencedOpts = {
+        repoRoot,
+        client: baseClient,
+        expectedLeaseEpoch: epoch,
+        ownerId: opts.ownerId,
+        ...(opts.expectedLeaseOwner !== undefined
+          ? { expectedLeaseOwner: opts.expectedLeaseOwner }
+          : {}),
+        lockFilePath,
+      }
+      const layer = Layer.merge(
+        makeWorkflowProjectionWriterLayer(fencedOpts),
+        makeWorkflowReadModelQueryLayer(fencedOpts),
+      )
+      return Effect.gen(function* () {
+        const writer = yield* WorkflowProjectionWriter
+        const query = yield* WorkflowReadModelQuery
+
+        const writeErr = yield* writer
+          .upsertRun({
+            runId,
+            executionId: WorkflowExecutionId.make("exec-owner-mismatch-1"),
+            level: "slice",
+            planSha: PlanSha256.make("a".repeat(64)),
+            baseSha,
+            state: "running",
+            updatedMs: WorkflowTimestampMs.make(1_000),
+          })
+          .pipe(Effect.flip)
+        expect(writeErr).toBeInstanceOf(WriterLeaseHeldError)
+
+        const queryErr = yield* query.getRun(runId).pipe(Effect.flip)
+        expect(queryErr).toBeInstanceOf(WriterLeaseHeldError)
+
+        const rebuildErr = yield* rebuildWorkflowReadModelViews(repoRoot, fencedOpts).pipe(
+          Effect.flip,
+        )
+        expect(rebuildErr).toBeInstanceOf(WriterLeaseHeldError)
+      }).pipe(Effect.provide(layer))
+    }
+
+    // 1. ownerId mismatch with matching epoch rejects all three surfaces
+    await Effect.runPromise(checkRejected({ ownerId: wrongHolder }))
+    // 2. expectedLeaseOwner mismatch (same holderId, different PID) with matching epoch rejects all three surfaces
+    await Effect.runPromise(
+      checkRejected({ ownerId: activeHolder, expectedLeaseOwner: wrongPidOwner }),
+    )
+  })
+
+  it("F-23: rebuildWorkflowReadModelViews retries cleanly when background heartbeat advances graphCommitId under same lease epoch", async () => {
+    const baseClient = createClient()
+    const lockFilePath = LeaseFilePath.make("/tmp/wf3-heartbeat-retry-test.lock")
+    const holderId = LeaseHolderId.make("daemon-hb")
+    const activeOwner = `${holderId}#3001`
+    const epoch = LeaseEpoch.make(20)
+    const runId = WorkflowRunId.make("run-hb-rebuild-1")
+    const staleRunId = WorkflowRunId.make("run-hb-stale-1")
+    const unitId = WorkUnitId.make("u-hb-1")
+    const baseSha = GitCommitSha.make("f".repeat(40))
+    const planSha = PlanSha256.make("7".repeat(64))
+    const stampHash = PackageStampHash.make("b".repeat(64))
+    const plan: CompiledPlan = {
+      runId,
+      level: "slice",
+      planSha,
+      baseSha,
+      mode: { _tag: "Manual" },
+      units: [
+        {
+          _tag: "PackageUnit",
+          unitId,
+          projectName: NxProjectName.make("@harness/hb"),
+          waveIndex: WaveIndex.make(0),
+          dependsOn: [],
+          ownedRelPaths: [OwnedRelPath.make("libs/hb")],
+          stubKeys: [],
+          earsKeys: [],
+          packageVerifyCommand: PackageVerifyCommand.make("pnpm nx run @harness/hb:verify"),
+        },
+      ],
+      sharedStepPaths: [],
+    }
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* ensureTestWriterLease(baseClient, activeOwner, epoch)
+        const writer = yield* WorkflowProjectionWriter
+        yield* writer.upsertRun({
+          runId: staleRunId,
+          executionId: WorkflowExecutionId.make("exec-hb-stale-1"),
+          level: "slice",
+          planSha,
+          baseSha,
+          state: "running",
+          updatedMs: WorkflowTimestampMs.make(1_000),
+        })
+        const runMsg = yield* insertJournalMessage(baseClient, {
+          shardId: "default:0",
+          entityId: runId,
+          tag: "run",
+          payload: JSON.stringify({ plan }),
+        })
+        yield* insertJournalReplyExit(baseClient, runMsg, {
+          _tag: "Success",
+          value: { _tag: "Complete", exit: { _tag: "Success", value: {} } },
+        })
+        const verifyMsg = yield* insertJournalMessage(baseClient, {
+          shardId: "default:0",
+          entityId: runId,
+          tag: "activity",
+          payload: JSON.stringify({ name: `VerifyUnit/${unitId}/1`, attempt: 1 }),
+        })
+        yield* insertJournalReplyExit(baseClient, verifyMsg, {
+          _tag: "Success",
+          value: {
+            _tag: "Complete",
+            exit: {
+              _tag: "Success",
+              value: UnitOutcome.cases.Completed.make({
+                unitId,
+                attempt: AttemptNumber.make(1),
+                changedPaths: [OwnedRelPath.make("libs/hb/index.ts")],
+                packageStampHash: stampHash,
+              }),
+            },
+          },
+        })
+      }).pipe(Effect.provide(makeWorkflowProjectionWriterLayer({ repoRoot, client: baseClient }))),
+    )
+
+    let phase2HeartbeatInjected = false
+    let phase3HeartbeatInjected = false
+    let injectedCount = 0
+    const hbClient = wrapQueriesInvoke(baseClient, async (name, orig, input, opts) => {
+      if (name === "wf_delete_run_views" && !phase2HeartbeatInjected) {
+        phase2HeartbeatInjected = true
+        injectedCount += 1
+        await orig("wf_refresh_writer_lease", {
+          branch: "main",
+          expectMutation: true,
+          params: {
+            name: "engine",
+            owner: activeOwner,
+            expectedEpoch: epoch,
+            heartbeatMs: Date.now(),
+          },
+        })
+      }
+      if (name === "wf_insert_unit" && !phase3HeartbeatInjected) {
+        phase3HeartbeatInjected = true
+        injectedCount += 1
+        await orig("wf_refresh_writer_lease", {
+          branch: "main",
+          expectMutation: true,
+          params: {
+            name: "engine",
+            owner: activeOwner,
+            expectedEpoch: epoch,
+            heartbeatMs: Date.now(),
+          },
+        })
+      }
+      return orig(name, input, opts)
+    })
+
+    const fencedOpts = {
+      repoRoot,
+      client: hbClient,
+      expectedLeaseEpoch: epoch,
+      expectedLeaseOwner: activeOwner,
+      ownerId: holderId,
+      lockFilePath,
+      nowMs: () => 444_000,
+    }
+    const queryLayer = makeWorkflowReadModelQueryLayer({ repoRoot, client: baseClient })
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const query = yield* WorkflowReadModelQuery
+        const rebuilt = yield* rebuildWorkflowReadModelViews(repoRoot, fencedOpts)
+        expect(injectedCount).toBe(2)
+        expect(rebuilt).toBe(1)
+        expect((yield* query.getRun(staleRunId))._tag).toBe("None")
+        expect((yield* query.getRun(runId))._tag).toBe("Some")
+        expect(yield* query.listUnits(runId)).toHaveLength(1)
+        expect(yield* query.listAttempts(runId)).toHaveLength(1)
+      }).pipe(
+        Effect.ensuring(cleanupRunsAndJournal(baseClient, [runId, staleRunId]).pipe(Effect.ignore)),
+        Effect.provide(queryLayer),
+      ),
+    )
+  })
+
+  it("F-23: rebuildWorkflowReadModelViews fails immediately with WriterLeaseHeldError when external writer advances lease epoch mid-Phase-2/3", async () => {
+    const baseClient = createClient()
+    const lockFilePath = LeaseFilePath.make("/tmp/wf3-takeover-fail-test.lock")
+    const holderId = LeaseHolderId.make("daemon-old")
+    const oldOwner = `${holderId}#4001`
+    const oldEpoch = LeaseEpoch.make(30)
+    const newEpoch = LeaseEpoch.make(31)
+    const runId = WorkflowRunId.make("run-takeover-fail-1")
+    const unitId = WorkUnitId.make("u-takeover-1")
+    const baseSha = GitCommitSha.make("e".repeat(40))
+    const plan: CompiledPlan = {
+      runId,
+      level: "slice",
+      planSha: PlanSha256.make("8".repeat(64)),
+      baseSha,
+      mode: { _tag: "Manual" },
+      units: [
+        {
+          _tag: "PackageUnit",
+          unitId,
+          projectName: NxProjectName.make("@harness/takeover"),
+          waveIndex: WaveIndex.make(0),
+          dependsOn: [],
+          ownedRelPaths: [OwnedRelPath.make("libs/takeover")],
+          stubKeys: [],
+          earsKeys: [],
+          packageVerifyCommand: PackageVerifyCommand.make("pnpm nx run @harness/takeover:verify"),
+        },
+      ],
+      sharedStepPaths: [],
+    }
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* ensureTestWriterLease(baseClient, oldOwner, oldEpoch)
+        const runMsg = yield* insertJournalMessage(baseClient, {
+          shardId: "default:0",
+          entityId: runId,
+          tag: "run",
+          payload: JSON.stringify({ plan }),
+        })
+        yield* insertJournalReplyExit(baseClient, runMsg, {
+          _tag: "Success",
+          value: { _tag: "Suspended" },
+        })
+      }),
+    )
+
+    let takeoverTriggered = false
+    const takeoverClient = wrapQueriesInvoke(baseClient, async (name, orig, input, opts) => {
+      if (name === "wf_insert_unit" && !takeoverTriggered) {
+        takeoverTriggered = true
+        await orig("wf_cas_writer_lease", {
+          branch: "main",
+          expectMutation: true,
+          params: {
+            name: "engine",
+            owner: "external-daemon#9999",
+            expectedEpoch: oldEpoch,
+            nextEpoch: newEpoch,
+            heartbeatMs: Date.now(),
+          },
+        })
+      }
+      return orig(name, input, opts)
+    })
+
+    const err = await Effect.runPromise(
+      rebuildWorkflowReadModelViews(repoRoot, {
+        repoRoot,
+        client: takeoverClient,
+        expectedLeaseEpoch: oldEpoch,
+        expectedLeaseOwner: oldOwner,
+        ownerId: holderId,
+        lockFilePath,
+      }).pipe(
+        Effect.flip,
+        Effect.ensuring(cleanupRunsAndJournal(baseClient, [runId]).pipe(Effect.ignore)),
+      ),
+    )
+    expect(takeoverTriggered).toBe(true)
+    expect(err).toBeInstanceOf(WriterLeaseHeldError)
+  })
+
   it("F-2.4: upsertReadModelEntity serializes per-run writes and retries 412 ifGraphCommit CAS conflict by re-reading", async () => {
     const baseClient = createClient()
     const runId = WorkflowRunId.make("run-cas-retry-1")
@@ -1710,6 +2100,175 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
     }
   })
 
+  const seedEpicAndLlmRebuildJournal = (
+    client: ReturnType<typeof createClient>,
+    params: {
+      readonly epicRunId: WorkflowRunId
+      readonly llmRunId: WorkflowRunId
+      readonly sliceUnitId: WorkUnitId
+      readonly sliceBranch: SliceBranchName
+      readonly epicPlan: CompiledPlan
+      readonly llmPlan: CompiledPlan
+    },
+  ) =>
+    Effect.gen(function* () {
+      // 1. Epic run: MergeSliceWave Conflict -> Escalation(retry) -> MergeSliceWave Merged + ack_chunk (tag: null) + non-run interrupt (tag: null)
+      const epicRunMsg = yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.epicRunId,
+        tag: "run",
+        payload: JSON.stringify({ plan: params.epicPlan }),
+      })
+      const completedSliceOutcome = UnitOutcome.cases.Completed.make({
+        unitId: params.sliceUnitId,
+        attempt: AttemptNumber.make(1),
+        changedPaths: [OwnedRelPath.make("libs/alpha/src/index.ts")],
+        packageStampHash: PackageStampHash.make("e".repeat(64)),
+      })
+      const unitDoneMsg = yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.epicRunId,
+        tag: "deferred",
+        payload: JSON.stringify({
+          name: `unit/${params.sliceUnitId}/1`,
+          exit: {
+            _tag: "Success",
+            value: completedSliceOutcome,
+          },
+        }),
+      })
+      const ackKey = nextMsgKey()
+      yield* invokeWorkflowStoreQuery({
+        repoRoot,
+        client,
+        operation: WorkflowStoreOperation.make("Test.insertAck"),
+        queryName: "wf_insert_ack_chunk",
+        expectMutation: true,
+        params: {
+          messageKey: ackKey.key,
+          seqKey: ackKey.seqKey,
+          primaryKeyHash: null,
+          shardId: "default:0",
+          entityType: "Workflow/HarnessTaskWorkflow",
+          entityId: params.epicRunId,
+          requestId: unitDoneMsg,
+          replyId: ReplyKey.make("999001"),
+          deliverAtMs: null,
+        },
+      })
+      const conflictMergeMsg = yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.epicRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: "MergeSliceWave/0" }),
+      })
+      yield* insertJournalReplyExit(client, conflictMergeMsg, {
+        _tag: "Success",
+        value: {
+          _tag: "Complete",
+          exit: {
+            _tag: "Success",
+            value: MergeSliceWaveOutcome.cases.Conflict.make({
+              branch: params.sliceBranch,
+            }),
+          },
+        },
+      })
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.epicRunId,
+        tag: "deferred",
+        payload: JSON.stringify({
+          name: `escalation/${params.sliceUnitId}/1`,
+          exit: { _tag: "Success", value: { decision: "retry" } },
+        }),
+      })
+      const retriedMergeMsg = yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.epicRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: "MergeSliceWave/0/r2" }),
+      })
+      yield* insertJournalReplyExit(client, retriedMergeMsg, {
+        _tag: "Success",
+        value: {
+          _tag: "Complete",
+          exit: {
+            _tag: "Success",
+            value: MergeSliceWaveOutcome.cases.Merged.make({
+              mergedBranches: [params.sliceBranch],
+            }),
+          },
+        },
+      })
+      const waitLlmMsg = yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.epicRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: "ProjectRunWaitingLlmPhase" }),
+      })
+      const nonRunInterrupt = nextMsgKey()
+      yield* invokeWorkflowStoreQuery({
+        repoRoot,
+        client,
+        operation: WorkflowStoreOperation.make("Test.insertActivityInterrupt"),
+        queryName: "wf_insert_interrupt",
+        expectMutation: true,
+        params: {
+          messageKey: nonRunInterrupt.key,
+          seqKey: nonRunInterrupt.seqKey,
+          primaryKeyHash: null,
+          shardId: "default:0",
+          entityType: "Workflow/HarnessTaskWorkflow",
+          entityId: params.epicRunId,
+          requestId: waitLlmMsg,
+          deliverAtMs: null,
+        },
+      })
+      void epicRunMsg
+
+      // 2. Second run: WaitingLlmPhase -> llm-phase-done -> ProjectRunCompleted (without final run reply yet)
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.llmRunId,
+        tag: "run",
+        payload: JSON.stringify({ plan: params.llmPlan }),
+      })
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.llmRunId,
+        tag: "deferred",
+        payload: JSON.stringify({
+          name: `unit/${params.sliceUnitId}/1`,
+          exit: {
+            _tag: "Success",
+            value: completedSliceOutcome,
+          },
+        }),
+      })
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.llmRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: "ProjectRunWaitingLlmPhase" }),
+      })
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.llmRunId,
+        tag: "deferred",
+        payload: JSON.stringify({
+          name: "llm-phase-done",
+          exit: { _tag: "Success", value: { workspaceHash: "h", frictionLogCleared: "cleared" } },
+        }),
+      })
+      yield* insertJournalMessage(client, {
+        shardId: "default:0",
+        entityId: params.llmRunId,
+        tag: "activity",
+        payload: JSON.stringify({ name: "ProjectRunCompleted" }),
+      })
+    })
+
   it("rebuildWorkflowReadModelViews replays interrupt/ack_chunk rows, retried MergeSliceWave conflict units, and ProjectRunWaitingLlmPhase/ProjectRunCompleted", async () => {
     const client = createClient()
     const layer = Layer.merge(
@@ -1749,159 +2308,13 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
     await Effect.runPromise(
       Effect.gen(function* () {
         const query = yield* WorkflowReadModelQuery
-
-        // 1. Epic run: MergeSliceWave Conflict -> Escalation(retry) -> MergeSliceWave Merged + ack_chunk (tag: null) + non-run interrupt (tag: null)
-        const epicRunMsg = yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: epicRunId,
-          tag: "run",
-          payload: JSON.stringify({ plan: epicPlan }),
-        })
-        const completedSliceOutcome = UnitOutcome.cases.Completed.make({
-          unitId: sliceUnitId,
-          attempt: AttemptNumber.make(1),
-          changedPaths: [OwnedRelPath.make("libs/alpha/src/index.ts")],
-          packageStampHash: PackageStampHash.make("e".repeat(64)),
-        })
-        const unitDoneMsg = yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: epicRunId,
-          tag: "deferred",
-          payload: JSON.stringify({
-            name: `unit/${sliceUnitId}/1`,
-            exit: {
-              _tag: "Success",
-              value: completedSliceOutcome,
-            },
-          }),
-        })
-        const ackKey = nextMsgKey()
-        yield* invokeWorkflowStoreQuery({
-          repoRoot,
-          client,
-          operation: WorkflowStoreOperation.make("Test.insertAck"),
-          queryName: "wf_insert_ack_chunk",
-          expectMutation: true,
-          params: {
-            messageKey: ackKey.key,
-            seqKey: ackKey.seqKey,
-            primaryKeyHash: null,
-            shardId: "default:0",
-            entityType: "Workflow/HarnessTaskWorkflow",
-            entityId: epicRunId,
-            requestId: unitDoneMsg,
-            replyId: ReplyKey.make("999001"),
-            deliverAtMs: null,
-          },
-        })
-        const conflictMergeMsg = yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: epicRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: "MergeSliceWave/0" }),
-        })
-        yield* insertJournalReplyExit(client, conflictMergeMsg, {
-          _tag: "Success",
-          value: {
-            _tag: "Complete",
-            exit: {
-              _tag: "Success",
-              value: MergeSliceWaveOutcome.cases.Conflict.make({
-                branch: sliceBranch,
-              }),
-            },
-          },
-        })
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: epicRunId,
-          tag: "deferred",
-          payload: JSON.stringify({
-            name: `escalation/${sliceUnitId}/1`,
-            exit: { _tag: "Success", value: { decision: "retry" } },
-          }),
-        })
-        const retriedMergeMsg = yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: epicRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: "MergeSliceWave/0/r2" }),
-        })
-        yield* insertJournalReplyExit(client, retriedMergeMsg, {
-          _tag: "Success",
-          value: {
-            _tag: "Complete",
-            exit: {
-              _tag: "Success",
-              value: MergeSliceWaveOutcome.cases.Merged.make({ mergedBranches: [sliceBranch] }),
-            },
-          },
-        })
-        const waitLlmMsg = yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: epicRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: "ProjectRunWaitingLlmPhase" }),
-        })
-        const nonRunInterrupt = nextMsgKey()
-        yield* invokeWorkflowStoreQuery({
-          repoRoot,
-          client,
-          operation: WorkflowStoreOperation.make("Test.insertActivityInterrupt"),
-          queryName: "wf_insert_interrupt",
-          expectMutation: true,
-          params: {
-            messageKey: nonRunInterrupt.key,
-            seqKey: nonRunInterrupt.seqKey,
-            primaryKeyHash: null,
-            shardId: "default:0",
-            entityType: "Workflow/HarnessTaskWorkflow",
-            entityId: epicRunId,
-            requestId: waitLlmMsg,
-            deliverAtMs: null,
-          },
-        })
-        void epicRunMsg
-
-        // 2. Second run: WaitingLlmPhase -> llm-phase-done -> ProjectRunCompleted (without final run reply yet)
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: llmRunId,
-          tag: "run",
-          payload: JSON.stringify({ plan: llmPlan }),
-        })
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: llmRunId,
-          tag: "deferred",
-          payload: JSON.stringify({
-            name: `unit/${sliceUnitId}/1`,
-            exit: {
-              _tag: "Success",
-              value: completedSliceOutcome,
-            },
-          }),
-        })
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: llmRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: "ProjectRunWaitingLlmPhase" }),
-        })
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: llmRunId,
-          tag: "deferred",
-          payload: JSON.stringify({
-            name: "llm-phase-done",
-            exit: { _tag: "Success", value: { workspaceHash: "h", frictionLogCleared: "cleared" } },
-          }),
-        })
-        yield* insertJournalMessage(client, {
-          shardId: "default:0",
-          entityId: llmRunId,
-          tag: "activity",
-          payload: JSON.stringify({ name: "ProjectRunCompleted" }),
+        yield* seedEpicAndLlmRebuildJournal(client, {
+          epicRunId,
+          llmRunId,
+          sliceUnitId,
+          sliceBranch,
+          epicPlan,
+          llmPlan,
         })
 
         const rebuilt = yield* rebuildWorkflowReadModelViews(repoRoot, {
@@ -1959,5 +2372,133 @@ describe("WF-3 WorkflowProjectionWriterLive, WorkflowReadModelQueryLive & rebuil
     } finally {
       cwdSpy.mockRestore()
     }
+  })
+
+  it("SPEC-0030 2nd-pass: rebuildWorkflowReadModelViews records rejected attempt on UnitOutcome.Escalated and fails closed on empty Complete.Success payload or unknown DispatchUnitAgent unitId", async () => {
+    const client = createClient()
+    const layer = Layer.merge(
+      makeWorkflowProjectionWriterLayer({ repoRoot, client }),
+      makeWorkflowReadModelQueryLayer({ repoRoot, client }),
+    )
+    const escRunId = WorkflowRunId.make("run-2ndpass-esc-1")
+    const emptyReplyRunId = WorkflowRunId.make("run-2ndpass-empty-reply-1")
+    const unknownUnitRunId = WorkflowRunId.make("run-2ndpass-unknown-unit-1")
+    const sliceUnitId = WorkUnitId.make("slice-1")
+    const basePlan = {
+      level: "epic" as const,
+      mode: { _tag: "Manual" as const },
+      baseSha: GitCommitSha.make("e".repeat(40)),
+      planSha: PlanSha256.make("f".repeat(64)),
+      units: [
+        {
+          _tag: "SliceUnit" as const,
+          unitId: sliceUnitId,
+          waveIndex: WaveIndex.make(0),
+          dependsOn: [],
+          ownedRelPaths: [OwnedRelPath.make("libs/alpha")],
+          earsKeys: [],
+          branch: SliceBranchName.make("slice/esc-1"),
+        },
+      ],
+      sharedStepPaths: [],
+    }
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const query = yield* WorkflowReadModelQuery
+        yield* insertJournalMessage(client, {
+          shardId: "default:0",
+          entityId: escRunId,
+          tag: "run",
+          payload: JSON.stringify({ plan: { ...basePlan, runId: escRunId } }),
+        })
+        yield* insertJournalMessage(client, {
+          shardId: "default:0",
+          entityId: escRunId,
+          tag: "deferred",
+          payload: JSON.stringify({
+            name: `unit/${sliceUnitId}/1`,
+            exit: {
+              _tag: "Success",
+              value: UnitOutcome.cases.Escalated.make({
+                unitId: sliceUnitId,
+                escalation: UnitEscalation.cases.RetryBudgetExhausted.make({
+                  lastRejection: UnitRejection.cases.StampMissing.make({}),
+                }),
+              }),
+            },
+          }),
+        })
+        yield* rebuildWorkflowReadModelViews(repoRoot, { client, nowMs: () => 50_000 })
+        const attempts = yield* query.listAttempts(escRunId)
+        expect(attempts).toHaveLength(1)
+        expect(attempts[0]?.verdict).toBe("rejected")
+      }).pipe(
+        Effect.ensuring(cleanupRunsAndJournal(client, [escRunId]).pipe(Effect.ignore)),
+        Effect.provide(layer),
+      ),
+    )
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* insertJournalMessage(client, {
+          shardId: "default:0",
+          entityId: emptyReplyRunId,
+          tag: "run",
+          payload: JSON.stringify({ plan: { ...basePlan, runId: emptyReplyRunId } }),
+        })
+        const verifyMsg = yield* insertJournalMessage(client, {
+          shardId: "default:0",
+          entityId: emptyReplyRunId,
+          tag: "activity",
+          payload: JSON.stringify({ name: `VerifyUnit/${sliceUnitId}/1` }),
+        })
+        yield* insertJournalReplyExit(client, verifyMsg, {
+          _tag: "Success",
+          value: { _tag: "Complete", exit: { _tag: "Success" } },
+        })
+        const err = yield* rebuildWorkflowReadModelViews(repoRoot, { client }).pipe(Effect.flip)
+        match(err)
+          .with({ _tag: "WorkflowStoreUnavailableError" }, (e) => {
+            expect(e.reason).toContain("Complete.Success without payload")
+          })
+          .with({ _tag: "WorkspaceFsError" }, { _tag: "WriterLeaseHeldError" }, (other) =>
+            expect.unreachable(`expected WorkflowStoreUnavailableError, got ${other._tag}`),
+          )
+          .exhaustive()
+      }).pipe(
+        Effect.ensuring(cleanupRunsAndJournal(client, [emptyReplyRunId]).pipe(Effect.ignore)),
+        Effect.provide(layer),
+      ),
+    )
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* insertJournalMessage(client, {
+          shardId: "default:0",
+          entityId: unknownUnitRunId,
+          tag: "run",
+          payload: JSON.stringify({ plan: { ...basePlan, runId: unknownUnitRunId } }),
+        })
+        yield* insertJournalMessage(client, {
+          shardId: "default:0",
+          entityId: unknownUnitRunId,
+          tag: "activity",
+          payload: JSON.stringify({ name: "DispatchUnitAgent/unknown-unit/1" }),
+        })
+        const err = yield* rebuildWorkflowReadModelViews(repoRoot, { client }).pipe(Effect.flip)
+        match(err)
+          .with({ _tag: "WorkflowStoreUnavailableError" }, (e) => {
+            expect(e.reason).toContain("targets unknown unit")
+          })
+          .with({ _tag: "WorkspaceFsError" }, { _tag: "WriterLeaseHeldError" }, (other) =>
+            expect.unreachable(`expected WorkflowStoreUnavailableError, got ${other._tag}`),
+          )
+          .exhaustive()
+      }).pipe(
+        Effect.ensuring(cleanupRunsAndJournal(client, [unknownUnitRunId]).pipe(Effect.ignore)),
+        Effect.provide(layer),
+      ),
+    )
   })
 })

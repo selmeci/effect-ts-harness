@@ -89,7 +89,10 @@ export const TierTopologyRuleId = Schema.Literals([
 ])
 export type TierTopologyRuleId = typeof TierTopologyRuleId.Type
 
-export const TierTopologyMessage = Schema.NonEmptyString.pipe(Schema.brand("TierTopologyMessage"))
+export const TierTopologyMessage = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isMaxLength(8192)),
+  Schema.brand("TierTopologyMessage"),
+)
 export type TierTopologyMessage = typeof TierTopologyMessage.Type
 
 export const PackageTierManifestInput = Schema.Struct({

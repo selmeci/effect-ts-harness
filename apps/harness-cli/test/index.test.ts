@@ -1918,7 +1918,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         "Do not use unbranded Schema.NonEmptyString for field 'albumId' in Schema.Struct",
       )
     }
+  })
 
+  it("flags raw primitive parameters at exported domain boundaries and unsafe brand casts", () => {
     // REQ-2.4: Raw primitive parameter in exported Effect.fn in type:domain
     {
       const reports: Array<{ message: string }> = []
@@ -2016,7 +2018,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       expect(reports[0]?.message).toContain("Brand.make")
       expect(reports[0]?.message).not.toContain("Brand.refined")
     }
+  })
 
+  it("flags duplicate Schema.brand keys and unbranded quantity/TaggedUnion contract schemas", () => {
     // F-1: Duplicate Schema.brand('<Key>') across multiple schemas in same file
     {
       const reports: Array<{ message: string }> = []
@@ -2160,7 +2164,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         "Do not use unbranded Schema.String for field 'itemId' in Schema.TaggedUnion",
       )
     }
+  })
 
+  it("flags inline object type aliases, inline object/primitive domain boundaries, and Schema.Int quantity schemas", () => {
     // F-7 & User Request: Inline object type alias ban and inline object parameter/return ban on service & domain boundaries
     {
       const reports: Array<{ message: string }> = []
@@ -2409,7 +2415,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain("unmanaged-sql-ddl")
     }
+  })
 
+  it("validates SqliteMigrator.fromRecord migration keys, spread declarations, and duplicate numeric ids", () => {
     // 3. Named migration variable + spread: const aggregateCoreMigrations = { "1_init_tables": eff1, "bad_key_after": eff2 } followed by SqliteMigrator.fromRecord({ ...aggregateCoreMigrations }) flags "bad_key_after" with invalid-migrator-record-key
     {
       const reports: Array<{ message: string }> = []
@@ -2510,7 +2518,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       expect(reports[0]?.message).toContain("invalid-migrator-record-key")
       expect(reports[0]?.message).toContain("1_InitTables")
     }
+  })
 
+  it("rejects duplicate SqliteMigrator numeric migration ids and allows sequential snake_case keys", () => {
     // 5. Duplicate numeric IDs "1_first" and "1_duplicate" are flagged with invalid-migrator-record-key
     {
       const reports: Array<{ message: string }> = []
@@ -2655,7 +2665,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       }
       expect(validReports).toHaveLength(0)
     }
+  })
 
+  it("flags ignored-chmod-permission in Effect.try pipes while allowing fail-closed catch handlers", () => {
     // 2. ignored-chmod-permission: chmodSync/fchmodSync inside .pipe(Effect.ignore / Effect.orElseSucceed) is flagged; fail-closed is allowed
     {
       const reports: Array<{ message: string }> = []
@@ -2762,7 +2774,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       })
       expect(safeReports).toHaveLength(0)
     }
+  })
 
+  it("flags catch-cause-interrupts-only inside runPromiseExit / runSyncExit while allowing tests and Cause.hasInterrupts", () => {
     // 3. catch-cause-interrupts-only inside Effect.runPromiseExit / Effect.runSyncExit is flagged; test files and Cause.hasInterrupts are allowed
     {
       const reports: Array<{ message: string }> = []

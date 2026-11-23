@@ -46,7 +46,7 @@ export const WorkUnitId = Schema.String.pipe(
 )
 export type WorkUnitId = typeof WorkUnitId.Type
 
-/** Reserved work unit identifier for sequential `sharedStepPaths` execution (`REQ-1.4`). */
+/** Reserved work unit identifier for sequential `sharedStepPaths` execution (`SPEC-0023 REQ-1.1` / `RFC-0013 REQ-1.4`). */
 export const SHARED_STEP_UNIT_ID: WorkUnitId = WorkUnitId.make("shared-step")
 
 /** Deterministic Effect workflow execution identifier (`Workflow.executionId` output). */

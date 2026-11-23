@@ -37,6 +37,15 @@ import {
 } from "./ast-gate-law-helpers.js"
 import { analyzeSqliteMigratorFromRecordAst } from "./sqlite-migrator-ast.js"
 import { collectWorkflowBodyViolations } from "./workflow-body-ast.js"
+import {
+  isSilentDecodeOrStoreFallback,
+  isUntypedCatchCauseWithoutInterruptGuard,
+} from "./ast-fail-closed-laws.js"
+import {
+  collectContractShapeViolations,
+  collectMaxTestCaseLineViolations,
+  collectWorkflowNameAccessViolations,
+} from "./ast-contract-and-test-hygiene.js"
 
 export {
   isCatchCauseInterruptsOnlyCall,
@@ -365,6 +374,14 @@ export const visitSourceFileSinglePass = (
       const m = `Silent Effect.catchDefect in '${fp}' — log or re-fail.`
       pushViolation(catEff, "silent-catch-defect", m, node)
     }
+    if (isProdSrc && isUntypedCatchCauseWithoutInterruptGuard(node, sourceFile)) {
+      const m = `Effect.catchCause in '${fp}' must guard isPureInterruptCause(cause).`
+      pushViolation(catEff, "untyped-catch-cause-interrupt-leak", m, node)
+    }
+    if (isProdSrc && isSilentDecodeOrStoreFallback(node, sourceFile)) {
+      const m = `Silent decode/workflow-store fallback in '${fp}' is banned — propagate typed failure.`
+      pushViolation(catEff, "silent-decode-fallback", m, node)
+    }
     if (!isTest && isIgnoredChmodPermissionCall(node, sourceFile)) {
       const m = `Ignoring chmodSync/fchmodSync failure in '${fp}' is banned.`
       pushViolation(catSyntax, "ignored-chmod-permission", m, node)
@@ -493,6 +510,14 @@ export const visitSourceFileSinglePass = (
       pushViolation(catDom, "unscoped-effect-run", m, node)
     }
     if (ts.isCallExpression(node)) checkCall(node)
+    if (
+      isProdSrc &&
+      ts.isBinaryExpression(node) &&
+      isSilentDecodeOrStoreFallback(node, sourceFile)
+    ) {
+      const m = `Nullish fallback on Schema.decodeOption in '${fp}' is banned — match Option explicitly.`
+      pushViolation(catEff, "silent-decode-fallback", m, node)
+    }
     const isEq =
       ts.isBinaryExpression(node) &&
       isTest &&
@@ -506,7 +531,7 @@ export const visitSourceFileSinglePass = (
       const m = `Fallback JSON.stringify equality in '${fp}' — use Equal.equals.`
       pushViolation(catTest, "fallback-json-equality", m, node)
     }
-    if (ts.isTaggedTemplateExpression(node)) {
+    if (!isTestOrHelper && ts.isTaggedTemplateExpression(node)) {
       const tag = node.tag.getText(sourceFile)
       if (tag === "sql" || tag.endsWith(".sql")) {
         const sql = node.template.getText(sourceFile).slice(1, -1)
@@ -548,6 +573,19 @@ export const visitSourceFileSinglePass = (
   }
 
   walk(sourceFile)
+  if (isContractSrc) {
+    for (const v of collectContractShapeViolations(sourceFile, norm)) {
+      pushViolation(catSyntax, "contract-shape-hardening", v.message, v.node)
+    }
+  }
+  for (const v of collectWorkflowNameAccessViolations(sourceFile, norm)) {
+    pushViolation(catSyntax, "workflow-name-instead-of-tag", v.message, v.node)
+  }
+  if (isTest) {
+    for (const v of collectMaxTestCaseLineViolations(sourceFile, norm)) {
+      pushViolation(catTest, "max-test-case-lines", v.message, v.node)
+    }
+  }
   if (!isTestOrHelper && /(?:^|\/)(?:libs|apps)\/.*\/src\//.test(norm)) {
     for (const v of collectWorkflowBodyViolations(sourceFile, norm)) {
       pushViolation(catSyntax, "nondeterministic-workflow-body", v.message, v.node)

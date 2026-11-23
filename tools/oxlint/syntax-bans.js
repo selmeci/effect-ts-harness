@@ -2279,6 +2279,403 @@ function checkWorkflowBodyDeterminismEstree(programNode, filename, reportOnce) {
   }
 }
 
+const CONTRACT_SCHEMA_CHAIN_METHODS = new Set(["pipe", "check", "annotate"])
+const CONTRACT_STRING_BOUND_CALLS = new Set(["isTrimmed", "isPattern", "isMaxLength"])
+const VITEST_HYGIENE_BASE_NAMES = new Set(["it", "test"])
+const VITEST_HYGIENE_CURRIED_NAMES = new Set(["each", "for", "skipIf", "runIf"])
+
+function walkEstreeChildren(node, fn) {
+  if (node == null || typeof node !== "object") return
+  for (const key of Object.keys(node)) {
+    if (
+      key === "parent" ||
+      key === "loc" ||
+      key === "range" ||
+      key === "tokens" ||
+      key === "comments"
+    ) {
+      continue
+    }
+    const val = node[key]
+    if (Array.isArray(val)) {
+      for (const item of val) {
+        if (item != null && typeof item === "object" && typeof item.type === "string") fn(item)
+      }
+    } else if (val != null && typeof val === "object" && typeof val.type === "string") {
+      fn(val)
+    }
+  }
+}
+
+function unwrapEstreeTop(n) {
+  let cur = n
+  while (
+    cur != null &&
+    (cur.type === "TSAsExpression" ||
+      cur.type === "TSTypeAssertion" ||
+      cur.type === "TSSatisfiesExpression" ||
+      cur.type === "TSNonNullExpression" ||
+      cur.type === "ParenthesizedExpression")
+  ) {
+    cur = cur.expression
+  }
+  return cur
+}
+
+function isEstreeSchemaMember(expr, objName, propName) {
+  const u = unwrapEstreeTop(expr)
+  return (
+    u != null &&
+    u.type === "MemberExpression" &&
+    u.computed !== true &&
+    u.object?.type === "Identifier" &&
+    u.object.name === objName &&
+    u.property?.type === "Identifier" &&
+    u.property.name === propName
+  )
+}
+
+function checkContractShapeHardeningEstree(programNode, filename, report) {
+  if (typeof filename !== "string" || /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(filename)) return
+  if (!/(?:^|\/)libs\/[^/]+\/contract\/src\/.*\.ts$/.test(filename)) return
+  const allowUnknownRecord = /(?:^|\/)wire-(?:adapter|envelope)\.ts$/.test(filename)
+  const visitedChains = new Set()
+
+  const isPipeParent = (parent) => {
+    if (parent == null || parent.type !== "CallExpression") return false
+    const c = unwrapEstreeTop(parent.callee)
+    if (
+      c != null &&
+      c.type === "MemberExpression" &&
+      c.computed !== true &&
+      c.property?.type === "Identifier" &&
+      CONTRACT_SCHEMA_CHAIN_METHODS.has(c.property.name)
+    ) {
+      return true
+    }
+    return c != null && c.type === "Identifier" && c.name === "pipe"
+  }
+
+  const resolveRootSchema = (chainRoot) => {
+    let cur = chainRoot
+    while (cur != null && cur.type === "CallExpression") {
+      const c = unwrapEstreeTop(cur.callee)
+      if (
+        c != null &&
+        isEstreeSchemaMember(c.callee, "Schema", "brand") &&
+        getStaticModuleString(c.arguments?.[0]) != null &&
+        cur.arguments?.[0] != null
+      ) {
+        cur = unwrapEstreeTop(cur.arguments[0])
+        continue
+      }
+      if (
+        c != null &&
+        c.type === "MemberExpression" &&
+        c.computed !== true &&
+        c.property?.type === "Identifier" &&
+        CONTRACT_SCHEMA_CHAIN_METHODS.has(c.property.name) &&
+        c.object != null
+      ) {
+        cur = unwrapEstreeTop(c.object)
+        continue
+      }
+      if (c != null && c.type === "Identifier" && c.name === "pipe" && cur.arguments?.[0] != null) {
+        cur = unwrapEstreeTop(cur.arguments[0])
+        continue
+      }
+      break
+    }
+    return cur
+  }
+
+  const hasBoundCall = (root) => {
+    let found = false
+    const walk = (n) => {
+      if (found || n == null || typeof n !== "object") return
+      if (n.type === "CallExpression") {
+        const c = unwrapEstreeTop(n.callee)
+        if (c?.type === "Identifier" && CONTRACT_STRING_BOUND_CALLS.has(c.name)) {
+          found = true
+          return
+        }
+        if (
+          c?.type === "MemberExpression" &&
+          c.computed !== true &&
+          c.property?.type === "Identifier" &&
+          CONTRACT_STRING_BOUND_CALLS.has(c.property.name)
+        ) {
+          found = true
+          return
+        }
+      }
+      walkEstreeChildren(n, walk)
+    }
+    walk(root)
+    return found
+  }
+
+  const ancestors = []
+  const visit = (node) => {
+    if (node == null || typeof node !== "object") return
+    if (node.type === "CallExpression") {
+      if (
+        isEstreeSchemaMember(node.callee, "Schema", "brand") &&
+        getStaticModuleString(node.arguments?.[0]) != null
+      ) {
+        let chainRoot = null
+        let child = node
+        let idx = ancestors.length - 1
+        while (idx >= 0) {
+          const parent = ancestors[idx]
+          if (parent == null) break
+          if (parent.type === "ParenthesizedExpression" || parent.type === "ChainExpression") {
+            child = unwrapEstreeTop(parent)
+            idx--
+            continue
+          }
+          if (
+            chainRoot === null &&
+            parent.type === "CallExpression" &&
+            unwrapEstreeTop(parent.callee) === child
+          ) {
+            chainRoot = parent
+            child = parent
+            idx--
+            continue
+          }
+          if (
+            parent.type === "MemberExpression" &&
+            parent.computed !== true &&
+            parent.property?.type === "Identifier" &&
+            CONTRACT_SCHEMA_CHAIN_METHODS.has(parent.property.name) &&
+            unwrapEstreeTop(parent.object) === child &&
+            ancestors[idx - 1]?.type === "CallExpression" &&
+            unwrapEstreeTop(ancestors[idx - 1].callee) === parent
+          ) {
+            chainRoot = ancestors[idx - 1]
+            child = chainRoot
+            idx -= 2
+            continue
+          }
+          if (isPipeParent(parent)) {
+            const pCallee = unwrapEstreeTop(parent.callee)
+            const isMethodOnChild =
+              pCallee?.type === "MemberExpression" && unwrapEstreeTop(pCallee.object) === child
+            const isPipeArg =
+              (pCallee?.type === "Identifier" && pCallee.name === "pipe") ||
+              (chainRoot === null && pCallee?.type === "MemberExpression")
+            if (isMethodOnChild || isPipeArg) {
+              chainRoot = parent
+              child = parent
+              idx--
+              continue
+            }
+          }
+          break
+        }
+        if (chainRoot != null && !visitedChains.has(chainRoot)) {
+          visitedChains.add(chainRoot)
+          const rootSchema = resolveRootSchema(chainRoot)
+          const isUnboundedRoot =
+            isEstreeSchemaMember(rootSchema, "Schema", "String") ||
+            isEstreeSchemaMember(rootSchema, "Schema", "NonEmptyString")
+          if (isUnboundedRoot && !hasBoundCall(chainRoot)) {
+            report(
+              node,
+              `[contract-shape-hardening] Branded string schema in '${filename}' must constrain bounds with Schema.isTrimmed(), Schema.isPattern(...), or Schema.isMaxLength(...).`,
+            )
+          }
+        }
+      }
+      if (!allowUnknownRecord && isEstreeSchemaMember(node.callee, "Schema", "Record")) {
+        let keyArg = null
+        let valArg = null
+        if (Array.isArray(node.arguments) && node.arguments.length >= 2) {
+          keyArg = node.arguments[0]
+          valArg = node.arguments[1]
+        } else if (
+          Array.isArray(node.arguments) &&
+          node.arguments.length === 1 &&
+          unwrapEstreeTop(node.arguments[0])?.type === "ObjectExpression"
+        ) {
+          for (const prop of unwrapEstreeTop(node.arguments[0]).properties ?? []) {
+            if (
+              prop?.type !== "Property" ||
+              prop.computed === true ||
+              prop.key?.type !== "Identifier"
+            ) {
+              continue
+            }
+            if (prop.key.name === "key") keyArg = prop.value
+            if (prop.key.name === "value") valArg = prop.value
+          }
+        }
+        if (
+          isEstreeSchemaMember(keyArg, "Schema", "String") &&
+          isEstreeSchemaMember(valArg, "Schema", "Unknown")
+        ) {
+          report(
+            node,
+            `[contract-shape-hardening] Unguarded Schema.Record(Schema.String, Schema.Unknown) in '${filename}' is banned outside wire-adapter modules — use a named typed Struct or Schema.Record with branded keys and value schemas.`,
+          )
+        }
+      }
+    }
+    ancestors.push(node)
+    walkEstreeChildren(node, visit)
+    ancestors.pop()
+  }
+  visit(programNode)
+}
+
+function isEstreeWorkflowMake(expr) {
+  const u = unwrapEstreeTop(expr)
+  if (u == null || u.type !== "CallExpression") return false
+  const c = unwrapEstreeTop(u.callee)
+  if (c == null || c.type !== "MemberExpression" || c.computed === true) return false
+  if (c.property?.type !== "Identifier" || c.property.name !== "make") return false
+  const recv = unwrapEstreeTop(c.object)
+  return (
+    (recv?.type === "Identifier" && recv.name === "Workflow") ||
+    (recv?.type === "MemberExpression" &&
+      recv.computed !== true &&
+      recv.property?.type === "Identifier" &&
+      recv.property.name === "Workflow")
+  )
+}
+
+function checkWorkflowNameInsteadOfTagEstree(programNode, filename, report) {
+  const wfDefNames = new Set()
+  const wfNsImports = new Set()
+  const collect = (node) => {
+    if (node == null || typeof node !== "object") return
+    if (node.type === "ImportDeclaration" && node.importKind !== "type") {
+      const mod = node.source?.value
+      const isWsOrRel =
+        typeof mod === "string" && (mod.startsWith("@harness/") || mod.startsWith("."))
+      if (isWsOrRel && Array.isArray(node.specifiers)) {
+        for (const spec of node.specifiers) {
+          if (spec == null || spec.importKind === "type") continue
+          if (spec.type === "ImportNamespaceSpecifier" && spec.local?.name) {
+            wfNsImports.add(spec.local.name)
+          } else if (spec.type === "ImportSpecifier" && spec.local?.name) {
+            const imp = spec.imported?.name ?? spec.local.name
+            if (imp !== "Workflow" && /^[A-Z][A-Za-z0-9_]*Workflow$/.test(imp)) {
+              wfDefNames.add(spec.local.name)
+            }
+          }
+        }
+      }
+    } else if (
+      node.type === "VariableDeclarator" &&
+      node.id?.type === "Identifier" &&
+      node.init != null
+    ) {
+      const init = unwrapEstreeTop(node.init)
+      if (
+        isEstreeWorkflowMake(init) ||
+        (init?.type === "Identifier" && wfDefNames.has(init.name))
+      ) {
+        wfDefNames.add(node.id.name)
+      }
+    }
+    walkEstreeChildren(node, collect)
+  }
+  collect(programNode)
+
+  const isWfTarget = (expr) => {
+    const u = unwrapEstreeTop(expr)
+    if (u == null) return false
+    if (u.type === "Identifier") return wfDefNames.has(u.name)
+    if (isEstreeWorkflowMake(u)) return true
+    return (
+      u.type === "MemberExpression" &&
+      u.computed !== true &&
+      u.object?.type === "Identifier" &&
+      wfNsImports.has(u.object.name) &&
+      u.property?.type === "Identifier" &&
+      u.property.name !== "Workflow" &&
+      /^[A-Z][A-Za-z0-9_]*Workflow$/.test(u.property.name)
+    )
+  }
+
+  const visit = (node) => {
+    if (node == null || typeof node !== "object") return
+    if (node.type === "MemberExpression") {
+      const isNameProp =
+        (node.computed !== true &&
+          node.property?.type === "Identifier" &&
+          node.property.name === "name") ||
+        (node.computed === true && getStaticModuleString(node.property) === "name")
+      if (isNameProp && isWfTarget(node.object)) {
+        report(
+          node,
+          `[workflow-name-instead-of-tag] Do not read '.name' on a Workflow.make(...) definition in '${filename}' (evaluates to Function.prototype.name 'Workflow') — use '._tag' instead.`,
+        )
+      }
+    }
+    walkEstreeChildren(node, visit)
+  }
+  visit(programNode)
+}
+
+function isEstreeVitestChain(expr) {
+  const u = unwrapEstreeTop(expr)
+  if (u == null) return false
+  if (u.type === "Identifier") return VITEST_HYGIENE_BASE_NAMES.has(u.name)
+  if (u.type === "MemberExpression" && u.computed !== true) return isEstreeVitestChain(u.object)
+  if (u.type === "CallExpression") {
+    const inner = unwrapEstreeTop(u.callee)
+    if (
+      inner != null &&
+      inner.type === "MemberExpression" &&
+      inner.computed !== true &&
+      inner.property?.type === "Identifier" &&
+      VITEST_HYGIENE_CURRIED_NAMES.has(inner.property.name) &&
+      isEstreeVitestChain(inner.object)
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+function checkMaxTestCaseLinesEstree(programNode, filename, report) {
+  if (typeof filename !== "string" || !/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(filename)) return
+  const visit = (node) => {
+    if (node == null || typeof node !== "object") return
+    if (
+      node.type === "CallExpression" &&
+      isEstreeVitestChain(node.callee) &&
+      Array.isArray(node.arguments)
+    ) {
+      for (const arg of node.arguments) {
+        if (
+          arg == null ||
+          (arg.type !== "ArrowFunctionExpression" && arg.type !== "FunctionExpression")
+        ) {
+          continue
+        }
+        const s = arg.loc?.start?.line
+        const e = arg.loc?.end?.line
+        if (typeof s === "number" && typeof e === "number") {
+          const lineSpan = e - s + 1
+          if (lineSpan > 200) {
+            report(
+              node,
+              `[max-test-case-lines] Test callback in '${filename}' spans ${lineSpan} lines (max 200) — split into focused helpers or separate it(...) blocks.`,
+            )
+            break
+          }
+        }
+      }
+    }
+    walkEstreeChildren(node, visit)
+  }
+  visit(programNode)
+}
+
 const syntaxBans = {
   create(context) {
     const discriminantAliasNames = new Set()
@@ -2915,7 +3312,10 @@ const syntaxBans = {
         if (/^\s*(\/\/|\/\*)\s*@ts-(ignore|expect-error|nocheck)\b/m.test(text)) {
           context.report({ node, message: tsSuppressionMessage })
         }
-        checkWorkflowBodyDeterminismEstree(node, getNormalizedFilename(), reportOnce)
+        const normalized = getNormalizedFilename()
+        checkWorkflowBodyDeterminismEstree(node, normalized, reportOnce)
+        checkContractShapeHardeningEstree(node, normalized, reportOnce)
+        checkWorkflowNameInsteadOfTagEstree(node, normalized, reportOnce)
       },
       ImportDeclaration(node) {
         recordContractImports(node)
@@ -4041,6 +4441,13 @@ const testIntegrity = {
         if (/^\s*(\/\/|\/\*)\s*@ts-(ignore|nocheck)\b/m.test(text)) {
           context.report({ node, message: testTsIgnoreMessage })
         }
+        const normalized = getNormalizedFilename()
+        checkWorkflowNameInsteadOfTagEstree(node, normalized, (target, message) => {
+          context.report({ node: target, message })
+        })
+        checkMaxTestCaseLinesEstree(node, normalized, (target, message) => {
+          context.report({ node: target, message })
+        })
       },
       ImportDeclaration(node) {
         const filename = getNormalizedFilename()

@@ -40,7 +40,7 @@ The plugin registers four lifecycle hooks to enforce safety constraints and inde
 1. **`PreInvocation` (`harness session --format=antigravity`):**
    Executes before each agent invocation. Runs `SessionHandoff.decide` to evaluate dirty working tree files, inspect git branch state, check `.harness/verify-stamp.json` freshness, and surface environment readiness.
 2. **`PreToolUse` (`harness guard --format=antigravity`):**
-   Intercepts tool calls (`run_command`, `edit_file`, `write_file`, `replace_file_content`, `multi_replace_file_content`, `write_to_file`, `view_file`, `grep_search`, `find_by_name`, `list_dir`).
+   Intercepts tool calls (`run_command`, `edit_file`, `write_file`, `replace_file_content`, `multi_replace_file_content`, `write_to_file`, `view_file`, `view_file_outline`, `view_code_item`, `read_file`, `grep_search`, `find_by_name`, `list_dir`).
    - Blocks edits to read-only `repos/effect` and `repos/alchemy`.
    - Blocks direct writes to `.harness/verify-stamp.json` (stamp forgery prevention).
    - Blocks reads of secret files and protected harness runtime state (`daemon.sock`, `auth-tokens.json`, `<git-common-dir>/harness/**`).
@@ -48,7 +48,7 @@ The plugin registers four lifecycle hooks to enforce safety constraints and inde
    - When `HARNESS_UNIT_WORKER=1` is set on unit worker invocations (automatic runner spawning lands in WF-5), blocks recursive `harness workflow start|resume|abort|doctor|complete --phase llm`, `harness done`, and direct access to `daemon.sock` or `auth-tokens.json`.
    - Requires explicit human approval for `alchemy deploy` and `alchemy destroy`.
 3. **`PostToolUse` (`harness ingest --format=antigravity`):**
-   Executes immediately following file write or replacement operations. Incrementally parses modified TypeScript ASTs, EARS specifications, and ADR documents into `.harness/index.sqlite` and the resident Omnigraph property graph.
+   Matcher `edit_file|write_file|replace_file_content|multi_replace_file_content|write_to_file` — executes immediately following file write or replacement operations. Incrementally parses modified TypeScript ASTs, EARS specifications, and ADR documents into `.harness/index.sqlite` and the resident Omnigraph property graph.
 4. **`Stop` (`harness done --format=antigravity`):**
    Executes when the agent attempts to stop or complete a task. Verifies that `.harness/verify-stamp.json` matches current `HEAD` commit and tree hash. Blocks exit if verification has not passed.
 

@@ -34,7 +34,10 @@ export {
 export {
   ActiveMutantId,
   BatchExitCode,
+  CANONICAL_CLI_COMMAND_NAMES,
   CANONICAL_MCP_TOOL_NAMES,
+  CanonicalCliCommandName,
+  CanonicalMcpToolName,
   CliCommandInput,
   CliCommandName,
   CliCommandNotFoundError,
@@ -66,7 +69,10 @@ export {
   WorkspaceFsError,
   WorkspaceFsOperation,
   isPureInterruptCause,
+  toCompilerOverlayErrorReason,
+  toCompilerRepoRootInput,
   toErrorReasonMessage,
+  toMcpToolInputName,
   validateSubprocessInput,
 } from "./workspace-and-process.js"
 export {
@@ -174,8 +180,12 @@ export {
   ActiveReviewPlan,
   DEFAULT_REVIEW_ROUTE_TIMEOUT_MS,
   InvalidReviewRouteInputError,
+  REMEDIATION_FINDING_SEVERITIES,
   REVIEW_DEPTH_LEVELS,
   REVIEW_DEPTH_RANK,
+  REVIEW_SLICE_FILE_THRESHOLD,
+  RemediationFindingSeverity,
+  RemediationReviewContext,
   ReviewChangedLines,
   ReviewDepth,
   ReviewDepthRank,
@@ -188,6 +198,9 @@ export {
   ReviewRoutingReason,
   ReviewRoutingSource,
   ReviewSignalPath,
+  ReviewSliceFileCount,
+  ReviewSliceId,
+  ReviewSlicePlan,
   ReviewSummaryText,
   ReviewTimeoutMillis,
   ReviewerId,
@@ -365,6 +378,26 @@ export {
   makeWorkflowUnitKey,
   toBoundedReason,
 } from "./workflow-storage.js"
+export {
+  WORKFLOW_TIMEOUT_BUDGETS,
+  WorkflowPollAttempts,
+  WorkflowPollBudget,
+  WorkflowTimeoutBudgets,
+  WorkflowTimeoutMs,
+  validateWorkflowTimeoutBudgets,
+} from "./workflow-timeouts.js"
+export {
+  WORKFLOW_ACTIVITY_DECODERS,
+  WORKFLOW_DEFERRED_DECODERS,
+  WorkflowActivityName,
+  WorkflowActivityTag,
+  WorkflowDeferredTag,
+  WorkflowRunAbortTarget,
+  decodeWorkflowActivityName,
+  decodeWorkflowDeferredName,
+  encodeWorkflowActivityName,
+  encodeWorkflowDeferredName,
+} from "./workflow-protocol.js"
 export {
   BatchMutantOutcomeResult,
   BatchMutantResultEntry,

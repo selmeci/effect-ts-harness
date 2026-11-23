@@ -3,7 +3,10 @@ import { HttpApi, HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/http-api
 import { Rpc, RpcGroup } from "effect/rpc"
 
 // Branded Domain Value Schemas
-export const GreetingMessage = Schema.String.pipe(Schema.brand("GreetingMessage"))
+export const GreetingMessage = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(1024)),
+  Schema.brand("GreetingMessage"),
+)
 export type GreetingMessage = typeof GreetingMessage.Type
 
 export const PhotoId = Schema.Int.check(Schema.isGreaterThan(0)).pipe(Schema.brand("PhotoId"))
@@ -12,10 +15,16 @@ export type PhotoId = typeof PhotoId.Type
 export const PhotoIdFromString = Schema.FiniteFromString.pipe(Schema.decodeTo(PhotoId))
 export type PhotoIdFromString = typeof PhotoIdFromString.Type
 
-export const PhotoName = Schema.String.pipe(Schema.brand("PhotoName"))
+export const PhotoName = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(512)),
+  Schema.brand("PhotoName"),
+)
 export type PhotoName = typeof PhotoName.Type
 
-export const AlbumId = Schema.String.pipe(Schema.brand("AlbumId"))
+export const AlbumId = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(256)),
+  Schema.brand("AlbumId"),
+)
 export type AlbumId = typeof AlbumId.Type
 
 export const CreatedAtMillis = Schema.Int.pipe(Schema.brand("CreatedAtMillis"))
@@ -26,16 +35,25 @@ export type AlbumPhotoCount = typeof AlbumPhotoCount.Type
 
 export const MAX_PHOTOS_PER_ALBUM: AlbumPhotoCount = AlbumPhotoCount.make(100)
 
-export const StorageOperationName = Schema.String.pipe(Schema.brand("StorageOperationName"))
+export const StorageOperationName = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(256)),
+  Schema.brand("StorageOperationName"),
+)
 export type StorageOperationName = typeof StorageOperationName.Type
 
-export const StorageErrorMessage = Schema.String.pipe(Schema.brand("StorageErrorMessage"))
+export const StorageErrorMessage = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(8192)),
+  Schema.brand("StorageErrorMessage"),
+)
 export type StorageErrorMessage = typeof StorageErrorMessage.Type
 
 export const HttpStatusCode = Schema.Int.pipe(Schema.brand("HttpStatusCode"))
 export type HttpStatusCode = typeof HttpStatusCode.Type
 
-export const ProtocolErrorMessage = Schema.String.pipe(Schema.brand("ProtocolErrorMessage"))
+export const ProtocolErrorMessage = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(8192)),
+  Schema.brand("ProtocolErrorMessage"),
+)
 export type ProtocolErrorMessage = typeof ProtocolErrorMessage.Type
 
 export const DecideAlbumQuotaInput = Schema.Struct({

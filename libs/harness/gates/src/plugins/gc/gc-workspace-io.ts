@@ -38,12 +38,17 @@ export const GcFindingKind = Schema.Literals([
   "adapter-rules-drift",
   "hook-timeout-parity",
   "hook-bootstrap-fail-closed",
+  "hook-matcher-tool-parity",
   "skill-tier-table-drift",
   "mermaid-dependency-drift",
   "doc-banned-or-phantom-tech",
   "contract-test-effect-vitest-import",
   "chained-equality-ternary",
   "hook-fastpath-forbidden-import",
+  "untested-union-variant",
+  "doc-mcp-tool-count-truth",
+  "doc-cli-command-truth",
+  "adapter-skill-parity",
 ])
 export type GcFindingKind = typeof GcFindingKind.Type
 
@@ -59,7 +64,7 @@ export type GcFinding = typeof GcFinding.Type
 export const GovernanceDocRef = Schema.Struct({
   docPath: Schema.String,
   id: Schema.String,
-  status: Schema.Literals(["accepted", "proposed", "superseded", "deprecated"]),
+  status: Schema.Literals(["draft", "accepted", "proposed", "superseded", "deprecated"]),
   markdown: Schema.optional(Schema.String),
   enforcedByFiles: Schema.optional(Schema.Array(Schema.String)),
   existingFiles: Schema.optional(Schema.Array(Schema.String)),
@@ -88,6 +93,16 @@ const stripFrontmatterQuotes = (val: string): string => {
   const hash = t.indexOf("#")
   return hash !== -1 ? t.slice(0, hash).trim() : t
 }
+
+const isAllowedGovernanceStatus = (
+  rawStatus: string | undefined,
+  isAdr: boolean,
+): rawStatus is GovernanceDocStatus =>
+  rawStatus === "accepted" ||
+  rawStatus === "proposed" ||
+  rawStatus === "superseded" ||
+  rawStatus === "deprecated" ||
+  (!isAdr && rawStatus === "draft")
 
 export const parseGovernanceDocFrontmatterChecked = (
   docPath: string,
@@ -170,13 +185,9 @@ export const parseGovernanceDocFrontmatterChecked = (
   if (!id || id.trim() === "") {
     return { _tag: "Err", reason: `Missing or empty 'id' in frontmatter of '${docPath}'.` }
   }
+  const isAdrDoc = docPath.includes("/adr/") || id.includes(":ADR-") || id.startsWith("ADR-")
   const rawStatus = scalars.get("status")
-  if (
-    rawStatus !== "accepted" &&
-    rawStatus !== "proposed" &&
-    rawStatus !== "superseded" &&
-    rawStatus !== "deprecated"
-  ) {
+  if (!isAllowedGovernanceStatus(rawStatus, isAdrDoc)) {
     return {
       _tag: "Err",
       reason: `Invalid or missing 'status' (${rawStatus ?? "<missing>"}) in frontmatter of '${docPath}'.`,
@@ -366,7 +377,7 @@ export const loadGovernanceDocsFromDisk = (
             nodeId: relDocPath,
             location: relDocPath,
             message: reason,
-            action: `Fix the YAML frontmatter in '${relDocPath}' (requires non-empty id and valid status: accepted | proposed | superseded | deprecated).`,
+            action: `Fix the YAML frontmatter in '${relDocPath}' (requires non-empty id and valid status: accepted | proposed | draft (specs only) | superseded | deprecated).`,
           })
           return undefined
         })

@@ -76,10 +76,12 @@ import {
   startScopedUnixSocketDaemon,
   startWorkflowViaDaemon,
 } from "../src/index.js"
+import { spawnVerifyCommand } from "../src/workflow/verify-child-process.js"
 import {
   resolveWorkflowRuntimePaths,
   resolveWorkflowWorktreeDir,
 } from "../src/worktree-repo-root.js"
+import { isLocalPidAlive } from "../src/writer-lease.js"
 
 const runWithTestTracer = <A, E, R>(
   testId: string,
@@ -250,6 +252,20 @@ const writeExecutableScript = (binDir: string, name: string, jsBody: string): vo
   writeFileSync(scriptPath, `#!/usr/bin/env node\n${jsBody}\n`, "utf8")
   chmodSync(scriptPath, 0o755)
 }
+
+const waitForFilesExist = Effect.fnUntraced(function* (
+  paths: ReadonlyArray<string>,
+  maxAttempts = 200,
+  intervalMs = 15,
+) {
+  for (let i = 0; i < maxAttempts; i += 1) {
+    if (paths.every((p) => existsSync(p))) {
+      return true
+    }
+    yield* Effect.sleep(`${intervalMs} millis`)
+  }
+  return paths.every((p) => existsSync(p))
+})
 
 const expectWorkspaceFsErrorExit = <A, E extends { readonly _tag: string }>(
   exit: Exit.Exit<A, E>,
@@ -1213,7 +1229,14 @@ process.exit(2)`,
             attempt: AttemptNumber.make(1),
             cwd: repoRoot,
           })
-          expect(emptyRes._tag).toBe("Rejected")
+          match(emptyRes)
+            .with({ _tag: "Rejected" }, (r) => {
+              expect(r.rejection._tag).toBe("AgentFailed")
+            })
+            .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
+              expect.unreachable("Expected AgentFailed rejection for empty shared step change set")
+            })
+            .exhaustive()
 
           writeFileSync(
             join(repoRoot, "libs", "alpha", "src", "index.ts"),
@@ -1259,6 +1282,258 @@ process.exit(2)`,
               expect.unreachable("Expected Completed")
             })
             .exhaustive()
+        }),
+      ),
+  )
+
+  it.live(
+    "S-2.1: spawnVerifyCommand timeout reaps surviving SIGTERM-trapping grandchild after direct child exits immediately on SIGTERM",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const binDir = join(dir, "bin")
+          const grandchildPidFile = join(dir, "gc-spawn.pid")
+          const grandchildTermMarker = join(dir, "gc-spawn.term")
+          writeExecutableScript(
+            binDir,
+            "nx",
+            `const { spawn } = require("node:child_process")
+process.on("SIGTERM", () => process.exit(0))
+const gc = spawn(
+  process.execPath,
+  [
+    "-e",
+    \`const fs = require("node:fs"); process.on("SIGTERM", () => { fs.writeFileSync(${JSON.stringify(grandchildTermMarker)}, "trapped"); }); fs.writeFileSync(${JSON.stringify(grandchildPidFile)}, String(process.pid)); setInterval(() => {}, 1000)\`,
+  ],
+  { stdio: "ignore" },
+)
+setInterval(() => {}, 1000)`,
+          )
+
+          const res = yield* spawnVerifyCommand(join(binDir, "nx"), [], {
+            cwd: dir,
+            env: process.env,
+            timeoutMs: 250,
+          })
+          expect(res._tag).toBe("TimedOut")
+          expect(existsSync(grandchildPidFile)).toBe(true)
+          expect(existsSync(grandchildTermMarker)).toBe(true)
+          const grandchildPid = Number(readFileSync(grandchildPidFile, "utf8").trim())
+          expect(grandchildPid).toBeGreaterThan(0)
+          expect(isLocalPidAlive(grandchildPid)).toBe(false)
+        }),
+      ),
+  )
+
+  it.live(
+    "S-2.1: completeUnitImpl verifyTimeoutMs reaps surviving SIGTERM-trapping grandchild after direct child exits immediately on SIGTERM",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
+          const binDir = join(dir, "bin")
+          const grandchildPidFile = join(dir, "gc-unit.pid")
+          const grandchildTermMarker = join(dir, "gc-unit.term")
+          writeExecutableScript(
+            binDir,
+            "nx",
+            `const { spawn } = require("node:child_process")
+process.on("SIGTERM", () => process.exit(0))
+const gc = spawn(
+  process.execPath,
+  [
+    "-e",
+    \`const fs = require("node:fs"); process.on("SIGTERM", () => { fs.writeFileSync(${JSON.stringify(grandchildTermMarker)}, "trapped"); }); fs.writeFileSync(${JSON.stringify(grandchildPidFile)}, String(process.pid)); setInterval(() => {}, 1000)\`,
+  ],
+  { stdio: "inherit" },
+)
+setInterval(() => {}, 1000)`,
+          )
+          writeFileSync(
+            join(repoRoot, "libs", "alpha", "src", "index.ts"),
+            "export const alpha = 56\n",
+            "utf8",
+          )
+
+          const outcome = yield* completeUnitImpl(
+            {
+              runId: WorkflowRunId.make("run-s21-grandchild-reap"),
+              level: "slice",
+              baseSha,
+              unit: makePackageUnit({
+                unitId: "pkg-s21-timeout",
+                command: "nx run @harness/alpha:verify",
+              }),
+              attempt: AttemptNumber.make(1),
+              cwd: repoRoot,
+              siblingInFlightOwnedPaths: [],
+            },
+            {
+              verifyTimeoutMs: 250,
+              env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` },
+            },
+          )
+
+          match(outcome)
+            .with({ _tag: "Rejected" }, (r) => {
+              match(r.rejection)
+                .with({ _tag: "PackageVerifyFailed" }, (p) => {
+                  expect(p.failureKind).toBe("timed-out")
+                })
+                .with(
+                  { _tag: "AgentFailed" },
+                  { _tag: "WriteSetViolation" },
+                  { _tag: "StampMissing" },
+                  () => expect.unreachable("Expected PackageVerifyFailed(timed-out)"),
+                )
+                .exhaustive()
+            })
+            .with({ _tag: "Completed" }, { _tag: "Escalated" }, () =>
+              expect.unreachable("Expected Rejected(PackageVerifyFailed)"),
+            )
+            .exhaustive()
+
+          expect(existsSync(grandchildPidFile)).toBe(true)
+          expect(existsSync(grandchildTermMarker)).toBe(true)
+          const grandchildPid = Number(readFileSync(grandchildPidFile, "utf8").trim())
+          expect(grandchildPid).toBeGreaterThan(0)
+          expect(isLocalPidAlive(grandchildPid)).toBe(false)
+        }),
+      ),
+  )
+
+  it.live(
+    "F-26: immediate fiber interruption terminates child process group including spawned descendant",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
+          const binDir = join(dir, "bin")
+          const parentPidFile = join(dir, "parent-imm.pid")
+          const descendantPidFile = join(dir, "descendant-imm.pid")
+          writeExecutableScript(
+            binDir,
+            "nx",
+            `const { spawn } = require("node:child_process")
+const { writeFileSync } = require("node:fs")
+const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" })
+writeFileSync(${JSON.stringify(descendantPidFile)}, String(child.pid))
+writeFileSync(${JSON.stringify(parentPidFile)}, String(process.pid))
+setInterval(() => {}, 1000)`,
+          )
+          writeFileSync(
+            join(repoRoot, "libs", "alpha", "src", "index.ts"),
+            "export const alpha = 55\n",
+            "utf8",
+          )
+
+          const fiber = yield* completeUnitImpl(
+            {
+              runId: WorkflowRunId.make("run-interrupt-group-1"),
+              level: "slice",
+              baseSha,
+              unit: makePackageUnit({
+                unitId: "pkg-int-1",
+                command: "nx run @harness/alpha:verify",
+              }),
+              attempt: AttemptNumber.make(1),
+              cwd: repoRoot,
+              siblingInFlightOwnedPaths: [],
+            },
+            { env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` } },
+          ).pipe(Effect.forkChild)
+
+          expect(yield* waitForFilesExist([parentPidFile, descendantPidFile])).toBe(true)
+          const parentPid = Number(readFileSync(parentPidFile, "utf8").trim())
+          const descendantPid = Number(readFileSync(descendantPidFile, "utf8").trim())
+          expect(isLocalPidAlive(parentPid)).toBe(true)
+          expect(isLocalPidAlive(descendantPid)).toBe(true)
+
+          yield* Fiber.interrupt(fiber)
+          const exit = yield* Fiber.await(fiber)
+          match(exit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(isPureInterruptCause(cause)).toBe(true)
+            })
+            .with({ _tag: "Success" }, () => expect.unreachable("Expected pure interrupt"))
+            .exhaustive()
+          expect(isLocalPidAlive(parentPid)).toBe(false)
+          expect(isLocalPidAlive(descendantPid)).toBe(false)
+        }),
+      ),
+  )
+
+  it.live(
+    "F-26: post-SIGTERM fiber interruption escalates to SIGKILL and kills trapped process group",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot, baseSha } = initGitRepo(dir)
+          const binDir = join(dir, "bin")
+          const parentPidFile = join(dir, "parent-term.pid")
+          const descendantPidFile = join(dir, "descendant-term.pid")
+          const sigtermReceivedFile = join(dir, "sigterm-received.marker")
+          writeExecutableScript(
+            binDir,
+            "nx",
+            `const { spawn } = require("node:child_process")
+const { writeFileSync } = require("node:fs")
+process.on("SIGTERM", () => {
+  writeFileSync(${JSON.stringify(sigtermReceivedFile)}, "sigterm-received\\n")
+})
+const child = spawn(
+  process.execPath,
+  [
+    "-e",
+    \`const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(${JSON.stringify(descendantPidFile)}, String(process.pid)); setInterval(() => {}, 1000)\`,
+  ],
+  { stdio: "ignore" },
+)
+writeFileSync(${JSON.stringify(parentPidFile)}, String(process.pid))
+setInterval(() => {}, 1000)`,
+          )
+          writeFileSync(
+            join(repoRoot, "libs", "alpha", "src", "index.ts"),
+            "export const alpha = 55\n",
+            "utf8",
+          )
+
+          const fiber = yield* completeUnitImpl(
+            {
+              runId: WorkflowRunId.make("run-interrupt-group-2"),
+              level: "slice",
+              baseSha,
+              unit: makePackageUnit({
+                unitId: "pkg-int-2",
+                command: "nx run @harness/alpha:verify",
+              }),
+              attempt: AttemptNumber.make(1),
+              cwd: repoRoot,
+              siblingInFlightOwnedPaths: [],
+            },
+            {
+              verifyTimeoutMs: 180,
+              env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` },
+            },
+          ).pipe(Effect.forkChild)
+
+          expect(yield* waitForFilesExist([parentPidFile, descendantPidFile])).toBe(true)
+          expect(yield* waitForFilesExist([sigtermReceivedFile])).toBe(true)
+          const parentPid = Number(readFileSync(parentPidFile, "utf8").trim())
+          const descendantPid = Number(readFileSync(descendantPidFile, "utf8").trim())
+          expect(isLocalPidAlive(parentPid)).toBe(true)
+          expect(isLocalPidAlive(descendantPid)).toBe(true)
+
+          yield* Fiber.interrupt(fiber)
+          const exit = yield* Fiber.await(fiber)
+          match(exit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(isPureInterruptCause(cause)).toBe(true)
+            })
+            .with({ _tag: "Success" }, () => expect.unreachable("Expected pure interrupt"))
+            .exhaustive()
+          expect(isLocalPidAlive(parentPid)).toBe(false)
+          expect(isLocalPidAlive(descendantPid)).toBe(false)
         }),
       ),
   )

@@ -2,7 +2,8 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect } from "effect"
+import { ErrorReasonMessage, toCompilerRepoRootInput } from "@harness/contract"
+import { Cause, Effect, Layer } from "effect"
 import { match } from "ts-pattern"
 import { type IndexedEffectFn, runWithTestTracer } from "@harness/ingest"
 import {
@@ -13,7 +14,8 @@ import {
   TsCompilerOverlayService,
 } from "../src/services/ts-compiler-overlay-service.js"
 import { resolveNode } from "../src/graph-engine.js"
-import { type TypeScriptProgramSession } from "../src/type-extractor.js"
+import { type HarnessGraph } from "../src/model.js"
+import { extractTypeGraphChecked, type TypeScriptProgramSession } from "../src/type-extractor.js"
 import { testHostIo } from "./helpers/test-host-io.js"
 
 const TsCompilerOverlayServiceLive = makeTsCompilerOverlayLayer(testHostIo)
@@ -98,11 +100,7 @@ describe("TsCompilerOverlayService (harness:SPEC-0011 §3)", () => {
         try {
           const sampleSrcDir = path.join(tmpRoot, "libs", "sample", "domain", "src")
           fs.mkdirSync(sampleSrcDir, { recursive: true })
-          fs.writeFileSync(
-            path.join(sampleSrcDir, "index.ts"),
-            `export const x = 1\n`,
-            "utf-8",
-          )
+          fs.writeFileSync(path.join(sampleSrcDir, "index.ts"), `export const x = 1\n`, "utf-8")
 
           const svc = yield* TsCompilerOverlayService
           const session1 = yield* svc.getSession(CompilerRepoRootPath.make(tmpRoot))
@@ -169,8 +167,33 @@ describe("TsCompilerOverlayService (harness:SPEC-0011 §3)", () => {
           )
 
           expect(internalSessionRef?.sourceFileCache.size).toBe(0)
+          expect(internalSessionRef?.oldProgram).toBeUndefined()
+          expect(internalSessionRef?.project).toBeUndefined()
+          expect(internalSessionRef?.lastWorkspaceSnapshot).toBeUndefined()
           expect(externalSession.sourceFileCache.size).toBeGreaterThanOrEqual(1)
           expect(externalSession.sourceFileCache.has("libs/sample/domain/src/index.ts")).toBe(true)
+
+          // Verify activeHostIo validation & per-HostIo session isolation inside one Scope
+          const virtualHostIo = {
+            ...testHostIo,
+            existsSync: (p: string) =>
+              p === "/virtual-missing-root" ? false : testHostIo.existsSync(p),
+            isDirectorySync: (p: string) =>
+              p === "/virtual-missing-root" ? false : testHostIo.isDirectorySync(p),
+          }
+          const badVirtualExit = yield* Effect.scoped(
+            TsCompilerOverlay.extractGraph({
+              repoRoot: "/virtual-missing-root",
+              hostIo: virtualHostIo,
+            }).pipe(Effect.provide(TsCompilerOverlayServiceLive), Effect.exit),
+          )
+          match(badVirtualExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(Cause.hasFails(cause)).toBe(true)
+              expect(Cause.hasDies(cause)).toBe(false)
+            })
+            .with({ _tag: "Success" }, () => expect.unreachable("expected TsCompilerOverlayError"))
+            .exhaustive()
         } finally {
           fs.rmSync(tmpRoot, { recursive: true, force: true })
         }
@@ -222,10 +245,7 @@ describe("TsCompilerOverlayService (harness:SPEC-0011 §3)", () => {
             testId,
             TsCompilerOverlay.extractGraph({
               repoRoot,
-            }).pipe(
-              Effect.provide(TsCompilerOverlayServiceLive),
-              Effect.exit,
-            ),
+            }).pipe(Effect.provide(TsCompilerOverlayServiceLive), Effect.exit),
             fnIndex,
           )
 
@@ -253,6 +273,228 @@ describe("TsCompilerOverlayService (harness:SPEC-0011 §3)", () => {
               expect.fail("Expected extractGraph to fail for invalid repoRoot")
             })
             .exhaustive()
+        }
+      }),
+  )
+
+  it.effect(
+    "F-20: maps > 4096-char repoRoot and > 8192-char thrown errors to typed TsCompilerOverlayError without SchemaError defects",
+    () =>
+      Effect.gen(function* () {
+        const assertOverlayError = (
+          exit:
+            | ReturnType<typeof Effect.runSyncExit<HarnessGraph, TsCompilerOverlayError>>
+            | ReturnType<
+                typeof Effect.runSyncExit<TypeScriptProgramSession, TsCompilerOverlayError>
+              >,
+        ): TsCompilerOverlayError =>
+          match(exit)
+            .with({ _tag: "Failure" }, ({ cause }) =>
+              match(Cause.findErrorOption(cause))
+                .with({ _tag: "Some" }, ({ value }) => {
+                  expect(value).toBeInstanceOf(TsCompilerOverlayError)
+                  expect(value._tag).toBe("TsCompilerOverlayError")
+                  return value
+                })
+                .with({ _tag: "None" }, () => {
+                  expect.fail(
+                    `Expected typed TsCompilerOverlayError, got defect/other cause: ${Cause.pretty(cause)}`,
+                  )
+                })
+                .exhaustive(),
+            )
+            .with({ _tag: "Success" }, () => {
+              expect.fail("Expected operation to fail with TsCompilerOverlayError")
+            })
+            .exhaustive()
+
+        const oversizedRoot = `/${"a".repeat(5000)}`
+        const expectedOversizedRoot = toCompilerRepoRootInput(oversizedRoot)
+        const extractLongRootExit = yield* TsCompilerOverlay.extractGraph({
+          repoRoot: oversizedRoot,
+        }).pipe(Effect.provide(TsCompilerOverlayServiceLive), Effect.exit)
+        const extractLongRootErr = assertOverlayError(extractLongRootExit)
+        expect(extractLongRootErr.repoRoot).toBe(expectedOversizedRoot)
+        expect(extractLongRootErr.repoRoot).toHaveLength(4096)
+        expect(extractLongRootErr.repoRoot).toContain("…[len=5001,h=")
+        expect(extractLongRootErr.reason.length).toBeLessThanOrEqual(8192)
+
+        const sessionLongRootExit = yield* Effect.gen(function* () {
+          const svc = yield* TsCompilerOverlayService
+          return yield* svc.getSession(CompilerRepoRootPath.make(oversizedRoot))
+        }).pipe(Effect.provide(TsCompilerOverlayServiceLive), Effect.exit)
+        const sessionLongRootErr = assertOverlayError(sessionLongRootExit)
+        expect(sessionLongRootErr.repoRoot).toBe(expectedOversizedRoot)
+        expect(sessionLongRootErr.repoRoot).toHaveLength(4096)
+        expect(sessionLongRootErr.repoRoot).toContain("…[len=5001,h=")
+
+        const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "harness-overlay-f20-"))
+        try {
+          fs.mkdirSync(path.join(tmpRoot, "libs", "sample", "domain", "src"), { recursive: true })
+          const hugeErrorMsg = `boom-${"z".repeat(9000)}`
+          const throwingExtractHostIo: typeof testHostIo = {
+            ...testHostIo,
+            readdirSync: () => {
+              throw new Error(hugeErrorMsg)
+            },
+          }
+          const extractHugeErrExit = yield* TsCompilerOverlay.extractGraph({
+            repoRoot: tmpRoot,
+            hostIo: throwingExtractHostIo,
+          }).pipe(Effect.provide(TsCompilerOverlayServiceLive), Effect.exit)
+          const extractHugeErr = assertOverlayError(extractHugeErrExit)
+          expect(extractHugeErr.reason.length).toBe(8192)
+          expect(extractHugeErr.reason).toContain("boom-")
+
+          const throwingSessionLayer = makeTsCompilerOverlayLayer({
+            ...testHostIo,
+            realpathSync: () => {
+              throw new Error(hugeErrorMsg)
+            },
+          })
+          const sessionHugeErrExit = yield* Effect.gen(function* () {
+            const svc = yield* TsCompilerOverlayService
+            return yield* svc.getSession(CompilerRepoRootPath.make(tmpRoot))
+          }).pipe(Effect.provide(throwingSessionLayer), Effect.exit)
+          const sessionHugeErr = assertOverlayError(sessionHugeErrExit)
+          expect(sessionHugeErr.reason.length).toBe(8192)
+          expect(sessionHugeErr.reason.startsWith("boom-")).toBe(true)
+        } finally {
+          fs.rmSync(tmpRoot, { recursive: true, force: true })
+        }
+      }),
+  )
+
+  it.effect(
+    "F-11.1: extractTypeGraphChecked maps sync FS throws to ErrorReasonMessage while TsCompilerOverlay propagates defects and mixed Die+Interrupt causes untouched",
+    () =>
+      Effect.gen(function* () {
+        const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "harness-overlay-f11-"))
+        try {
+          const sampleSrcDir = path.join(tmpRoot, "libs", "sample", "domain", "src")
+          fs.mkdirSync(sampleSrcDir, { recursive: true })
+          fs.writeFileSync(
+            path.join(sampleSrcDir, "index.ts"),
+            `import { Effect } from "effect"\nexport const ping = Effect.fn("Sample.ping")(function* () { return yield* Effect.succeed(1) })\n`,
+            "utf-8",
+          )
+
+          // 1. Direct checked extraction succeeds on valid repo and maps sync FS errors to typed ErrorReasonMessage
+          const checkedOk = yield* extractTypeGraphChecked({
+            repoRoot: tmpRoot,
+            hostIo: testHostIo,
+          })
+          expect(resolveNode(checkedOk, "Sample.ping")?._tag).toBe("EffectFn")
+
+          const checkedFailExit = yield* extractTypeGraphChecked({
+            repoRoot: tmpRoot,
+            hostIo: {
+              ...testHostIo,
+              readdirSync: () => {
+                throw new Error("checked-readdir-failure")
+              },
+            },
+          }).pipe(Effect.exit)
+          match(checkedFailExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(Cause.hasDies(cause)).toBe(false)
+              expect(Cause.hasFails(cause)).toBe(true)
+              match(Cause.findErrorOption(cause))
+                .with({ _tag: "Some" }, ({ value }) => {
+                  expect(value).toBe(ErrorReasonMessage.make("checked-readdir-failure"))
+                })
+                .with({ _tag: "None" }, () => {
+                  expect.unreachable("Expected ErrorReasonMessage from extractTypeGraphChecked")
+                })
+                .exhaustive()
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected extractTypeGraphChecked to fail")
+            })
+            .exhaustive()
+
+          // 2. Real defects from hostIo pre-checks propagate as Cause.die untouched
+          const defectHostIoLayer = makeTsCompilerOverlayLayer({
+            ...testHostIo,
+            isDirectorySync: () => {
+              throw new Error("unexpected hostIo invariant defect")
+            },
+          })
+          const hostDefectExit = yield* TsCompilerOverlay.extractGraph({
+            repoRoot: tmpRoot,
+          }).pipe(Effect.provide(defectHostIoLayer), Effect.exit)
+          match(hostDefectExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(Cause.hasDies(cause)).toBe(true)
+              expect(Cause.hasFails(cause)).toBe(false)
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected hostIo defect to propagate untouched")
+            })
+            .exhaustive()
+
+          // 3. Injected Effect.die and mixed (Die + Interrupt) causes propagate untouched
+          const dieLayer = Layer.succeed(TsCompilerOverlayService, {
+            getSession: () => Effect.die(new Error("session-defect")),
+            extractGraphWithOverlays: () => Effect.die(new Error("extract-defect")),
+          })
+          const dieExit = yield* TsCompilerOverlay.extractGraph({ repoRoot: tmpRoot }).pipe(
+            Effect.provide(dieLayer),
+            Effect.exit,
+          )
+          match(dieExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(Cause.hasDies(cause)).toBe(true)
+              expect(Cause.hasFails(cause)).toBe(false)
+              expect(Cause.hasInterrupts(cause)).toBe(false)
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected Effect.die to propagate untouched")
+            })
+            .exhaustive()
+
+          const mixedLayer = Layer.succeed(TsCompilerOverlayService, {
+            getSession: () => Effect.die(new Error("session-defect")),
+            extractGraphWithOverlays: () =>
+              Effect.failCause(
+                Cause.combine(Cause.die(new Error("mixed-die")), Cause.interrupt(0)),
+              ),
+          })
+          const mixedExit = yield* TsCompilerOverlay.extractGraph({ repoRoot: tmpRoot }).pipe(
+            Effect.provide(mixedLayer),
+            Effect.exit,
+          )
+          match(mixedExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(Cause.hasDies(cause)).toBe(true)
+              expect(Cause.hasInterrupts(cause)).toBe(true)
+              expect(Cause.hasFails(cause)).toBe(false)
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected mixed Die+Interrupt cause to propagate untouched")
+            })
+            .exhaustive()
+
+          const interruptLayer = Layer.succeed(TsCompilerOverlayService, {
+            getSession: () => Effect.interrupt,
+            extractGraphWithOverlays: () => Effect.interrupt,
+          })
+          const interruptExit = yield* TsCompilerOverlay.extractGraph({ repoRoot: tmpRoot }).pipe(
+            Effect.provide(interruptLayer),
+            Effect.exit,
+          )
+          match(interruptExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(Cause.hasInterrupts(cause)).toBe(true)
+              expect(Cause.hasDies(cause)).toBe(false)
+              expect(Cause.hasFails(cause)).toBe(false)
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected pure interrupt to propagate untouched")
+            })
+            .exhaustive()
+        } finally {
+          fs.rmSync(tmpRoot, { recursive: true, force: true })
         }
       }),
   )

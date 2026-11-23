@@ -5,13 +5,9 @@ status: accepted
 date: 2026-11-02
 enforced_by:
   - libs/es/contract/src/index.ts
-  - libs/es/core/src/index.ts
   - libs/es/core/src/decider.ts
   - libs/es/core/src/projection.ts
   - libs/es/core/src/aggregate.ts
-  - libs/es/core/src/testing.ts
-  - libs/es/core/test/fixtures/cart.ts
-  - libs/es/infra/src/index.ts
   - libs/es/infra/src/aggregate.ts
   - libs/es/infra/src/memory.ts
   - libs/es/infra/src/workerd-scripts.ts
@@ -90,15 +86,16 @@ In Phase 2 of the Event Sourcing MVP (`docs/mvp_event_sourcing.md`), an aggregat
 
 ### Deterministic Enforcement
 
-| Rule                               | Enforced By                                                                   | Gate / Mechanism                                          | Governed Symbols                            |
-| ---------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------- |
-| Command Idempotency Dedup          | `libs/es/infra/src/aggregate.ts`                                              | `handleAggregateCommand`                                  | `Aggregate.handleCommand`                   |
-| Cross-Aggregate Command Guard      | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`             | `CommandAggregateMismatchError`, `handleAggregateCommand` | `CommandAggregateMismatchError`             |
-| Stream Contiguity & Decode Guard   | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`             | `EventStreamCorruptionError`, `loadAggregate`             | `EventStreamCorruptionError`                |
-| Read-Your-Writes Query             | `libs/es/core/src/projection.ts`                                              | `queryLocalProjection`                                    | `LocalProjection.query`                     |
-| Versioned Projection Rebuild       | `libs/es/core/src/projection.ts`, `libs/es/infra/src/aggregate.ts`            | `rebuildLocalProjection`, `loadAggregate`                 | `LocalProjection.rebuild`, `Aggregate.load` |
-| Selective Outbox Isolation         | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`             | `OutboxPublicationMode`, `handleAggregateCommand`         | `Aggregate.handleCommand`                   |
-| Concurrency Conflict Detection     | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`             | `ConcurrencyConflictError`, `handleAggregateCommand`      | `ConcurrencyConflictError`                  |
-| Missing Aggregate Query            | `libs/es/contract/src/index.ts`, `libs/es/infra/test/fixtures/cart-sqlite.ts` | `AggregateNotFoundError`, `queryCartView`                 | `AggregateNotFoundError`                    |
-| Missing Local Projection           | `libs/es/contract/src/index.ts`, `libs/es/core/src/projection.ts`             | `LocalProjectionNotFoundError`, `queryLocalProjection`    | `LocalProjectionNotFoundError`              |
-| Event & Result Serialization Guard | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`             | `EventSerializationError`, `handleAggregateCommand`       | `EventSerializationError`                   |
+| Rule                                                          | Enforced By                                                                                                                                                             | Gate / Mechanism                                                                                                | Governed Symbols                            |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| I/O-Free Core Protocols, Workerd DO SQLite & `SqliteMigrator` | `libs/es/core/src/decider.ts`, `libs/es/core/src/aggregate.ts`, `libs/es/infra/src/aggregate.ts`, `libs/es/infra/src/memory.ts`, `libs/es/infra/src/workerd-scripts.ts` | `initializeAggregateTables`, `aggregateCoreMigrations`, `makeAggregateMigratorLayer`, workerd DO SQLite runtime | `Aggregate.handleCommand`, `Aggregate.load` |
+| Command Idempotency Dedup                                     | `libs/es/infra/src/aggregate.ts`                                                                                                                                        | `handleAggregateCommand`                                                                                        | `Aggregate.handleCommand`                   |
+| Cross-Aggregate Command Guard                                 | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`                                                                                                       | `CommandAggregateMismatchError`, `handleAggregateCommand`                                                       | `CommandAggregateMismatchError`             |
+| Stream Contiguity & Decode Guard                              | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`                                                                                                       | `EventStreamCorruptionError`, `loadAggregate`                                                                   | `EventStreamCorruptionError`                |
+| Read-Your-Writes Query                                        | `libs/es/core/src/projection.ts`                                                                                                                                        | `queryLocalProjection`                                                                                          | `LocalProjection.query`                     |
+| Versioned Projection Rebuild                                  | `libs/es/core/src/projection.ts`, `libs/es/infra/src/aggregate.ts`                                                                                                      | `rebuildLocalProjection`, `loadAggregate`                                                                       | `LocalProjection.rebuild`, `Aggregate.load` |
+| Selective Outbox Isolation                                    | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`                                                                                                       | `OutboxPublicationMode`, `handleAggregateCommand`                                                               | `Aggregate.handleCommand`                   |
+| Concurrency Conflict Detection                                | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`                                                                                                       | `ConcurrencyConflictError`, `handleAggregateCommand`                                                            | `ConcurrencyConflictError`                  |
+| Missing Aggregate Query                                       | `libs/es/contract/src/index.ts`, `libs/es/infra/test/fixtures/cart-sqlite.ts`                                                                                           | `AggregateNotFoundError`, `queryCartView`                                                                       | `AggregateNotFoundError`                    |
+| Missing Local Projection                                      | `libs/es/contract/src/index.ts`, `libs/es/core/src/projection.ts`                                                                                                       | `LocalProjectionNotFoundError`, `queryLocalProjection`                                                          | `LocalProjectionNotFoundError`              |
+| Event & Result Serialization Guard                            | `libs/es/contract/src/index.ts`, `libs/es/infra/src/aggregate.ts`                                                                                                       | `EventSerializationError`, `handleAggregateCommand`                                                             | `EventSerializationError`                   |

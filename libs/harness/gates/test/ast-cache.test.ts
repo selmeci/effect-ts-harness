@@ -160,4 +160,43 @@ describe("AstGateCache Drizzle interpolated template specifier ban", () => {
       expect(r2.cacheHitCount).toBe(0)
     }),
   )
+
+  it.effect(
+    "exempts infra test files from raw SQL DDL/DROP checks while still flagging infra production src files",
+    () =>
+      Effect.sync(() => {
+        const triggerDdlSource = [
+          'const sql = (_strings: TemplateStringsArray) => "ok"',
+          "export const setupTrigger = sql`CREATE TRIGGER IF NOT EXISTS t_tmp AFTER INSERT ON es_events BEGIN SELECT 1; END`",
+          "export const dropTrigger = sql`DROP TRIGGER IF EXISTS t_tmp`",
+        ].join("\n")
+
+        const testReport = evaluateAstGateFiles({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/es/infra/test/api-evolution.test.ts"),
+              content: AstSourceContent.make(triggerDdlSource),
+            },
+          ],
+        })
+        expect(
+          testReport.violations.filter(
+            (v) => v.rule === "unmanaged-sql-ddl" || v.rule === "unsafe-sql-migration",
+          ),
+        ).toEqual([])
+
+        const prodReport = evaluateAstGateFiles({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/es/infra/src/repo.ts"),
+              content: AstSourceContent.make(triggerDdlSource),
+            },
+          ],
+        })
+        expect(prodReport.violations.filter((v) => v.rule === "unmanaged-sql-ddl").length).toBe(2)
+        expect(prodReport.violations.filter((v) => v.rule === "unsafe-sql-migration").length).toBe(
+          1,
+        )
+      }),
+  )
 })

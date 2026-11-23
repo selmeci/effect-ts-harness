@@ -13,7 +13,7 @@ import {
 } from "../src/index.js"
 
 describe("ArchiMate Ontology Module", () => {
-  it("classifyOntologyNode accurately classifies all 8 node types into ArchiMate layers and aspects", () => {
+  it("classifyOntologyNode accurately classifies Motivation and EffectFn nodes into ArchiMate layers and aspects", () => {
     // 1. AdrDoc
     const adrNode = {
       _tag: "AdrDoc" as const,
@@ -122,7 +122,9 @@ describe("ArchiMate Ontology Module", () => {
       elementType: "ApplicationFunction",
       file: "apps/sample/src/index.ts",
     })
+  })
 
+  it("classifyOntologyNode accurately classifies TaggedError, ServiceTag, ServiceLayer, PatternDoc, and VitestCase nodes", () => {
     // 4. TaggedError
     const errorNode = {
       _tag: "TaggedError" as const,

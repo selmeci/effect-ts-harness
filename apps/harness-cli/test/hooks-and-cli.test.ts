@@ -818,7 +818,9 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         decision: "continue",
         reason: expect.stringContaining("interrupted"),
       })
+    }, 25_000) // spawns 4 real Node hook child processes with SIGTERM/SIGINT signal delivery and teardown
 
+    it("F-1.1 & M-4.1: real subprocess SIGTERM and SIGINT detected from Antigravity stdin payloads fail closed", async () => {
       // 5. Antigravity guard WITHOUT --format=antigravity (detected from stdin payload) SIGTERM
       let killChildOnRequest: (() => void) | undefined
       const hangingServer = createServer(() => {
@@ -958,7 +960,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         hangingServer.closeAllConnections()
         hangingServer.close()
       }
-    }, 25_000)
+    }, 25_000) // exercises hanging Omnigraph HTTP socket timeout and SIGTERM/SIGKILL cleanup in child process
   })
 
   describe("F-10.1: omnigraph-lifecycle safety checks", () => {
@@ -2034,7 +2036,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
     }
   })
 
-  it("REQ-4.1: handleGuard enforces HARNESS_UNIT_WORKER=1 via CliEnv.env across commands and file reads while allowing complete/status/verify", async () => {
+  it("SPEC-0023 REQ-4.1: handleGuard enforces HARNESS_UNIT_WORKER=1 via CliEnv.env across commands and file reads while allowing complete/status/verify", async () => {
     const workerEnv = { HARNESS_UNIT_WORKER: "1" } as const
     const nonWorkerEnv = { HARNESS_UNIT_WORKER: "0" } as const
 
@@ -2204,6 +2206,14 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
     )
     expect(nonWorkerStartRes.exitCode).toBe(0)
     expect(JSON.parse(nonWorkerStartRes.stdout)).toEqual({ decision: "allow" })
+  })
+
+  it("F-4.1/F-16.1/F-16.2/F-3.6/F-3.3/F-3.4: enforces secret/harness-dir fails closed across non-worker & worker modes", async () => {
+    const workerEnv = { HARNESS_UNIT_WORKER: "1" } as const
+    const nonWorkerEnv = { HARNESS_UNIT_WORKER: "0" } as const
+    const dir = mkdtempSync(join(tmpdir(), "harness-worker-guard-symdir-"))
+    tempDirs.push(dir)
+    const { symlinkSync } = await import("node:fs")
 
     // F-4.1: secret & harness-state reads denied even in non-worker mode
     for (const readInput of [

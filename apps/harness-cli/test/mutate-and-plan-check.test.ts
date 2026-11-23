@@ -13,7 +13,18 @@ import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import { Effect } from "effect"
 import { makeMockDecisionModelLayer } from "@harness/decision"
-import { MutantCount, MutateStampPassed, StampRelFilePath, writeMutateStamp } from "@harness/gates"
+import { buildHarnessGraph, resolveOmnigraphTaskBranches } from "@harness/graph"
+import {
+  checkVerifyStamp,
+  computeMutableTreeHashChecked,
+  DstSeed,
+  DstSeedsRunCount,
+  MutantCount,
+  MutateStampPassed,
+  StampRelFilePath,
+  writeMutateStamp,
+  writeVerifyStamp,
+} from "@harness/gates"
 import { nodeSyncHostIo } from "@harness/infra"
 import type { SyncHostIo } from "@harness/service/host-io"
 import {
@@ -22,8 +33,10 @@ import {
   handleBench,
   handleMutate,
 } from "../src/commands/mutate-and-bench.command.js"
+import { cleanupStalePlanSnapshotAfterDone } from "../src/commands/omnigraph-safety-helpers.js"
 import { handlePlanCheck } from "../src/commands/plan-and-repair.command.js"
 import { handleVerify } from "../src/commands/verify-and-done.command.js"
+import { tryRunDocOnlyVerifyFastPath } from "../src/commands/verify-doc-fastpath.js"
 import { runDeclarativeCli } from "../src/index.js"
 
 const REAL_REPO_ROOT = resolve(import.meta.dirname, "../../..")
@@ -450,25 +463,30 @@ describe("CLI handleMutate, handleVerify (mutate-stamp), handleBench, and handle
     }
   })
 
-  it("handleMutate CLI integration: failing strict deletes stamp; --scope/--file/--base never write stamp; --file= and 0-mutant strict fail closed", async () => {
-    const dir = initTempGitRepo("cli-mut-integration-")
-    try {
-      const engineSource = "export const isAdult = (age: number): boolean => age >= 18\n"
-      const strongTest = [
-        'import { expect, it } from "vitest"',
-        'import { isAdult } from "../src/engine.js"',
-        'it("strong", () => { expect(isAdult(21)).toBe(true); expect(isAdult(20)).toBe(false) })',
-      ].join("\n")
-      writeDemoGatesPkg(dir, engineSource, strongTest)
-      gitCommitAll(dir, "add demo")
-      git(dir, ["checkout", "-b", "feat/cli-int"])
-      writeFileSync(
-        join(dir, "libs", "demo", "gates", "src", "engine.ts"),
-        "export const isAdult = (age: number): boolean => age >= 21\n",
-        "utf8",
-      )
-      gitCommitAll(dir, "update age")
+  const DEMO_STRONG_TEST = [
+    'import { expect, it } from "vitest"',
+    'import { isAdult } from "../src/engine.js"',
+    'it("strong", () => { expect(isAdult(21)).toBe(true); expect(isAdult(20)).toBe(false) })',
+  ].join("\n")
 
+  const setupMutateCliRepo = () => {
+    const dir = initTempGitRepo("cli-mut-integration-")
+    const engineSource = "export const isAdult = (age: number): boolean => age >= 18\n"
+    writeDemoGatesPkg(dir, engineSource, DEMO_STRONG_TEST)
+    gitCommitAll(dir, "add demo")
+    git(dir, ["checkout", "-b", "feat/cli-int"])
+    writeFileSync(
+      join(dir, "libs", "demo", "gates", "src", "engine.ts"),
+      "export const isAdult = (age: number): boolean => age >= 21\n",
+      "utf8",
+    )
+    gitCommitAll(dir, "update age")
+    return dir
+  }
+
+  it("handleMutate CLI integration: failing strict deletes stamp; --scope/--file/--base never write stamp; --file= and 0-mutant strict fail closed", async () => {
+    const dir = setupMutateCliRepo()
+    try {
       const stampPath = join(dir, ".harness", "mutate-stamp.json")
 
       // 1. --scope, --file, and --base NEVER write a stamp even on passing --strict
@@ -548,6 +566,16 @@ describe("CLI handleMutate, handleVerify (mutate-stamp), handleBench, and handle
       )
       expect(zeroMutantRes.exitCode).toBe(1)
       expect(existsSync(stampPath)).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 60_000) // spawns git + Vitest mutation subprocesses across strict failure modes in temp repo
+
+  it("handleMutate CLI integration: --strict --all writes valid stamp, honors mutant cache/HMAC isolation, and --diff filters branch-base lines", async () => {
+    const dir = setupMutateCliRepo()
+    try {
+      const stampPath = join(dir, ".harness", "mutate-stamp.json")
+      const strongTest = DEMO_STRONG_TEST
 
       // 5. --strict --all with 0-mutant contract sibling passes evaluateVerifyMutateStampGate E2E
       writeFileSync(
@@ -682,5 +710,417 @@ describe("CLI handleMutate, handleVerify (mutate-stamp), handleBench, and handle
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
-  }, 60_000)
+  }, 60_000) // spawns git + Vitest mutation subprocesses with malformed cache recovery in temp repo
+
+  it("SPEC-0026 REQ-4.3 & REQ-4.4: doc-only handleVerify fast-path skips subprocess verify on matching mutableTreeHash and cleanupStalePlanSnapshotAfterDone removes stale snapshot", async () => {
+    const dir = initTempGitRepo("harness-doc-fastpath-")
+    try {
+      git(dir, ["checkout", "-b", "feat/doc-fastpath"])
+      writeDemoGatesPkg(
+        dir,
+        "export const isEven = (n: number): boolean => n % 2 === 0\n",
+        [
+          'import { expect, it } from "vitest"',
+          'import { isEven } from "../src/engine.js"',
+          'it("kills %", () => { expect(isEven(2)).toBe(true); expect(isEven(3)).toBe(false) })',
+        ].join("\n"),
+      )
+      mkdirSync(join(dir, "docs"), { recursive: true })
+      writeFileSync(join(dir, "docs", "guide.md"), "# initial guide\n", "utf8")
+      gitCommitAll(dir, "add gates")
+
+      // 1. Prime mutate-stamp & verify-stamp (with mutableTreeHash and branch)
+      const mutRes = await Effect.runPromise(
+        handleMutate(["mutate", "--strict"], { repoRoot: dir }),
+      )
+      expect(mutRes.exitCode).toBe(0)
+
+      const { implBranch } = resolveOmnigraphTaskBranches(dir, nodeSyncHostIo)
+      const initialStamp = writeVerifyStamp(dir, nodeSyncHostIo, implBranch, {
+        dstSeed: DstSeed.make(12345),
+        dstSeedsRun: DstSeedsRunCount.make(100),
+      })
+      expect(initialStamp.mutableTreeHash).toBeDefined()
+
+      // 2. Modify markdown only -> handleVerify WITHOUT skipSubprocessVerify takes fast-path without invoking Nx/pnpm
+      writeFileSync(join(dir, "docs", "guide.md"), "# updated markdown only\n", "utf8")
+      const fastPathRes = await Effect.runPromise(
+        handleVerify({
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+          skipAutoSessionReport: true,
+          mutateStampPolicy: "enforce",
+          decisionLayer: makeMockDecisionModelLayer(),
+        }),
+      )
+      expect(fastPathRes.exitCode).toBe(0)
+      const refreshedCheck = checkVerifyStamp(dir, nodeSyncHostIo)
+      expect(refreshedCheck.valid).toBe(true)
+      if (refreshedCheck.valid) {
+        expect(refreshedCheck.stamp.mutableTreeHash).toBe(initialStamp.mutableTreeHash)
+        expect(refreshedCheck.stamp.treeHash).not.toBe(initialStamp.treeHash)
+        expect(refreshedCheck.stamp.dstSeed).toBe(12345)
+      }
+
+      // 3. Direct tryRunDocOnlyVerifyFastPath checks: branch mismatch returns Skipped, GC failure fails closed
+      const emptyGraph = buildHarnessGraph({
+        fns: [],
+        services: [],
+        layers: [],
+        errors: [],
+        tests: [],
+      })
+      const mismatchRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch: "impl/other-branch",
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(mismatchRes).toEqual({
+        _tag: "Skipped",
+        reason: "no valid prior verify-stamp or taskBranch mismatch",
+      })
+
+      const gcFailRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [
+            {
+              id: "harness:SPEC-9999",
+              docPath: "libs/harness/docs/specs/bad.md",
+              status: "accepted",
+              markdown:
+                "## Requirements\n\n### 1 · Bad\n**Source:** t\n\n| ID | Pattern | Requirement | Effect Symbol | Verification |\n|---|---|---|---|---|\n| REQ-1.1 | Ubiquitous | The system should fail. | x | test |\n",
+              enforcedByFiles: [],
+            },
+          ],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(gcFailRes).toMatchObject({
+        _tag: "Executed",
+        result: {
+          exitCode: 1,
+          stderr: expect.stringContaining("verify:gc-doc-only"),
+        },
+      })
+
+      // 4. Editing .ts code bypasses fast path (mutableTreeHash mismatches)
+      writeFileSync(
+        join(dir, "libs", "demo", "gates", "src", "engine.ts"),
+        "export const isEven = (n: number): boolean => n % 2 === 0 // code edit\n",
+        "utf8",
+      )
+      const codeEditedFastPath = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(codeEditedFastPath).toEqual({
+        _tag: "Skipped",
+        reason: "mutableTreeHash mismatch",
+      })
+      expect(computeMutableTreeHashChecked(dir, nodeSyncHostIo)._tag).toBe("Success")
+
+      // 5. cleanupStalePlanSnapshotAfterDone removes .harness/plan-graph-snapshot.json, no-ops if absent, fails on symlink/unlink error
+      const planSnapPath = join(dir, ".harness", "plan-graph-snapshot.json")
+      writeFileSync(planSnapPath, "{}", "utf8")
+      expect(cleanupStalePlanSnapshotAfterDone(dir, nodeSyncHostIo)).toBeUndefined()
+      expect(existsSync(planSnapPath)).toBe(false)
+      expect(cleanupStalePlanSnapshotAfterDone(dir, nodeSyncHostIo)).toBeUndefined()
+
+      writeFileSync(planSnapPath, "{}", "utf8")
+      const symlinkIo: SyncHostIo = {
+        ...nodeSyncHostIo,
+        isSymbolicLinkSync: (p) =>
+          p === planSnapPath ? true : nodeSyncHostIo.isSymbolicLinkSync(p),
+      }
+      expect(cleanupStalePlanSnapshotAfterDone(dir, symlinkIo)).toContain("Refusing symlink")
+
+      const failUnlinkIo: SyncHostIo = {
+        ...nodeSyncHostIo,
+        isSymbolicLinkSync: () => false,
+        unlinkSync: () => {
+          throw new Error("EPERM")
+        },
+      }
+      expect(cleanupStalePlanSnapshotAfterDone(dir, failUnlinkIo)).toContain("EPERM")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 60_000) // spawns git + Vitest mutate/verify subprocesses in temporary repo
+
+  const withDocFastpathEdgeFixture = async (
+    fn: (ctx: {
+      readonly dir: string
+      readonly implBranch: string
+      readonly emptyGraph: ReturnType<typeof buildHarnessGraph>
+    }) => Promise<void>,
+  ): Promise<void> => {
+    const dir = initTempGitRepo("harness-doc-fastpath-edges-")
+    const prevCi = process.env.CI
+    const prevDstSeed = process.env.DST_SEED
+    try {
+      git(dir, ["checkout", "-b", "feat/doc-fastpath-edges"])
+      writeDemoGatesPkg(
+        dir,
+        "export const isEven = (n: number): boolean => n % 2 === 0\n",
+        [
+          'import { expect, it } from "vitest"',
+          'import { isEven } from "../src/engine.js"',
+          'it("kills %", () => { expect(isEven(2)).toBe(true); expect(isEven(3)).toBe(false) })',
+        ].join("\n"),
+      )
+      mkdirSync(join(dir, "agent-patterns"), { recursive: true })
+      mkdirSync(join(dir, "docs"), { recursive: true })
+      writeFileSync(join(dir, "docs", "guide.md"), "# initial\n", "utf8")
+      gitCommitAll(dir, "add gates")
+
+      const mutRes = await Effect.runPromise(
+        handleMutate(["mutate", "--strict"], { repoRoot: dir }),
+      )
+      expect(mutRes.exitCode).toBe(0)
+
+      const { implBranch } = resolveOmnigraphTaskBranches(dir, nodeSyncHostIo)
+      const emptyGraph = buildHarnessGraph({
+        fns: [],
+        services: [],
+        layers: [],
+        errors: [],
+        tests: [],
+      })
+      await fn({ dir, implBranch, emptyGraph })
+    } finally {
+      if (prevCi === undefined) {
+        Reflect.deleteProperty(process.env, "CI")
+      } else {
+        process.env.CI = prevCi
+      }
+      if (prevDstSeed === undefined) {
+        Reflect.deleteProperty(process.env, "DST_SEED")
+      } else {
+        process.env.DST_SEED = prevDstSeed
+      }
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it("SPEC-0026 REQ-4.4 F-09 / S-5.2: doc-only fast-path enforces skipSubprocessVerify, CI seed threshold, DST_SEED match, and mutableTreeHash failure fail-closed", async () => {
+    await withDocFastpathEdgeFixture(async ({ dir, implBranch, emptyGraph }) => {
+      // (a0) skipSubprocessVerify returns Skipped with concrete reason
+      const skipFlagRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch,
+          options: { repoRoot: dir, skipSubprocessVerify: true },
+        }),
+      )
+      expect(skipFlagRes).toEqual({
+        _tag: "Skipped",
+        reason: "skipSubprocessVerify flag enabled",
+      })
+
+      // (a) CI=true with stamped dstSeedsRun < 100 bypasses fast-path
+      process.env.CI = "true"
+      Reflect.deleteProperty(process.env, "DST_SEED")
+      writeVerifyStamp(dir, nodeSyncHostIo, implBranch, {
+        dstSeed: DstSeed.make(12345),
+        dstSeedsRun: DstSeedsRunCount.make(42),
+      })
+      const lowSeedRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(lowSeedRes).toEqual({
+        _tag: "Skipped",
+        reason: "insufficient dstSeedsRun",
+      })
+
+      // (b) Mismatched DST_SEED bypasses fast-path
+      writeVerifyStamp(dir, nodeSyncHostIo, implBranch, {
+        dstSeed: DstSeed.make(12345),
+        dstSeedsRun: DstSeedsRunCount.make(100),
+      })
+      process.env.DST_SEED = "99999"
+      const mismatchSeedRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(mismatchSeedRes).toEqual({
+        _tag: "Skipped",
+        reason: "DST_SEED mismatch",
+      })
+
+      // (b2) Matching DST_SEED + CI=true + dstSeedsRun=100 passes fast-path cleanly
+      process.env.DST_SEED = "12345"
+      rmSync(join(dir, "agent-patterns"), { recursive: true, force: true })
+      const matchingSeedRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(matchingSeedRes).toMatchObject({
+        _tag: "Executed",
+        result: { exitCode: 0 },
+      })
+
+      // (b3) S-5.2: computeMutableTreeHashChecked Failure (symlinked source file) fails closed with verify:mutable-tree-hash
+      symlinkSync(
+        join(dir, "libs", "demo", "gates", "src", "engine.ts"),
+        join(dir, "libs", "demo", "gates", "src", "bad-link.ts"),
+      )
+      const mutableFailRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(mutableFailRes).toMatchObject({
+        _tag: "Executed",
+        result: {
+          exitCode: 1,
+          stderr: expect.stringContaining("[GATE FAILURE] verify:mutable-tree-hash"),
+        },
+      })
+    })
+  }, 60_000) // spawns git + Vitest mutate subprocess in temporary repo
+
+  it("SPEC-0026 REQ-4.4 F-09: doc-only fast-path fails closed on invalid DST_SEED and missing agent-patterns docs", async () => {
+    await withDocFastpathEdgeFixture(async ({ dir, implBranch, emptyGraph }) => {
+      process.env.CI = "true"
+      writeVerifyStamp(dir, nodeSyncHostIo, implBranch, {
+        dstSeed: DstSeed.make(12345),
+        dstSeedsRun: DstSeedsRunCount.make(100),
+      })
+
+      // (c) Invalid DST_SEED fails closed with verify:dst-seed
+      process.env.DST_SEED = "not-a-number"
+      const invalidSeedRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(invalidSeedRes).toMatchObject({
+        _tag: "Executed",
+        result: {
+          exitCode: 1,
+          stderr: expect.stringContaining("verify:dst-seed"),
+        },
+      })
+
+      // (d) agent-patterns/ present without required docs fails closed with verify:gc-doc-only
+      Reflect.deleteProperty(process.env, "DST_SEED")
+      const missingPatternsRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(missingPatternsRes).toMatchObject({
+        _tag: "Executed",
+        result: {
+          exitCode: 1,
+          stderr: expect.stringContaining("verify:gc-doc-only"),
+        },
+      })
+    })
+  }, 60_000) // spawns git + Vitest mutate subprocess in temporary repo
+
+  it("SPEC-0026 REQ-4.4 F-09: doc-only fast-path fails closed on corrupt span-trace.json and SpanCausalityError budget violations", async () => {
+    await withDocFastpathEdgeFixture(async ({ dir, implBranch, emptyGraph }) => {
+      process.env.CI = "true"
+      Reflect.deleteProperty(process.env, "DST_SEED")
+      rmSync(join(dir, "agent-patterns"), { recursive: true, force: true })
+      writeVerifyStamp(dir, nodeSyncHostIo, implBranch, {
+        dstSeed: DstSeed.make(12345),
+        dstSeedsRun: DstSeedsRunCount.make(100),
+      })
+
+      // (e) Corrupt .harness/span-trace.json and SpanCausalityError budget violations both fail closed with verify:span-budget
+      mkdirSync(join(dir, ".harness"), { recursive: true })
+      writeFileSync(join(dir, ".harness", "span-trace.json"), "{not-json", "utf8")
+      const corruptSpanRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(corruptSpanRes).toMatchObject({
+        _tag: "Executed",
+        result: {
+          exitCode: 1,
+          stderr: expect.stringContaining("verify:span-budget"),
+        },
+      })
+
+      const violatingSpans = [
+        { spanId: "root-1", name: "Root.run", parentSpanId: null, durationMs: 10 },
+        ...Array.from({ length: 6 }, (_, idx) => ({
+          spanId: `child-${idx}`,
+          name: "Child.work",
+          parentSpanId: "root-1",
+          durationMs: 1,
+        })),
+      ]
+      writeFileSync(
+        join(dir, ".harness", "span-trace.json"),
+        JSON.stringify(violatingSpans),
+        "utf8",
+      )
+      const causalityViolationRes = await Effect.runPromise(
+        tryRunDocOnlyVerifyFastPath({
+          repoRoot: dir,
+          graph: emptyGraph,
+          governanceDocs: [],
+          implBranch,
+          options: { repoRoot: dir },
+        }),
+      )
+      expect(causalityViolationRes).toMatchObject({
+        _tag: "Executed",
+        result: {
+          exitCode: 1,
+          stderr: expect.stringContaining("verify:span-budget"),
+        },
+      })
+    })
+  }, 60_000) // spawns git + Vitest mutate subprocess in temporary repo
 })

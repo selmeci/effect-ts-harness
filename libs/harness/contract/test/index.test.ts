@@ -13,7 +13,11 @@ import {
   AstSourceContent,
   AstSourceFilePath,
   AttemptNumber,
+  CANONICAL_CLI_COMMAND_NAMES,
   CANONICAL_MCP_TOOL_NAMES,
+  CanonicalCliCommandName,
+  CanonicalMcpToolName,
+  CliCommandName,
   CompiledPlan,
   CompiledWaves,
   type CompiledWorkUnit,
@@ -59,6 +63,8 @@ import {
   InvalidPlanWorkflowGraphError,
   InvalidReviewRouteInputError,
   LeaseEpoch,
+  LeaseFilePath,
+  LeaseHolderId,
   McpToolName,
   NonNegativeCount,
   NxScopeTag,
@@ -106,10 +112,13 @@ import {
   SubprocessArg,
   SubprocessCommand,
   SubprocessExitCode,
+  SubprocessMaxBufferBytes,
   SubprocessOutput,
   TaskRunAbortedError,
   TierTopologyMessage,
   TierTopologyRuleId,
+  UnitEscalation,
+  UnitOutcome,
   WORKFLOW_GQ_QUERY_NAMES,
   WaveIndex,
   WorkUnitDraft,
@@ -118,6 +127,7 @@ import {
   WorkflowAttemptVerdict,
   WorkflowCompileReason,
   WorkflowCompleteRequest,
+  WorkflowCompleteResponse,
   WorkflowExecutionId,
   WorkflowGqQueryName,
   WorkflowLevel,
@@ -125,6 +135,7 @@ import {
   WorkflowProjectionStatus,
   WorkflowRebuiltRunCount,
   WorkflowResumeRequest,
+  WorkflowResumeResponse,
   WorkflowRpcEnvelope,
   WorkflowRpcErrorEnvelope,
   WorkflowRpcRequestId,
@@ -166,7 +177,10 @@ import {
   resolveDefaultDecisionCachePath,
   sanitizeWorktreeIdSegment,
   selectActivePersistedAstCacheEntries,
+  toCompilerOverlayErrorReason,
+  toCompilerRepoRootInput,
   toErrorReasonMessage,
+  toMcpToolInputName,
   validateSubprocessInput,
   wavesOf,
 } from "../src/index.js"
@@ -814,6 +828,43 @@ describe("@harness/contract schemas", () => {
     expect(toErrorReasonMessage("", "   ")).toBe("Unknown error")
     expect(toErrorReasonMessage(Object.create(null), "null-proto")).toBe("null-proto")
 
+    expect(Schema.is(SubprocessMaxBufferBytes)(1024)).toBe(true)
+    expect(Schema.is(SubprocessMaxBufferBytes)(16_777_216)).toBe(true)
+    expect(Schema.is(SubprocessMaxBufferBytes)(16_777_217)).toBe(false)
+    expect(toMcpToolInputName("t".repeat(256))).toBe("t".repeat(256))
+    expect(toMcpToolInputName("t".repeat(257))).toHaveLength(256)
+    expect(toMcpToolInputName("t".repeat(300))).toHaveLength(256)
+    expect(toCompilerRepoRootInput("/".repeat(4096))).toBe("/".repeat(4096))
+    expect(toCompilerRepoRootInput("/".repeat(4097))).toHaveLength(4096)
+    expect(toCompilerRepoRootInput("/".repeat(5000))).toHaveLength(4096)
+    const mcpLongA = toMcpToolInputName(`${"t".repeat(299)}a`)
+    const mcpLongB = toMcpToolInputName(`${"t".repeat(299)}b`)
+    expect(mcpLongA).not.toBe(mcpLongB)
+    expect(mcpLongA).toContain("…[len=300,h=")
+    const mcpSurrogateLowBound = toMcpToolInputName(
+      `${"x".repeat(226)}\uD800\uDC00${"y".repeat(60)}`,
+    )
+    expect(mcpSurrogateLowBound).toHaveLength(255)
+    expect(() => encodeURIComponent(mcpSurrogateLowBound)).not.toThrow()
+    const mcpSurrogateHighBound = toMcpToolInputName(
+      `${"x".repeat(226)}\uDBFF\uDFFF${"y".repeat(60)}`,
+    )
+    expect(mcpSurrogateHighBound).toHaveLength(255)
+    expect(() => encodeURIComponent(mcpSurrogateHighBound)).not.toThrow()
+    const mcpNonSurrogate = toMcpToolInputName(`${"x".repeat(226)}\uD7FF${"y".repeat(60)}`)
+    expect(mcpNonSurrogate).toHaveLength(256)
+    const rootLongA = toCompilerRepoRootInput(`${"/".repeat(4999)}a`)
+    const rootLongB = toCompilerRepoRootInput(`${"/".repeat(4999)}b`)
+    expect(rootLongA).not.toBe(rootLongB)
+    expect(rootLongA).toContain("…[len=5000,h=")
+    const rootSurrogateSplit = toCompilerRepoRootInput(
+      `${"/".repeat(4065)}\u{1F680}${"z".repeat(80)}`,
+    )
+    expect(rootSurrogateSplit).toHaveLength(4095)
+    expect(() => encodeURIComponent(rootSurrogateSplit)).not.toThrow()
+    expect(toCompilerOverlayErrorReason("e".repeat(9000))).toHaveLength(8192)
+    expect(toCompilerOverlayErrorReason("", "fallback")).toBe("fallback")
+
     const report = makeVerdictReport([], {
       inspectedFileCount: NonNegativeCount.make(3),
     })
@@ -876,8 +927,25 @@ describe("@harness/contract schemas", () => {
     expect(() => Schema.decodeUnknownSync(NxTierTag)("type:unknown")).toThrow()
   })
 
-  it("validates review routing contracts, branded literals, and 18 canonical MCP tool names", () => {
-    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(18)
+  it("validates review routing contracts, branded literals, and canonical CLI/MCP schemas", () => {
+    expect(CANONICAL_CLI_COMMAND_NAMES).toHaveLength(CanonicalCliCommandName.schema.literals.length)
+    expect(CANONICAL_CLI_COMMAND_NAMES.map((n) => String(n))).toEqual([
+      ...CanonicalCliCommandName.schema.literals,
+    ])
+    for (const cmd of CANONICAL_CLI_COMMAND_NAMES) {
+      expect(Schema.decodeUnknownSync(CanonicalCliCommandName)(cmd)).toBe(cmd)
+      expect(Schema.decodeSync(CliCommandName)(cmd)).toBe(cmd)
+    }
+    expect(() => Schema.decodeUnknownSync(CanonicalCliCommandName)("not-a-cli-cmd")).toThrow()
+
+    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(CanonicalMcpToolName.schema.literals.length)
+    expect(CANONICAL_MCP_TOOL_NAMES.map((n) => String(n))).toEqual([
+      ...CanonicalMcpToolName.schema.literals,
+    ])
+    for (const tool of CANONICAL_MCP_TOOL_NAMES) {
+      expect(Schema.decodeUnknownSync(CanonicalMcpToolName)(tool)).toBe(tool)
+    }
+    expect(() => Schema.decodeUnknownSync(CanonicalMcpToolName)("not_an_mcp_tool")).toThrow()
     expect(CANONICAL_MCP_TOOL_NAMES).toContain(McpToolName.make("harness_review_route"))
     expect(CANONICAL_MCP_TOOL_NAMES).toContain(McpToolName.make("harness_git_diff"))
     expect(CANONICAL_MCP_TOOL_NAMES).toContain(McpToolName.make("harness_workflow_plan"))
@@ -1146,7 +1214,116 @@ describe("@harness/contract schemas", () => {
     expect(invalidErr.message).toContain("unit-a")
   })
 
-  it("validates WF-3 workflow RPC contracts, read-model schemas, TaskRunAbortedError, and 14 new GQ query names", () => {
+  const makeWf3Fixtures = () => {
+    const runId = WorkflowRunId.make("run-wf3-001")
+    const execId = WorkflowExecutionId.make("exec-wf3-001")
+    const unitId = WorkUnitId.make("unit-wf3-1")
+    const planSha = PlanSha256.make("a".repeat(64))
+    const baseSha = GitCommitSha.make("0123456789abcdef0123456789abcdef01234567")
+    const treeHash = WorkspaceTreeHash.make("b".repeat(64))
+    const stampHash = PackageStampHash.make("c".repeat(64))
+    const repoRoot = AbsoluteRepoRoot.make("/workspace/repo")
+    const commonGitDir = GitCommonDirPath.make("/workspace/repo/.git")
+    const expectedUnitKey = makeWorkflowUnitKey(runId, unitId)
+    const expectedAttemptKey = makeWorkflowAttemptKey(runId, unitId, AttemptNumber.make(1))
+    const dispatchedAttempt = Schema.decodeSync(DispatchedWorkflowAttemptRecord)({
+      attemptKey: expectedAttemptKey,
+      runId,
+      unitId,
+      attempt: AttemptNumber.make(1),
+      verdict: "dispatched",
+      runner: RunnerId.make("antigravity"),
+      updatedMs: WorkflowTimestampMs.make(1_150),
+    })
+    const completedAttempt = Schema.decodeSync(CompletedWorkflowAttemptRecord)({
+      attemptKey: expectedAttemptKey,
+      runId,
+      unitId,
+      attempt: AttemptNumber.make(1),
+      verdict: "completed",
+      packageStampHash: stampHash,
+      updatedMs: WorkflowTimestampMs.make(1_180),
+    })
+    const rejectedAttempt = Schema.decodeSync(RejectedWorkflowAttemptRecord)({
+      attemptKey: expectedAttemptKey,
+      runId,
+      unitId,
+      attempt: AttemptNumber.make(1),
+      verdict: "rejected",
+      runner: RunnerId.make("antigravity"),
+      rejection: { _tag: "StampMissing" },
+      packageStampHash: stampHash,
+      updatedMs: WorkflowTimestampMs.make(1_200),
+    })
+    const pendingDeferreds = [
+      {
+        _tag: "UnitCompletion" as const,
+        unitId,
+        attempt: AttemptNumber.make(1),
+        deferredName: PendingDeferredName.make(`unit/${unitId}/1`),
+      },
+      {
+        _tag: "Escalation" as const,
+        unitId,
+        deferredName: PendingDeferredName.make(`escalation/${unitId}/1`),
+        escalation: { _tag: "AuthRequired" as const, runner: RunnerId.make("claude-code") },
+      },
+      {
+        _tag: "LlmPhase" as const,
+        deferredName: PendingDeferredName.make("llm-phase-done"),
+      },
+    ]
+    const skipReview = {
+      _tag: "SkipReviewPlan" as const,
+      depth: ReviewDepth.make("skip"),
+      source: ReviewRoutingSource.make("deterministic"),
+      reason: ReviewRoutingReason.make("doc-only"),
+      selections: [] as const,
+    }
+    const runRecord = {
+      runId,
+      executionId: execId,
+      level: WorkflowLevel.make("slice"),
+      planSha,
+      baseSha,
+      state: WorkflowRunState.make("waiting"),
+      planJson: PlanJsonPayload.make("{}"),
+      updatedMs: WorkflowTimestampMs.make(1_000),
+    }
+    const unitRecord = {
+      unitKey: WorkflowUnitKey.make(expectedUnitKey),
+      runId,
+      unitId,
+      kind: WorkflowUnitKind.make("slice"),
+      waveIndex: WaveIndex.make(0),
+      status: WorkflowUnitStatus.make("escalated"),
+      ownedRelPaths: [OwnedRelPath.make("libs/harness/contract/src")],
+      updatedMs: WorkflowTimestampMs.make(1_100),
+    }
+    return {
+      runId,
+      execId,
+      unitId,
+      planSha,
+      baseSha,
+      treeHash,
+      stampHash,
+      repoRoot,
+      commonGitDir,
+      expectedUnitKey,
+      expectedAttemptKey,
+      dispatchedAttempt,
+      completedAttempt,
+      rejectedAttempt,
+      pendingDeferreds,
+      skipReview,
+      runRecord,
+      unitRecord,
+    }
+  }
+
+  it("validates WF-3 IDs, TaskRunAbortedError, 14 GQ query names, and CompleteSharedStepInput", () => {
+    const { runId, baseSha, repoRoot } = makeWf3Fixtures()
     expect(SHARED_STEP_UNIT_ID).toBe("shared-step")
     expect(Schema.decodeSync(WorkUnitId)(SHARED_STEP_UNIT_ID)).toBe("shared-step")
 
@@ -1166,16 +1343,6 @@ describe("@harness/contract schemas", () => {
     for (const badRebuiltCount of [-1, 1.5, Number.NaN, "2", null]) {
       expect(() => Schema.decodeUnknownSync(WorkflowRebuiltRunCount)(badRebuiltCount)).toThrow()
     }
-
-    const runId = WorkflowRunId.make("run-wf3-001")
-    const execId = WorkflowExecutionId.make("exec-wf3-001")
-    const unitId = WorkUnitId.make("unit-wf3-1")
-    const planSha = PlanSha256.make("a".repeat(64))
-    const baseSha = GitCommitSha.make("0123456789abcdef0123456789abcdef01234567")
-    const treeHash = WorkspaceTreeHash.make("b".repeat(64))
-    const stampHash = PackageStampHash.make("c".repeat(64))
-    const repoRoot = AbsoluteRepoRoot.make("/workspace/repo")
-    const commonGitDir = GitCommonDirPath.make("/workspace/repo/.git")
 
     const authAbort = new TaskRunAbortedError({
       runId,
@@ -1268,6 +1435,20 @@ describe("@harness/contract schemas", () => {
         cwd: repoRoot,
       }),
     ).toThrow()
+  })
+
+  it("validates WF-3 start, complete, resume requests and workflow attempt record schemas", () => {
+    const {
+      runId,
+      unitId,
+      planSha,
+      baseSha,
+      repoRoot,
+      expectedAttemptKey,
+      dispatchedAttempt,
+      completedAttempt,
+      rejectedAttempt,
+    } = makeWf3Fixtures()
 
     const plan = Schema.decodeSync(CompiledPlan)({
       runId,
@@ -1321,10 +1502,7 @@ describe("@harness/contract schemas", () => {
       }),
     ).toThrow()
     expect(() =>
-      Schema.decodeUnknownSync(WorkflowCompleteRequest)({
-        _tag: "CompleteUnknown",
-        repoRoot,
-      }),
+      Schema.decodeUnknownSync(WorkflowCompleteRequest)({ _tag: "CompleteUnknown", repoRoot }),
     ).toThrow()
 
     const resumeEscalationReq = Schema.decodeSync(WorkflowResumeRequest)({
@@ -1355,15 +1533,8 @@ describe("@harness/contract schemas", () => {
         decision: "skip",
       }),
     ).toThrow()
-    expect(() =>
-      Schema.decodeUnknownSync(WorkflowResumeRequest)({
-        repoRoot,
-        runId,
-      }),
-    ).toThrow()
+    expect(() => Schema.decodeUnknownSync(WorkflowResumeRequest)({ repoRoot, runId })).toThrow()
 
-    const expectedUnitKey = makeWorkflowUnitKey(runId, unitId)
-    const expectedAttemptKey = makeWorkflowAttemptKey(runId, unitId, AttemptNumber.make(1))
     const retryEscalationAttemptKey = makeWorkflowAttemptKey(
       runId,
       unitId,
@@ -1373,36 +1544,6 @@ describe("@harness/contract schemas", () => {
     expect(retryEscalationAttemptKey).toBe(`${runId}/${unitId}#1/r2`)
     expect(Schema.decodeSync(WorkflowAttemptKey)(expectedAttemptKey)).toBe(expectedAttemptKey)
     expect(Schema.decodeSync(WorkflowAttemptVerdict)("rejected")).toBe("rejected")
-
-    const dispatchedAttempt = Schema.decodeSync(DispatchedWorkflowAttemptRecord)({
-      attemptKey: expectedAttemptKey,
-      runId,
-      unitId,
-      attempt: AttemptNumber.make(1),
-      verdict: "dispatched",
-      runner: RunnerId.make("antigravity"),
-      updatedMs: WorkflowTimestampMs.make(1_150),
-    })
-    const completedAttempt = Schema.decodeSync(CompletedWorkflowAttemptRecord)({
-      attemptKey: expectedAttemptKey,
-      runId,
-      unitId,
-      attempt: AttemptNumber.make(1),
-      verdict: "completed",
-      packageStampHash: stampHash,
-      updatedMs: WorkflowTimestampMs.make(1_180),
-    })
-    const rejectedAttempt = Schema.decodeSync(RejectedWorkflowAttemptRecord)({
-      attemptKey: expectedAttemptKey,
-      runId,
-      unitId,
-      attempt: AttemptNumber.make(1),
-      verdict: "rejected",
-      runner: RunnerId.make("antigravity"),
-      rejection: { _tag: "StampMissing" },
-      packageStampHash: stampHash,
-      updatedMs: WorkflowTimestampMs.make(1_200),
-    })
     expect(dispatchedAttempt.verdict).toBe("dispatched")
     expect(completedAttempt.verdict).toBe("completed")
     expect(rejectedAttempt.rejection._tag).toBe("StampMissing")
@@ -1420,55 +1561,24 @@ describe("@harness/contract schemas", () => {
         updatedMs: WorkflowTimestampMs.make(1_200),
       }),
     ).toThrow()
+  })
 
-    const pendingDeferreds = [
-      {
-        _tag: "UnitCompletion" as const,
-        unitId,
-        attempt: AttemptNumber.make(1),
-        deferredName: PendingDeferredName.make(`unit/${unitId}/1`),
-      },
-      {
-        _tag: "Escalation" as const,
-        unitId,
-        deferredName: PendingDeferredName.make(`escalation/${unitId}/1`),
-        escalation: { _tag: "AuthRequired" as const, runner: RunnerId.make("claude-code") },
-      },
-      {
-        _tag: "LlmPhase" as const,
-        deferredName: PendingDeferredName.make("llm-phase-done"),
-      },
-    ]
-
-    const skipReview = {
-      _tag: "SkipReviewPlan" as const,
-      depth: ReviewDepth.make("skip"),
-      source: ReviewRoutingSource.make("deterministic"),
-      reason: ReviewRoutingReason.make("doc-only"),
-      selections: [] as const,
-    }
-
-    const runRecord = {
-      runId,
-      executionId: execId,
-      level: WorkflowLevel.make("slice"),
-      planSha,
-      baseSha,
-      state: WorkflowRunState.make("waiting"),
-      planJson: PlanJsonPayload.make("{}"),
-      updatedMs: WorkflowTimestampMs.make(1_000),
-    }
-
-    const unitRecord = {
-      unitKey: WorkflowUnitKey.make(expectedUnitKey),
+  it("validates WF-3 outcomes, WorkflowStatusSummary, RPC envelopes, and WorkflowPlanToolOutput", () => {
+    const {
       runId,
       unitId,
-      kind: WorkflowUnitKind.make("slice"),
-      waveIndex: WaveIndex.make(0),
-      status: WorkflowUnitStatus.make("escalated"),
-      ownedRelPaths: [OwnedRelPath.make("libs/harness/contract/src")],
-      updatedMs: WorkflowTimestampMs.make(1_100),
-    }
+      planSha,
+      treeHash,
+      repoRoot,
+      commonGitDir,
+      dispatchedAttempt,
+      completedAttempt,
+      rejectedAttempt,
+      pendingDeferreds,
+      skipReview,
+      runRecord,
+      unitRecord,
+    } = makeWf3Fixtures()
 
     const failedOutcome = Schema.decodeSync(WorkflowRunOutcome)({
       _tag: "Failed",
@@ -1504,10 +1614,7 @@ describe("@harness/contract schemas", () => {
         planSha,
         review: skipReview,
         completedUnits: [unitId],
-        llmPhase: {
-          workspaceHash: treeHash,
-          frictionLogCleared: FrictionLogState.make("cleared"),
-        },
+        llmPhase: { workspaceHash: treeHash, frictionLogCleared: FrictionLogState.make("cleared") },
       },
       projectionStatus: WorkflowProjectionStatus.make("fresh"),
     })
@@ -1590,5 +1697,90 @@ describe("@harness/contract schemas", () => {
         status: statusSummary,
       }),
     ).toThrow()
+  })
+
+  it("round-trips all closed WorkflowTerminalError, WorkflowCompleteResponse, and WorkflowResumeResponse variants", () => {
+    const { runId, treeHash, runRecord } = makeWf3Fixtures()
+    const executionId = runRecord.executionId
+    const unitId = WorkUnitId.make("unit-a")
+    const roundtrip = <A, E>(schema: Schema.Codec<A, E, never, never>, value: A): A => {
+      const encoded = Schema.encodeSync(schema)(value)
+      const decoded = Schema.decodeSync(schema)(encoded)
+      expect(decoded).toEqual(value)
+      return decoded
+    }
+
+    const terminalVariants: ReadonlyArray<WorkflowTerminalError> = [
+      WorkflowTerminalError.cases.Aborted.make({
+        runId,
+        escalation: UnitEscalation.cases.AuthRequired.make({
+          runner: RunnerId.make("claude-code"),
+        }),
+      }),
+      WorkflowTerminalError.cases.OperatorAborted.make({
+        runId,
+        reason: WorkflowStoreFailureReason.make("cancelled by operator"),
+      }),
+      WorkflowTerminalError.cases.WorkspaceFs.make({
+        operation: WorkspaceFsOperation.make("read"),
+        reason: WorkflowStoreFailureReason.make("unreadable snapshot"),
+      }),
+      WorkflowTerminalError.cases.StoreUnavailable.make({
+        operation: WorkflowStoreOperation.make("rebuild"),
+        reason: WorkflowStoreFailureReason.make("daemon store offline"),
+      }),
+      WorkflowTerminalError.cases.LeaseHeld.make({
+        holderId: LeaseHolderId.make("worker-1"),
+        lockFilePath: LeaseFilePath.make("/tmp/repo/.git/harness/daemon.lock"),
+      }),
+      WorkflowTerminalError.cases.LeaseHeld.make({
+        holderId: LeaseHolderId.make("worker-2"),
+        leaseEpoch: LeaseEpoch.make(7),
+        lockFilePath: LeaseFilePath.make("/tmp/repo/.git/harness/daemon.lock"),
+      }),
+      WorkflowTerminalError.cases.Interrupted.make({
+        reason: WorkflowStoreFailureReason.make("fiber interrupted"),
+      }),
+      WorkflowTerminalError.cases.Defect.make({
+        reason: WorkflowStoreFailureReason.make("unexpected fiber defect"),
+      }),
+    ]
+    for (const variant of terminalVariants) {
+      expect(roundtrip(WorkflowTerminalError, variant)._tag).toBe(variant._tag)
+    }
+
+    const completeVariants: ReadonlyArray<WorkflowCompleteResponse> = [
+      WorkflowCompleteResponse.cases.UnitCompleted.make({
+        runId,
+        executionId,
+        outcome: UnitOutcome.cases.Completed.make({
+          unitId,
+          attempt: AttemptNumber.make(1),
+          changedPaths: [],
+          packageStampHash: PackageStampHash.make("b".repeat(64)),
+        }),
+      }),
+      WorkflowCompleteResponse.cases.LlmPhaseCompleted.make({
+        runId,
+        executionId,
+        receipt: { workspaceHash: treeHash, frictionLogCleared: FrictionLogState.make("cleared") },
+      }),
+    ]
+    for (const variant of completeVariants) {
+      expect(roundtrip(WorkflowCompleteResponse, variant)._tag).toBe(variant._tag)
+    }
+
+    const resumeVariants: ReadonlyArray<WorkflowResumeResponse> = [
+      WorkflowResumeResponse.cases.WorkflowResumed.make({ runId, executionId }),
+      WorkflowResumeResponse.cases.EscalationResolved.make({
+        runId,
+        executionId,
+        unitId,
+        decision: EscalationDecision.make("retry"),
+      }),
+    ]
+    for (const variant of resumeVariants) {
+      expect(roundtrip(WorkflowResumeResponse, variant)._tag).toBe(variant._tag)
+    }
   })
 })

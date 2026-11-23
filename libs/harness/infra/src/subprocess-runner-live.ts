@@ -1,5 +1,5 @@
 import { NodeServices } from "@effect/platform-node"
-import { Duration, Effect, Layer, type PlatformError, Stream } from "effect"
+import { Duration, Effect, Layer, type PlatformError, Schema, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { match } from "ts-pattern"
 import {
@@ -22,6 +22,33 @@ import type { SyncHostIo } from "@harness/service/host-io"
 
 const DEFAULT_SUBPROCESS_TIMEOUT_MS = 60_000
 const DEFAULT_MAX_BUFFER_BYTES = 10 * 1024 * 1024
+const MAX_SUBPROCESS_OUTPUT_CHARS = 16_777_216
+
+const toBoundedSubprocessOutput = (raw: string): SubprocessOutput =>
+  SubprocessOutput.make(
+    raw.length <= MAX_SUBPROCESS_OUTPUT_CHARS ? raw : raw.slice(0, MAX_SUBPROCESS_OUTPUT_CHARS),
+  )
+
+const decodeSubprocessOutput = (
+  command: SubprocessExecInput["command"],
+  raw: string,
+  streamName: "stdout" | "stderr",
+): Effect.Effect<SubprocessOutput, HarnessSubprocessError> =>
+  Schema.decodeEffect(SubprocessOutput)(raw).pipe(
+    Effect.mapError(
+      () =>
+        new HarnessSubprocessError({
+          command,
+          stderr: SubprocessOutput.make(
+            `Command '${command}' ${streamName} exceeded SubprocessOutput max length (${MAX_SUBPROCESS_OUTPUT_CHARS})`,
+          ),
+          reason: ErrorReasonMessage.make(
+            `Command '${command}' ${streamName} exceeded maxBufferBytes (${MAX_SUBPROCESS_OUTPUT_CHARS})`,
+          ),
+          failureKind: SubprocessFailureKind.make("max-buffer"),
+        }),
+    ),
+  )
 
 const extractErrnoCode = (err: unknown): string | undefined => {
   if (typeof err !== "object" || err === null) {
@@ -84,7 +111,7 @@ const toSubprocessError = (
   const reason = toErrorReasonMessage(err, `Command '${command}' failed to spawn`)
   return new HarnessSubprocessError({
     command,
-    stderr: SubprocessOutput.make(reason),
+    stderr: toBoundedSubprocessOutput(reason),
     reason,
     failureKind: classifySpawnErrorKind(err, reason),
   })
@@ -157,11 +184,15 @@ const makeHarnessSubprocessRunnerLayer = (
               ],
               { concurrency: "unbounded" },
             )
+            const [boundedStdout, boundedStderr] = yield* Effect.all([
+              decodeSubprocessOutput(input.command, stdout, "stdout"),
+              decodeSubprocessOutput(input.command, stderr, "stderr"),
+            ])
             return {
               command: input.command,
               exitCode: SubprocessExitCode.make(exitCode),
-              stdout: SubprocessOutput.make(stdout),
-              stderr: SubprocessOutput.make(stderr),
+              stdout: boundedStdout,
+              stderr: boundedStderr,
             } satisfies SubprocessExecResult
           }),
         ).pipe(Effect.mapError((err) => toSubprocessError(input.command, err)))
@@ -235,7 +266,7 @@ const makeHarnessSubprocessRunnerHostIoLayer = (
             Effect.fail(
               new HarnessSubprocessError({
                 command: input.command,
-                stderr: SubprocessOutput.make(timedOut.stderr),
+                stderr: toBoundedSubprocessOutput(timedOut.stderr),
                 reason: ErrorReasonMessage.make(`Command '${input.command}' timed out`),
                 failureKind: SubprocessFailureKind.make("timeout"),
               }),
@@ -245,8 +276,11 @@ const makeHarnessSubprocessRunnerHostIoLayer = (
             Effect.fail(
               new HarnessSubprocessError({
                 command: input.command,
-                stderr: SubprocessOutput.make(failed.stderr),
-                reason: toErrorReasonMessage(failed.spawnError, `Command '${input.command}' failed to spawn`),
+                stderr: toBoundedSubprocessOutput(failed.stderr),
+                reason: toErrorReasonMessage(
+                  failed.spawnError,
+                  `Command '${input.command}' failed to spawn`,
+                ),
                 failureKind: classifySpawnErrorKind(
                   failed.errorCode !== undefined ? { code: failed.errorCode } : undefined,
                   failed.spawnError,
@@ -258,7 +292,7 @@ const makeHarnessSubprocessRunnerHostIoLayer = (
             Effect.fail(
               new HarnessSubprocessError({
                 command: input.command,
-                stderr: SubprocessOutput.make(signaled.stderr),
+                stderr: toBoundedSubprocessOutput(signaled.stderr),
                 reason: ErrorReasonMessage.make(
                   `Command '${input.command}' terminated by signal ${signaled.signal}`,
                 ),
@@ -273,7 +307,7 @@ const makeHarnessSubprocessRunnerHostIoLayer = (
                 new HarnessSubprocessError({
                   command: input.command,
                   exitCode,
-                  stderr: SubprocessOutput.make(exited.stderr),
+                  stderr: toBoundedSubprocessOutput(exited.stderr),
                   reason: ErrorReasonMessage.make(
                     `Command '${input.command}' exited with code ${exited.exitCode}`,
                   ),
@@ -281,12 +315,17 @@ const makeHarnessSubprocessRunnerHostIoLayer = (
                 }),
               )
             }
-            return Effect.succeed({
-              command: input.command,
-              exitCode,
-              stdout: SubprocessOutput.make(exited.stdout),
-              stderr: SubprocessOutput.make(exited.stderr),
-            })
+            return Effect.all([
+              decodeSubprocessOutput(input.command, exited.stdout, "stdout"),
+              decodeSubprocessOutput(input.command, exited.stderr, "stderr"),
+            ]).pipe(
+              Effect.map(([stdout, stderr]) => ({
+                command: input.command,
+                exitCode,
+                stdout,
+                stderr,
+              })),
+            )
           })
           .exhaustive()
       }),

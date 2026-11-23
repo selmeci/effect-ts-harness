@@ -531,7 +531,7 @@ describe("Harness decision definitions & fallbacks", () => {
   )
 
   it.effect(
-    "REQ-4.6: decideGuardCommand threads unitWorkerMode into deterministic worker isolation guards without touching DecisionModel",
+    "SPEC-0023 REQ-4.1 / RFC-0013 REQ-4.6: decideGuardCommand threads unitWorkerMode into deterministic worker isolation guards without touching DecisionModel",
     () =>
       Effect.gen(function* () {
         const failingLayer = makeFailingDecisionModelLayer()
