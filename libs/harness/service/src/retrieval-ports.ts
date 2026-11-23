@@ -1,5 +1,6 @@
 import { Context, type Effect, type Option } from "effect"
 import type {
+  EmbeddingCacheError,
   EmbeddingCacheSnapshot,
   EmbeddingProviderAvailability,
   EmbeddingProviderConfig,
@@ -28,11 +29,11 @@ export class EmbeddingClient extends Context.Service<EmbeddingClient, EmbeddingC
 export interface EmbeddingCachePortShape {
   readonly readCache: (
     repoRoot: WorkspaceFilePath,
-  ) => Effect.Effect<Option.Option<EmbeddingCacheSnapshot>>
+  ) => Effect.Effect<Option.Option<EmbeddingCacheSnapshot>, EmbeddingCacheError>
   readonly writeCache: (
     repoRoot: WorkspaceFilePath,
     snapshot: EmbeddingCacheSnapshot,
-  ) => Effect.Effect<void>
+  ) => Effect.Effect<void, EmbeddingCacheError>
 }
 
 export class EmbeddingCachePort extends Context.Service<

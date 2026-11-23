@@ -1,15 +1,29 @@
+import * as fs from "node:fs"
+import * as os from "node:os"
+import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect, Layer } from "effect"
+import { Cause, Effect, Layer, Schema } from "effect"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
 import {
+  DocLineNumber,
+  DocTreePath,
   DocTreePathError,
+  EarsAreaName,
+  EarsClauseText,
+  EarsEffectSymbol,
+  EarsPatternName,
+  EarsRequirementNodeId,
+  EarsVerificationKind,
   EmbeddingComponent,
   EmbeddingDimensionCount,
   EmbeddingModelId,
+  type EmbeddingProviderAvailability,
   EmbeddingProviderBaseUrl,
   EmbeddingProviderError,
   ErrorReasonMessage,
+  GovernanceDocIdentifier,
+  RequirementId,
   WorkspaceFileContent,
   WorkspaceFsError,
   WorkspaceFsOperation,
@@ -26,8 +40,8 @@ import {
   scoreLexicalBm25Lite,
 } from "@harness/graph"
 import { runWithTestTracer } from "@harness/ingest"
-import { EmbeddingClient, WorkspaceFs } from "@harness/service"
-import { executeToolEffect, ProjectPathEscapeError } from "../src/server.js"
+import { EmbeddingCachePort, EmbeddingClient, WorkspaceFs } from "@harness/service"
+import { executeToolEffect, isPathInsideRoot, ProjectPathEscapeError } from "../src/server.js"
 import { executeDocTreeTool, executeSearchKnowledgeTool } from "../src/tools/retrieval.tools.js"
 
 const makeMockOmnigraphSyncLayer = (
@@ -77,9 +91,11 @@ const makeMockOmnigraphSyncLayer = (
 }
 
 const makeEmbeddingLayer = (opts: {
-  readonly availability: "available" | "unavailable"
+  readonly availability: EmbeddingProviderAvailability
   readonly vector?: ReadonlyArray<number> | undefined
   readonly failQuery?: boolean | undefined
+  readonly defectOnQuery?: boolean | undefined
+  readonly vectorsByText?: ReadonlyMap<string, ReadonlyArray<number>> | undefined
 }): Layer.Layer<EmbeddingClient> =>
   Layer.succeed(
     EmbeddingClient,
@@ -92,21 +108,41 @@ const makeEmbeddingLayer = (opts: {
       checkAvailability: Effect.succeed(opts.availability),
       embedBatch: (texts) =>
         Effect.succeed(
-          texts.map(() => ({
-            components: (opts.vector ?? [1, 0, 0, 0]).map((v) => EmbeddingComponent.make(v)),
+          texts.map((text) => ({
+            components: (opts.vectorsByText?.get(text) ?? opts.vector ?? [1, 0, 0, 0]).map((v) =>
+              EmbeddingComponent.make(v),
+            ),
           })),
         ),
       embedQuery: () =>
-        opts.failQuery
-          ? Effect.fail(
-              new EmbeddingProviderError({
-                model: EmbeddingModelId.make("qwen3-embedding:8b"),
-                reason: ErrorReasonMessage.make("Embedding timeout"),
+        opts.defectOnQuery
+          ? Effect.die(new Error("Injected EmbeddingClient defect"))
+          : opts.failQuery
+            ? Effect.fail(
+                new EmbeddingProviderError({
+                  model: EmbeddingModelId.make("qwen3-embedding:8b"),
+                  reason: ErrorReasonMessage.make("Embedding timeout"),
+                }),
+              )
+            : Effect.succeed({
+                components: (opts.vector ?? [1, 0, 0, 0]).map((v) => EmbeddingComponent.make(v)),
               }),
-            )
-          : Effect.succeed({
-              components: (opts.vector ?? [1, 0, 0, 0]).map((v) => EmbeddingComponent.make(v)),
-            }),
+    }),
+  )
+
+const availableEmbedding: EmbeddingProviderAvailability = { _tag: "Available" }
+const unavailableEmbedding: EmbeddingProviderAvailability = {
+  _tag: "Unavailable",
+  cause: "network-error",
+  reason: ErrorReasonMessage.make("Ollama offline in test"),
+}
+
+const makeMemoryEmbeddingCacheLayer = (): Layer.Layer<EmbeddingCachePort> =>
+  Layer.succeed(
+    EmbeddingCachePort,
+    EmbeddingCachePort.of({
+      readCache: () => Effect.succeedNone,
+      writeCache: () => Effect.void,
     }),
   )
 
@@ -188,17 +224,18 @@ const buildSampleRetrievalGraph = () =>
     ],
     earsRequirements: [
       {
-        id: "harness:SPEC-0031::REQ-2.3",
-        specId: "harness:SPEC-0031",
-        requirementId: "REQ-2.3",
-        area: "Embedding Sync",
-        pattern: "Unwanted behaviour",
-        clauseText:
+        id: EarsRequirementNodeId.make("harness:SPEC-0031::REQ-2.3"),
+        specId: GovernanceDocIdentifier.make("harness:SPEC-0031"),
+        requirementId: RequirementId.make("REQ-2.3"),
+        area: EarsAreaName.make("Embedding Sync"),
+        pattern: EarsPatternName.make("Unwanted behaviour"),
+        clauseText: EarsClauseText.make(
           "If Ollama is unreachable, GraphEmbeddings.sync shall degrade to bm25-only without mock vectors.",
-        effectSymbol: "GraphEmbeddings.sync",
-        verification: "UnitTest",
-        path: "libs/harness/docs/specs/0031.md",
-        line: 42,
+        ),
+        effectSymbol: EarsEffectSymbol.make("GraphEmbeddings.sync"),
+        verification: EarsVerificationKind.make("UnitTest"),
+        path: DocTreePath.make("libs/harness/docs/specs/0031.md"),
+        line: DocLineNumber.make(42),
         status: "proposed",
       },
     ],
@@ -276,7 +313,7 @@ describe("HarnessMcp 3-tier retrieval tools (ADR-0025 / SPEC-0031)", () => {
             repoRoot: "/repo",
             graph,
             skipTelemetry: true,
-            embeddingClientLayer: makeEmbeddingLayer({ availability: "available" }),
+            embeddingClientLayer: makeEmbeddingLayer({ availability: availableEmbedding }),
             omnigraphSyncLayer: syncLayer,
           },
         )
@@ -340,7 +377,7 @@ describe("HarnessMcp 3-tier retrieval tools (ADR-0025 / SPEC-0031)", () => {
             repoRoot: "/repo",
             graph,
             skipTelemetry: true,
-            embeddingClientLayer: makeEmbeddingLayer({ availability: "unavailable" }),
+            embeddingClientLayer: makeEmbeddingLayer({ availability: unavailableEmbedding }),
             omnigraphSyncLayer: omnigraphBm25Layer,
           },
         )
@@ -363,7 +400,7 @@ describe("HarnessMcp 3-tier retrieval tools (ADR-0025 / SPEC-0031)", () => {
             skipTelemetry: true,
             skipOmnigraphSpawn: true,
             embeddingClientLayer: makeEmbeddingLayer({
-              availability: "available",
+              availability: availableEmbedding,
               failQuery: true,
             }),
           },
@@ -662,8 +699,15 @@ describe("HarnessMcp 3-tier retrieval tools (ADR-0025 / SPEC-0031)", () => {
           ),
         )
         match(whitespaceExit)
-          .with({ _tag: "Failure" }, () => {
-            expect(true).toBe(true)
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            match(Cause.findErrorOption(cause))
+              .with({ _tag: "Some" }, ({ value }) => {
+                expect(Schema.isSchemaError(value)).toBe(true)
+              })
+              .with({ _tag: "None" }, () => {
+                expect.unreachable("Expected SchemaError on whitespace-only query")
+              })
+              .exhaustive()
           })
           .with({ _tag: "Success" }, () => {
             expect.unreachable("Expected whitespace-only query to fail Schema validation")
@@ -731,7 +775,7 @@ describe("HarnessMcp 3-tier retrieval tools (ADR-0025 / SPEC-0031)", () => {
             repoRoot: "/repo",
             graph: multiTargetGraph,
             skipTelemetry: true,
-            embeddingClientLayer: makeEmbeddingLayer({ availability: "available" }),
+            embeddingClientLayer: makeEmbeddingLayer({ availability: availableEmbedding }),
             omnigraphSyncLayer: mixedSyncLayer,
           },
         )
@@ -753,7 +797,7 @@ describe("HarnessMcp 3-tier retrieval tools (ADR-0025 / SPEC-0031)", () => {
               graph: multiTargetGraph,
               skipTelemetry: true,
               skipOmnigraphSpawn: true,
-              embeddingClientLayer: makeEmbeddingLayer({ availability: "unavailable" }),
+              embeddingClientLayer: makeEmbeddingLayer({ availability: unavailableEmbedding }),
             },
           ),
           new Map(),
@@ -803,4 +847,493 @@ describe("HarnessMcp 3-tier retrieval tools (ADR-0025 / SPEC-0031)", () => {
     expect(scoreLexicalBm25Lite(body, title, "a")).toBe(0)
     expect(scoreLexicalBm25Lite(body, title, "d1")).toBeGreaterThan(0)
   })
+
+  it.effect(
+    "F-16.2: harness_route upgrades review via RRF live vector hybrid with zero lexical overlap, keeps stopword-only prompts as review, and falls back to BM25 when hybrid is empty or fails",
+    () =>
+      Effect.gen(function* () {
+        const graph = buildSampleRetrievalGraph()
+        const invoked: Array<string> = []
+        const hybridSyncLayer = makeMockOmnigraphSyncLayer((name) => {
+          invoked.push(name)
+          return Effect.succeed({
+            source: "omnigraph" as const,
+            degraded: false as const,
+            rows: [
+              {
+                slug: "resources-scope",
+                path: "agent-patterns/resources-scope.md",
+                title: "Resources & Scope",
+                summary: "Acquire and release scoped resources deterministically.",
+              },
+            ],
+          })
+        })
+
+        const hybridUpgraded = (yield* executeToolEffect(
+          "harness_route",
+          { planStep: "manage connection lifetimes cleanly" },
+          {
+            repoRoot: "/repo",
+            graph,
+            skipTelemetry: true,
+            embeddingClientLayer: makeEmbeddingLayer({ availability: availableEmbedding }),
+            omnigraphSyncLayer: hybridSyncLayer,
+            decisionLayer: makeMockDecisionModelLayer({ blockLabel: "review", fitsAnyProb: 0.2 }),
+          },
+        )) as { readonly block: string; readonly source: string }
+        expect(invoked).toContain("rank_patterns_vector_hybrid")
+        expect(hybridUpgraded.block).toBe("resources-scope")
+        expect(hybridUpgraded.source).toBe("hybrid-retrieval")
+
+        const stopwordOnly = (yield* executeToolEffect(
+          "harness_route",
+          { planStep: "Any step" },
+          {
+            repoRoot: "/repo",
+            graph,
+            skipTelemetry: true,
+            embeddingClientLayer: makeEmbeddingLayer({ availability: availableEmbedding }),
+            omnigraphSyncLayer: hybridSyncLayer,
+            decisionLayer: makeMockDecisionModelLayer({ blockLabel: "review", fitsAnyProb: 0.2 }),
+          },
+        )) as { readonly block: string; readonly source: string }
+        expect(stopwordOnly.block).toBe("review")
+        expect(stopwordOnly.source).toBe("model")
+
+        const fallbackQueries: Array<string> = []
+        const emptyHybridFallbackSyncLayer = makeMockOmnigraphSyncLayer((name) => {
+          fallbackQueries.push(name)
+          if (name === "rank_patterns_vector_hybrid") {
+            return Effect.succeed({
+              source: "omnigraph" as const,
+              degraded: false as const,
+              rows: [],
+            })
+          }
+          return Effect.succeed({
+            source: "omnigraph" as const,
+            degraded: false as const,
+            rows: [
+              {
+                slug: "resources-scope",
+                path: "agent-patterns/resources-scope.md",
+                title: "Resources & Scope",
+                summary: "Acquire and release scoped resources deterministically.",
+              },
+            ],
+          })
+        })
+        const fellBackFromEmpty = (yield* executeToolEffect(
+          "harness_route",
+          { planStep: "Acquire scoped resources safely" },
+          {
+            repoRoot: "/repo",
+            graph,
+            skipTelemetry: true,
+            embeddingClientLayer: makeEmbeddingLayer({ availability: availableEmbedding }),
+            omnigraphSyncLayer: emptyHybridFallbackSyncLayer,
+            decisionLayer: makeMockDecisionModelLayer({ blockLabel: "review", fitsAnyProb: 0.2 }),
+          },
+        )) as { readonly block: string; readonly source: string }
+        expect(fallbackQueries).toEqual(["rank_patterns_vector_hybrid", "rank_patterns_bm25"])
+        expect(fellBackFromEmpty.block).toBe("resources-scope")
+        expect(fellBackFromEmpty.source).toBe("hybrid-retrieval")
+      }),
+  )
+
+  it.effect(
+    "F-3.1c / F-5.1a: harness_ontology_check fails closed when embeddings are unavailable across 2+ active specs and surfaces semantic similarity candidates when available",
+    () =>
+      Effect.gen(function* () {
+        const graph = buildHarnessGraph({
+          earsSpecs: [
+            {
+              id: "harness:SPEC-0001",
+              title: "Spec One",
+              status: "accepted",
+              path: "libs/harness/docs/specs/0001.md",
+              enforcedByFiles: [],
+            },
+            {
+              id: "harness:SPEC-0002",
+              title: "Spec Two",
+              status: "proposed",
+              path: "libs/harness/docs/specs/0002.md",
+              enforcedByFiles: [],
+            },
+          ],
+          earsRequirements: [
+            {
+              id: EarsRequirementNodeId.make("harness:SPEC-0001::REQ-1.1"),
+              specId: GovernanceDocIdentifier.make("harness:SPEC-0001"),
+              requirementId: RequirementId.make("REQ-1.1"),
+              area: EarsAreaName.make("Persistence"),
+              pattern: EarsPatternName.make("Event-driven"),
+              clauseText: EarsClauseText.make(
+                "When save executes, the repository shall upsert the record immediately.",
+              ),
+              effectSymbol: EarsEffectSymbol.make("Repo.save"),
+              verification: EarsVerificationKind.make("UnitTest"),
+              path: DocTreePath.make("libs/harness/docs/specs/0001.md"),
+              line: DocLineNumber.make(10),
+              status: "accepted",
+            },
+            {
+              id: EarsRequirementNodeId.make("harness:SPEC-0002::REQ-1.1"),
+              specId: GovernanceDocIdentifier.make("harness:SPEC-0002"),
+              requirementId: RequirementId.make("REQ-1.1"),
+              area: EarsAreaName.make("Audit"),
+              pattern: EarsPatternName.make("Event-driven"),
+              clauseText: EarsClauseText.make(
+                "When save executes, the audit writer shall skip persistence.",
+              ),
+              effectSymbol: EarsEffectSymbol.make("Audit.skip"),
+              verification: EarsVerificationKind.make("UnitTest"),
+              path: DocTreePath.make("libs/harness/docs/specs/0002.md"),
+              line: DocLineNumber.make(12),
+              status: "proposed",
+            },
+          ],
+        })
+
+        const docs = [
+          {
+            id: "harness:SPEC-0001",
+            docPath: "libs/harness/docs/specs/0001.md",
+            status: "accepted" as const,
+            markdown: "---\nid: harness:SPEC-0001\ntitle: Spec One\nstatus: accepted\n---\n",
+          },
+          {
+            id: "harness:SPEC-0002",
+            docPath: "libs/harness/docs/specs/0002.md",
+            status: "proposed" as const,
+            markdown: "---\nid: harness:SPEC-0002\ntitle: Spec Two\nstatus: proposed\n---\n",
+          },
+        ]
+
+        const degradedCheck = (yield* executeToolEffect(
+          "harness_ontology_check",
+          {},
+          {
+            repoRoot: "/repo",
+            graph,
+            governanceDocs: docs,
+            skipTelemetry: true,
+            embeddingClientLayer: makeEmbeddingLayer({ availability: unavailableEmbedding }),
+            embeddingCacheLayer: makeMemoryEmbeddingCacheLayer(),
+            decisionLayer: makeMockDecisionModelLayer(),
+          },
+        )) as {
+          readonly clean: boolean
+          readonly degraded: boolean
+          readonly degradedReason?: string
+          readonly evaluationError?: string
+        }
+        expect(degradedCheck.clean).toBe(false)
+        expect(degradedCheck.degraded).toBe(true)
+        expect(degradedCheck.degradedReason).toContain("Ollama offline")
+        expect(degradedCheck.evaluationError).toContain(
+          "Semantic conflict embedding check degraded",
+        )
+
+        const flaggedCheck = (yield* executeToolEffect(
+          "harness_ontology_check",
+          {},
+          {
+            repoRoot: "/repo",
+            graph,
+            governanceDocs: docs,
+            skipTelemetry: true,
+            embeddingClientLayer: makeEmbeddingLayer({
+              availability: availableEmbedding,
+              vector: [1, 0, 0, 0],
+            }),
+            embeddingCacheLayer: makeMemoryEmbeddingCacheLayer(),
+            decisionLayer: makeMockDecisionModelLayer({
+              contradictsProb: 0.95,
+              conflictKindLabel: "state-transition-conflict",
+            }),
+          },
+        )) as {
+          readonly clean: boolean
+          readonly degraded: boolean
+          readonly semanticConflicts: ReadonlyArray<{ readonly hasConflict: boolean }>
+          readonly evaluatedPairs: number
+        }
+        expect(flaggedCheck.degraded).toBe(false)
+        expect(flaggedCheck.clean).toBe(false)
+        expect(flaggedCheck.evaluatedPairs).toBe(1)
+        expect(flaggedCheck.semanticConflicts.some((c) => c.hasConflict)).toBe(true)
+      }),
+  )
+
+  it.effect(
+    "F-9.1 / F-9.2 / S-4.1 / S-2.6 / F-11.1: preserves all distinct degraded reasons, propagates defects, handles 0-row vector fallback vs empty kind, deduplicates/caps hits, and rejects invalid DocTree inputs",
+    () =>
+      Effect.gen(function* () {
+        const base = buildSampleRetrievalGraph()
+        const fifteenSpanGraph = {
+          ...base,
+          graph: Graph.mutate(base.graph, (mutable) => {
+            Graph.addNode(mutable, {
+              _tag: "PatternDoc",
+              slug: "dense-pattern",
+              path: "agent-patterns/dense-pattern.md",
+              title: "Dense Pattern",
+              headings: ["Dense Pattern"],
+              summary: "A".repeat(600),
+              coveredSpans: Array.from(
+                { length: 15 },
+                (_, i) => `Span.${String(i + 1).padStart(2, "0")}`,
+              ),
+              coveredTags: [],
+            })
+          }),
+        }
+
+        const multiErrorSyncLayer = makeMockOmnigraphSyncLayer((name) => {
+          if (name.includes("patterns")) {
+            return Effect.fail(new OmnigraphLoadError({ cause: "pattern bm25 down" }))
+          }
+          return Effect.fail(new OmnigraphLoadError({ cause: "adr bm25 down" }))
+        })
+        const multiDegraded = yield* executeSearchKnowledgeTool(
+          { query: "typed errors", kinds: ["PatternDoc", "AdrDoc"], repoRoot: "/repo" },
+          {
+            repoRoot: "/repo",
+            graph: base,
+            skipTelemetry: true,
+            embeddingClientLayer: makeEmbeddingLayer({ availability: unavailableEmbedding }),
+            omnigraphSyncLayer: multiErrorSyncLayer,
+          },
+        )
+        expect(multiDegraded.retrievalMode).toBe("lexical-fallback")
+        expect(multiDegraded.degradedReason).toContain("Ollama offline")
+        expect(multiDegraded.degradedReason).toContain("pattern bm25 down")
+        expect(multiDegraded.degradedReason).toContain("adr bm25 down")
+
+        const unpopulatedVectorLayer = makeMockOmnigraphSyncLayer((name) => {
+          if (name === "rank_patterns_vector_hybrid") {
+            return Effect.succeed({
+              source: "omnigraph" as const,
+              degraded: false as const,
+              rows: [],
+            })
+          }
+          return Effect.succeed({
+            source: "omnigraph" as const,
+            degraded: false as const,
+            rows: [
+              {
+                slug: "errors",
+                path: "agent-patterns/errors.md",
+                title: "Typed Errors Pattern",
+                summary: "Use Schema.TaggedError.",
+              },
+            ],
+          })
+        })
+        const unpopulatedRes = yield* executeSearchKnowledgeTool(
+          { query: "typed errors", kinds: ["PatternDoc"], repoRoot: "/repo" },
+          {
+            repoRoot: "/repo",
+            graph: base,
+            skipTelemetry: true,
+            embeddingClientLayer: makeEmbeddingLayer({ availability: availableEmbedding }),
+            omnigraphSyncLayer: unpopulatedVectorLayer,
+          },
+        )
+        expect(unpopulatedRes.retrievalMode).toBe("bm25-only")
+        expect(unpopulatedRes.degradedReason).toContain("unpopulated")
+        expect(unpopulatedRes.hits).toHaveLength(1)
+
+        let bm25CalledForEmptyKind = false
+        const emptyKindSyncLayer = makeMockOmnigraphSyncLayer((name) => {
+          if (name.endsWith("_bm25")) bm25CalledForEmptyKind = true
+          return Effect.succeed({
+            source: "omnigraph" as const,
+            degraded: false as const,
+            rows: [],
+          })
+        })
+        const emptyKindRes = yield* executeSearchKnowledgeTool(
+          {
+            query: "typed errors",
+            kinds: ["AdrDoc"],
+            status: "deprecated",
+            repoRoot: "/repo",
+          },
+          {
+            repoRoot: "/repo",
+            graph: base,
+            skipTelemetry: true,
+            embeddingClientLayer: makeEmbeddingLayer({ availability: availableEmbedding }),
+            omnigraphSyncLayer: emptyKindSyncLayer,
+          },
+        )
+        expect(emptyKindRes.retrievalMode).toBe("hybrid-rrf")
+        expect(emptyKindRes.degradedReason).toBeNull()
+        expect(emptyKindRes.hits).toHaveLength(0)
+        expect(bm25CalledForEmptyKind).toBe(false)
+
+        const shapingSyncLayer = makeMockOmnigraphSyncLayer(() =>
+          Effect.succeed({
+            source: "omnigraph" as const,
+            degraded: false as const,
+            rows: [
+              { slug: "zero-score", summary: "skip", score: 0 },
+              { slug: "nan-score", summary: "skip", score: Number.NaN },
+              {
+                slug: "dense-pattern",
+                path: "agent-patterns/dense-pattern.md",
+                title: "Dense Pattern",
+                summary: "B".repeat(600),
+              },
+              {
+                slug: "dense-pattern",
+                path: "agent-patterns/dense-pattern.md",
+                title: "Dense Pattern",
+                summary: "C".repeat(600),
+              },
+            ],
+          }),
+        )
+        const shaped = yield* executeSearchKnowledgeTool(
+          { query: "Dense Pattern", kinds: ["PatternDoc"], repoRoot: "/repo" },
+          {
+            repoRoot: "/repo",
+            graph: fifteenSpanGraph,
+            skipTelemetry: true,
+            embeddingClientLayer: makeEmbeddingLayer({ availability: availableEmbedding }),
+            omnigraphSyncLayer: shapingSyncLayer,
+          },
+        )
+        expect(shaped.hits).toHaveLength(1)
+        expect(shaped.hits[0]?.nodeKey).toBe("PatternDoc:dense-pattern")
+        expect(shaped.hits[0]?.snippet.length).toBe(420)
+        expect(shaped.hits[0]?.linkedSymbols.length).toBe(12)
+
+        const defectSyncLayer = makeMockOmnigraphSyncLayer(() =>
+          Effect.die(new Error("Injected OmnigraphSync defect")),
+        )
+        const defectFsLayer = Layer.succeed(
+          WorkspaceFs,
+          WorkspaceFs.of({
+            exists: () => Effect.die(new Error("Injected WorkspaceFs defect")),
+            realPath: () => Effect.die(new Error("Injected WorkspaceFs defect")),
+            readTextFile: () => Effect.die(new Error("Injected WorkspaceFs defect")),
+            writeTextFileAtomic: () => Effect.void,
+          }),
+        )
+        for (const defectCall of [
+          executeSearchKnowledgeTool(
+            { query: "errors", kinds: ["PatternDoc"], repoRoot: "/repo" },
+            {
+              repoRoot: "/repo",
+              graph: base,
+              skipTelemetry: true,
+              embeddingClientLayer: makeEmbeddingLayer({
+                availability: availableEmbedding,
+                defectOnQuery: true,
+              }),
+              omnigraphSyncLayer: emptyKindSyncLayer,
+            },
+          ).pipe(Effect.asVoid),
+          executeSearchKnowledgeTool(
+            { query: "errors", kinds: ["PatternDoc"], repoRoot: "/repo" },
+            {
+              repoRoot: "/repo",
+              graph: base,
+              skipTelemetry: true,
+              embeddingClientLayer: makeEmbeddingLayer({ availability: unavailableEmbedding }),
+              omnigraphSyncLayer: defectSyncLayer,
+            },
+          ).pipe(Effect.asVoid),
+          executeDocTreeTool(
+            { mode: "tree", path: "libs/harness/docs/adr/0025.md", repoRoot: "/repo" },
+            {
+              repoRoot: "/repo",
+              graph: base,
+              skipTelemetry: true,
+              workspaceFsLayer: defectFsLayer,
+            },
+          ).pipe(Effect.asVoid),
+        ]) {
+          const exit = yield* Effect.exit(defectCall)
+          match(exit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(Cause.hasDies(cause)).toBe(true)
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected defect to propagate untouched")
+            })
+            .exhaustive()
+        }
+
+        for (const badDocInput of [
+          { mode: "tree" as const, repoRoot: "/repo" },
+          {
+            mode: "section" as const,
+            path: "libs/harness/docs/adr/0025.md",
+            repoRoot: "/repo",
+          },
+        ]) {
+          const schemaExit = yield* Effect.exit(
+            executeDocTreeTool(badDocInput, {
+              repoRoot: "/repo",
+              graph: base,
+              skipTelemetry: true,
+              workspaceFsLayer: makeMemoryFsLayer(new Map()),
+            }),
+          )
+          match(schemaExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              match(Cause.findErrorOption(cause))
+                .with({ _tag: "Some" }, ({ value }) => {
+                  expect(Schema.isSchemaError(value)).toBe(true)
+                })
+                .with({ _tag: "None" }, () => {
+                  expect.unreachable("Expected SchemaError for missing mode fields")
+                })
+                .exhaustive()
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected DocTree mode validation failure")
+            })
+            .exhaustive()
+        }
+      }),
+  )
+
+  it.effect(
+    "S-2.5 / F-17.3: isPathInsideRoot blocks sibling prefixes and symlink escapes while allowing ..foo and handling regular-file ENOTDIR ancestors",
+    () =>
+      Effect.gen(function* () {
+        const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-root-containment-"))
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            fs.rmSync(tmpBase, { recursive: true, force: true })
+          }),
+        )
+        const repoRoot = path.join(tmpBase, "repo")
+        const siblingEvil = path.join(tmpBase, "repo-evil")
+        const outsideDir = path.join(tmpBase, "outside")
+        const dotDotDir = path.join(repoRoot, "..foo")
+        const regularFile = path.join(repoRoot, "regular.txt")
+        fs.mkdirSync(dotDotDir, { recursive: true })
+        fs.mkdirSync(siblingEvil, { recursive: true })
+        fs.mkdirSync(outsideDir, { recursive: true })
+        fs.writeFileSync(regularFile, "data\n", "utf8")
+        fs.writeFileSync(path.join(dotDotDir, "notes.md"), "ok\n", "utf8")
+        fs.symlinkSync(outsideDir, path.join(repoRoot, "escape-link"), "dir")
+
+        expect(isPathInsideRoot(repoRoot, siblingEvil)).toBe(false)
+        expect(isPathInsideRoot(repoRoot, path.join(repoRoot, "escape-link", "secret.txt"))).toBe(
+          false,
+        )
+        expect(isPathInsideRoot(repoRoot, path.join(regularFile, "child.ts"))).toBe(true)
+        expect(isPathInsideRoot(repoRoot, path.join(dotDotDir, "notes.md"))).toBe(true)
+      }),
+  )
 })

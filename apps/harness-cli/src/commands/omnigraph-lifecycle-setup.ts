@@ -54,8 +54,8 @@ export const resolveDesiredOmnigraphEmbeddingsMode: Effect.Effect<"mock" | "live
       return yield* client.checkAvailability
     }).pipe(Effect.provide(OllamaEmbeddingClientLive))
     return match(availability)
-      .with("available", () => "live" as const)
-      .with("unavailable", () => "mock" as const)
+      .with({ _tag: "Available" }, () => "live" as const)
+      .with({ _tag: "Unavailable" }, () => "mock" as const)
       .exhaustive()
   },
 )
@@ -184,10 +184,12 @@ export const setupAndSpawnOmnigraphCluster = (options: {
       typeof process.env.OMNIGRAPH_EMBEDDING_API_KEY === "string" &&
       process.env.OMNIGRAPH_EMBEDDING_API_KEY.length > 0
     const embeddingsMode = yield* resolveDesiredOmnigraphEmbeddingsMode
+    const isMockMode = match(embeddingsMode)
+      .with("mock", () => true)
+      .with("live", () => false)
+      .exhaustive()
     const shouldWarnMockFallback =
-      process.env.OMNIGRAPH_EMBEDDINGS_MOCK === undefined &&
-      !hasExplicitEmbeddingKey &&
-      embeddingsMode === "mock"
+      process.env.OMNIGRAPH_EMBEDDINGS_MOCK === undefined && !hasExplicitEmbeddingKey && isMockMode
 
     return yield* Effect.try({
       try: (): ClusterSetupRes => {
@@ -276,9 +278,11 @@ export const setupAndSpawnOmnigraphCluster = (options: {
           OMNIGRAPH_EMBEDDING_API_KEY:
             process.env.OMNIGRAPH_EMBEDDING_API_KEY ?? DEFAULT_EMBEDDING_API_KEY,
         }
-        const mockFlag =
-          process.env.OMNIGRAPH_EMBEDDINGS_MOCK ??
-          (embeddingsMode === "mock" ? DEFAULT_EMBEDDINGS_MOCK : undefined)
+        const defaultMockFlag = match(embeddingsMode)
+          .with("mock", () => DEFAULT_EMBEDDINGS_MOCK)
+          .with("live", () => undefined)
+          .exhaustive()
+        const mockFlag = process.env.OMNIGRAPH_EMBEDDINGS_MOCK ?? defaultMockFlag
         if (mockFlag !== undefined) {
           spawnEnv.OMNIGRAPH_EMBEDDINGS_MOCK = mockFlag
         } else {

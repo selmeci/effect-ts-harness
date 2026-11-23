@@ -32,7 +32,10 @@ import {
   recordTelemetry,
   resolveClusterRepoRoot,
 } from "./daemon-and-omnigraph.service.js"
-import { computeSyncEmbeddingsForGraph } from "./omnigraph-embedding-sync-helper.js"
+import {
+  computeSyncEmbeddingsForGraph,
+  toSyncEmbeddingOptions,
+} from "./omnigraph-embedding-sync-helper.js"
 import { runOmnigraphMaintenance, runVerifyOmnigraphLintCheck } from "./omnigraph-lint-gate.js"
 import {
   countImplEffectFns,
@@ -357,13 +360,13 @@ export const syncVerifyImplToOmnigraph = (
     }
     const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
     const syncLayer = makeOmnigraphSyncLayer(nodeSyncHostIo)
-    const embeddingsByNodeKey = yield* computeSyncEmbeddingsForGraph(repoRoot, graph, options)
+    const embeddingResult = yield* computeSyncEmbeddingsForGraph(repoRoot, graph, options)
     const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
       repoRoot: clusterRepoRoot,
       branch: taskBranches.implBranch,
       from: taskBranches.mainBranch,
       snapshotPath,
-      embeddingsByNodeKey,
+      ...toSyncEmbeddingOptions(embeddingResult),
     }).pipe(
       Effect.provide(syncLayer),
       Effect.catchCause((cause) => {
@@ -522,14 +525,14 @@ export const syncOmnigraphOnDone = (
         implGraph,
         syncLayer,
       )
-      const doneEmbeddings = yield* computeSyncEmbeddingsForGraph(repoRoot, implGraph, options)
+      const doneEmbeddingRes = yield* computeSyncEmbeddingsForGraph(repoRoot, implGraph, options)
       const reloadRes = yield* syncToOmnigraphAndSnapshot(implGraph, {
         repoRoot: clusterRepoRoot,
         branch: taskBranches.implBranch,
         from: taskBranches.mainBranch,
         mode: "overwrite",
         snapshotPath,
-        embeddingsByNodeKey: doneEmbeddings,
+        ...toSyncEmbeddingOptions(doneEmbeddingRes),
       }).pipe(
         Effect.provide(syncLayer),
         Effect.catchCause((cause) => {

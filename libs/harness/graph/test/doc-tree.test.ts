@@ -2,11 +2,20 @@ import { describe, expect, it } from "@effect/vitest"
 import { Cause, Effect, Layer, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
+  DocLineNumber,
   DocSectionId,
   DocTreeInput,
   DocTreePath,
   DocTreePathError,
+  EarsAreaName,
+  EarsClauseText,
+  EarsEffectSymbol,
+  EarsPatternName,
+  EarsRequirementNodeId,
+  EarsVerificationKind,
   ErrorReasonMessage,
+  GovernanceDocIdentifier,
+  RequirementId,
   WorkspaceFileContent,
   WorkspaceFilePath,
   WorkspaceFsError,
@@ -16,6 +25,8 @@ import { WorkspaceFs } from "@harness/service"
 import {
   buildGovernanceCatalog,
   buildHarnessGraph,
+  EarsRequirementNode,
+  EarsSpecNode,
   inspectDocTree,
   parseMarkdownTree,
 } from "../src/index.js"
@@ -148,16 +159,18 @@ Faster context reads.
             requirements: [
               {
                 _tag: "EarsRequirement",
-                id: "harness:SPEC-0031::REQ-1.1",
-                specId: "harness:SPEC-0031",
-                requirementId: "REQ-1.1",
-                area: "Extraction",
-                pattern: "Event-driven",
-                clauseText: "When parsing specs, extractor shall extract REQ rows.",
-                effectSymbol: "",
-                verification: "UnitTest",
-                path: "libs/harness/docs/specs/0031.md",
-                line: 42,
+                id: EarsRequirementNodeId.make("harness:SPEC-0031::REQ-1.1"),
+                specId: GovernanceDocIdentifier.make("harness:SPEC-0031"),
+                requirementId: RequirementId.make("REQ-1.1"),
+                area: EarsAreaName.make("Extraction"),
+                pattern: EarsPatternName.make("Event-driven"),
+                clauseText: EarsClauseText.make(
+                  "When parsing specs, extractor shall extract REQ rows.",
+                ),
+                effectSymbol: EarsEffectSymbol.make(""),
+                verification: EarsVerificationKind.make("UnitTest"),
+                path: DocTreePath.make("libs/harness/docs/specs/0031.md"),
+                line: DocLineNumber.make(42),
                 status: "proposed",
               },
             ],
@@ -368,6 +381,210 @@ Body after nested fence.
 `)
         const parsedNested = yield* parseMarkdownTree(nestedFenceDoc)
         expect(parsedNested.map((s) => s.title)).toEqual(["Outer Title", "Real Following Section"])
+      }),
+  )
+
+  it.effect(
+    "enforces 250-line caps, CRLF+BOM, tilde fences, dotdot filenames, forbidden .git/node_modules segments, anchored scopes, and EARS/DocTree invariants",
+    () =>
+      Effect.gen(function* () {
+        const crlfBomContent = `\uFEFF# CRLF Title\r\n\r\n~~~markdown\r\n# Fenced Tilde Heading\r\n~~~\r\n\r\n## Long Section\r\n${Array.from({ length: 280 }, (_, idx) => `Line ${idx + 1}`).join("\r\n")}\r\n`
+        const parsedCrlf = yield* parseMarkdownTree(WorkspaceFileContent.make(crlfBomContent))
+        expect(parsedCrlf.map((s) => s.title)).toEqual(["CRLF Title", "Long Section"])
+
+        const validDotDotPath = "..foo.md"
+        const graph = buildHarnessGraph({
+          adrDocs: [
+            {
+              id: "sample:ADR-0002",
+              title: "Sample ADR",
+              status: "accepted",
+              path: "libs/sample/docs/adr/0002.md",
+              enforcedByFiles: [],
+              summary: "   ",
+              searchText: "   ",
+            },
+            {
+              id: "other:ADR-0009",
+              title: "External Nested Docs",
+              status: "accepted",
+              path: "docs/external/libs/sample/docs/adr/0009.md",
+              enforcedByFiles: [],
+              summary: "Should not match sample scope by substring",
+            },
+          ],
+          earsSpecs: [
+            {
+              id: "sample:SPEC-0001",
+              title: "Spec Without Nested Requirements Array",
+              status: "accepted",
+              path: "libs/sample/docs/specs/0001.md",
+              enforcedByFiles: [],
+              goalSummary: "   ",
+            },
+          ],
+          earsRequirements: [
+            {
+              id: EarsRequirementNodeId.make("sample:SPEC-0001::REQ-1.1"),
+              specId: GovernanceDocIdentifier.make("sample:SPEC-0001"),
+              requirementId: RequirementId.make("REQ-1.1"),
+              area: EarsAreaName.make("Core"),
+              pattern: EarsPatternName.make("Ubiquitous"),
+              clauseText: EarsClauseText.make("The system shall count top-level requirements."),
+              effectSymbol: EarsEffectSymbol.make(""),
+              verification: EarsVerificationKind.make("UnitTest"),
+              path: DocTreePath.make("libs/sample/docs/specs/0001.md"),
+              line: DocLineNumber.make(10),
+              status: "accepted",
+            },
+          ],
+        })
+
+        const catalog = yield* buildGovernanceCatalog(graph)
+        const adrEntry = catalog.find((e) => e.id === "sample:ADR-0002")
+        const specEntry = catalog.find((e) => e.id === "sample:SPEC-0001")
+        expect(adrEntry?.summary).toBe("Sample ADR")
+        expect(specEntry?.summary).toBe("Spec Without Nested Requirements Array")
+        expect(specEntry?.requirementCount).toBe(1)
+
+        const fsLayer = makeMemoryWorkspaceFsLayer(
+          new Map([
+            [`/repo/${validDotDotPath}`, "# DotDot File\n\nValid filename.\n"],
+            ["/repo/docs/long.md", crlfBomContent],
+            ["/repo/.git/HEAD.md", "# Secret git doc\n"],
+            ["/repo/node_modules/pkg/readme.md", "# Dependency readme\n"],
+          ]),
+          new Map([["/repo/docs/sym-node-modules.md", "/repo/node_modules/pkg/readme.md"]]),
+        )
+
+        const scopedRes = yield* inspectDocTree({
+          repoRoot: WorkspaceFilePath.make("/repo"),
+          input: decodeDocTreeInput({ mode: "catalog", scope: "sample" }),
+          graph,
+        }).pipe(Effect.provide(fsLayer))
+        match(scopedRes)
+          .with({ _tag: "GovernanceCatalog" }, (cat) => {
+            expect(cat.entries.map((e) => e.id)).toEqual(["sample:ADR-0002", "sample:SPEC-0001"])
+          })
+          .with({ _tag: "DocumentTree" }, { _tag: "SectionContent" }, () => {
+            expect.unreachable("Expected GovernanceCatalog")
+          })
+          .exhaustive()
+
+        const dotDotTree = yield* inspectDocTree({
+          repoRoot: WorkspaceFilePath.make("/repo"),
+          input: { mode: "tree", path: DocTreePath.make(validDotDotPath) },
+          graph,
+        }).pipe(Effect.provide(fsLayer))
+        match(dotDotTree)
+          .with({ _tag: "DocumentTree" }, (t) => {
+            expect(t.path).toBe("..foo.md")
+            expect(t.sections.map((s) => s.title)).toEqual(["DotDot File"])
+          })
+          .with({ _tag: "GovernanceCatalog" }, { _tag: "SectionContent" }, () => {
+            expect.unreachable("Expected DocumentTree")
+          })
+          .exhaustive()
+
+        const cappedSlice = yield* inspectDocTree({
+          repoRoot: WorkspaceFilePath.make("/repo"),
+          input: {
+            mode: "section",
+            path: DocTreePath.make("docs/long.md"),
+            sectionId: DocSectionId.make("h2-2"),
+          },
+          graph,
+        }).pipe(Effect.provide(fsLayer))
+        match(cappedSlice)
+          .with({ _tag: "SectionContent" }, (sec) => {
+            expect(sec.content.split("\n")).toHaveLength(250)
+          })
+          .with({ _tag: "GovernanceCatalog" }, { _tag: "DocumentTree" }, () => {
+            expect.unreachable("Expected SectionContent")
+          })
+          .exhaustive()
+
+        for (const forbiddenPath of [
+          ".git/HEAD.md",
+          "node_modules/pkg/readme.md",
+          "docs/sym-node-modules.md",
+        ]) {
+          const exit = yield* Effect.exit(
+            inspectDocTree({
+              repoRoot: WorkspaceFilePath.make("/repo"),
+              input: { mode: "tree", path: DocTreePath.make(forbiddenPath) },
+              graph,
+            }).pipe(Effect.provide(fsLayer)),
+          )
+          match(exit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              const err = Cause.findErrorOption(cause)
+              match(err)
+                .with({ _tag: "Some" }, ({ value }) => {
+                  expect(value.reason).toContain("forbidden directory segment")
+                })
+                .with({ _tag: "None" }, () => {
+                  expect.unreachable(`Expected DocTreePathError for ${forbiddenPath}`)
+                })
+                .exhaustive()
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable(`Expected failure for ${forbiddenPath}`)
+            })
+            .exhaustive()
+        }
+
+        expect(Schema.decodeUnknownOption(DocTreeInput)({ mode: "tree" })._tag).toBe("None")
+        expect(
+          Schema.decodeUnknownOption(DocTreeInput)({
+            mode: "section",
+            path: "docs/long.md",
+          })._tag,
+        ).toBe("None")
+
+        expect(
+          Schema.decodeOption(EarsRequirementNode)({
+            _tag: "EarsRequirement",
+            id: EarsRequirementNodeId.make("wrong:SPEC::REQ-1.1"),
+            specId: GovernanceDocIdentifier.make("sample:SPEC-0001"),
+            requirementId: RequirementId.make("REQ-1.1"),
+            area: EarsAreaName.make("Core"),
+            pattern: EarsPatternName.make("Ubiquitous"),
+            clauseText: EarsClauseText.make("Clause."),
+            effectSymbol: EarsEffectSymbol.make(""),
+            verification: EarsVerificationKind.make("UnitTest"),
+            path: DocTreePath.make("docs/specs/0001.md"),
+            line: DocLineNumber.make(1),
+            status: "accepted",
+          })._tag,
+        ).toBe("None")
+
+        expect(
+          Schema.decodeOption(EarsSpecNode)({
+            _tag: "EarsSpec",
+            id: "sample:SPEC-0001",
+            title: "Spec",
+            status: "accepted",
+            path: "docs/specs/0001.md",
+            enforcedByFiles: [],
+            requirements: [
+              {
+                _tag: "EarsRequirement",
+                id: EarsRequirementNodeId.make("other:SPEC::REQ-1.1"),
+                specId: GovernanceDocIdentifier.make("other:SPEC"),
+                requirementId: RequirementId.make("REQ-1.1"),
+                area: EarsAreaName.make("Core"),
+                pattern: EarsPatternName.make("Ubiquitous"),
+                clauseText: EarsClauseText.make("Mismatched specId."),
+                effectSymbol: EarsEffectSymbol.make(""),
+                verification: EarsVerificationKind.make("UnitTest"),
+                path: DocTreePath.make("docs/specs/0001.md"),
+                line: DocLineNumber.make(2),
+                status: "accepted",
+              },
+            ],
+          })._tag,
+        ).toBe("None")
       }),
   )
 })

@@ -17,7 +17,7 @@ import {
   type ReviewTimeoutMillis,
   UnknownToolError,
 } from "@harness/contract"
-import type { EmbeddingClient, WorkspaceFs } from "@harness/service"
+import type { EmbeddingCachePort, EmbeddingClient, WorkspaceFs } from "@harness/service"
 import {
   appendTelemetryEvent,
   type TelemetryCategory,
@@ -31,6 +31,7 @@ import {
   type GraphProjectorError,
   type GraphRewriteError,
   type HarnessGraph,
+  isRelativeEscape,
   loadGraphSnapshotEffect,
   type OmnigraphLoadError,
   type OmnigraphSync,
@@ -104,6 +105,7 @@ export interface ServerOptions {
   readonly snapshotPath?: string
   readonly decisionLayer?: Layer.Layer<DecisionModel.DecisionModel>
   readonly embeddingClientLayer?: Layer.Layer<EmbeddingClient>
+  readonly embeddingCacheLayer?: Layer.Layer<EmbeddingCachePort>
   readonly workspaceFsLayer?: Layer.Layer<WorkspaceFs>
   readonly omnigraphSyncLayer?: Layer.Layer<OmnigraphSync>
   readonly extraLayer?: Layer.Layer<never>
@@ -359,13 +361,17 @@ export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolea
     ? path.resolve(candidatePath)
     : path.resolve(logicalRoot, candidatePath)
   const rel = path.relative(logicalRoot, logicalCandidate)
-  if (rel !== "" && (rel.startsWith("..") || path.isAbsolute(rel))) {
+  if (rel !== "" && isRelativeEscape(rel)) {
     return false
   }
   if (nodeSyncHostIo.existsSync(logicalRoot)) {
     let checkPath = logicalCandidate
     while (!nodeSyncHostIo.existsSync(checkPath)) {
-      if (nodeSyncHostIo.isSymbolicLinkSync(checkPath)) {
+      const isSymlink = Result.getOrElse(
+        Result.try(() => nodeSyncHostIo.isSymbolicLinkSync(checkPath)),
+        () => false,
+      )
+      if (isSymlink) {
         return false
       }
       if (checkPath === logicalRoot) {
@@ -377,13 +383,13 @@ export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolea
     }
     if (nodeSyncHostIo.existsSync(checkPath)) {
       const checkRel = path.relative(logicalRoot, checkPath)
-      if (!checkRel.startsWith("..") && !path.isAbsolute(checkRel)) {
+      if (!isRelativeEscape(checkRel)) {
         const contained = Result.getOrElse(
           Result.try(() => {
             const realRoot = nodeSyncHostIo.realpathSync(logicalRoot)
             const realCheck = nodeSyncHostIo.realpathSync(checkPath)
             const realRel = path.relative(realRoot, realCheck)
-            return !(realRel !== "" && (realRel.startsWith("..") || path.isAbsolute(realRel)))
+            return !(realRel !== "" && isRelativeEscape(realRel))
           }),
           () => false,
         )
@@ -492,20 +498,20 @@ export const recordMcpToolTelemetry = (
 
   const engineSource: TelemetryEngineSource = match(toolName)
     .with("harness_gq_query", () =>
-      typeof result === "object" &&
-      result !== null &&
-      "source" in result &&
-      result.source === "omnigraph"
-        ? ("omnigraph" as const)
-        : ("memory-fallback" as const),
+      match(result)
+        .with({ source: "omnigraph" }, () => "omnigraph" as const)
+        .with({ source: "memory-fallback" }, () => "memory-fallback" as const)
+        .otherwise(() => "memory-fallback" as const),
     )
     .with("harness_search_knowledge", () =>
-      typeof result === "object" &&
-      result !== null &&
-      "retrievalMode" in result &&
-      (result.retrievalMode === "hybrid-rrf" || result.retrievalMode === "bm25-only")
-        ? ("omnigraph" as const)
-        : ("memory-fallback" as const),
+      match(result)
+        .with(
+          { retrievalMode: "hybrid-rrf" },
+          { retrievalMode: "bm25-only" },
+          () => "omnigraph" as const,
+        )
+        .with({ retrievalMode: "lexical-fallback" }, () => "memory-fallback" as const)
+        .otherwise(() => "memory-fallback" as const),
     )
     .with(
       "harness_route",

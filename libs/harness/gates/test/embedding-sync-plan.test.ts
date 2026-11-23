@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Schema } from "effect"
+import { Effect, Layer, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   compareCodeUnits,
@@ -10,10 +10,15 @@ import {
   EmbeddingDimensionCount,
   EmbeddingModelId,
   EmbeddingNodeKey,
+  EmbeddingProviderBaseUrl,
   EmbeddingSourceText,
   type EmbeddingCacheSnapshot,
   type EmbeddingSyncCandidateItem,
+  ErrorReasonMessage,
+  WorkspaceFilePath,
 } from "@harness/contract"
+import { buildHarnessGraph, syncGraphEmbeddings } from "@harness/graph"
+import { EmbeddingCachePort, EmbeddingClient } from "@harness/service"
 import { decideEmbeddingSyncPlan } from "../src/index.js"
 
 const sha256 = (value: string): EmbeddingContentHash =>
@@ -108,7 +113,11 @@ describe("EmbeddingSyncPlan.decide (ADR-0025 / SPEC-0031)", () => {
               nodeKind: base.nodeKind,
               contentHash: g.dirtyHash ? sha256(`dirty-${g.id}`) : base.contentHash,
               dimensions: cachedDimensions,
-              vector: { components: [EmbeddingComponent.make(1)] },
+              vector: {
+                components: Array.from({ length: cachedDimensions }, () =>
+                  EmbeddingComponent.make(1),
+                ),
+              },
             }
           })
 
@@ -138,29 +147,202 @@ describe("EmbeddingSyncPlan.decide (ADR-0025 / SPEC-0031)", () => {
 
         expect(forward).toEqual(reversed)
         const expectedCurrentKeys = currentItems.map((i) => i.nodeKey).sort(compareCodeUnits)
+        const expectedCachedKeys = cachedEntries.map((e) => e.nodeKey).sort(compareCodeUnits)
+        const cachedHashByKey = new Map(cachedEntries.map((e) => [e.nodeKey, e.contentHash]))
+        const currentKeySet = new Set(expectedCurrentKeys)
 
-        match(forward)
-          .with({ _tag: "ModelMismatchRebuild" }, (d) => {
-            expect(!scenario.sameModel || !scenario.sameDimensions).toBe(true)
-            expect(d.embedKeys).toEqual(expectedCurrentKeys)
-          })
-          .with({ _tag: "CacheHitAll" }, (d) => {
-            expect(scenario.sameModel && scenario.sameDimensions).toBe(true)
-            expect(d.reusedKeys).toEqual(expectedCurrentKeys)
-          })
-          .with({ _tag: "EmbedDelta" }, (d) => {
-            expect(scenario.sameModel && scenario.sameDimensions).toBe(true)
-            const reusedSet = new Set(d.reusedKeys)
-            const embedSet = new Set(d.embedKeys)
-            const evictedSet = new Set(d.evictedKeys)
-            for (const k of reusedSet) {
-              expect(embedSet.has(k)).toBe(false)
-              expect(evictedSet.has(k)).toBe(false)
-            }
-            const combined = [...d.reusedKeys, ...d.embedKeys].sort(compareCodeUnits)
-            expect(combined).toEqual(expectedCurrentKeys)
-          })
-          .exhaustive()
+        if (!scenario.sameModel || !scenario.sameDimensions) {
+          match(forward)
+            .with({ _tag: "ModelMismatchRebuild" }, (d) => {
+              expect(d.embedKeys).toEqual(expectedCurrentKeys)
+              expect(d.evictedKeys).toEqual(expectedCachedKeys)
+            })
+            .with({ _tag: "CacheHitAll" }, { _tag: "EmbedDelta" }, () => {
+              expect.unreachable("Expected ModelMismatchRebuild when model or dimensions differ")
+            })
+            .exhaustive()
+          return
+        }
+
+        const expectedReusedKeys = currentItems
+          .filter((i) => cachedHashByKey.get(i.nodeKey) === i.contentHash)
+          .map((i) => i.nodeKey)
+          .sort(compareCodeUnits)
+        const expectedEmbedKeys = currentItems
+          .filter((i) => cachedHashByKey.get(i.nodeKey) !== i.contentHash)
+          .map((i) => i.nodeKey)
+          .sort(compareCodeUnits)
+        const expectedEvictedKeys = cachedEntries
+          .filter((e) => !currentKeySet.has(e.nodeKey))
+          .map((e) => e.nodeKey)
+          .sort(compareCodeUnits)
+
+        if (expectedEmbedKeys.length === 0 && expectedEvictedKeys.length === 0) {
+          match(forward)
+            .with({ _tag: "CacheHitAll" }, (d) => {
+              expect(d.reusedKeys).toEqual(expectedReusedKeys)
+            })
+            .with({ _tag: "EmbedDelta" }, { _tag: "ModelMismatchRebuild" }, () => {
+              expect.unreachable("Expected CacheHitAll when all items match cached hashes")
+            })
+            .exhaustive()
+        } else {
+          match(forward)
+            .with({ _tag: "EmbedDelta" }, (d) => {
+              expect(d.reusedKeys).toEqual(expectedReusedKeys)
+              expect(d.embedKeys).toEqual(expectedEmbedKeys)
+              expect(d.evictedKeys).toEqual(expectedEvictedKeys)
+            })
+            .with({ _tag: "CacheHitAll" }, { _tag: "ModelMismatchRebuild" }, () => {
+              expect.unreachable("Expected EmbedDelta when delta or evictions exist")
+            })
+            .exhaustive()
+        }
+      }),
+  )
+
+  it.effect(
+    "integrates real decideEmbeddingSyncPlan with syncGraphEmbeddings across cold build, cache hit, delta/eviction, ModelMismatchRebuild, and unavailable degradation",
+    () =>
+      Effect.gen(function* () {
+        let snapshot: EmbeddingCacheSnapshot | undefined
+        const cacheLayer = Layer.succeed(
+          EmbeddingCachePort,
+          EmbeddingCachePort.of({
+            readCache: () =>
+              Effect.succeed(snapshot === undefined ? Option.none() : Option.some(snapshot)),
+            writeCache: (_root, next) =>
+              Effect.sync(() => {
+                snapshot = next
+              }),
+          }),
+        )
+
+        const makeClientLayer = (opts: {
+          readonly model: string
+          readonly dimensions: number
+          readonly available: boolean
+        }) => {
+          let embedCalls = 0
+          const layer = Layer.succeed(
+            EmbeddingClient,
+            EmbeddingClient.of({
+              config: {
+                baseUrl: EmbeddingProviderBaseUrl.make("http://127.0.0.1:11434/v1"),
+                model: EmbeddingModelId.make(opts.model),
+                dimensions: EmbeddingDimensionCount.make(opts.dimensions),
+              },
+              checkAvailability: Effect.succeed(
+                opts.available
+                  ? { _tag: "Available" as const }
+                  : {
+                      _tag: "Unavailable" as const,
+                      cause: "network-error" as const,
+                      reason: ErrorReasonMessage.make("Ollama offline"),
+                    },
+              ),
+              embedBatch: (texts) =>
+                Effect.sync(() => {
+                  embedCalls++
+                  return texts.map(() => ({
+                    components: Array.from({ length: opts.dimensions }, () =>
+                      EmbeddingComponent.make(1),
+                    ),
+                  }))
+                }),
+              embedQuery: () =>
+                Effect.succeed({
+                  components: Array.from({ length: opts.dimensions }, () =>
+                    EmbeddingComponent.make(1),
+                  ),
+                }),
+            }),
+          )
+          return { layer, getCalls: () => embedCalls }
+        }
+
+        const initialGraph = buildHarnessGraph({
+          patternDocs: [
+            { slug: "errors", path: "agent-patterns/errors.md", summary: "Errors summary v1" },
+            { slug: "schema", path: "agent-patterns/schema.md", summary: "Schema summary v1" },
+          ],
+        })
+
+        // 1. Cold build
+        const c1 = makeClientLayer({ model: "qwen3-embedding:8b", dimensions: 4, available: true })
+        const res1 = yield* syncGraphEmbeddings({
+          graph: initialGraph,
+          repoRoot: WorkspaceFilePath.make("/repo"),
+          decidePlan: decideEmbeddingSyncPlan,
+        }).pipe(Effect.provide(Layer.mergeAll(c1.layer, cacheLayer)))
+        expect(res1.mode).toBe("hybrid-rrf")
+        expect(res1.embeddedDeltaCount).toBe(2)
+        expect(c1.getCalls()).toBe(1)
+
+        // 2. Cache hit -> 0 embed calls
+        const res2 = yield* syncGraphEmbeddings({
+          graph: initialGraph,
+          repoRoot: WorkspaceFilePath.make("/repo"),
+          decidePlan: decideEmbeddingSyncPlan,
+        }).pipe(Effect.provide(Layer.mergeAll(c1.layer, cacheLayer)))
+        expect(res2.mode).toBe("hybrid-rrf")
+        expect(res2.reusedCacheCount).toBe(2)
+        expect(res2.embeddedDeltaCount).toBe(0)
+        expect(c1.getCalls()).toBe(1)
+
+        // 3. Delta update + eviction
+        const deltaGraph = buildHarnessGraph({
+          patternDocs: [
+            { slug: "errors", path: "agent-patterns/errors.md", summary: "Errors summary v1" },
+            {
+              slug: "planning",
+              path: "agent-patterns/planning.md",
+              summary: "Planning summary v1",
+            },
+          ],
+        })
+        const res3 = yield* syncGraphEmbeddings({
+          graph: deltaGraph,
+          repoRoot: WorkspaceFilePath.make("/repo"),
+          decidePlan: decideEmbeddingSyncPlan,
+        }).pipe(Effect.provide(Layer.mergeAll(c1.layer, cacheLayer)))
+        expect(res3.mode).toBe("hybrid-rrf")
+        expect(res3.reusedCacheCount).toBe(1)
+        expect(res3.embeddedDeltaCount).toBe(1)
+        expect(snapshot?.entries.map((e) => e.nodeKey)).toEqual([
+          "PatternDoc:errors",
+          "PatternDoc:planning",
+        ])
+
+        // 4. ModelMismatchRebuild when model changes -> reusedCacheCount 0, embeds all items
+        const c2 = makeClientLayer({ model: "bge-m3", dimensions: 8, available: true })
+        const res4 = yield* syncGraphEmbeddings({
+          graph: deltaGraph,
+          repoRoot: WorkspaceFilePath.make("/repo"),
+          decidePlan: decideEmbeddingSyncPlan,
+        }).pipe(Effect.provide(Layer.mergeAll(c2.layer, cacheLayer)))
+        expect(res4.mode).toBe("hybrid-rrf")
+        expect(res4.reusedCacheCount).toBe(0)
+        expect(res4.embeddedDeltaCount).toBe(2)
+        expect(snapshot?.model).toBe("bge-m3")
+        expect(snapshot?.dimensions).toBe(8)
+
+        // 5. Provider unavailable on dirty delta preserves existing cache snapshot
+        const prevSnapshot = snapshot
+        const cOffline = makeClientLayer({ model: "bge-m3", dimensions: 8, available: false })
+        const dirtyGraph = buildHarnessGraph({
+          patternDocs: [
+            { slug: "errors", path: "agent-patterns/errors.md", summary: "Errors summary v2" },
+          ],
+        })
+        const res5 = yield* syncGraphEmbeddings({
+          graph: dirtyGraph,
+          repoRoot: WorkspaceFilePath.make("/repo"),
+          decidePlan: decideEmbeddingSyncPlan,
+        }).pipe(Effect.provide(Layer.mergeAll(cOffline.layer, cacheLayer)))
+        expect(res5.mode).toBe("bm25-only")
+        expect(res5.degradedReason).toContain("Ollama offline")
+        expect(snapshot).toEqual(prevSnapshot)
       }),
   )
 })

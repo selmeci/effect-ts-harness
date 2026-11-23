@@ -1,6 +1,7 @@
 import * as path from "node:path"
 import { Cause, Effect, Option, Schema } from "effect"
 import type * as DecisionModel from "effect/ai/DecisionModel"
+import { match } from "ts-pattern"
 import {
   ErrorReasonMessage,
   InvalidReviewRouteInputError,
@@ -23,6 +24,7 @@ import {
   makeOmnigraphSyncLayer,
   resolveNode,
   scoreLexicalBm25Lite,
+  tokenizeRetrievalText,
 } from "@harness/graph"
 import {
   inferReviewDiffSignals,
@@ -53,6 +55,7 @@ import {
   type ReviewRouteExecutionContext,
   ReviewRouteInputSchema,
 } from "./review-route-helpers.js"
+import { graphHasNodesForKind } from "./retrieval-search-helpers.js"
 import { resolveContainedRepoRoot } from "./retrieval.tools.js"
 
 export { isPathInsideRoot, normalizeProjectPath, resolveDefaultRepoRoot }
@@ -359,20 +362,24 @@ export const buildGraphNavigationToolDescriptors = (
         const trimmedStep = planStep.trim()
         const shouldProbeEmbeddings =
           trimmedStep.length > 0 && (!skipOmnigraph || options?.embeddingClientLayer !== undefined)
-        const queryVectorOpt = shouldProbeEmbeddings
+        const queryVectorOpt: Option.Option<ReadonlyArray<number>> = shouldProbeEmbeddings
           ? yield* Effect.gen(function* () {
               const client = yield* EmbeddingClient
               const avail = yield* client.checkAvailability
-              if (avail === "unavailable") return undefined
-              const vec = yield* client.embedQuery(KnowledgeQueryText.make(trimmedStep))
-              return vec.components
+              return yield* match(avail)
+                .with({ _tag: "Available" }, () =>
+                  client.embedQuery(KnowledgeQueryText.make(trimmedStep)).pipe(
+                    Effect.map((vec): ReadonlyArray<number> => vec.components),
+                    Effect.asSome,
+                  ),
+                )
+                .with({ _tag: "Unavailable" }, () => Effect.succeedNone)
+                .exhaustive()
             }).pipe(
               Effect.provide(embeddingLayer),
-              Effect.catchCause((cause) =>
-                isPureInterruptCause(cause) ? Effect.interrupt : Effect.void,
-              ),
+              Effect.orElseSucceed(() => Option.none<ReadonlyArray<number>>()),
             )
-          : undefined
+          : Option.none<ReadonlyArray<number>>()
 
         const runRoutePatternQuery = (
           queryName: "rank_patterns_vector_hybrid" | "rank_patterns_bm25",
@@ -387,56 +394,85 @@ export const buildGraphNavigationToolDescriptors = (
             ...(skipOmnigraph ? { baseUrl: "http://127.0.0.1:1" } : {}),
           }).pipe(
             Effect.provide(syncLayer),
-            Effect.catchCause((cause) =>
-              isPureInterruptCause(cause)
-                ? Effect.interrupt
-                : Effect.succeed({
-                    source: "memory-fallback" as const,
-                    rows: executeNamedGqQueryInMemory(graphStatus.graph, queryName, queryParams),
-                    degraded: true as const,
-                    fallbackError: "fallback",
-                  }),
+            Effect.catch((err) =>
+              Effect.succeed({
+                source: "memory-fallback" as const,
+                rows: executeNamedGqQueryInMemory(graphStatus.graph, queryName, queryParams),
+                degraded: true as const,
+                fallbackError: toErrorReasonMessage(err, "fallback"),
+              }),
             ),
           )
 
-        const candidateQueryRes =
-          queryVectorOpt !== undefined
-            ? yield* runRoutePatternQuery("rank_patterns_vector_hybrid", {
-                vectorQuery: [...queryVectorOpt],
-                textQuery: trimmedStep,
-                targetLayer: "*",
-              })
-            : yield* runRoutePatternQuery("rank_patterns_bm25", {
-                query: trimmedStep,
-                targetLayer: "*",
-              })
+        interface RouteCandidateQueryOutcome {
+          readonly rows: ReadonlyArray<Record<string, unknown>>
+          readonly usedLiveVectorHybrid: boolean
+        }
 
-        const finalCandidateRows =
-          queryVectorOpt !== undefined && candidateQueryRes.source === "memory-fallback"
-            ? (yield* runRoutePatternQuery("rank_patterns_bm25", {
-                query: trimmedStep,
-                targetLayer: "*",
-              })).rows
-            : candidateQueryRes.rows
+        const runBm25FallbackRows = (): Effect.Effect<RouteCandidateQueryOutcome> =>
+          runRoutePatternQuery("rank_patterns_bm25", {
+            query: trimmedStep,
+            targetLayer: "*",
+          }).pipe(Effect.map((res) => ({ rows: res.rows, usedLiveVectorHybrid: false })))
 
-        const candidatePatterns = finalCandidateRows
+        const candidateQueryOutcome: RouteCandidateQueryOutcome = yield* match(queryVectorOpt)
+          .with({ _tag: "Some" }, ({ value: vectorQuery }) =>
+            runRoutePatternQuery("rank_patterns_vector_hybrid", {
+              vectorQuery: [...vectorQuery],
+              textQuery: trimmedStep,
+              targetLayer: "*",
+            }).pipe(
+              Effect.flatMap((res) =>
+                match(res)
+                  .with({ source: "omnigraph" }, ({ rows }) => {
+                    if (rows.length > 0) {
+                      return Effect.succeed<RouteCandidateQueryOutcome>({
+                        rows,
+                        usedLiveVectorHybrid: true,
+                      })
+                    }
+                    if (graphHasNodesForKind(graphStatus.graph, "PatternDoc", "*")) {
+                      return runBm25FallbackRows()
+                    }
+                    return Effect.succeed<RouteCandidateQueryOutcome>({
+                      rows: [],
+                      usedLiveVectorHybrid: false,
+                    })
+                  })
+                  .with({ source: "memory-fallback" }, () => runBm25FallbackRows())
+                  .exhaustive(),
+              ),
+            ),
+          )
+          .with({ _tag: "None" }, () => runBm25FallbackRows())
+          .exhaustive()
+
+        const hasMeaningfulTokens = tokenizeRetrievalText(trimmedStep).length > 0
+        const candidatePatterns = candidateQueryOutcome.rows
           .filter((row) => typeof row["slug"] === "string")
-          .map((row) => {
+          .map((row, idx) => {
             const slug = String(row["slug"])
             const titleStr = typeof row["title"] === "string" ? row["title"] : ""
             const summaryStr = typeof row["summary"] === "string" ? row["summary"] : ""
-            const computedScore =
+            const rowScore =
               typeof row["score"] === "number" && Number.isFinite(row["score"])
                 ? row["score"]
-                : scoreLexicalBm25Lite(
-                    `${slug} ${titleStr} ${summaryStr}`,
-                    `${slug} ${titleStr}`,
-                    trimmedStep,
-                  )
+                : undefined
+            const computedScore = candidateQueryOutcome.usedLiveVectorHybrid
+              ? (rowScore ?? (hasMeaningfulTokens ? 1 / (60 + idx) : 0))
+              : (rowScore ??
+                scoreLexicalBm25Lite(
+                  `${slug} ${titleStr} ${summaryStr}`,
+                  `${slug} ${titleStr}`,
+                  trimmedStep,
+                ))
             return {
               slug,
               path: typeof row["path"] === "string" ? row["path"] : undefined,
               score: computedScore,
+              scoreKind: candidateQueryOutcome.usedLiveVectorHybrid
+                ? ("rrf" as const)
+                : ("bm25" as const),
             }
           })
 

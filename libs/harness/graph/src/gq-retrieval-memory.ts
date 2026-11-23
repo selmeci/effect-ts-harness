@@ -2,6 +2,7 @@ import * as Graph from "effect/Graph"
 import { compareCodeUnits } from "@harness/contract"
 import { match } from "ts-pattern"
 import { classifyOntologyNode } from "./archimate-ontology.js"
+import { firstNonBlank } from "./doc-tree.js"
 import type { HarnessGqQueryName } from "./gq-query-descriptors.js"
 import type { HarnessGraph } from "./model.js"
 
@@ -160,7 +161,7 @@ export const executeAdrSearchMemory = (
     match(node)
       .with({ _tag: "AdrDoc" }, (adr) => {
         if (statusFilter !== "*" && adr.status !== statusFilter) return
-        const text = adr.searchText ?? `${adr.title} ${adr.summary ?? ""}`
+        const text = firstNonBlank(adr.searchText, `${adr.title} ${adr.summary ?? ""}`)
         const score = scoreLexicalBm25Lite(text, `${adr.id} ${adr.title}`, query)
         if (score > 0) {
           scored.push({

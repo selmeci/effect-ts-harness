@@ -579,24 +579,33 @@ describe("OmnigraphMessageStorage fencing, fail-closed guards, corrupt-row seman
       }),
     )
     expect(polled).toHaveLength(1)
-    expect(polled[0]?.envelope._tag === "Request" ? polled[0].envelope.requestId : "").toBe(
-      validMsgId,
-    )
+    match(polled[0]?.envelope)
+      .with({ _tag: "Request" }, (req) => {
+        expect(req.requestId).toBe(validMsgId)
+      })
+      .with({ _tag: "AckChunk" }, { _tag: "Interrupt" }, undefined, () => {
+        expect.unreachable("Expected Request envelope for validMsgId")
+      })
+      .exhaustive()
 
     const corruptMsgReplies = await Effect.runPromise(driver.repliesForUnfiltered([corruptMsgId]))
     expect(corruptMsgReplies).toHaveLength(1)
     const firstCorruptMsgReply = corruptMsgReplies[0]
-    expect(firstCorruptMsgReply?._tag).toBe("WithExit")
-    if (firstCorruptMsgReply?._tag === "WithExit") {
-      match(firstCorruptMsgReply.exit)
-        .with({ _tag: "Failure" }, (exitFailure) => {
-          expect(exitFailure.cause[0]?._tag).toBe("Die")
-        })
-        .with({ _tag: "Success" }, () => {
-          expect.unreachable("Expected Failure(Die) for corrupt WfMessage")
-        })
-        .exhaustive()
-    }
+    match(firstCorruptMsgReply)
+      .with({ _tag: "WithExit" }, (reply) => {
+        match(reply.exit)
+          .with({ _tag: "Failure" }, (exitFailure) => {
+            expect(exitFailure.cause[0]?._tag).toBe("Die")
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected Failure(Die) for corrupt WfMessage")
+          })
+          .exhaustive()
+      })
+      .with({ _tag: "Chunk" }, undefined, () => {
+        expect.unreachable("Expected WithExit reply for corrupt WfMessage")
+      })
+      .exhaustive()
 
     // Corrupt WfReply on one requestId synthesizes WithExit(Die) while preserving healthy sibling requestId
     const corruptReplyReqId = MessageKey.make(String(mintSnowflake()))
@@ -631,17 +640,21 @@ describe("OmnigraphMessageStorage fencing, fail-closed guards, corrupt-row seman
     expect(replies).toHaveLength(2)
     const badSynthesized = replies.find((r) => r.requestId === corruptReplyReqId)
     const healthySibling = replies.find((r) => r.requestId === validMsgId)
-    expect(badSynthesized?._tag).toBe("WithExit")
-    if (badSynthesized?._tag === "WithExit") {
-      match(badSynthesized.exit)
-        .with({ _tag: "Failure" }, (exitFailure) => {
-          expect(exitFailure.cause[0]?._tag).toBe("Die")
-        })
-        .with({ _tag: "Success" }, () => {
-          expect.unreachable("Expected Failure(Die) for corrupt WfReply")
-        })
-        .exhaustive()
-    }
+    match(badSynthesized)
+      .with({ _tag: "WithExit" }, (reply) => {
+        match(reply.exit)
+          .with({ _tag: "Failure" }, (exitFailure) => {
+            expect(exitFailure.cause[0]?._tag).toBe("Die")
+          })
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable("Expected Failure(Die) for corrupt WfReply")
+          })
+          .exhaustive()
+      })
+      .with({ _tag: "Chunk" }, undefined, () => {
+        expect.unreachable("Expected WithExit reply for corrupt WfReply")
+      })
+      .exhaustive()
     expect(healthySibling?.id).toBe(goodReplyId)
 
     await Effect.runPromise(driver.clearAddress(addr))

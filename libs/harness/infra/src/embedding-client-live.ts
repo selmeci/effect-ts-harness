@@ -6,11 +6,14 @@ import {
   EmbeddingComponent,
   EmbeddingDimensionCount,
   EmbeddingModelId,
+  type EmbeddingProviderAvailability,
   EmbeddingProviderBaseUrl,
   type EmbeddingProviderConfig,
   EmbeddingProviderError,
   EmbeddingSourceText,
+  type EmbeddingUnavailableCause,
   type EmbeddingVector,
+  ErrorReasonMessage,
   type KnowledgeQueryText,
   toErrorReasonMessage,
 } from "@harness/contract"
@@ -31,13 +34,11 @@ const EmbeddingsApiResponseSchema = Schema.Struct({
 })
 
 const OllamaTagsResponseSchema = Schema.Struct({
-  models: Schema.optional(
-    Schema.Array(
-      Schema.Struct({
-        name: Schema.String,
-        model: Schema.optional(Schema.String),
-      }),
-    ),
+  models: Schema.Array(
+    Schema.Struct({
+      name: Schema.String,
+      model: Schema.optional(Schema.String),
+    }),
   ),
 })
 
@@ -210,6 +211,108 @@ const formatQwen3InstructQuery = (query: KnowledgeQueryText): EmbeddingSourceTex
     `Instruct: Given a technical architecture, Effect-TS pattern, or EARS specification query, retrieve the most relevant documentation or requirement passage.\nQuery: ${query}`,
   )
 
+const makeUnavailable = (
+  cause: EmbeddingUnavailableCause,
+  reason: string,
+): EmbeddingProviderAvailability => ({
+  _tag: "Unavailable",
+  cause,
+  reason: ErrorReasonMessage.make(toErrorReasonMessage(reason, "Embedding provider unavailable")),
+})
+
+const isTimeoutFailure = (err: unknown, timeoutSignal: AbortSignal): boolean => {
+  if (timeoutSignal.aborted) return true
+  const errName =
+    err instanceof Error
+      ? err.name
+      : typeof err === "object" && err !== null && "name" in err
+        ? String(err.name)
+        : ""
+  if (errName === "TimeoutError" || errName === "AbortError") return true
+  return /\b(?:timeout|timed?\s*out|aborted)\b/i.test(String(err))
+}
+
+const probeOllamaAvailability = (
+  cfg: EmbeddingProviderConfig,
+  fetchFn: typeof globalThis.fetch,
+): Effect.Effect<EmbeddingProviderAvailability> =>
+  Effect.gen(function* () {
+    const baseUrlRes = validateLoopbackBaseUrl(cfg.baseUrl)
+    const parsedUrl = match(baseUrlRes)
+      .with({ _tag: "Success" }, ({ success }) => success)
+      .with({ _tag: "Failure" }, ({ failure }) => makeUnavailable("invalid-base-url", failure))
+      .exhaustive()
+    if (!(parsedUrl instanceof URL)) {
+      return parsedUrl
+    }
+
+    const tagsUrl = `${parsedUrl.origin}/api/tags`
+    const timeoutSignal = AbortSignal.timeout(AVAILABILITY_TIMEOUT_MS)
+    const fetchResult = yield* Effect.result(
+      Effect.tryPromise({
+        try: (fiberSignal) =>
+          fetchFn(tagsUrl, {
+            method: "GET",
+            redirect: "error",
+            signal: AbortSignal.any([fiberSignal, timeoutSignal]),
+          }),
+        catch: (err) =>
+          makeUnavailable(
+            isTimeoutFailure(err, timeoutSignal) ? "timeout" : "network-error",
+            `Failed probing ${tagsUrl}: ${toErrorReasonMessage(err, "Network error")}`,
+          ),
+      }),
+    )
+
+    return yield* match(fetchResult)
+      .with({ _tag: "Failure" }, ({ failure }) => Effect.succeed(failure))
+      .with({ _tag: "Success" }, ({ success: response }) =>
+        Effect.gen(function* () {
+          if (!response.ok) {
+            yield* cancelResponseBodyQuietly(response)
+            return makeUnavailable("http-error", `GET ${tagsUrl} returned HTTP ${response.status}`)
+          }
+          const jsonResult = yield* Effect.result(
+            Effect.tryPromise({
+              try: () => response.json(),
+              catch: (err) =>
+                makeUnavailable(
+                  "invalid-json",
+                  `Invalid JSON from ${tagsUrl}: ${toErrorReasonMessage(err, "Parse error")}`,
+                ),
+            }).pipe(Effect.onInterrupt(() => cancelResponseBodyQuietly(response))),
+          )
+          return match(jsonResult)
+            .with({ _tag: "Failure" }, ({ failure }) => failure)
+            .with({ _tag: "Success" }, ({ success: rawJson }) =>
+              match(Schema.decodeUnknownOption(OllamaTagsResponseSchema)(rawJson))
+                .with({ _tag: "None" }, () =>
+                  makeUnavailable(
+                    "invalid-payload",
+                    `Unexpected /api/tags payload from ${tagsUrl}`,
+                  ),
+                )
+                .with({ _tag: "Some" }, ({ value: parsed }) => {
+                  const hasModel = parsed.models.some(
+                    (m) =>
+                      matchesInstalledModel(m.name, cfg.model) ||
+                      (m.model !== undefined && matchesInstalledModel(m.model, cfg.model)),
+                  )
+                  return hasModel
+                    ? ({ _tag: "Available" as const } satisfies EmbeddingProviderAvailability)
+                    : makeUnavailable(
+                        "model-not-installed",
+                        `Model '${cfg.model}' is not installed on Ollama at ${tagsUrl}`,
+                      )
+                })
+                .exhaustive(),
+            )
+            .exhaustive()
+        }),
+      )
+      .exhaustive()
+  })
+
 const makeOllamaEmbeddingClientLayer = (
   options?: OllamaEmbeddingClientOptions,
 ): Layer.Layer<EmbeddingClient> =>
@@ -231,66 +334,7 @@ const makeOllamaEmbeddingClientLayer = (
 
       return EmbeddingClient.of({
         config: cfg,
-        checkAvailability: Effect.gen(function* () {
-          const baseUrlRes = validateLoopbackBaseUrl(cfg.baseUrl)
-          const parsedUrl = match(baseUrlRes)
-            .with({ _tag: "Success" }, ({ success }) => success)
-            .with({ _tag: "Failure" }, () => undefined)
-            .exhaustive()
-          if (parsedUrl === undefined) {
-            return "unavailable" as const
-          }
-
-          const tagsUrl = `${parsedUrl.origin}/api/tags`
-          const responseOpt = yield* Effect.tryPromise({
-            try: (fiberSignal) =>
-              fetchFn(tagsUrl, {
-                method: "GET",
-                redirect: "error",
-                signal: AbortSignal.any([
-                  fiberSignal,
-                  AbortSignal.timeout(AVAILABILITY_TIMEOUT_MS),
-                ]),
-              }),
-            catch: () => undefined,
-          }).pipe(Effect.option)
-
-          return yield* match(responseOpt)
-            .with({ _tag: "None" }, () => Effect.succeed("unavailable" as const))
-            .with({ _tag: "Some" }, ({ value: response }) =>
-              Effect.gen(function* () {
-                if (!response.ok) {
-                  yield* cancelResponseBodyQuietly(response)
-                  return "unavailable" as const
-                }
-                const jsonOpt = yield* Effect.tryPromise({
-                  try: () => response.json(),
-                  catch: () => undefined,
-                }).pipe(
-                  Effect.onInterrupt(() => cancelResponseBodyQuietly(response)),
-                  Effect.option,
-                )
-                return match(jsonOpt)
-                  .with({ _tag: "None" }, () => "unavailable" as const)
-                  .with({ _tag: "Some" }, ({ value: rawJson }) =>
-                    match(Schema.decodeUnknownOption(OllamaTagsResponseSchema)(rawJson))
-                      .with({ _tag: "None" }, () => "unavailable" as const)
-                      .with({ _tag: "Some" }, ({ value: parsed }) => {
-                        const models = parsed.models ?? []
-                        const hasModel = models.some(
-                          (m) =>
-                            matchesInstalledModel(m.name, cfg.model) ||
-                            (m.model !== undefined && matchesInstalledModel(m.model, cfg.model)),
-                        )
-                        return hasModel ? ("available" as const) : ("unavailable" as const)
-                      })
-                      .exhaustive(),
-                  )
-                  .exhaustive()
-              }),
-            )
-            .exhaustive()
-        }),
+        checkAvailability: probeOllamaAvailability(cfg, fetchFn),
         embedBatch: (texts) => embedBatchViaOllama(texts, cfg, fetchFn),
         embedQuery: (query) =>
           embedBatchViaOllama([formatQwen3InstructQuery(query)], cfg, fetchFn).pipe(

@@ -230,20 +230,27 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
                 .with({ _tag: "NotReady" }, () => false)
                 .exhaustive()
               if (alreadyReady) {
-                if (
-                  explicitEnvUrl === undefined &&
-                  serverMeta?.embeddingsMode === "mock" &&
-                  serverAlive
-                ) {
+                const serverIsMock = match(serverMeta?.embeddingsMode)
+                  .with("mock", () => true)
+                  .with("live", undefined, () => false)
+                  .exhaustive()
+                if (explicitEnvUrl === undefined && serverIsMock && serverAlive) {
                   const desiredMode = yield* resolveDesiredOmnigraphEmbeddingsMode
-                  if (desiredMode === "live") {
-                    const killed = yield* killOmnigraphServerPidIfAlive(
-                      serverPid,
-                      clusterRootDir,
-                      "embeddings-mode-upgrade",
-                    )
-                    if (killed) {
-                      return { _tag: "Continue" as const }
+                  const wantsLive = match(desiredMode)
+                    .with("live", () => true)
+                    .with("mock", () => false)
+                    .exhaustive()
+                  if (wantsLive) {
+                    const blockedByWorktreeGuard =
+                      resolve(clusterRepoRoot) !== resolve(canonicalRepoRoot) &&
+                      isSharedCanonicalCluster &&
+                      process.env.HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD !== "1"
+                    if (blockedByWorktreeGuard) {
+                      process.stderr.write(
+                        `[harness:omnigraph] Warning: skipping mock-to-live embeddings upgrade of shared canonical cluster '${clusterRootDir}' from linked worktree '${repoRoot}'; reusing running server.\n`,
+                      )
+                    } else {
+                      return { _tag: "UpgradeEmbeddingsMode" as const }
                     }
                   }
                 }
@@ -266,7 +273,7 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
 
       const preLockEarly = match(preLockDecision)
         .with({ _tag: "Done" }, ({ ok }) => ok)
-        .with({ _tag: "Continue" }, () => undefined)
+        .with({ _tag: "Continue" }, { _tag: "UpgradeEmbeddingsMode" }, () => undefined)
         .exhaustive()
       if (preLockEarly !== undefined) {
         return preLockEarly
@@ -389,19 +396,43 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
               }),
             )
             .with({ _tag: "NoOp" }, () =>
-              Effect.sync(() => {
-                if (serverJsonCorruptOrUnreadable) {
-                  const stopped = stopStaleOmnigraphClusterBeforeDelete(clusterRootDir, undefined)
-                  if (!stopped) {
-                    return { ok: false as const, applyCluster: false }
-                  }
-                }
-                return {
-                  ok: true as const,
-                  applyCluster: false,
-                  workflowBackup: pendingBackup,
-                }
-              }),
+              match(preLockDecision)
+                .with({ _tag: "UpgradeEmbeddingsMode" }, () =>
+                  Effect.gen(function* () {
+                    const killed = yield* killOmnigraphServerPidIfAlive(
+                      serverPid,
+                      clusterRootDir,
+                      "embeddings-mode-upgrade",
+                    )
+                    if (!killed) {
+                      return { ok: false as const, applyCluster: false }
+                    }
+                    return {
+                      ok: true as const,
+                      applyCluster: false,
+                      workflowBackup: pendingBackup,
+                    }
+                  }),
+                )
+                .with({ _tag: "Continue" }, { _tag: "Done" }, () =>
+                  Effect.sync(() => {
+                    if (serverJsonCorruptOrUnreadable) {
+                      const stopped = stopStaleOmnigraphClusterBeforeDelete(
+                        clusterRootDir,
+                        undefined,
+                      )
+                      if (!stopped) {
+                        return { ok: false as const, applyCluster: false }
+                      }
+                    }
+                    return {
+                      ok: true as const,
+                      applyCluster: false,
+                      workflowBackup: pendingBackup,
+                    }
+                  }),
+                )
+                .exhaustive(),
             )
             .exhaustive()
 
@@ -490,12 +521,19 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
         return yield* body.pipe(Effect.onInterrupt(() => cleanupSpawned("fiber interrupt")))
       })
 
+      const requiresClusterLock =
+        pendingBackup !== undefined ||
+        match(preLockDecision)
+          .with({ _tag: "UpgradeEmbeddingsMode" }, () => true)
+          .with({ _tag: "Continue" }, { _tag: "Done" }, () => false)
+          .exhaustive()
+
       return yield* match(drift.action)
         .with({ _tag: "RequiresCleanRebuild" }, () =>
           withClusterDaemonLockIfGit(clusterRepoRoot, executeLifecycle),
         )
         .with({ _tag: "LiveClusterApply" }, { _tag: "NoOp" }, () =>
-          pendingBackup !== undefined
+          requiresClusterLock
             ? withClusterDaemonLockIfGit(clusterRepoRoot, executeLifecycle)
             : executeLifecycle,
         )

@@ -20,7 +20,13 @@ import {
   resolveHarnessStateDir,
 } from "./cache-helpers.js"
 import { DecisionCacheLive, makeDecisionCacheLayer } from "./decision-cache-live.js"
-import { FileEmbeddingCacheLive, makeFileEmbeddingCacheLayer } from "./embedding-cache-live.js"
+import {
+  FileEmbeddingCacheLive,
+  makeFileEmbeddingCacheLayer,
+  readEmbeddingCacheFile,
+  type FileEmbeddingCacheOptions,
+  writeEmbeddingCacheFile,
+} from "./embedding-cache-live.js"
 import {
   OllamaEmbeddingClientLive,
   embedBatchViaOllama,
@@ -73,7 +79,13 @@ export {
 }
 export { resolveAstGateCachePath, resolveDecisionCachePath, resolveHarnessStateDir }
 export { DecisionCacheLive, makeDecisionCacheLayer }
-export { FileEmbeddingCacheLive, makeFileEmbeddingCacheLayer }
+export {
+  FileEmbeddingCacheLive,
+  makeFileEmbeddingCacheLayer,
+  readEmbeddingCacheFile,
+  type FileEmbeddingCacheOptions,
+  writeEmbeddingCacheFile,
+}
 export {
   OllamaEmbeddingClientLive,
   embedBatchViaOllama,

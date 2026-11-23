@@ -261,6 +261,7 @@ export const HARNESS_GQ_QUERIES: Readonly<Record<HarnessGqQueryName, HarnessGqQu
     source: `query rank_patterns_vector_hybrid($vectorQuery: Vector(4096), $textQuery: String, $targetLayer: String) {
   match {
     $p: PatternDoc
+    $p.summaryEmbedding is not null
     $p.archimateLayer = $targetLayer or $targetLayer = "*"
   }
   return {
@@ -300,6 +301,7 @@ export const HARNESS_GQ_QUERIES: Readonly<Record<HarnessGqQueryName, HarnessGqQu
     source: `query search_adrs_vector_hybrid($vectorQuery: Vector(4096), $textQuery: String, $status: String) {
   match {
     $a: AdrDoc
+    $a.searchEmbedding is not null
     $a.status = $status or $status = "*"
   }
   return {
@@ -342,6 +344,7 @@ export const HARNESS_GQ_QUERIES: Readonly<Record<HarnessGqQueryName, HarnessGqQu
     source: `query search_requirements_vector_hybrid($vectorQuery: Vector(4096), $textQuery: String, $status: String) {
   match {
     $r: EarsRequirement
+    $r.clauseEmbedding is not null
     $r.status = $status or $status = "*"
   }
   return {

@@ -1,4 +1,7 @@
 export {
+  HYBRID_ROUTE_BM25_THRESHOLD,
+  HYBRID_ROUTE_RRF_THRESHOLD,
+  type HybridCandidateScoreKind,
   IDIOM_BLOCKS,
   type IdiomBlock,
   type BuildingBlock,
@@ -176,4 +179,9 @@ export {
   decideDeterministicReviewRoute,
   routeReviewDiff,
 } from "./review-router-decision.js"
-export { decideSemanticConflictPairs } from "./semantic-conflict-pairer.js"
+export {
+  collectSemanticConflictCandidates,
+  decideSemanticConflictPairs,
+  type CollectSemanticConflictCandidatesInput,
+  type CollectSemanticConflictCandidatesResult,
+} from "./semantic-conflict-pairer.js"

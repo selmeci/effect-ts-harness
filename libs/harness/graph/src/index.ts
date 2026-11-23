@@ -166,6 +166,7 @@ export {
   type OmnigraphGetBlobInput,
   type OmnigraphInspectCommitChangesInput,
   type OmnigraphNamedQueryResult,
+  type OmnigraphNdjsonExportOptions,
   type OmnigraphPollChangesInput,
   type OmnigraphProposeMergeInput,
   type OmnigraphPutBlobInput,
@@ -382,13 +383,19 @@ export {
 } from "./graph-projector.js"
 export {
   buildGovernanceCatalog,
+  firstNonBlank,
+  hasForbiddenDocSegment,
   inspectDocTree,
+  isRelativeEscape,
+  matchesGovernanceScope,
   parseMarkdownTree,
   type DocTreeInspectRequest,
 } from "./doc-tree.js"
 export {
   embedGraphDelta,
   syncGraphEmbeddings,
+  type GraphEmbeddingSyncDegradedOutcome,
+  type GraphEmbeddingSyncHybridOutcome,
   type GraphEmbeddingSyncInput,
   type GraphEmbeddingSyncOutcome,
 } from "./embedding-sync.js"

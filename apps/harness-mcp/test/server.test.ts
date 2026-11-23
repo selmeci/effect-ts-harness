@@ -20,6 +20,7 @@ import {
   EmbeddingDimensionCount,
   EmbeddingModelId,
   EmbeddingProviderBaseUrl,
+  ErrorReasonMessage,
   isPureInterruptCause,
 } from "@harness/contract"
 import { makeMockDecisionModelLayer } from "@harness/decision"
@@ -1955,7 +1956,11 @@ describe("harness-mcp tools", () => {
           model: EmbeddingModelId.make("qwen3-embedding:8b"),
           dimensions: EmbeddingDimensionCount.make(4),
         },
-        checkAvailability: Effect.succeed("unavailable" as const),
+        checkAvailability: Effect.succeed({
+          _tag: "Unavailable" as const,
+          cause: "network-error" as const,
+          reason: ErrorReasonMessage.make("Ollama offline in test"),
+        }),
         embedBatch: () => Effect.succeed([]),
         embedQuery: () => Effect.die("unused"),
       }),

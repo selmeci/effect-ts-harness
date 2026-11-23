@@ -1,3 +1,15 @@
+import {
+  DocLineNumber,
+  DocTreePath,
+  EarsAreaName,
+  EarsClauseText,
+  EarsEffectSymbol,
+  EarsPatternName,
+  EarsRequirementNodeId,
+  EarsVerificationKind,
+  GovernanceDocIdentifier,
+  RequirementId,
+} from "@harness/contract"
 import { Schema } from "effect"
 import type * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
@@ -156,18 +168,25 @@ export const AdrDocNode = Schema.TaggedStruct("AdrDoc", {
 export type AdrDocNode = typeof AdrDocNode.Type
 
 export const EarsRequirementNode = Schema.TaggedStruct("EarsRequirement", {
-  id: Schema.String,
-  specId: Schema.String,
-  requirementId: Schema.String,
-  area: Schema.String,
-  pattern: Schema.String,
-  clauseText: Schema.String,
-  effectSymbol: Schema.String,
-  verification: Schema.String,
-  path: Schema.String,
-  line: Schema.Int,
+  id: EarsRequirementNodeId,
+  specId: GovernanceDocIdentifier,
+  requirementId: RequirementId,
+  area: EarsAreaName,
+  pattern: EarsPatternName,
+  clauseText: EarsClauseText,
+  effectSymbol: EarsEffectSymbol,
+  verification: EarsVerificationKind,
+  path: DocTreePath,
+  line: DocLineNumber,
   status: EarsStatus,
-})
+}).pipe(
+  Schema.check(
+    Schema.makeFilter((req) => req.id === `${req.specId}::${req.requirementId}`, {
+      title: "EarsRequirementCompositeKey",
+      description: "EarsRequirement.id must equal `${specId}::${requirementId}`",
+    }),
+  ),
+)
 export type EarsRequirementNode = typeof EarsRequirementNode.Type
 
 export const EarsSpecNode = Schema.TaggedStruct("EarsSpec", {
@@ -184,7 +203,26 @@ export const EarsSpecNode = Schema.TaggedStruct("EarsSpec", {
   referencedErrors: Schema.optional(Schema.Array(Schema.String)),
   goalSummary: Schema.optional(Schema.String),
   requirements: Schema.optional(Schema.Array(EarsRequirementNode)),
-})
+}).pipe(
+  Schema.check(
+    Schema.makeFilter(
+      (spec) => {
+        const seenIds = new Set<string>()
+        for (const req of spec.requirements ?? []) {
+          if (req.specId !== spec.id) return false
+          if (seenIds.has(req.id)) return false
+          seenIds.add(req.id)
+        }
+        return true
+      },
+      {
+        title: "EarsSpecRequirementsIntegrity",
+        description:
+          "EarsSpec.requirements entries must belong to spec.id and have unique requirement ids",
+      },
+    ),
+  ),
+)
 export type EarsSpecNode = typeof EarsSpecNode.Type
 
 export const EntityNode = Schema.Union([

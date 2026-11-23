@@ -1156,6 +1156,38 @@ setTimeout(() => process.exit(0), 5000);
 
         try {
           process.env.HARNESS_EMBEDDING_BASE_URL = `http://127.0.0.1:${ollamaAddr.port}/v1`
+          // Linked worktree sharing canonical cluster must NOT kill or upgrade the canonical mock daemon
+          const linkedWtRoot = mkdtempSync(join(tmpdir(), "harness-rfc0009-wt-upgrade-"))
+          const gitWtDir = join(upgradeCase.repoRoot, ".git", "worktrees", "wt-upgrade")
+          mkdirSync(gitWtDir, { recursive: true })
+          writeFileSync(join(gitWtDir, "commondir"), "../..\n", "utf8")
+          writeFileSync(join(linkedWtRoot, ".git"), `gitdir: ${gitWtDir}\n`, "utf8")
+          const wtStderrChunks: Array<string> = []
+          const wtStderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+            wtStderrChunks.push(String(chunk))
+            return true
+          })
+          const prevAllowWt = process.env.HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD
+          Reflect.deleteProperty(process.env, "HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD")
+          try {
+            const wtReady = await Effect.runPromise(ensureLocalOmnigraphReady(linkedWtRoot))
+            expect(wtReady).toBe(true)
+            const stillMockMeta = JSON.parse(
+              readFileSync(join(upgradeClusterDir, "server.json"), "utf8"),
+            ) as Record<string, unknown>
+            expect(stillMockMeta.pid).toBe(pid1)
+            expect(stillMockMeta.embeddingsMode).toBe("mock")
+            expect(wtStderrChunks.join("")).toContain(
+              "skipping mock-to-live embeddings upgrade of shared canonical cluster",
+            )
+          } finally {
+            wtStderrSpy.mockRestore()
+            if (prevAllowWt !== undefined) {
+              process.env.HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD = prevAllowWt
+            }
+            rmSync(linkedWtRoot, { recursive: true, force: true })
+          }
+
           const upgradeLiveReady = await Effect.runPromise(
             ensureLocalOmnigraphReady(upgradeCase.repoRoot),
           )

@@ -1,4 +1,12 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
@@ -6,6 +14,9 @@ import { Cause, Effect, Fiber } from "effect"
 import { match } from "ts-pattern"
 import {
   EmbeddingBatchTimestamp,
+  EmbeddingCacheError,
+  type EmbeddingCacheErrorKind,
+  type EmbeddingCacheOperation,
   EmbeddingComponent,
   EmbeddingContentHash,
   EmbeddingDimensionCount,
@@ -56,6 +67,34 @@ const expectEmbeddingProviderError = (
     .exhaustive()
 }
 
+const expectEmbeddingCacheError = (
+  exit: Awaited<ReturnType<typeof Effect.runPromiseExit<unknown, EmbeddingCacheError>>>,
+  expectedOperation: EmbeddingCacheOperation,
+  expectedKind: EmbeddingCacheErrorKind,
+): void => {
+  match(exit)
+    .with({ _tag: "Failure" }, ({ cause }) => {
+      match(Cause.findErrorOption(cause))
+        .with({ _tag: "Some" }, ({ value }) => {
+          expect(value).toBeInstanceOf(EmbeddingCacheError)
+          if (value instanceof EmbeddingCacheError) {
+            expect(value.operation).toBe(expectedOperation)
+            expect(value.kind).toBe(expectedKind)
+          }
+        })
+        .with({ _tag: "None" }, () => {
+          expect.unreachable(`Expected EmbeddingCacheError (${expectedOperation}:${expectedKind})`)
+        })
+        .exhaustive()
+    })
+    .with({ _tag: "Success" }, () => {
+      expect.unreachable(
+        `Expected Failure with EmbeddingCacheError (${expectedOperation}:${expectedKind})`,
+      )
+    })
+    .exhaustive()
+}
+
 describe("OllamaEmbeddingClientLive & FileEmbeddingCacheLive (ADR-0025 / SPEC-0031)", () => {
   it.effect(
     "detects qwen3-embedding:8b via /api/tags, adds Instruct prefix only on embedQuery, and L2-normalizes vectors",
@@ -100,7 +139,7 @@ describe("OllamaEmbeddingClientLive & FileEmbeddingCacheLive (ADR-0025 / SPEC-00
           EmbeddingClient,
           (c) => c.checkAvailability,
         ).pipe(Effect.provide(layer))
-        expect(availability).toBe("available")
+        expect(availability).toEqual({ _tag: "Available" })
 
         const batchVecs = yield* Effect.flatMap(EmbeddingClient, (c) =>
           c.embedBatch([EmbeddingSourceText.make("Plain document summary")]),
@@ -144,7 +183,15 @@ describe("OllamaEmbeddingClientLive & FileEmbeddingCacheLive (ADR-0025 / SPEC-00
         const avail = yield* Effect.flatMap(EmbeddingClient, (c) => c.checkAvailability).pipe(
           Effect.provide(missingModelLayer),
         )
-        expect(avail).toBe("unavailable")
+        expect(avail._tag).toBe("Unavailable")
+        match(avail)
+          .with({ _tag: "Unavailable" }, (u) => {
+            expect(u.cause).toBe("model-not-installed")
+          })
+          .with({ _tag: "Available" }, () => {
+            expect.unreachable("Expected Unavailable(model-not-installed)")
+          })
+          .exhaustive()
 
         const httpExit = yield* Effect.exit(
           Effect.flatMap(EmbeddingClient, (c) =>
@@ -204,11 +251,11 @@ describe("OllamaEmbeddingClientLive & FileEmbeddingCacheLive (ADR-0025 / SPEC-00
   )
 
   it.effect(
-    "FileEmbeddingCacheLive persists atomically, self-heals on corrupt JSON, and refuses symlinks",
+    "FileEmbeddingCacheLive persists atomically (including '..foo' names), fails closed with typed EmbeddingCacheError on corrupt/mismatched/symlink/io errors",
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
-          const cacheLayer = makeFileEmbeddingCacheLayer({ cacheFilename: "embeddings-v1.json" })
+          const cacheLayer = makeFileEmbeddingCacheLayer({ cacheFilename: "..embeddings-v1.json" })
           const repoRoot = WorkspaceFilePath.make(dir)
           const snapshot = {
             schemaVersion: 1 as const,
@@ -226,6 +273,11 @@ describe("OllamaEmbeddingClientLive & FileEmbeddingCacheLive (ADR-0025 / SPEC-00
             ],
           }
 
+          const initialMissing = yield* Effect.flatMap(EmbeddingCachePort, (p) =>
+            p.readCache(repoRoot),
+          ).pipe(Effect.provide(cacheLayer))
+          expect(initialMissing._tag).toBe("None")
+
           yield* Effect.flatMap(EmbeddingCachePort, (p) => p.writeCache(repoRoot, snapshot)).pipe(
             Effect.provide(cacheLayer),
           )
@@ -242,46 +294,126 @@ describe("OllamaEmbeddingClientLive & FileEmbeddingCacheLive (ADR-0025 / SPEC-00
             })
             .exhaustive()
 
-          const cacheFile = join(dir, ".harness", "cache", "embeddings-v1.json")
+          const cacheFile = join(dir, ".harness", "cache", "..embeddings-v1.json")
           writeFileSync(cacheFile, "{not-valid-json", "utf8")
-          const corruptLoaded = yield* Effect.flatMap(EmbeddingCachePort, (p) =>
-            p.readCache(repoRoot),
-          ).pipe(Effect.provide(cacheLayer))
-          expect(corruptLoaded._tag).toBe("None")
+          const corruptExit = yield* Effect.exit(
+            Effect.flatMap(EmbeddingCachePort, (p) => p.readCache(repoRoot)).pipe(
+              Effect.provide(cacheLayer),
+            ),
+          )
+          expectEmbeddingCacheError(corruptExit, "read", "corrupt-snapshot")
 
+          // Dimension mismatch inside snapshot fails with corrupt-snapshot (F-12.1)
+          writeFileSync(
+            cacheFile,
+            JSON.stringify({
+              ...snapshot,
+              entries: [
+                {
+                  ...snapshot.entries[0]!,
+                  dimensions: 2,
+                  vector: { components: [1, 0, 0] },
+                },
+              ],
+            }),
+            "utf8",
+          )
+          const dimMismatchExit = yield* Effect.exit(
+            Effect.flatMap(EmbeddingCachePort, (p) => p.readCache(repoRoot)).pipe(
+              Effect.provide(cacheLayer),
+            ),
+          )
+          expectEmbeddingCacheError(dimMismatchExit, "read", "corrupt-snapshot")
+
+          // Duplicate nodeKey fails with corrupt-snapshot (F-12.1)
+          writeFileSync(
+            cacheFile,
+            JSON.stringify({
+              ...snapshot,
+              entries: [snapshot.entries[0]!, snapshot.entries[0]!],
+            }),
+            "utf8",
+          )
+          const dupKeyExit = yield* Effect.exit(
+            Effect.flatMap(EmbeddingCachePort, (p) => p.readCache(repoRoot)).pipe(
+              Effect.provide(cacheLayer),
+            ),
+          )
+          expectEmbeddingCacheError(dupKeyExit, "read", "corrupt-snapshot")
+
+          // Symlink cache file fails with symlink-refused on both read and write and does not clobber target
           const targetFile = join(dir, "target.json")
           writeFileSync(targetFile, "untouched", "utf8")
           rmSync(cacheFile)
           symlinkSync(targetFile, cacheFile)
 
-          const symlinkRead = yield* Effect.flatMap(EmbeddingCachePort, (p) =>
-            p.readCache(repoRoot),
-          ).pipe(Effect.provide(cacheLayer))
-          expect(symlinkRead._tag).toBe("None")
-
-          yield* Effect.flatMap(EmbeddingCachePort, (p) => p.writeCache(repoRoot, snapshot)).pipe(
-            Effect.provide(cacheLayer),
+          const symlinkReadExit = yield* Effect.exit(
+            Effect.flatMap(EmbeddingCachePort, (p) => p.readCache(repoRoot)).pipe(
+              Effect.provide(cacheLayer),
+            ),
           )
+          expectEmbeddingCacheError(symlinkReadExit, "read", "symlink-refused")
+
+          const symlinkWriteExit = yield* Effect.exit(
+            Effect.flatMap(EmbeddingCachePort, (p) => p.writeCache(repoRoot, snapshot)).pipe(
+              Effect.provide(cacheLayer),
+            ),
+          )
+          expectEmbeddingCacheError(symlinkWriteExit, "write", "symlink-refused")
           expect(readFileSync(targetFile, "utf8")).toBe("untouched")
 
+          // Symlink parent cache directory fails with symlink-refused on both read and write
           const outsideCacheDir = join(dir, "outside-cache")
           mkdirSync(outsideCacheDir, { recursive: true })
-          const outsideCacheFile = join(outsideCacheDir, "embeddings-v1.json")
+          const outsideCacheFile = join(outsideCacheDir, "..embeddings-v1.json")
           writeFileSync(outsideCacheFile, JSON.stringify(snapshot), "utf8")
           const cacheDirPath = join(dir, ".harness", "cache")
           rmSync(cacheDirPath, { recursive: true, force: true })
           symlinkSync(outsideCacheDir, cacheDirPath)
 
-          const parentSymlinkRead = yield* Effect.flatMap(EmbeddingCachePort, (p) =>
-            p.readCache(repoRoot),
-          ).pipe(Effect.provide(cacheLayer))
-          expect(parentSymlinkRead._tag).toBe("None")
+          const parentSymlinkReadExit = yield* Effect.exit(
+            Effect.flatMap(EmbeddingCachePort, (p) => p.readCache(repoRoot)).pipe(
+              Effect.provide(cacheLayer),
+            ),
+          )
+          expectEmbeddingCacheError(parentSymlinkReadExit, "read", "symlink-refused")
 
           writeFileSync(outsideCacheFile, "parent-untouched", "utf8")
-          yield* Effect.flatMap(EmbeddingCachePort, (p) => p.writeCache(repoRoot, snapshot)).pipe(
-            Effect.provide(cacheLayer),
+          const parentSymlinkWriteExit = yield* Effect.exit(
+            Effect.flatMap(EmbeddingCachePort, (p) => p.writeCache(repoRoot, snapshot)).pipe(
+              Effect.provide(cacheLayer),
+            ),
           )
+          expectEmbeddingCacheError(parentSymlinkWriteExit, "write", "symlink-refused")
           expect(readFileSync(outsideCacheFile, "utf8")).toBe("parent-untouched")
+
+          // Write I/O error (cache dir blocked by a regular file) fails cleanly with io-error
+          rmSync(cacheDirPath, { recursive: true, force: true })
+          writeFileSync(cacheDirPath, "not-a-directory", "utf8")
+          const writeIoExit = yield* Effect.exit(
+            Effect.flatMap(EmbeddingCachePort, (p) => p.writeCache(repoRoot, snapshot)).pipe(
+              Effect.provide(cacheLayer),
+            ),
+          )
+          expectEmbeddingCacheError(writeIoExit, "write", "io-error")
+
+          // Unreadable cache file on read fails with io-error (unless running as root)
+          if (typeof process.getuid === "function" && process.getuid() !== 0) {
+            rmSync(cacheDirPath, { force: true })
+            mkdirSync(cacheDirPath, { recursive: true })
+            writeFileSync(cacheFile, JSON.stringify(snapshot), "utf8")
+            chmodSync(cacheFile, 0o000)
+            try {
+              const unreadExit = yield* Effect.exit(
+                Effect.flatMap(EmbeddingCachePort, (p) => p.readCache(repoRoot)).pipe(
+                  Effect.provide(cacheLayer),
+                ),
+              )
+              expectEmbeddingCacheError(unreadExit, "read", "io-error")
+            } finally {
+              chmodSync(cacheFile, 0o600)
+            }
+          }
         }),
       ),
   )
@@ -308,7 +440,14 @@ describe("OllamaEmbeddingClientLive & FileEmbeddingCacheLive (ADR-0025 / SPEC-00
           const avail = yield* Effect.flatMap(EmbeddingClient, (c) => c.checkAvailability).pipe(
             Effect.provide(badLayer),
           )
-          expect(avail).toBe("unavailable")
+          match(avail)
+            .with({ _tag: "Unavailable" }, (u) => {
+              expect(u.cause).toBe("invalid-base-url")
+            })
+            .with({ _tag: "Available" }, () => {
+              expect.unreachable("Expected Unavailable(invalid-base-url)")
+            })
+            .exhaustive()
           const errExit = yield* Effect.exit(
             Effect.flatMap(EmbeddingClient, (c) =>
               c.embedBatch([EmbeddingSourceText.make("ssrf")]),
@@ -316,6 +455,47 @@ describe("OllamaEmbeddingClientLive & FileEmbeddingCacheLive (ADR-0025 / SPEC-00
           )
           expectEmbeddingProviderError(errExit, "")
           expect(fetchCalled).toBe(false)
+        }
+
+        // Remaining Unavailable causes: timeout, network-error, http-error, invalid-json, invalid-payload
+        const timeoutErr = new DOMException("The operation timed out", "TimeoutError")
+        for (const [expectedCause, fakeFetch] of [
+          [
+            "timeout",
+            async () => {
+              return Promise.reject(timeoutErr)
+            },
+          ],
+          [
+            "network-error",
+            async () => {
+              return Promise.reject(new Error("connect ECONNREFUSED 127.0.0.1:11434"))
+            },
+          ],
+          ["http-error", async () => new Response("down", { status: 503 })],
+          ["invalid-json", async () => new Response("{bad", { status: 200 })],
+          [
+            "invalid-payload",
+            async () => new Response(JSON.stringify({ models: "bad" }), { status: 200 }),
+          ],
+        ] as const) {
+          const probeLayer = makeOllamaEmbeddingClientLayer({
+            baseUrl: EmbeddingProviderBaseUrl.make("http://127.0.0.1:11434/v1"),
+            model: EmbeddingModelId.make("qwen3-embedding:8b"),
+            dimensions: EmbeddingDimensionCount.make(4),
+            fetch: fakeFetch,
+          })
+          const res = yield* Effect.flatMap(EmbeddingClient, (c) => c.checkAvailability).pipe(
+            Effect.provide(probeLayer),
+          )
+          match(res)
+            .with({ _tag: "Unavailable" }, (u) => {
+              expect(u.cause).toBe(expectedCause)
+            })
+            .with({ _tag: "Available" }, () => {
+              expect.unreachable(`Expected Unavailable(${expectedCause})`)
+            })
+            .exhaustive()
         }
 
         let observedRedirect: string | undefined
@@ -337,7 +517,7 @@ describe("OllamaEmbeddingClientLive & FileEmbeddingCacheLive (ADR-0025 / SPEC-00
           EmbeddingClient,
           (c) => c.checkAvailability,
         ).pipe(Effect.provide(modelOnlyFieldLayer))
-        expect(availModelField).toBe("available")
+        expect(availModelField).toEqual({ _tag: "Available" })
         expect(observedRedirect).toBe("error")
 
         const rejectLayer = makeOllamaEmbeddingClientLayer({

@@ -63,10 +63,31 @@ describe("TsCompilerOverlayService (harness:SPEC-0011 §3)", () => {
           )
 
           const resolvedPing = resolveNode(graph, "Sample.ping")
-          expect(resolvedPing?._tag).toBe("EffectFn")
-          if (resolvedPing?._tag === "EffectFn") {
-            expect(resolvedPing.qualname).toContain("ping")
-          }
+          match(resolvedPing)
+            .with({ _tag: "EffectFn" }, (fnNode) => {
+              expect(fnNode.qualname).toContain("ping")
+            })
+            .with(
+              { _tag: "ServiceTag" },
+              { _tag: "ServiceLayer" },
+              { _tag: "TaggedError" },
+              { _tag: "SchemaDef" },
+              { _tag: "VitestCase" },
+              { _tag: "PatternDoc" },
+              { _tag: "AdrDoc" },
+              { _tag: "EarsSpec" },
+              { _tag: "EarsRequirement" },
+              { _tag: "EffectSignature" },
+              { _tag: "LayerFlow" },
+              { _tag: "TraceabilityTuple" },
+              { _tag: "HttpEndpointTuple" },
+              { _tag: "MigrationTuple" },
+              undefined,
+              () => {
+                expect.unreachable("Expected EffectFn node for Sample.ping")
+              },
+            )
+            .exhaustive()
 
           const overlaySpans = spans.filter((s) => s.name === "TsCompilerOverlay.extractGraph")
           expect(overlaySpans.length).toBeGreaterThanOrEqual(1)
@@ -98,11 +119,7 @@ describe("TsCompilerOverlayService (harness:SPEC-0011 §3)", () => {
         try {
           const sampleSrcDir = path.join(tmpRoot, "libs", "sample", "domain", "src")
           fs.mkdirSync(sampleSrcDir, { recursive: true })
-          fs.writeFileSync(
-            path.join(sampleSrcDir, "index.ts"),
-            `export const x = 1\n`,
-            "utf-8",
-          )
+          fs.writeFileSync(path.join(sampleSrcDir, "index.ts"), `export const x = 1\n`, "utf-8")
 
           const svc = yield* TsCompilerOverlayService
           const session1 = yield* svc.getSession(CompilerRepoRootPath.make(tmpRoot))
@@ -222,10 +239,7 @@ describe("TsCompilerOverlayService (harness:SPEC-0011 §3)", () => {
             testId,
             TsCompilerOverlay.extractGraph({
               repoRoot,
-            }).pipe(
-              Effect.provide(TsCompilerOverlayServiceLive),
-              Effect.exit,
-            ),
+            }).pipe(Effect.provide(TsCompilerOverlayServiceLive), Effect.exit),
             fnIndex,
           )
 

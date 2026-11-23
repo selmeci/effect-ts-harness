@@ -1,10 +1,19 @@
+import {
+  DocLineNumber,
+  DocTreePath,
+  EarsAreaName,
+  EarsClauseText,
+  EarsEffectSymbol,
+  EarsPatternName,
+  EarsRequirementNodeId,
+  EarsVerificationKind,
+  GovernanceDocIdentifier,
+  RequirementId,
+} from "@harness/contract"
 import * as Graph from "effect/Graph"
-import { Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   type AdrDocNode,
-  type EarsPatternKind,
-  EarsPatternKind as EarsPatternKindSchema,
   type EarsRequirementNode,
   type EarsSpecNode,
   type EffectFnNode,
@@ -20,132 +29,29 @@ import {
   type UnresolvedGraphReference,
   getNodeKey,
 } from "../model.js"
+import {
+  HEADING_RE,
+  isTableSeparatorRow,
+  iterNonFencedLines,
+  normalizeEarsPattern,
+  normalizeEffectSymbol,
+  splitMarkdownTableCells,
+  stripFrontmatterAndStartLine,
+  stripMarkdownInline,
+} from "./governance-markdown-helpers.js"
 
 export interface ExtractedEarsRequirementRow {
-  readonly id: string
-  readonly specId: string
-  readonly requirementId: string
-  readonly area: string
-  readonly pattern: string
-  readonly clauseText: string
-  readonly effectSymbol: string
-  readonly verification: string
-  readonly path: string
-  readonly line: number
+  readonly id: EarsRequirementNodeId
+  readonly specId: GovernanceDocIdentifier
+  readonly requirementId: RequirementId
+  readonly area: EarsAreaName
+  readonly pattern: EarsPatternName
+  readonly clauseText: EarsClauseText
+  readonly effectSymbol: EarsEffectSymbol
+  readonly verification: EarsVerificationKind
+  readonly path: DocTreePath
+  readonly line: DocLineNumber
   readonly status: GovernanceDocStatus
-}
-
-const FENCE_RE = /^(\s*)(`{3,}|~{3,})(.*)$/
-const HEADING_RE = /^(#{1,6})\s+(.+?)\s*$/
-const FRONTMATTER_START_RE = /^---\s*$/
-
-const stripFrontmatterAndStartLine = (
-  lines: ReadonlyArray<string>,
-): { readonly startIndex: number } => {
-  if (lines.length === 0 || !FRONTMATTER_START_RE.test((lines[0] ?? "").trim())) {
-    return { startIndex: 0 }
-  }
-  for (let i = 1; i < lines.length; i++) {
-    if (FRONTMATTER_START_RE.test((lines[i] ?? "").trim())) {
-      return { startIndex: i + 1 }
-    }
-  }
-  return { startIndex: 0 }
-}
-
-const stripMarkdownInline = (raw: string): string =>
-  raw
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/__([^_]+)__/g, "$1")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim()
-
-const splitMarkdownTableCells = (rowLine: string): Array<string> => {
-  const trimmed = rowLine.trim()
-  if (!trimmed.startsWith("|")) return []
-  const body = trimmed.endsWith("|") ? trimmed.slice(1, -1) : trimmed.slice(1)
-  const cells: Array<string> = []
-  let current = ""
-  let inBackticks = false
-  for (let i = 0; i < body.length; i++) {
-    const ch = body[i]!
-    const prev = i > 0 ? body[i - 1] : ""
-    if (ch === "`" && prev !== "\\") {
-      inBackticks = !inBackticks
-      current += ch
-      continue
-    }
-    if (ch === "|" && !inBackticks && prev !== "\\") {
-      cells.push(current.trim())
-      current = ""
-      continue
-    }
-    if (ch === "\\" && i + 1 < body.length && body[i + 1] === "|") {
-      current += "|"
-      i++
-      continue
-    }
-    current += ch
-  }
-  cells.push(current.trim())
-  return cells
-}
-
-const isTableSeparatorRow = (cells: ReadonlyArray<string>): boolean =>
-  cells.length > 0 && cells.every((c) => /^:?-{2,}:?$/.test(c.trim()))
-
-const normalizeEffectSymbol = (raw: string | undefined): string => {
-  if (raw === undefined) return ""
-  const stripped = raw.replace(/^`+|`+$/g, "").trim()
-  if (stripped === "" || stripped === "—" || stripped === "-" || stripped === "--") {
-    return ""
-  }
-  return stripped
-}
-
-const normalizeEarsPattern = (rawPattern: string): EarsPatternKind | undefined => {
-  const cleaned = stripMarkdownInline(rawPattern)
-  const normalized = cleaned === "Unwanted behavior" ? "Unwanted behaviour" : cleaned
-  const decoded = Schema.decodeUnknownOption(EarsPatternKindSchema)(normalized)
-  return match(decoded)
-    .with({ _tag: "Some" }, ({ value }) => value)
-    .with({ _tag: "None" }, () => undefined)
-    .exhaustive()
-}
-
-const iterNonFencedLines = (
-  content: string,
-  startAfterFrontmatter: number,
-  onLine: (line: string, lineIndex: number) => void,
-): void => {
-  const lines = content.replace(/^\uFEFF/, "").split(/\r?\n/)
-  let inFence: boolean = false
-  let fenceChar = ""
-  let fenceLength = 0
-  for (let i = startAfterFrontmatter; i < lines.length; i++) {
-    const rawLine = lines[i] ?? ""
-    const fenceMatch = rawLine.match(FENCE_RE)
-    if (fenceMatch) {
-      const marker = fenceMatch[2] ?? ""
-      const rest = fenceMatch[3] ?? ""
-      const ch = marker[0] ?? "`"
-      if (!inFence) {
-        inFence = true
-        fenceChar = ch
-        fenceLength = marker.length
-        continue
-      }
-      if (ch === fenceChar && marker.length >= fenceLength && rest.trim().length === 0) {
-        inFence = false
-        fenceChar = ""
-        fenceLength = 0
-        continue
-      }
-    }
-    if (!inFence) onLine(rawLine, i)
-  }
 }
 
 export const extractEarsRequirements = (
@@ -188,16 +94,16 @@ export const extractEarsRequirements = (
     seenIds.add(uniqueReqId)
 
     rows.push({
-      id: `${specId}::${uniqueReqId}`,
-      specId,
-      requirementId: uniqueReqId,
-      area: currentArea.length > 0 ? currentArea : "General",
-      pattern: pattern.length > 0 ? pattern : "Ubiquitous",
-      clauseText,
-      effectSymbol: normalizeEffectSymbol(cells[3]),
-      verification: stripMarkdownInline(cells[4] ?? "") || "UnitTest",
-      path: relPath,
-      line: i + 1,
+      id: EarsRequirementNodeId.make(`${specId}::${uniqueReqId}`),
+      specId: GovernanceDocIdentifier.make(specId),
+      requirementId: RequirementId.make(uniqueReqId),
+      area: EarsAreaName.make(currentArea.length > 0 ? currentArea : "General"),
+      pattern: EarsPatternName.make(pattern.length > 0 ? pattern : "Ubiquitous"),
+      clauseText: EarsClauseText.make(clauseText),
+      effectSymbol: EarsEffectSymbol.make(normalizeEffectSymbol(cells[3])),
+      verification: EarsVerificationKind.make(stripMarkdownInline(cells[4] ?? "") || "UnitTest"),
+      path: DocTreePath.make(relPath),
+      line: DocLineNumber.make(i + 1),
       status,
     })
   })
@@ -273,10 +179,17 @@ export const extractGovernanceSummary = (kind: "AdrDoc" | "EarsSpec", content: s
     if (trimmed.length === 0 || trimmed.startsWith("|") || trimmed.startsWith(">")) return
     const cleaned = stripMarkdownInline(trimmed)
     if (cleaned.length === 0) return
-    if (kind === "AdrDoc" && /\bchosen option:/i.test(cleaned)) {
-      directChoice = cleaned.slice(0, 400).trim()
-      return
-    }
+    const isDirectChoice = match(kind)
+      .with("AdrDoc", () => {
+        if (/\bchosen option:/i.test(cleaned)) {
+          directChoice = cleaned.slice(0, 400).trim()
+          return true
+        }
+        return false
+      })
+      .with("EarsSpec", () => false)
+      .exhaustive()
+    if (isDirectChoice) return
     match(inPreferredSection)
       .with(true, () => {
         preferredLines.push(cleaned)
@@ -425,8 +338,20 @@ export const linkGovernanceDocsToGraph = (
         }
         const relIdx = Graph.addNode(mutable, relNode)
         updatedNodeIndexByKey.set(relId, relIdx)
-        Graph.addEdge(mutable, relIdx, docIdx, { _tag: "PlaysRole", relationId: relId, entityKey: NodeKey.make(docKey), role: RoleName.make(docRole), archimateRelation: docArchimate })
-        Graph.addEdge(mutable, relIdx, targetIdx, { _tag: "PlaysRole", relationId: relId, entityKey: NodeKey.make(targetKey), role: RoleName.make("realizing-symbol"), archimateRelation: "Realization" })
+        Graph.addEdge(mutable, relIdx, docIdx, {
+          _tag: "PlaysRole",
+          relationId: relId,
+          entityKey: NodeKey.make(docKey),
+          role: RoleName.make(docRole),
+          archimateRelation: docArchimate,
+        })
+        Graph.addEdge(mutable, relIdx, targetIdx, {
+          _tag: "PlaysRole",
+          relationId: relId,
+          entityKey: NodeKey.make(targetKey),
+          role: RoleName.make("realizing-symbol"),
+          archimateRelation: "Realization",
+        })
       }
     }
 
@@ -441,19 +366,47 @@ export const linkGovernanceDocsToGraph = (
         for (const n of nodes) {
           if (matchFn(item, n)) {
             found = true
-            const k = getNodeKey(n), idx = !added.has(k) ? updatedNodeIndexByKey.get(k) : undefined
-            if (!added.has(k)) { added.add(k); if (idx !== undefined) addGovernanceTraceability(k, idx) }
+            const k = getNodeKey(n),
+              idx = !added.has(k) ? updatedNodeIndexByKey.get(k) : undefined
+            if (!added.has(k)) {
+              added.add(k)
+              if (idx !== undefined) addGovernanceTraceability(k, idx)
+            }
           }
         }
-        if (!found) unresolvedReferences.push({ relationId: `TraceabilityTuple:${kindPrefix}:${docNode.id}->${item}`, role: "realizing-symbol", targetKey: item, file: docNode.path })
+        if (!found)
+          unresolvedReferences.push({
+            relationId: `TraceabilityTuple:${kindPrefix}:${docNode.id}->${item}`,
+            role: "realizing-symbol",
+            targetKey: item,
+            file: docNode.path,
+          })
       }
     }
 
-    linkGovRefs(docNode.referencedSpans, effectFns, (s, n) => n.spanName === s || n.qualname === s || n.qualname.endsWith(`#${s}`))
-    linkGovRefs(docNode.referencedServices, serviceTags, (s, n) => n.tagId === s || n.name === s || n.tagId.endsWith(`#${s}`))
+    linkGovRefs(
+      docNode.referencedSpans,
+      effectFns,
+      (s, n) => n.spanName === s || n.qualname === s || n.qualname.endsWith(`#${s}`),
+    )
+    linkGovRefs(
+      docNode.referencedServices,
+      serviceTags,
+      (s, n) => n.tagId === s || n.name === s || n.tagId.endsWith(`#${s}`),
+    )
     linkGovRefs(docNode.referencedErrors, taggedErrors, (s, n) => n.errorTag === s)
     match(docNode)
-      .with({ _tag: "EarsSpec" }, (spec) => linkExtractedEarsRequirements(mutable, spec, docIdx, effectFns, serviceTags, taggedErrors, updatedNodeIndexByKey))
+      .with({ _tag: "EarsSpec" }, (spec) =>
+        linkExtractedEarsRequirements(
+          mutable,
+          spec,
+          docIdx,
+          effectFns,
+          serviceTags,
+          taggedErrors,
+          updatedNodeIndexByKey,
+        ),
+      )
       .with({ _tag: "AdrDoc" }, () => undefined)
       .exhaustive()
   }

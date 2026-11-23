@@ -21,6 +21,7 @@ import {
   queryUnixSocketLineDetailed,
   resolveHarnessDaemonSocketPath,
 } from "@harness/infra/hook-fastpath"
+import type { EmbeddingCachePort, EmbeddingClient } from "@harness/service"
 import type { CliResult, HookStdinTracker } from "./hook-format.js"
 export type { CliResult } from "./hook-format.js"
 
@@ -115,6 +116,8 @@ export interface CliEnv {
   readonly governanceDocs?: ReadonlyArray<GovernanceDocReference> | undefined
   readonly hookStdinTracker?: HookStdinTracker | undefined
   readonly skipInitialSessionCacheRead?: boolean | undefined
+  readonly embeddingClientLayer?: Layer.Layer<EmbeddingClient> | undefined
+  readonly embeddingCacheLayer?: Layer.Layer<EmbeddingCachePort> | undefined
 }
 
 export const resolveDecisionModelLayer = (

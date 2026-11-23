@@ -181,6 +181,7 @@ query rank_patterns_hybrid($query: String, $targetLayer: String) {
 query rank_patterns_vector_hybrid($vectorQuery: Vector(4096), $textQuery: String, $targetLayer: String) {
   match {
     $p: PatternDoc
+    $p.summaryEmbedding is not null
     $p.archimateLayer = $targetLayer or $targetLayer = "*"
   }
   return {
@@ -212,6 +213,7 @@ query rank_patterns_bm25($query: String, $targetLayer: String) {
 query search_adrs_vector_hybrid($vectorQuery: Vector(4096), $textQuery: String, $status: String) {
   match {
     $a: AdrDoc
+    $a.searchEmbedding is not null
     $a.status = $status or $status = "*"
   }
   return {
@@ -245,6 +247,7 @@ query search_adrs_bm25($query: String, $status: String) {
 query search_requirements_vector_hybrid($vectorQuery: Vector(4096), $textQuery: String, $status: String) {
   match {
     $r: EarsRequirement
+    $r.clauseEmbedding is not null
     $r.status = $status or $status = "*"
   }
   return {

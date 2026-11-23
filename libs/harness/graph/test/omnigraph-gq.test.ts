@@ -35,6 +35,18 @@ import {
   toOmnigraphServerNdjsonResult,
   writeGraphHeadMeta,
 } from "../src/index.js"
+import {
+  DocLineNumber,
+  DocTreePath,
+  EarsAreaName,
+  EarsClauseText,
+  EarsEffectSymbol,
+  EarsPatternName,
+  EarsRequirementNodeId,
+  EarsVerificationKind,
+  GovernanceDocIdentifier,
+  RequirementId,
+} from "@harness/contract"
 import { testHostIo } from "./helpers/test-host-io.js"
 
 const OmnigraphSyncLive = makeOmnigraphSyncLayer(testHostIo)
@@ -378,16 +390,18 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
       const reqGraph = buildHarnessGraph({
         earsRequirements: [
           {
-            id: "sample:SPEC-0001::REQ-1.1",
-            specId: "sample:SPEC-0001",
-            requirementId: "REQ-1.1",
-            area: "Gallery",
-            pattern: "Event-driven",
-            clauseText: "When uploading photos, system persists metadata deterministically.",
-            effectSymbol: "Sample.greet",
-            verification: "UnitTest",
-            path: "docs/specs/0001.md",
-            line: 12,
+            id: EarsRequirementNodeId.make("sample:SPEC-0001::REQ-1.1"),
+            specId: GovernanceDocIdentifier.make("sample:SPEC-0001"),
+            requirementId: RequirementId.make("REQ-1.1"),
+            area: EarsAreaName.make("Gallery"),
+            pattern: EarsPatternName.make("Event-driven"),
+            clauseText: EarsClauseText.make(
+              "When uploading photos, system persists metadata deterministically.",
+            ),
+            effectSymbol: EarsEffectSymbol.make("Sample.greet"),
+            verification: EarsVerificationKind.make("UnitTest"),
+            path: DocTreePath.make("docs/specs/0001.md"),
+            line: DocLineNumber.make(12),
             status: "accepted",
           },
         ],
@@ -515,6 +529,35 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
         const adrLine = lines.find((l) => l.type === "AdrDoc" && l.id === "sample:ADR-0001")
         expect(patternLine?.data["summaryEmbedding"]).toBeNull()
         expect(adrLine?.data["searchEmbedding"]).toEqual([0.25, 0.75])
+
+        const preserveRes = toOmnigraphServerNdjsonResult(
+          sampleGraph,
+          new Map([["AdrDoc:sample:ADR-0001", [0.25, 0.75]]]),
+          { clearMissingEmbeddings: false },
+        )
+        const preserveNdjson = match(preserveRes)
+          .with({ _tag: "Success" }, ({ success }) => success)
+          .with({ _tag: "Failure" }, ({ failure }) => expect.unreachable(String(failure)))
+          .exhaustive()
+        const preserveLines = preserveNdjson
+          .split("\n")
+          .filter((l) => l.trim().length > 0)
+          .map(
+            (l) =>
+              JSON.parse(l) as {
+                readonly type: string
+                readonly id: string
+                readonly data: Record<string, unknown>
+              },
+          )
+        const preservedPatternLine = preserveLines.find(
+          (l) => l.type === "PatternDoc" && l.id === "planning",
+        )
+        const updatedAdrLine = preserveLines.find(
+          (l) => l.type === "AdrDoc" && l.id === "sample:ADR-0001",
+        )
+        expect("summaryEmbedding" in (preservedPatternLine?.data ?? {})).toBe(false)
+        expect(updatedAdrLine?.data["searchEmbedding"]).toEqual([0.25, 0.75])
       }),
   )
 

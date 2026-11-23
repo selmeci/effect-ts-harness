@@ -27,8 +27,40 @@ import { WorkspaceFs } from "@harness/service"
 import type { HarnessGraph } from "./model.js"
 
 const ALLOWED_DOC_EXTENSIONS = new Set([".md", ".markdown", ".txt", ".mdx", ".pg", ".gq"])
+const FORBIDDEN_DOC_SEGMENTS = new Set([".git", "node_modules"])
 const MAX_PREVIEW_CHARS = 180
 const MAX_SECTION_SLICE_LINES = 250
+
+export const firstNonBlank = (...values: ReadonlyArray<string | undefined>): string => {
+  for (const val of values) {
+    if (val !== undefined) {
+      const trimmed = val.trim()
+      if (trimmed.length > 0) return trimmed
+    }
+  }
+  return ""
+}
+
+export const isRelativeEscape = (rel: string): boolean =>
+  rel === ".." || rel.startsWith(`..${path.sep}`) || rel.startsWith("../") || path.isAbsolute(rel)
+
+export const hasForbiddenDocSegment = (relPath: string): boolean =>
+  relPath
+    .replace(/\\/g, "/")
+    .split("/")
+    .some((segment) => FORBIDDEN_DOC_SEGMENTS.has(segment))
+
+export const matchesGovernanceScope = (id: string, docPath: string, rawScope: string): boolean => {
+  const scope = rawScope.trim()
+  if (scope.length === 0) return true
+  if (id.startsWith(`${scope}:`)) return true
+  const normalizedPath = docPath.replace(/\\/g, "/").replace(/^\.\//, "")
+  return (
+    normalizedPath.startsWith(`libs/${scope}/`) ||
+    normalizedPath.startsWith(`apps/${scope}/`) ||
+    normalizedPath.startsWith(`packages/${scope}/`)
+  )
+}
 
 const advanceFence = (
   trimmed: string,
@@ -158,7 +190,58 @@ export const parseMarkdownTree = Effect.fn("DocTree.parseMarkdownTree")(function
   return yield* Effect.succeed(parseMarkdownTreeSync(content))
 })
 
+const addRequirementId = (
+  bySpecId: Map<string, Set<string>>,
+  specId: string,
+  reqId: string,
+): void => {
+  let set = bySpecId.get(specId)
+  if (!set) {
+    set = new Set<string>()
+    bySpecId.set(specId, set)
+  }
+  set.add(reqId)
+}
+
+const collectRequirementIdsBySpec = (
+  graph: HarnessGraph,
+): ReadonlyMap<string, ReadonlySet<string>> => {
+  const bySpecId = new Map<string, Set<string>>()
+  for (const [, node] of Graph.nodes(graph.graph)) {
+    match(node)
+      .with({ _tag: "EarsRequirement" }, (req) => {
+        addRequirementId(bySpecId, req.specId, req.id)
+      })
+      .with({ _tag: "EarsSpec" }, (spec) => {
+        for (const req of spec.requirements ?? []) {
+          if (req.specId === spec.id) {
+            addRequirementId(bySpecId, spec.id, req.id)
+          }
+        }
+      })
+      .with(
+        { _tag: "AdrDoc" },
+        { _tag: "EffectFn" },
+        { _tag: "ServiceTag" },
+        { _tag: "ServiceLayer" },
+        { _tag: "TaggedError" },
+        { _tag: "SchemaDef" },
+        { _tag: "VitestCase" },
+        { _tag: "PatternDoc" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
+        () => undefined,
+      )
+      .exhaustive()
+  }
+  return bySpecId
+}
+
 const buildGovernanceCatalogSync = (graph: HarnessGraph): ReadonlyArray<GovernanceCatalogEntry> => {
+  const reqIdsBySpecId = collectRequirementIdsBySpec(graph)
   const entries: Array<GovernanceCatalogEntry> = []
   for (const [, node] of Graph.nodes(graph.graph)) {
     match(node)
@@ -166,10 +249,10 @@ const buildGovernanceCatalogSync = (graph: HarnessGraph): ReadonlyArray<Governan
         entries.push({
           id: GovernanceDocIdentifier.make(adr.id),
           kind: "AdrDoc" as const,
-          title: DocHeadingTitle.make((adr.title.trim() || adr.id).slice(0, 4096)),
+          title: DocHeadingTitle.make(firstNonBlank(adr.title, adr.id).slice(0, 4096)),
           status: GovernanceDocLifecycleStatus.make(adr.status),
           path: DocTreePath.make(adr.path),
-          summary: DocSummarySnippet.make(adr.summary ?? adr.searchText ?? adr.title),
+          summary: DocSummarySnippet.make(firstNonBlank(adr.summary, adr.searchText, adr.title)),
           informedByAdrs: [],
           requirementCount: NonNegativeCount.make(0),
           sections: [],
@@ -179,12 +262,12 @@ const buildGovernanceCatalogSync = (graph: HarnessGraph): ReadonlyArray<Governan
         entries.push({
           id: GovernanceDocIdentifier.make(spec.id),
           kind: "EarsSpec" as const,
-          title: DocHeadingTitle.make((spec.title.trim() || spec.id).slice(0, 4096)),
+          title: DocHeadingTitle.make(firstNonBlank(spec.title, spec.id).slice(0, 4096)),
           status: GovernanceDocLifecycleStatus.make(spec.status),
           path: DocTreePath.make(spec.path),
-          summary: DocSummarySnippet.make(spec.goalSummary ?? spec.title),
+          summary: DocSummarySnippet.make(firstNonBlank(spec.goalSummary, spec.title)),
           informedByAdrs: (spec.informedByAdrs ?? []).map((id) => GovernanceDocIdentifier.make(id)),
-          requirementCount: NonNegativeCount.make(spec.requirements?.length ?? 0),
+          requirementCount: NonNegativeCount.make(reqIdsBySpecId.get(spec.id)?.size ?? 0),
           sections: [],
         })
       })
@@ -229,7 +312,7 @@ const makePathError = (requestedPath: string, reason: string): DocTreePathError 
 
 const resolveValidatedDocFile = Effect.fn("DocTree.resolveValidatedDocFile")(function* (
   repoRoot: WorkspaceFilePath,
-  rawRequestedPath: DocTreePath | undefined,
+  rawRequestedPath: DocTreePath,
 ): Effect.fn.Return<
   {
     readonly relPath: DocTreePath
@@ -237,36 +320,26 @@ const resolveValidatedDocFile = Effect.fn("DocTree.resolveValidatedDocFile")(fun
   },
   DocTreePathError
 > {
-  if (rawRequestedPath === undefined || rawRequestedPath.trim().length === 0) {
+  const normalizedInput = rawRequestedPath.trim()
+  if (normalizedInput.length === 0) {
     return yield* makePathError("<empty>", "Missing required 'path' parameter")
   }
-  const normalizedInput = rawRequestedPath.trim()
   if (normalizedInput.includes("\0")) {
     return yield* makePathError(normalizedInput, "Null byte in path is forbidden")
   }
   const resolvedRoot = path.resolve(repoRoot)
-  if (path.isAbsolute(normalizedInput)) {
-    const relFromAbs = path.relative(resolvedRoot, path.resolve(normalizedInput))
-    if (relFromAbs === "" || relFromAbs.startsWith("..") || path.isAbsolute(relFromAbs)) {
-      return yield* makePathError(normalizedInput, "Path escapes repository root boundary")
-    }
-    const extAbs = path.extname(relFromAbs).toLowerCase()
-    if (!ALLOWED_DOC_EXTENSIONS.has(extAbs)) {
-      return yield* makePathError(
-        normalizedInput,
-        `Unsupported documentation file extension '${extAbs || "<none>"}'`,
-      )
-    }
-    return {
-      relPath: DocTreePath.make(relFromAbs.replace(/\\/g, "/")),
-      absPath: WorkspaceFilePath.make(path.resolve(resolvedRoot, relFromAbs)),
-    }
-  }
-
-  const candidateAbs = path.resolve(resolvedRoot, normalizedInput)
+  const candidateAbs = path.isAbsolute(normalizedInput)
+    ? path.resolve(normalizedInput)
+    : path.resolve(resolvedRoot, normalizedInput)
   const rel = path.relative(resolvedRoot, candidateAbs)
-  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
+  if (rel === "" || isRelativeEscape(rel)) {
     return yield* makePathError(normalizedInput, "Path escapes repository root boundary")
+  }
+  if (hasForbiddenDocSegment(rel)) {
+    return yield* makePathError(
+      normalizedInput,
+      "Path references forbidden directory segment (.git or node_modules)",
+    )
   }
   const ext = path.extname(rel).toLowerCase()
   if (!ALLOWED_DOC_EXTENSIONS.has(ext)) {
@@ -283,7 +356,7 @@ const resolveValidatedDocFile = Effect.fn("DocTree.resolveValidatedDocFile")(fun
 
 const readValidatedDocument = Effect.fn("DocTree.readValidatedDocument")(function* (
   repoRoot: WorkspaceFilePath,
-  requestedPath: DocTreePath | undefined,
+  requestedPath: DocTreePath,
 ): Effect.fn.Return<
   {
     readonly relPath: DocTreePath
@@ -320,8 +393,14 @@ const readValidatedDocument = Effect.fn("DocTree.readValidatedDocument")(functio
       ),
     )
   const realRel = path.relative(realRoot, realTarget)
-  if (realRel === "" || realRel.startsWith("..") || path.isAbsolute(realRel)) {
+  if (realRel === "" || isRelativeEscape(realRel)) {
     return yield* makePathError(relPath, "Resolved symlink target escapes repository root boundary")
+  }
+  if (hasForbiddenDocSegment(realRel)) {
+    return yield* makePathError(
+      relPath,
+      "Resolved symlink target references forbidden directory segment (.git or node_modules)",
+    )
   }
   const realExt = path.extname(realTarget).toLowerCase()
   if (!ALLOWED_DOC_EXTENSIONS.has(realExt)) {
@@ -349,19 +428,13 @@ export const inspectDocTree = Effect.fn("DocTree.inspect")(function* (
 ): Effect.fn.Return<DocTreeResponse, DocTreePathError, WorkspaceFs> {
   const { input, repoRoot, graph } = request
 
-  return yield* match(input.mode)
-    .with("catalog", () => {
+  return yield* match(input)
+    .with({ mode: "catalog" }, (catalogInput) => {
       const allEntries = buildGovernanceCatalogSync(graph)
-      const scope = input.scope?.trim()
+      const scope = catalogInput.scope?.trim()
       const filtered =
         scope !== undefined && scope.length > 0
-          ? allEntries.filter(
-              (entry) =>
-                entry.id.startsWith(`${scope}:`) ||
-                entry.path.includes(`libs/${scope}/`) ||
-                entry.path.includes(`apps/${scope}/`) ||
-                entry.path.includes(`packages/${scope}/`),
-            )
+          ? allEntries.filter((entry) => matchesGovernanceScope(entry.id, entry.path, scope))
           : allEntries
       return Effect.succeed({
         _tag: "GovernanceCatalog" as const,
@@ -369,9 +442,9 @@ export const inspectDocTree = Effect.fn("DocTree.inspect")(function* (
         entries: filtered,
       } satisfies DocTreeResponse)
     })
-    .with("tree", () =>
+    .with({ mode: "tree" }, (treeInput) =>
       Effect.gen(function* () {
-        const { relPath, lines, sections } = yield* readValidatedDocument(repoRoot, input.path)
+        const { relPath, lines, sections } = yield* readValidatedDocument(repoRoot, treeInput.path)
         return {
           _tag: "DocumentTree" as const,
           path: relPath,
@@ -380,16 +453,13 @@ export const inspectDocTree = Effect.fn("DocTree.inspect")(function* (
         } satisfies DocTreeResponse
       }),
     )
-    .with("section", () =>
+    .with({ mode: "section" }, (sectionInput) =>
       Effect.gen(function* () {
-        const { relPath, lines, sections } = yield* readValidatedDocument(repoRoot, input.path)
-        const requestedSectionId = input.sectionId?.trim()
-        if (requestedSectionId === undefined || requestedSectionId.length === 0) {
-          return yield* makePathError(
-            relPath,
-            "Missing required 'sectionId' parameter for section mode",
-          )
-        }
+        const { relPath, lines, sections } = yield* readValidatedDocument(
+          repoRoot,
+          sectionInput.path,
+        )
+        const requestedSectionId = sectionInput.sectionId
         const section = sections.find((s) => s.sectionId === requestedSectionId)
         if (section === undefined) {
           return yield* makePathError(

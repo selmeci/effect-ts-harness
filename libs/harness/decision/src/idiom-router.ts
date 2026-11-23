@@ -172,6 +172,17 @@ export const validateDecisionLimits = Effect.fn("Harness.validateDecisionLimits"
   },
 )
 
+/** Minimum BM25 lexical score required to promote a `review` route via hybrid retrieval. */
+export const HYBRID_ROUTE_BM25_THRESHOLD = 0.75
+
+/**
+ * Minimum RRF score (`1 / (60 + rankIdx)`) required to promote a `review` route
+ * (`rank_patterns_vector_hybrid`, k = 60, accepting ranks 0, 1, and 2).
+ */
+export const HYBRID_ROUTE_RRF_THRESHOLD = 1 / 62
+
+export type HybridCandidateScoreKind = "bm25" | "rrf"
+
 export type RouteStepSource = "deterministic" | "model" | "hybrid-retrieval" | "degraded-fallback"
 
 export interface RouteStepStatusResult {
@@ -183,29 +194,58 @@ export interface PatternCandidateSlug {
   readonly slug: string
   readonly path?: string | undefined
   readonly score?: number | undefined
+  readonly scoreKind?: HybridCandidateScoreKind | undefined
 }
 
 const KNOWN_IDIOM_BLOCK_SET: ReadonlySet<string> = new Set(IDIOM_BLOCKS)
+
+const isReviewBlock = (block: BuildingBlock): boolean =>
+  match(block)
+    .with("review", () => true)
+    .with(
+      "services-and-layers",
+      "errors",
+      "schema",
+      "pattern-matching",
+      "event-sourcing",
+      "resources-scope",
+      "concurrency",
+      "schedule",
+      "testing",
+      "alchemy-infra",
+      "d1-repository",
+      "durable-object-state",
+      "httpapi",
+      "rpc",
+      "atom",
+      "decision-model",
+      "planning",
+      "effect",
+      () => false,
+    )
+    .exhaustive()
 
 export const selectRouteWithHybridCandidates = (
   routed: RouteStepStatusResult,
   candidates: ReadonlyArray<PatternCandidateSlug>,
 ): RouteStepStatusResult => {
-  if (routed.source === "deterministic") {
+  const sourceAllowsHybrid = match(routed.source)
+    .with("deterministic", () => false)
+    .with("model", "hybrid-retrieval", "degraded-fallback", () => true)
+    .exhaustive()
+  if (!sourceAllowsHybrid || !isReviewBlock(routed.block)) {
     return routed
   }
-  const matchingCandidate = candidates.find(
-    (c) =>
-      KNOWN_IDIOM_BLOCK_SET.has(c.slug) &&
-      c.slug !== "review" &&
-      c.score !== undefined &&
-      Number.isFinite(c.score) &&
-      c.score >= 0.75,
-  )
-  if (routed.block !== "review") {
-    return routed
-  }
-  if (matchingCandidate !== undefined && KNOWN_IDIOM_BLOCK_SET.has(matchingCandidate.slug)) {
+  const matchingCandidate = candidates.find((c) => {
+    if (!KNOWN_IDIOM_BLOCK_SET.has(c.slug) || c.slug === "review") return false
+    if (c.score === undefined || !Number.isFinite(c.score)) return false
+    const threshold = match(c.scoreKind ?? "bm25")
+      .with("bm25", () => HYBRID_ROUTE_BM25_THRESHOLD)
+      .with("rrf", () => HYBRID_ROUTE_RRF_THRESHOLD)
+      .exhaustive()
+    return c.score >= threshold
+  })
+  if (matchingCandidate !== undefined) {
     const matchedBlock = IDIOM_BLOCKS.find((b) => b === matchingCandidate.slug)
     if (matchedBlock !== undefined) {
       return {

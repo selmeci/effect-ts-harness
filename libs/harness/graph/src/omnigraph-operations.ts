@@ -232,9 +232,14 @@ const EDGE_CALL_METRICS_ALLOWED = new Set([
   "PlaysExercisedSpanRole",
 ])
 
+export interface OmnigraphNdjsonExportOptions {
+  readonly clearMissingEmbeddings?: boolean | undefined
+}
+
 export const toOmnigraphServerNdjsonResult = (
   graph: HarnessGraph,
   embeddingsByNodeKey?: ReadonlyMap<string, ReadonlyArray<number>>,
+  options?: OmnigraphNdjsonExportOptions,
 ): Result.Result<string, OmnigraphLoadError> => {
   const nodeLines: Array<string> = []
   const seenNodes = new Set<string>()
@@ -242,9 +247,23 @@ export const toOmnigraphServerNdjsonResult = (
     string,
     { readonly tag: HarnessNode["_tag"]; readonly id: string }
   >()
+  const clearMissing = options?.clearMissingEmbeddings ?? true
 
   const lookupEmbedding = (key: string, id: string): ReadonlyArray<number> | undefined =>
     embeddingsByNodeKey?.get(key) ?? embeddingsByNodeKey?.get(id)
+
+  const toEmbeddingField = (
+    propName: "summaryEmbedding" | "searchEmbedding" | "clauseEmbedding",
+    vec: ReadonlyArray<number> | undefined,
+  ): Readonly<Record<string, ReadonlyArray<number> | null>> => {
+    if (vec !== undefined) {
+      return { [propName]: vec }
+    }
+    if (embeddingsByNodeKey !== undefined && clearMissing) {
+      return { [propName]: null }
+    }
+    return {}
+  }
 
   const pushNode = (type: string, id: string, data: Record<string, unknown>): void => {
     const dedupKey = `${type}::${id}`
@@ -354,13 +373,7 @@ export const toOmnigraphServerNdjsonResult = (
       .with({ _tag: "PatternDoc" }, (n) => {
         if (!n.slug) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.slug })
-        const vec = lookupEmbedding(key, n.slug)
-        const embeddingField =
-          vec !== undefined
-            ? { summaryEmbedding: vec }
-            : embeddingsByNodeKey !== undefined
-              ? { summaryEmbedding: null }
-              : {}
+        const embeddingField = toEmbeddingField("summaryEmbedding", lookupEmbedding(key, n.slug))
         pushNode("PatternDoc", n.slug, {
           slug: n.slug,
           qualname: n.slug,
@@ -376,13 +389,7 @@ export const toOmnigraphServerNdjsonResult = (
       .with({ _tag: "AdrDoc" }, (n) => {
         if (!n.id) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.id })
-        const vec = lookupEmbedding(key, n.id)
-        const embeddingField =
-          vec !== undefined
-            ? { searchEmbedding: vec }
-            : embeddingsByNodeKey !== undefined
-              ? { searchEmbedding: null }
-              : {}
+        const embeddingField = toEmbeddingField("searchEmbedding", lookupEmbedding(key, n.id))
         pushNode("AdrDoc", n.id, {
           id: n.id,
           qualname: n.id,
@@ -420,13 +427,7 @@ export const toOmnigraphServerNdjsonResult = (
       .with({ _tag: "EarsRequirement" }, (n) => {
         if (!n.id) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.id })
-        const vec = lookupEmbedding(key, n.id)
-        const embeddingField =
-          vec !== undefined
-            ? { clauseEmbedding: vec }
-            : embeddingsByNodeKey !== undefined
-              ? { clauseEmbedding: null }
-              : {}
+        const embeddingField = toEmbeddingField("clauseEmbedding", lookupEmbedding(key, n.id))
         pushNode("EarsRequirement", n.id, {
           id: n.id,
           qualname: n.id,

@@ -38,6 +38,7 @@ import {
   type OmnigraphGetBlobInput,
   type OmnigraphInspectCommitChangesInput,
   OmnigraphLoadError,
+  type OmnigraphNdjsonExportOptions,
   type OmnigraphPollChangesInput,
   type OmnigraphProposeMergeInput,
   type OmnigraphPutBlobInput,
@@ -52,6 +53,7 @@ export {
   OmnigraphLoadError,
   toOmnigraphServerNdjson,
   toOmnigraphServerNdjsonResult,
+  type OmnigraphNdjsonExportOptions,
   type OmnigraphBlobSelectorInput,
   type OmnigraphBlobStatResult,
   type OmnigraphChangeFeedResult,
@@ -116,6 +118,7 @@ export interface OmnigraphBranchOpsShape {
       readonly from?: OmnigraphBranchName | string | undefined
       readonly mode?: "overwrite" | "merge" | undefined
       readonly embeddingsByNodeKey?: ReadonlyMap<string, ReadonlyArray<number>> | undefined
+      readonly clearMissingEmbeddings?: boolean | undefined
     },
   ) => Effect.Effect<OmnigraphSyncResult>
   readonly mergeBranch: (
@@ -214,7 +217,9 @@ export const makeOmnigraphSyncLayer = (
       sync: (graph, options) =>
         Effect.gen(function* () {
           const snapshotPath = options?.snapshotPath ?? ".harness/graph-snapshot.json"
-          const ndjsonRes = toOmnigraphServerNdjsonResult(graph, options?.embeddingsByNodeKey)
+          const ndjsonRes = toOmnigraphServerNdjsonResult(graph, options?.embeddingsByNodeKey, {
+            clearMissingEmbeddings: options?.clearMissingEmbeddings,
+          })
           const ndjson = match(ndjsonRes)
             .with({ _tag: "Success" }, ({ success }) => success)
             .with({ _tag: "Failure" }, () => undefined)
@@ -623,6 +628,7 @@ export const syncToOmnigraphAndSnapshot = Effect.fn("OmnigraphSync.sync")(functi
     readonly from?: OmnigraphBranchName | string | undefined
     readonly mode?: "overwrite" | "merge" | undefined
     readonly embeddingsByNodeKey?: ReadonlyMap<string, ReadonlyArray<number>> | undefined
+    readonly clearMissingEmbeddings?: boolean | undefined
   },
 ) {
   const service = yield* OmnigraphSync

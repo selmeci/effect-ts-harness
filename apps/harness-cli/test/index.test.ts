@@ -1156,6 +1156,368 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
     }
   })
 
+  it("F-6.7: flags embeddingsMode and retrievalMode discriminant branching across dot, optional chaining, computed bracket, nullish fallback, destructured params/aliases, and collection callbacks in both syntax-bans and test-integrity while preserving lexical scope and ignoring 'source'", () => {
+    interface VisitorStub {
+      Program?: (node: unknown) => void
+      VariableDeclarator?: (node: unknown) => void
+      AssignmentExpression?: (node: unknown) => void
+      BlockStatement?: (node: unknown) => void
+      "BlockStatement:exit"?: () => void
+      FunctionDeclaration?: (node: unknown) => void
+      "FunctionDeclaration:exit"?: () => void
+      ArrowFunctionExpression?: (node: unknown) => void
+      "ArrowFunctionExpression:exit"?: () => void
+      IfStatement?: (node: unknown) => void
+      ConditionalExpression?: (node: unknown) => void
+      CallExpression?: (node: unknown) => void
+    }
+
+    const targets = [
+      {
+        rule: syntaxBans,
+        filename: "/repo/apps/harness-cli/src/commands/omnigraph-lifecycle.ts",
+      },
+      {
+        rule: testIntegrity,
+        filename: "/repo/apps/harness-cli/test/omnigraph-lifecycle.test.ts",
+      },
+    ] as const
+
+    const runBanChecks = (visit: (visitor: VisitorStub) => void) => {
+      for (const target of targets) {
+        const reports: Array<{ message: string }> = []
+        const visitor = target.rule.create({
+          filename: target.filename,
+          sourceCode: { text: "export const x = 1" },
+          report: (r: { message: string }) => {
+            reports.push(r)
+          },
+        }) as VisitorStub
+        visitor.Program?.({})
+        visit(visitor)
+        expect(reports).toHaveLength(1)
+        expect(reports[0]?.message).toContain(
+          "Do not use if/else or ternary expressions to branch on discriminated unions",
+        )
+      }
+    }
+
+    const runAllowedChecks = (visit: (visitor: VisitorStub) => void) => {
+      for (const target of targets) {
+        const reports: Array<{ message: string }> = []
+        const visitor = target.rule.create({
+          filename: target.filename,
+          sourceCode: { text: "export const x = 1" },
+          report: (r: { message: string }) => {
+            reports.push(r)
+          },
+        }) as VisitorStub
+        visitor.Program?.({})
+        visit(visitor)
+        expect(reports).toHaveLength(0)
+      }
+    }
+
+    // 1. Plain dot access: meta.retrievalMode === "bm25-only"
+    runBanChecks((visitor) => {
+      visitor.IfStatement?.({
+        type: "IfStatement",
+        test: {
+          type: "BinaryExpression",
+          operator: "===",
+          left: {
+            type: "MemberExpression",
+            computed: false,
+            object: { type: "Identifier", name: "meta" },
+            property: { type: "Identifier", name: "retrievalMode" },
+          },
+          right: { type: "Literal", value: "bm25-only" },
+        },
+      })
+    })
+
+    // 2. Optional chaining: serverMeta?.embeddingsMode === "live"
+    runBanChecks((visitor) => {
+      visitor.IfStatement?.({
+        type: "IfStatement",
+        test: {
+          type: "BinaryExpression",
+          operator: "===",
+          left: {
+            type: "ChainExpression",
+            expression: {
+              type: "MemberExpression",
+              computed: false,
+              optional: true,
+              object: { type: "Identifier", name: "serverMeta" },
+              property: { type: "Identifier", name: "embeddingsMode" },
+            },
+          },
+          right: { type: "Literal", value: "live" },
+        },
+      })
+    })
+
+    // 3. Computed bracket access: meta["embeddingsMode"] === "mock"
+    runBanChecks((visitor) => {
+      visitor.ConditionalExpression?.({
+        type: "ConditionalExpression",
+        test: {
+          type: "BinaryExpression",
+          operator: "===",
+          left: {
+            type: "MemberExpression",
+            computed: true,
+            object: { type: "Identifier", name: "meta" },
+            property: { type: "Literal", value: "embeddingsMode" },
+          },
+          right: { type: "Literal", value: "mock" },
+        },
+      })
+    })
+
+    // 4. Nested destructured alias with default + inline nullish fallback
+    runBanChecks((visitor) => {
+      visitor.VariableDeclarator?.({
+        type: "VariableDeclarator",
+        id: {
+          type: "ObjectPattern",
+          properties: [
+            {
+              type: "Property",
+              computed: false,
+              key: { type: "Identifier", name: "meta" },
+              value: {
+                type: "AssignmentPattern",
+                left: {
+                  type: "ObjectPattern",
+                  properties: [
+                    {
+                      type: "Property",
+                      computed: false,
+                      key: { type: "Identifier", name: "embeddingsMode" },
+                      value: {
+                        type: "AssignmentPattern",
+                        left: { type: "Identifier", name: "mode" },
+                        right: { type: "Literal", value: "mock" },
+                      },
+                    },
+                  ],
+                },
+                right: { type: "ObjectExpression", properties: [] },
+              },
+            },
+          ],
+        },
+        init: { type: "Identifier", name: "response" },
+      })
+      visitor.IfStatement?.({
+        type: "IfStatement",
+        test: {
+          type: "BinaryExpression",
+          operator: "===",
+          left: { type: "Identifier", name: "mode" },
+          right: { type: "Literal", value: "live" },
+        },
+      })
+    })
+
+    // 5. Nullish fallback alias & reassignment: const raw = meta?.embeddingsMode ?? "mock"; if (raw === "live")
+    runBanChecks((visitor) => {
+      visitor.VariableDeclarator?.({
+        type: "VariableDeclarator",
+        id: { type: "Identifier", name: "rawMode" },
+        init: {
+          type: "LogicalExpression",
+          operator: "??",
+          left: {
+            type: "ChainExpression",
+            expression: {
+              type: "MemberExpression",
+              computed: false,
+              optional: true,
+              object: { type: "Identifier", name: "serverMeta" },
+              property: { type: "Identifier", name: "embeddingsMode" },
+            },
+          },
+          right: { type: "Literal", value: "mock" },
+        },
+      })
+      visitor.IfStatement?.({
+        type: "IfStatement",
+        test: {
+          type: "BinaryExpression",
+          operator: "===",
+          left: { type: "Identifier", name: "rawMode" },
+          right: { type: "Literal", value: "live" },
+        },
+      })
+    })
+
+    // 6. Collection callback variants (destructured param, block pre-order alias, optional/computed callee, Effect data-first Array.filter)
+    runBanChecks((visitor) => {
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "results" },
+          property: { type: "Identifier", name: "filter" },
+        },
+        arguments: [
+          {
+            type: "ArrowFunctionExpression",
+            params: [
+              {
+                type: "ObjectPattern",
+                properties: [
+                  {
+                    type: "Property",
+                    computed: false,
+                    key: { type: "Identifier", name: "retrievalMode" },
+                    value: { type: "Identifier", name: "retrievalMode" },
+                  },
+                ],
+              },
+            ],
+            body: {
+              type: "BinaryExpression",
+              operator: "===",
+              left: { type: "Identifier", name: "retrievalMode" },
+              right: { type: "Literal", value: "bm25-only" },
+            },
+          },
+        ],
+      })
+    })
+
+    runBanChecks((visitor) => {
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "ChainExpression",
+          expression: {
+            type: "MemberExpression",
+            computed: true,
+            optional: true,
+            object: { type: "Identifier", name: "results" },
+            property: { type: "Literal", value: "some" },
+          },
+        },
+        arguments: [
+          {
+            type: "ArrowFunctionExpression",
+            params: [{ type: "Identifier", name: "r" }],
+            body: {
+              type: "BlockStatement",
+              body: [
+                {
+                  type: "VariableDeclaration",
+                  declarations: [
+                    {
+                      type: "VariableDeclarator",
+                      id: { type: "Identifier", name: "localMode" },
+                      init: {
+                        type: "MemberExpression",
+                        computed: true,
+                        object: { type: "Identifier", name: "r" },
+                        property: { type: "Literal", value: "embeddingsMode" },
+                      },
+                    },
+                  ],
+                },
+                {
+                  type: "ReturnStatement",
+                  argument: {
+                    type: "BinaryExpression",
+                    operator: "===",
+                    left: { type: "Identifier", name: "localMode" },
+                    right: { type: "Literal", value: "live" },
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      })
+    })
+
+    runBanChecks((visitor) => {
+      visitor.CallExpression?.({
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Array" },
+          property: { type: "Identifier", name: "filter" },
+        },
+        arguments: [
+          { type: "Identifier", name: "results" },
+          {
+            type: "ArrowFunctionExpression",
+            params: [{ type: "Identifier", name: "r" }],
+            body: {
+              type: "BinaryExpression",
+              operator: "===",
+              left: {
+                type: "MemberExpression",
+                computed: false,
+                object: { type: "Identifier", name: "r" },
+                property: { type: "Identifier", name: "retrievalMode" },
+              },
+              right: { type: "Literal", value: "bm25-only" },
+            },
+          },
+        ],
+      })
+    })
+
+    // 7. Lexical scope isolation and non-discriminant 'source' property must NOT be flagged
+    runAllowedChecks((visitor) => {
+      visitor.ArrowFunctionExpression?.({
+        type: "ArrowFunctionExpression",
+        params: [
+          {
+            type: "ObjectPattern",
+            properties: [
+              {
+                type: "Property",
+                computed: false,
+                key: { type: "Identifier", name: "embeddingsMode" },
+                value: { type: "Identifier", name: "mode" },
+              },
+            ],
+          },
+        ],
+        body: { type: "BlockStatement", body: [] },
+      })
+      visitor["ArrowFunctionExpression:exit"]?.()
+      visitor.IfStatement?.({
+        type: "IfStatement",
+        test: {
+          type: "BinaryExpression",
+          operator: "===",
+          left: { type: "Identifier", name: "mode" },
+          right: { type: "Literal", value: 0 },
+        },
+      })
+      visitor.IfStatement?.({
+        type: "IfStatement",
+        test: {
+          type: "BinaryExpression",
+          operator: "===",
+          left: {
+            type: "MemberExpression",
+            computed: false,
+            object: { type: "Identifier", name: "res" },
+            property: { type: "Identifier", name: "source" },
+          },
+          right: { type: "Literal", value: "omnigraph" },
+        },
+      })
+    })
+  })
+
   it("flags boolean state flags in Schema.Struct (checkedOut: Schema.Boolean)", () => {
     const reports: Array<{ message: string }> = []
     const visitor = syntaxBans.create({
