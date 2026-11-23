@@ -360,7 +360,14 @@ export const computeMutationContextDigestsChecked = (
     }
   }
 
-  for (const runtimeTool of ["tools/node-ts-resolver.mjs", "tools/parallel-vitest-batch.mjs"]) {
+  for (const runtimeTool of [
+    "tools/node-ts-resolver.mjs",
+    "tools/parallel-vitest-batch.mjs",
+    "tools/package-vitest-batch.mjs",
+    "tools/warm-vitest-worker.mjs",
+    "tools/mutant-coverage-setup.mjs",
+    "tools/vitest-pool-helpers.mjs",
+  ]) {
     const fullTool = join(repoRoot, runtimeTool)
     const exists = checkExists(fullTool, hostIo)
     if (exists === undefined) {

@@ -1,19 +1,25 @@
-import { spawn } from "node:child_process"
-import { mkdtempSync, rmSync } from "node:fs"
-import { availableParallelism, tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { existsSync } from "node:fs"
+import { dirname, resolve } from "node:path"
+import {
+  WARM_WORKER_SCRIPT,
+  createBatchTempTracker,
+  createWarmVitestWorker,
+  dedupCanonicalTests,
+  resolveBatchConcurrency,
+  runCoverageProbe,
+  runOneColdMutant,
+  runWarmMutantWithWorker,
+} from "./vitest-pool-helpers.mjs"
 
 const vitestCli = process.env["HARNESS_BATCH_VITEST_CLI"] ?? ""
 const cwd = process.env["HARNESS_BATCH_CWD"] ?? process.cwd()
 const parsedTimeout = Number(process.env["HARNESS_BATCH_TIMEOUT_MS"] ?? "30000")
 const timeoutMs = Number.isFinite(parsedTimeout) && parsedTimeout > 0 ? parsedTimeout : 30_000
-const testFiles = JSON.parse(process.env["HARNESS_BATCH_TESTS_JSON"] ?? "[]")
+const rawTestFiles = JSON.parse(process.env["HARNESS_BATCH_TESTS_JSON"] ?? "[]")
 const mutantIds = JSON.parse(process.env["HARNESS_BATCH_MUTANTS_JSON"] ?? "[]")
+const targetFile = process.env["HARNESS_BATCH_TARGET_FILE"] ?? ""
 
-const truncateOutput = (text) =>
-  text.length > 48_000
-    ? `${text.slice(0, 16_000)}\n...[truncated]...\n${text.slice(-24_000)}`
-    : text
+const { testFiles, absToRaw } = dedupCanonicalTests(cwd, rawTestFiles)
 
 const childBaseEnv = { ...process.env }
 delete childBaseEnv["HARNESS_BATCH_VITEST_CLI"]
@@ -21,148 +27,116 @@ delete childBaseEnv["HARNESS_BATCH_CWD"]
 delete childBaseEnv["HARNESS_BATCH_TIMEOUT_MS"]
 delete childBaseEnv["HARNESS_BATCH_TESTS_JSON"]
 delete childBaseEnv["HARNESS_BATCH_MUTANTS_JSON"]
+delete childBaseEnv["HARNESS_BATCH_TARGET_FILE"]
 delete childBaseEnv["HARNESS_ACTIVE_MUTANT_ID"]
 
-const activeChildren = new Set()
-const activeStateDirs = new Set()
-
-const cleanupActiveWorkers = () => {
-  for (const child of activeChildren) {
-    try {
-      child.kill("SIGKILL")
-    } catch {
-      // Best-effort termination of active batch worker
-    }
-  }
-  activeChildren.clear()
-  for (const dir of activeStateDirs) {
-    try {
-      rmSync(dir, { recursive: true, force: true })
-    } catch {
-      // Best-effort cleanup of per-worker temporary state directory
-    }
-  }
-  activeStateDirs.clear()
-}
+const tracker = createBatchTempTracker()
 
 for (const [sig, code] of [
   ["SIGINT", 2],
   ["SIGTERM", 15],
 ]) {
   process.once(sig, () => {
-    cleanupActiveWorkers()
+    tracker.cleanupAll()
     process.exit(128 + code)
   })
 }
 
-const runOneMutant = async (mutantId) => {
-  const workerStateDir = resolve(mkdtempSync(join(tmpdir(), "harness-batch-state-")))
-  activeStateDirs.add(workerStateDir)
-  const childEnv = {
-    ...childBaseEnv,
-    HARNESS_STATE_DIR: workerStateDir,
-    HARNESS_ACTIVE_MUTANT_ID: mutantId,
-  }
-  try {
-    return await new Promise((resolvePromise) => {
-      let stdout = ""
-      let stderr = ""
-      let timedOut = false
-      let settled = false
-      let child
-      try {
-        child = spawn(
-          process.execPath,
-          [vitestCli, "run", "--bail=1", "--maxWorkers=1", ...testFiles],
-          {
-            cwd,
-            env: childEnv,
-            stdio: ["ignore", "pipe", "pipe"],
-          },
-        )
-      } catch (err) {
-        const rawErr = (err instanceof Error ? err.message : String(err)).trim()
-        resolvePromise({
-          id: mutantId,
-          result: {
-            _tag: "SpawnFailed",
-            spawnError: rawErr.length > 0 ? rawErr : "Spawn failed",
-            stdout: "",
-            stderr: "",
-          },
-        })
-        return
-      }
-      activeChildren.add(child)
-      const timer = setTimeout(() => {
-        timedOut = true
-        child.kill("SIGKILL")
-      }, timeoutMs)
-      const finish = (result) => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        activeChildren.delete(child)
-        resolvePromise({ id: mutantId, result })
-      }
-      child.stdout?.on("data", (chunk) => {
-        stdout += String(chunk)
-      })
-      child.stderr?.on("data", (chunk) => {
-        stderr += String(chunk)
-      })
-      child.on("error", (err) => {
-        const rawErr = (err instanceof Error ? err.message : String(err)).trim()
-        finish({
-          _tag: "SpawnFailed",
-          spawnError: rawErr.length > 0 ? rawErr : "Spawn failed",
-          stdout: truncateOutput(stdout),
-          stderr: truncateOutput(stderr),
-        })
-      })
-      child.on("close", (code, signal) => {
-        const out = truncateOutput(stdout)
-        const errOut = truncateOutput(stderr)
-        if (timedOut) {
-          finish({ _tag: "TimedOut", stdout: out, stderr: errOut })
-          return
-        }
-        if (signal !== null) {
-          finish({ _tag: "Signaled", signal, stdout: out, stderr: errOut })
-          return
-        }
-        finish({ _tag: "Exited", exitCode: code ?? -1, stdout: out, stderr: errOut })
-      })
-    })
-  } finally {
-    activeStateDirs.delete(workerStateDir)
-    try {
-      rmSync(workerStateDir, { recursive: true, force: true })
-    } catch {
-      // Best-effort cleanup of per-worker temporary state directory
-    }
-  }
-}
+const vitestNodeEntry = vitestCli.length > 0 ? resolve(dirname(vitestCli), "dist", "node.js") : ""
+const useWarmMode =
+  vitestNodeEntry.length > 0 &&
+  existsSync(vitestNodeEntry) &&
+  existsSync(WARM_WORKER_SCRIPT) &&
+  process.env["HARNESS_MUTATE_USE_WARM_VITEST"] !== "0"
 
 const results = Array.from({ length: mutantIds.length })
 if (mutantIds.length > 0) {
-  const concurrency = Math.min(6, Math.max(2, availableParallelism()), mutantIds.length)
+  const concurrency = resolveBatchConcurrency(mutantIds.length, useWarmMode)
   let nextIdx = 0
-  const workers = Array.from({ length: concurrency }, async () => {
-    while (nextIdx < mutantIds.length) {
-      const idx = nextIdx
-      nextIdx += 1
-      results[idx] = await runOneMutant(mutantIds[idx])
+  if (useWarmMode) {
+    const coverageInfo = await runCoverageProbe({
+      vitestNodeEntry,
+      cwd,
+      childBaseEnv,
+      testFiles,
+      absToRaw,
+      mutantCount: mutantIds.length,
+      minTests: 2,
+      minMutants: 4,
+      timeoutMs,
+      tracker,
+    })
+    const spawnWorker = () =>
+      createWarmVitestWorker({
+        vitestNodeEntry,
+        cwd,
+        childBaseEnv,
+        allTests: testFiles,
+        tracker,
+        isolate: process.env["HARNESS_MUTATE_WARM_ISOLATE"] !== "0",
+      })
+    const coldFallback = (mutantId, targetTests, stepTimeoutMs) =>
+      runOneColdMutant({
+        vitestCli,
+        cwd,
+        childBaseEnv,
+        testFiles: targetTests,
+        mutantId,
+        timeoutMs: stepTimeoutMs,
+        tracker,
+      })
+    const workers = Array.from({ length: concurrency }, async () => {
+      const workerRef = { current: await spawnWorker() }
+      try {
+        while (nextIdx < mutantIds.length) {
+          const idx = nextIdx
+          nextIdx += 1
+          results[idx] = await runWarmMutantWithWorker({
+            workerRef,
+            spawnWorker,
+            coldFallback,
+            mutantId: mutantIds[idx],
+            targetTests: testFiles,
+            coverageInfo,
+            timeoutMs,
+            cwd,
+            targetFilePath: targetFile,
+          })
+        }
+      } finally {
+        if (workerRef.current) await workerRef.current.shutdown()
+      }
+    })
+    try {
+      await Promise.all(workers)
+    } finally {
+      tracker.cleanupAll()
     }
-  })
-  try {
-    await Promise.all(workers)
-  } finally {
-    cleanupActiveWorkers()
+  } else {
+    const workers = Array.from({ length: concurrency }, async () => {
+      while (nextIdx < mutantIds.length) {
+        const idx = nextIdx
+        nextIdx += 1
+        results[idx] = await runOneColdMutant({
+          vitestCli,
+          cwd,
+          childBaseEnv,
+          testFiles,
+          mutantId: mutantIds[idx],
+          timeoutMs,
+          tracker,
+        })
+      }
+    })
+    try {
+      await Promise.all(workers)
+    } finally {
+      tracker.cleanupAll()
+    }
   }
 }
 
 const payload = JSON.stringify(results)
-await new Promise((resolve) => {
-  process.stdout.write(payload, () => resolve(undefined))
+await new Promise((resolveDone) => {
+  process.stdout.write(payload, () => resolveDone(undefined))
 })

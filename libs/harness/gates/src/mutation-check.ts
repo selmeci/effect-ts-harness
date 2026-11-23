@@ -13,7 +13,7 @@ import {
   SourceLineNumber,
 } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
-import { runVitestTargetList, stripAnsi } from "./mutation-subprocess-helpers.js"
+import { stripAnsi } from "./mutation-subprocess-helpers.js"
 import {
   getActiveMutantId,
   setActiveMutantId,
@@ -50,6 +50,12 @@ import {
   resolveSuiteDiff,
   resolveTargetsForSuite,
 } from "./mutation/mutation-suite-helpers.js"
+import {
+  executeQueuedPackageBatches,
+  type PackageBatchFileResult,
+  type QueuedPackageEntry,
+  runSingleFileVitestPass,
+} from "./mutation/mutation-package-batch.js"
 import {
   decideMutationCheck,
   decideMutationReport,
@@ -425,7 +431,61 @@ export const runDomainMutationSuite = (
           .exhaustive()
   if (typeof baselinePrep === "string") return abortWith([], baselinePrep)
 
+  const hasPackageBatchInfra =
+    !hasOverlays &&
+    options?.testRunner === undefined &&
+    hostIo.existsSync(join(repoRoot, "tools", "package-vitest-batch.mjs")) &&
+    hostIo.existsSync(join(repoRoot, "node_modules", "vitest", "vitest.mjs"))
+  const queuedByPkg = new Map<string, Array<QueuedPackageEntry>>()
   const outcomes: Array<MutantOutcome> = []
+
+  const finalizeFileResult = (finalizeInput: {
+    readonly relFile: string
+    readonly mutants: ReadonlyArray<CodeMutant>
+    readonly uncachedMutants: ReadonlyArray<CodeMutant>
+    readonly mutantKeys: ReadonlyMap<string, ContentSha256>
+    readonly fileOutcomes: ReadonlyMap<string, MutantOutcome>
+    readonly fileNonCacheableIds: ReadonlySet<string>
+  }): string | undefined => {
+    const ordered = collectOrderedFileOutcomes(finalizeInput.mutants, finalizeInput.fileOutcomes)
+    if (ordered.missingIds.length > 0) {
+      outcomes.push(...ordered.present)
+      return `[mutation-check] Missing outcome(s) for mutant(s) in '${finalizeInput.relFile}': ${ordered.missingIds.join(", ")}`
+    }
+    if (
+      recordKilledMutantsToCache({
+        relFile: finalizeInput.relFile,
+        uncachedMutants: finalizeInput.uncachedMutants,
+        fileOutcomes: finalizeInput.fileOutcomes,
+        mutantKeys: finalizeInput.mutantKeys,
+        fileNonCacheableIds: finalizeInput.fileNonCacheableIds,
+        cacheAuth: enabledCacheAuth,
+        nowMs: suiteNowMs,
+        cacheEntries,
+      })
+    ) {
+      cacheDirty = true
+    }
+    outcomes.push(...ordered.present)
+    flushCacheIfDirty()
+    return undefined
+  }
+
+  const finalizeBatchResult = (
+    mutants: ReadonlyArray<CodeMutant>,
+    uncachedMutants: ReadonlyArray<CodeMutant>,
+    mutantKeys: ReadonlyMap<string, ContentSha256>,
+    result: PackageBatchFileResult,
+  ): string | undefined =>
+    finalizeFileResult({
+      relFile: result.file.relFile,
+      mutants,
+      uncachedMutants,
+      mutantKeys,
+      fileOutcomes: result.fileOutcomes,
+      fileNonCacheableIds: result.fileNonCacheableIds,
+    })
+
   for (const file of targets) {
     const overlaySource = normalizedOverlays.get(file.relFile)
     if (diffLinesMap !== undefined && diffLinesMap.has(file.relFile)) {
@@ -543,105 +603,79 @@ export const runDomainMutationSuite = (
     const uncachedMutants = mutants.filter((m) => !cachedHitIds.has(m.id))
     cachedKilledCount += mutants.length - uncachedMutants.length
 
-    const pkgBaselinePassed =
-      baselinePrep?.passedPackageBaselines.has(`${file.scope}/${file.pkgDir}`) === true
-    const primaryRes = runVitestTargetList(
+    const pkgKey = `${file.scope}/${file.pkgDir}`
+    const pkgBaselinePassed = baselinePrep?.passedPackageBaselines.has(pkgKey) === true
+    if (hasPackageBatchInfra && pkgBaselinePassed && uncachedMutants.length > 0) {
+      const list = queuedByPkg.get(pkgKey) ?? []
+      list.push({
+        pkgKey,
+        mutantKeys,
+        input: {
+          file,
+          originalContent,
+          schemaSource: schemaBundle.schemaSource,
+          mutants,
+          uncachedMutants,
+          primaryTests,
+          fallbackTests,
+          cachedHitIds,
+        },
+      })
+      queuedByPkg.set(pkgKey, list)
+      continue
+    }
+
+    const singlePass = runSingleFileVitestPass({
       repoRoot,
-      file,
+      backupPath,
       hostIo,
       baseSubprocessEnv,
-      primaryTests,
+      file,
       originalContent,
-      schemaBundle.schemaSource,
-      backupPath,
+      schemaSource: schemaBundle.schemaSource,
+      mutants,
       uncachedMutants,
-      { skipBaselineCheck: pkgBaselinePassed },
-    )
-    const fileNonCacheableIds = new Set<string>()
-    const primaryOutcomes = match(primaryRes)
-      .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
-      .with({ _tag: "Ok" }, ({ outcomes: resOutcomes, nonCacheableIds }) => {
-        for (const id of nonCacheableIds) fileNonCacheableIds.add(id)
-        return resOutcomes
+      primaryTests,
+      fallbackTests,
+      cachedHitIds,
+      pkgBaselinePassed,
+    })
+    const singleErr = match(singlePass)
+      .with({ _tag: "Abort" }, ({ partialResult, diagnostic }) => {
+        if (partialResult.fileOutcomes.size > 0) {
+          outcomes.push(...collectOrderedFileOutcomes(mutants, partialResult.fileOutcomes).present)
+        }
+        return diagnostic
       })
+      .with({ _tag: "Ok" }, ({ result }) =>
+        finalizeBatchResult(mutants, uncachedMutants, mutantKeys, result),
+      )
       .exhaustive()
-    if (typeof primaryOutcomes === "string") return abortWith(outcomes, primaryOutcomes)
+    if (singleErr !== undefined) return abortWith(outcomes, singleErr)
+  }
 
-    const fileOutcomes = new Map<string, MutantOutcome>(
-      primaryOutcomes.map((o) => [o.mutant.id, o]),
-    )
-    for (const mutant of mutants) {
-      if (cachedHitIds.has(mutant.id)) {
-        fileOutcomes.set(mutant.id, { mutant, status: "killed" })
-      }
-    }
-    const survivingMutants = primaryOutcomes
-      .filter((o) =>
-        match(o.status)
-          .with("survived", () => true)
-          .with("killed", "equivalent", () => false)
-          .exhaustive(),
-      )
-      .map((o) => o.mutant)
-
-    if (survivingMutants.length > 0 && fallbackTests.length > 0) {
-      const fallbackRes = runVitestTargetList(
-        repoRoot,
-        file,
-        hostIo,
-        baseSubprocessEnv,
-        fallbackTests,
-        originalContent,
-        schemaBundle.schemaSource,
-        backupPath,
-        survivingMutants,
-      )
-      const fallbackAbort = match(fallbackRes)
-        .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
-        .with({ _tag: "Ok" }, ({ outcomes: fbOutcomes, nonCacheableIds }) => {
-          for (const id of nonCacheableIds) fileNonCacheableIds.add(id)
-          for (const fbOutcome of fbOutcomes) {
-            match(fbOutcome.status)
-              .with("killed", () => {
-                fileOutcomes.set(fbOutcome.mutant.id, fbOutcome)
-              })
-              .with("survived", "equivalent", () => {})
-              .exhaustive()
-          }
-          return undefined
-        })
-        .exhaustive()
-      if (fallbackAbort !== undefined) {
-        return abortWith(
-          [...outcomes, ...collectOrderedFileOutcomes(mutants, fileOutcomes).present],
-          fallbackAbort,
+  const batchAbort = executeQueuedPackageBatches({
+    repoRoot,
+    backupPath,
+    hostIo,
+    baseSubprocessEnv,
+    queuedByPkg,
+    finalizeEntry: (entry, result) =>
+      finalizeBatchResult(
+        entry.input.mutants,
+        entry.input.uncachedMutants,
+        entry.mutantKeys,
+        result,
+      ),
+    recordPartialOnAbort: (entry, partialResult) => {
+      if (partialResult.fileOutcomes.size > 0) {
+        outcomes.push(
+          ...collectOrderedFileOutcomes(entry.input.mutants, partialResult.fileOutcomes).present,
         )
       }
-    }
-    const ordered = collectOrderedFileOutcomes(mutants, fileOutcomes)
-    if (ordered.missingIds.length > 0) {
-      return abortWith(
-        [...outcomes, ...ordered.present],
-        `[mutation-check] Missing outcome(s) for mutant(s) in '${file.relFile}': ${ordered.missingIds.join(", ")}`,
-      )
-    }
-    if (
-      recordKilledMutantsToCache({
-        relFile: file.relFile,
-        uncachedMutants,
-        fileOutcomes,
-        mutantKeys,
-        fileNonCacheableIds,
-        cacheAuth: enabledCacheAuth,
-        nowMs: suiteNowMs,
-        cacheEntries,
-      })
-    ) {
-      cacheDirty = true
-    }
-    outcomes.push(...ordered.present)
-    flushCacheIfDirty()
-  }
+    },
+  })
+  if (batchAbort !== undefined) return abortWith(outcomes, batchAbort)
 
   flushCacheIfDirty()
 

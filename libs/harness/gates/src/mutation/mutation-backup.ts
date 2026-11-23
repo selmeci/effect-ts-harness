@@ -39,6 +39,8 @@ const mergeLineMaps = (
   }
 }
 
+const COMMIT_SHA_RE = /^[0-9a-f]{40,64}$/i
+
 export const extractGitDiffModifiedLinesChecked = (
   repoRoot: string,
   hostIo: SyncHostIo,
@@ -200,15 +202,84 @@ export const extractGitDiffModifiedLinesChecked = (
       },
     )
 
+  const resolveCommitSha = (ref: string): string | undefined => {
+    if (ref.startsWith("-")) return undefined
+    return match(runGit(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]))
+      .with({ _tag: "Success" }, ({ success }) => {
+        const trimmed = success.trim()
+        return COMMIT_SHA_RE.test(trimmed) ? trimmed : undefined
+      })
+      .with({ _tag: "Failure" }, () => undefined)
+      .exhaustive()
+  }
+
+  const isAncestorCommit = (ancestorRef: string, descendantRef: string): boolean =>
+    match(runGit(["merge-base", "--is-ancestor", ancestorRef, descendantRef]))
+      .with({ _tag: "Success" }, () => true)
+      .with({ _tag: "Failure" }, () => false)
+      .exhaustive()
+
+  const resolveEffectiveBaseRef = (baseRef: string): string => {
+    if (options?.explicitBaseRef === true || baseRef.includes("/")) return baseRef
+    const localBaseSha = resolveCommitSha(baseRef)
+    const originBaseSha = resolveCommitSha(`origin/${baseRef}`)
+    const headSha = resolveCommitSha("HEAD")
+    if (
+      localBaseSha !== undefined &&
+      originBaseSha !== undefined &&
+      headSha !== undefined &&
+      localBaseSha !== originBaseSha &&
+      isAncestorCommit(localBaseSha, originBaseSha) &&
+      isAncestorCommit(originBaseSha, headSha)
+    ) {
+      return originBaseSha
+    }
+    return baseRef
+  }
+
+  const tryIncomingBaseMergeDiff = (baseRef: string): GitDiffExtractionResult | undefined => {
+    if (baseRef.startsWith("-")) return undefined
+    const mergeHeadSha = resolveCommitSha("MERGE_HEAD")
+    const headSha = resolveCommitSha("HEAD")
+    if (mergeHeadSha === undefined || headSha === undefined || headSha === mergeHeadSha) {
+      return undefined
+    }
+    const candidateShas = [resolveCommitSha(baseRef)]
+    if (!baseRef.includes("/")) {
+      candidateShas.push(resolveCommitSha(`origin/${baseRef}`))
+    }
+    if (!candidateShas.some((sha) => sha === mergeHeadSha)) {
+      return undefined
+    }
+    return match(
+      Result.flatMap(
+        runGit(["diff", "-U0", mergeHeadSha, "--", "libs/", "apps/"]),
+        (diffStdout) => {
+          const lineMap = new Map<string, Set<number>>()
+          mergeLineMaps(lineMap, parseGitDiffModifiedLines(diffStdout))
+          return Result.map(collectUntrackedLibsFiles(lineMap), () => lineMap)
+        },
+      ),
+    )
+      .with({ _tag: "Success" }, ({ success: lines }) => ({
+        _tag: "Ok" as const,
+        lines,
+        diffMode: "branch-base" as const,
+      }))
+      .with({ _tag: "Failure" }, ({ failure: reason }) => ({ _tag: "Failed" as const, reason }))
+      .exhaustive()
+  }
+
   const diffFromMergeBase = (baseRef: string): Result.Result<Map<string, Set<number>>, string> => {
     if (baseRef.startsWith("-")) {
       return Result.fail(`Invalid baseRef '${baseRef}': must not start with '-'`)
     }
-    return Result.flatMap(runGit(["rev-parse", "--verify", `${baseRef}^{commit}`]), () =>
-      Result.flatMap(runGit(["merge-base", "HEAD", baseRef]), (mbStdout) => {
+    const effectiveBaseRef = resolveEffectiveBaseRef(baseRef)
+    return Result.flatMap(runGit(["rev-parse", "--verify", `${effectiveBaseRef}^{commit}`]), () =>
+      Result.flatMap(runGit(["merge-base", "HEAD", effectiveBaseRef]), (mbStdout) => {
         const mergeBase = mbStdout.trim()
         if (mergeBase.length === 0) {
-          return Result.fail(`git merge-base HEAD ${baseRef} returned empty output`)
+          return Result.fail(`git merge-base HEAD ${effectiveBaseRef} returned empty output`)
         }
         return Result.flatMap(
           runGit(["diff", "-U0", mergeBase, "--", "libs/", "apps/"]),
@@ -234,6 +305,11 @@ export const extractGitDiffModifiedLinesChecked = (
       }))
       .with({ _tag: "Failure" }, ({ failure: reason }) => ({ _tag: "Failed" as const, reason }))
       .exhaustive()
+  }
+
+  if (options?.fallbackBaseRef !== undefined) {
+    const incomingMergeResult = tryIncomingBaseMergeDiff(options.fallbackBaseRef)
+    if (incomingMergeResult !== undefined) return incomingMergeResult
   }
 
   const workingTreeRes = Result.flatMap(runGit(["diff", "-U0"]), (primaryStdout) =>

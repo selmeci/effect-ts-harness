@@ -571,3 +571,19 @@ export {
   type ScanWorkspaceTsFilesResult,
 } from "./workspace-ts-scan.js"
 export { decideEmbeddingSyncPlan } from "./embedding-sync-plan.js"
+export {
+  type PackageBatchFileInput,
+  type PackageBatchFileResult,
+  type RunPackageBatchResult,
+  runPackageMutantBatchChecked,
+} from "./mutation/mutation-package-batch.js"
+export {
+  buildPackageReachabilityIndexChecked,
+  getOrBuildPackageReachabilityIndexChecked,
+  partitionEligibleTestsChecked,
+  queryReverseImportReachability,
+  selectReachabilityPartition,
+  type BuildReachabilityIndexResult,
+  type PackageReachabilityIndex,
+  type ReverseImportReachability,
+} from "./mutation/mutation-test-reachability.js"

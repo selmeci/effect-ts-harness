@@ -1,4 +1,4 @@
-import { join } from "node:path"
+import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { Cause, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
@@ -58,13 +58,60 @@ const hasCleanVitestPassSummary = (cleanStdout: string, infraScanOutput: string)
   !/\bTests\s+[1-9]\d*\s+failed\b/.test(cleanStdout) &&
   !(isInfraMissingOutput(infraScanOutput) || /\bTests\s+0\s+passed\b/i.test(cleanStdout))
 
-const hasClearFailureEvidence = (stdout: string, stderr: string): boolean => {
+export const hasClearFailureEvidence = (stdout: string, stderr: string): boolean => {
   const cleanStdout = stripAnsi(stdout)
   const cleanStderr = stripAnsi(stderr)
   const combinedOutput = `${cleanStdout}\n${stripInnerMutationDiagnostics(cleanStderr)}`
   const hasExplicitFailedCount = /\bTests\s+[1-9]\d*\s+failed\b/.test(cleanStdout)
   const hasAssertionOrExpectError = /\b(?:AssertionError|ExpectError)\b/.test(combinedOutput)
   return hasExplicitFailedCount || hasAssertionOrExpectError
+}
+
+const VITEST_CONFIG_CANDIDATES = [
+  "vitest.config.ts",
+  "vitest.config.mts",
+  "vitest.config.js",
+  "vitest.config.mjs",
+  "vitest.config.cts",
+  "vitest.config.cjs",
+] as const
+
+const isPathContainedStrict = (parentDir: string, childPath: string): boolean => {
+  const rel = relative(parentDir, childPath)
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
+}
+
+export const resolveCommonVitestConfigPath = (
+  repoRoot: string,
+  testFiles: ReadonlyArray<string>,
+  hostIo: SyncHostIo,
+): string | undefined => {
+  if (testFiles.length === 0) return undefined
+  const resolvedRoot = resolve(repoRoot)
+  const dirs = testFiles.map((f) => dirname(resolve(resolvedRoot, f)))
+  let commonDir = dirs[0]!
+  while (!dirs.every((d) => isPathContainedStrict(commonDir, d))) {
+    const parent = dirname(commonDir)
+    if (parent === commonDir) return undefined
+    commonDir = parent
+  }
+  if (!isPathContainedStrict(resolvedRoot, commonDir)) return undefined
+  let cur = commonDir
+  while (isPathContainedStrict(resolvedRoot, cur)) {
+    for (const cfgName of VITEST_CONFIG_CANDIDATES) {
+      const candidate = join(cur, cfgName)
+      const exists = Result.getOrElse(
+        Result.try(() => hostIo.existsSync(candidate) && !hostIo.isSymbolicLinkSync(candidate)),
+        () => false,
+      )
+      if (exists) return candidate
+    }
+    if (cur === resolvedRoot) break
+    const parent = dirname(cur)
+    if (parent === cur) break
+    cur = parent
+  }
+  return undefined
 }
 
 export const classifyMutantSubprocessResult = (
@@ -139,6 +186,30 @@ export type VitestPackageBaselineResult =
   | { readonly _tag: "Ok" }
   | { readonly _tag: "Failed"; readonly diagnostic: string }
 
+const buildDirectVitestArgs = (
+  repoRoot: string,
+  vitestCliPath: string,
+  extraFlags: ReadonlyArray<string>,
+  testFiles: ReadonlyArray<string>,
+  hostIo: SyncHostIo,
+): ReadonlyArray<string> => {
+  const cfgPath = resolveCommonVitestConfigPath(repoRoot, testFiles, hostIo)
+  if (cfgPath === undefined) {
+    return [vitestCliPath, "run", ...extraFlags, ...testFiles]
+  }
+  const absTests = testFiles.map((tf) => resolve(repoRoot, tf))
+  return [
+    vitestCliPath,
+    "run",
+    "--root",
+    dirname(cfgPath),
+    "--config",
+    cfgPath,
+    ...extraFlags,
+    ...absTests,
+  ]
+}
+
 const runVitestBaselineCheck = (
   repoRoot: string,
   hostIo: SyncHostIo,
@@ -152,8 +223,9 @@ const runVitestBaselineCheck = (
   const useDirectVitest = hostIo.existsSync(vitestCliPath)
   const execCmd = useDirectVitest ? process.execPath : "pnpm"
   const bailArgs = bailOnFailure ? ["--bail=1"] : []
+  const workersFlag = testFiles.length >= 4 ? "--maxWorkers=8" : "--maxWorkers=2"
   const execArgs = useDirectVitest
-    ? [vitestCliPath, "run", ...bailArgs, "--maxWorkers=2", ...testFiles]
+    ? buildDirectVitestArgs(repoRoot, vitestCliPath, [...bailArgs, workersFlag], testFiles, hostIo)
     : ["vitest", "run", ...bailArgs, ...testFiles]
   const baselineExecRes = Result.try(() =>
     hostIo.execFileSync(execCmd, execArgs, {
@@ -230,7 +302,13 @@ export const runVitestTargetList = (
   const useDirectVitest = hostIo.existsSync(vitestCliPath)
   const execCmd = useDirectVitest ? process.execPath : "pnpm"
   const mutantExecArgs = useDirectVitest
-    ? [vitestCliPath, "run", "--bail=1", "--maxWorkers=1", ...reachingTestFiles]
+    ? buildDirectVitestArgs(
+        repoRoot,
+        vitestCliPath,
+        ["--bail=1", "--maxWorkers=1"],
+        reachingTestFiles,
+        hostIo,
+      )
     : ["vitest", "run", "--bail=1", ...reachingTestFiles]
 
   const scaledTimeoutMs = Math.max(30_000, Math.min(180_000, reachingTestFiles.length * 10_000))
@@ -420,6 +498,7 @@ export const runVitestTargetList = (
               HARNESS_BATCH_TIMEOUT_MS: String(scaledTimeoutMs),
               HARNESS_BATCH_TESTS_JSON: JSON.stringify(reachingTestFiles),
               HARNESS_BATCH_MUTANTS_JSON: JSON.stringify(mutantsToRun.map((m) => m.id)),
+              HARNESS_BATCH_TARGET_FILE: file.fullPath,
             },
           }),
         )
