@@ -23,7 +23,7 @@ import {
   type GraphEntropyInput,
   type GraphReachabilityContext,
   IGNORED_ERRORS,
-  IGNORED_SERVICES,
+  isIgnoredServiceTag,
   readdirOrReport,
   readTextOrReport,
 } from "./gc-helpers.js"
@@ -337,7 +337,7 @@ export const evaluateTopologyEntropyPlugin = (
   for (const [idx, node] of Graph.nodes(g)) {
     match(node)
       .with({ _tag: "ServiceTag" }, (n) => {
-        if (IGNORED_SERVICES.has(n.tagId) || IGNORED_SERVICES.has(n.name)) return
+        if (isIgnoredServiceTag(n.tagId, n.name)) return
         const totalConsumers =
           (ctx.incomingRequires.get(idx) ?? 0) + (ctx.incomingLayerRequires.get(idx) ?? 0)
         if (totalConsumers === 0) {
@@ -379,7 +379,7 @@ export const evaluateTopologyEntropyPlugin = (
   for (const [idx, node] of Graph.nodes(g)) {
     match(node)
       .with({ _tag: "ServiceTag" }, (n) => {
-        if (IGNORED_SERVICES.has(n.tagId) || IGNORED_SERVICES.has(n.name)) return
+        if (isIgnoredServiceTag(n.tagId, n.name)) return
         const providers = ctx.incomingProvides.get(idx) ?? 0
         if (providers === 0) {
           const location = n.file

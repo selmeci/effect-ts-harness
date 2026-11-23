@@ -5,8 +5,6 @@ import { match } from "ts-pattern"
 import { isPureInterruptCause } from "@harness/contract"
 import { checkPlanStepCoverage, triageFailure } from "@harness/decision"
 import {
-  buildSessionReport,
-  checkLoopThrashing,
   checkVerifyStamp,
   decideOntologyInvariants,
   decideSpanBudgets,
@@ -15,10 +13,7 @@ import {
   DstStepCount,
   loadGovernanceDocsChecked,
   parseDstSeedEnv,
-  readFrictionEvents,
-  readTelemetryEvents,
   runDstSeedSuite,
-  writeSessionReportFiles,
   writeVerifyStamp,
 } from "@harness/gates"
 import {
@@ -38,13 +33,11 @@ import {
   type CliEnv,
   type CliResult,
   ensureLocalOllamaReady,
-  shouldSuppressLiveRepoTestSideEffects,
   findWorkspaceRoot,
   formatSubprocessError,
   isIsolatedExternalWorkspace,
   isRootConfigOrSharedCoreChange,
   makeReadStdinEffect,
-  recordFriction,
   recordTelemetry,
   resolveDecisionModelLayer,
   resolveModifiedFilesSinceStampOrHead,
@@ -69,6 +62,8 @@ import {
 } from "./stop-hook-and-transcript.js"
 import {
   evaluateVerifyMutateStampGate,
+  finalizeDoneSuccess,
+  isAlreadyDoneForVerifiedTree,
   isVerifyMutateStampGateEnforced,
   loadSnapshotPair,
   parseDoneDeadlineMs,
@@ -79,21 +74,7 @@ import {
   readRecordedSpans,
   runDeltaAstAndPluginGates,
 } from "./verify-delta-gates.js"
-
-const verifyFailureWithThrashing = (
-  options: CliEnv | undefined,
-  repoRoot: string,
-  summary: string,
-  detail: string,
-  stderrMsg: string,
-): CliResult => {
-  recordFriction(options, { kind: "verify_failure", summary, detail })
-  const thrashing = checkLoopThrashing(readFrictionEvents(repoRoot, nodeSyncHostIo))
-  if (thrashing.stuck && thrashing.escalationMessage !== null) {
-    return { exitCode: 2, stdout: "", stderr: `${thrashing.escalationMessage}\n${stderrMsg}` }
-  }
-  return { exitCode: 1, stdout: "", stderr: stderrMsg }
-}
+import { tryRunDocOnlyVerifyFastPath, verifyFailureWithThrashing } from "./verify-doc-fastpath.js"
 
 export const handleVerify = (options: CliEnv | undefined): Effect.Effect<CliResult> =>
   Effect.gen(function* () {
@@ -276,6 +257,19 @@ export const handleVerify = (options: CliEnv | undefined): Effect.Effect<CliResu
       )
       if (verifySyncFail !== undefined) return verifySyncFail
     }
+
+    const docOnlyOutcome = yield* tryRunDocOnlyVerifyFastPath({
+      repoRoot,
+      graph,
+      governanceDocs,
+      implBranch: taskBranches.implBranch,
+      options,
+    })
+    const docOnlyResult = match(docOnlyOutcome)
+      .with({ _tag: "Executed" }, ({ result }) => result)
+      .with({ _tag: "Skipped" }, () => undefined)
+      .exhaustive()
+    if (docOnlyResult !== undefined) return docOnlyResult
 
     if (
       !options?.skipSubprocessVerify &&
@@ -464,9 +458,7 @@ export const handleDone = (
           return makeDoneBlockResult(isAntigravity, reason)
         })
         .exhaustive()
-      if (stdinErrResult !== undefined) {
-        return stdinErrResult
-      }
+      if (stdinErrResult !== undefined) return stdinErrResult
     }
     if (rawStdin !== undefined && rawStdin.trim().length === 0) {
       return makeDoneBlockResult(isAntigravity, "done: empty Stop hook stdin payload")
@@ -491,15 +483,16 @@ export const handleDone = (
           makeDoneBlockResult(isAntigravity, "done: malformed Stop hook stdin JSON payload"),
         )
         .exhaustive()
-      if (earlyResult !== undefined) {
-        return earlyResult
-      }
+      if (earlyResult !== undefined) return earlyResult
     }
 
     const blockDecision = isAntigravity ? "continue" : "block"
     const verificationEffect = Effect.gen(function* () {
       // 1. Subagent bypass
-      if (isSubagentStopContext(repoRoot, decodedStdin)) {
+      if (
+        (isAntigravity || rawStdin !== undefined) &&
+        isSubagentStopContext(repoRoot, decodedStdin)
+      ) {
         return {
           exitCode: 0,
           stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
@@ -550,6 +543,14 @@ export const handleDone = (
               stderr:
                 res.stderr.length > 0 ? `${res.stderr}\n${transcriptStderr}` : transcriptStderr,
             }
+      if (isAlreadyDoneForVerifiedTree(repoRoot, stampCheck.stamp, options, nodeSyncHostIo)) {
+        return withTranscriptStderr({
+          exitCode: 0,
+          stdout: isAntigravity ? JSON.stringify({ decision: "stop" }) : "",
+          stderr: "",
+          telemetryDetail: "alreadyDone=true",
+        })
+      }
       const snapshotOutcome = yield* loadSnapshotPair(
         repoRoot,
         options?.planGraph,
@@ -599,17 +600,7 @@ export const handleDone = (
             )
             if (omnigraphFailure !== undefined) return withTranscriptStderr(omnigraphFailure)
 
-            if (
-              (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) &&
-              !shouldSuppressLiveRepoTestSideEffects(repoRoot)
-            ) {
-              const report = buildSessionReport({
-                events: readTelemetryEvents(repoRoot, nodeSyncHostIo),
-                frictionEvents: readFrictionEvents(repoRoot, nodeSyncHostIo),
-                stampValid: true,
-              })
-              writeSessionReportFiles(repoRoot, report, nodeSyncHostIo)
-            }
+            finalizeDoneSuccess(repoRoot, stampCheck.stamp.treeHash, options)
             runOmnigraphMaintenance(repoRoot, { includeCleanup: true })
             return {
               exitCode: 0,

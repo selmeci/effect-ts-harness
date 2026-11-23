@@ -29,7 +29,13 @@ import {
   WorkspaceFilePath,
 } from "@harness/contract"
 import { EmbeddingCachePort, EmbeddingClient } from "@harness/service"
-import { makeFileEmbeddingCacheLayer, makeOllamaEmbeddingClientLayer } from "../src/index.js"
+import {
+  embedBatchViaOllama,
+  makeFileEmbeddingCacheLayer,
+  makeOllamaEmbeddingClientLayer,
+  readEmbeddingCacheFile,
+  writeEmbeddingCacheFile,
+} from "../src/index.js"
 
 const withTempDir = <A, E, R>(
   use: (dir: string) => Effect.Effect<A, E, R>,
@@ -584,5 +590,55 @@ describe("OllamaEmbeddingClientLive & FileEmbeddingCacheLive (ADR-0025 / SPEC-00
         yield* Fiber.interrupt(fiber)
         expect(abortedBySignal).toBe(true)
       }),
+  )
+
+  it.effect(
+    "writeEmbeddingCacheFile, readEmbeddingCacheFile, and embedBatchViaOllama work directly as standalone Effect.fn entrypoints",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const repoRoot = WorkspaceFilePath.make(dir)
+          const vectors = yield* embedBatchViaOllama(
+            [EmbeddingSourceText.make("direct cache and batch check")],
+            {
+              baseUrl: EmbeddingProviderBaseUrl.make("http://127.0.0.1:11434/v1"),
+              model: EmbeddingModelId.make("qwen3-embedding:8b"),
+              dimensions: EmbeddingDimensionCount.make(2),
+            },
+            async () =>
+              new Response(JSON.stringify({ data: [{ index: 0, embedding: [3, 4] }] }), {
+                status: 200,
+              }),
+          )
+          expect(vectors).toHaveLength(1)
+          const snapshot = {
+            schemaVersion: 1 as const,
+            model: EmbeddingModelId.make("qwen3-embedding:8b"),
+            dimensions: EmbeddingDimensionCount.make(2),
+            updatedAt: EmbeddingBatchTimestamp.make("2026-11-22T00:00:00.000Z"),
+            entries: [
+              {
+                nodeKey: EmbeddingNodeKey.make("PatternDoc:errors"),
+                nodeKind: "PatternDoc" as const,
+                contentHash: EmbeddingContentHash.make("b".repeat(64)),
+                dimensions: EmbeddingDimensionCount.make(2),
+                vector: vectors[0]!,
+              },
+            ],
+          }
+          yield* writeEmbeddingCacheFile(repoRoot, snapshot)
+          const loaded = yield* readEmbeddingCacheFile(repoRoot)
+          match(loaded)
+            .with({ _tag: "Some" }, ({ value }) => {
+              expect(value.entries).toHaveLength(1)
+              expect(value.entries[0]?.vector.components[0]).toBeCloseTo(0.6, 5)
+              expect(value.entries[0]?.vector.components[1]).toBeCloseTo(0.8, 5)
+            })
+            .with({ _tag: "None" }, () => {
+              expect.unreachable("Expected persisted embedding cache snapshot")
+            })
+            .exhaustive()
+        }),
+      ),
   )
 })

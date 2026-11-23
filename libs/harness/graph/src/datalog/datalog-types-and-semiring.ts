@@ -128,7 +128,7 @@ export const isAcceptedAdr = (adrNode: AdrDocNode): boolean =>
 export const isProposedOrAcceptedSpec = (specNode: EarsSpecNode): boolean =>
   match(specNode.status)
     .with("proposed", "accepted", () => true)
-    .with("superseded", "deprecated", () => false)
+    .with("draft", "superseded", "deprecated", () => false)
     .exhaustive()
 
 export const minHeightReducer = (

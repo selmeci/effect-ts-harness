@@ -5,14 +5,11 @@ status: accepted
 date: 2026-11-03
 enforced_by:
   - libs/es/contract/src/index.ts
-  - libs/es/core/src/index.ts
   - libs/es/core/src/projection.ts
   - libs/es/core/src/outbox.ts
-  - libs/es/infra/src/index.ts
   - libs/es/infra/src/outbox.ts
   - libs/es/infra/src/projector.ts
   - libs/es/infra/src/projector-rebuild.ts
-  - libs/es/infra/test/fixtures/cart-sqlite.ts
 spans:
   - ProjectionSequence.decide
   - CrossProjection.apply
@@ -89,14 +86,14 @@ If outbox draining deletes rows before publishing or swallows bus errors, events
 
 ### Deterministic Enforcement
 
-| Rule                                  | Enforced By                                                        | Gate / Mechanism                                           | Governed Symbols                                        |
-| ------------------------------------- | ------------------------------------------------------------------ | ---------------------------------------------------------- | ------------------------------------------------------- |
-| Pure Sequencing Decider (`R = never`) | `libs/es/core/src/projection.ts`                                   | `decideProjectionSequence`                                 | `ProjectionSequence.decide`                             |
-| At-Least-Once Outbox Drain            | `libs/es/infra/src/outbox.ts`, `libs/es/contract/src/index.ts`     | `drainAggregateOutbox`, `OutboxPublishError`               | `Outbox.drain`, `OutboxPublishError`                    |
-| Outbox Corruption Guard               | `libs/es/infra/src/outbox.ts`, `libs/es/contract/src/index.ts`     | `drainAggregateOutbox`, `EventStreamCorruptionError`       | `EventStreamCorruptionError`                            |
-| Transactional Projector Migrations    | `libs/es/infra/src/projector.ts`                                   | `initializeProjectorTables`, `projectorCoreMigrations`     | `ProjectorInfra.initTables`                             |
-| Idempotent Ingestion & Gap Parking    | `libs/es/infra/src/projector.ts`, `libs/es/core/src/projection.ts` | `ingestPublishedEvent`, `applyCrossProjection`             | `Projector.ingest`, `CrossProjection.apply`             |
-| Archive Rebuild Parity                | `libs/es/infra/src/projector-rebuild.ts`, `libs/es/core/src/projection.ts` | `rebuildProjectorFromArchive`, `rebuildCrossProjection`    | `Projector.rebuild`, `CrossProjection.rebuild`          |
-| Cross-Projection Query & Lookup Guard | `libs/es/core/src/projection.ts`, `libs/es/contract/src/index.ts`          | `queryCrossProjection`, `CrossProjectionNotFoundError`     | `CrossProjection.query`, `CrossProjectionNotFoundError` |
-| Archive & Envelope Corruption Guard   | `libs/es/infra/src/projector.ts`, `libs/es/contract/src/index.ts`          | `ingestPublishedEvent`, `ProjectionArchiveCorruptionError` | `ProjectionArchiveCorruptionError`                      |
-| Deterministic Catch-Up Inspection     | `libs/es/infra/src/projector-rebuild.ts`                                   | `checkProjectorCatchUp`                                    | `Projector.checkCatchUp`                                |
+| Rule                                  | Enforced By                                                                                  | Gate / Mechanism                                           | Governed Symbols                                        |
+| ------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------- |
+| Pure Sequencing Decider (`R = never`) | `libs/es/core/src/projection.ts`                                                             | `decideProjectionSequence`                                 | `ProjectionSequence.decide`                             |
+| At-Least-Once Outbox Drain            | `libs/es/infra/src/outbox.ts`, `libs/es/core/src/outbox.ts`, `libs/es/contract/src/index.ts` | `drainAggregateOutbox`, `EventBus`, `OutboxPublishError`   | `Outbox.drain`, `OutboxPublishError`                    |
+| Outbox Corruption Guard               | `libs/es/infra/src/outbox.ts`, `libs/es/contract/src/index.ts`                               | `drainAggregateOutbox`, `EventStreamCorruptionError`       | `EventStreamCorruptionError`                            |
+| Transactional Projector Migrations    | `libs/es/infra/src/projector.ts`                                                             | `initializeProjectorTables`, `projectorCoreMigrations`     | `ProjectorInfra.initTables`                             |
+| Idempotent Ingestion & Gap Parking    | `libs/es/infra/src/projector.ts`, `libs/es/core/src/projection.ts`                           | `ingestPublishedEvent`, `applyCrossProjection`             | `Projector.ingest`, `CrossProjection.apply`             |
+| Archive Rebuild Parity                | `libs/es/infra/src/projector-rebuild.ts`, `libs/es/core/src/projection.ts`                   | `rebuildProjectorFromArchive`, `rebuildCrossProjection`    | `Projector.rebuild`, `CrossProjection.rebuild`          |
+| Cross-Projection Query & Lookup Guard | `libs/es/core/src/projection.ts`, `libs/es/contract/src/index.ts`                            | `queryCrossProjection`, `CrossProjectionNotFoundError`     | `CrossProjection.query`, `CrossProjectionNotFoundError` |
+| Archive & Envelope Corruption Guard   | `libs/es/infra/src/projector.ts`, `libs/es/contract/src/index.ts`                            | `ingestPublishedEvent`, `ProjectionArchiveCorruptionError` | `ProjectionArchiveCorruptionError`                      |
+| Deterministic Catch-Up Inspection     | `libs/es/infra/src/projector-rebuild.ts`                                                     | `checkProjectorCatchUp`                                    | `Projector.checkCatchUp`                                |

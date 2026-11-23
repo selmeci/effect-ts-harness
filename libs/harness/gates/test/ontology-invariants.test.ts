@@ -1192,4 +1192,210 @@ services:
         ).toBe(true)
       }),
   )
+
+  it.effect(
+    "F-08: strips markdown emphasis/code markup from pattern, effectSymbol, and compound verification cells",
+    () =>
+      Effect.gen(function* () {
+        const deciderQualname = "libs/sample/domain/src/index.ts#Checkout.decide"
+        const graph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: deciderQualname,
+              spanName: "Checkout.decide",
+              packageTag: "domain",
+              file: "libs/sample/domain/src/index.ts",
+              line: 10,
+              successType: "boolean",
+              isStub: false,
+            },
+          ],
+          tests: [
+            {
+              testId: "libs/sample/domain/test/a.test.ts#t1",
+              testFile: "libs/sample/domain/test/a.test.ts",
+              testName: "checks checkout",
+              lastTreeHash: "workspace",
+              isPropertyTest: true,
+            },
+          ],
+          exercisesSpans: [
+            {
+              testId: "libs/sample/domain/test/a.test.ts#t1",
+              calleeQualname: deciderQualname,
+              callCount: 1,
+              receiverLayer: null,
+            },
+          ],
+          specifiesSymbols: [
+            {
+              specId: "sample:SPEC-0002",
+              targetKey: deciderQualname,
+              targetKind: "EffectFn",
+            },
+          ],
+        })
+        const doc: GovernanceDocReference = {
+          id: "sample:SPEC-0002",
+          docPath: "libs/sample/docs/specs/0002.md",
+          status: "accepted",
+          markdown: `---
+id: sample:SPEC-0002
+title: Markup Normalization Spec
+status: accepted
+date: 2026-11-22
+enforced_by:
+  - libs/sample/domain/src/index.ts
+spans:
+  - Checkout.decide
+---
+
+# sample:SPEC-0002: Markup Normalization Spec
+
+## Requirements
+
+| ID | Pattern | Requirement | Effect Symbol | Verification |
+| --- | --- | --- | --- | --- |
+| REQ-1.1 | **State-driven** | While active, the engine evaluates R = never pure rules. | \`Checkout.decide\` | \`PropertyTest\`, \`GraphCheck\` |
+`,
+        }
+
+        const report = yield* decideOntologyInvariants({
+          graph,
+          governanceDocs: [doc],
+        })
+        expect(
+          report.findings.some(
+            (f) =>
+              f.nodeId === "sample:SPEC-0002:REQ-1.1" &&
+              (f.kind === "ontology-while-decider-mismatch" ||
+                f.kind === "ontology-unverified-requirement"),
+          ),
+        ).toBe(false)
+      }),
+  )
+
+  it.effect(
+    "F-08: detects ontology mismatches under markdown markup and compound verification delimiters",
+    () =>
+      Effect.gen(function* () {
+        const badGraph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/sample/domain/src/index.ts#Impure.decide",
+              spanName: "Impure.decide",
+              packageTag: "domain",
+              file: "libs/sample/domain/src/index.ts",
+              line: 20,
+              successType: "boolean",
+              isStub: false,
+            },
+            {
+              qualname: "libs/sample/domain/src/index.ts#Untested.decide",
+              spanName: "Untested.decide",
+              packageTag: "domain",
+              file: "libs/sample/domain/src/index.ts",
+              line: 30,
+              successType: "boolean",
+              isStub: false,
+            },
+          ],
+          services: [
+            {
+              tagId: "PhotoRepo",
+              name: "PhotoRepo",
+              packageTag: "service",
+              file: "libs/sample/service/src/index.ts",
+            },
+          ],
+          requiresService: [
+            {
+              callerQualname: "libs/sample/domain/src/index.ts#Impure.decide",
+              tagId: "PhotoRepo",
+            },
+          ],
+          tests: [
+            {
+              testId: "libs/sample/domain/test/a.test.ts#t2",
+              testFile: "libs/sample/domain/test/a.test.ts",
+              testName: "exercises impure",
+              lastTreeHash: "workspace",
+              isPropertyTest: true,
+            },
+          ],
+          exercisesSpans: [
+            {
+              testId: "libs/sample/domain/test/a.test.ts#t2",
+              calleeQualname: "libs/sample/domain/src/index.ts#Impure.decide",
+              callCount: 1,
+              receiverLayer: null,
+            },
+          ],
+        })
+        const negativeDoc: GovernanceDocReference = {
+          id: "sample:SPEC-0003",
+          docPath: "libs/sample/docs/specs/0003.md",
+          status: "accepted",
+          markdown: `---
+id: sample:SPEC-0003
+title: Markup Negative Cases
+status: accepted
+date: 2026-11-22
+enforced_by:
+  - libs/sample/domain/src/index.ts
+spans:
+  - Impure.decide
+  - Untested.decide
+services:
+  - PhotoRepo
+---
+
+# sample:SPEC-0003: Markup Negative Cases
+
+## Requirements
+
+### Area 1: Rules
+
+| ID | Pattern | Requirement | Effect Symbol | Verification |
+| --- | --- | --- | --- | --- |
+| REQ-1.1 | **State-driven** | While active, evaluate state. | \`Impure.decide\` | \`PropertyTest\` |
+| REQ-1.2 | **Event-driven** | When submitted, run untested rule. | \`Untested.decide\` | \`PropertyTest\`, \`GraphCheck\` |
+| REQ-1.3 | **State-driven** | While pure, require R = never check. | \`Impure.decide\` | \`PropertyTest\`, \`UnitTest\` |
+| REQ-1.4 | **Event-driven** | When pure, check R = never with graph. | \`Impure.decide\` | \`UnitTest\`, \`GraphCheck\` |
+`,
+        }
+        const negReport = yield* decideOntologyInvariants({
+          graph: badGraph,
+          governanceDocs: [negativeDoc],
+        })
+        expect(
+          negReport.findings.some(
+            (f) =>
+              f.nodeId === "sample:SPEC-0003:REQ-1.1" &&
+              f.kind === "ontology-while-decider-mismatch",
+          ),
+        ).toBe(true)
+        expect(
+          negReport.findings.some(
+            (f) =>
+              f.nodeId === "sample:SPEC-0003:REQ-1.2" &&
+              f.kind === "ontology-unverified-requirement",
+          ),
+        ).toBe(true)
+        expect(
+          negReport.findings.some(
+            (f) =>
+              f.nodeId === "sample:SPEC-0003:REQ-1.3" &&
+              f.kind === "ontology-unverified-requirement",
+          ),
+        ).toBe(true)
+        expect(
+          negReport.findings.some(
+            (f) =>
+              f.nodeId === "sample:SPEC-0003:REQ-1.4" &&
+              f.kind === "ontology-unverified-requirement",
+          ),
+        ).toBe(false)
+      }),
+  )
 })

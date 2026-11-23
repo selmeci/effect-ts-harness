@@ -126,7 +126,7 @@ export const collectSemanticConflictCandidates = Effect.fn(
       .filter((d) =>
         match(d.status)
           .with("accepted", "proposed", () => true)
-          .with("deprecated", "superseded", () => false)
+          .with("draft", "deprecated", "superseded", () => false)
           .exhaustive(),
       )
       .map((d) => d.id),

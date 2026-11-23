@@ -8,6 +8,7 @@ import {
   GcFindingKind,
   type GraphEntropyInput,
   collectMarkdownFilesRecursive,
+  parseGovernanceDocFrontmatter,
   readdirOrReport,
   readTextOrReport,
 } from "./gc-helpers.js"
@@ -16,8 +17,20 @@ import {
   checkAstGateRuleClosure,
   extractGateRuleIdsFromSources,
 } from "./gc-rule-ids.js"
+import { checkHookMatcherToolParity } from "./gc-hook-parity.js"
+import { auditCatalogDocTruthInContent, checkCatalogDocTruth } from "./gc-catalog-doc-truth.js"
+import {
+  ADAPTER_SKILL_PARITY_CLAUSES,
+  auditAdapterSkillParityPair,
+  checkAdapterSkillParity,
+} from "./gc-adapter-skill-parity.js"
 
-export { extractGateRuleIdsFromSources }
+export {
+  ADAPTER_SKILL_PARITY_CLAUSES,
+  auditAdapterSkillParityPair,
+  auditCatalogDocTruthInContent,
+  extractGateRuleIdsFromSources,
+}
 
 const PkgManifestDepsSchema = Schema.Struct({
   name: Schema.optional(Schema.String),
@@ -640,7 +653,11 @@ export const evaluateDocTruthPlugin = (input: GraphEntropyInput): ReadonlyArray<
       }
     }
 
-    if (docFilesForPaths.has(absDoc)) {
+    const isDraftSpec =
+      (relDoc.includes("/docs/specs/") || relDoc.startsWith("docs/specs/")) &&
+      parseGovernanceDocFrontmatter(relDoc, content)?.status === "draft"
+
+    if (docFilesForPaths.has(absDoc) && !isDraftSpec) {
       const seenPaths = new Set<string>()
       for (const m of content.matchAll(/`([^`\n]+)`/g)) {
         const raw = m[1]!
@@ -717,10 +734,13 @@ export const evaluateDocTruthPlugin = (input: GraphEntropyInput): ReadonlyArray<
     hostIo,
     findings,
   )
+  checkHookMatcherToolParity(repoRoot, hostIo, findings)
   checkSkillTierTables(repoRoot, hostIo, findings)
   checkMermaidDependencyDrift(repoRoot, hostIo, depsByPkg, pkgByRelDir, findings)
   checkDocBannedOrPhantomTech(repoRoot, hostIo, findings)
   checkAstGateRuleClosure(repoRoot, hostIo, findings)
+  checkCatalogDocTruth(repoRoot, hostIo, findings)
+  checkAdapterSkillParity(repoRoot, hostIo, findings)
 
   return findings
 }

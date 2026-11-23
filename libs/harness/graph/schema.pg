@@ -138,7 +138,7 @@ node EarsSpec
   id: String @key @description("Canonical EARS spec identifier, e.g. harness:SPEC-0001")
   qualname: String @index
   title: String @index
-  status: enum(accepted, proposed, superseded, deprecated) @index
+  status: enum(draft, accepted, proposed, superseded, deprecated) @index
   date: String?
   path: String @index
   enforcedByFiles: [String]
@@ -166,7 +166,7 @@ node EarsRequirement
   verification: String @index
   path: String @index
   line: I32
-  status: enum(accepted, proposed, superseded, deprecated) @index
+  status: enum(draft, accepted, proposed, superseded, deprecated) @index
   clauseEmbedding: Vector(4096)? @embed("clauseText") @index
   archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index
   archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index

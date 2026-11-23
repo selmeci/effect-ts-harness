@@ -1524,4 +1524,110 @@ describe("Aggregate HTTP & Evolution Specs", () => {
         }),
       ).pipe(Effect.provide(TestEnv)),
   )
+
+  it.effect(
+    "F-20: seedAggregateStream bounds composite CommandId <= 256 chars deterministically when prefix + aggregateId > 256",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          yield* initializeProjectorTables()
+          yield* initCartViewV2Table
+          yield* initOpenCartsProjectionTable
+          const sql = yield* SqlClient
+
+          const longAggregateId = AggregateId.make("a".repeat(200))
+          const longPrefix = CommandId.make("p".repeat(200))
+          const seededVer = yield* seedAggregateStream(
+            longAggregateId,
+            [
+              {
+                _tag: "CartCreated" as const,
+                version: 1 as const,
+                cartId: CartId.make("cart-long-cmd"),
+              },
+              {
+                _tag: "ItemAdded" as const,
+                version: 1 as const,
+                cartId: CartId.make("cart-long-cmd"),
+                itemId: ItemId.make("item-long-1"),
+                quantity: positiveInt(1),
+              },
+            ],
+            cartAggregateConfigV2,
+            longPrefix,
+          )
+          expect(seededVer).toBe(2)
+
+          const eventRows = yield* sql<{ stream_version: number; command_id: string }>`
+            SELECT stream_version, command_id FROM es_events
+            WHERE aggregate_id = ${longAggregateId}
+            ORDER BY stream_version ASC
+          `
+          expect(eventRows).toHaveLength(2)
+          for (const row of eventRows) {
+            expect(row.command_id.length).toBeLessThanOrEqual(256)
+            expect(row.command_id.trim()).toBe(row.command_id)
+            expect(() => Schema.decodeSync(CommandId)(row.command_id)).not.toThrow()
+          }
+          expect(eventRows[0]?.command_id).not.toBe(eventRows[1]?.command_id)
+        }),
+      ).pipe(Effect.provide(TestEnv)),
+  )
+
+  it.effect(
+    "SPEC-0030 2nd-pass: seedAggregateStream clamps oversized >65536 schema failure causes into typed EventSerializationError without synchronous ErrorMessage defect",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* initializeAggregateTables()
+          yield* initializeProjectorTables()
+          yield* initCartViewV2Table
+          yield* initOpenCartsProjectionTable
+
+          const hugeCauseConfig = {
+            ...cartAggregateConfigV2,
+            projections: [],
+            eventSchema: CartEventV2.pipe(
+              Schema.check(
+                Schema.makeFilter(() => `Oversized serialization cause: ${"x".repeat(70_000)}`),
+              ),
+            ),
+          }
+
+          const seedExit = yield* seedAggregateStream(
+            AggregateId.make("cart-oversized-cause"),
+            [
+              {
+                _tag: "CartCreated" as const,
+                version: 1 as const,
+                cartId: CartId.make("cart-oversized-cause"),
+              },
+            ],
+            hugeCauseConfig,
+          ).pipe(Effect.exit)
+
+          match(seedExit)
+            .with({ _tag: "Failure" }, (f) => {
+              match(Cause.findErrorOption(f.cause))
+                .with({ _tag: "Some" }, ({ value }) => {
+                  match(value)
+                    .with({ _tag: "EventSerializationError" }, (serErr) => {
+                      expect(serErr.reason.length).toBeLessThanOrEqual(65_536)
+                      expect(serErr.reason).toContain("Oversized serialization cause:")
+                    })
+                    .otherwise(() =>
+                      expect.unreachable(`expected EventSerializationError, got ${value._tag}`),
+                    )
+                })
+                .with({ _tag: "None" }, () =>
+                  expect.unreachable("expected typed EventSerializationError, not Defect"),
+                )
+                .exhaustive()
+            })
+            .with({ _tag: "Success" }, () => expect.unreachable("expected EventSerializationError"))
+            .exhaustive()
+        }),
+      ).pipe(Effect.provide(TestEnv)),
+  )
 })

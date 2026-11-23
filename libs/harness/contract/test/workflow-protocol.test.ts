@@ -1,0 +1,677 @@
+import { Arbitrary, Effect, Result, Schema } from "effect"
+import { match } from "ts-pattern"
+import { describe, expect, it } from "vitest"
+import {
+  AttemptNumber,
+  EscalationOrdinal,
+  WORKFLOW_ACTIVITY_DECODERS,
+  WORKFLOW_DEFERRED_DECODERS,
+  WORKFLOW_TIMEOUT_BUDGETS,
+  WaveIndex,
+  WorkUnitId,
+  WorkflowActivityName,
+  WorkflowActivityTag,
+  WorkflowDeferredTag,
+  WorkflowPollAttempts,
+  WorkflowPollBudget,
+  WorkflowRunAbortTarget,
+  WorkflowTimeoutBudgets,
+  WorkflowTimeoutMs,
+  decodeWorkflowActivityName,
+  decodeWorkflowDeferredName,
+  encodeWorkflowActivityName,
+  encodeWorkflowDeferredName,
+  validateWorkflowTimeoutBudgets,
+} from "../src/index.js"
+
+const expectDecodedActivity = (raw: string, expected: WorkflowActivityTag): void => {
+  const res = decodeWorkflowActivityName(raw)
+  match(res)
+    .with({ _tag: "Success" }, ({ success }) => expect(success).toEqual(expected))
+    .with({ _tag: "Failure" }, ({ failure }) =>
+      expect.unreachable(`Expected activity decode success for '${raw}': ${failure}`),
+    )
+    .exhaustive()
+}
+
+const expectDecodedDeferred = (raw: string, expected: WorkflowDeferredTag): void => {
+  const res = decodeWorkflowDeferredName(raw)
+  match(res)
+    .with({ _tag: "Success" }, ({ success }) => expect(success).toEqual(expected))
+    .with({ _tag: "Failure" }, ({ failure }) =>
+      expect.unreachable(`Expected deferred decode success for '${raw}': ${failure}`),
+    )
+    .exhaustive()
+}
+
+const firstCharArb = Arbitrary.schema(Schema.Literals(["a", "b", "m", "u", "s", "0", "9"]))
+const tailCharArb = Arbitrary.schema(Schema.Literals(["a", "z", "0", "-", "_", ".", ":"]))
+const workUnitIdArb: Arbitrary.Arbitrary<WorkUnitId> = Arbitrary.map(
+  Arbitrary.all({
+    first: Arbitrary.schema(Schema.Literals(["merge", "a", "u", "s", "0"])),
+    tail: Arbitrary.array(tailCharArb, { minLength: 0, maxLength: 10 }),
+    useMergeLiteral: Arbitrary.schema(Schema.Literals([true, false])),
+  }),
+  ({ first, tail, useMergeLiteral }) =>
+    WorkUnitId.make(
+      useMergeLiteral ? "merge" : `${first === "merge" ? "m" : first}${tail.join("")}`,
+    ),
+)
+void firstCharArb
+
+const attemptArb: Arbitrary.Arbitrary<AttemptNumber> = Arbitrary.map(
+  Arbitrary.schema(Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 1, maximum: 3 })))),
+  (n) => AttemptNumber.make(n),
+)
+
+const escalationArb: Arbitrary.Arbitrary<EscalationOrdinal> = Arbitrary.map(
+  Arbitrary.schema(Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 1, maximum: 12 })))),
+  (n) => EscalationOrdinal.make(n),
+)
+
+const waveArb: Arbitrary.Arbitrary<WaveIndex> = Arbitrary.map(
+  Arbitrary.schema(Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 0, maximum: 12 })))),
+  (n) => WaveIndex.make(n),
+)
+
+const abortTargetArb: Arbitrary.Arbitrary<WorkflowRunAbortTarget> = Arbitrary.map(
+  Arbitrary.all({
+    kind: Arbitrary.schema(Schema.Literals(["Unit", "Merge"])),
+    unitId: workUnitIdArb,
+    waveIndex: waveArb,
+    escalationOrdinal: escalationArb,
+  }),
+  ({ kind, unitId, waveIndex, escalationOrdinal }) =>
+    match(kind)
+      .with("Unit", () => WorkflowRunAbortTarget.cases.Unit.make({ unitId, escalationOrdinal }))
+      .with("Merge", () =>
+        WorkflowRunAbortTarget.cases.Merge.make({ waveIndex, escalationOrdinal }),
+      )
+      .exhaustive(),
+)
+
+const activityTagArb: Arbitrary.Arbitrary<WorkflowActivityTag> = Arbitrary.map(
+  Arbitrary.all({
+    kind: Arbitrary.schema(
+      Schema.Literals([
+        "ProvisionWorktrees",
+        "ProjectRunStarted",
+        "ProjectRunWaitingLlmPhase",
+        "ProjectRunCompleted",
+        "RouteReview",
+        "ProjectRunAborted",
+        "MergeSliceWave",
+        "ProjectWaveMergeEscalated",
+        "ProjectWaveMergeRetried",
+        "ProjectUnitDispatched",
+        "ProjectUnitCompleted",
+        "ProjectUnitRejected",
+        "ProjectUnitAttemptEscalated",
+        "DispatchUnitAgent",
+        "VerifyUnit",
+        "ProjectUnitEscalated",
+        "ProjectUnitEscalationRetried",
+        "VerifySharedStep",
+      ]),
+    ),
+    abortTarget: abortTargetArb,
+    unitId: workUnitIdArb,
+    attempt: attemptArb,
+    escalationOrdinal: escalationArb,
+    waveIndex: waveArb,
+  }),
+  ({ kind, abortTarget, unitId, attempt, escalationOrdinal, waveIndex }) =>
+    match(kind)
+      .with("ProvisionWorktrees", () => WorkflowActivityTag.cases.ProvisionWorktrees.make({}))
+      .with("ProjectRunStarted", () => WorkflowActivityTag.cases.ProjectRunStarted.make({}))
+      .with("ProjectRunWaitingLlmPhase", () =>
+        WorkflowActivityTag.cases.ProjectRunWaitingLlmPhase.make({}),
+      )
+      .with("ProjectRunCompleted", () => WorkflowActivityTag.cases.ProjectRunCompleted.make({}))
+      .with("RouteReview", () => WorkflowActivityTag.cases.RouteReview.make({}))
+      .with("ProjectRunAborted", () =>
+        WorkflowActivityTag.cases.ProjectRunAborted.make({ target: abortTarget }),
+      )
+      .with("MergeSliceWave", () =>
+        WorkflowActivityTag.cases.MergeSliceWave.make({ waveIndex, escalationOrdinal }),
+      )
+      .with("ProjectWaveMergeEscalated", () =>
+        WorkflowActivityTag.cases.ProjectWaveMergeEscalated.make({
+          waveIndex,
+          escalationOrdinal,
+        }),
+      )
+      .with("ProjectWaveMergeRetried", () =>
+        WorkflowActivityTag.cases.ProjectWaveMergeRetried.make({ waveIndex, escalationOrdinal }),
+      )
+      .with("ProjectUnitDispatched", () =>
+        WorkflowActivityTag.cases.ProjectUnitDispatched.make({
+          unitId,
+          attempt,
+          escalationOrdinal,
+        }),
+      )
+      .with("ProjectUnitCompleted", () =>
+        WorkflowActivityTag.cases.ProjectUnitCompleted.make({
+          unitId,
+          attempt,
+          escalationOrdinal,
+        }),
+      )
+      .with("ProjectUnitRejected", () =>
+        WorkflowActivityTag.cases.ProjectUnitRejected.make({
+          unitId,
+          attempt,
+          escalationOrdinal,
+        }),
+      )
+      .with("ProjectUnitAttemptEscalated", () =>
+        WorkflowActivityTag.cases.ProjectUnitAttemptEscalated.make({
+          unitId,
+          attempt,
+          escalationOrdinal,
+        }),
+      )
+      .with("DispatchUnitAgent", () =>
+        WorkflowActivityTag.cases.DispatchUnitAgent.make({
+          unitId,
+          attempt,
+          escalationOrdinal,
+        }),
+      )
+      .with("VerifyUnit", () =>
+        WorkflowActivityTag.cases.VerifyUnit.make({ unitId, attempt, escalationOrdinal }),
+      )
+      .with("ProjectUnitEscalated", () =>
+        WorkflowActivityTag.cases.ProjectUnitEscalated.make({ unitId, escalationOrdinal }),
+      )
+      .with("ProjectUnitEscalationRetried", () =>
+        WorkflowActivityTag.cases.ProjectUnitEscalationRetried.make({
+          unitId,
+          escalationOrdinal,
+        }),
+      )
+      .with("VerifySharedStep", () =>
+        WorkflowActivityTag.cases.VerifySharedStep.make({ attempt, escalationOrdinal }),
+      )
+      .exhaustive(),
+)
+
+const deferredTagArb: Arbitrary.Arbitrary<WorkflowDeferredTag> = Arbitrary.map(
+  Arbitrary.all({
+    kind: Arbitrary.schema(
+      Schema.Literals(["LlmPhaseDone", "InterruptSignal", "UnitCompletion", "UnitEscalation"]),
+    ),
+    unitId: workUnitIdArb,
+    attempt: attemptArb,
+    escalationOrdinal: escalationArb,
+  }),
+  ({ kind, unitId, attempt, escalationOrdinal }) =>
+    match(kind)
+      .with("LlmPhaseDone", () => WorkflowDeferredTag.cases.LlmPhaseDone.make({}))
+      .with("InterruptSignal", () => WorkflowDeferredTag.cases.InterruptSignal.make({}))
+      .with("UnitCompletion", () =>
+        WorkflowDeferredTag.cases.UnitCompletion.make({ unitId, attempt, escalationOrdinal }),
+      )
+      .with("UnitEscalation", () =>
+        WorkflowDeferredTag.cases.UnitEscalation.make({ unitId, escalationOrdinal }),
+      )
+      .exhaustive(),
+)
+
+describe("workflow-protocol & workflow-timeouts", () => {
+  it("encodes and decodes all 18 WorkflowActivityTag variants including 'merge' WorkUnitId disambiguation", () => {
+    const unitId = WorkUnitId.make("unit-a")
+    const mergeNamedUnit = WorkUnitId.make("merge")
+    const a1 = AttemptNumber.make(1)
+    const a3 = AttemptNumber.make(3)
+    const o1 = EscalationOrdinal.make(1)
+    const o2 = EscalationOrdinal.make(2)
+    const w0 = WaveIndex.make(0)
+    const w2 = WaveIndex.make(2)
+
+    const cases: ReadonlyArray<readonly [WorkflowActivityTag, string]> = [
+      [WorkflowActivityTag.cases.ProvisionWorktrees.make({}), "ProvisionWorktrees"],
+      [WorkflowActivityTag.cases.ProjectRunStarted.make({}), "ProjectRunStarted"],
+      [WorkflowActivityTag.cases.ProjectRunWaitingLlmPhase.make({}), "ProjectRunWaitingLlmPhase"],
+      [WorkflowActivityTag.cases.ProjectRunCompleted.make({}), "ProjectRunCompleted"],
+      [WorkflowActivityTag.cases.RouteReview.make({}), "RouteReview"],
+      [
+        WorkflowActivityTag.cases.ProjectRunAborted.make({
+          target: WorkflowRunAbortTarget.cases.Unit.make({ unitId, escalationOrdinal: o1 }),
+        }),
+        "ProjectRunAborted/unit-a/1",
+      ],
+      [
+        WorkflowActivityTag.cases.ProjectRunAborted.make({
+          target: WorkflowRunAbortTarget.cases.Unit.make({
+            unitId: mergeNamedUnit,
+            escalationOrdinal: o1,
+          }),
+        }),
+        "ProjectRunAborted/merge/1",
+      ],
+      [
+        WorkflowActivityTag.cases.ProjectRunAborted.make({
+          target: WorkflowRunAbortTarget.cases.Merge.make({
+            waveIndex: w0,
+            escalationOrdinal: o2,
+          }),
+        }),
+        "ProjectRunAborted/merge/0/2",
+      ],
+      [
+        WorkflowActivityTag.cases.MergeSliceWave.make({ waveIndex: w0, escalationOrdinal: o1 }),
+        "MergeSliceWave/0",
+      ],
+      [
+        WorkflowActivityTag.cases.MergeSliceWave.make({ waveIndex: w2, escalationOrdinal: o2 }),
+        "MergeSliceWave/2/r2",
+      ],
+      [
+        WorkflowActivityTag.cases.ProjectWaveMergeEscalated.make({
+          waveIndex: w0,
+          escalationOrdinal: o1,
+        }),
+        "ProjectWaveMergeEscalated/0/1",
+      ],
+      [
+        WorkflowActivityTag.cases.ProjectWaveMergeRetried.make({
+          waveIndex: w2,
+          escalationOrdinal: o2,
+        }),
+        "ProjectWaveMergeRetried/2/2",
+      ],
+      [
+        WorkflowActivityTag.cases.ProjectUnitDispatched.make({
+          unitId,
+          attempt: a1,
+          escalationOrdinal: o1,
+        }),
+        "ProjectUnitDispatched/unit-a/1",
+      ],
+      [
+        WorkflowActivityTag.cases.ProjectUnitCompleted.make({
+          unitId,
+          attempt: a1,
+          escalationOrdinal: o1,
+        }),
+        "ProjectUnitCompleted/unit-a/1",
+      ],
+      [
+        WorkflowActivityTag.cases.ProjectUnitRejected.make({
+          unitId,
+          attempt: a3,
+          escalationOrdinal: o2,
+        }),
+        "ProjectUnitRejected/unit-a/3/r2",
+      ],
+      [
+        WorkflowActivityTag.cases.ProjectUnitAttemptEscalated.make({
+          unitId,
+          attempt: a3,
+          escalationOrdinal: o1,
+        }),
+        "ProjectUnitAttemptEscalated/unit-a/3",
+      ],
+      [
+        WorkflowActivityTag.cases.DispatchUnitAgent.make({
+          unitId,
+          attempt: a1,
+          escalationOrdinal: o1,
+        }),
+        "DispatchUnitAgent/unit-a/1",
+      ],
+      [
+        WorkflowActivityTag.cases.VerifyUnit.make({ unitId, attempt: a3, escalationOrdinal: o2 }),
+        "VerifyUnit/unit-a/3/r2",
+      ],
+      [
+        WorkflowActivityTag.cases.ProjectUnitEscalated.make({ unitId, escalationOrdinal: o1 }),
+        "ProjectUnitEscalated/unit-a/1",
+      ],
+      [
+        WorkflowActivityTag.cases.ProjectUnitEscalationRetried.make({
+          unitId,
+          escalationOrdinal: o2,
+        }),
+        "ProjectUnitEscalationRetried/unit-a/2",
+      ],
+      [
+        WorkflowActivityTag.cases.VerifySharedStep.make({ attempt: a1, escalationOrdinal: o1 }),
+        "VerifySharedStep/1",
+      ],
+      [
+        WorkflowActivityTag.cases.VerifySharedStep.make({ attempt: a3, escalationOrdinal: o2 }),
+        "VerifySharedStep/3/r2",
+      ],
+    ]
+
+    for (const [tag, wire] of cases) {
+      const encoded = encodeWorkflowActivityName(tag)
+      expect(encoded).toBe(WorkflowActivityName.make(wire))
+      expectDecodedActivity(wire, tag)
+    }
+  })
+
+  it("encodes and decodes all 4 WorkflowDeferredTag variants", () => {
+    const unitId = WorkUnitId.make("unit-a")
+    const a2 = AttemptNumber.make(2)
+    const o1 = EscalationOrdinal.make(1)
+    const o3 = EscalationOrdinal.make(3)
+
+    const cases: ReadonlyArray<readonly [WorkflowDeferredTag, string]> = [
+      [WorkflowDeferredTag.cases.LlmPhaseDone.make({}), "llm-phase-done"],
+      [WorkflowDeferredTag.cases.InterruptSignal.make({}), "Workflow/InterruptSignal"],
+      [
+        WorkflowDeferredTag.cases.UnitCompletion.make({
+          unitId,
+          attempt: a2,
+          escalationOrdinal: o1,
+        }),
+        "unit/unit-a/2",
+      ],
+      [
+        WorkflowDeferredTag.cases.UnitCompletion.make({
+          unitId,
+          attempt: a2,
+          escalationOrdinal: o3,
+        }),
+        "unit/unit-a/2/r3",
+      ],
+      [
+        WorkflowDeferredTag.cases.UnitEscalation.make({ unitId, escalationOrdinal: o3 }),
+        "escalation/unit-a/3",
+      ],
+    ]
+
+    for (const [tag, wire] of cases) {
+      expect(encodeWorkflowDeferredName(tag)).toBe(wire)
+      expectDecodedDeferred(wire, tag)
+    }
+  })
+
+  it("rejects malformed, prototype-named, out-of-range, and non-canonical activity/deferred names", () => {
+    const badActivities = [
+      "",
+      "toString",
+      "constructor",
+      "__proto__",
+      "NoopTick/0",
+      "ProvisionWorktrees/extra",
+      "RouteReview/",
+      "ProjectRunAborted",
+      "ProjectRunAborted/u1",
+      "ProjectRunAborted/u1/0",
+      "ProjectRunAborted/u1/01",
+      "ProjectRunAborted/BAD_ID/1",
+      "ProjectRunAborted/foo/0/1",
+      "ProjectRunAborted/merge/bad/1",
+      "ProjectRunAborted/merge/0/0",
+      "ProjectRunAborted/merge/0/1/extra",
+      "MergeSliceWave",
+      "MergeSliceWave/-1",
+      "MergeSliceWave/01",
+      "MergeSliceWave/0/r1",
+      "MergeSliceWave/0/r0",
+      "MergeSliceWave/0/r02",
+      "MergeSliceWave/0/x2",
+      "MergeSliceWave/0/r2/extra",
+      "MergeSliceWave/9007199254740992",
+      "VerifySharedStep",
+      "VerifySharedStep/0",
+      "VerifySharedStep/4",
+      "VerifySharedStep/1/r1",
+      "VerifySharedStep/1/r2/extra",
+      "ProjectWaveMergeEscalated",
+      "ProjectWaveMergeEscalated/0",
+      "ProjectWaveMergeEscalated/0/0",
+      "ProjectWaveMergeEscalated/0/1/extra",
+      "ProjectWaveMergeEscalated/-1/1",
+      "ProjectWaveMergeRetried/01/1",
+      "VerifyUnit",
+      "VerifyUnit/u1",
+      "VerifyUnit/u1/0",
+      "VerifyUnit/u1/4",
+      "VerifyUnit/BAD_ID/1",
+      "VerifyUnit/u1/1/r1",
+      "VerifyUnit/u1/1/r2/extra",
+      "VerifyUnit/u1/1/r9007199254740992",
+      "ProjectUnitEscalated",
+      "ProjectUnitEscalated/u1",
+      "ProjectUnitEscalated/u1/0",
+      "ProjectUnitEscalated/BAD_ID/1",
+      "ProjectUnitEscalated/u1/1/extra",
+      "ProjectUnitEscalationRetried/u1/9007199254740992",
+    ]
+    for (const bad of badActivities) {
+      const res = decodeWorkflowActivityName(bad)
+      expect(Result.isFailure(res)).toBe(true)
+    }
+
+    const badDeferreds = [
+      "",
+      "unknown",
+      "toString",
+      "llm-phase-done/extra",
+      "Workflow/InterruptSignal/extra",
+      "unit",
+      "unit/u1",
+      "unit/u1/0",
+      "unit/u1/4",
+      "unit/BAD_ID/1",
+      "unit/u1/1/r1",
+      "unit/u1/1/r2/extra",
+      "escalation",
+      "escalation/u1",
+      "escalation/u1/0",
+      "escalation/BAD_ID/1",
+      "escalation/u1/1/extra",
+    ]
+    for (const bad of badDeferreds) {
+      const res = decodeWorkflowDeferredName(bad)
+      expect(Result.isFailure(res)).toBe(true)
+    }
+  })
+
+  it("satisfies lossless round-trip across arbitrary WorkflowActivityTag and WorkflowDeferredTag values", () => {
+    const activityTagEquivalence = Schema.toEquivalence(WorkflowActivityTag)
+    const deferredTagEquivalence = Schema.toEquivalence(WorkflowDeferredTag)
+
+    const activityCheck = Effect.runSync(
+      Arbitrary.checkEffect(
+        activityTagArb,
+        (tag) => {
+          const encoded = encodeWorkflowActivityName(tag)
+          const decoded = decodeWorkflowActivityName(encoded)
+          return match(decoded)
+            .with({ _tag: "Failure" }, () => false)
+            .with(
+              { _tag: "Success" },
+              ({ success }) =>
+                activityTagEquivalence(success, tag) &&
+                encodeWorkflowActivityName(success) === encoded,
+            )
+            .exhaustive()
+        },
+        { runs: 150, seed: 27 },
+      ),
+    )
+    expect(activityCheck._tag).toBe("Passed")
+
+    const deferredCheck = Effect.runSync(
+      Arbitrary.checkEffect(
+        deferredTagArb,
+        (tag) => {
+          const encoded = encodeWorkflowDeferredName(tag)
+          const decoded = decodeWorkflowDeferredName(encoded)
+          return match(decoded)
+            .with({ _tag: "Failure" }, () => false)
+            .with(
+              { _tag: "Success" },
+              ({ success }) =>
+                deferredTagEquivalence(success, tag) &&
+                encodeWorkflowDeferredName(success) === encoded,
+            )
+            .exhaustive()
+        },
+        { runs: 100, seed: 27 },
+      ),
+    )
+    expect(deferredCheck._tag).toBe("Passed")
+  })
+
+  it("ties WORKFLOW_ACTIVITY_DECODERS and WORKFLOW_DEFERRED_DECODERS exhaustively to union variants", () => {
+    expect(Object.keys(WORKFLOW_ACTIVITY_DECODERS).sort()).toEqual(
+      Object.keys(WorkflowActivityTag.cases).sort(),
+    )
+    expect(Object.keys(WORKFLOW_DEFERRED_DECODERS).sort()).toEqual(
+      Object.keys(WorkflowDeferredTag.cases).sort(),
+    )
+  })
+
+  it("validates WORKFLOW_TIMEOUT_BUDGETS schema defaults and strict default inequalities", () => {
+    expect(Schema.decodeSync(WorkflowTimeoutBudgets)(WORKFLOW_TIMEOUT_BUDGETS)).toEqual(
+      WORKFLOW_TIMEOUT_BUDGETS,
+    )
+    const pollBudget: WorkflowPollBudget = Schema.decodeSync(WorkflowPollBudget)({
+      maxAttempts: WORKFLOW_TIMEOUT_BUDGETS.pollSettleMaxAttempts,
+      intervalMs: WORKFLOW_TIMEOUT_BUDGETS.pollSettleIntervalMs,
+    })
+    expect(pollBudget.maxAttempts).toBe(80)
+    expect(pollBudget.intervalMs).toBe(25)
+
+    const validRes = validateWorkflowTimeoutBudgets(WORKFLOW_TIMEOUT_BUDGETS)
+    match(validRes)
+      .with({ _tag: "Success" }, ({ success }) => expect(success).toBe(WORKFLOW_TIMEOUT_BUDGETS))
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        expect.unreachable(`Expected default WORKFLOW_TIMEOUT_BUDGETS to pass: ${failure}`),
+      )
+      .exhaustive()
+  })
+
+  it("rejects inverted server socket and workflowCompleteIpcMs timeout layers", () => {
+    // Inequality 1: workflowServerSocketMs > workflowCompleteIpcMs
+    expect(
+      Result.isFailure(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          workflowServerSocketMs: WORKFLOW_TIMEOUT_BUDGETS.workflowCompleteIpcMs,
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      Result.isSuccess(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          workflowServerSocketMs: WorkflowTimeoutMs.make(
+            WORKFLOW_TIMEOUT_BUDGETS.workflowCompleteIpcMs + 1,
+          ),
+        }),
+      ),
+    ).toBe(true)
+
+    // Inequality 2: workflowCompleteIpcMs > unitVerifyMs + pollSettleMaxAttempts * pollSettleIntervalMs
+    const exactPollBudget =
+      WORKFLOW_TIMEOUT_BUDGETS.unitVerifyMs +
+      WORKFLOW_TIMEOUT_BUDGETS.pollSettleMaxAttempts * WORKFLOW_TIMEOUT_BUDGETS.pollSettleIntervalMs
+    expect(
+      Result.isFailure(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          workflowCompleteIpcMs: WorkflowTimeoutMs.make(exactPollBudget),
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      Result.isSuccess(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          workflowCompleteIpcMs: WorkflowTimeoutMs.make(exactPollBudget + 1),
+        }),
+      ),
+    ).toBe(true)
+    const scaledPollBudget = {
+      ...WORKFLOW_TIMEOUT_BUDGETS,
+      pollSettleMaxAttempts: WorkflowPollAttempts.make(80),
+      pollSettleIntervalMs: WorkflowTimeoutMs.make(100),
+    }
+    expect(
+      Result.isFailure(
+        validateWorkflowTimeoutBudgets({
+          ...scaledPollBudget,
+          workflowCompleteIpcMs: WorkflowTimeoutMs.make(128_000),
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      Result.isSuccess(
+        validateWorkflowTimeoutBudgets({
+          ...scaledPollBudget,
+          workflowCompleteIpcMs: WorkflowTimeoutMs.make(128_001),
+        }),
+      ),
+    ).toBe(true)
+  })
+
+  it("rejects inverted default server socket and abort settle timeout layers", () => {
+    // Inequality 3: defaultServerSocketMs > workflowIpcMs
+    expect(
+      Result.isFailure(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          defaultServerSocketMs: WORKFLOW_TIMEOUT_BUDGETS.workflowIpcMs,
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      Result.isSuccess(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          defaultServerSocketMs: WorkflowTimeoutMs.make(WORKFLOW_TIMEOUT_BUDGETS.workflowIpcMs + 1),
+        }),
+      ),
+    ).toBe(true)
+
+    // Inequality 4: workflowIpcMs > abortSettleMaxAttempts * abortSettleIntervalMs
+    const exactAbortBudget =
+      WORKFLOW_TIMEOUT_BUDGETS.abortSettleMaxAttempts *
+      WORKFLOW_TIMEOUT_BUDGETS.abortSettleIntervalMs
+    expect(
+      Result.isFailure(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          workflowIpcMs: WorkflowTimeoutMs.make(exactAbortBudget),
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      Result.isSuccess(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          workflowIpcMs: WorkflowTimeoutMs.make(exactAbortBudget + 1),
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      Result.isFailure(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          abortSettleMaxAttempts: WorkflowPollAttempts.make(100),
+          abortSettleIntervalMs: WorkflowTimeoutMs.make(200),
+          workflowIpcMs: WorkflowTimeoutMs.make(20_000),
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      Result.isSuccess(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          abortSettleMaxAttempts: WorkflowPollAttempts.make(100),
+          abortSettleIntervalMs: WorkflowTimeoutMs.make(200),
+          workflowIpcMs: WorkflowTimeoutMs.make(20_001),
+        }),
+      ),
+    ).toBe(true)
+  })
+})

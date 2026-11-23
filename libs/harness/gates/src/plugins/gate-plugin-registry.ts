@@ -1,7 +1,9 @@
-import { Context, Effect, Layer } from "effect"
+import { Context, Effect, Layer, Schema } from "effect"
+import { match } from "ts-pattern"
 import {
   AstSourceContent,
   AstSourceFilePath,
+  ErrorReasonMessage,
   makeSelfDogfoodingReport,
   type MaxPluginFileLines,
   PluginId,
@@ -10,7 +12,8 @@ import {
   type SelfDogfoodingViolation,
   SelfDogfoodingViolationError,
   type WorkspaceFilePath,
-  type WorkspaceFsError,
+  WorkspaceFsError,
+  WorkspaceFsOperation,
 } from "@harness/contract"
 import { NonNegativeCount } from "@harness/graph"
 import { WorkspaceFs } from "@harness/service"
@@ -128,10 +131,27 @@ export const evaluateAllGatePlugins = Effect.fn("GatePluginRunner.evaluateAll")(
 > {
   const registry = yield* GatePluginRegistry
   const stats = yield* statAndReadWorkspaceFiles(input.filePaths)
-  const loadedFiles: ReadonlyArray<SelfDogfoodingFileInput> = stats.map((fileStat) => ({
-    filePath: AstSourceFilePath.make(fileStat.filePath),
-    content: AstSourceContent.make(fileStat.content),
-  }))
+  const loadedFiles: Array<SelfDogfoodingFileInput> = []
+  for (const fileStat of stats) {
+    const decodedPath = Schema.decodeOption(AstSourceFilePath)(fileStat.filePath)
+    const decodedContent = Schema.decodeOption(AstSourceContent)(fileStat.content)
+    const decoded = match([decodedPath, decodedContent] as const)
+      .with([{ _tag: "Some" }, { _tag: "Some" }], ([p, c]) => ({
+        filePath: p.value,
+        content: c.value,
+      }))
+      .otherwise(() => undefined)
+    if (decoded === undefined) {
+      return yield* new WorkspaceFsError({
+        filePath: fileStat.filePath,
+        operation: WorkspaceFsOperation.make("read"),
+        reason: ErrorReasonMessage.make(
+          `AST gate file '${fileStat.filePath}' failed bounded path or content validation`,
+        ),
+      })
+    }
+    loadedFiles.push(decoded)
+  }
 
   return yield* registry.evaluateFiles(loadedFiles, {
     maxPluginFileLines: input.maxPluginFileLines,

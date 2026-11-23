@@ -28,7 +28,7 @@ Monorepo je spravované nástrojom **Nx** a balíčkovacím manažérom **pnpm**
 graph TD
     subgraph "Harness Platform (libs/harness/* & apps/harness-*)"
         CLI["apps/harness-cli<br/>(type:app — effect/cli + NodeRuntime)"]
-        MCP["apps/harness-mcp<br/>(type:app — ManagedRuntime, 19 MCP nástrojov)"]
+        MCP["apps/harness-mcp<br/>(type:app — ManagedRuntime, 20 MCP nástrojov)"]
         H_INFRA["libs/harness/infra<br/>(type:infra — NodeServices, ScopedCache.makeWith, Ref+Deferred, UnixSocketDaemon, LocalDecisionModel)"]
         GATES["libs/harness/gates<br/>(type:core — 18+ čistých deciderov & brány)"]
         DECISION["libs/harness/decision<br/>(type:core — 14 schém DecisionModel & čisté smerovanie)"]
@@ -55,7 +55,7 @@ graph TD
 
     CLI --> H_INFRA & GATES & DECISION & INGEST & GRAPH
     MCP --> H_INFRA & GATES & DECISION & INGEST & GRAPH
-    H_INFRA --> GRAPH & H_SVC & H_CON
+    H_INFRA --> GRAPH & H_SVC & H_CON & GATES & DECISION
     GATES --> GRAPH & H_SVC & H_CON
     DECISION --> GATES & H_SVC & H_CON
     INGEST --> H_SVC & H_CON
@@ -95,10 +95,10 @@ graph TD
    - Poskytuje natívne Effect v4 `Live` vrstvy nad `@effect/platform-node` (`NodeServices.layer`, `FileSystem.FileSystem`, `Path.Path`, `ChildProcessSpawner`, `ScopedCache.makeWith` pre `AstGateCacheLive`, per-key `Ref` + `Deferred` single-flight deduplikáciu pre `DecisionCacheLive`, `SynchronizedRef`, `Effect.acquireRelease` pre `UnixSocketDaemonLive`, a `LocalDecisionModel` v `libs/harness/infra/src/local-decision-model-live.ts`).
 8. **`apps/harness-cli` (`type:app`):**
    - Deklaratívny `effect/cli` + `NodeRuntime.runMain` vstupný bod pre nástroje agentov a automatizačné háky (hooks).
-   - Poskytuje subpríkazy: `guard`, `route`, `plan-check`, `verify`, `done`, `ingest`, `session`, `doctor`, `learn`, `ontology`, `gc`, `mutate`, `report`, `check-openapi`, `check-migrations`, `check-event-schemas`, `benchmark`, `scenario`.
+   - Poskytuje subpríkazy: `guard`, `route`, `plan-check`, `verify`, `done`, `workflow`, `ingest`, `session`, `doctor`, `learn`, `ontology`, `gc`, `mutate`, `report`, `check-openapi`, `check-migrations`, `check-event-schemas`, `benchmark`, `scenario`.
 9. **`apps/harness-mcp` (`type:app`):**
    - Štandardný Model Context Protocol (MCP) server bežiaci cez `stdio` nad zdieľaným `ManagedRuntime`.
-   - Sprístupňuje agentom **19 analytických nástrojov**: `harness_resolve`, `harness_callers`, `harness_callees`, `harness_tests_reaching`, `harness_structural_search`, `harness_route`, `harness_search_knowledge`, `harness_doc_tree`, `harness_review_route`, `harness_ontology_why`, `harness_ontology_impact`, `harness_ontology_check`, `harness_gq_query`, `harness_lsp_diagnostics`, `harness_telemetry_report`, `harness_graph_infer`, `harness_graph_complete`, `harness_graph_rewrite` a `harness_git_diff`.
+   - Sprístupňuje agentom **20 analytických nástrojov**: `harness_resolve`, `harness_callers`, `harness_callees`, `harness_tests_reaching`, `harness_structural_search`, `harness_route`, `harness_search_knowledge`, `harness_doc_tree`, `harness_review_route`, `harness_ontology_why`, `harness_ontology_impact`, `harness_ontology_check`, `harness_gq_query`, `harness_lsp_diagnostics`, `harness_telemetry_report`, `harness_graph_infer`, `harness_graph_complete`, `harness_graph_rewrite`, `harness_git_diff` a `harness_workflow_plan`.
 
 #### Komponenty Event Sourcingu (`libs/es/*`) & Ukážkovej Aplikácie (`libs/sample/*`, `apps/sample-*`)
 

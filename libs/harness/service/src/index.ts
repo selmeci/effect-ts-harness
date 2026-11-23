@@ -65,7 +65,22 @@ export {
   type UnixSocketDaemonPortShape,
 } from "./cache-and-daemon-ports.js"
 
-export { WorkflowGraphBackup, type WorkflowGraphBackupShape } from "./workflow-ports.js"
+export {
+  UnitAgentDispatcher,
+  type UnitAgentDispatcherShape,
+  UnitVerifier,
+  type UnitVerifierShape,
+  WorkflowGraphBackup,
+  type WorkflowGraphBackupShape,
+  WorkflowProjectionWriter,
+  type WorkflowProjectionWriterShape,
+  WorkflowReadModelQuery,
+  type WorkflowReadModelQueryShape,
+  WorkflowReviewRouter,
+  type WorkflowReviewRouterShape,
+  WorkflowWorktreePort,
+  type WorkflowWorktreePortShape,
+} from "./workflow-ports.js"
 
 export {
   EmbeddingCachePort,

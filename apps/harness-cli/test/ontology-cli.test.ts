@@ -375,6 +375,128 @@ status: accepted
       }),
   )
 
+  const makeSemanticCheckTestFixtures = (tmpDir: string) => {
+    mkdirSync(join(tmpDir, "libs/sample/docs/specs"), { recursive: true })
+    writeFileSync(
+      join(tmpDir, "libs/sample/docs/specs/0001.md"),
+      `---\nid: sample:SPEC-0001\ntitle: Spec One\nstatus: accepted\n---\n`,
+      "utf8",
+    )
+    writeFileSync(
+      join(tmpDir, "libs/sample/docs/specs/0002.md"),
+      `---\nid: sample:SPEC-0002\ntitle: Spec Two\nstatus: accepted\n---\n`,
+      "utf8",
+    )
+
+    const crossSpecGraph = buildHarnessGraph({
+      services: [
+        {
+          tagId: "PhotoRepo",
+          name: "PhotoRepo",
+          packageTag: "service",
+          file: "libs/sample/service/src/index.ts",
+        },
+      ],
+      layers: [
+        {
+          qualname: "PhotoRepoLive",
+          layerKind: "infra",
+          packageTag: "infra",
+          file: "libs/sample/infra/src/index.ts",
+        },
+      ],
+      providesService: [{ layerQualname: "PhotoRepoLive", tagId: "PhotoRepo" }],
+      specifiesSymbols: [
+        { specId: "sample:SPEC-0001", targetKey: "PhotoRepo", targetKind: "ServiceTag" },
+        { specId: "sample:SPEC-0002", targetKey: "PhotoRepo", targetKind: "ServiceTag" },
+      ],
+      earsSpecs: [
+        {
+          id: "sample:SPEC-0001",
+          title: "Spec One",
+          status: "accepted",
+          path: "libs/sample/docs/specs/0001.md",
+          enforcedByFiles: [],
+          referencedServices: ["PhotoRepo"],
+        },
+        {
+          id: "sample:SPEC-0002",
+          title: "Spec Two",
+          status: "accepted",
+          path: "libs/sample/docs/specs/0002.md",
+          enforcedByFiles: [],
+          referencedServices: ["PhotoRepo"],
+        },
+      ],
+      earsRequirements: [
+        {
+          id: EarsRequirementNodeId.make("sample:SPEC-0001::REQ-1.1"),
+          specId: GovernanceDocIdentifier.make("sample:SPEC-0001"),
+          requirementId: RequirementId.make("REQ-1.1"),
+          area: EarsAreaName.make("Core"),
+          pattern: EarsPatternName.make("Event-driven"),
+          clauseText: EarsClauseText.make("When image arrives, approve upload."),
+          effectSymbol: EarsEffectSymbol.make("Sample.a"),
+          verification: EarsVerificationKind.make("UnitTest"),
+          path: DocTreePath.make("libs/sample/docs/specs/0001.md"),
+          line: DocLineNumber.make(10),
+          status: "accepted",
+        },
+        {
+          id: EarsRequirementNodeId.make("sample:SPEC-0002::REQ-2.1"),
+          specId: GovernanceDocIdentifier.make("sample:SPEC-0002"),
+          requirementId: RequirementId.make("REQ-2.1"),
+          area: EarsAreaName.make("Core"),
+          pattern: EarsPatternName.make("Event-driven"),
+          clauseText: EarsClauseText.make("When image arrives, reject upload."),
+          effectSymbol: EarsEffectSymbol.make("Sample.b"),
+          verification: EarsVerificationKind.make("UnitTest"),
+          path: DocTreePath.make("libs/sample/docs/specs/0002.md"),
+          line: DocLineNumber.make(10),
+          status: "accepted",
+        },
+      ],
+    })
+
+    const offlineClientLayer = Layer.succeed(
+      EmbeddingClient,
+      EmbeddingClient.of({
+        config: {
+          baseUrl: EmbeddingProviderBaseUrl.make("http://127.0.0.1:1/v1"),
+          model: EmbeddingModelId.make("qwen3-embedding:8b"),
+          dimensions: EmbeddingDimensionCount.make(3),
+        },
+        checkAvailability: Effect.succeed({
+          _tag: "Unavailable" as const,
+          cause: "network-error" as const,
+          reason: ErrorReasonMessage.make("Ollama offline"),
+        }),
+        embedBatch: () =>
+          Effect.fail(
+            new EmbeddingProviderError({
+              model: EmbeddingModelId.make("qwen3-embedding:8b"),
+              reason: ErrorReasonMessage.make("Offline"),
+            }),
+          ),
+        embedQuery: () =>
+          Effect.fail(
+            new EmbeddingProviderError({
+              model: EmbeddingModelId.make("qwen3-embedding:8b"),
+              reason: ErrorReasonMessage.make("Offline"),
+            }),
+          ),
+      }),
+    )
+    const emptyCacheLayer = Layer.succeed(
+      EmbeddingCachePort,
+      EmbeddingCachePort.of({
+        readCache: () => Effect.succeedNone,
+        writeCache: () => Effect.void,
+      }),
+    )
+    return { crossSpecGraph, offlineClientLayer, emptyCacheLayer }
+  }
+
   it.effect(
     "ontology check --strict fails closed when semantic conflict embeddings degrade on cross-spec requirements, while --deterministic bypasses it",
     () =>
@@ -385,124 +507,8 @@ status: accepted
             rmSync(tmpDir, { recursive: true, force: true })
           }),
         )
-        mkdirSync(join(tmpDir, "libs/sample/docs/specs"), { recursive: true })
-        writeFileSync(
-          join(tmpDir, "libs/sample/docs/specs/0001.md"),
-          `---\nid: sample:SPEC-0001\ntitle: Spec One\nstatus: accepted\n---\n`,
-          "utf8",
-        )
-        writeFileSync(
-          join(tmpDir, "libs/sample/docs/specs/0002.md"),
-          `---\nid: sample:SPEC-0002\ntitle: Spec Two\nstatus: accepted\n---\n`,
-          "utf8",
-        )
-
-        const crossSpecGraph = buildHarnessGraph({
-          services: [
-            {
-              tagId: "PhotoRepo",
-              name: "PhotoRepo",
-              packageTag: "service",
-              file: "libs/sample/service/src/index.ts",
-            },
-          ],
-          layers: [
-            {
-              qualname: "PhotoRepoLive",
-              layerKind: "infra",
-              packageTag: "infra",
-              file: "libs/sample/infra/src/index.ts",
-            },
-          ],
-          providesService: [{ layerQualname: "PhotoRepoLive", tagId: "PhotoRepo" }],
-          specifiesSymbols: [
-            { specId: "sample:SPEC-0001", targetKey: "PhotoRepo", targetKind: "ServiceTag" },
-            { specId: "sample:SPEC-0002", targetKey: "PhotoRepo", targetKind: "ServiceTag" },
-          ],
-          earsSpecs: [
-            {
-              id: "sample:SPEC-0001",
-              title: "Spec One",
-              status: "accepted",
-              path: "libs/sample/docs/specs/0001.md",
-              enforcedByFiles: [],
-              referencedServices: ["PhotoRepo"],
-            },
-            {
-              id: "sample:SPEC-0002",
-              title: "Spec Two",
-              status: "accepted",
-              path: "libs/sample/docs/specs/0002.md",
-              enforcedByFiles: [],
-              referencedServices: ["PhotoRepo"],
-            },
-          ],
-          earsRequirements: [
-            {
-              id: EarsRequirementNodeId.make("sample:SPEC-0001::REQ-1.1"),
-              specId: GovernanceDocIdentifier.make("sample:SPEC-0001"),
-              requirementId: RequirementId.make("REQ-1.1"),
-              area: EarsAreaName.make("Core"),
-              pattern: EarsPatternName.make("Event-driven"),
-              clauseText: EarsClauseText.make("When image arrives, approve upload."),
-              effectSymbol: EarsEffectSymbol.make("Sample.a"),
-              verification: EarsVerificationKind.make("UnitTest"),
-              path: DocTreePath.make("libs/sample/docs/specs/0001.md"),
-              line: DocLineNumber.make(10),
-              status: "accepted",
-            },
-            {
-              id: EarsRequirementNodeId.make("sample:SPEC-0002::REQ-2.1"),
-              specId: GovernanceDocIdentifier.make("sample:SPEC-0002"),
-              requirementId: RequirementId.make("REQ-2.1"),
-              area: EarsAreaName.make("Core"),
-              pattern: EarsPatternName.make("Event-driven"),
-              clauseText: EarsClauseText.make("When image arrives, reject upload."),
-              effectSymbol: EarsEffectSymbol.make("Sample.b"),
-              verification: EarsVerificationKind.make("UnitTest"),
-              path: DocTreePath.make("libs/sample/docs/specs/0002.md"),
-              line: DocLineNumber.make(10),
-              status: "accepted",
-            },
-          ],
-        })
-
-        const offlineClientLayer = Layer.succeed(
-          EmbeddingClient,
-          EmbeddingClient.of({
-            config: {
-              baseUrl: EmbeddingProviderBaseUrl.make("http://127.0.0.1:1/v1"),
-              model: EmbeddingModelId.make("qwen3-embedding:8b"),
-              dimensions: EmbeddingDimensionCount.make(3),
-            },
-            checkAvailability: Effect.succeed({
-              _tag: "Unavailable" as const,
-              cause: "network-error" as const,
-              reason: ErrorReasonMessage.make("Ollama offline"),
-            }),
-            embedBatch: () =>
-              Effect.fail(
-                new EmbeddingProviderError({
-                  model: EmbeddingModelId.make("qwen3-embedding:8b"),
-                  reason: ErrorReasonMessage.make("Offline"),
-                }),
-              ),
-            embedQuery: () =>
-              Effect.fail(
-                new EmbeddingProviderError({
-                  model: EmbeddingModelId.make("qwen3-embedding:8b"),
-                  reason: ErrorReasonMessage.make("Offline"),
-                }),
-              ),
-          }),
-        )
-        const emptyCacheLayer = Layer.succeed(
-          EmbeddingCachePort,
-          EmbeddingCachePort.of({
-            readCache: () => Effect.succeedNone,
-            writeCache: () => Effect.void,
-          }),
-        )
+        const { crossSpecGraph, offlineClientLayer, emptyCacheLayer } =
+          makeSemanticCheckTestFixtures(tmpDir)
 
         const strictRes = yield* runCliEffect(["ontology", "check", "--scope=sample", "--strict"], {
           repoRoot: tmpDir,
@@ -554,8 +560,22 @@ status: accepted
         const detReport = decodeCheckOutput(detRes.stdout)
         expect(detReport.clean).toBe(true)
         expect(detReport.semanticSkipped).toBe(true)
+      }),
+  )
 
-        // Verify computeSyncEmbeddingsForGraph & toSyncEmbeddingOptions preserve Ready / Degraded / Skipped semantics
+  it.effect(
+    "computeSyncEmbeddingsForGraph & toSyncEmbeddingOptions preserve Ready / Degraded / Skipped semantics",
+    () =>
+      Effect.gen(function* () {
+        const tmpDir = mkdtempSync(join(tmpdir(), "harness-cli-embed-sync-"))
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            rmSync(tmpDir, { recursive: true, force: true })
+          }),
+        )
+        const { crossSpecGraph, offlineClientLayer, emptyCacheLayer } =
+          makeSemanticCheckTestFixtures(tmpDir)
+
         const skipped = yield* computeSyncEmbeddingsForGraph(tmpDir, crossSpecGraph, {
           skipBackgroundDaemons: true,
         })

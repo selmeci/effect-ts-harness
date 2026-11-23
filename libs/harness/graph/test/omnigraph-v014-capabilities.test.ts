@@ -599,11 +599,27 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
       }).pipe(Effect.provide(OmnigraphSyncLive)),
   )
 
+  const makeErr500Fetch = (): FetchLike => (input) => {
+    const url = toUrlString(input)
+    if (url.endsWith("/healthz")) {
+      return Promise.resolve(
+        new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }),
+      )
+    }
+    return Promise.resolve(
+      new Response("Server Error", {
+        status: 500,
+        headers: { "Omnigraph-Http-Api": "0.14" },
+      }),
+    )
+  }
+
   it.effect(
-    "handles Wave 3 negative paths: proposeMergeCommit 409, inspectCommitChanges non-empty, blob 404/500, stat 500, mutateConditional null actualCommit & 500, pollChanges 410 missing cursor, and actor token loopback guard",
+    "handles Wave 3 negative paths for proposeMergeCommit 409, inspectCommitChanges non-empty, blob 404/500, and stat 500",
     () =>
       Effect.gen(function* () {
         const svc = yield* OmnigraphSync
+        const err500Fetch = makeErr500Fetch()
 
         const proposeConflictFetch: FetchLike = (input) => {
           if (toUrlString(input).endsWith("/healthz")) {
@@ -681,21 +697,6 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
           fetch: blob404Fetch,
         })
         expect(missingBlob).toBeNull()
-
-        const err500Fetch: FetchLike = (input) => {
-          const url = toUrlString(input)
-          if (url.endsWith("/healthz")) {
-            return Promise.resolve(
-              new Response(null, { status: 200, headers: { "Omnigraph-Http-Api": "0.14" } }),
-            )
-          }
-          return Promise.resolve(
-            new Response("Server Error", {
-              status: 500,
-              headers: { "Omnigraph-Http-Api": "0.14" },
-            }),
-          )
-        }
         const blob500Exit = yield* Effect.exit(
           svc.getBlobText({
             entity: OmnigraphEntityKind.make("node"),
@@ -739,7 +740,14 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
           })
           .with({ _tag: "Success" }, () => expect.fail("Expected failure"))
           .exhaustive()
+      }).pipe(Effect.provide(OmnigraphSyncLive)),
+  )
 
+  it.effect(
+    "handles Wave 3 negative paths for mutateConditional null actualCommit/500 and pollChanges 410 missing cursor",
+    () =>
+      Effect.gen(function* () {
+        const err500Fetch = makeErr500Fetch()
         const mutNullActualFetch: FetchLike = (input) => {
           if (toUrlString(input).endsWith("/healthz")) {
             return Promise.resolve(
@@ -834,80 +842,84 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
           })
           .with({ _tag: "Success" }, () => expect.fail("Expected failure"))
           .exhaustive()
-
-        const tmpRepo = fs.mkdtempSync(path.join(tmpdir(), "og-v014-tokens-"))
-        try {
-          const clusterDir = path.join(tmpRepo, ".harness", "omnigraph-cluster")
-          fs.mkdirSync(clusterDir, { recursive: true })
-          const authTokensPath = path.join(clusterDir, "auth-tokens.json")
-          fs.writeFileSync(
-            authTokensPath,
-            JSON.stringify({ schemaVersion: 1, cliToken: "cli-secret", mcpToken: "mcp-secret" }),
-            { mode: 0o600 },
-          )
-          fs.chmodSync(authTokensPath, 0o600)
-          fs.writeFileSync(
-            path.join(clusterDir, "server.json"),
-            JSON.stringify({
-              pid: process.pid,
-              port: 18999,
-              baseUrl: "http://127.0.0.1:18999",
-              canonicalRepoRoot: tmpRepo,
-              updatedAt: null,
-            }),
-          )
-
-          let seenAuthHeader: string | null = null
-          const captureAuthFetch: FetchLike = (input, init) => {
-            const url = toUrlString(input)
-            if (url.endsWith("/healthz")) {
-              return jsonResponse({ status: "ok" })
-            }
-            seenAuthHeader = new Headers(init?.headers).get("Authorization")
-            return jsonResponse({ branches: [] })
-          }
-
-          const cliClient = makeOmnigraphClient(
-            { repoRoot: tmpRepo, actor: "harness-cli", fetch: captureAuthFetch },
-            extendedTestHostIo,
-            {},
-          )
-          yield* Effect.tryPromise({
-            try: () => cliClient.health(),
-            catch: (cause) => new OmnigraphLoadError({ cause }),
-          })
-          // health() is unauthenticated, test access() or query() for Authorization header
-          const mcpClient = makeOmnigraphClient(
-            { repoRoot: tmpRepo, actor: "agent-mcp", fetch: captureAuthFetch },
-            extendedTestHostIo,
-            {},
-          )
-          yield* Effect.tryPromise({
-            try: () => mcpClient.branches.list(),
-            catch: (cause) => new OmnigraphLoadError({ cause }),
-          }).pipe(Effect.orElseSucceed(() => undefined))
-          expect(seenAuthHeader).toBe("Bearer mcp-secret")
-
-          seenAuthHeader = null
-          const remoteClient = makeOmnigraphClient(
-            {
-              repoRoot: tmpRepo,
-              baseUrl: "https://evil.example.com",
-              actor: "harness-cli",
-              fetch: captureAuthFetch,
-            },
-            extendedTestHostIo,
-            {},
-          )
-          yield* Effect.tryPromise({
-            try: () => remoteClient.branches.list(),
-            catch: (cause) => new OmnigraphLoadError({ cause }),
-          }).pipe(Effect.orElseSucceed(() => undefined))
-          expect(seenAuthHeader).toBeNull()
-        } finally {
-          fs.rmSync(tmpRepo, { recursive: true, force: true })
-        }
       }).pipe(Effect.provide(OmnigraphSyncLive)),
+  )
+
+  it.effect("enforces actor token loopback guard for local cluster vs remote endpoints", () =>
+    Effect.gen(function* () {
+      const tmpRepo = fs.mkdtempSync(path.join(tmpdir(), "og-v014-tokens-"))
+      try {
+        const clusterDir = path.join(tmpRepo, ".harness", "omnigraph-cluster")
+        fs.mkdirSync(clusterDir, { recursive: true })
+        const authTokensPath = path.join(clusterDir, "auth-tokens.json")
+        fs.writeFileSync(
+          authTokensPath,
+          JSON.stringify({ schemaVersion: 1, cliToken: "cli-secret", mcpToken: "mcp-secret" }),
+          { mode: 0o600 },
+        )
+        fs.chmodSync(authTokensPath, 0o600)
+        fs.writeFileSync(
+          path.join(clusterDir, "server.json"),
+          JSON.stringify({
+            pid: process.pid,
+            port: 18999,
+            baseUrl: "http://127.0.0.1:18999",
+            canonicalRepoRoot: tmpRepo,
+            updatedAt: null,
+          }),
+        )
+
+        let seenAuthHeader: string | null = null
+        const captureAuthFetch: FetchLike = (input, init) => {
+          const url = toUrlString(input)
+          if (url.endsWith("/healthz")) {
+            return jsonResponse({ status: "ok" })
+          }
+          seenAuthHeader = new Headers(init?.headers).get("Authorization")
+          return jsonResponse({ branches: [] })
+        }
+
+        const cliClient = makeOmnigraphClient(
+          { repoRoot: tmpRepo, actor: "harness-cli", fetch: captureAuthFetch },
+          extendedTestHostIo,
+          {},
+        )
+        yield* Effect.tryPromise({
+          try: () => cliClient.health(),
+          catch: (cause) => new OmnigraphLoadError({ cause }),
+        })
+        // health() is unauthenticated, test access() or query() for Authorization header
+        const mcpClient = makeOmnigraphClient(
+          { repoRoot: tmpRepo, actor: "agent-mcp", fetch: captureAuthFetch },
+          extendedTestHostIo,
+          {},
+        )
+        yield* Effect.tryPromise({
+          try: () => mcpClient.branches.list(),
+          catch: (cause) => new OmnigraphLoadError({ cause }),
+        }).pipe(Effect.orElseSucceed(() => undefined))
+        expect(seenAuthHeader).toBe("Bearer mcp-secret")
+
+        seenAuthHeader = null
+        const remoteClient = makeOmnigraphClient(
+          {
+            repoRoot: tmpRepo,
+            baseUrl: "https://evil.example.com",
+            actor: "harness-cli",
+            fetch: captureAuthFetch,
+          },
+          extendedTestHostIo,
+          {},
+        )
+        yield* Effect.tryPromise({
+          try: () => remoteClient.branches.list(),
+          catch: (cause) => new OmnigraphLoadError({ cause }),
+        }).pipe(Effect.orElseSucceed(() => undefined))
+        expect(seenAuthHeader).toBeNull()
+      } finally {
+        fs.rmSync(tmpRepo, { recursive: true, force: true })
+      }
+    }).pipe(Effect.provide(OmnigraphSyncLive)),
   )
 
   const PropDryRunCase = Schema.Struct({
@@ -1294,7 +1306,9 @@ describe("Omnigraph v0.14.0 native capabilities (RFC-0009)", () => {
       process.env["OMNIGRAPH_TOKEN"] = "env-default-token"
 
       expect(resolveOmnigraphBaseUrl(undefined, process.env)).toBe("http://127.0.0.1:19444")
-      expect(resolveOmnigraphBaseUrl(undefined, undefined, testHostIo)).toBe("http://127.0.0.1:19444")
+      expect(resolveOmnigraphBaseUrl(undefined, undefined, testHostIo)).toBe(
+        "http://127.0.0.1:19444",
+      )
       expect(resolveOmnigraphBaseUrl()).toBe("http://127.0.0.1:8080")
       expect(resolveOmnigraphBaseUrl(undefined, {})).toBe("http://127.0.0.1:8080")
 

@@ -386,119 +386,128 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
         status: "*",
       })
       expect(adrBm25Rows.map((r) => r["id"])).toContain("sample:ADR-0001")
+    }),
+  )
 
-      const reqGraph = buildHarnessGraph({
-        earsRequirements: [
+  it.effect(
+    "executes requirement retrieval and structural policy GQ queries in memory deterministically",
+    () =>
+      Effect.gen(function* () {
+        yield* Effect.void
+        const reqGraph = buildHarnessGraph({
+          earsRequirements: [
+            {
+              id: EarsRequirementNodeId.make("sample:SPEC-0001::REQ-1.1"),
+              specId: GovernanceDocIdentifier.make("sample:SPEC-0001"),
+              requirementId: RequirementId.make("REQ-1.1"),
+              area: EarsAreaName.make("Gallery"),
+              pattern: EarsPatternName.make("Event-driven"),
+              clauseText: EarsClauseText.make(
+                "When uploading photos, system persists metadata deterministically.",
+              ),
+              effectSymbol: EarsEffectSymbol.make("Sample.greet"),
+              verification: EarsVerificationKind.make("UnitTest"),
+              path: DocTreePath.make("docs/specs/0001.md"),
+              line: DocLineNumber.make(12),
+              status: "accepted",
+            },
+          ],
+        })
+        const reqVecRows = executeNamedGqQueryInMemory(
+          reqGraph,
+          "search_requirements_vector_hybrid",
           {
-            id: EarsRequirementNodeId.make("sample:SPEC-0001::REQ-1.1"),
-            specId: GovernanceDocIdentifier.make("sample:SPEC-0001"),
-            requirementId: RequirementId.make("REQ-1.1"),
-            area: EarsAreaName.make("Gallery"),
-            pattern: EarsPatternName.make("Event-driven"),
-            clauseText: EarsClauseText.make(
-              "When uploading photos, system persists metadata deterministically.",
-            ),
-            effectSymbol: EarsEffectSymbol.make("Sample.greet"),
-            verification: EarsVerificationKind.make("UnitTest"),
-            path: DocTreePath.make("docs/specs/0001.md"),
-            line: DocLineNumber.make(12),
+            vectorQuery: [1, 0, 0, 0],
+            textQuery: "uploading photos",
             status: "accepted",
           },
-        ],
-      })
-      const reqVecRows = executeNamedGqQueryInMemory(
-        reqGraph,
-        "search_requirements_vector_hybrid",
-        {
-          vectorQuery: [1, 0, 0, 0],
-          textQuery: "uploading photos",
-          status: "accepted",
-        },
-      )
-      expect(reqVecRows.map((r) => r["id"])).toContain("sample:SPEC-0001::REQ-1.1")
+        )
+        expect(reqVecRows.map((r) => r["id"])).toContain("sample:SPEC-0001::REQ-1.1")
 
-      const reqBm25Rows = executeNamedGqQueryInMemory(reqGraph, "search_requirements_bm25", {
-        query: "photos",
-        status: "*",
-      })
-      expect(reqBm25Rows.map((r) => r["id"])).toContain("sample:SPEC-0001::REQ-1.1")
+        const reqBm25Rows = executeNamedGqQueryInMemory(reqGraph, "search_requirements_bm25", {
+          query: "photos",
+          status: "*",
+        })
+        expect(reqBm25Rows.map((r) => r["id"])).toContain("sample:SPEC-0001::REQ-1.1")
 
-      const stubSvcRows = executeNamedGqQueryInMemory(
-        sampleGraph,
-        "rank_candidate_services_for_stub",
-        {
-          layer: "*",
-          intent: "photo",
-        },
-      )
-      expect(stubSvcRows).toHaveLength(1)
-      expect(stubSvcRows[0]?.tagId).toBe("PhotoRepo")
-
-      const policyUnverifiedRows = executeNamedGqQueryInMemory(
-        sampleGraph,
-        "policy_unverified_domain_fns",
-      )
-      expect(policyUnverifiedRows).toHaveLength(1)
-      expect(policyUnverifiedRows[0]?.spanName).toBe("Sample.untested")
-
-      const linkedSigGraph = buildHarnessGraph({
-        fns: [
+        const stubSvcRows = executeNamedGqQueryInMemory(
+          sampleGraph,
+          "rank_candidate_services_for_stub",
           {
-            qualname: "libs/sample/domain/src/index.ts#linked",
-            spanName: "Sample.linked",
-            file: "libs/sample/domain/src/index.ts",
-            line: 4,
-            packageTag: "domain",
-            successType: "void",
-            isStub: false,
+            layer: "*",
+            intent: "photo",
           },
-        ],
-        services: [
-          {
-            tagId: "LinkedSvc",
-            name: "LinkedSvc",
-            packageTag: "service",
-            file: "libs/sample/service/src/index.ts",
-          },
-        ],
-        requiresService: [
-          {
-            fnQualname: "libs/sample/domain/src/index.ts#linked",
-            tagId: "LinkedSvc",
-          },
-        ],
-      })
-      expect(
-        Array.from(Graph.nodes(linkedSigGraph.graph)).some(([, n]) => n._tag === "EffectSignature"),
-      ).toBe(true)
-      expect(
-        executeNamedGqQueryInMemory(linkedSigGraph, "policy_orphan_effect_signatures"),
-      ).toEqual([])
+        )
+        expect(stubSvcRows).toHaveLength(1)
+        expect(stubSvcRows[0]?.tagId).toBe("PhotoRepo")
 
-      const baseOrphanGraph = buildHarnessGraph({ fns: [] })
-      const graphWithOrphanSig = {
-        ...baseOrphanGraph,
-        graph: Graph.mutate(baseOrphanGraph.graph, (mutable) => {
-          Graph.addNode(mutable, {
-            _tag: "EffectSignature",
-            relationId: RelationId.make("sig:orphan-1"),
-            callerQualname: "libs/sample/domain/src/index.ts#missing",
-            requiredServices: [],
-            emittedErrors: [],
-            calleeQualnames: [],
-            payloadSchemas: [],
-            file: "libs/sample/domain/src/index.ts",
-            line: 1,
-          })
-        }),
-      }
-      const orphanSigRows = executeNamedGqQueryInMemory(
-        graphWithOrphanSig,
-        "policy_orphan_effect_signatures",
-      )
-      expect(orphanSigRows).toHaveLength(1)
-      expect(orphanSigRows[0]?.relationId).toBe("sig:orphan-1")
-    }),
+        const policyUnverifiedRows = executeNamedGqQueryInMemory(
+          sampleGraph,
+          "policy_unverified_domain_fns",
+        )
+        expect(policyUnverifiedRows).toHaveLength(1)
+        expect(policyUnverifiedRows[0]?.spanName).toBe("Sample.untested")
+
+        const linkedSigGraph = buildHarnessGraph({
+          fns: [
+            {
+              qualname: "libs/sample/domain/src/index.ts#linked",
+              spanName: "Sample.linked",
+              file: "libs/sample/domain/src/index.ts",
+              line: 4,
+              packageTag: "domain",
+              successType: "void",
+              isStub: false,
+            },
+          ],
+          services: [
+            {
+              tagId: "LinkedSvc",
+              name: "LinkedSvc",
+              packageTag: "service",
+              file: "libs/sample/service/src/index.ts",
+            },
+          ],
+          requiresService: [
+            {
+              fnQualname: "libs/sample/domain/src/index.ts#linked",
+              tagId: "LinkedSvc",
+            },
+          ],
+        })
+        expect(
+          Array.from(Graph.nodes(linkedSigGraph.graph)).some(
+            ([, n]) => n._tag === "EffectSignature",
+          ),
+        ).toBe(true)
+        expect(
+          executeNamedGqQueryInMemory(linkedSigGraph, "policy_orphan_effect_signatures"),
+        ).toEqual([])
+
+        const baseOrphanGraph = buildHarnessGraph({ fns: [] })
+        const graphWithOrphanSig = {
+          ...baseOrphanGraph,
+          graph: Graph.mutate(baseOrphanGraph.graph, (mutable) => {
+            Graph.addNode(mutable, {
+              _tag: "EffectSignature",
+              relationId: RelationId.make("sig:orphan-1"),
+              callerQualname: "libs/sample/domain/src/index.ts#missing",
+              requiredServices: [],
+              emittedErrors: [],
+              calleeQualnames: [],
+              payloadSchemas: [],
+              file: "libs/sample/domain/src/index.ts",
+              line: 1,
+            })
+          }),
+        }
+        const orphanSigRows = executeNamedGqQueryInMemory(
+          graphWithOrphanSig,
+          "policy_orphan_effect_signatures",
+        )
+        expect(orphanSigRows).toHaveLength(1)
+        expect(orphanSigRows[0]?.relationId).toBe("sig:orphan-1")
+      }),
   )
 
   it.effect(
@@ -1247,6 +1256,258 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
       }),
   )
 
+  const makeComprehensiveNdjsonGraph = () =>
+    buildHarnessGraph({
+      fns: [
+        {
+          qualname: "libs/comprehensive/domain/src/index.ts#callerFn",
+          spanName: "Caller.fn",
+          file: "libs/comprehensive/domain/src/index.ts",
+          line: 1,
+          packageTag: "domain",
+          successType: "string",
+          inputSchema: "InputSchemaDef",
+          outputSchema: "OutputSchemaDef",
+          payloadSchemas: ["UsesSchemaDef"],
+          isStub: false,
+        },
+        {
+          qualname: "libs/comprehensive/domain/src/index.ts#calleeFn",
+          spanName: "Callee.fn",
+          file: "libs/comprehensive/domain/src/index.ts",
+          line: 10,
+          packageTag: "domain",
+          successType: "void",
+          isStub: false,
+        },
+        {
+          qualname: "libs/comprehensive/infra/src/index.ts#httpHandler",
+          spanName: "Http.handler",
+          file: "libs/comprehensive/infra/src/index.ts",
+          line: 20,
+          packageTag: "infra",
+          successType: "void",
+          isStub: false,
+        },
+      ],
+      services: [
+        {
+          tagId: "CompService",
+          name: "CompService",
+          packageTag: "service",
+          file: "libs/comprehensive/service/src/index.ts",
+        },
+        {
+          tagId: "LayerReqService",
+          name: "LayerReqService",
+          packageTag: "service",
+          file: "libs/comprehensive/service/src/index.ts",
+        },
+      ],
+      layers: [
+        {
+          qualname: "CompLayerLive",
+          layerKind: "live",
+          packageTag: "infra",
+          file: "libs/comprehensive/infra/src/layer.ts",
+        },
+      ],
+      errors: [
+        {
+          errorTag: "SigError",
+          file: "libs/comprehensive/contract/src/errors.ts",
+        },
+        {
+          errorTag: "LayerError",
+          file: "libs/comprehensive/contract/src/errors.ts",
+        },
+        {
+          errorTag: "HttpError",
+          file: "libs/comprehensive/contract/src/errors.ts",
+        },
+      ],
+      schemas: [
+        {
+          schemaName: "InputSchemaDef",
+          file: "libs/comprehensive/contract/src/schemas.ts",
+        },
+        {
+          schemaName: "OutputSchemaDef",
+          file: "libs/comprehensive/contract/src/schemas.ts",
+        },
+        {
+          schemaName: "UsesSchemaDef",
+          file: "libs/comprehensive/contract/src/schemas.ts",
+        },
+        {
+          schemaName: "HttpRequestSchema",
+          file: "libs/comprehensive/contract/src/schemas.ts",
+        },
+        {
+          schemaName: "HttpResponseSchema",
+          file: "libs/comprehensive/contract/src/schemas.ts",
+        },
+      ],
+      tests: [
+        {
+          testId: "libs/comprehensive/domain/test/index.test.ts::test 1",
+          testFile: "libs/comprehensive/domain/test/index.test.ts",
+          testName: "test 1",
+        },
+        {
+          testId: "libs/comprehensive/infra/test/mig.test.ts::migration test",
+          testFile: "libs/comprehensive/infra/test/mig.test.ts",
+          testName: "migration test",
+        },
+      ],
+      patternDocs: [
+        {
+          slug: "comp-pattern",
+          path: "agent-patterns/comp.md",
+          summary: "Comprehensive pattern",
+        },
+      ],
+      adrDocs: [
+        {
+          id: "ADR-COMP",
+          title: "Comprehensive ADR",
+          status: "accepted",
+          path: "docs/adr/comp.md",
+          enforcedByFiles: [],
+        },
+      ],
+      earsSpecs: [
+        {
+          id: "SPEC-COMP",
+          title: "Comprehensive Spec",
+          status: "accepted",
+          path: "docs/specs/comp.md",
+          enforcedByFiles: [],
+        },
+      ],
+      requiresService: [
+        {
+          callerQualname: "libs/comprehensive/domain/src/index.ts#callerFn",
+          tagId: "CompService",
+        },
+      ],
+      failsWith: [
+        {
+          callerQualname: "libs/comprehensive/domain/src/index.ts#callerFn",
+          errorTag: "SigError",
+        },
+      ],
+      tracedCalls: [
+        {
+          callerQualname: "libs/comprehensive/domain/src/index.ts#callerFn",
+          calleeQualname: "libs/comprehensive/domain/src/index.ts#calleeFn",
+          callCount: 2,
+          receiverLayer: null,
+        },
+      ],
+      providesService: [
+        {
+          layerQualname: "CompLayerLive",
+          tagId: "CompService",
+        },
+      ],
+      layerRequires: [
+        {
+          layerQualname: "CompLayerLive",
+          tagId: "LayerReqService",
+        },
+      ],
+      layerFlows: [
+        {
+          relationId: RelationId.make("LayerFlow:CompLayerLive"),
+          layerQualname: "CompLayerLive",
+          providesServices: ["CompService"],
+          requiresServices: ["LayerReqService"],
+          emittedErrors: ["LayerError"],
+          file: "libs/comprehensive/infra/src/layer.ts",
+          line: 1,
+        },
+      ],
+      exercisesSpans: [
+        {
+          testId: "libs/comprehensive/domain/test/index.test.ts::test 1",
+          calleeQualname: "libs/comprehensive/domain/src/index.ts#callerFn",
+          callCount: 1,
+          receiverLayer: null,
+        },
+      ],
+      governsSymbols: [
+        {
+          adrId: "ADR-COMP",
+          targetKey: "libs/comprehensive/domain/src/index.ts#callerFn",
+          targetKind: "EffectFn",
+        },
+      ],
+      specifiesSymbols: [
+        {
+          specId: "SPEC-COMP",
+          targetKey: "libs/comprehensive/domain/src/index.ts#callerFn",
+          targetKind: "EffectFn",
+        },
+      ],
+      traceabilityTuples: [
+        {
+          relationId: RelationId.make("TraceabilityTuple:pattern-and-test"),
+          adrId: "ADR-COMP",
+          earsSpecId: "SPEC-COMP",
+          targetSymbolQualname: "libs/comprehensive/domain/src/index.ts#callerFn",
+          verifyingTestQualnames: ["libs/comprehensive/domain/test/index.test.ts::test 1"],
+          enforcingPatternPaths: ["agent-patterns/comp.md"],
+        },
+        {
+          relationId: RelationId.make("TraceabilityTuple:realize-svc"),
+          targetSymbolQualname: "CompService",
+          verifyingTestQualnames: [],
+        },
+        {
+          relationId: RelationId.make("TraceabilityTuple:realize-layer"),
+          targetSymbolQualname: "CompLayerLive",
+          verifyingTestQualnames: [],
+        },
+        {
+          relationId: RelationId.make("TraceabilityTuple:realize-err"),
+          targetSymbolQualname: "SigError",
+          verifyingTestQualnames: [],
+        },
+        {
+          relationId: RelationId.make("TraceabilityTuple:realize-schema"),
+          targetSymbolQualname: "InputSchemaDef",
+          verifyingTestQualnames: [],
+        },
+      ],
+      httpEndpointTuples: [
+        {
+          relationId: RelationId.make("HttpEndpoint:CompEp"),
+          endpointGroup: "Comp",
+          endpointName: "handle",
+          method: "POST",
+          path: "/comp",
+          handlerQualname: "libs/comprehensive/infra/src/index.ts#httpHandler",
+          requestSchemaQualnames: ["HttpRequestSchema"],
+          responseSchemaQualnames: ["HttpResponseSchema"],
+          errorTags: ["HttpError"],
+          file: "libs/comprehensive/infra/src/http.ts",
+          line: 1,
+        },
+      ],
+      migrationTuples: [
+        {
+          relationId: RelationId.make("Migration:1_comp_mig"),
+          migrationId: "1_comp_mig",
+          engine: "SqliteMigrator",
+          moduleFile: "libs/comprehensive/infra/src/mig.ts",
+          isDestructive: false,
+          verifyingTestQualnames: ["libs/comprehensive/infra/test/mig.test.ts::migration test"],
+          line: 1,
+        },
+      ],
+    })
+
   it.effect(
     "F-29: every edge emitted by toOmnigraphNdjson on a comprehensive graph is declared in schema.pg",
     () =>
@@ -1263,256 +1524,7 @@ describe("OmnigraphSync against mock wire protocol (Omnigraph-Http-Api: 0.14)", 
         }
         expect(declaredEdgeTypes.size).toBeGreaterThanOrEqual(25)
 
-        const comprehensiveGraph = buildHarnessGraph({
-          fns: [
-            {
-              qualname: "libs/comprehensive/domain/src/index.ts#callerFn",
-              spanName: "Caller.fn",
-              file: "libs/comprehensive/domain/src/index.ts",
-              line: 1,
-              packageTag: "domain",
-              successType: "string",
-              inputSchema: "InputSchemaDef",
-              outputSchema: "OutputSchemaDef",
-              payloadSchemas: ["UsesSchemaDef"],
-              isStub: false,
-            },
-            {
-              qualname: "libs/comprehensive/domain/src/index.ts#calleeFn",
-              spanName: "Callee.fn",
-              file: "libs/comprehensive/domain/src/index.ts",
-              line: 10,
-              packageTag: "domain",
-              successType: "void",
-              isStub: false,
-            },
-            {
-              qualname: "libs/comprehensive/infra/src/index.ts#httpHandler",
-              spanName: "Http.handler",
-              file: "libs/comprehensive/infra/src/index.ts",
-              line: 20,
-              packageTag: "infra",
-              successType: "void",
-              isStub: false,
-            },
-          ],
-          services: [
-            {
-              tagId: "CompService",
-              name: "CompService",
-              packageTag: "service",
-              file: "libs/comprehensive/service/src/index.ts",
-            },
-            {
-              tagId: "LayerReqService",
-              name: "LayerReqService",
-              packageTag: "service",
-              file: "libs/comprehensive/service/src/index.ts",
-            },
-          ],
-          layers: [
-            {
-              qualname: "CompLayerLive",
-              layerKind: "live",
-              packageTag: "infra",
-              file: "libs/comprehensive/infra/src/layer.ts",
-            },
-          ],
-          errors: [
-            {
-              errorTag: "SigError",
-              file: "libs/comprehensive/contract/src/errors.ts",
-            },
-            {
-              errorTag: "LayerError",
-              file: "libs/comprehensive/contract/src/errors.ts",
-            },
-            {
-              errorTag: "HttpError",
-              file: "libs/comprehensive/contract/src/errors.ts",
-            },
-          ],
-          schemas: [
-            {
-              schemaName: "InputSchemaDef",
-              file: "libs/comprehensive/contract/src/schemas.ts",
-            },
-            {
-              schemaName: "OutputSchemaDef",
-              file: "libs/comprehensive/contract/src/schemas.ts",
-            },
-            {
-              schemaName: "UsesSchemaDef",
-              file: "libs/comprehensive/contract/src/schemas.ts",
-            },
-            {
-              schemaName: "HttpRequestSchema",
-              file: "libs/comprehensive/contract/src/schemas.ts",
-            },
-            {
-              schemaName: "HttpResponseSchema",
-              file: "libs/comprehensive/contract/src/schemas.ts",
-            },
-          ],
-          tests: [
-            {
-              testId: "libs/comprehensive/domain/test/index.test.ts::test 1",
-              testFile: "libs/comprehensive/domain/test/index.test.ts",
-              testName: "test 1",
-            },
-            {
-              testId: "libs/comprehensive/infra/test/mig.test.ts::migration test",
-              testFile: "libs/comprehensive/infra/test/mig.test.ts",
-              testName: "migration test",
-            },
-          ],
-          patternDocs: [
-            {
-              slug: "comp-pattern",
-              path: "agent-patterns/comp.md",
-              summary: "Comprehensive pattern",
-            },
-          ],
-          adrDocs: [
-            {
-              id: "ADR-COMP",
-              title: "Comprehensive ADR",
-              status: "accepted",
-              path: "docs/adr/comp.md",
-              enforcedByFiles: [],
-            },
-          ],
-          earsSpecs: [
-            {
-              id: "SPEC-COMP",
-              title: "Comprehensive Spec",
-              status: "accepted",
-              path: "docs/specs/comp.md",
-              enforcedByFiles: [],
-            },
-          ],
-          requiresService: [
-            {
-              callerQualname: "libs/comprehensive/domain/src/index.ts#callerFn",
-              tagId: "CompService",
-            },
-          ],
-          failsWith: [
-            {
-              callerQualname: "libs/comprehensive/domain/src/index.ts#callerFn",
-              errorTag: "SigError",
-            },
-          ],
-          tracedCalls: [
-            {
-              callerQualname: "libs/comprehensive/domain/src/index.ts#callerFn",
-              calleeQualname: "libs/comprehensive/domain/src/index.ts#calleeFn",
-              callCount: 2,
-              receiverLayer: null,
-            },
-          ],
-          providesService: [
-            {
-              layerQualname: "CompLayerLive",
-              tagId: "CompService",
-            },
-          ],
-          layerRequires: [
-            {
-              layerQualname: "CompLayerLive",
-              tagId: "LayerReqService",
-            },
-          ],
-          layerFlows: [
-            {
-              relationId: RelationId.make("LayerFlow:CompLayerLive"),
-              layerQualname: "CompLayerLive",
-              providesServices: ["CompService"],
-              requiresServices: ["LayerReqService"],
-              emittedErrors: ["LayerError"],
-              file: "libs/comprehensive/infra/src/layer.ts",
-              line: 1,
-            },
-          ],
-          exercisesSpans: [
-            {
-              testId: "libs/comprehensive/domain/test/index.test.ts::test 1",
-              calleeQualname: "libs/comprehensive/domain/src/index.ts#callerFn",
-              callCount: 1,
-              receiverLayer: null,
-            },
-          ],
-          governsSymbols: [
-            {
-              adrId: "ADR-COMP",
-              targetKey: "libs/comprehensive/domain/src/index.ts#callerFn",
-              targetKind: "EffectFn",
-            },
-          ],
-          specifiesSymbols: [
-            {
-              specId: "SPEC-COMP",
-              targetKey: "libs/comprehensive/domain/src/index.ts#callerFn",
-              targetKind: "EffectFn",
-            },
-          ],
-          traceabilityTuples: [
-            {
-              relationId: RelationId.make("TraceabilityTuple:pattern-and-test"),
-              adrId: "ADR-COMP",
-              earsSpecId: "SPEC-COMP",
-              targetSymbolQualname: "libs/comprehensive/domain/src/index.ts#callerFn",
-              verifyingTestQualnames: ["libs/comprehensive/domain/test/index.test.ts::test 1"],
-              enforcingPatternPaths: ["agent-patterns/comp.md"],
-            },
-            {
-              relationId: RelationId.make("TraceabilityTuple:realize-svc"),
-              targetSymbolQualname: "CompService",
-              verifyingTestQualnames: [],
-            },
-            {
-              relationId: RelationId.make("TraceabilityTuple:realize-layer"),
-              targetSymbolQualname: "CompLayerLive",
-              verifyingTestQualnames: [],
-            },
-            {
-              relationId: RelationId.make("TraceabilityTuple:realize-err"),
-              targetSymbolQualname: "SigError",
-              verifyingTestQualnames: [],
-            },
-            {
-              relationId: RelationId.make("TraceabilityTuple:realize-schema"),
-              targetSymbolQualname: "InputSchemaDef",
-              verifyingTestQualnames: [],
-            },
-          ],
-          httpEndpointTuples: [
-            {
-              relationId: RelationId.make("HttpEndpoint:CompEp"),
-              endpointGroup: "Comp",
-              endpointName: "handle",
-              method: "POST",
-              path: "/comp",
-              handlerQualname: "libs/comprehensive/infra/src/index.ts#httpHandler",
-              requestSchemaQualnames: ["HttpRequestSchema"],
-              responseSchemaQualnames: ["HttpResponseSchema"],
-              errorTags: ["HttpError"],
-              file: "libs/comprehensive/infra/src/http.ts",
-              line: 1,
-            },
-          ],
-          migrationTuples: [
-            {
-              relationId: RelationId.make("Migration:1_comp_mig"),
-              migrationId: "1_comp_mig",
-              engine: "SqliteMigrator",
-              moduleFile: "libs/comprehensive/infra/src/mig.ts",
-              isDestructive: false,
-              verifyingTestQualnames: ["libs/comprehensive/infra/test/mig.test.ts::migration test"],
-              line: 1,
-            },
-          ],
-        })
+        const comprehensiveGraph = makeComprehensiveNdjsonGraph()
 
         const ndjson = toOmnigraphNdjson(comprehensiveGraph)
         const emittedEdgeNames = new Set<string>()

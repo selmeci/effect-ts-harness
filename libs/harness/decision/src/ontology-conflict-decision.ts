@@ -165,7 +165,7 @@ export const extractOntologyConflictPairs = Effect.fn("OntologyConflict.extractP
   const activeDocs = governanceDocs.filter((doc) => {
     const isActiveStatus = match(doc.status)
       .with("accepted", "proposed", () => true)
-      .with("deprecated", "superseded", () => false)
+      .with("draft", "deprecated", "superseded", () => false)
       .exhaustive()
     if (!isActiveStatus) {
       return false

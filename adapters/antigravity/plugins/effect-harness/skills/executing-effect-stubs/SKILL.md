@@ -45,6 +45,15 @@ Implement the production code and tests within each package boundary:
 - Check span budgets using `checkSpanBudgets` (`SpanBudget.decide`) on recorded spans to prevent N+1 query/RPC repetitions (`maxRepeatedChildCalls` threshold, e.g. $\le 3$) and ensure latency budgets (`maxSpanDurationMs`) are honored.
 - Keep `*.decide` deciders strictly pure (`R = never`), confining side effects and cloud bindings to `type:infra`.
 
+### Swarm Seam Checklist (Pre-Review)
+
+Before dispatching review routing (`harness_review_route`) after multi-package or cross-layer implementation, verify all four cross-package seams across touched units:
+
+1. **Symmetric Activity & Deferred Codecs:** Producer and consumer packages decode and encode shared payloads through the same branded `@harness/contract` Schema round-trip with zero unbranded raw JSON assumptions.
+2. **Single-Source Timeout Budgets:** Every retry, lease, and RPC/subprocess wait reads from canonical `WORKFLOW_TIMEOUT_BUDGETS` bounds rather than ad-hoc hardcoded constants.
+3. **Fenced Non-Lease Mutations:** Non-lease state transitions pass and assert explicit `expectedLeaseEpoch` fencing so stale workers fail closed before mutating shared state.
+4. **Differential Replay Parity:** Fresh execution and recovery/journal replay converge to identical terminal state, pending deferreds, and telemetry projections under `SPEC-0026` seam invariants.
+
 ### 3. Final Verification & Closeout (Controller Only)
 
 - **Acceptance Gate (Phase 5 & `swarm kill` Blocker):** Before proceeding to Phase 5 closeout (`gc --strict`, `mutate --strict`, `verify`, `done`) or calling `swarm kill` (`swarm action: "kill"`), verify every implementer/fixer returned a complete `Sub-Bullet Verification Matrix` and passed its package verification gate; a failed or missing `Sub-Bullet Verification Matrix` or verification gate MUST block Phase 5 and `swarm kill`.

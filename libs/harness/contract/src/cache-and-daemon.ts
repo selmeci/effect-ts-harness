@@ -112,7 +112,10 @@ export const DecisionCacheKey = Schema.NonEmptyString.pipe(
 )
 export type DecisionCacheKey = typeof DecisionCacheKey.Type
 
-export const DecisionCachePayloadJson = Schema.String.pipe(Schema.brand("DecisionCachePayloadJson"))
+export const DecisionCachePayloadJson = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(4_194_304)),
+  Schema.brand("DecisionCachePayloadJson"),
+)
 export type DecisionCachePayloadJson = typeof DecisionCachePayloadJson.Type
 
 export const DecisionCacheTtlMillis = Schema.Int.pipe(

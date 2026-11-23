@@ -391,87 +391,87 @@ errors:
         }),
     )
 
+    const seedFastpathWorkspace = (tempDir: string): void => {
+      mkdirSync(join(tempDir, "libs", "harness", "graph", "src"), { recursive: true })
+      mkdirSync(join(tempDir, "libs", "harness", "gates", "src"), { recursive: true })
+      mkdirSync(join(tempDir, "libs", "harness", "decision", "src"), { recursive: true })
+      mkdirSync(join(tempDir, "libs", "harness", "infra", "src"), { recursive: true })
+      mkdirSync(join(tempDir, "apps", "harness-cli", "src", "commands"), { recursive: true })
+      writeFileSync(
+        join(tempDir, "libs", "harness", "graph", "src", "index.ts"),
+        'import ts from "typescript"\nexport const g = ts.version\n',
+      )
+      writeFileSync(
+        join(tempDir, "libs", "harness", "graph", "src", "cluster-resolver.ts"),
+        'import type { Type } from "typescript"\nexport const resolveCluster = (): Type | undefined => undefined\n',
+      )
+      writeFileSync(
+        join(tempDir, "libs", "harness", "gates", "src", "hook-fastpath.ts"),
+        'import type * as Graph from "@harness/graph"\nexport type G = Graph.HarnessGraph\nexport const ok = () => "allow"\n',
+      )
+      writeFileSync(
+        join(tempDir, "libs", "harness", "gates", "src", "policy-helper.ts"),
+        'export const helper = () => "allow"\n',
+      )
+      writeFileSync(
+        join(tempDir, "libs", "harness", "gates", "src", "policy.ts"),
+        'import { helper } from "./policy-helper.js"\nexport const ok = () => helper()\n',
+      )
+      writeFileSync(
+        join(tempDir, "libs", "harness", "decision", "src", "hook-fastpath.ts"),
+        'export const ok = () => "allow"\n',
+      )
+      writeFileSync(
+        join(tempDir, "libs", "harness", "infra", "src", "hook-fastpath.ts"),
+        'export const ok = () => "allow"\n',
+      )
+      writeFileSync(
+        join(tempDir, "libs", "harness", "infra", "src", "hook-io.ts"),
+        'import * as Option from "effect/Option"\nimport * as Result from "effect/Result"\nimport * as Schema from "effect/Schema"\nexport const io = { Option, Result, Schema }\n',
+      )
+      writeFileSync(
+        join(tempDir, "apps", "harness-cli", "src", "index.ts"),
+        'export const ok = () => "allow"\n',
+      )
+      writeFileSync(
+        join(tempDir, "apps", "harness-cli", "src", "commands", "hook-fastpath-core.ts"),
+        [
+          'import * as Option from "effect/Option"',
+          'import { ok } from "@harness/gates/policy"',
+          'import { io } from "@harness/infra/hook-io"',
+          "export const run = () => ({ Option, ok, io })",
+          'export const fallback = () => import("./hook-fallback.js")',
+        ].join("\n") + "\n",
+      )
+      writeFileSync(
+        join(tempDir, "apps", "harness-cli", "src", "hook-entry.ts"),
+        'import { run } from "./commands/hook-fastpath-core.js"\nexport const main = () => run()\n',
+      )
+      writeFileSync(
+        join(tempDir, "apps", "harness-cli", "src", "commands", "session-fastpath.ts"),
+        'export const ok = () => "allow"\n',
+      )
+      writeFileSync(
+        join(tempDir, "apps", "harness-cli", "src", "commands", "ingest-fastpath.ts"),
+        'import { io } from "@harness/infra/hook-io"\nexport const ok = () => io\n',
+      )
+      writeFileSync(
+        join(tempDir, "apps", "harness-cli", "src", "commands", "guard-helper.ts"),
+        'import { resolveCluster } from "@harness/graph/cluster-resolver"\nexport const check = () => resolveCluster()\n',
+      )
+      writeFileSync(
+        join(tempDir, "apps", "harness-cli", "src", "commands", "guard-and-route.command.ts"),
+        'import { check } from "./guard-helper.js"\nexport const run = () => check()\n',
+      )
+    }
+
     it.effect(
-      "Gate A (hook-fastpath-forbidden-import): flags transitive typescript or @harness/graph barrel imports in hook fastpath while allowing type-only and cluster-resolver imports",
+      "Gate A (hook-fastpath-forbidden-import): flags transitive typescript/ts-morph/@harness/graph evasion while allowing clean imports",
       () =>
         Effect.gen(function* () {
-          const tempDir = mkdtempSync(join(tmpdir(), "harness-fastpath-closure-"))
+          const tempDir = mkdtempSync(join(tmpdir(), "harness-fastpath-closure-a-"))
           try {
-            mkdirSync(join(tempDir, "libs", "harness", "graph", "src"), { recursive: true })
-            mkdirSync(join(tempDir, "libs", "harness", "gates", "src"), { recursive: true })
-            mkdirSync(join(tempDir, "libs", "harness", "decision", "src"), { recursive: true })
-            mkdirSync(join(tempDir, "libs", "harness", "infra", "src"), { recursive: true })
-            mkdirSync(join(tempDir, "apps", "harness-cli", "src", "commands"), {
-              recursive: true,
-            })
-
-            writeFileSync(
-              join(tempDir, "libs", "harness", "graph", "src", "index.ts"),
-              'import ts from "typescript"\nexport const g = ts.version\n',
-            )
-            writeFileSync(
-              join(tempDir, "libs", "harness", "graph", "src", "cluster-resolver.ts"),
-              'import type { Type } from "typescript"\nexport const resolveCluster = (): Type | undefined => undefined\n',
-            )
-            writeFileSync(
-              join(tempDir, "libs", "harness", "gates", "src", "hook-fastpath.ts"),
-              'import type * as Graph from "@harness/graph"\nexport type G = Graph.HarnessGraph\nexport const ok = () => "allow"\n',
-            )
-            writeFileSync(
-              join(tempDir, "libs", "harness", "gates", "src", "policy-helper.ts"),
-              'export const helper = () => "allow"\n',
-            )
-            writeFileSync(
-              join(tempDir, "libs", "harness", "gates", "src", "policy.ts"),
-              'import { helper } from "./policy-helper.js"\nexport const ok = () => helper()\n',
-            )
-            writeFileSync(
-              join(tempDir, "libs", "harness", "decision", "src", "hook-fastpath.ts"),
-              'export const ok = () => "allow"\n',
-            )
-            writeFileSync(
-              join(tempDir, "libs", "harness", "infra", "src", "hook-fastpath.ts"),
-              'export const ok = () => "allow"\n',
-            )
-            writeFileSync(
-              join(tempDir, "libs", "harness", "infra", "src", "hook-io.ts"),
-              'import * as Option from "effect/Option"\nimport * as Result from "effect/Result"\nimport * as Schema from "effect/Schema"\nexport const io = { Option, Result, Schema }\n',
-            )
-            writeFileSync(
-              join(tempDir, "apps", "harness-cli", "src", "index.ts"),
-              'export const ok = () => "allow"\n',
-            )
-            writeFileSync(
-              join(tempDir, "apps", "harness-cli", "src", "commands", "hook-fastpath-core.ts"),
-              [
-                'import * as Option from "effect/Option"',
-                'import { ok } from "@harness/gates/policy"',
-                'import { io } from "@harness/infra/hook-io"',
-                "export const run = () => ({ Option, ok, io })",
-                'export const fallback = () => import("./hook-fallback.js")',
-              ].join("\n") + "\n",
-            )
-            writeFileSync(
-              join(tempDir, "apps", "harness-cli", "src", "hook-entry.ts"),
-              'import { run } from "./commands/hook-fastpath-core.js"\nexport const main = () => run()\n',
-            )
-            writeFileSync(
-              join(tempDir, "apps", "harness-cli", "src", "commands", "session-fastpath.ts"),
-              'export const ok = () => "allow"\n',
-            )
-            writeFileSync(
-              join(tempDir, "apps", "harness-cli", "src", "commands", "ingest-fastpath.ts"),
-              'import { io } from "@harness/infra/hook-io"\nexport const ok = () => io\n',
-            )
-            writeFileSync(
-              join(tempDir, "apps", "harness-cli", "src", "commands", "guard-helper.ts"),
-              'import { resolveCluster } from "@harness/graph/cluster-resolver"\nexport const check = () => resolveCluster()\n',
-            )
-            writeFileSync(
-              join(tempDir, "apps", "harness-cli", "src", "commands", "guard-and-route.command.ts"),
-              'import { check } from "./guard-helper.js"\nexport const run = () => check()\n',
-            )
-
+            seedFastpathWorkspace(tempDir)
             const cleanFindings = yield* evaluatePackageAndMigrationPlugin({
               graph: buildHarnessGraph({}),
               workspaceRoot: tempDir,
@@ -481,7 +481,6 @@ errors:
               cleanFindings.filter((f) => f.kind === "hook-fastpath-forbidden-import"),
             ).toEqual([])
 
-            // Evade via transitive relative helper importing @harness/graph barrel
             writeFileSync(
               join(tempDir, "apps", "harness-cli", "src", "commands", "guard-helper.ts"),
               'import { g } from "@harness/graph"\nexport const check = () => g\n',
@@ -505,8 +504,6 @@ errors:
               "libs/harness/gates/src/hook-fastpath.ts",
             )
 
-            // Evade via ts-morph, import = require("typescript"), await import("typescript"), require("@harness/graph"), and @harness/graph/type-extractor
-            mkdirSync(join(tempDir, "libs", "harness", "decision", "src"), { recursive: true })
             writeFileSync(
               join(tempDir, "libs", "harness", "decision", "src", "hook-fastpath.ts"),
               [
@@ -538,8 +535,19 @@ errors:
                   f.message.includes("@harness/graph/type-extractor"),
               ),
             ).toBe(true)
+          } finally {
+            rmSync(tempDir, { recursive: true, force: true })
+          }
+        }),
+    )
 
-            // SPEC-0022: policy.ts must not pull effect/*/@harness/*, hook-io.ts/hook-entry.ts/ingest-fastpath.ts must not pull heavy effect/* or @effect/* or @harness/*, and hook-fastpath-core.ts must not lazy-import ../index.js
+    it.effect(
+      "Gate A (SPEC-0022 hook-fastpath-forbidden-import): enforces policy.ts, hook-io.ts, ingest-fastpath.ts, and hook-entry.ts import restrictions",
+      () =>
+        Effect.gen(function* () {
+          const tempDir = mkdtempSync(join(tmpdir(), "harness-fastpath-closure-b-"))
+          try {
+            seedFastpathWorkspace(tempDir)
             writeFileSync(
               join(tempDir, "libs", "harness", "gates", "src", "policy-helper.ts"),
               'import * as Option from "effect/Option"\nimport { compareCodeUnits } from "@harness/contract"\nexport const helper = () => ({ Option, compareCodeUnits })\n',
@@ -584,6 +592,7 @@ errors:
               workspaceRoot: tempDir,
               hostIo: testHostIo,
             })).filter((f) => f.kind === "hook-fastpath-forbidden-import")
+
             const policyTraces = spec22Findings
               .filter((f) => f.location === "libs/harness/gates/src/policy.ts")
               .map((f) => f.message)
@@ -813,73 +822,68 @@ errors:
         const f3: Array<GcFinding> = []
         evaluateHookFastpathImportClosure(tempDir, ioPkgFail, f3)
         expect(f3.some((f) => f.kind === "unreadable-workspace-file")).toBe(true)
-
-        // F-10.a / F-10.b / F-10.c: missing harness entrypoint, broken @harness/* export target, and unresolved relative/@harness/* imports fail closed
-        const f10Dir = mkdtempSync(join(tmpdir(), "gc-fastpath-f10-"))
-        try {
-          mkdirSync(join(f10Dir, "libs", "harness", "broken-pkg", "src"), { recursive: true })
-          mkdirSync(join(f10Dir, "libs", "harness", "gates", "src"), { recursive: true })
-          mkdirSync(join(f10Dir, "libs", "harness", "graph", "src"), { recursive: true })
-          writeFileSync(
-            join(f10Dir, "libs", "harness", "graph", "package.json"),
-            JSON.stringify({
-              name: "@harness/graph",
-              exports: { "./cluster-resolver": "./src/cluster-resolver.ts" },
-            }),
-          )
-          writeFileSync(
-            join(f10Dir, "libs", "harness", "graph", "src", "cluster-resolver.ts"),
-            "export const okResolver = 1\n",
-          )
-          writeFileSync(
-            join(f10Dir, "libs", "harness", "broken-pkg", "package.json"),
-            JSON.stringify({
-              name: "@harness/broken-pkg",
-              exports: {
-                ".": "./src/missing-entry.ts",
-                "./sub": "./src/missing-sub.ts",
-              },
-            }),
-          )
-          writeFileSync(
-            join(f10Dir, "libs", "harness", "gates", "src", "hook-fastpath.ts"),
-            [
-              'import { okResolver } from "@harness/graph/cluster-resolver.js"',
-              'import { badGraphSub } from "@harness/graph/internal"',
-              'import { missingRel } from "./does-not-exist.js"',
-              'import { missingPkg } from "@harness/broken-pkg/sub"',
-              "export const fast = { okResolver, badGraphSub, missingRel, missingPkg }",
-            ].join("\n") + "\n",
-          )
-          const f10Findings: Array<GcFinding> = []
-          evaluateHookFastpathImportClosure(f10Dir, testHostIo, f10Findings)
-          const f10Msgs = f10Findings.map((f) => f.message).join("\n")
-          // F-10.a: missing entrypoint in harness workspace
-          expect(
-            f10Findings.some(
-              (f) =>
-                f.kind === "hook-fastpath-forbidden-import" &&
-                f.nodeId === "libs/harness/decision/src/hook-fastpath.ts:missing-entrypoint",
-            ),
-          ).toBe(true)
-          // F-10.b: declared missing @harness/* package export target
-          expect(
-            f10Findings.some(
-              (f) =>
-                f.kind === "hook-fastpath-forbidden-import" &&
-                f.nodeId === "unresolved-export:@harness/broken-pkg/sub",
-            ),
-          ).toBe(true)
-          // F-10.c: unresolved relative & @harness/* imports inside BFS, while allowing @harness/graph/cluster-resolver.js and rejecting @harness/graph/internal
-          expect(f10Msgs).toContain("./does-not-exist.js (unresolved)")
-          expect(f10Msgs).toContain("@harness/broken-pkg/sub (unresolved)")
-          expect(f10Msgs).not.toContain("@harness/graph/cluster-resolver.js")
-          expect(f10Msgs).toContain("@harness/graph/internal")
-        } finally {
-          rmSync(f10Dir, { recursive: true, force: true })
-        }
       } finally {
         rmSync(tempDir, { recursive: true, force: true })
+      }
+    })
+
+    it("F-10.a / F-10.b / F-10.c: fails closed on missing harness entrypoints, broken exports, and unresolved imports", () => {
+      const f10Dir = mkdtempSync(join(tmpdir(), "gc-fastpath-f10-"))
+      try {
+        mkdirSync(join(f10Dir, "libs", "harness", "broken-pkg", "src"), { recursive: true })
+        mkdirSync(join(f10Dir, "libs", "harness", "gates", "src"), { recursive: true })
+        mkdirSync(join(f10Dir, "libs", "harness", "graph", "src"), { recursive: true })
+        writeFileSync(
+          join(f10Dir, "libs", "harness", "graph", "package.json"),
+          JSON.stringify({
+            name: "@harness/graph",
+            exports: { "./cluster-resolver": "./src/cluster-resolver.ts" },
+          }),
+        )
+        writeFileSync(
+          join(f10Dir, "libs", "harness", "graph", "src", "cluster-resolver.ts"),
+          "export const okResolver = 1\n",
+        )
+        writeFileSync(
+          join(f10Dir, "libs", "harness", "broken-pkg", "package.json"),
+          JSON.stringify({
+            name: "@harness/broken-pkg",
+            exports: { ".": "./src/missing-entry.ts", "./sub": "./src/missing-sub.ts" },
+          }),
+        )
+        writeFileSync(
+          join(f10Dir, "libs", "harness", "gates", "src", "hook-fastpath.ts"),
+          [
+            'import { okResolver } from "@harness/graph/cluster-resolver.js"',
+            'import { badGraphSub } from "@harness/graph/internal"',
+            'import { missingRel } from "./does-not-exist.js"',
+            'import { missingPkg } from "@harness/broken-pkg/sub"',
+            "export const fast = { okResolver, badGraphSub, missingRel, missingPkg }",
+          ].join("\n") + "\n",
+        )
+        const f10Findings: Array<GcFinding> = []
+        evaluateHookFastpathImportClosure(f10Dir, testHostIo, f10Findings)
+        const f10Msgs = f10Findings.map((f) => f.message).join("\n")
+        expect(
+          f10Findings.some(
+            (f) =>
+              f.kind === "hook-fastpath-forbidden-import" &&
+              f.nodeId === "libs/harness/decision/src/hook-fastpath.ts:missing-entrypoint",
+          ),
+        ).toBe(true)
+        expect(
+          f10Findings.some(
+            (f) =>
+              f.kind === "hook-fastpath-forbidden-import" &&
+              f.nodeId === "unresolved-export:@harness/broken-pkg/sub",
+          ),
+        ).toBe(true)
+        expect(f10Msgs).toContain("./does-not-exist.js (unresolved)")
+        expect(f10Msgs).toContain("@harness/broken-pkg/sub (unresolved)")
+        expect(f10Msgs).not.toContain("@harness/graph/cluster-resolver.js")
+        expect(f10Msgs).toContain("@harness/graph/internal")
+      } finally {
+        rmSync(f10Dir, { recursive: true, force: true })
       }
     })
 

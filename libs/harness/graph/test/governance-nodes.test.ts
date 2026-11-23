@@ -1,13 +1,23 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { Effect, Schema } from "effect"
+import { match } from "ts-pattern"
 import { describe, expect, it } from "vitest"
 import {
   buildHarnessGraph,
   checkEffectGraph,
+  createTypeScriptProgramSession,
+  decideEffectGraphPolicy,
   diffHarnessGraphs,
   extractWorkspaceTypeAwareGraph,
   findCallees,
   findCallers,
+  type HarnessGraph,
   loadWorkspaceGovernanceDocs,
+  loadWorkspaceGovernanceDocsWithViolations,
+  parseGovernanceDocFile,
+  parseGovernanceDocFileChecked,
   renderMermaid,
   resolveNode,
   toOmnigraphNdjson,
@@ -17,8 +27,8 @@ import { testHostIo } from "./helpers/test-host-io.js"
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))
 
 describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
-  it("buildHarnessGraph creates doc nodes and governance edges, serializes to NDJSON, and resolves via resolveNode/findCallers/findCallees", () => {
-    const graph = buildHarnessGraph({
+  const makeGovernanceRoundtripGraph = () =>
+    buildHarnessGraph({
       fns: [
         {
           qualname: "libs/sample/domain/src/index.ts#uploadPhoto",
@@ -103,6 +113,9 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
         },
       ],
     })
+
+  it("buildHarnessGraph creates doc nodes and governance edges and resolves via resolveNode/findCallers/findCallees", () => {
+    const graph = makeGovernanceRoundtripGraph()
 
     // 1. resolveNode
     const adrById = resolveNode(graph, "sample:ADR-0001")
@@ -219,6 +232,10 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
         }),
       ]),
     )
+  })
+
+  it("buildHarnessGraph renders Mermaid and serializes governance nodes and edges to NDJSON", () => {
+    const graph = makeGovernanceRoundtripGraph()
 
     // 4. renderMermaid
     const mermaid = renderMermaid(graph)
@@ -482,6 +499,181 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
       expect(res.ok).toBe(true)
       expect(res.violations).toHaveLength(0)
     })
+
+    it("SPEC-0029 REQ-4.1: ignores unmapped symbols for status: draft EARS specs", () => {
+      const graph = buildHarnessGraph({
+        earsSpecs: [
+          {
+            id: "harness:SPEC-DRAFT",
+            title: "Draft Spec",
+            status: "draft",
+            path: "libs/harness/docs/specs/draft.md",
+            enforcedByFiles: [],
+            referencedSpans: ["Future.span"],
+            referencedServices: ["FutureService"],
+            referencedErrors: ["FutureError"],
+          },
+        ],
+      })
+      const res = checkEffectGraph(graph)
+      expect(res.ok).toBe(true)
+      expect(res.violations).toHaveLength(0)
+    })
+
+    it("SPEC-0029 REQ-4.3: fails closed on unrecognized spec/adr status via parseGovernanceDocFileChecked and GraphPolicy.decide", () => {
+      const okDraft = parseGovernanceDocFileChecked(
+        "libs/harness/docs/specs/draft.md",
+        "---\nid: harness:SPEC-1\nstatus: draft\n---\n",
+      )
+      expect(okDraft._tag).toBe("Ok")
+
+      const badAdrDraft = parseGovernanceDocFileChecked(
+        "libs/harness/docs/adr/0001.md",
+        "---\nid: harness:ADR-1\nstatus: draft\n---\n",
+      )
+      expect(badAdrDraft._tag).toBe("InvalidStatus")
+
+      const badSpecStatus = parseGovernanceDocFileChecked(
+        "libs/harness/docs/specs/bogus.md",
+        "---\nid: harness:SPEC-2\nstatus: bogus\n---\n",
+      )
+      expect(badSpecStatus._tag).toBe("InvalidStatus")
+
+      const tempDir = mkdtempSync(join(tmpdir(), "harness-gov-status-failclosed-"))
+      try {
+        mkdirSync(join(tempDir, "libs/harness/docs/specs"), { recursive: true })
+        writeFileSync(join(tempDir, "pnpm-workspace.yaml"), "packages:\n  - 'libs/**'\n")
+        writeFileSync(
+          join(tempDir, "libs/harness/docs/specs/2026-11-22-bogus.md"),
+          "---\nid: harness:SPEC-9999\ntitle: Bogus\nstatus: bogus\n---\n",
+        )
+        const loaded = loadWorkspaceGovernanceDocsWithViolations(tempDir, testHostIo)
+        expect(loaded.docs).toHaveLength(0)
+        expect(loaded.violations).toHaveLength(1)
+        const extracted = Effect.runSync(extractWorkspaceTypeAwareGraph(tempDir, testHostIo))
+        const policyRes = Effect.runSync(decideEffectGraphPolicy(extracted))
+        expect(policyRes.ok).toBe(false)
+        expect(
+          policyRes.violations.some(
+            (v) => v.rule === "unmapped-spec-symbol" && v.message.includes("bogus"),
+          ),
+        ).toBe(true)
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    })
+
+    it("SPEC-0029: exercises governance-doc-parser Skip, AdrDoc, quoted frontmatter, heading title fallback, and null compatibility wrapper", () => {
+      expect(parseGovernanceDocFileChecked("docs/notes.md", "---\nid: x\n---\n")._tag).toBe("Skip")
+      expect(parseGovernanceDocFileChecked("libs/harness/docs/specs/a.md", "no fm")._tag).toBe(
+        "Skip",
+      )
+      expect(
+        parseGovernanceDocFileChecked("libs/harness/docs/specs/a.md", "---\ntitle: NoId\n---\n")
+          ._tag,
+      ).toBe("Skip")
+      expect(
+        parseGovernanceDocFileChecked(
+          "libs/harness/docs/specs/missing-status.md",
+          "---\nid: harness:SPEC-1\n---\n",
+        )._tag,
+      ).toBe("InvalidStatus")
+      expect(
+        parseGovernanceDocFileChecked(
+          "libs/harness/docs/adr/bad-adr.md",
+          "---\nid: harness:ADR-9\nstatus: bogus\n---\n",
+        )._tag,
+      ).toBe("InvalidStatus")
+
+      const validAdr = parseGovernanceDocFileChecked(
+        "libs/harness/docs/adr/0009.md",
+        '\uFEFF---\n# comment\nid: "harness:ADR-9"\nstatus: \'accepted\'\nenforced_by: [libs/a.ts]\nspans: []\nservices:\n  - "SvcTag"\nerrors:\n  - ErrA # inline\n---\n# Heading Fallback Title\n',
+      )
+      match(validAdr)
+        .with({ _tag: "Ok" }, ({ node }) => {
+          expect(node._tag).toBe("AdrDoc")
+          expect(node.id).toBe("harness:ADR-9")
+          expect(node.title).toBe("Heading Fallback Title")
+          expect(node.enforcedByFiles).toEqual(["libs/a.ts"])
+          expect(node.referencedSpans).toEqual([])
+          expect(node.referencedServices).toEqual(["SvcTag"])
+          expect(node.referencedErrors).toEqual(["ErrA"])
+        })
+        .with({ _tag: "Skip" }, { _tag: "InvalidStatus" }, () => {
+          expect.unreachable("Expected Ok for valid ADR")
+        })
+        .exhaustive()
+      expect(
+        parseGovernanceDocFile(
+          "libs/harness/docs/specs/a.md",
+          "---\nid: harness:SPEC-1\nstatus: bogus\n---\n",
+        ),
+      ).toBeNull()
+      expect(
+        parseGovernanceDocFile(
+          "libs/harness/docs/specs/a.md",
+          "---\nid: harness:SPEC-1\nstatus: draft\n---\n# Title\n",
+        )?.id,
+      ).toBe("harness:SPEC-1")
+
+      const explicitTitleAdr = parseGovernanceDocFileChecked(
+        "libs/harness/docs/adr/0010.md",
+        "---\nid: harness:ADR-10\ntitle: Explicit FM Title\nstatus: accepted\n---\n# Body Heading\n",
+      )
+      match(explicitTitleAdr)
+        .with({ _tag: "Ok" }, ({ node }) => {
+          expect(node.title).toBe("Explicit FM Title")
+        })
+        .with({ _tag: "Skip" }, { _tag: "InvalidStatus" }, () => {
+          expect.unreachable("Expected Ok for explicit title ADR")
+        })
+        .exhaustive()
+    })
+
+    it("F-07: preserves quoted '#' qualnames in frontmatter while stripping unquoted inline comments", () => {
+      const parsed = parseGovernanceDocFileChecked(
+        "libs/sample/docs/specs/quoted-hash.md",
+        [
+          "---",
+          'id: "sample:SPEC-HASH"',
+          'title: "Quoted # Title"',
+          "status: accepted # unquoted inline comment",
+          "enforced_by: [\"libs/sample/domain/src/index.ts#uploadPhoto\", 'libs/sample/domain/src/other.ts#savePhoto']",
+          "spans:",
+          '  - "libs/sample/domain/src/index.ts#uploadPhoto"',
+          "  - 'libs/sample/domain/src/other.ts#savePhoto'",
+          "  - Sample.cleanSpan # trailing unquoted comment",
+          "services:",
+          "  - PhotoRepo # inline service comment",
+          "errors:",
+          '  - "Photo#CustomError"',
+          "---",
+        ].join("\n"),
+      )
+
+      match(parsed)
+        .with({ _tag: "Ok" }, ({ node }) => {
+          expect(node._tag).toBe("EarsSpec")
+          expect(node.id).toBe("sample:SPEC-HASH")
+          expect(node.title).toBe("Quoted # Title")
+          expect(node.status).toBe("accepted")
+          expect(node.enforcedByFiles).toEqual([
+            "libs/sample/domain/src/index.ts#uploadPhoto",
+            "libs/sample/domain/src/other.ts#savePhoto",
+          ])
+          expect(node.referencedSpans).toEqual([
+            "libs/sample/domain/src/index.ts#uploadPhoto",
+            "libs/sample/domain/src/other.ts#savePhoto",
+            "Sample.cleanSpan",
+          ])
+          expect(node.referencedServices).toEqual(["PhotoRepo"])
+          expect(node.referencedErrors).toEqual(["Photo#CustomError"])
+        })
+        .with({ _tag: "Skip" }, { _tag: "InvalidStatus" }, () => {
+          expect.unreachable("Expected Ok when parsing quoted '#' qualnames")
+        })
+        .exhaustive()
+    })
   })
 
   describe("diffHarnessGraphs and diffPlanAndImplGraphs with governance edges", () => {
@@ -648,6 +840,144 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
       const specNode = resolveNode(graph, "sample:SPEC-0001")
       expect(specNode).toBeDefined()
       expect(specNode?._tag).toBe("EarsSpec")
+      // 15s budget: cold full-workspace TypeScript compiler extraction & governance graph assembly across process.cwd()
+    }, 15_000)
+
+    it("F-06: preserves governance status violations across topology snapshot hit and invalidates when test, pattern, or gov map size shrinks", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "harness-f06-warm-session-"))
+      try {
+        mkdirSync(join(tempDir, "libs/sample/infra/src"), { recursive: true })
+        mkdirSync(join(tempDir, "libs/sample/infra/test"), { recursive: true })
+        mkdirSync(join(tempDir, "libs/sample/docs/specs"), { recursive: true })
+        mkdirSync(join(tempDir, "libs/sample/docs/adr"), { recursive: true })
+        mkdirSync(join(tempDir, "agent-patterns"), { recursive: true })
+        writeFileSync(join(tempDir, "pnpm-workspace.yaml"), "packages:\n  - 'libs/**'\n")
+        writeFileSync(
+          join(tempDir, "libs/sample/infra/src/index.ts"),
+          "export const infraValue = 1\n",
+        )
+        writeFileSync(
+          join(tempDir, "libs/sample/infra/test/sample.test.ts"),
+          'import { expect, it } from "vitest"\nit("ok", () => { expect(1).toBe(1) })\n',
+        )
+        writeFileSync(
+          join(tempDir, "libs/sample/docs/specs/2026-11-22-bogus.md"),
+          "---\nid: harness:SPEC-9999\ntitle: Bogus\nstatus: bogus\n---\n",
+        )
+        writeFileSync(
+          join(tempDir, "libs/sample/docs/adr/0001-valid.md"),
+          "---\nid: sample:ADR-0001\ntitle: Valid ADR\nstatus: accepted\n---\n",
+        )
+        writeFileSync(
+          join(tempDir, "agent-patterns/sample-pattern.md"),
+          "# Sample Pattern\nPattern summary.\n",
+        )
+
+        const session = createTypeScriptProgramSession(tempDir, testHostIo)
+        const hasBogusStatusViolation = (graph: HarnessGraph) =>
+          (graph.branchingViolations ?? []).some(
+            (v) =>
+              v.rule === "unmapped-spec-symbol" &&
+              v.enclosingSymbol === "harness:SPEC-9999" &&
+              v.message.includes("bogus"),
+          )
+
+        const run1 = Effect.runSync(
+          extractWorkspaceTypeAwareGraph(tempDir, testHostIo, { session }),
+        )
+        expect(hasBogusStatusViolation(run1)).toBe(true)
+        expect(resolveNode(run1, "sample-pattern")?._tag).toBe("PatternDoc")
+        expect(resolveNode(run1, "libs/sample/infra/test/sample.test.ts::suite")?._tag).toBe(
+          "VitestCase",
+        )
+        expect(resolveNode(run1, "sample:ADR-0001")?._tag).toBe("AdrDoc")
+
+        // (a) Edit non-governance infra .ts comment via overlay -> checkWorkspaceSnapshotMatch misses, checkTopologySnapshotMatch hits
+        const commentOverlay = {
+          "libs/sample/infra/src/index.ts": "export const infraValue = 1\n// comment-only edit\n",
+        }
+        const run2 = Effect.runSync(
+          extractWorkspaceTypeAwareGraph(tempDir, testHostIo, {
+            session,
+            overlays: commentOverlay,
+          }),
+        )
+        expect(run2.graph).toBe(run1.graph)
+        expect(hasBogusStatusViolation(run2)).toBe(true)
+        const policy2 = Effect.runSync(decideEffectGraphPolicy(run2))
+        expect(policy2.ok).toBe(false)
+        expect(
+          policy2.violations.some(
+            (v) => v.rule === "unmapped-spec-symbol" && v.message.includes("bogus"),
+          ),
+        ).toBe(true)
+
+        // (b.1) Delete pattern doc -> patternShaMap.size shrinks -> topology snapshot invalidates
+        rmSync(join(tempDir, "agent-patterns/sample-pattern.md"))
+        const run3 = Effect.runSync(
+          extractWorkspaceTypeAwareGraph(tempDir, testHostIo, {
+            session,
+            overlays: commentOverlay,
+          }),
+        )
+        expect(run3.graph).not.toBe(run2.graph)
+        expect(resolveNode(run3, "sample-pattern")).toBeUndefined()
+        expect(hasBogusStatusViolation(run3)).toBe(true)
+
+        // (b.2) Delete test file -> testShaMap.size shrinks -> topology snapshot invalidates
+        rmSync(join(tempDir, "libs/sample/infra/test/sample.test.ts"))
+        const run4 = Effect.runSync(
+          extractWorkspaceTypeAwareGraph(tempDir, testHostIo, {
+            session,
+            overlays: commentOverlay,
+          }),
+        )
+        expect(run4.graph).not.toBe(run3.graph)
+        expect(resolveNode(run4, "libs/sample/infra/test/sample.test.ts::suite")).toBeUndefined()
+        expect(hasBogusStatusViolation(run4)).toBe(true)
+
+        // (b.3) Delete valid governance doc -> govShaMap.size shrinks -> topology snapshot invalidates
+        rmSync(join(tempDir, "libs/sample/docs/adr/0001-valid.md"))
+        const run5 = Effect.runSync(
+          extractWorkspaceTypeAwareGraph(tempDir, testHostIo, {
+            session,
+            overlays: commentOverlay,
+          }),
+        )
+        expect(run5.graph).not.toBe(run4.graph)
+        expect(resolveNode(run5, "sample:ADR-0001")).toBeUndefined()
+        expect(hasBogusStatusViolation(run5)).toBe(true)
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    })
+
+    it("stripFmQuotes strips empty quoted frontmatter items (length === 2)", () => {
+      const res = parseGovernanceDocFileChecked(
+        "libs/sample/docs/specs/2026-11-22-empty-quotes.md",
+        [
+          "---",
+          "id: sample:SPEC-9001",
+          'title: "Empty Quotes Spec"',
+          "status: accepted",
+          'spans: ["Sample.validSpan", "", \'\']',
+          "services:",
+          '  - ""',
+          "  - ''",
+          "  - PhotoRepo",
+          "---",
+          "# Empty Quotes Spec",
+        ].join("\n"),
+      )
+      match(res)
+        .with({ _tag: "Ok" }, ({ node }) => {
+          expect(node.referencedSpans).toEqual(["Sample.validSpan"])
+          expect(node.referencedServices).toEqual(["PhotoRepo"])
+        })
+        .with({ _tag: "Skip" }, { _tag: "InvalidStatus" }, () => {
+          expect.unreachable("Expected Ok governance doc result")
+        })
+        .exhaustive()
     })
   })
 })

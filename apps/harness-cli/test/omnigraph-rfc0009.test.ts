@@ -950,21 +950,20 @@ EOF
     expect(clusterYamlDeclaresPolicies('{ name: "test", policies: [] }')).toBe(false)
   })
 
-  it("F-6.2 & S-1.1 & S-1.2: ensureLocalOmnigraphReady spawns policy-gated server with OMNIGRAPH_SERVER_BEARER_TOKENS_JSON and no --unauthenticated", async () => {
-    const setupFakeBinRepo = (clusterYaml: string) => {
-      const repoRoot = makeTempRepo("harness-rfc0009-spawn-")
-      writeFileSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"), clusterYaml, "utf8")
-      const fakeHome = join(repoRoot, "fake-home")
-      const binDir = join(fakeHome, ".local", "bin")
-      mkdirSync(binDir, { recursive: true })
-      const canonicalRoot = resolveCanonicalRepoRoot(repoRoot, nodeSyncHostIo)
-      const port = deriveRepoOmnigraphPort(canonicalRoot, nodeSyncHostIo)
-      const capturePath = join(repoRoot, "spawn-capture.json")
+  const setupFakeBinRepoForSpawn = (clusterYaml: string) => {
+    const repoRoot = makeTempRepo("harness-rfc0009-spawn-")
+    writeFileSync(join(repoRoot, "libs", "harness", "graph", "cluster.yaml"), clusterYaml, "utf8")
+    const fakeHome = join(repoRoot, "fake-home")
+    const binDir = join(fakeHome, ".local", "bin")
+    mkdirSync(binDir, { recursive: true })
+    const canonicalRoot = resolveCanonicalRepoRoot(repoRoot, nodeSyncHostIo)
+    const port = deriveRepoOmnigraphPort(canonicalRoot, nodeSyncHostIo)
+    const capturePath = join(repoRoot, "spawn-capture.json")
 
-      const fakeCli = join(binDir, "omnigraph")
-      writeFileSync(
-        fakeCli,
-        `#!/bin/sh
+    const fakeCli = join(binDir, "omnigraph")
+    writeFileSync(
+      fakeCli,
+      `#!/bin/sh
 if [ "$1" = "cluster" ] && [ "$2" = "apply" ]; then
   mkdir -p "${join(repoRoot, ".harness", "omnigraph-cluster", "graphs", "harness.omni")}"
   echo '{"status":"applied"}'
@@ -972,14 +971,14 @@ if [ "$1" = "cluster" ] && [ "$2" = "apply" ]; then
 fi
 exit 0
 `,
-        "utf8",
-      )
-      chmodSync(fakeCli, 0o755)
+      "utf8",
+    )
+    chmodSync(fakeCli, 0o755)
 
-      const fakeServer = join(binDir, "omnigraph-server")
-      writeFileSync(
-        fakeServer,
-        `#!${process.execPath}
+    const fakeServer = join(binDir, "omnigraph-server")
+    writeFileSync(
+      fakeServer,
+      `#!${process.execPath}
 const http = require("node:http");
 const fs = require("node:fs");
 fs.writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify({
@@ -995,21 +994,40 @@ const server = http.createServer((req, res) => {
 server.listen(${port}, "127.0.0.1");
 setTimeout(() => process.exit(0), 5000);
 `,
-        "utf8",
-      )
-      chmodSync(fakeServer, 0o755)
-      return { repoRoot, fakeHome, capturePath }
-    }
+      "utf8",
+    )
+    chmodSync(fakeServer, 0o755)
+    return { repoRoot, fakeHome, capturePath }
+  }
 
+  const withSavedSpawnEnv = async (run: () => Promise<void>): Promise<void> => {
     const prevHome = process.env.HOME
     const prevApiKey = process.env.OMNIGRAPH_EMBEDDING_API_KEY
     const prevMock = process.env.OMNIGRAPH_EMBEDDINGS_MOCK
     const prevUrl = process.env.OMNIGRAPH_URL
     const prevEmbedBaseUrl = process.env.HARNESS_EMBEDDING_BASE_URL
-
     try {
+      await run()
+    } finally {
+      if (prevHome === undefined) Reflect.deleteProperty(process.env, "HOME")
+      else process.env.HOME = prevHome
+      if (prevApiKey === undefined)
+        Reflect.deleteProperty(process.env, "OMNIGRAPH_EMBEDDING_API_KEY")
+      else process.env.OMNIGRAPH_EMBEDDING_API_KEY = prevApiKey
+      if (prevMock === undefined) Reflect.deleteProperty(process.env, "OMNIGRAPH_EMBEDDINGS_MOCK")
+      else process.env.OMNIGRAPH_EMBEDDINGS_MOCK = prevMock
+      if (prevUrl === undefined) Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
+      else process.env.OMNIGRAPH_URL = prevUrl
+      if (prevEmbedBaseUrl === undefined)
+        Reflect.deleteProperty(process.env, "HARNESS_EMBEDDING_BASE_URL")
+      else process.env.HARNESS_EMBEDDING_BASE_URL = prevEmbedBaseUrl
+    }
+  }
+
+  it("F-6.2 & S-1.1 & S-1.2: ensureLocalOmnigraphReady spawns policy-gated server with OMNIGRAPH_SERVER_BEARER_TOKENS_JSON and no --unauthenticated", async () => {
+    await withSavedSpawnEnv(async () => {
       // Case 1: policy-gated cluster with unset OMNIGRAPH_EMBEDDING_API_KEY and unavailable Ollama falls back to OMNIGRAPH_EMBEDDINGS_MOCK="1"
-      const policyCase = setupFakeBinRepo("name: test\npolicies:\n  - name: p1\n")
+      const policyCase = setupFakeBinRepoForSpawn("name: test\npolicies:\n  - name: p1\n")
       process.env.HOME = policyCase.fakeHome
       process.env.HARNESS_EMBEDDING_BASE_URL = "http://127.0.0.1:1/v1"
       Reflect.deleteProperty(process.env, "OMNIGRAPH_EMBEDDING_API_KEY")
@@ -1048,7 +1066,7 @@ setTimeout(() => process.exit(0), 5000);
       }
 
       // Case 2: explicit OMNIGRAPH_EMBEDDING_API_KEY does NOT set OMNIGRAPH_EMBEDDINGS_MOCK="1", and no policies logs --unauthenticated warning
-      const unauthCase = setupFakeBinRepo("name: test\n")
+      const unauthCase = setupFakeBinRepoForSpawn("name: test\n")
       process.env.HOME = unauthCase.fakeHome
       process.env.OMNIGRAPH_EMBEDDING_API_KEY = "real-provider-key"
       Reflect.deleteProperty(process.env, "OMNIGRAPH_EMBEDDINGS_MOCK")
@@ -1084,7 +1102,11 @@ setTimeout(() => process.exit(0), 5000);
           // ignore
         }
       }
+    })
+  })
 
+  it("F-6.2 & S-1.1: ensureLocalOmnigraphReady enables live qwen3-embedding:8b when available and preserves shared canonical cluster for linked worktrees", async () => {
+    await withSavedSpawnEnv(async () => {
       // Case 3: live local Ollama qwen3-embedding:8b detected on HARNESS_EMBEDDING_BASE_URL omits OMNIGRAPH_EMBEDDINGS_MOCK
       const ollamaMockServer = createServer((req, res) => {
         if (req.url === "/api/tags") {
@@ -1104,7 +1126,7 @@ setTimeout(() => process.exit(0), 5000);
       })
       try {
         const ollamaAddr = ollamaMockServer.address() as AddressInfo
-        const ollamaCase = setupFakeBinRepo("name: test\npolicies:\n  - name: p1\n")
+        const ollamaCase = setupFakeBinRepoForSpawn("name: test\npolicies:\n  - name: p1\n")
         process.env.HOME = ollamaCase.fakeHome
         process.env.HARNESS_EMBEDDING_BASE_URL = `http://127.0.0.1:${ollamaAddr.port}/v1`
         Reflect.deleteProperty(process.env, "OMNIGRAPH_EMBEDDING_API_KEY")
@@ -1135,7 +1157,7 @@ setTimeout(() => process.exit(0), 5000);
         }
 
         // Case 4: NoOp fast-path upgrades running "mock" daemon to "live" when Ollama qwen3-embedding:8b becomes available
-        const upgradeCase = setupFakeBinRepo("name: test\npolicies:\n  - name: p1\n")
+        const upgradeCase = setupFakeBinRepoForSpawn("name: test\npolicies:\n  - name: p1\n")
         process.env.HOME = upgradeCase.fakeHome
         process.env.HARNESS_EMBEDDING_BASE_URL = "http://127.0.0.1:1/v1"
         Reflect.deleteProperty(process.env, "OMNIGRAPH_EMBEDDING_API_KEY")
@@ -1225,20 +1247,7 @@ setTimeout(() => process.exit(0), 5000);
         ollamaMockServer.closeAllConnections()
         ollamaMockServer.close()
       }
-    } finally {
-      if (prevHome === undefined) Reflect.deleteProperty(process.env, "HOME")
-      else process.env.HOME = prevHome
-      if (prevApiKey === undefined)
-        Reflect.deleteProperty(process.env, "OMNIGRAPH_EMBEDDING_API_KEY")
-      else process.env.OMNIGRAPH_EMBEDDING_API_KEY = prevApiKey
-      if (prevMock === undefined) Reflect.deleteProperty(process.env, "OMNIGRAPH_EMBEDDINGS_MOCK")
-      else process.env.OMNIGRAPH_EMBEDDINGS_MOCK = prevMock
-      if (prevUrl === undefined) Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
-      else process.env.OMNIGRAPH_URL = prevUrl
-      if (prevEmbedBaseUrl === undefined)
-        Reflect.deleteProperty(process.env, "HARNESS_EMBEDDING_BASE_URL")
-      else process.env.HARNESS_EMBEDDING_BASE_URL = prevEmbedBaseUrl
-    }
+    })
   })
 
   it("F-7.2: evaluateClusterConfigDrift classifies cluster.yaml, graph.policy.yaml, and cluster.policy.yaml drift as RequiresCleanRebuild", async () => {
@@ -1730,7 +1739,7 @@ setTimeout(() => process.exit(0), 5000);
     }
   })
 
-  it("handleGc --strict runs optimize only, syncVerifyImplToOmnigraph uploads and stats blob, lifecycle helpers guard unsafe PIDs, and isolated done skips omnigraph:merge-main telemetry", async () => {
+  it("handleGc --strict runs optimize only while runOmnigraphMaintenance includeCleanup runs optimize + cleanup", async () => {
     // gc --strict invokes optimize only (without destructive cleanup) on non-isolated cluster dir
     const gcRepo = makeTempRepo("harness-rfc0009-gc-")
     const gcClusterDir = resolveOmnigraphClusterDir(gcRepo, nodeSyncHostIo)
@@ -1764,6 +1773,15 @@ setTimeout(() => process.exit(0), 5000);
       else process.env.HOME = prevHome
     }
 
+    // killOmnigraphServerPidIfAlive refuses unsafe PID (current vitest PID) & stopStaleOmnigraphClusterBeforeDelete
+    expect(
+      await Effect.runPromise(killOmnigraphServerPidIfAlive(process.pid, gcClusterDir, "test")),
+    ).toBe(false)
+    expect(stopStaleOmnigraphClusterBeforeDelete(gcClusterDir, undefined)).toBe(true)
+  })
+
+  it("syncVerifyImplToOmnigraph uploads and stats blob and isolated done skips omnigraph:merge-main telemetry", async () => {
+    const prevHome = process.env.HOME
     // syncVerifyImplToOmnigraph sends putBlob + statBlob when spans.jsonl + VitestCase exist
     const verifyRepo = makeTempRepo("harness-rfc0009-putblob-")
     const verifyClusterDir = resolveOmnigraphClusterDir(verifyRepo, nodeSyncHostIo)
@@ -1925,12 +1943,6 @@ setTimeout(() => process.exit(0), 5000);
       if (prevHome === undefined) Reflect.deleteProperty(process.env, "HOME")
       else process.env.HOME = prevHome
     }
-
-    // killOmnigraphServerPidIfAlive refuses unsafe PID (current vitest PID) & stopStaleOmnigraphClusterBeforeDelete
-    expect(
-      await Effect.runPromise(killOmnigraphServerPidIfAlive(process.pid, gcClusterDir, "test")),
-    ).toBe(false)
-    expect(stopStaleOmnigraphClusterBeforeDelete(gcClusterDir, undefined)).toBe(true)
 
     // Isolated workspace syncOmnigraphOnDone does not record omnigraph:merge-main telemetry
     const isoDir = mkdtempSync(join(tmpdir(), "harness-rfc0009-iso-"))

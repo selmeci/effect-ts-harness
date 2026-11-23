@@ -20,6 +20,11 @@ import {
 import type { ExtendedHostIo, SyncHostIo } from "@harness/service/host-io"
 import { Data, Effect, Option, Result, Schema, Stream } from "effect"
 import {
+  DEFAULT_OMNIGRAPH_LOAD_CHUNK_BYTES,
+  DEFAULT_OMNIGRAPH_OVERWRITE_CHUNK_BYTES,
+  splitNdjsonIntoByteChunks,
+} from "./omnigraph-ndjson-chunks.js"
+import {
   type BranchMergeOutcome,
   type ChangeBlock,
   ConflictError,
@@ -639,33 +644,10 @@ export const executeStatBlob = (
     ),
   )
 
-export const DEFAULT_OMNIGRAPH_LOAD_CHUNK_BYTES = 1_048_576
-const UTF8_ENCODER = new TextEncoder()
-
-/** Splits an NDJSON payload on line boundaries so each chunk fits within `maxChunkBytes` UTF-8 bytes. */
-export const splitNdjsonIntoByteChunks = (
-  ndjson: string,
-  maxChunkBytes: number = DEFAULT_OMNIGRAPH_LOAD_CHUNK_BYTES,
-): ReadonlyArray<string> => {
-  const limit = Math.max(1, Math.floor(maxChunkBytes))
-  if (UTF8_ENCODER.encode(ndjson).byteLength <= limit) return [ndjson]
-  const lines = ndjson.split("\n").filter((line) => line.length > 0)
-  if (lines.length <= 1) return [ndjson]
-  const chunks: Array<string> = []
-  let current: Array<string> = []
-  let currentBytes = 0
-  for (const line of lines) {
-    const lineBytes = UTF8_ENCODER.encode(line).byteLength + 1
-    if (current.length > 0 && currentBytes + lineBytes > limit) {
-      chunks.push(current.join("\n"))
-      current = []
-      currentBytes = 0
-    }
-    current.push(line)
-    currentBytes += lineBytes
-  }
-  if (current.length > 0) chunks.push(current.join("\n"))
-  return chunks
+export {
+  DEFAULT_OMNIGRAPH_LOAD_CHUNK_BYTES,
+  DEFAULT_OMNIGRAPH_OVERWRITE_CHUNK_BYTES,
+  splitNdjsonIntoByteChunks,
 }
 
 export interface OmnigraphLoadWithReforkInput {
@@ -693,12 +675,15 @@ export const executeLoadWithStaleRefork = (
   input: OmnigraphLoadWithReforkInput,
 ): Effect.Effect<Ingest, OmnigraphLoadError> =>
   Effect.gen(function* () {
-    const chunks = splitNdjsonIntoByteChunks(input.data, input.maxChunkBytes)
     const { isOverwrite, nextMode } = match(input.mode)
       .with("overwrite", () => ({ isOverwrite: true, nextMode: "merge" as const }))
       .with("merge", () => ({ isOverwrite: false, nextMode: "merge" as const }))
       .with("append", () => ({ isOverwrite: false, nextMode: "append" as const }))
       .exhaustive()
+    const chunkBytes =
+      input.maxChunkBytes ??
+      (isOverwrite ? DEFAULT_OMNIGRAPH_OVERWRITE_CHUNK_BYTES : DEFAULT_OMNIGRAPH_LOAD_CHUNK_BYTES)
+    const chunks = splitNdjsonIntoByteChunks(input.data, chunkBytes)
     const runChunkedLoad = Effect.gen(function* () {
       const firstData = chunks[0] ?? input.data
       const firstRes = yield* runSingleLoad(og, input.branch, input.mode, firstData, input.from)
@@ -731,14 +716,22 @@ export const executeLoadWithStaleRefork = (
       catch: (cause) => new OmnigraphLoadError({ cause }),
     }).pipe(
       Effect.as(false),
-      Effect.catchIf((err) => err.cause instanceof ConflictError, () => Effect.succeed(true)),
+      Effect.catchIf(
+        (err) => err.cause instanceof ConflictError,
+        () => Effect.succeed(true),
+      ),
     )
     if (!hasConflict) return initial.lastRes
 
     yield* Effect.tryPromise({
       try: () => og.branches.delete(input.branch),
       catch: (cause) => new OmnigraphLoadError({ cause }),
-    }).pipe(Effect.catchIf((err) => err.cause instanceof NotFoundError, () => Effect.void))
+    }).pipe(
+      Effect.catchIf(
+        (err) => err.cause instanceof NotFoundError,
+        () => Effect.void,
+      ),
+    )
 
     return (yield* runChunkedLoad).lastRes
   })

@@ -218,6 +218,47 @@ describe("Harness Gates: Session Handoff, Span Budget, Mutation, and State Dir",
         expect(summary.handoffMessage).toContain("[ESCALATE: STUCK LOOP DETECTED]")
       }),
     )
+
+    it("compacts multi-line >120 char friction summaries and caps rendered stub/missing lists at 8 entries", () => {
+      const exact120 = "x".repeat(120)
+      const multiLine121 = `line one\n  line two\t${"y".repeat(120)}`
+      const summary = buildSessionHandoff({
+        stampValid: true,
+        activeStubs: Array.from({ length: 8 }, (_, i) => `stub-${i}`),
+        missingPlannedFns: Array.from({ length: 10 }, (_, i) => `fn-${i}`),
+        frictionClusters: [
+          {
+            key: "verify_failure::exact120",
+            kind: "verify_failure",
+            summary: `  ${exact120}  `,
+            detail: "d1",
+            occurrences: 1,
+            lastSeen: "2026-11-20T12:00:00.000Z",
+          },
+          {
+            key: "route_miss::long",
+            kind: "route_miss",
+            summary: multiLine121,
+            detail: "d2",
+            occurrences: 2,
+            lastSeen: "2026-11-20T12:01:00.000Z",
+          },
+        ],
+      })
+
+      expect(summary.topFrictionSummary[0]).toBe(`[verify_failure x1] ${exact120}`)
+      expect(summary.topFrictionSummary[1]).toHaveLength(`[route_miss x2] `.length + 120)
+      expect(summary.topFrictionSummary[1]?.endsWith("...")).toBe(true)
+      expect(summary.topFrictionSummary[1]).toContain("line one line two ")
+
+      expect(summary.handoffMessage).toContain(
+        "Active stub() skeletons remaining: stub-0, stub-1, stub-2, stub-3, stub-4, stub-5, stub-6, stub-7",
+      )
+      expect(summary.handoffMessage).not.toContain("(+0 more)")
+      expect(summary.handoffMessage).toContain(
+        "Missing planned functions from plan-graph-snapshot: fn-0, fn-1, fn-2, fn-3, fn-4, fn-5, fn-6, fn-7 (+2 more)",
+      )
+    })
   })
 
   describe("decideLoopThrashing / checkLoopThrashing (LoopCircuitBreaker.decide)", () => {

@@ -225,7 +225,7 @@ export const handlePlanCheck = (
       for (const doc of governanceDocs) {
         const isActive = match(doc.status)
           .with("accepted", "proposed", () => true)
-          .with("deprecated", "superseded", () => false)
+          .with("draft", "deprecated", "superseded", () => false)
           .exhaustive()
         if (isActive) {
           for (const errName of doc.referencedErrors ?? []) {

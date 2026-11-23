@@ -8,9 +8,11 @@ import {
   type LeaseFilePath,
   LeaseHolderId,
   type LeaseHolderPid,
+  WORKFLOW_TIMEOUT_BUDGETS,
   WorkflowStoreOperation,
   type WorkflowStoreUnavailableError,
-  type WriterLeaseHeldError,
+  type WorkflowTimeoutMs,
+  WriterLeaseHeldError,
 } from "@harness/contract"
 import type { OmnigraphClient } from "@harness/graph"
 import type { ExtendedHostIo } from "@harness/service/host-io"
@@ -45,7 +47,8 @@ import {
 type Omnigraph = InstanceType<typeof OmnigraphClient>
 
 /** Fallback heartbeat TTL (ms) when local PID liveness of a previous holder is indeterminate. */
-export const WRITER_LEASE_HEARTBEAT_TTL_MS = 45_000
+export const WRITER_LEASE_HEARTBEAT_TTL_MS: WorkflowTimeoutMs =
+  WORKFLOW_TIMEOUT_BUDGETS.writerLeaseHeartbeatTtlMs
 
 export interface WriterLeaseAcquireInput {
   readonly commonGitDir: GitCommonDirPath
@@ -454,12 +457,10 @@ export const refreshWriterLease = Effect.fn("WfWriterLease.refresh")(function* (
     })
     const currentRow = rows[0]
     if (currentRow === undefined) {
-      return yield* makeHeldLeaseError(
-        LeaseHolderId.make("no-active-lease"),
-        LeaseEpoch.make(0),
-        input.lockFilePath,
-        undefined,
-      )
+      return yield* new WriterLeaseHeldError({
+        holderId: LeaseHolderId.make("no-active-lease"),
+        lockFilePath: input.lockFilePath,
+      })
     }
     const heldErr = yield* match(writerLeaseRowToHeldError(currentRow, input.lockFilePath))
       .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))

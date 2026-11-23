@@ -13,6 +13,8 @@ import {
   WORKFLOW_DAEMON_PROTOCOL_VERSION,
   WorkflowDaemonCapability,
   WorkflowProtocolVersion,
+  WorkflowRunOutcome,
+  WorkflowStatusSummary,
 } from "@harness/contract"
 import { nodeSyncHostIo, resolveWorkflowRuntimePaths } from "@harness/infra"
 import {
@@ -43,14 +45,19 @@ export {
 
 export const WORKFLOW_DAEMON_CAPABILITIES: ReadonlyArray<WorkflowDaemonCapability> = [
   WorkflowDaemonCapability.make("workflow.handshake"),
+  WorkflowDaemonCapability.make("workflow.start"),
   WorkflowDaemonCapability.make("workflow.status"),
+  WorkflowDaemonCapability.make("workflow.complete"),
+  WorkflowDaemonCapability.make("workflow.resume"),
+  WorkflowDaemonCapability.make("workflow.abort"),
+  WorkflowDaemonCapability.make("workflow.doctor"),
 ]
 
 export interface WorkflowDaemonHandshakeContext {
   readonly repoRoot: AbsoluteRepoRoot
   readonly commonGitDir: GitCommonDirPath
   readonly validatedWorktree: ValidatedWorktreeRoot
-  readonly writerLeaseEpoch: LeaseEpoch
+  readonly writerLeaseEpoch?: LeaseEpoch | undefined
   readonly request: DaemonHandshakeRequest
   readonly socketPath?: DaemonSocketPath | undefined
 }
@@ -63,7 +70,7 @@ export interface WorkflowDaemonProtocolMetadata {
 export interface DaemonWorkflowHandshakeRequestInput {
   readonly requestId: string
   readonly scope: DaemonRequestScopeAllowed
-  readonly writerLeaseEpoch: LeaseEpoch
+  readonly writerLeaseEpoch?: LeaseEpoch | undefined
   readonly protocolVersion?: string | undefined
   readonly commonGitDir?: string | undefined
   readonly requestedRepoRoot?: string | undefined
@@ -73,7 +80,7 @@ export interface DaemonWorkflowHandshakeRequestInput {
 export interface DaemonWorkflowStatusRequestInput {
   readonly requestId: string
   readonly scope: DaemonRequestScopeAllowed
-  readonly writerLeaseEpoch: LeaseEpoch
+  readonly writerLeaseEpoch?: LeaseEpoch | undefined
 }
 
 const toMismatchDetail = (raw: string): DaemonProtocolMismatchDetail => {
@@ -145,7 +152,9 @@ export const handleWorkflowDaemonHandshake = Effect.fn("WorkflowDaemonHelper.han
     capabilities: [...WORKFLOW_DAEMON_CAPABILITIES],
     repoRoot: context.validatedWorktree.worktreeRoot,
     commonGitDir: context.commonGitDir,
-    writerLeaseEpoch: context.writerLeaseEpoch,
+    ...(context.writerLeaseEpoch !== undefined
+      ? { writerLeaseEpoch: context.writerLeaseEpoch }
+      : {}),
   }
 })
 
@@ -282,16 +291,27 @@ export const handleDaemonWorkflowHandshakeRequest = Effect.fn(
 })
 
 /**
- * Processes a JSON-RPC `workflow.status` request over the daemon Unix socket.
- * Reports `status: "ready"` only when an active writer lease (`writerLeaseEpoch >= 1`)
- * and a validated git worktree are both present; otherwise reports `status: "inactive"`.
+ * Processes a JSON-RPC `workflow.status` request over the daemon Unix socket when the
+ * workflow engine runtime is inactive. Reports `status: "ready"` only when an active
+ * writer lease (`writerLeaseEpoch >= 1`) and a validated git worktree are both present;
+ * otherwise reports `status: "inactive"` (`DaemonOffline`).
  */
 export const handleDaemonWorkflowStatusRequest = (
   input: DaemonWorkflowStatusRequestInput,
 ): Record<string, unknown> => {
-  const { scope } = input
-  const status =
-    input.writerLeaseEpoch >= 1 && scope.validatedWorktree !== undefined ? "ready" : "inactive"
+  const { scope, writerLeaseEpoch } = input
+  const isReady = writerLeaseEpoch !== undefined && scope.validatedWorktree !== undefined
+  const status = isReady ? "ready" : "inactive"
+  const notFound = WorkflowRunOutcome.cases.NotFound.make({})
+  const summary: WorkflowStatusSummary =
+    writerLeaseEpoch !== undefined && scope.validatedWorktree !== undefined
+      ? WorkflowStatusSummary.cases.Ready.make({
+          writerLeaseEpoch,
+          outcome: notFound,
+        })
+      : WorkflowStatusSummary.cases.DaemonOffline.make({
+          outcome: notFound,
+        })
   if (scope.validatedWorktree !== undefined) {
     return {
       id: input.requestId,
@@ -303,7 +323,8 @@ export const handleDaemonWorkflowStatusRequest = (
       repoRoot: scope.validatedWorktree.worktreeRoot,
       commonGitDir: scope.validatedWorktree.commonGitDir,
       worktreeKind: scope.validatedWorktree.kind,
-      writerLeaseEpoch: input.writerLeaseEpoch,
+      ...(writerLeaseEpoch !== undefined ? { writerLeaseEpoch } : {}),
+      result: summary,
     }
   }
   return {
@@ -314,6 +335,7 @@ export const handleDaemonWorkflowStatusRequest = (
     protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
     capabilities: [...WORKFLOW_DAEMON_CAPABILITIES],
     repoRoot: scope.resolvedRoot,
-    writerLeaseEpoch: input.writerLeaseEpoch,
+    ...(writerLeaseEpoch !== undefined ? { writerLeaseEpoch } : {}),
+    result: summary,
   }
 }

@@ -39,6 +39,10 @@ import {
   type EarsSemanticClause,
 } from "../../ears-consistency.js"
 import { decideAdrDocQuality } from "../../adr-lint.js"
+import {
+  extractEnforcedFilePathsFromCell,
+  parseMarkdownTableRow,
+} from "../../adr-enforcement-table-lint.js"
 import { decideOntologyInvariants, normalizeConditionPrefix } from "../../ontology-invariants.js"
 
 export const evaluateGovernanceDocsPlugin = (
@@ -147,7 +151,7 @@ export const evaluateGovernanceDocsPlugin = (
 
         const isAccepted = match(doc.status)
           .with("accepted", () => true)
-          .with("proposed", "superseded", "deprecated", () => false)
+          .with("draft", "proposed", "superseded", "deprecated", () => false)
           .exhaustive()
         if (!isAccepted) continue
 
@@ -258,10 +262,7 @@ export const evaluateGovernanceDocsPlugin = (
             for (const line of tableLines) {
               const trimmed = line.trim()
               if (!trimmed.startsWith("|")) continue
-              const parts = trimmed
-                .split("|")
-                .slice(1, -1)
-                .map((p) => p.trim())
+              const parts = parseMarkdownTableRow(trimmed)
               if (parts.length < 3) continue
               if (parts.every((p) => /^:?-+:?$/.test(p))) {
                 seenSep = true
@@ -270,26 +271,7 @@ export const evaluateGovernanceDocsPlugin = (
               if (seenSep) {
                 const enforcedByCol = parts[1] ?? "",
                   gateMechCol = parts[2] ?? ""
-                const col1Paths: Array<string> = []
-                for (const b of Array.from(enforcedByCol.matchAll(/`([^`]+)`/g)).map((m) =>
-                  m[1]!.trim(),
-                )) {
-                  if (
-                    b.includes("/") &&
-                    /\.(?:ts|tsx|js|mjs|md|json|cedar)$/.test(b) &&
-                    !col1Paths.includes(b)
-                  )
-                    col1Paths.push(b)
-                }
-                for (const t of enforcedByCol.replace(/`([^`]+)`/g, " $1 ").split(/[,\s]+/)) {
-                  const tr = t.trim()
-                  if (
-                    tr.includes("/") &&
-                    /\.(?:ts|tsx|js|mjs|md|json|cedar)$/.test(tr) &&
-                    !col1Paths.includes(tr)
-                  )
-                    col1Paths.push(tr)
-                }
+                const col1Paths = extractEnforcedFilePathsFromCell(enforcedByCol)
                 const gateBackticks = Array.from(gateMechCol.matchAll(/`([^`]+)`/g)).map((m) =>
                   m[1]!.trim(),
                 )
@@ -354,7 +336,8 @@ export const evaluateGovernanceDocsPlugin = (
           const clausesBySymbol = new Map<string, Array<EarsSemanticClause>>()
           for (const req of lintReport.requirements) {
             const sym = req.effectSymbol?.trim()
-            if (!sym) continue
+            if (!sym || sym === "-" || sym === "—" || sym === "--" || sym.toLowerCase() === "n/a")
+              continue
             const lowerReq = req.requirement.toLowerCase()
             const isDoubleNegativeAllow = /\bshall\s+not\s+(?:deny|fail|reject)\b/.test(lowerReq)
             const isNot = lowerReq.includes("shall not") && !isDoubleNegativeAllow

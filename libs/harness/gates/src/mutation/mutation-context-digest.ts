@@ -298,7 +298,7 @@ const resolveRuntimeVersionTag = (
   return { _tag: "Disabled", reason: "unable to resolve exact installed vitest version" }
 }
 
-const LIBS_EXCLUDED_DIRS = new Set(["test", "dist", "node_modules", ".git", "coverage"])
+const LIBS_EXCLUDED_DIRS = new Set(["test", "dist", "node_modules", ".git", "coverage", "docs"])
 const GENERAL_EXCLUDED_DIRS = new Set(["dist", "node_modules", ".git", "coverage"])
 
 const collectOptionalDir = (
@@ -523,31 +523,95 @@ export const computeMutationContextDigestsChecked = (
     if (apps === undefined) return { _tag: "Disabled", reason: `unreadable directory '${appsDir}'` }
     for (const app of [...apps].sort((a, b) => compareCodeUnits(a.name, b.name))) {
       if (!app.isDirectory || GENERAL_EXCLUDED_DIRS.has(app.name)) continue
-      const appErr = disabledErr(
+      const appDir = join(appsDir, app.name)
+      const appPkgKey = PackageRelKey.make(`apps/${app.name}`)
+      const appPkgMeta = readPkgJson(join(appDir, "package.json"), hostIo)
+      if (appPkgMeta?.name !== undefined && appPkgMeta.name.length > 0) {
+        workspacePackages.set(appPkgMeta.name, `apps/${app.name}`)
+      }
+      const appSupportFiles: Array<string> = []
+      const appPkgSupportFiles: Array<string> = []
+      const appEntries = unwrapOption(readdirSafe(appDir, hostIo))
+      if (appEntries === undefined) {
+        return { _tag: "Disabled", reason: `unreadable directory '${appDir}'` }
+      }
+      let hasVitestConfig = false
+      for (const ae of [...appEntries].sort((a, b) => compareCodeUnits(a.name, b.name))) {
+        if (!ae.isFile || !/^vitest\.config\..+$/.test(ae.name)) continue
+        const fullCfg = join(appDir, ae.name)
+        if (!isNonSymlink(fullCfg, hostIo)) {
+          return { _tag: "Disabled", reason: `symlink detected at '${fullCfg}'` }
+        }
+        const relEntry = `apps/${app.name}/${ae.name}`
+        appSupportFiles.push(relEntry)
+        appPkgSupportFiles.push(relEntry)
+        hasVitestConfig = true
+      }
+      const appTestFiles: Array<string> = []
+      const appTestErr = disabledErr(
         collectOptionalDir(
-          join(appsDir, app.name, "test"),
+          join(appDir, "test"),
           `apps/${app.name}/test`,
           GENERAL_EXCLUDED_DIRS,
-          (name) => !isTestFile(name),
+          () => true,
           hostIo,
-          appsTestHelpersFiles,
+          appTestFiles,
         ),
       )
-      if (appErr !== undefined) return appErr
+      if (appTestErr !== undefined) return appTestErr
+      for (const tf of appTestFiles) {
+        if (!isTestFile(tf)) {
+          appsTestHelpersFiles.push(tf)
+          appSupportFiles.push(tf)
+          appPkgSupportFiles.push(tf)
+        }
+        if (isTsJsFile(tf)) {
+          const err = match(hashCheckedOrErr(repoRoot, [tf], hostIo, fileShaCache))
+            .with({ _tag: "Ok" }, () => undefined)
+            .with({ _tag: "Disabled" }, (d) => d)
+            .exhaustive()
+          if (err !== undefined) return err
+        }
+      }
+      const appSrcFiles: Array<string> = []
       const appSrcErr = disabledErr(
         collectOptionalDir(
-          join(appsDir, app.name, "src"),
+          join(appDir, "src"),
           `apps/${app.name}/src`,
           GENERAL_EXCLUDED_DIRS,
           (name) => !isTestFile(name),
           hostIo,
-          appsTestHelpersFiles,
+          appSrcFiles,
         ),
       )
       if (appSrcErr !== undefined) return appSrcErr
+      for (const sf of appSrcFiles) {
+        appsTestHelpersFiles.push(sf)
+        if (!isTsJsFile(sf)) appPkgSupportFiles.push(sf)
+      }
+      if (hasVitestConfig || appTestFiles.length > 0) {
+        const supportErr = match(hashCheckedOrErr(repoRoot, appSupportFiles, hostIo, fileShaCache))
+          .with({ _tag: "Ok" }, ({ sha256 }) => {
+            testSupportDigests.set(appPkgKey, sha256)
+            return undefined
+          })
+          .with({ _tag: "Disabled" }, (d) => d)
+          .exhaustive()
+        if (supportErr !== undefined) return supportErr
+      }
+      const appPkgSupportErr = match(
+        hashCheckedOrErr(repoRoot, appPkgSupportFiles, hostIo, fileShaCache),
+      )
+        .with({ _tag: "Ok" }, ({ sha256 }) => {
+          packageSupportDigests.set(appPkgKey, sha256)
+          return undefined
+        })
+        .with({ _tag: "Disabled" }, (d) => d)
+        .exhaustive()
+      if (appPkgSupportErr !== undefined) return appPkgSupportErr
       const appDocsErr = disabledErr(
         collectOptionalDir(
-          join(appsDir, app.name, "docs"),
+          join(appDir, "docs"),
           `apps/${app.name}/docs`,
           GENERAL_EXCLUDED_DIRS,
           () => true,
@@ -604,7 +668,7 @@ export const computeMutationContextDigestsChecked = (
   if (typeof wsSha !== "string") return wsSha
 
   for (const [relPath, sha] of fileShaCache.entries()) {
-    if (relPath.startsWith("libs/") && isTsJsFile(relPath)) {
+    if ((relPath.startsWith("libs/") || relPath.startsWith("apps/")) && isTsJsFile(relPath)) {
       fileDigests.set(relPath, sha)
     }
   }

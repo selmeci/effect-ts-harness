@@ -110,7 +110,7 @@ describe("Effect.fn syntactic index", () => {
       }),
   )
 
-  it("oxlint rule rejects non-literal Effect.fn arguments and uninstrumented domain/infra exports", () => {
+  it("oxlint rule rejects non-literal Effect.fn arguments and accepts literal spans", () => {
     const rule = syntaxBansPlugin.rules["syntax-bans"]
 
     // 1. Rejects dynamic name argument
@@ -209,6 +209,10 @@ describe("Effect.fn syntactic index", () => {
       })
       expect(reports).toHaveLength(0)
     }
+  })
+
+  it("oxlint rule rejects uninstrumented domain exports and accepts Effect.fn wrappers", () => {
+    const rule = syntaxBansPlugin.rules["syntax-bans"]
 
     // 5. Rejects uninstrumented arrow function in domain src
     {
@@ -334,6 +338,10 @@ describe("Effect.fn syntactic index", () => {
       })
       expect(reports).toHaveLength(0)
     }
+  })
+
+  it("oxlint rule applies Effect.fn export enforcement to sample infra and excludes contract", () => {
+    const rule = syntaxBansPlugin.rules["syntax-bans"]
 
     // 9. Rejects uninstrumented arrow function in sample infra src
     {
@@ -387,6 +395,10 @@ describe("Effect.fn syntactic index", () => {
       })
       expect(reports).toHaveLength(0)
     }
+  })
+
+  it("oxlint rule rejects @effect-diagnostics directives and SwitchStatement in test-integrity", () => {
+    const rule = syntaxBansPlugin.rules["syntax-bans"]
 
     // 11. Rejects @effect-diagnostics and @effect-diagnostics-next-line directives in syntax-bans and test-integrity
     {
@@ -432,8 +444,12 @@ describe("Effect.fn syntactic index", () => {
       expect(switchReports).toHaveLength(1)
       expect(switchReports[0]?.message).toContain("No switch statements")
     }
+  })
 
-    // 12. Enforces ts-pattern exhaustive matching and bans switch, else-if, discriminant if/ternary, match().run(), and union .otherwise()
+  it("oxlint rule bans switch, else-if chains, and discriminant if/ternary expressions", () => {
+    const rule = syntaxBansPlugin.rules["syntax-bans"]
+
+    // 12a. Enforces ts-pattern exhaustive matching and bans switch, else-if, and discriminant if/ternary
     {
       const reports: Array<{ message: string }> = []
       const visitor = rule.create({
@@ -530,6 +546,19 @@ describe("Effect.fn syntactic index", () => {
         alternate: { type: "BlockStatement", body: [] },
       })
       expect(reports).toHaveLength(4)
+    }
+  })
+
+  it("oxlint rule bans match().run() and union .otherwise() while allowing primitive .otherwise()", () => {
+    const rule = syntaxBansPlugin.rules["syntax-bans"]
+    {
+      const reports: Array<{ message: string }> = []
+      const visitor = rule.create({
+        filename: "/repo/libs/sample/domain/src/index.ts",
+        report: (r: { message: string }) => {
+          reports.push(r)
+        },
+      })
 
       // match(...).with(...).run() is banned
       visitor.CallExpression({
@@ -555,8 +584,8 @@ describe("Effect.fn syntactic index", () => {
         },
         arguments: [],
       })
-      expect(reports).toHaveLength(5)
-      expect(reports[4]?.message).toContain("match(...).run() is banned")
+      expect(reports).toHaveLength(1)
+      expect(reports[0]?.message).toContain("match(...).run() is banned")
 
       // match(...).with({ _tag: "A" }, ...).otherwise(...) is banned
       visitor.CallExpression({
@@ -594,8 +623,8 @@ describe("Effect.fn syntactic index", () => {
         },
         arguments: [{ type: "ArrowFunctionExpression" }],
       })
-      expect(reports).toHaveLength(6)
-      expect(reports[5]?.message).toContain(
+      expect(reports).toHaveLength(2)
+      expect(reports[1]?.message).toContain(
         "Do not use .otherwise() when matching on discriminated union tags",
       )
 
@@ -623,9 +652,12 @@ describe("Effect.fn syntactic index", () => {
         },
         arguments: [{ type: "ArrowFunctionExpression" }],
       })
-      expect(reports).toHaveLength(6)
+      expect(reports).toHaveLength(2)
     }
+  })
 
+  it("oxlint rule rejects unscoped-effect-run namespace, computed-element, and destructuring bypasses", () => {
+    const rule = syntaxBansPlugin.rules["syntax-bans"]
     // 7. Rejects unscoped-effect-run namespace, computed-element, and destructuring bypasses
     {
       const reports: Array<{ message: string }> = []

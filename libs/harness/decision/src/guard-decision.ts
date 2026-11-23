@@ -22,20 +22,40 @@ export const GuardV1 = Decision.make({
   },
 })
 
+export interface GuardCommandOptions {
+  readonly unitWorkerMode?: boolean | undefined
+}
+
+export interface GuardCommandInput {
+  readonly command: string
+  readonly unitWorkerMode?: boolean | undefined
+}
+
 export interface GuardDecisionResult {
   readonly verdict: "allow" | "deny" | "ask"
   readonly reason: string
 }
 
+const WORKER_SENSITIVE_FALLBACK_PATTERN =
+  /\bharness(?:-cli)?\b|auth-tokens|daemon\.soc|\.harness\/omnigraph-cluster/i
+
 export const decideGuardCommand = Effect.fn("Harness.decideGuardCommand")(function* (
-  command: string,
+  input: string | GuardCommandInput,
+  options?: GuardCommandOptions,
 ) {
-  const fastPath = classifyCommand(command)
+  const command = typeof input === "string" ? input : input.command
+  const unitWorkerMode =
+    typeof input === "string"
+      ? options?.unitWorkerMode
+      : (input.unitWorkerMode ?? options?.unitWorkerMode)
+  const policyOptions = unitWorkerMode === undefined ? undefined : { unitWorkerMode }
+  const fastPath = classifyCommand(command, policyOptions)
   return yield* match(fastPath)
     .with("deny", () =>
       Effect.succeed({
         verdict: "deny" as const,
-        reason: explainCommandDenyReason(command) ?? "Matched deterministic denylist.",
+        reason:
+          explainCommandDenyReason(command, policyOptions) ?? "Matched deterministic denylist.",
       }),
     )
     .with("allow", () =>
@@ -112,6 +132,24 @@ export const decideGuardCommand = Effect.fn("Harness.decideGuardCommand")(functi
                 answers.secretAccess.probability < 0.3 &&
                 answers.exfiltration.probability < 0.3
               ) {
+                if (unitWorkerMode === true) {
+                  const workerDenyReason = explainCommandDenyReason(command, {
+                    unitWorkerMode: true,
+                  })
+                  if (workerDenyReason !== undefined) {
+                    return {
+                      verdict: "deny" as const,
+                      reason: workerDenyReason,
+                    }
+                  }
+                  if (WORKER_SENSITIVE_FALLBACK_PATTERN.test(command.replace(/\\/g, "/"))) {
+                    return {
+                      verdict: "ask" as const,
+                      reason:
+                        "Worker isolation mode (HARNESS_UNIT_WORKER=1) refuses DecisionModel auto-allow for unallowlisted harness or credential-referencing commands; requires human confirmation.",
+                    }
+                  }
+                }
                 return {
                   verdict: "allow" as const,
                   reason: "Command deemed safe by decision model.",

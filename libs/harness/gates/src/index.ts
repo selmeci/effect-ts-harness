@@ -9,12 +9,15 @@ export {
   GIT_DISCARD_PATTERNS,
   GUARD_SELF_INVOCATION_PATTERN,
   INTERACTIVE_NX_BANNED_REASON,
+  MAX_SUBSHELL_INSPECT_DEPTH,
   OBFUSCATION_PATTERNS,
   SECRET_FILE_PATTERN,
   SHELL_OPERATORS,
   SKIP_NX_CACHE_BANNED_REASON,
   classifyCommand,
+  classifyFileRead,
   classifyFileWrite,
+  classifyWorkerFileAccess,
   explainCommandDenyReason,
   explainCommandDenyRule,
   isCdCommand,
@@ -23,13 +26,21 @@ export {
   isInvalidClefEndpointCommand,
   isSkipNxCacheCommand,
   isSkipNxCacheOverrideCommand,
+  isWorkerDaemonCredentialShellAccess,
+  isWorkerRecursiveWorkflowCommand,
   toCommandView,
   type CommandDenyExplanation,
   type CommandDenyRuleId,
   type CommandView,
+  type FileReadDenyRuleId,
+  type FileReadGuardResult,
+  type FileWriteDenyRuleId,
   type FileWriteGuardResult,
   type GuardPatternRule,
   type GuardVerdict,
+  type PolicyGuardOptions,
+  type WorkerFileAccessDenyRuleId,
+  type WorkerFileAccessResult,
 } from "./policy.js"
 export {
   DstSeedsRunCount,
@@ -44,9 +55,13 @@ export {
   VerifyStampSchema,
   checkMutateStamp,
   checkVerifyStamp,
+  computeMutableTreeHash,
+  computeMutableTreeHashChecked,
   computeWorkspaceTreeHash,
   computeWorkspaceTreeHashChecked,
+  isMarkdownDocPath,
   parseDstSeedEnv,
+  readExistingVerifyStamp,
   removeMutateStamp,
   type CheckMutateStampResult,
   type CheckVerifyStampResult,
@@ -102,7 +117,6 @@ export {
   GraphGcReport,
   IGNORED_ERRORS,
   IGNORED_SERVICES,
-  IGNORED_UNTESTED_FNS,
   augmentReachabilityWithInference,
   buildGraphReachabilityContext,
   checkUnusedContractExports,
@@ -117,6 +131,9 @@ export {
   evaluatePackageAndMigrationPlugin,
   evaluateTestAndDeciderPlugin,
   evaluateTopologyEntropyPlugin,
+  ADAPTER_SKILL_PARITY_CLAUSES,
+  auditAdapterSkillParityPair,
+  auditCatalogDocTruthInContent,
   DOC_TRUTH_RULE_ID_SOURCES,
   checkAstGateRuleClosure,
   extractBalancedBraces,
@@ -215,6 +232,11 @@ export {
   type TraceSpanObservation,
   type UntestedMutationFile,
 } from "./mutation-check.js"
+export {
+  classifyMutationModulePurity,
+  isPureMutationCandidate,
+  type PureModuleClassification,
+} from "./mutation/mutation-pure-module-classifier.js"
 export {
   decideEarsSpecLint,
   decideEarsSpecQuality,
@@ -435,6 +457,14 @@ export {
   computePercentileMillis,
   decideHarnessBench,
 } from "./bench-check.js"
+export {
+  MAX_TEST_CASE_LINES,
+  collectContractShapeViolations,
+  collectWorkflowNameAccessViolations,
+  collectMaxTestCaseLineViolations,
+  type AstHygieneFinding,
+  type AstHygieneRuleId,
+} from "./plugins/ast-contract-and-test-hygiene.js"
 export { SelfDogfoodingFileInput, SelfDogfoodingInput } from "./plugins/self-dogfooding-contract.js"
 export {
   SelfDogfooding,
@@ -491,6 +521,25 @@ export {
   assertDisjointWave,
   compileWorkflowWaves,
 } from "./plan-workflow-compiler.js"
+export {
+  HarnessTaskWorkflow,
+  HarnessTaskWorkflowError,
+  HarnessTaskWorkflowLayer,
+  HarnessTaskWorkflowPayload,
+  LlmPhaseDone,
+  driveSharedStep,
+  driveWorkUnit,
+  executeTaskWorkflow,
+  executionIdOf,
+  makeUnitCompletionDeferred,
+  makeUnitEscalationDeferred,
+  unitCompletionDeferredName,
+  unitEscalationDeferredName,
+} from "./harness-task-workflow.js"
+export {
+  collectWorkflowBodyViolations,
+  type WorkflowBodyViolation,
+} from "./plugins/workflow-body-ast.js"
 export {
   MAX_MUTATION_CACHE_AGE_MS,
   MAX_MUTATION_CACHE_ENTRIES,

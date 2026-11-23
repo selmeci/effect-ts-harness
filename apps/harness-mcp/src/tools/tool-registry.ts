@@ -12,10 +12,12 @@ import {
   type McpToolPluginDescriptor,
   type McpToolInputSchema,
   type ServerOptions,
+  toMcpToolInputName,
   UnknownToolError,
 } from "./mcp-helpers.js"
 import { buildOntologyAndGqToolDescriptors } from "./ontology-and-gq.tools.js"
 import { buildRetrievalToolDescriptors } from "./retrieval.tools.js"
+import { buildWorkflowPlanToolDescriptors } from "./workflow-plan.tools.js"
 
 export {
   CANONICAL_MCP_TOOL_NAMES,
@@ -69,6 +71,7 @@ export const buildLiveMcpToolDescriptors = (
   ...buildLspAndTelemetryToolDescriptors(options),
   ...buildDatalogAndDpoToolDescriptors(options),
   ...buildGitDiffToolDescriptors(options),
+  ...buildWorkflowPlanToolDescriptors(options),
   ...buildRetrievalToolDescriptors(options),
 ]
 
@@ -105,7 +108,7 @@ export const dispatchMcpTool = Effect.fn("HarnessMcp.dispatchTool")(function* (
     .with({ _tag: "Some" }, ({ value }) => value.execute(input.args))
     .with(
       { _tag: "None" },
-      () => new UnknownToolError({ toolName: McpToolInputName.make(input.toolName) }),
+      () => new UnknownToolError({ toolName: toMcpToolInputName(input.toolName) }),
     )
     .exhaustive()
 })

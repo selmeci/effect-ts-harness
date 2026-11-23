@@ -7,8 +7,10 @@ import {
   type DaemonServerError,
   type DaemonSocketPath,
   isPureInterruptCause,
-  LeaseEpoch,
+  type LeaseEpoch,
+  toBoundedReason,
   toErrorReasonMessage,
+  type WorkflowRpcEnvelope,
   WorkspaceFilePath,
   type WriterLeaseHeldError,
 } from "@harness/contract"
@@ -23,6 +25,7 @@ import {
   resolveWorkflowRuntimePaths,
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
+  WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
 } from "@harness/infra"
 import { UnixSocketDaemonPort } from "@harness/service"
 import {
@@ -38,7 +41,6 @@ import { handleDaemonPollChangesRequest } from "./poll-changes-daemon-helper.js"
 import {
   type DaemonWorktreeScopeCache,
   handleDaemonWorkflowHandshakeRequest,
-  handleDaemonWorkflowStatusRequest,
   makeDaemonWorktreeScopeCache,
   resolveDaemonRequestScope,
   type WorktreeValidatorFn,
@@ -47,9 +49,18 @@ import {
   acquireWorkflowEngineInScope,
   buildAlreadyAliveLeaseError,
   forkWorkflowLeaseWatchers,
+  type WorkflowDaemonRuntime,
   type WorkflowEngineDaemonMode,
   type WorkflowEngineDaemonOptions,
 } from "./workflow-engine-daemon-helper.js"
+import {
+  handleDaemonWorkflowAbortRequest,
+  handleDaemonWorkflowCompleteRequest,
+  handleDaemonWorkflowDoctorRequest,
+  handleDaemonWorkflowResumeRequest,
+  handleDaemonWorkflowStartRequest,
+  handleDaemonWorkflowStatusRpcRequest,
+} from "./workflow-rpc-daemon-helper.js"
 
 export type { WorkflowEngineDaemonMode, WorkflowEngineDaemonOptions }
 
@@ -63,9 +74,14 @@ export interface StartHarnessDaemonServerOptions {
 
 export interface HarnessDaemonServerHandle {
   readonly socketPath: string
-  readonly writerLeaseEpoch: LeaseEpoch
+  readonly writerLeaseEpoch?: LeaseEpoch | undefined
   readonly close: () => Promise<void>
 }
+
+const BaseDaemonRequestSchema = Schema.Struct({
+  id: Schema.String,
+  command: Schema.String,
+})
 
 const DaemonRequestSchema = Schema.Struct({
   id: Schema.String,
@@ -79,7 +95,12 @@ const DaemonRequestSchema = Schema.Struct({
     "bench",
     "poll-changes",
     "workflow.handshake",
+    "workflow.start",
     "workflow.status",
+    "workflow.complete",
+    "workflow.resume",
+    "workflow.abort",
+    "workflow.doctor",
   ]),
   argv: Schema.optional(Schema.Array(Schema.String)),
   repoRoot: Schema.optional(Schema.String),
@@ -90,7 +111,11 @@ const DaemonRequestSchema = Schema.Struct({
   commonGitDir: Schema.optional(Schema.String),
 })
 
+const decodeBaseDaemonRequest = Schema.decodeOption(Schema.fromJsonString(BaseDaemonRequestSchema))
 const decodeDaemonRequest = Schema.decodeOption(Schema.fromJsonString(DaemonRequestSchema))
+const decodeJsonRecordOption = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+)
 
 export const resolveDaemonSocketPath = (repoRoot: string): string =>
   resolveHarnessDaemonSocketPath(repoRoot)
@@ -113,14 +138,37 @@ const createDaemonLineHandler =
     readonly startupRuleVersion: ResolvedGateRuleVersion
     readonly startupExtractorDigest: GraphExtractorDigestResult
     readonly ruleSourceConfig: AstGateCacheRuleSourceConfig
-    readonly writerLeaseEpoch: LeaseEpoch
+    readonly writerLeaseEpoch?: LeaseEpoch | undefined
     readonly socketPath?: DaemonSocketPath | undefined
+    readonly workflowRuntime?: WorkflowDaemonRuntime | undefined
   }) =>
   (line: string): Effect.Effect<string> => {
-    const reqOpt = decodeDaemonRequest(line.trim())
+    const trimmedLine = line.trim()
+    const baseOpt = decodeBaseDaemonRequest(trimmedLine)
+    const reqOpt = decodeDaemonRequest(trimmedLine)
+    const rawPayload = match(decodeJsonRecordOption(trimmedLine))
+      .with({ _tag: "Some" }, ({ value }) => value)
+      .with({ _tag: "None" }, () => ({}))
+      .exhaustive()
     return match(reqOpt)
       .with({ _tag: "None" }, () =>
-        Effect.succeed(JSON.stringify({ ok: false, error: "Invalid daemon request payload" })),
+        match(baseOpt)
+          .with({ _tag: "Some" }, ({ value: base }) => {
+            const detail = toBoundedReason(`Unknown daemon command '${base.command}'`)
+            return Effect.succeed(
+              JSON.stringify({
+                id: base.id,
+                ok: false,
+                command: base.command,
+                error: detail,
+                detail,
+              }),
+            )
+          })
+          .with({ _tag: "None" }, () =>
+            Effect.succeed(JSON.stringify({ ok: false, error: "Invalid daemon request payload" })),
+          )
+          .exhaustive(),
       )
       .with({ _tag: "Some" }, ({ value: req }) =>
         Effect.gen(function* () {
@@ -133,7 +181,19 @@ const createDaemonLineHandler =
             )
             .with({ _tag: "Allowed" }, (allowedScope) => {
               const { resolvedRoot } = allowedScope
-              return match<typeof req.command, Effect.Effect<Record<string, unknown>>>(req.command)
+              const workflowInput = {
+                requestId: req.id,
+                rawPayload,
+                scope: allowedScope,
+                ...(input.writerLeaseEpoch !== undefined
+                  ? { writerLeaseEpoch: input.writerLeaseEpoch }
+                  : {}),
+                ...(input.workflowRuntime !== undefined ? { runtime: input.workflowRuntime } : {}),
+              }
+              return match<
+                typeof req.command,
+                Effect.Effect<WorkflowRpcEnvelope | Readonly<Record<string, unknown>>>
+              >(req.command)
                 .with("ping", () =>
                   Effect.succeed({
                     id: req.id,
@@ -153,15 +213,12 @@ const createDaemonLineHandler =
                     ...(input.socketPath !== undefined ? { socketPath: input.socketPath } : {}),
                   }),
                 )
-                .with("workflow.status", () =>
-                  Effect.succeed(
-                    handleDaemonWorkflowStatusRequest({
-                      requestId: req.id,
-                      scope: allowedScope,
-                      writerLeaseEpoch: input.writerLeaseEpoch,
-                    }),
-                  ),
-                )
+                .with("workflow.start", () => handleDaemonWorkflowStartRequest(workflowInput))
+                .with("workflow.status", () => handleDaemonWorkflowStatusRpcRequest(workflowInput))
+                .with("workflow.complete", () => handleDaemonWorkflowCompleteRequest(workflowInput))
+                .with("workflow.resume", () => handleDaemonWorkflowResumeRequest(workflowInput))
+                .with("workflow.abort", () => handleDaemonWorkflowAbortRequest(workflowInput))
+                .with("workflow.doctor", () => handleDaemonWorkflowDoctorRequest(workflowInput))
                 .with("extract-graph", () =>
                   Effect.gen(function* () {
                     const versionCheck = yield* verifyWorktreeRuleVersionConsistency({
@@ -279,7 +336,7 @@ export const startHarnessDaemonServer = (
   options?: StartHarnessDaemonServerOptions,
 ): Promise<HarnessDaemonServerHandle> => {
   const baseRoot = path.resolve(repoRoot)
-  const fallbackWriterLeaseEpoch = options?.writerLeaseEpoch ?? LeaseEpoch.make(0)
+  const fallbackWriterLeaseEpoch = options?.writerLeaseEpoch
   const daemonRuntime = ManagedRuntime.make(UnixSocketDaemonLive)
 
   return daemonRuntime
@@ -338,7 +395,6 @@ export const startHarnessDaemonServer = (
               Scope.close(scope, Exit.void).pipe(
                 Effect.as<HarnessDaemonServerHandle>({
                   socketPath,
-                  writerLeaseEpoch: LeaseEpoch.make(0),
                   close: () => daemonRuntime.dispose(),
                 }),
               ),
@@ -348,6 +404,10 @@ export const startHarnessDaemonServer = (
                 const effectiveWriterLeaseEpoch = match(readyState)
                   .with({ _tag: "Active" }, ({ lease }) => lease.leaseEpoch)
                   .with({ _tag: "Inactive" }, ({ writerLeaseEpoch }) => writerLeaseEpoch)
+                  .exhaustive()
+                const effectiveSocketTimeoutMs = match(readyState)
+                  .with({ _tag: "Active" }, () => WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS)
+                  .with({ _tag: "Inactive" }, () => DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS)
                   .exhaustive()
 
                 const canonicalBaseRoot = match(scopeCache.startupState)
@@ -385,7 +445,7 @@ export const startHarnessDaemonServer = (
                 const socketResult = yield* startScopedUnixSocketDaemon(
                   WorkspaceFilePath.make(baseRoot),
                   {
-                    socketTimeoutMs: DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
+                    socketTimeoutMs: effectiveSocketTimeoutMs,
                     ...(canonicalSocketPath !== undefined
                       ? { socketPathOverride: canonicalSocketPath }
                       : {}),
@@ -400,10 +460,16 @@ export const startHarnessDaemonServer = (
                       startupRuleVersion,
                       startupExtractorDigest,
                       ruleSourceConfig,
-                      writerLeaseEpoch: effectiveWriterLeaseEpoch,
+                      ...(effectiveWriterLeaseEpoch !== undefined
+                        ? { writerLeaseEpoch: effectiveWriterLeaseEpoch }
+                        : {}),
                       ...(canonicalSocketPath !== undefined
                         ? { socketPath: canonicalSocketPath }
                         : {}),
+                      ...match(readyState)
+                        .with({ _tag: "Active" }, ({ runtime }) => ({ workflowRuntime: runtime }))
+                        .with({ _tag: "Inactive" }, () => ({}))
+                        .exhaustive(),
                     }),
                   },
                 ).pipe(
@@ -459,7 +525,6 @@ export const startHarnessDaemonServer = (
                   .with({ _tag: "AlreadyAlive" }, ({ socketPath }) =>
                     Effect.succeed<HarnessDaemonServerHandle>({
                       socketPath,
-                      writerLeaseEpoch: LeaseEpoch.make(0),
                       close: () => daemonRuntime.dispose(),
                     }),
                   )
@@ -478,7 +543,9 @@ export const startHarnessDaemonServer = (
                         .exhaustive()
                       return {
                         socketPath,
-                        writerLeaseEpoch: effectiveWriterLeaseEpoch,
+                        ...(effectiveWriterLeaseEpoch !== undefined
+                          ? { writerLeaseEpoch: effectiveWriterLeaseEpoch }
+                          : {}),
                         close,
                       } satisfies HarnessDaemonServerHandle
                     }),

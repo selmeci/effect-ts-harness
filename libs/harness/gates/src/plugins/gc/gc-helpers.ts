@@ -44,6 +44,12 @@ export const IGNORED_SERVICES = new Set([
   "Scope.Scope",
   "DecisionModel",
   "DecisionModel.DecisionModel",
+  "WorkflowEngine",
+  "WorkflowEngine.WorkflowEngine",
+  "WorkflowInstance",
+  "WorkflowEngine.WorkflowInstance",
+  "Execution",
+  "Workflow.Execution",
   "OmnigraphSync",
   "SpanRecorder",
   "@harness/ingest/SpanRecorder",
@@ -54,6 +60,12 @@ export const IGNORED_SERVICES = new Set([
   "ActiveCounterStore",
 ])
 
+/** Returns `true` for Effect/framework runtime services and fixture tags exempt from `unused-service` / `unprovided-service`. */
+export const isIgnoredServiceTag = (tagId: string, name: string): boolean =>
+  IGNORED_SERVICES.has(tagId) ||
+  IGNORED_SERVICES.has(name) ||
+  tagId.startsWith("Workflow.Execution<")
+
 export const IGNORED_ERRORS = new Set([
   "OmnigraphLoadError",
   "SchemaError",
@@ -61,27 +73,6 @@ export const IGNORED_ERRORS = new Set([
   "DstStepFailureError",
   "ProjectPathEscapeError",
   "OutboxPublishError",
-])
-
-export const IGNORED_UNTESTED_FNS = new Set([
-  "Friction.decide",
-  "GraphGc.decide",
-  "MigrationSafety.decide",
-  "MutationCheck.decide",
-  "SessionHandoff.decide",
-  "SpanBudget.decide",
-  "Harness.decideGuardCommand",
-  "Harness.routeStep",
-  "Harness.proposeLearningAction",
-  "Harness.checkPlanStepCoverage",
-  "Harness.triageFailure",
-  "EarsSpecLint.decide",
-  "AdrDocLint.decide",
-  "OntologyInvariants.decide",
-  "SessionReport.decide",
-  "Harness.checkOntologyPairConflict",
-  "Harness.evaluateOntologyConflicts",
-  "HarnessMcp.executeTool",
 ])
 
 export interface GraphReachabilityContext {

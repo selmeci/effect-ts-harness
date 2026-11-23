@@ -1,7 +1,20 @@
 import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import { DaemonSocketPath } from "./cache-and-daemon.js"
-import { AbsoluteRepoRoot } from "./repo-identity.js"
+import { AbsoluteRepoRoot, GitCommitSha } from "./repo-identity.js"
+import {
+  AttemptNumber,
+  EscalationOrdinal,
+  OwnedRelPath,
+  PackageStampHash,
+  PlanSha256,
+  RunnerId,
+  WaveIndex,
+  WorkUnitId,
+  WorkflowExecutionId,
+  WorkflowLevel,
+  WorkflowRunId,
+} from "./workflow.js"
 import { ErrorReasonMessage, toErrorReasonMessage } from "./workspace-and-process.js"
 
 const SEQ_KEY_WIDTH = 20
@@ -101,8 +114,11 @@ export const encodeSeqKey = (
 /** Losslessly decodes a 20-character `SeqKey` back into a non-negative `bigint`. */
 export const decodeSeqKey = (seqKey: SeqKey): bigint => BigInt(seqKey)
 
-/** Monotonically increasing fencing epoch (`>= 0`; active leases start at `>= 1`) for the workflow single-writer lease. */
-export const LeaseEpoch = NonNegativeInt.pipe(Schema.brand("LeaseEpoch"))
+/** Monotonically increasing fencing epoch (`>= 1`) for the active workflow single-writer lease. */
+export const LeaseEpoch = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(1)),
+  Schema.brand("LeaseEpoch"),
+)
 export type LeaseEpoch = typeof LeaseEpoch.Type
 
 /**
@@ -211,15 +227,15 @@ export type DaemonHandshakeRequest = typeof DaemonHandshakeRequest.Type
 
 /**
  * Handshake metadata returned under `{ id, ok: true, handshake: DaemonHandshakeResponse }`.
- * Active workflow-leased daemons advertise `writerLeaseEpoch >= 1`; clients expecting a live
- * workflow writer fail closed when `writerLeaseEpoch < 1`.
+ * Active workflow-leased daemons advertise `writerLeaseEpoch` (`>= 1`); daemons running without
+ * an active workflow lease omit `writerLeaseEpoch`.
  */
 export const DaemonHandshakeResponse = Schema.Struct({
   protocolVersion: WorkflowProtocolVersion,
   capabilities: Schema.Array(WorkflowDaemonCapability),
   repoRoot: AbsoluteRepoRoot,
   commonGitDir: GitCommonDirPath,
-  writerLeaseEpoch: LeaseEpoch,
+  writerLeaseEpoch: Schema.optional(LeaseEpoch),
 })
 export type DaemonHandshakeResponse = typeof DaemonHandshakeResponse.Type
 
@@ -374,10 +390,102 @@ export const WORKFLOW_GQ_QUERY_NAMES = [
   "wf_insert_writer_lease",
   "wf_cas_writer_lease",
   "wf_refresh_writer_lease",
+  "wf_get_run",
+  "wf_list_runs",
+  "wf_insert_run",
+  "wf_update_run",
+  "wf_units_for_run",
+  "wf_get_unit",
+  "wf_insert_unit",
+  "wf_update_unit",
+  "wf_attempts_for_run",
+  "wf_get_attempt",
+  "wf_insert_attempt",
+  "wf_update_attempt",
+  "wf_delete_run_views",
+  "wf_probe_runs",
 ] as const
 
 export const WorkflowGqQueryName = Schema.Literals(WORKFLOW_GQ_QUERY_NAMES)
 export type WorkflowGqQueryName = typeof WorkflowGqQueryName.Type
+
+const WORKFLOW_UNIT_KEY_RE = /^[a-z0-9][a-z0-9-]{7,63}\/[a-z0-9][a-z0-9_.:-]{0,63}$/
+const WORKFLOW_ATTEMPT_KEY_RE =
+  /^[a-z0-9][a-z0-9-]{7,63}\/[a-z0-9][a-z0-9_.:-]{0,63}#[1-3](?:\/r[1-9]\d*)?$/
+
+/** Non-negative epoch millisecond timestamp recorded in workflow read-model records. */
+export const WorkflowTimestampMs = NonNegativeInt.pipe(Schema.brand("WorkflowTimestampMs"))
+export type WorkflowTimestampMs = typeof WorkflowTimestampMs.Type
+
+/** Composite key `<runId>/<unitId>` identifying a `WfUnit` read-model node. */
+export const WorkflowUnitKey = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(256)),
+  Schema.check(Schema.isPattern(WORKFLOW_UNIT_KEY_RE)),
+  Schema.brand("WorkflowUnitKey"),
+)
+export type WorkflowUnitKey = typeof WorkflowUnitKey.Type
+
+/** Composite key `<runId>/<unitId>#<attempt>(/r<n>)?` identifying a `WfAttempt` read-model node. */
+export const WorkflowAttemptKey = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(256)),
+  Schema.check(Schema.isPattern(WORKFLOW_ATTEMPT_KEY_RE)),
+  Schema.brand("WorkflowAttemptKey"),
+)
+export type WorkflowAttemptKey = typeof WorkflowAttemptKey.Type
+
+/** Canonical smart constructor for `WorkflowUnitKey` (`<runId>/<unitId>`). */
+export const makeWorkflowUnitKey = (runId: WorkflowRunId, unitId: WorkUnitId): WorkflowUnitKey =>
+  WorkflowUnitKey.make(`${runId}/${unitId}`)
+
+/** Canonical smart constructor for `WorkflowAttemptKey` (`<runId>/<unitId>#<attempt>(/r<n>)?`). */
+export const makeWorkflowAttemptKey = (
+  runId: WorkflowRunId,
+  unitId: WorkUnitId,
+  attempt: AttemptNumber,
+  escalationOrdinal?: EscalationOrdinal,
+): WorkflowAttemptKey =>
+  WorkflowAttemptKey.make(
+    escalationOrdinal !== undefined && escalationOrdinal > 1
+      ? `${runId}/${unitId}#${attempt}/r${escalationOrdinal}`
+      : `${runId}/${unitId}#${attempt}`,
+  )
+
+/** Serialized `CompiledPlan` JSON stored on `WfRun.planJson`. */
+export const PlanJsonPayload = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.brand("PlanJsonPayload"),
+)
+export type PlanJsonPayload = typeof PlanJsonPayload.Type
+
+/** Serialized `UnitRejection` JSON stored on `WfAttempt.rejection`. */
+export const RejectionJsonPayload = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.brand("RejectionJsonPayload"),
+)
+export type RejectionJsonPayload = typeof RejectionJsonPayload.Type
+
+/** Lifecycle states persisted in `WfRun.state`. */
+export const WorkflowRunState = Schema.Literals(["running", "waiting", "completed", "aborted"])
+export type WorkflowRunState = typeof WorkflowRunState.Type
+
+/** Unit kinds persisted in `WfUnit.kind`. */
+export const WorkflowUnitKind = Schema.Literals(["slice", "package"])
+export type WorkflowUnitKind = typeof WorkflowUnitKind.Type
+
+/** Unit status values persisted in `WfUnit.status`. */
+export const WorkflowUnitStatus = Schema.Literals([
+  "pending",
+  "dispatched",
+  "completed",
+  "escalated",
+])
+export type WorkflowUnitStatus = typeof WorkflowUnitStatus.Type
+
+/** Attempt verdicts persisted in `WfAttempt.verdict`. */
+export const WorkflowAttemptVerdict = Schema.Literals(["dispatched", "completed", "rejected"])
+export type WorkflowAttemptVerdict = typeof WorkflowAttemptVerdict.Type
 
 /** Empty GQ parameter map shared by zero-argument workflow queries. */
 export const EmptyWorkflowGqParams = Schema.Struct({})
@@ -535,20 +643,78 @@ export interface WorkflowGqParamsMap {
     readonly expectedEpoch: LeaseEpoch
     readonly heartbeatMs: number
   }
+  readonly wf_get_run: { readonly runId: WorkflowRunId }
+  readonly wf_list_runs: EmptyWorkflowGqParams
+  readonly wf_insert_run: {
+    readonly runId: WorkflowRunId
+    readonly executionId: WorkflowExecutionId
+    readonly level: WorkflowLevel
+    readonly planSha: PlanSha256
+    readonly baseSha: GitCommitSha
+    readonly state: WorkflowRunState
+    readonly planJson: PlanJsonPayload | null
+    readonly updatedMs: WorkflowTimestampMs
+  }
+  readonly wf_update_run: {
+    readonly runId: WorkflowRunId
+    readonly state: WorkflowRunState
+    readonly updatedMs: WorkflowTimestampMs
+  }
+  readonly wf_units_for_run: { readonly runId: WorkflowRunId }
+  readonly wf_get_unit: { readonly unitKey: WorkflowUnitKey }
+  readonly wf_insert_unit: {
+    readonly unitKey: WorkflowUnitKey
+    readonly runId: WorkflowRunId
+    readonly unitId: WorkUnitId
+    readonly kind: WorkflowUnitKind
+    readonly waveIndex: WaveIndex
+    readonly status: WorkflowUnitStatus
+    readonly ownedRelPaths: ReadonlyArray<OwnedRelPath>
+    readonly updatedMs: WorkflowTimestampMs
+  }
+  readonly wf_update_unit: {
+    readonly unitKey: WorkflowUnitKey
+    readonly status: WorkflowUnitStatus
+    readonly updatedMs: WorkflowTimestampMs
+  }
+  readonly wf_attempts_for_run: { readonly runId: WorkflowRunId }
+  readonly wf_get_attempt: { readonly attemptKey: WorkflowAttemptKey }
+  readonly wf_insert_attempt: {
+    readonly attemptKey: WorkflowAttemptKey
+    readonly runId: WorkflowRunId
+    readonly unitId: WorkUnitId
+    readonly attempt: AttemptNumber
+    readonly verdict: WorkflowAttemptVerdict
+    readonly runner: RunnerId | null
+    readonly rejection: RejectionJsonPayload | null
+    readonly packageStampHash: PackageStampHash | null
+    readonly updatedMs: WorkflowTimestampMs
+  }
+  readonly wf_update_attempt: {
+    readonly attemptKey: WorkflowAttemptKey
+    readonly verdict: WorkflowAttemptVerdict
+    readonly runner: RunnerId | null
+    readonly rejection: RejectionJsonPayload | null
+    readonly packageStampHash: PackageStampHash | null
+    readonly updatedMs: WorkflowTimestampMs
+  }
+  readonly wf_delete_run_views: { readonly runId: WorkflowRunId }
+  readonly wf_probe_runs: EmptyWorkflowGqParams
 }
 
 export class WriterLeaseHeldError extends Schema.TaggedError<WriterLeaseHeldError>()(
   "WriterLeaseHeldError",
   {
     holderId: LeaseHolderId,
-    leaseEpoch: LeaseEpoch,
+    leaseEpoch: Schema.optional(LeaseEpoch),
     lockFilePath: LeaseFilePath,
     holderPid: Schema.optional(LeaseHolderPid),
   },
 ) {
   override get message(): string {
+    const epochPart = this.leaseEpoch !== undefined ? `epoch ${this.leaseEpoch}` : "epoch unknown"
     const pidPart = this.holderPid !== undefined ? `, pid ${this.holderPid}` : ""
-    return `Workflow writer lease held by ${this.holderId} (epoch ${this.leaseEpoch}${pidPart}) at ${this.lockFilePath}`
+    return `Workflow writer lease held by ${this.holderId} (${epochPart}${pidPart}) at ${this.lockFilePath}`
   }
 }
 

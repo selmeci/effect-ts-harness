@@ -129,10 +129,16 @@ export const DocLineNumber = Schema.Int.pipe(
 )
 export type DocLineNumber = typeof DocLineNumber.Type
 
-export const DocSummarySnippet = Schema.String.pipe(Schema.brand("DocSummarySnippet"))
+export const DocSummarySnippet = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(4096)),
+  Schema.brand("DocSummarySnippet"),
+)
 export type DocSummarySnippet = typeof DocSummarySnippet.Type
 
-export const DocSectionSliceText = Schema.String.pipe(Schema.brand("DocSectionSliceText"))
+export const DocSectionSliceText = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(200_000)),
+  Schema.brand("DocSectionSliceText"),
+)
 export type DocSectionSliceText = typeof DocSectionSliceText.Type
 
 export const GovernanceDocIdentifier = TrimmedRetrievalString.pipe(
@@ -141,6 +147,7 @@ export const GovernanceDocIdentifier = TrimmedRetrievalString.pipe(
 export type GovernanceDocIdentifier = typeof GovernanceDocIdentifier.Type
 
 export const GovernanceDocLifecycleStatus = Schema.Literals([
+  "draft",
   "accepted",
   "proposed",
   "superseded",
@@ -176,7 +183,11 @@ export const EarsClauseText = Schema.NonEmptyString.pipe(
 )
 export type EarsClauseText = typeof EarsClauseText.Type
 
-export const EarsEffectSymbol = Schema.String.pipe(Schema.brand("EarsEffectSymbol"))
+export const EarsEffectSymbol = Schema.String.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(512)),
+  Schema.brand("EarsEffectSymbol"),
+)
 export type EarsEffectSymbol = typeof EarsEffectSymbol.Type
 
 export const SimilarityScore = Schema.Finite.pipe(
@@ -185,7 +196,10 @@ export const SimilarityScore = Schema.Finite.pipe(
 )
 export type SimilarityScore = typeof SimilarityScore.Type
 
-export const RetrievalMatchTitle = Schema.String.pipe(Schema.brand("RetrievalMatchTitle"))
+export const RetrievalMatchTitle = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(1024)),
+  Schema.brand("RetrievalMatchTitle"),
+)
 export type RetrievalMatchTitle = typeof RetrievalMatchTitle.Type
 
 export const LinkedGraphSymbolKey = TrimmedRetrievalString.pipe(

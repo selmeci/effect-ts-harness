@@ -19,7 +19,17 @@
         ]
       },
       {
-        "matcher": "replace_file_content|multi_replace_file_content|write_to_file",
+        "matcher": "edit_file|write_file|replace_file_content|multi_replace_file_content|write_to_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/hook-entry.ts guard --format=antigravity || { rc=$?; if [ \"$rc\" -ne 2 ]; then printf '%s\\n' '{\"decision\":\"deny\",\"reason\":\"guard: runtime bootstrap failed\"}'; fi; exit 2; }",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "view_file|view_file_outline|view_code_item|read_file|grep_search|find_by_name|list_dir",
         "hooks": [
           {
             "type": "command",
@@ -31,7 +41,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "replace_file_content|multi_replace_file_content|write_to_file",
+        "matcher": "edit_file|write_file|replace_file_content|multi_replace_file_content|write_to_file",
         "hooks": [
           {
             "type": "command",
@@ -44,7 +54,7 @@
     "Stop": [
       {
         "type": "command",
-        "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts done --format=antigravity || { rc=$?; if [ \"$rc\" -ne 2 ]; then printf '%s\\n' '{\"decision\":\"continue\",\"reason\":\"done: runtime bootstrap failed\"}'; fi; exit 2; }",
+        "command": "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/hook-entry.ts done --format=antigravity || { rc=$?; if [ \"$rc\" -ne 2 ]; then printf '%s\\n' '{\"decision\":\"continue\",\"reason\":\"done: runtime bootstrap failed\"}'; fi; exit 2; }",
         "timeout": 30
       }
     ]

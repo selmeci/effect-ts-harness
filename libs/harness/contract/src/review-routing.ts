@@ -31,9 +31,8 @@ export const REVIEW_DEPTH_RANK = {
   full: ReviewDepthRank.make(3),
 } as const satisfies Record<(typeof REVIEW_DEPTH_LEVELS)[number], ReviewDepthRank>
 
-const lookupReviewDepthRank = (
-  depth: (typeof REVIEW_DEPTH_LEVELS)[number],
-): ReviewDepthRank => REVIEW_DEPTH_RANK[depth]
+const lookupReviewDepthRank = (depth: (typeof REVIEW_DEPTH_LEVELS)[number]): ReviewDepthRank =>
+  REVIEW_DEPTH_RANK[depth]
 
 export const getReviewDepthRank = (depth: ReviewDepth): ReviewDepthRank =>
   lookupReviewDepthRank(depth)
@@ -56,6 +55,36 @@ export const ReviewChangedLines = Schema.Int.pipe(
   Schema.brand("ReviewChangedLines"),
 )
 export type ReviewChangedLines = typeof ReviewChangedLines.Type
+
+export const ReviewSliceFileCount = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(1)),
+  Schema.check(Schema.isLessThanOrEqualTo(200)),
+  Schema.brand("ReviewSliceFileCount"),
+)
+export type ReviewSliceFileCount = typeof ReviewSliceFileCount.Type
+
+export const REVIEW_SLICE_FILE_THRESHOLD: ReviewSliceFileCount = ReviewSliceFileCount.make(12)
+
+export const ReviewSliceId = Schema.String.pipe(
+  Schema.check(Schema.isBetweenLength(1, 128)),
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isPattern(/^[a-z0-9][a-z0-9._:/#-]*$/)),
+  Schema.brand("ReviewSliceId"),
+)
+export type ReviewSliceId = typeof ReviewSliceId.Type
+
+export const REMEDIATION_FINDING_SEVERITIES = ["blocker", "critical", "major", "minor"] as const
+
+export const RemediationFindingSeverity = Schema.Literals(REMEDIATION_FINDING_SEVERITIES).pipe(
+  Schema.brand("RemediationFindingSeverity"),
+)
+export type RemediationFindingSeverity = typeof RemediationFindingSeverity.Type
+
+export const RemediationReviewContext = Schema.Struct({
+  priorSpecialists: Schema.NonEmptyArray(ReviewerId).pipe(Schema.check(Schema.isMaxLength(16))),
+  maxSeverity: RemediationFindingSeverity,
+})
+export type RemediationReviewContext = typeof RemediationReviewContext.Type
 
 export const ReviewTimeoutMillis = Schema.Int.pipe(
   Schema.check(Schema.isGreaterThanOrEqualTo(100)),
@@ -106,6 +135,7 @@ export const ReviewRawDiffInput = Schema.Struct({
   touchedTiers: Schema.Array(NxTierTag).pipe(Schema.check(Schema.isMaxLength(16))),
   touchedScopes: Schema.Array(NxScopeTag).pipe(Schema.check(Schema.isMaxLength(16))),
   timeoutMs: Schema.optional(ReviewTimeoutMillis),
+  remediationContext: Schema.optional(RemediationReviewContext),
 })
 export type ReviewRawDiffInput = typeof ReviewRawDiffInput.Type
 
@@ -123,6 +153,7 @@ export const ReviewDiffSignals = Schema.Struct({
   hasAuthOrSecretSurface: Schema.Boolean,
   hasArchitectureOrAdapterSurface: Schema.Boolean,
   hasWebSurface: Schema.Boolean,
+  remediationContext: Schema.optional(RemediationReviewContext),
 })
 export type ReviewDiffSignals = typeof ReviewDiffSignals.Type
 
@@ -132,6 +163,14 @@ export const ReviewerSelection = Schema.Struct({
   mandatory: Schema.Boolean,
 })
 export type ReviewerSelection = typeof ReviewerSelection.Type
+
+export const ReviewSlicePlan = Schema.Struct({
+  sliceId: ReviewSliceId,
+  label: ReviewRoutingReason,
+  files: Schema.NonEmptyArray(ReviewSignalPath),
+  selections: Schema.NonEmptyArray(ReviewerSelection),
+})
+export type ReviewSlicePlan = typeof ReviewSlicePlan.Type
 
 export const SkipReviewPlan = Schema.TaggedStruct("SkipReviewPlan", {
   depth: Schema.Literal(ReviewDepth.make("skip")),
@@ -151,6 +190,7 @@ export const ActiveReviewPlan = Schema.TaggedStruct("ActiveReviewPlan", {
   source: ReviewRoutingSource,
   degradedReason: Schema.optional(ErrorReasonMessage),
   selections: Schema.NonEmptyArray(ReviewerSelection),
+  reviewSlices: Schema.optional(Schema.NonEmptyArray(ReviewSlicePlan)),
 })
 export type ActiveReviewPlan = typeof ActiveReviewPlan.Type
 
@@ -172,5 +212,6 @@ export const ReviewRouteToolOutput = Schema.Struct({
   degraded: Schema.Boolean,
   degradedReason: Schema.optional(ErrorReasonMessage),
   evaluationError: Schema.optional(ErrorReasonMessage),
+  reviewSlices: Schema.optional(Schema.NonEmptyArray(ReviewSlicePlan)),
 })
 export type ReviewRouteToolOutput = typeof ReviewRouteToolOutput.Type

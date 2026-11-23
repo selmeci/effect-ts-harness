@@ -6,8 +6,10 @@ import {
   type LeaseEpoch,
   type LeaseFilePath,
   type MessageKey,
+  WORKFLOW_TIMEOUT_BUDGETS,
   WorkflowStoreOperation,
   type WorkflowStoreUnavailableError,
+  type WorkflowTimeoutMs,
 } from "@harness/contract"
 import type { OmnigraphClient } from "@harness/graph"
 import type { SyncHostIo } from "@harness/service/host-io"
@@ -45,7 +47,8 @@ import { hydrateCandidateRows, insertEnvelopeRow } from "./workflow/message-stor
 type Omnigraph = InstanceType<typeof OmnigraphClient>
 
 /** Default claim timeout (`6 hours`, matching Effect Cluster `Sharding` activity protection). */
-export const DEFAULT_WORKFLOW_CLAIM_TIMEOUT_MS = 6 * 60 * 60 * 1_000
+export const DEFAULT_WORKFLOW_CLAIM_TIMEOUT_MS: WorkflowTimeoutMs =
+  WORKFLOW_TIMEOUT_BUDGETS.claimTimeoutMs
 
 const decodeCandidateRowMetaOption = Schema.decodeUnknownOption(CandidateRowMetaSchema)
 const decodeByPkRowOption = Schema.decodeUnknownOption(WfMessageByPkRowSchema)

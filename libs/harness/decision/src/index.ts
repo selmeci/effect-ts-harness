@@ -174,8 +174,10 @@ export {
 } from "./mock-layer.js"
 export {
   ReviewRouterV1,
+  attachReviewSlicesIfThresholdReached,
   normalizeReviewFilePaths,
   inferReviewDiffSignals,
+  reconcileReviewSlicesWithSelections,
   decideDeterministicReviewRoute,
   routeReviewDiff,
 } from "./review-router-decision.js"
@@ -185,3 +187,4 @@ export {
   type CollectSemanticConflictCandidatesInput,
   type CollectSemanticConflictCandidatesResult,
 } from "./semantic-conflict-pairer.js"
+export { partitionDiffReviewSlices, resolveReviewSliceUnitKey } from "./review-slice-partitioner.js"

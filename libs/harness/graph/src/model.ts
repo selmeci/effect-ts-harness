@@ -50,10 +50,16 @@ export type LayerKind = typeof LayerKind.Type
 export const AdrStatus = Schema.Literals(["proposed", "accepted", "superseded", "deprecated"])
 export type AdrStatus = typeof AdrStatus.Type
 
-export const EarsStatus = Schema.Literals(["proposed", "accepted", "superseded", "deprecated"])
+export const EarsStatus = Schema.Literals([
+  "draft",
+  "proposed",
+  "accepted",
+  "superseded",
+  "deprecated",
+])
 export type EarsStatus = typeof EarsStatus.Type
 
-export const GovernanceDocStatus = AdrStatus
+export const GovernanceDocStatus = EarsStatus
 export type GovernanceDocStatus = typeof GovernanceDocStatus.Type
 
 export const EarsPatternKind = Schema.Literals([

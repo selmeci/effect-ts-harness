@@ -34,7 +34,7 @@ import {
   type OllamaEmbeddingClientOptions,
 } from "./embedding-client-live.js"
 import { LocalDecisionModel, makeLocalDecisionModelLayer } from "./local-decision-model-live.js"
-import { nodeSyncHostIo } from "./node-host-io.js"
+import { execFileAsyncEffect, nodeSyncHostIo } from "./node-host-io.js"
 import {
   HarnessSubprocessRunnerLive,
   makeHarnessSubprocessRunnerHostIoLayer,
@@ -43,6 +43,7 @@ import {
 import {
   DAEMON_SOCKET_TIMEOUT_MS,
   DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
+  WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
   makeUnixSocketDaemonLayer,
   queryUnixSocketLine,
   queryUnixSocketLineDetailed,
@@ -62,7 +63,7 @@ import {
   WorkspaceFsLive,
 } from "./workspace-fs-live.js"
 
-export { nodeSyncHostIo }
+export { execFileAsyncEffect, nodeSyncHostIo }
 export { ActiveMutantContextLive }
 export { makeWorkspaceFsHostIoLayer, makeWorkspaceFsLayer, WorkspaceFsLive }
 export {
@@ -100,6 +101,7 @@ export {
 export {
   DAEMON_SOCKET_TIMEOUT_MS,
   DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
+  WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
   makeUnixSocketDaemonLayer,
   queryUnixSocketLine,
   queryUnixSocketLineDetailed,
@@ -115,6 +117,7 @@ export {
 }
 export {
   resolveWorkflowRuntimePaths,
+  resolveWorkflowWorktreeDir,
   validateWorktreeRepoRoot,
   type ResolvedWorktreeKind,
   type WorkflowRuntimePaths,
@@ -185,13 +188,57 @@ export {
   type OmnigraphClusterStartupLockOptions,
 } from "./workflow/cluster-startup-lock.js"
 export {
+  abortWorkflowViaDaemon,
+  completeWorkflowViaDaemon,
+  doctorWorkflowViaDaemon,
+  getWorkflowStatusViaDaemon,
   handshakeWorkflowDaemon,
   queryWorkflowDaemonCommand,
+  resumeWorkflowViaDaemon,
+  startWorkflowViaDaemon,
+  WORKFLOW_COMPLETE_IPC_TIMEOUT_MS,
   WORKFLOW_DAEMON_IPC_TIMEOUT_MS,
   type WorkflowDaemonCommandInput,
   type WorkflowDaemonExpectedProtocol,
   type WorkflowDaemonHandshakeInput,
+  type WorkflowDaemonRpcOptions,
 } from "./workflow/daemon-client.js"
+export { UnitAgentDispatcherLive } from "./workflow/agent-dispatcher-live.js"
+export {
+  compileWorkflowPlanFromRepo,
+  type CompileWorkflowPlanError,
+  type CompileWorkflowPlanRequest,
+} from "./workflow/plan-compiler-extractor.js"
+export {
+  makeWorkflowProjectionWriterLayer,
+  makeWorkflowReadModelQueryLayer,
+  rebuildWorkflowReadModelViews,
+  type WorkflowReadModelLeaseFence,
+  type WorkflowReadModelOptions,
+  WorkflowProjectionWriterLive,
+  WorkflowReadModelQueryLive,
+} from "./workflow/read-model-live.js"
+export {
+  makeWorkflowReviewRouterLayer,
+  routeWorkflowReviewImpl,
+  type WorkflowReviewRouterOptions,
+  WorkflowReviewRouterLive,
+} from "./workflow/review-router-live.js"
+export {
+  completeSharedStepImpl,
+  completeUnitImpl,
+  makeUnitVerifierLayer,
+  type UnitVerifierOptions,
+  UnitVerifierLive,
+} from "./workflow/unit-verifier-live.js"
+export {
+  makeWorkflowWorktreePortLayer,
+  mergeSliceWaveImpl,
+  provisionWorkflowWorktreesImpl,
+  removeWorktreeCheckoutsImpl,
+  type WorkflowWorktreePortOptions,
+  WorkflowWorktreePortLive,
+} from "./workflow/worktree-port-live.js"
 
 export const TsCompilerOverlayServiceLive: Layer.Layer<TsCompilerOverlayService> =
   makeTsCompilerOverlayLayer(nodeSyncHostIo)

@@ -606,46 +606,48 @@ describe("HarnessMcp 3-tier retrieval tools (ADR-0025 / SPEC-0031)", () => {
       }),
   )
 
+  const makeMultiTargetRetrievalFixtures = () => {
+    const base = buildSampleRetrievalGraph()
+    const multiTargetGraph = {
+      ...base,
+      graph: Graph.mutate(base.graph, (mutable) => {
+        const relIdx = Graph.addNode(mutable, {
+          _tag: "TraceabilityTuple",
+          relationId: RelationId.make("TraceabilityTuple:req:harness:SPEC-0031#REQ-2.3"),
+          earsSpecId: "harness:SPEC-0031",
+          requirementId: "REQ-2.3",
+          targetSymbolQualname: "harness:SPEC-0031::REQ-2.3",
+          verifyingTestQualnames: [],
+        })
+        const fnIdx = Graph.addNode(mutable, {
+          _tag: "EffectFn",
+          qualname: "libs/harness/graph/src/extra.ts#extraFn",
+          spanName: "Extra.fn",
+          packageTag: "domain",
+          file: "libs/harness/graph/src/extra.ts",
+          line: 5,
+          isStub: false,
+        })
+        Graph.addEdge(mutable, relIdx, fnIdx, {
+          _tag: "PlaysRole",
+          relationId: RelationId.make("TraceabilityTuple:req:harness:SPEC-0031#REQ-2.3"),
+          entityKey: NodeKey.make("EffectFn:libs/harness/graph/src/extra.ts#extraFn"),
+          role: RoleName.make("specified-target"),
+          archimateRelation: "Realization",
+        })
+      }),
+    }
+    const fsLayer = makeMemoryFsLayer(
+      new Map([["/repo/libs/harness/docs/adr/0025.md", "# ADR-0025\n\n## Decision\n\nBody.\n"]]),
+    )
+    return { multiTargetGraph, fsLayer }
+  }
+
   it.effect(
-    "enforces repoRoot containment, trims whitespace queries, scores fairly without short-circuiting fallback, and excludes self-IDs in linkedSymbols",
+    "enforces repoRoot containment and trims whitespace queries across retrieval tools",
     () =>
       Effect.gen(function* () {
-        const base = buildSampleRetrievalGraph()
-        const multiTargetGraph = {
-          ...base,
-          graph: Graph.mutate(base.graph, (mutable) => {
-            const relIdx = Graph.addNode(mutable, {
-              _tag: "TraceabilityTuple",
-              relationId: RelationId.make("TraceabilityTuple:req:harness:SPEC-0031#REQ-2.3"),
-              earsSpecId: "harness:SPEC-0031",
-              requirementId: "REQ-2.3",
-              targetSymbolQualname: "harness:SPEC-0031::REQ-2.3",
-              verifyingTestQualnames: [],
-            })
-            const fnIdx = Graph.addNode(mutable, {
-              _tag: "EffectFn",
-              qualname: "libs/harness/graph/src/extra.ts#extraFn",
-              spanName: "Extra.fn",
-              packageTag: "domain",
-              file: "libs/harness/graph/src/extra.ts",
-              line: 5,
-              isStub: false,
-            })
-            Graph.addEdge(mutable, relIdx, fnIdx, {
-              _tag: "PlaysRole",
-              relationId: RelationId.make("TraceabilityTuple:req:harness:SPEC-0031#REQ-2.3"),
-              entityKey: NodeKey.make("EffectFn:libs/harness/graph/src/extra.ts#extraFn"),
-              role: RoleName.make("specified-target"),
-              archimateRelation: "Realization",
-            })
-          }),
-        }
-
-        const fsLayer = makeMemoryFsLayer(
-          new Map([
-            ["/repo/libs/harness/docs/adr/0025.md", "# ADR-0025\n\n## Decision\n\nBody.\n"],
-          ]),
-        )
+        const { multiTargetGraph, fsLayer } = makeMultiTargetRetrievalFixtures()
 
         for (const toolCall of [
           executeSearchKnowledgeTool(
@@ -713,6 +715,14 @@ describe("HarnessMcp 3-tier retrieval tools (ADR-0025 / SPEC-0031)", () => {
             expect.unreachable("Expected whitespace-only query to fail Schema validation")
           })
           .exhaustive()
+      }),
+  )
+
+  it.effect(
+    "scores fairly without short-circuiting fallback, excludes self-IDs in linkedSymbols, and meets SpanBudget",
+    () =>
+      Effect.gen(function* () {
+        const { multiTargetGraph, fsLayer } = makeMultiTargetRetrievalFixtures()
 
         const invokedNames: Array<string> = []
         const mixedSyncLayer = makeMockOmnigraphSyncLayer((name) => {
@@ -1068,29 +1078,34 @@ describe("HarnessMcp 3-tier retrieval tools (ADR-0025 / SPEC-0031)", () => {
       }),
   )
 
+  const makeDegradedAndShapingRetrievalFixtures = () => {
+    const base = buildSampleRetrievalGraph()
+    const fifteenSpanGraph = {
+      ...base,
+      graph: Graph.mutate(base.graph, (mutable) => {
+        Graph.addNode(mutable, {
+          _tag: "PatternDoc",
+          slug: "dense-pattern",
+          path: "agent-patterns/dense-pattern.md",
+          title: "Dense Pattern",
+          headings: ["Dense Pattern"],
+          summary: "A".repeat(600),
+          coveredSpans: Array.from(
+            { length: 15 },
+            (_, i) => `Span.${String(i + 1).padStart(2, "0")}`,
+          ),
+          coveredTags: [],
+        })
+      }),
+    }
+    return { base, fifteenSpanGraph }
+  }
+
   it.effect(
-    "F-9.1 / F-9.2 / S-4.1 / S-2.6 / F-11.1: preserves all distinct degraded reasons, propagates defects, handles 0-row vector fallback vs empty kind, deduplicates/caps hits, and rejects invalid DocTree inputs",
+    "F-9.1 / F-9.2 / S-4.1: preserves distinct degraded reasons, handles 0-row vector fallback, and skips bm25 on empty kinds",
     () =>
       Effect.gen(function* () {
-        const base = buildSampleRetrievalGraph()
-        const fifteenSpanGraph = {
-          ...base,
-          graph: Graph.mutate(base.graph, (mutable) => {
-            Graph.addNode(mutable, {
-              _tag: "PatternDoc",
-              slug: "dense-pattern",
-              path: "agent-patterns/dense-pattern.md",
-              title: "Dense Pattern",
-              headings: ["Dense Pattern"],
-              summary: "A".repeat(600),
-              coveredSpans: Array.from(
-                { length: 15 },
-                (_, i) => `Span.${String(i + 1).padStart(2, "0")}`,
-              ),
-              coveredTags: [],
-            })
-          }),
-        }
+        const { base } = makeDegradedAndShapingRetrievalFixtures()
 
         const multiErrorSyncLayer = makeMockOmnigraphSyncLayer((name) => {
           if (name.includes("patterns")) {
@@ -1176,7 +1191,22 @@ describe("HarnessMcp 3-tier retrieval tools (ADR-0025 / SPEC-0031)", () => {
         expect(emptyKindRes.degradedReason).toBeNull()
         expect(emptyKindRes.hits).toHaveLength(0)
         expect(bm25CalledForEmptyKind).toBe(false)
+      }),
+  )
 
+  it.effect(
+    "S-2.6 / F-11.1: deduplicates and caps hits, propagates defects, and rejects invalid DocTree inputs",
+    () =>
+      Effect.gen(function* () {
+        const { base, fifteenSpanGraph } = makeDegradedAndShapingRetrievalFixtures()
+
+        const emptySyncLayer = makeMockOmnigraphSyncLayer(() =>
+          Effect.succeed({
+            source: "omnigraph" as const,
+            degraded: false as const,
+            rows: [],
+          }),
+        )
         const shapingSyncLayer = makeMockOmnigraphSyncLayer(() =>
           Effect.succeed({
             source: "omnigraph" as const,
@@ -1237,7 +1267,7 @@ describe("HarnessMcp 3-tier retrieval tools (ADR-0025 / SPEC-0031)", () => {
                 availability: availableEmbedding,
                 defectOnQuery: true,
               }),
-              omnigraphSyncLayer: emptyKindSyncLayer,
+              omnigraphSyncLayer: emptySyncLayer,
             },
           ).pipe(Effect.asVoid),
           executeSearchKnowledgeTool(

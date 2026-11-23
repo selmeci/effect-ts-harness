@@ -3,12 +3,18 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { Effect, Schema } from "effect"
-import { buildHarnessGraph } from "@harness/graph"
+import * as Graph from "effect/Graph"
+import { match } from "ts-pattern"
+import { buildHarnessGraph, extractTypeAwareGraphFromSource } from "@harness/graph"
 import {
   decideAdrDocQuality,
+  decideEarsConsistency,
   decideEarsSpecQuality,
   decideGraphEntropy,
   evaluatePackageAndMigrationPlugin,
+  type EarsConsistencyError,
+  type EarsConsistencyInput,
+  type EarsConsistencyReport,
   type GovernanceDocReference,
 } from "../src/index.js"
 import { testHostIo } from "./helpers/test-host-io.js"
@@ -252,6 +258,180 @@ Currently, this is inside a fenced code block and must be ignored.
             false,
           )
         }),
+    )
+
+    it.effect(
+      "SPEC-0029 REQ-3.1/REQ-3.2/REQ-4.2/REQ-4.3: enforces Effect Symbol frontmatter ownership and fails closed on invalid status",
+      () =>
+        Effect.gen(function* () {
+          const validDraft = `---
+id: harness:SPEC-9991
+title: Owned Draft
+status: draft
+spans: [Alpha.decide]
+services:
+  - "@harness/graph/OmnigraphSync"
+errors:
+  - AlphaFailedError
+---
+
+## Requirements
+
+### 1 · Ownership
+**Source:** Verified ownership.
+
+| ID | Pattern | Requirement | Effect Symbol | Verification |
+|---|---|---|---|---|
+| REQ-1.1 | Event-driven | **When** Alpha runs, Alpha.decide **shall** complete. | \`Alpha.decide\` | UnitTest |
+| REQ-1.2 | Ubiquitous | OmnigraphSync **shall** persist schemas. | OmnigraphSync | UnitTest |
+| REQ-1.3 | Unwanted behaviour | **If** Alpha breaks, **then** Alpha.decide **shall** fail with AlphaFailedError. | AlphaFailedError | UnitTest |
+| REQ-1.4 | Ubiquitous | Schema types **shall** validate inputs. | — | UnitTest |
+`
+          const validReport = yield* decideEarsSpecQuality({
+            docPath: "libs/harness/docs/specs/valid-draft.md",
+            markdown: validDraft,
+          })
+          expect(validReport.clean).toBe(true)
+
+          const unownedMd = validDraft.replace("| `Alpha.decide` |", "| Ghost.decide |")
+          const unownedReport = yield* decideEarsSpecQuality({
+            docPath: "libs/harness/docs/specs/unowned.md",
+            markdown: unownedMd,
+          })
+          expect(unownedReport.clean).toBe(false)
+          const ownershipFinding = unownedReport.findings.find(
+            (f) => f.kind === "spec-source-symbol-ownership",
+          )
+          expect(ownershipFinding).toBeDefined()
+          expect(ownershipFinding?.message).toContain("REQ-1.1")
+          expect(ownershipFinding?.message).toContain("Ghost.decide")
+
+          const badStatusMd = validDraft.replace("status: draft", "status: bogus_status")
+          const badStatusReport = yield* decideEarsSpecQuality({
+            docPath: "libs/harness/docs/specs/bad-status.md",
+            markdown: badStatusMd,
+          })
+          expect(badStatusReport.clean).toBe(false)
+          expect(
+            badStatusReport.findings.some(
+              (f) => f.kind === "invalid-frontmatter-status" && f.line === 4,
+            ),
+          ).toBe(true)
+
+          const emptyQuotedStatusReport = yield* decideEarsSpecQuality({
+            docPath: "libs/harness/docs/specs/empty-status.md",
+            markdown: validDraft.replace("status: draft", 'status: ""'),
+          })
+          expect(
+            emptyQuotedStatusReport.findings.some(
+              (f) => f.kind === "invalid-frontmatter-status" && f.message.includes("'<missing>'"),
+            ),
+          ).toBe(true)
+
+          const draftGenericMd = validDraft.replace(
+            "Alpha.decide **shall** complete",
+            "the system **shall** complete",
+          )
+          const draftGenericReport = yield* decideEarsSpecQuality({
+            docPath: "libs/harness/docs/specs/draft-generic.md",
+            markdown: draftGenericMd,
+          })
+          expect(draftGenericReport.findings.some((f) => f.kind === "generic-subject")).toBe(true)
+        }),
+    )
+
+    it.effect.prop(
+      "SPEC-0029 REQ-3.1/REQ-3.2 property: undeclared Effect Symbol triggers spec-source-symbol-ownership",
+      { suffix: Schema.Literals(["One", "Two", "Three"]) },
+      ({ suffix }) =>
+        Effect.gen(function* () {
+          const md = `---
+id: harness:SPEC-9992
+title: Prop
+status: proposed
+spans:
+  - Owned.fn${suffix}
+---
+
+## Requirements
+
+### 1 · Area
+**Source:** test source
+
+| ID | Pattern | Requirement | Effect Symbol | Verification |
+|---|---|---|---|---|
+| REQ-1.1 | Ubiquitous | The Owned.fn${suffix} handler **shall** run. | Unowned.fn${suffix} | UnitTest |
+`
+          const report = yield* decideEarsSpecQuality({
+            docPath: "libs/harness/docs/specs/prop.md",
+            markdown: md,
+          })
+          expect(
+            report.findings.some(
+              (f) =>
+                f.kind === "spec-source-symbol-ownership" &&
+                f.message.includes(`Unowned.fn${suffix}`),
+            ),
+          ).toBe(true)
+        }),
+    )
+
+    it.effect("SPEC-0029 REQ-3.3: EarsConsistency.decide preserves R = never purity", () =>
+      Effect.sync(() => {
+        const checkPurity: (
+          input: EarsConsistencyInput,
+        ) => Effect.Effect<EarsConsistencyReport, EarsConsistencyError, never> =
+          decideEarsConsistency
+        expect(typeof checkPurity).toBe("function")
+
+        let root = process.cwd()
+        while (root !== dirname(root)) {
+          if (existsSync(join(root, "pnpm-workspace.yaml"))) break
+          root = dirname(root)
+        }
+        const sourcePath = "libs/harness/gates/src/ears-consistency.ts"
+        const graph = extractTypeAwareGraphFromSource([
+          {
+            filePath: sourcePath,
+            content: readFileSync(join(root, sourcePath), "utf8"),
+            packageTag: "domain",
+          },
+        ])
+        let foundSpan = false
+        let requiredServicesCount = -1
+        for (const [, node] of Graph.nodes(graph.graph)) {
+          match(node)
+            .with({ _tag: "EffectFn" }, (fnNode) => {
+              if (fnNode.spanName === "EarsConsistency.decide") {
+                foundSpan = true
+              }
+            })
+            .with({ _tag: "EffectSignature" }, (sigNode) => {
+              if (sigNode.callerQualname.endsWith("#decideEarsConsistency")) {
+                requiredServicesCount = sigNode.requiredServices.length
+              }
+            })
+            .with(
+              { _tag: "ServiceTag" },
+              { _tag: "ServiceLayer" },
+              { _tag: "TaggedError" },
+              { _tag: "SchemaDef" },
+              { _tag: "VitestCase" },
+              { _tag: "PatternDoc" },
+              { _tag: "AdrDoc" },
+              { _tag: "EarsSpec" },
+              { _tag: "EarsRequirement" },
+              { _tag: "LayerFlow" },
+              { _tag: "TraceabilityTuple" },
+              { _tag: "HttpEndpointTuple" },
+              { _tag: "MigrationTuple" },
+              () => {},
+            )
+            .exhaustive()
+        }
+        expect(foundSpan).toBe(true)
+        expect(requiredServicesCount).toBe(0)
+      }),
     )
   })
 
@@ -826,12 +1006,159 @@ Every domain fixture must have the scope:fixture tag applied in project.json.
     )
 
     it.effect(
+      "flags adr-enforcement-mismatch when frontmatter enforced_by file is missing from Deterministic Enforcement table",
+      () =>
+        Effect.gen(function* () {
+          const adrMissingFromTable = `---
+id: test:ADR-0001
+title: Test ADR
+status: accepted
+date: 2026-10-27
+enforced_by:
+  - libs/harness/gates/src/adr-lint.ts
+  - libs/harness/gates/src/adr-enforcement-table-lint.ts
+  - libs/harness/graph/schema.pg
+  - libs/harness/graph/queries/harness.gq
+  - libs/harness/graph/cluster.yaml
+spans:
+  - AdrDocLint.decide
+---
+
+# test:ADR-0001: Test ADR
+
+## Context and Problem Statement
+Context description here.
+
+## Decision Drivers
+* Driver 1
+* Driver 2
+
+## Considered Options
+* Option 1
+* Option 2
+
+## Decision Outcome
+**Chosen option:** "Option 1"
+
+## Rejected Alternatives
+### 1 · Option 2
+- **Why rejected:** Reasons
+
+## Consequences and Enforcement
+### Positive Consequences
+- Good things
+
+### Negative Consequences and Trade-offs
+- Tradeoffs
+
+### Deterministic Enforcement
+| Rule | Enforced By | Gate / Mechanism | Governed Symbols |
+| --- | --- | --- | --- |
+| Check $O(\\|T\\| + \\|F\\|)$ Rule | \`libs/harness/gates/src/adr-lint.ts\`, \`libs/harness/graph/schema.pg\` | AdrDocLint.decide | \`AdrDocLint.decide\` |
+`
+          const failReport = yield* decideAdrDocQuality({
+            docPath: "docs/adr/test.md",
+            markdown: adrMissingFromTable,
+          })
+          expect(failReport.clean).toBe(false)
+          const missingMessages = failReport.findings
+            .filter((f) => f.kind === "adr-enforcement-mismatch")
+            .map((f) => f.message)
+          expect(
+            missingMessages.some((m) =>
+              m.includes("libs/harness/gates/src/adr-enforcement-table-lint.ts"),
+            ),
+          ).toBe(true)
+          expect(
+            missingMessages.some((m) => m.includes("libs/harness/graph/queries/harness.gq")),
+          ).toBe(true)
+          expect(missingMessages.some((m) => m.includes("libs/harness/graph/cluster.yaml"))).toBe(
+            true,
+          )
+
+          const completeAdr = adrMissingFromTable.replace(
+            "`libs/harness/gates/src/adr-lint.ts`, `libs/harness/graph/schema.pg`",
+            "`libs/harness/gates/src/adr-lint.ts`, `libs/harness/gates/src/adr-enforcement-table-lint.ts`, `libs/harness/graph/schema.pg`, `libs/harness/graph/queries/harness.gq`, `libs/harness/graph/cluster.yaml`",
+          )
+          const okReport = yield* decideAdrDocQuality({
+            docPath: "docs/adr/test.md",
+            markdown: completeAdr,
+          })
+          expect(okReport.clean).toBe(true)
+          expect(okReport.findings).toHaveLength(0)
+        }),
+    )
+
+    it.effect.prop(
+      "enforces bidirectional equality between enforced_by frontmatter and Deterministic Enforcement table",
+      {
+        scenario: Schema.Struct({
+          extraInFrontmatter: Schema.Boolean,
+          extraInTable: Schema.Boolean,
+        }),
+      },
+      ({ scenario: { extraInFrontmatter, extraInTable } }) =>
+        Effect.gen(function* () {
+          const f1 = "libs/harness/gates/src/adr-lint.ts"
+          const f2 = "libs/harness/gates/src/adr-enforcement-table-lint.ts"
+          const f3 = "libs/harness/graph/schema.pg"
+          const fmFiles = [f1, ...(extraInFrontmatter ? [f2] : [])]
+          const tblFiles = [f1, ...(extraInTable ? [f3] : [])]
+          const md = `---
+id: test:ADR-0001
+title: Bidirectional Check
+status: accepted
+date: 2026-10-27
+enforced_by:
+${fmFiles.map((p) => `  - ${p}`).join("\n")}
+spans:
+  - AdrDocLint.decide
+---
+
+# test:ADR-0001: Bidirectional Check
+
+## Context and Problem Statement
+Context description here.
+
+## Decision Drivers
+* Driver 1
+* Driver 2
+
+## Considered Options
+* Option 1
+* Option 2
+
+## Decision Outcome
+**Chosen option:** "Option 1"
+
+## Rejected Alternatives
+### 1 · Option 2
+- **Why rejected:** Reasons
+
+## Consequences and Enforcement
+### Positive Consequences
+- Good things
+
+### Negative Consequences and Trade-offs
+- Tradeoffs
+
+### Deterministic Enforcement
+| Rule | Enforced By | Gate / Mechanism | Governed Symbols |
+| --- | --- | --- | --- |
+| Bidirectional Parity | ${tblFiles.map((p) => `\`${p}\``).join(", ")} | AdrDocLint.decide | \`AdrDocLint.decide\` |
+`
+          const report = yield* decideAdrDocQuality({ docPath: "docs/adr/prop.md", markdown: md })
+          expect(report.clean).toBe(!extraInFrontmatter && !extraInTable)
+        }),
+    )
+
+    it.effect(
       "flags adr-overstated-proof-claim outside fenced code blocks while ignoring negations",
       () =>
         Effect.gen(function* () {
           const adrWithOverclaim = validCanonicalAdr.replace(
             "## Context and Problem Statement",
-            "## Context and Problem Statement\n\nUnit tests prove this invariant holds.\nTests do not prove absence of bugs.\n\n```\nUnit tests prove code inside fences is ignored.\n```",
+            "## Context and Problem Statement\n\nUnit tests prove this invariant holds.\n`foo.test.ts` proves invariants hold.\nTests prove invariants via property tests.\nTests do not prove absence of bugs.\n\n```\nUnit tests prove code inside fences is ignored.\n```",
           )
 
           const report = yield* decideAdrDocQuality({
@@ -842,7 +1169,7 @@ Every domain fixture must have the scope:fixture tag applied in project.json.
           const proofFindings = report.findings.filter(
             (f) => f.kind === "adr-overstated-proof-claim",
           )
-          expect(proofFindings).toHaveLength(1)
+          expect(proofFindings).toHaveLength(3)
           expect(proofFindings[0]?.message).toContain("verify")
         }),
     )
@@ -1167,43 +1494,31 @@ export {};
             const infraSrcDir = join(tempDir, "libs", "sample", "infra", "src")
             mkdirSync(infraSrcDir, { recursive: true })
 
-            // 1. bad-ddl.ts: runs sql`CREATE TABLE foo (id INT)` without SqliteMigrator
             writeFileSync(
               join(infraSrcDir, "bad-ddl.ts"),
               `import {sql} from "@effect/sql";\nexport const makeTable = sql\`CREATE TABLE foo (id INT);\`;\n`,
             )
-
-            // 2. bad-key.ts: passes "init_Without_Number" and duplicate "1_first" / "1_second" to SqliteMigrator.fromRecord
             writeFileSync(
               join(infraSrcDir, "bad-key.ts"),
               `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nexport const badMigrations = SqliteMigrator.fromRecord({\n  "init_Without_Number": sql\`CREATE TABLE IF NOT EXISTS a (id INT);\`,\n  "1_first": sql\`CREATE TABLE IF NOT EXISTS b (id INT);\`,\n  "1_second": sql\`CREATE TABLE IF NOT EXISTS c (id INT);\`,\n});\n`,
             )
-
-            // 3. drop.ts: contains sql`DROP TABLE foo`
             writeFileSync(
               join(infraSrcDir, "drop.ts"),
               `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nexport const dropMigrations = SqliteMigrator.fromRecord({\n  "1_drop_table": sql\`DROP TABLE foo;\`,\n});\n`,
             )
-
-            // 4. multiline-gen.ts: multi-line Effect.gen block with nested object followed by second invalid key "2_InvalidCamel"
             writeFileSync(
               join(infraSrcDir, "multiline-gen.ts"),
               `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nimport {Effect} from "effect";\nexport const complexMigrations = SqliteMigrator.fromRecord({\n  "1_init": Effect.gen(function* () {\n    const nested = { a: 1 };\n    yield* sql\`CREATE TABLE IF NOT EXISTS complex (id INT);\`;\n  }),\n  "2_InvalidCamel": sql\`CREATE TABLE IF NOT EXISTS camel (id INT);\`,\n});\n`,
             )
-
-            // 5. spread-migrations.ts: spread record with duplicate numeric id "1"
             writeFileSync(
               join(infraSrcDir, "spread-migrations.ts"),
               `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nconst aggregateCoreMigrations = {\n  "1_init": sql\`CREATE TABLE IF NOT EXISTS core (id INT);\`,\n};\nexport const migrations = SqliteMigrator.fromRecord({\n  ...aggregateCoreMigrations,\n  "1_second": sql\`CREATE TABLE IF NOT EXISTS duplicate_id (id INT);\`,\n});\n`,
             )
-
-            // 6. stray-ddl.ts: file imports SqliteMigrator, has valid fromRecord, but also has stray CREATE TABLE outside migration record
             writeFileSync(
               join(infraSrcDir, "stray-ddl.ts"),
               `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nexport const managedMigrations = SqliteMigrator.fromRecord({\n  "1_init_managed": sql\`CREATE TABLE IF NOT EXISTS managed (id INT);\`,\n});\nexport const strayTable = sql\`CREATE TABLE stray_table (id INT);\`;\n`,
             )
 
-            // 7. .sql file with destructive DROP TABLE in migrations/
             const migrationsDir = join(tempDir, "libs", "sample", "infra", "migrations")
             mkdirSync(migrationsDir, { recursive: true })
             writeFileSync(join(migrationsDir, "0002_drop.sql"), "DROP TABLE old_table;\n")
@@ -1214,7 +1529,6 @@ export {};
               hostIo: testHostIo,
             })
 
-            // Check unmanaged-sql-ddl
             const unmanagedFindings = findings.filter(
               (f) =>
                 f.kind === "unmanaged-sql-ddl" && f.nodeId === "libs/sample/infra/src/bad-ddl.ts",
@@ -1224,7 +1538,6 @@ export {};
               'Infrastructure module "libs/sample/infra/src/bad-ddl.ts" executes raw SQL DDL without SqliteMigrator',
             )
 
-            // Check stray CREATE TABLE outside fromRecord in a file importing SqliteMigrator
             const strayDdlFinding = findings.find(
               (f) =>
                 f.kind === "unmanaged-sql-ddl" && f.nodeId === "libs/sample/infra/src/stray-ddl.ts",
@@ -1234,7 +1547,6 @@ export {};
               'Infrastructure module "libs/sample/infra/src/stray-ddl.ts" executes raw SQL DDL without SqliteMigrator',
             )
 
-            // Check invalid-migrator-record-key (invalid format and duplicate id)
             const invalidKeyFinding = findings.find(
               (f) =>
                 f.kind === "invalid-migrator-record-key" &&
@@ -1255,7 +1567,6 @@ export {};
               "Duplicate migration version prefix '1_' in SqliteMigrator.fromRecord",
             )
 
-            // Check multiline Effect.gen second key invalid format
             const camelKeyFinding = findings.find(
               (f) =>
                 f.kind === "invalid-migrator-record-key" &&
@@ -1266,7 +1577,6 @@ export {};
               'Invalid SqliteMigrator.fromRecord migration key "2_InvalidCamel"',
             )
 
-            // Check spread record duplicate id detection
             const spreadDuplicateFinding = findings.find(
               (f) =>
                 f.kind === "invalid-migrator-record-key" &&
@@ -1277,7 +1587,6 @@ export {};
               "Duplicate migration version prefix '1_' in SqliteMigrator.fromRecord",
             )
 
-            // Check unsafe-sql-migration from TS file
             const unsafeFindings = findings.filter(
               (f) =>
                 f.kind === "unsafe-sql-migration" &&
@@ -1288,7 +1597,6 @@ export {};
               'Destructive DROP statement in "libs/sample/infra/src/drop.ts" requires human approval (ESCALATE).',
             )
 
-            // Check unsafe-sql-migration from .sql file in migrations/
             const unsafeSqlFileFinding = findings.find(
               (f) =>
                 f.kind === "unsafe-sql-migration" &&
@@ -1301,91 +1609,90 @@ export {};
           } finally {
             rmSync(tempDir, { recursive: true, force: true })
           }
-
-          // 8. Reports 0 findings when SqliteMigrator.fromRecord({ ...aggregateCoreMigrations, "2_init_bar": ... }) is used with additive CREATE TABLE IF NOT EXISTS
-          const cleanTempDir = mkdtempSync(join(tmpdir(), "harness-sql-clean-test-"))
-          try {
-            const cleanInfraSrcDir = join(cleanTempDir, "libs", "sample", "infra", "src")
-            mkdirSync(cleanInfraSrcDir, { recursive: true })
-
-            writeFileSync(
-              join(cleanInfraSrcDir, "clean.ts"),
-              `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nconst aggregateCoreMigrations = {\n  "1_init_foo": sql\`CREATE TABLE IF NOT EXISTS foo (id INT);\`,\n};\nexport const cleanMigrations = SqliteMigrator.fromRecord({\n  ...aggregateCoreMigrations,\n  "2_init_bar": sql\`CREATE TABLE IF NOT EXISTS bar (id INT);\`,\n});\nexport const runAggregateMigrations = SqliteMigrator.run({ loader: cleanMigrations });\nexport const projectorCoreMigrations = {\n  "1_init_projector": sql\`CREATE TABLE IF NOT EXISTS proj (id INT);\`,\n};\nexport const runProjectorMigrations = SqliteMigrator.run({\n  loader: SqliteMigrator.fromRecord(projectorCoreMigrations),\n  table: "es_projector_sql_migrations",\n});\n`,
-            )
-
-            const cleanFindings = yield* evaluatePackageAndMigrationPlugin({
-              graph: buildHarnessGraph({}),
-              workspaceRoot: cleanTempDir,
-              hostIo: testHostIo,
-            })
-            expect(cleanFindings).toHaveLength(0)
-          } finally {
-            rmSync(cleanTempDir, { recursive: true, force: true })
-          }
-
-          // 9. Detects non-1-based migration sequence, non-contiguous sequence, shared default migration table, and untrusted-row-brand-make
-          const collisionTempDir = mkdtempSync(join(tmpdir(), "harness-sql-collision-test-"))
-          try {
-            const collisionInfraSrcDir = join(collisionTempDir, "libs", "sample", "infra", "src")
-            mkdirSync(collisionInfraSrcDir, { recursive: true })
-
-            writeFileSync(
-              join(collisionInfraSrcDir, "aggregate.ts"),
-              `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nexport const aggregateCoreMigrations = {\n  "1_init_agg": sql\`CREATE TABLE IF NOT EXISTS agg (id INT);\`,\n  "3_skip_two": sql\`CREATE TABLE IF NOT EXISTS agg2 (id INT);\`,\n};\nexport const runAgg = SqliteMigrator.run({ loader: SqliteMigrator.fromRecord(aggregateCoreMigrations) });\n`,
-            )
-
-            writeFileSync(
-              join(collisionInfraSrcDir, "projector.ts"),
-              `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nexport const projectorCoreMigrations = {\n  "2_init_projector": sql\`CREATE TABLE IF NOT EXISTS proj (id INT);\`,\n};\nexport const runProj = SqliteMigrator.run({ loader: SqliteMigrator.fromRecord(projectorCoreMigrations) });\nexport const decodeRow = (row: { readonly stream_version: number }) => StreamVersion.make(Math.max(0, row.stream_version));\n`,
-            )
-
-            const collisionFindings = yield* evaluatePackageAndMigrationPlugin({
-              graph: buildHarnessGraph({}),
-              workspaceRoot: collisionTempDir,
-              hostIo: testHostIo,
-            })
-
-            const startAtTwoFinding = collisionFindings.find(
-              (f) =>
-                f.kind === "invalid-migrator-record-key" &&
-                f.nodeId === "libs/sample/infra/src/projector.ts:sequence-start-2",
-            )
-            expect(startAtTwoFinding).toBeDefined()
-            expect(startAtTwoFinding?.message).toContain('starts at id "2" instead of "1"')
-
-            const gapFinding = collisionFindings.find(
-              (f) =>
-                f.kind === "invalid-migrator-record-key" &&
-                f.nodeId === "libs/sample/infra/src/aggregate.ts:sequence-gap-1-3",
-            )
-            expect(gapFinding).toBeDefined()
-            expect(gapFinding?.message).toContain('jumps from "1" to "3"')
-
-            const sharedTableFinding = collisionFindings.find(
-              (f) =>
-                f.kind === "invalid-migrator-record-key" &&
-                f.nodeId ===
-                  "libs/sample/infra/src/projector.ts:shared-default-migrations-table:projectorCoreMigrations",
-            )
-            expect(sharedTableFinding).toBeDefined()
-            expect(sharedTableFinding?.message).toContain(
-              'Multiple distinct SqliteMigrator loaders (aggregateCoreMigrations, projectorCoreMigrations) in "sample/infra" use the default "effect_sql_migrations" table without a custom "table" option',
-            )
-
-            const brandMakeFinding = collisionFindings.find(
-              (f) =>
-                f.kind === "untrusted-row-brand-make" &&
-                f.nodeId ===
-                  "libs/sample/infra/src/projector.ts:StreamVersion.make(row.stream_version)",
-            )
-            expect(brandMakeFinding).toBeDefined()
-            expect(brandMakeFinding?.message).toContain(
-              'Unvalidated "StreamVersion.make(...row.stream_version...)" on SQLite row column',
-            )
-          } finally {
-            rmSync(collisionTempDir, { recursive: true, force: true })
-          }
         }),
+      )
+
+      it.effect(
+        "allows clean SqliteMigrator records and catches sequence gaps, shared default tables, and untrusted-row-brand-make",
+        () =>
+          Effect.gen(function* () {
+            const cleanTempDir = mkdtempSync(join(tmpdir(), "harness-sql-clean-test-"))
+            try {
+              const cleanInfraSrcDir = join(cleanTempDir, "libs", "sample", "infra", "src")
+              mkdirSync(cleanInfraSrcDir, { recursive: true })
+              writeFileSync(
+                join(cleanInfraSrcDir, "clean.ts"),
+                `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nconst aggregateCoreMigrations = {\n  "1_init_foo": sql\`CREATE TABLE IF NOT EXISTS foo (id INT);\`,\n};\nexport const cleanMigrations = SqliteMigrator.fromRecord({\n  ...aggregateCoreMigrations,\n  "2_init_bar": sql\`CREATE TABLE IF NOT EXISTS bar (id INT);\`,\n});\nexport const runAggregateMigrations = SqliteMigrator.run({ loader: cleanMigrations });\nexport const projectorCoreMigrations = {\n  "1_init_projector": sql\`CREATE TABLE IF NOT EXISTS proj (id INT);\`,\n};\nexport const runProjectorMigrations = SqliteMigrator.run({\n  loader: SqliteMigrator.fromRecord(projectorCoreMigrations),\n  table: "es_projector_sql_migrations",\n});\n`,
+              )
+              const cleanFindings = yield* evaluatePackageAndMigrationPlugin({
+                graph: buildHarnessGraph({}),
+                workspaceRoot: cleanTempDir,
+                hostIo: testHostIo,
+              })
+              expect(cleanFindings).toHaveLength(0)
+            } finally {
+              rmSync(cleanTempDir, { recursive: true, force: true })
+            }
+
+            const collisionTempDir = mkdtempSync(join(tmpdir(), "harness-sql-collision-test-"))
+            try {
+              const collisionInfraSrcDir = join(collisionTempDir, "libs", "sample", "infra", "src")
+              mkdirSync(collisionInfraSrcDir, { recursive: true })
+              writeFileSync(
+                join(collisionInfraSrcDir, "aggregate.ts"),
+                `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nexport const aggregateCoreMigrations = {\n  "1_init_agg": sql\`CREATE TABLE IF NOT EXISTS agg (id INT);\`,\n  "3_skip_two": sql\`CREATE TABLE IF NOT EXISTS agg2 (id INT);\`,\n};\nexport const runAgg = SqliteMigrator.run({ loader: SqliteMigrator.fromRecord(aggregateCoreMigrations) });\n`,
+              )
+              writeFileSync(
+                join(collisionInfraSrcDir, "projector.ts"),
+                `import {SqliteMigrator} from "@effect/sql-sqlite-do";\nimport {sql} from "@effect/sql";\nexport const projectorCoreMigrations = {\n  "2_init_projector": sql\`CREATE TABLE IF NOT EXISTS proj (id INT);\`,\n};\nexport const runProj = SqliteMigrator.run({ loader: SqliteMigrator.fromRecord(projectorCoreMigrations) });\nexport const decodeRow = (row: { readonly stream_version: number }) => StreamVersion.make(Math.max(0, row.stream_version));\n`,
+              )
+
+              const collisionFindings = yield* evaluatePackageAndMigrationPlugin({
+                graph: buildHarnessGraph({}),
+                workspaceRoot: collisionTempDir,
+                hostIo: testHostIo,
+              })
+              const startAtTwoFinding = collisionFindings.find(
+                (f) =>
+                  f.kind === "invalid-migrator-record-key" &&
+                  f.nodeId === "libs/sample/infra/src/projector.ts:sequence-start-2",
+              )
+              expect(startAtTwoFinding).toBeDefined()
+              expect(startAtTwoFinding?.message).toContain('starts at id "2" instead of "1"')
+
+              const gapFinding = collisionFindings.find(
+                (f) =>
+                  f.kind === "invalid-migrator-record-key" &&
+                  f.nodeId === "libs/sample/infra/src/aggregate.ts:sequence-gap-1-3",
+              )
+              expect(gapFinding).toBeDefined()
+              expect(gapFinding?.message).toContain('jumps from "1" to "3"')
+
+              const sharedTableFinding = collisionFindings.find(
+                (f) =>
+                  f.kind === "invalid-migrator-record-key" &&
+                  f.nodeId ===
+                    "libs/sample/infra/src/projector.ts:shared-default-migrations-table:projectorCoreMigrations",
+              )
+              expect(sharedTableFinding).toBeDefined()
+              expect(sharedTableFinding?.message).toContain(
+                'Multiple distinct SqliteMigrator loaders (aggregateCoreMigrations, projectorCoreMigrations) in "sample/infra" use the default "effect_sql_migrations" table without a custom "table" option',
+              )
+
+              const brandMakeFinding = collisionFindings.find(
+                (f) =>
+                  f.kind === "untrusted-row-brand-make" &&
+                  f.nodeId ===
+                    "libs/sample/infra/src/projector.ts:StreamVersion.make(row.stream_version)",
+              )
+              expect(brandMakeFinding).toBeDefined()
+              expect(brandMakeFinding?.message).toContain(
+                'Unvalidated "StreamVersion.make(...row.stream_version...)" on SQLite row column',
+              )
+            } finally {
+              rmSync(collisionTempDir, { recursive: true, force: true })
+            }
+          }),
       )
     })
   })

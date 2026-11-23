@@ -18,6 +18,7 @@ import {
   TierTopologyRuleId,
 } from "@harness/contract"
 import { resolveHarnessStateDir } from "@harness/gates/hook-fastpath"
+import { ADAPTER_SKILL_PARITY_CLAUSES, auditAdapterSkillParityPair } from "@harness/gates"
 import {
   CLI_REPO_ROOT,
   recordTelemetry,
@@ -44,6 +45,13 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
       "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard || exit 2",
     )
 
+    const readPreHook = hooks.hooks.PreToolUse[2]
+    expect(readPreHook.matcher).toBe("Read|Grep|Glob|LS|Find")
+    expect(readPreHook.hooks[0].command).toBe(
+      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard || exit 2",
+    )
+    expect(readPreHook.hooks[0].timeout).toBe(15)
+
     const postHook = hooks.hooks.PostToolUse[0]
     expect(postHook.matcher).toBe("Edit|Write|MultiEdit")
     expect(postHook.hooks[0].command).toBe(
@@ -52,7 +60,7 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
 
     const stopHook = hooks.hooks.Stop[0].hooks[0]
     expect(stopHook.command).toBe(
-      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done || exit 2",
+      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts done || exit 2",
     )
   })
 
@@ -100,7 +108,7 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
       })
 
       const agyDoneCmd = (agyHooks["effect-harness"].Stop[0].command as string).replace(
-        "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts",
+        "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/hook-entry.ts",
         `node ${JSON.stringify(brokenEntry)}`,
       )
       const agyDoneRes = spawnSync("/bin/sh", ["-c", agyDoneCmd], { encoding: "utf8" })
@@ -240,13 +248,23 @@ describe("Antigravity adapter & plugin configuration", () => {
     expect(spec.PreToolUse[0].hooks[0].command).toContain(
       "hook-entry.ts guard --format=antigravity",
     )
+    expect(spec.PreToolUse[1].matcher).toBe(
+      "edit_file|write_file|replace_file_content|multi_replace_file_content|write_to_file",
+    )
+    expect(spec.PreToolUse[2].matcher).toBe(
+      "view_file|view_file_outline|view_code_item|read_file|grep_search|find_by_name|list_dir",
+    )
+    expect(spec.PreToolUse[2].hooks[0].command).toContain(
+      "hook-entry.ts guard --format=antigravity",
+    )
+    expect(spec.PreToolUse[2].hooks[0].timeout).toBe(15)
     expect(spec.PostToolUse[0].matcher).toBe(
-      "replace_file_content|multi_replace_file_content|write_to_file",
+      "edit_file|write_file|replace_file_content|multi_replace_file_content|write_to_file",
     )
     expect(spec.PostToolUse[0].hooks[0].command).toContain(
       "hook-entry.ts ingest --format=antigravity",
     )
-    expect(spec.Stop[0].command).toContain("index.ts done --format=antigravity")
+    expect(spec.Stop[0].command).toContain("hook-entry.ts done --format=antigravity")
   })
 
   it("executes Antigravity PreToolUse guard hook from plugin directory with toolCall stdin", () => {
@@ -539,7 +557,7 @@ describe("Antigravity adapter & plugin configuration", () => {
     }
   })
 
-  it("enforces 5-tier hexagonal architecture and canonical rule/tool registries across skills, references, and reviewer personas in both adapters", () => {
+  const buildAdapterSkillExpectations = () => {
     const registeredRules = new Set<string>([
       ...SelfDogfoodingRuleId.literals,
       ...TierTopologyRuleId.literals,
@@ -567,7 +585,7 @@ describe("Antigravity adapter & plugin configuration", () => {
         true,
       )
     }
-    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(19)
+    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(20)
 
     const skillExpectations: ReadonlyArray<{
       readonly relPath: string
@@ -707,6 +725,9 @@ describe("Antigravity adapter & plugin configuration", () => {
           "{path, path/posix, path/win32, crypto, url}",
           "Phase 5 Step 0",
           "ontology check --strict",
+          "workflow <compile|start|status|complete|resume|doctor|abort>",
+          "HARNESS_UNIT_WORKER=1",
+          "nondeterministic-workflow-body",
           ...CANONICAL_MCP_TOOL_NAMES,
         ],
         bannedTokens: [
@@ -779,6 +800,22 @@ describe("Antigravity adapter & plugin configuration", () => {
         bannedTokens: ["Layer.scoped", "Schema.TaggedErrorClass"],
       },
     ]
+
+    return { registeredRules, canonicalTopologyRules, canonicalDogfoodRules, skillExpectations }
+  }
+
+  it("enforces 5-tier hexagonal architecture and canonical rule/tool registries across skills, references, and reviewer personas in both adapters", () => {
+    const { registeredRules, canonicalTopologyRules, canonicalDogfoodRules, skillExpectations } =
+      buildAdapterSkillExpectations()
+    for (const ruleId of [...canonicalTopologyRules, ...canonicalDogfoodRules]) {
+      expect(registeredRules.has(ruleId), `Rule ${ruleId} must exist in @harness/contract`).toBe(
+        true,
+      )
+    }
+    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(20)
+    expect(CANONICAL_MCP_TOOL_NAMES).toContain("harness_workflow_plan")
+    expect(CANONICAL_MCP_TOOL_NAMES).toContain("harness_search_knowledge")
+    expect(CANONICAL_MCP_TOOL_NAMES).toContain("harness_doc_tree")
 
     const skillDirs = [
       resolve(pluginDir, "skills"),
@@ -942,11 +979,23 @@ describe("Antigravity adapter & plugin configuration", () => {
     expect(rootReadme).not.toContain("{ writeReport? }")
 
     for (const readme of [agyReadme, claudeReadme]) {
-      expect(readme).toContain("exposing 19 tools")
+      expect(readme).toContain("exposing 20 tools")
+      expect(readme).toContain("harness workflow")
+      expect(readme).toContain("HARNESS_UNIT_WORKER=1")
+      expect(readme).toContain("nondeterministic-workflow-body")
       for (const toolName of CANONICAL_MCP_TOOL_NAMES) {
         expect(readme).toContain(toolName)
       }
     }
+    expect(rootReadme).toContain(
+      "HARNESS_INFRA --> GATES & DECISION & GRAPH & HARNESS_SVC & HARNESS_CON",
+    )
+    expect(rootReadme).toContain("Exposes 20")
+    expect(rootReadme).toContain(
+      "workflow <compile\\|start\\|status\\|complete\\|resume\\|doctor\\|abort>",
+    )
+    expect(rootReadme).toContain("HARNESS_UNIT_WORKER=1")
+    expect(rootReadme).toContain("nondeterministic-workflow-body")
     for (const toolName of CANONICAL_MCP_TOOL_NAMES) {
       expect(rootReadme).toContain(toolName)
     }
@@ -1237,8 +1286,12 @@ describe("Antigravity adapter & plugin configuration", () => {
           detail: "should-write",
         },
       )
-      expect(existsSync(join(resolveHarnessStateDir(tempRepo), "telemetry-log.jsonl"))).toBe(true)
-      expect(existsSync(join(resolveHarnessStateDir(tempRepo), "friction-log.jsonl"))).toBe(true)
+      expect(
+        existsSync(join(resolveHarnessStateDir(tempRepo, process.env), "telemetry-log.jsonl")),
+      ).toBe(true)
+      expect(
+        existsSync(join(resolveHarnessStateDir(tempRepo, process.env), "friction-log.jsonl")),
+      ).toBe(true)
     } finally {
       rmSync(tempRepo, { recursive: true, force: true })
     }
@@ -1260,6 +1313,13 @@ describe("Antigravity adapter & plugin configuration", () => {
         HARNESS_STATE_DIR: "/tmp/custom-state",
       }),
     ).toBe(false)
+    expect(shouldSuppressLiveRepoTestSideEffects(CLI_REPO_ROOT, { VITEST: "true" })).toBe(true)
+    expect(
+      shouldSuppressLiveRepoTestSideEffects(join(CLI_REPO_ROOT, "apps", "harness-mcp"), {
+        VITEST: "true",
+      }),
+    ).toBe(true)
+    expect(shouldSuppressLiveRepoTestSideEffects(CLI_REPO_ROOT, { NODE_ENV: "test" })).toBe(true)
     expect(shouldSuppressLiveRepoTestSideEffects(CLI_REPO_ROOT, {})).toBe(false)
 
     const tempRepo = mkdtempSync(join(tmpdir(), "harness-test-isolation-"))
@@ -1392,6 +1452,29 @@ describe("Antigravity adapter & plugin configuration", () => {
       ]) {
         expect(content, `${filePath} contains ${bannedTool}`).not.toContain(bannedTool)
       }
+    }
+  })
+
+  it("SPEC-0030 REQ-2.1 / REQ-2.2: keeps Swarm Seam Checklist and Second-Pass Remediation Re-Audit synchronized across Antigravity and Claude Code", () => {
+    for (const clause of ADAPTER_SKILL_PARITY_CLAUSES) {
+      const agyContent = readFileSync(
+        resolve(pluginDir, "skills", clause.skillName, "SKILL.md"),
+        "utf8",
+      )
+      const claudeContent = readFileSync(
+        resolve(repoRoot, "adapters/claude-code/skills", clause.skillName, "SKILL.md"),
+        "utf8",
+      )
+      expect(
+        auditAdapterSkillParityPair(clause, agyContent, claudeContent),
+        `Adapter skill parity drifted for ${clause.skillName}`,
+      ).toEqual([])
+      const strippedClaude = claudeContent.replace(clause.heading, "### Removed Heading")
+      expect(
+        auditAdapterSkillParityPair(clause, agyContent, strippedClaude).some(
+          (f) => f.kind === "adapter-skill-parity",
+        ),
+      ).toBe(true)
     }
   })
 })

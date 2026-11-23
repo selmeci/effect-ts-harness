@@ -296,10 +296,14 @@ export const runDomainMutationSuite = (
   })
   const targetsOrAbort = match(resolvedTargets)
     .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
-    .with({ _tag: "Ok" }, ({ domainFiles, targets }) => ({ domainFiles, targets }))
+    .with({ _tag: "Ok" }, ({ domainFiles, targets, unclassifiedPackages }) => ({
+      domainFiles,
+      targets,
+      unclassifiedPackages,
+    }))
     .exhaustive()
   if (typeof targetsOrAbort === "string") return abortWith([], targetsOrAbort)
-  const { domainFiles, targets } = targetsOrAbort
+  const { domainFiles, targets, unclassifiedPackages } = targetsOrAbort
   scannedCandidateFiles = targets.length
 
   const resolvedDiff = match(
@@ -322,19 +326,21 @@ export const runDomainMutationSuite = (
   diffMode = resolvedDiff.diffMode
   const diffLinesMap = resolvedDiff.diffLinesMap
 
-  if (
-    isStrictMode &&
-    options?.scope === undefined &&
-    !hasTargetFilesOpt &&
-    diffLinesMap !== undefined
-  ) {
+  const strictDiffLines =
+    isStrictMode && options?.scope === undefined && !hasTargetFilesOpt ? diffLinesMap : undefined
+  if (strictDiffLines !== undefined) {
     const unclassifiedErr = checkUnclassifiedStrictFiles(
       repoRoot,
-      diffLinesMap,
+      strictDiffLines,
       domainFiles,
       hostIo,
     )
     if (unclassifiedErr !== undefined) return abortWith([], unclassifiedErr)
+  }
+  if (strictDiffLines === undefined && unclassifiedPackages.length > 0) {
+    process.stderr.write(
+      `[mutation-check] Warning: Skipped unclassified library package(s): ${unclassifiedPackages.join(", ")}\n`,
+    )
   }
 
   const suiteNowMs = options?.nowMs ?? MutationEpochMillis.make(Date.now())

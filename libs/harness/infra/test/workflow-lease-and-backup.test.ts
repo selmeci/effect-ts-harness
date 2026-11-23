@@ -13,15 +13,16 @@ import {
 import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { Effect } from "effect"
+import { Effect, Fiber, Schema } from "effect"
 import { match } from "ts-pattern"
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import {
   AbsoluteRepoRoot,
   BackupDirPath,
   BackupFileHash,
   encodeSeqKey,
   GitCommonDirPath,
+  isPureInterruptCause,
   LeaseFilePath,
   MessageKey,
   ReplyKey,
@@ -39,6 +40,7 @@ import {
   runOfflineWorkflowMaintenance,
   withAdvisoryFlock,
 } from "../src/index.js"
+import { isLocalPidAlive } from "../src/writer-lease.js"
 import { makeWorkflowGraphBackupLayer } from "../src/workflow-graph-backup.js"
 
 const graphConfigDir = resolve(import.meta.dirname, "../../graph")
@@ -220,6 +222,7 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
     const started = await startClusterAndServer(primaryClusterDir, cliToken)
     primaryBaseUrl = started.baseUrl
     primaryProc = started.proc
+    // 30_000ms: provisions primary Omnigraph cluster via `omnigraph cluster apply` and waits for `omnigraph-server /readyz`.
   }, 30_000)
 
   afterAll(async () => {
@@ -230,18 +233,14 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
     }
   })
 
-  it("exports deterministic SHA-256 backups, restores merge & replace (expectedSha256 + WfReply parity), and annotates partial-restore failures", async () => {
-    const wsRoot = mkdtempSync(join(tmpdir(), "wf2-backup-ws-"))
-    tempDirs.push(wsRoot)
-    const repoRoot = AbsoluteRepoRoot.make(wsRoot)
-    const backupDir = BackupDirPath.make(join(wsRoot, "backups"))
-    const primaryClient = makeWorkflowOmnigraphClient({ baseUrl: primaryBaseUrl, token: cliToken })
-
+  const seedBackupSampleEntities = async (
+    client: ReturnType<typeof makeWorkflowOmnigraphClient>,
+  ) => {
     const m1 = MessageKey.make("248476693641700001")
     const m2 = MessageKey.make("248476693641700002")
     const r1 = ReplyKey.make("248476693641700003")
 
-    await primaryClient.queries.invoke("wf_insert_request_message", {
+    await client.queries.invoke("wf_insert_request_message", {
       branch: "main",
       expectMutation: true,
       params: {
@@ -261,7 +260,7 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
         deliverAtMs: null,
       },
     })
-    await primaryClient.queries.invoke("wf_insert_request_message", {
+    await client.queries.invoke("wf_insert_request_message", {
       branch: "main",
       expectMutation: true,
       params: {
@@ -281,7 +280,7 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
         deliverAtMs: null,
       },
     })
-    await primaryClient.queries.invoke("wf_save_reply_exit", {
+    await client.queries.invoke("wf_save_reply_exit", {
       branch: "main",
       expectMutation: true,
       params: {
@@ -291,6 +290,31 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
         payload: JSON.stringify({ _tag: "Success", value: "ok" }),
       },
     })
+  }
+
+  const wrapLoadSpy = (
+    client: ReturnType<typeof makeWorkflowOmnigraphClient>,
+    onLoad: () => void,
+  ): ReturnType<typeof makeWorkflowOmnigraphClient> =>
+    new Proxy(client, {
+      get(target, prop, receiver) {
+        if (prop === "load") {
+          return (...args: Parameters<typeof target.load>) => {
+            onLoad()
+            return target.load(...args)
+          }
+        }
+        return Reflect.get(target, prop, receiver)
+      },
+    })
+
+  it("exports deterministic SHA-256 backups, restores merge & replace (expectedSha256 + WfReply parity), and annotates partial-restore failures", async () => {
+    const wsRoot = mkdtempSync(join(tmpdir(), "wf2-backup-ws-"))
+    tempDirs.push(wsRoot)
+    const repoRoot = AbsoluteRepoRoot.make(wsRoot)
+    const backupDir = BackupDirPath.make(join(wsRoot, "backups"))
+    const primaryClient = makeWorkflowOmnigraphClient({ baseUrl: primaryBaseUrl, token: cliToken })
+    await seedBackupSampleEntities(primaryClient)
 
     const primaryBackupLayer = makeWorkflowGraphBackupLayer({
       repoRoot,
@@ -332,10 +356,7 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
     const mergeRestore = await Effect.runPromise(
       Effect.gen(function* () {
         const svc = yield* WorkflowGraphBackup
-        return yield* svc.restoreBackup({
-          backupFile: summary1.backupFile,
-          mode: "merge",
-        })
+        return yield* svc.restoreBackup({ backupFile: summary1.backupFile, mode: "merge" })
       }).pipe(Effect.provide(restoreBackupLayer)),
     )
     expect(mergeRestore.restoredEntityCount).toBe(summary1.entityCount)
@@ -403,16 +424,8 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
     writeFileSync(emptyBackupPath, "", "utf8")
     const emptySha = BackupFileHash.make(createHash("sha256").update("", "utf8").digest("hex"))
     let loadCallsOnEmpty = 0
-    const spyEmptyClient = new Proxy(restoreClient, {
-      get(target, prop, receiver) {
-        if (prop === "load") {
-          return (...args: Parameters<typeof target.load>) => {
-            loadCallsOnEmpty += 1
-            return target.load(...args)
-          }
-        }
-        return Reflect.get(target, prop, receiver)
-      },
+    const spyEmptyClient = wrapLoadSpy(restoreClient, () => {
+      loadCallsOnEmpty += 1
     })
     const emptyReplaceErr = await Effect.runPromise(
       Effect.gen(function* () {
@@ -460,24 +473,39 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
     expect(replyVerifyErr.reason).toContain("og.load already ran")
     expect(replyVerifyErr.reason).toContain("partial-restore state")
 
-    // expectedSha256 mismatch MUST fail BEFORE calling og.load
+    await stopChildProcess(restoreProc)
+    restoreProc = undefined
+    // 30_000ms: starts a second real `omnigraph-server` cluster and performs export + merge/replace restore rounds.
+  }, 30_000)
+
+  it("rejects sha mismatch before og.load, missing files, corrupt NDJSON, and dead export servers", async () => {
+    const wsRoot = mkdtempSync(join(tmpdir(), "wf2-backup-neg-"))
+    tempDirs.push(wsRoot)
+    const repoRoot = AbsoluteRepoRoot.make(wsRoot)
+    const backupDir = BackupDirPath.make(join(wsRoot, "backups"))
+    const primaryClient = makeWorkflowOmnigraphClient({ baseUrl: primaryBaseUrl, token: cliToken })
+    const primaryBackupLayer = makeWorkflowGraphBackupLayer({
+      repoRoot,
+      client: primaryClient,
+      nowMs: () => 1_700_000_000_002,
+    })
+
+    const summary = await Effect.runPromise(
+      Effect.gen(function* () {
+        const svc = yield* WorkflowGraphBackup
+        return yield* svc.exportBackup(backupDir)
+      }).pipe(Effect.provide(primaryBackupLayer)),
+    )
+
     let ogLoadCalled = false
-    const spyClient = new Proxy(restoreClient, {
-      get(target, prop, receiver) {
-        if (prop === "load") {
-          return (...args: Parameters<typeof target.load>) => {
-            ogLoadCalled = true
-            return target.load(...args)
-          }
-        }
-        return Reflect.get(target, prop, receiver)
-      },
+    const spyClient = wrapLoadSpy(primaryClient, () => {
+      ogLoadCalled = true
     })
     const shaMismatchErr = await Effect.runPromise(
       Effect.gen(function* () {
         const svc = yield* WorkflowGraphBackup
         return yield* svc.restoreBackup({
-          backupFile: summary1.backupFile,
+          backupFile: summary.backupFile,
           mode: "merge",
           expectedSha256: BackupFileHash.make("0".repeat(64)),
         })
@@ -489,7 +517,6 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
     expect(shaMismatchErr).toBeInstanceOf(WorkspaceFsError)
     expect(ogLoadCalled).toBe(false)
 
-    // Missing file, corrupt NDJSON, and dead export server fail closed
     const missingErr = await Effect.runPromise(
       Effect.gen(function* () {
         const svc = yield* WorkflowGraphBackup
@@ -497,7 +524,7 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
           backupFile: WorkflowBackupFilePath.make(join(wsRoot, "missing.ndjson")),
           mode: "merge",
         })
-      }).pipe(Effect.provide(restoreBackupLayer), Effect.flip),
+      }).pipe(Effect.provide(primaryBackupLayer), Effect.flip),
     )
     expect(missingErr).toBeInstanceOf(WorkspaceFsError)
 
@@ -507,7 +534,7 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
       Effect.gen(function* () {
         const svc = yield* WorkflowGraphBackup
         return yield* svc.restoreBackup({ backupFile: corruptPath, mode: "merge" })
-      }).pipe(Effect.provide(restoreBackupLayer), Effect.flip),
+      }).pipe(Effect.provide(primaryBackupLayer), Effect.flip),
     )
     expect(corruptErr).toBeInstanceOf(WorkspaceFsError)
 
@@ -527,12 +554,10 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
       }).pipe(Effect.provide(deadBackupLayer), Effect.flip),
     )
     expect(deadExportErr).toBeInstanceOf(WorkflowStoreUnavailableError)
-
-    await stopChildProcess(restoreProc)
-    restoreProc = undefined
+    // 30_000ms: exports live Omnigraph snapshot and runs negative restore/HTTP checks against live and dead servers.
   }, 30_000)
 
-  it("runs offline maintenance, verifies safety export before cleanup, unlocks run-created __cluster/lock.json, and aborts on pre-existing foreign locks or corrupt server.json", async () => {
+  it("runs offline maintenance, verifies safety export before cleanup, and preserves rows across restart", async () => {
     const wsRoot = mkdtempSync(join(tmpdir(), "wf2-maint-ws-"))
     tempDirs.push(wsRoot)
     const commonGitDir = GitCommonDirPath.make(join(wsRoot, ".git"))
@@ -682,7 +707,10 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
     } finally {
       await stopChildProcess(maintProc)
     }
+    // 45_000ms: starts/restarts real `omnigraph-server`, seeds 40 mutations, and executes full `omnigraph` CLI export/optimize/cleanup.
+  }, 45_000)
 
+  it("aborts offline maintenance on foreign __cluster/lock.json, corrupt export NDJSON, active startup.lock, and symlink clusterDir, and unlocks run-created lock", async () => {
     // F-17.5 & F-20.3 & F-5.1: Stub omnigraph CLI tests for real __cluster/lock.json force-unlock,
     // pre-existing foreign admission lock abort, and corrupt export NDJSON abort before cleanup.
     const stubRoot = mkdtempSync(join(tmpdir(), "wf2-maint-stub-"))
@@ -813,5 +841,171 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
       })
       .exhaustive()
     expect(existsSync(stubLog)).toBe(false)
+    // 45_000ms: runs 5 sequential offline maintenance scenarios spawning `omnigraph-stub.sh` subprocesses and lock checks.
   }, 45_000)
+
+  it("F-22: runOmnigraphCli interruption escalates SIGTERM -> SIGKILL and awaits child termination BEFORE force-unlock or fiber interrupt resolves", async () => {
+    const stubRoot = mkdtempSync(join(tmpdir(), "wf2-maint-interrupt-"))
+    tempDirs.push(stubRoot)
+    const stubGit = GitCommonDirPath.make(join(stubRoot, ".git"))
+    const stubCluster = join(stubRoot, "cluster")
+    const stubClusterMeta = join(stubCluster, "__cluster")
+    const stubLockJson = join(stubClusterMeta, "lock.json")
+    const stubBackupDir = BackupDirPath.make(join(stubRoot, "backups"))
+    const startedFile = join(stubRoot, "started.pid")
+    const unlockEventFile = join(stubRoot, "unlock-event.json")
+    mkdirSync(stubGit, { recursive: true })
+    mkdirSync(stubClusterMeta, { recursive: true })
+
+    const stubBin = join(stubRoot, "omnigraph-slow-stub.mjs")
+    writeFileSync(
+      stubBin,
+      [
+        `#!${process.execPath}`,
+        'import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs"',
+        "const args = process.argv.slice(2)",
+        'if (args[0] === "export") {',
+        '  process.on("SIGTERM", () => {})',
+        `  writeFileSync(${JSON.stringify(stubLockJson)}, JSON.stringify({ lock_id: "adm-interrupt-1" }), "utf8")`,
+        `  writeFileSync(${JSON.stringify(startedFile)}, String(process.pid), "utf8")`,
+        "  setInterval(() => {}, 1000)",
+        '} else if (args[0] === "cluster" && args[1] === "force-unlock") {',
+        `  const pidRaw = existsSync(${JSON.stringify(startedFile)}) ? Number(readFileSync(${JSON.stringify(startedFile)}, "utf8").trim()) : 0`,
+        "  let childAliveAtUnlock = false",
+        "  if (Number.isInteger(pidRaw) && pidRaw > 0) {",
+        "    try { process.kill(pidRaw, 0); childAliveAtUnlock = true } catch { childAliveAtUnlock = false }",
+        "  }",
+        `  writeFileSync(${JSON.stringify(unlockEventFile)}, JSON.stringify({ childAliveAtUnlock, lockId: args[2] }), "utf8")`,
+        `  rmSync(${JSON.stringify(stubLockJson)}, { force: true })`,
+        "  process.exit(0)",
+        "} else {",
+        "  process.exit(0)",
+        "}",
+      ].join("\n"),
+      "utf8",
+    )
+    chmodSync(stubBin, 0o755)
+
+    const exit = await Effect.runPromise(
+      Effect.gen(function* () {
+        const fiber = yield* runOfflineWorkflowMaintenance({
+          repoRoot: AbsoluteRepoRoot.make(stubRoot),
+          commonGitDir: stubGit,
+          backupDir: stubBackupDir,
+          omnigraphBin: stubBin,
+          clusterDir: stubCluster,
+        }).pipe(Effect.forkChild)
+
+        for (let i = 0; i < 100; i += 1) {
+          if (existsSync(startedFile)) break
+          yield* Effect.sleep("25 millis")
+        }
+        expect(existsSync(startedFile)).toBe(true)
+        const childPid = Number(readFileSync(startedFile, "utf8").trim())
+        expect(childPid).toBeGreaterThan(0)
+        expect(isLocalPidAlive(childPid)).toBe(true)
+
+        yield* Fiber.interrupt(fiber)
+        // Child MUST already be dead the instant Fiber.interrupt resolves (no zombie race).
+        expect(isLocalPidAlive(childPid)).toBe(false)
+        return yield* Fiber.await(fiber)
+      }),
+    )
+
+    match(exit)
+      .with({ _tag: "Failure" }, ({ cause }) => {
+        expect(isPureInterruptCause(cause)).toBe(true)
+      })
+      .with({ _tag: "Success" }, () => {
+        expect.unreachable("Expected pure interrupt exit")
+      })
+      .exhaustive()
+
+    expect(existsSync(unlockEventFile)).toBe(true)
+    const unlockEvent = Schema.decodeSync(
+      Schema.fromJsonString(
+        Schema.Struct({
+          childAliveAtUnlock: Schema.Boolean,
+          lockId: Schema.String,
+        }),
+      ),
+    )(readFileSync(unlockEventFile, "utf8"))
+    expect(unlockEvent.childAliveAtUnlock).toBe(false)
+    expect(unlockEvent.lockId).toBe("adm-interrupt-1")
+    expect(existsSync(stubLockJson)).toBe(false)
+    // 15_000ms: spawns Node stub trapping SIGTERM, exercises 500ms SIGKILL escalation on interrupt, and runs post-interrupt force-unlock.
+  }, 15_000)
+
+  it("S-5.3: writes stderr diagnostic and appends unlock failure reason when force-unlock fails after maintenance step error", async () => {
+    const stubRoot = mkdtempSync(join(tmpdir(), "wf2-maint-unlock-err-"))
+    tempDirs.push(stubRoot)
+    const stubGit = GitCommonDirPath.make(join(stubRoot, ".git"))
+    const stubCluster = join(stubRoot, "cluster")
+    const stubClusterMeta = join(stubCluster, "__cluster")
+    const stubLockJson = join(stubClusterMeta, "lock.json")
+    const stubBackupDir = BackupDirPath.make(join(stubRoot, "backups"))
+    mkdirSync(stubGit, { recursive: true })
+    mkdirSync(stubClusterMeta, { recursive: true })
+
+    const stubBin = join(stubRoot, "omnigraph-unlock-fail.sh")
+    writeFileSync(
+      stubBin,
+      [
+        "#!/bin/sh",
+        'if [ "$1" = "export" ]; then',
+        `  printf '{"lock_id":"adm-fail-unlock-1"}' > '${stubLockJson}'`,
+        '  printf "primary export failed\\n" >&2',
+        "  exit 1",
+        "fi",
+        'if [ "$1" = "cluster" ] && [ "$2" = "force-unlock" ]; then',
+        '  printf "force-unlock permission denied\\n" >&2',
+        "  exit 2",
+        "fi",
+        "exit 0",
+      ].join("\n"),
+      "utf8",
+    )
+    chmodSync(stubBin, 0o755)
+
+    const stderrChunks: Array<string> = []
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+      return true
+    })
+
+    const err = await (async () => {
+      try {
+        return await Effect.runPromise(
+          runOfflineWorkflowMaintenance({
+            repoRoot: AbsoluteRepoRoot.make(stubRoot),
+            commonGitDir: stubGit,
+            backupDir: stubBackupDir,
+            omnigraphBin: stubBin,
+            clusterDir: stubCluster,
+          }).pipe(Effect.flip),
+        )
+      } finally {
+        stderrSpy.mockRestore()
+      }
+    })()
+
+    match(err)
+      .with({ _tag: "WorkflowStoreUnavailableError" }, (storeErr) => {
+        expect(storeErr.reason).toContain("primary export failed")
+        expect(storeErr.reason).toContain(
+          "Failed to force-unlock cluster admission locks after export failure",
+        )
+        expect(storeErr.reason).toContain("force-unlock permission denied")
+      })
+      .with({ _tag: "WorkspaceFsError" }, (fsErr) => {
+        throw new Error(`Expected WorkflowStoreUnavailableError, got ${fsErr.message}`)
+      })
+      .exhaustive()
+
+    const stderrText = stderrChunks.join("")
+    expect(stderrText).toContain(
+      "[harness] Failed to force-unlock cluster admission locks after export failure:",
+    )
+    expect(stderrText).toContain("force-unlock permission denied")
+  })
 })

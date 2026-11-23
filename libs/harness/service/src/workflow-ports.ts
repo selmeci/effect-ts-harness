@@ -1,11 +1,28 @@
-import { Context, type Effect } from "effect"
+import { Context, type Effect, type Option } from "effect"
 import type {
   BackupDirPath,
+  CompiledPlan,
+  CompleteSharedStepInput,
+  CompleteUnitInput,
+  MergeSliceWaveInput,
+  MergeSliceWaveOutcome,
+  ReviewRoutingPlan,
+  UnitAgentDispatchResult,
+  UnitAgentRequest,
+  UnitOutcome,
+  WorkflowAttemptRecord,
   WorkflowBackupSummary,
   WorkflowRestoreRequest,
   WorkflowRestoreSummary,
+  WorkflowRouteReviewInput,
+  WorkflowRunId,
+  WorkflowRunRecord,
+  WorkflowStoreAvailabilityState,
   WorkflowStoreUnavailableError,
+  WorkflowUnitRecord,
+  WorktreeProvisionReceipt,
   WorkspaceFsError,
+  WriterLeaseHeldError,
 } from "@harness/contract"
 
 export interface WorkflowGraphBackupShape {
@@ -21,3 +38,117 @@ export class WorkflowGraphBackup extends Context.Service<
   WorkflowGraphBackup,
   WorkflowGraphBackupShape
 >()("@harness/service/WorkflowGraphBackup") {}
+
+/** Verifies unit write-set ownership and verification stamps/commands for manual & automatic modes. */
+export interface UnitVerifierShape {
+  readonly completeUnit: (input: CompleteUnitInput) => Effect.Effect<UnitOutcome, WorkspaceFsError>
+  readonly completeSharedStep: (
+    input: CompleteSharedStepInput,
+  ) => Effect.Effect<UnitOutcome, WorkspaceFsError>
+}
+
+export class UnitVerifier extends Context.Service<UnitVerifier, UnitVerifierShape>()(
+  "@harness/service/UnitVerifier",
+) {}
+
+/** Dispatches an automatic work unit against a pluggable agent runner boundary (live runners land in WF-5). */
+export interface UnitAgentDispatcherShape {
+  readonly runnerKind: "live" | "placeholder"
+  readonly dispatchUnit: (
+    request: UnitAgentRequest,
+  ) => Effect.Effect<UnitAgentDispatchResult, WorkspaceFsError>
+}
+
+export class UnitAgentDispatcher extends Context.Service<
+  UnitAgentDispatcher,
+  UnitAgentDispatcherShape
+>()("@harness/service/UnitAgentDispatcher") {}
+
+/**
+ * Provisions and tears down L1 linked slice worktrees (and resolves L2 canonical mappings)
+ * and executes wave merges for L1 slice runs.
+ */
+export interface WorkflowWorktreePortShape {
+  readonly provisionWorktrees: (
+    plan: CompiledPlan,
+  ) => Effect.Effect<WorktreeProvisionReceipt, WorkspaceFsError>
+  readonly removeWorktreeCheckouts: (
+    receipt: WorktreeProvisionReceipt,
+  ) => Effect.Effect<void, never>
+  readonly mergeSliceWave: (
+    input: MergeSliceWaveInput,
+  ) => Effect.Effect<MergeSliceWaveOutcome, WorkspaceFsError>
+}
+
+export class WorkflowWorktreePort extends Context.Service<
+  WorkflowWorktreePort,
+  WorkflowWorktreePortShape
+>()("@harness/service/WorkflowWorktreePort") {}
+
+/** Routes final review diffs over touched paths at the end of a workflow run. */
+export interface WorkflowReviewRouterShape {
+  readonly routeReview: (
+    input: WorkflowRouteReviewInput,
+  ) => Effect.Effect<ReviewRoutingPlan, WorkspaceFsError>
+}
+
+export class WorkflowReviewRouter extends Context.Service<
+  WorkflowReviewRouter,
+  WorkflowReviewRouterShape
+>()("@harness/service/WorkflowReviewRouter") {}
+
+/**
+ * Write-only projection port used by `HarnessTaskWorkflow` activities (`REQ-3.1`)
+ * to maintain `harness-workflows` read-model entities; only live daemon holders with a valid lease may write.
+ */
+export interface WorkflowProjectionWriterShape {
+  readonly upsertRun: (
+    run: WorkflowRunRecord,
+  ) => Effect.Effect<void, WorkflowStoreUnavailableError | WriterLeaseHeldError>
+  readonly upsertUnit: (
+    unit: WorkflowUnitRecord,
+  ) => Effect.Effect<void, WorkflowStoreUnavailableError | WriterLeaseHeldError>
+  readonly upsertAttempt: (
+    attempt: WorkflowAttemptRecord,
+  ) => Effect.Effect<void, WorkflowStoreUnavailableError | WriterLeaseHeldError>
+}
+
+export class WorkflowProjectionWriter extends Context.Service<
+  WorkflowProjectionWriter,
+  WorkflowProjectionWriterShape
+>()("@harness/service/WorkflowProjectionWriter") {}
+
+/**
+ * Read-only `harness-workflows` query port for `workflow status`, `harness_workflow_plan`,
+ * and `workflow doctor` (`REQ-3.1`); never queried from `HarnessTaskWorkflow` orchestration or pure `.decide` functions.
+ */
+export interface WorkflowReadModelQueryShape {
+  readonly getRun: (
+    runId: WorkflowRunId,
+  ) => Effect.Effect<
+    Option.Option<WorkflowRunRecord>,
+    WorkflowStoreUnavailableError | WriterLeaseHeldError
+  >
+  readonly listRuns: Effect.Effect<
+    ReadonlyArray<WorkflowRunRecord>,
+    WorkflowStoreUnavailableError | WriterLeaseHeldError
+  >
+  readonly listUnits: (
+    runId: WorkflowRunId,
+  ) => Effect.Effect<
+    ReadonlyArray<WorkflowUnitRecord>,
+    WorkflowStoreUnavailableError | WriterLeaseHeldError
+  >
+  readonly listAttempts: (
+    runId: WorkflowRunId,
+  ) => Effect.Effect<
+    ReadonlyArray<WorkflowAttemptRecord>,
+    WorkflowStoreUnavailableError | WriterLeaseHeldError
+  >
+  readonly probeAvailability: Effect.Effect<WorkflowStoreAvailabilityState, never>
+}
+
+export class WorkflowReadModelQuery extends Context.Service<
+  WorkflowReadModelQuery,
+  WorkflowReadModelQueryShape
+>()("@harness/service/WorkflowReadModelQuery") {}

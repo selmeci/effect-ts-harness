@@ -1,5 +1,13 @@
 import { execFileSync, spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { Graph, Option } from "effect"
@@ -9,6 +17,7 @@ import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
 import { computePreInvocationFingerprintLite } from "@harness/infra/hook-io"
 import { tryFastPathIngest } from "../src/commands/ingest-fastpath.js"
 import { computePreInvocationFingerprint } from "../src/commands/session-fastpath.js"
+import { evaluateFileReadDecision, toGuardCliResult } from "../src/commands/hook-guard-payload.js"
 
 const REPO_ROOT = resolve(import.meta.dirname, "../../..")
 const RESOLVER_PATH = join(REPO_ROOT, "tools", "node-ts-resolver.mjs")
@@ -207,6 +216,24 @@ describe("hook-entry.ts fast-path", () => {
       })
       expect(fileRes.status).toBe(0)
       expect(JSON.parse(fileRes.stdout.trim())).toEqual({ decision: "allow" })
+
+      for (const editTool of ["edit_file", "write_file"] as const) {
+        const allowEdit = runHookEntry(["guard", "--format=antigravity"], {
+          input: JSON.stringify({
+            toolCall: { name: editTool, args: { Path: "libs/sample/src/ok.ts" } },
+          }),
+        })
+        expect(allowEdit.status).toBe(0)
+        expect(JSON.parse(allowEdit.stdout.trim())).toEqual({ decision: "allow" })
+
+        const denyEdit = runHookEntry(["guard", "--format=antigravity"], {
+          input: JSON.stringify({
+            toolCall: { name: editTool, args: { Path: ".harness/verify-stamp.json" } },
+          }),
+        })
+        expect(denyEdit.status).toBe(0)
+        expect(JSON.parse(denyEdit.stdout.trim()).decision).toBe("deny")
+      }
     })
 
     it.each([
@@ -631,6 +658,31 @@ describe("hook-entry.ts fast-path", () => {
         )
       }
     })
+
+    it("F-9.1: evaluateFileReadDecision routes truncated benign glob overflows to ask in both Claude Code and Antigravity formats", () => {
+      const decision = evaluateFileReadDecision("*.{ts,tsx,js,jsx,mjs,cjs,json,md,yaml}")
+      expect(decision).toEqual({
+        verdict: "ask",
+        reason: expect.stringContaining("complexity limit"),
+      })
+
+      const claudeRes = toGuardCliResult(decision, false)
+      expect(claudeRes.exitCode).toBe(0)
+      expect(JSON.parse(claudeRes.stdout)).toEqual({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "ask",
+          permissionDecisionReason: expect.stringContaining("complexity limit"),
+        },
+      })
+
+      const agyRes = toGuardCliResult(decision, true)
+      expect(agyRes.exitCode).toBe(0)
+      expect(JSON.parse(agyRes.stdout)).toEqual({
+        decision: "ask",
+        reason: expect.stringContaining("complexity limit"),
+      })
+    })
   })
 
   describe("ingest --format=antigravity", () => {
@@ -790,6 +842,15 @@ describe("hook-entry.ts fast-path", () => {
       writeFileSync(join(harnessDir, "verify-stamp.json"), JSON.stringify({ ok: true }), "utf8")
       const fpStateUpdated = assertParity(".harness/ state-file update")
       expect(fpStateUpdated).not.toBe(fpDemoIgnored)
+
+      mkdirSync(join(dir, "libs", "demo", "src", "nested"), { recursive: true })
+      writeFileSync(
+        join(dir, "libs", "demo", "src", "nested", "deep.ts"),
+        "export const d = 1\n",
+        "utf8",
+      )
+      const fpNestedIgnored = assertParity("nested ignored dir file")
+      expect(fpNestedIgnored).not.toBe(fpStateUpdated)
     })
 
     it("miss avoids @effect/ai-typesafe and warm hit loads fewer modules without fallback", () => {
@@ -828,6 +889,494 @@ describe("hook-entry.ts fast-path", () => {
         `[bench] session warm hit: ${Math.round(hitMs)}ms (${hitInspect.loadedUrls.length} modules) vs cold miss: ${Math.round(missMs)}ms (${missInspect.loadedUrls.length} modules)`,
       )
       expect(hitInspect.loadedUrls.length).toBeLessThan(missInspect.loadedUrls.length)
+    })
+  })
+
+  describe("HARNESS_UNIT_WORKER=1 worker isolation fast-path and parity", () => {
+    it.each([
+      {
+        label: "workflow start",
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm harness workflow start --plan plan.json" },
+          },
+        }),
+      },
+      {
+        label: "workflow resume",
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm harness workflow resume --run-id wf-test-0001" },
+          },
+        }),
+      },
+      {
+        label: "workflow abort",
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm harness workflow abort --run-id wf-test-0001" },
+          },
+        }),
+      },
+      {
+        label: "workflow done",
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm harness workflow done" },
+          },
+        }),
+      },
+      {
+        label: "harness done",
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm harness done" },
+          },
+        }),
+      },
+      {
+        label: "cat daemon.sock",
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "cat .git/harness/daemon.sock" },
+          },
+        }),
+      },
+      {
+        label: "view_file daemon.sock",
+        input: JSON.stringify({
+          toolCall: {
+            name: "view_file",
+            args: { AbsolutePath: "/repo/.git/harness/daemon.sock" },
+          },
+        }),
+      },
+      {
+        label: "grep_search auth-tokens.json",
+        input: JSON.stringify({
+          toolCall: {
+            name: "grep_search",
+            args: { SearchPath: "/repo/.harness/omnigraph-cluster/auth-tokens.json" },
+          },
+        }),
+      },
+      {
+        label: "list_dir daemon.sock",
+        input: JSON.stringify({
+          toolCall: {
+            name: "list_dir",
+            args: { DirectoryPath: "/repo/.git/harness/daemon.sock" },
+          },
+        }),
+      },
+      {
+        label: "read_file Path auth-tokens.json",
+        input: JSON.stringify({
+          toolCall: {
+            name: "read_file",
+            args: { Path: "/repo/.harness/omnigraph-cluster/auth-tokens.json" },
+          },
+        }),
+      },
+      {
+        label: "read_file Path daemon.sock",
+        input: JSON.stringify({
+          toolCall: {
+            name: "read_file",
+            args: { Path: "/repo/.git/harness/daemon.sock" },
+          },
+        }),
+      },
+      {
+        label: "pnpm --filter harness-cli start workflow start",
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm --filter harness-cli start workflow start" },
+          },
+        }),
+      },
+      {
+        label: "cat auth-tokens.*",
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "cat .harness/omnigraph-cluster/auth-tokens.*" },
+          },
+        }),
+      },
+      {
+        label: "rg -u . .harness/omnigraph-cluster",
+        input: JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "rg -u . .harness/omnigraph-cluster" },
+          },
+        }),
+      },
+    ])(
+      "blocks $label under HARNESS_UNIT_WORKER=1 without loading heavy modules and matches index.ts",
+      ({ input }) => {
+        const env = { HARNESS_UNIT_WORKER: "1" }
+        const inspect = inspectLoadedModulesForHookEntry(["guard", "--format=antigravity"], {
+          input,
+          env,
+        })
+        expect(inspect.status).toBe(0)
+        const parsed = JSON.parse(inspect.stdout.trim()) as { decision: string; reason: string }
+        expect(parsed.decision).toBe("deny")
+        expect(parsed.reason).toContain("HARNESS_UNIT_WORKER=1")
+        assertNoHeavyModulesLoaded(inspect.loadedUrls)
+
+        const fullRes = runEntry(INDEX_PATH, ["guard", "--format=antigravity"], { input, env })
+        expect(fullRes.status).toBe(inspect.status)
+        expect(fullRes.stdout.trim()).toBe(inspect.stdout.trim())
+      },
+    )
+
+    it("enforces Claude Code exit 2 parity for Read/Glob/Grep auth-tokens.json and workflow start under HARNESS_UNIT_WORKER=1", () => {
+      const env = { HARNESS_UNIT_WORKER: "1" }
+      for (const input of [
+        JSON.stringify({
+          tool_name: "Read",
+          tool_input: { file_path: ".harness/omnigraph-cluster/auth-tokens.json" },
+        }),
+        JSON.stringify({
+          tool_name: "Glob",
+          tool_input: { pattern: "**/*auth-tokens*" },
+        }),
+        JSON.stringify({
+          tool_name: "Grep",
+          tool_input: { pattern: ".", glob: "**/auth-tokens.json" },
+        }),
+        JSON.stringify({
+          tool_name: "Bash",
+          tool_input: { command: "pnpm harness workflow start --plan plan.json" },
+        }),
+        JSON.stringify({
+          tool_name: "Bash",
+          tool_input: { command: "pnpm --filter harness-cli start workflow start" },
+        }),
+      ]) {
+        const fastRes = runHookEntry(["guard"], { input, env })
+        const fullRes = runEntry(INDEX_PATH, ["guard"], { input, env })
+        expect(fastRes.status).toBe(2)
+        expect(fullRes.status).toBe(2)
+        expect(fastRes.stdout.trim()).toBe(fullRes.stdout.trim())
+        expect(fastRes.stderr).toContain("HARNESS_UNIT_WORKER=1")
+      }
+    }, 15_000) // spawns multiple Node guard and full-entry subprocesses across test vectors
+
+    it("resolves symlinks pointing to .harness/omnigraph-cluster/auth-tokens.json and denies with fast-path parity", () => {
+      const dir = mkdtempSync(join(tmpdir(), "harness-worker-symlink-"))
+      tempDirs.push(dir)
+      const clusterDir = join(dir, ".harness", "omnigraph-cluster")
+      mkdirSync(clusterDir, { recursive: true })
+      const targetTokens = join(clusterDir, "auth-tokens.json")
+      writeFileSync(targetTokens, JSON.stringify({ token: "secret" }), "utf8")
+      const symlinkPath = join(dir, "benign-alias.json")
+      symlinkSync(targetTokens, symlinkPath)
+
+      const env = { HARNESS_UNIT_WORKER: "1" }
+      const agyInput = JSON.stringify({
+        toolCall: { name: "read_file", args: { Path: symlinkPath } },
+      })
+      const fastAgy = runHookEntry(["guard", "--format=antigravity"], { input: agyInput, env })
+      const fullAgy = runEntry(INDEX_PATH, ["guard", "--format=antigravity"], {
+        input: agyInput,
+        env,
+      })
+      expect(fastAgy.status).toBe(0)
+      expect(fullAgy.status).toBe(0)
+      expect(JSON.parse(fastAgy.stdout.trim())).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining("HARNESS_UNIT_WORKER=1"),
+      })
+      expect(fullAgy.stdout.trim()).toBe(fastAgy.stdout.trim())
+
+      const ccInput = JSON.stringify({ tool_name: "Read", tool_input: { file_path: symlinkPath } })
+      const fastCc = runHookEntry(["guard"], { input: ccInput, env })
+      const fullCc = runEntry(INDEX_PATH, ["guard"], { input: ccInput, env })
+      expect(fastCc.status).toBe(2)
+      expect(fullCc.status).toBe(2)
+      expect(fastCc.stderr).toContain("HARNESS_UNIT_WORKER=1")
+    })
+
+    it("allows workflow complete, workflow status, nx run verify, and normal file reads under HARNESS_UNIT_WORKER=1", () => {
+      const env = { HARNESS_UNIT_WORKER: "1" }
+      for (const input of [
+        JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm harness workflow complete --unit u1 --repo-root /tmp/repo" },
+          },
+        }),
+        JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "pnpm harness workflow status --json" },
+          },
+        }),
+        JSON.stringify({
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: "nx run @harness/contract:verify" },
+          },
+        }),
+        JSON.stringify({
+          toolCall: {
+            name: "view_file",
+            args: { AbsolutePath: "/repo/libs/harness/contract/src/workflow.ts" },
+          },
+        }),
+      ]) {
+        const fastRes = runHookEntry(["guard", "--format=antigravity"], { input, env })
+        const fullRes = runEntry(INDEX_PATH, ["guard", "--format=antigravity"], { input, env })
+        expect(fastRes.status).toBe(0)
+        expect(JSON.parse(fastRes.stdout.trim())).toEqual({ decision: "allow" })
+        expect(fullRes.stdout.trim()).toBe(fastRes.stdout.trim())
+      }
+    }, 15_000) // spawns multiple Node guard and full-entry subprocesses for worker allow cases
+
+    it("F-4.1: denies Read .env and <commonGitDir>/harness/** reads in non-worker mode with fast-path parity", () => {
+      const env = { HARNESS_UNIT_WORKER: "0" }
+      for (const input of [
+        JSON.stringify({ tool_name: "Read", tool_input: { file_path: ".env" } }),
+        JSON.stringify({
+          tool_name: "Read",
+          tool_input: { file_path: ".git/harness/daemon.sock" },
+        }),
+        JSON.stringify({
+          tool_name: "Read",
+          tool_input: { file_path: ".git/harness/daemon.lock" },
+        }),
+        JSON.stringify({
+          tool_name: "Read",
+          tool_input: { file_path: ".git/harness/workflow-backups/2026-11-20.ndjson" },
+        }),
+        JSON.stringify({
+          tool_name: "Read",
+          tool_input: { file_path: ".git/harness/auth-tokens.json" },
+        }),
+      ]) {
+        const fastRes = runHookEntry(["guard"], { input, env })
+        const fullRes = runEntry(INDEX_PATH, ["guard"], { input, env })
+        expect(fastRes.status, input).toBe(2)
+        expect(fullRes.status, input).toBe(2)
+      }
+
+      const agyEnvRes = runHookEntry(["guard", "--format=antigravity"], {
+        input: JSON.stringify({ toolCall: { name: "view_file", args: { AbsolutePath: ".env" } } }),
+        env,
+      })
+      expect(agyEnvRes.status).toBe(0)
+      expect(JSON.parse(agyEnvRes.stdout.trim())).toMatchObject({ decision: "deny" })
+    }, 15_000) // spawns multiple Node guard and full-entry subprocesses for .env/.git/harness parity
+
+    it("F-3.6: walks ancestors to resolve non-existent files under symlinked dirs and fails closed on symlink loops", () => {
+      const dir = mkdtempSync(join(tmpdir(), "harness-f36-ancestor-"))
+      tempDirs.push(dir)
+      const harnessDir = join(dir, ".git", "harness")
+      mkdirSync(harnessDir, { recursive: true })
+      const symDir = join(dir, "alias-harness")
+      symlinkSync(harnessDir, symDir)
+
+      const nonExistentWrite = JSON.stringify({
+        toolCall: { name: "write_to_file", args: { TargetFile: join(symDir, "new-daemon.sock") } },
+      })
+      const writeFast = runHookEntry(["guard", "--format=antigravity"], { input: nonExistentWrite })
+      const writeFull = runEntry(INDEX_PATH, ["guard", "--format=antigravity"], {
+        input: nonExistentWrite,
+      })
+      expect(writeFast.status).toBe(0)
+      expect(JSON.parse(writeFast.stdout.trim())).toMatchObject({ decision: "deny" })
+      expect(writeFull.stdout.trim()).toBe(writeFast.stdout.trim())
+
+      const loopA = join(dir, "loop-a")
+      const loopB = join(dir, "loop-b")
+      symlinkSync(loopB, loopA)
+      symlinkSync(loopA, loopB)
+      const loopRead = JSON.stringify({
+        toolCall: { name: "read_file", args: { Path: join(loopA, "secret.txt") } },
+      })
+      const loopFast = runHookEntry(["guard", "--format=antigravity"], { input: loopRead })
+      expect(loopFast.status).toBe(0)
+      expect(JSON.parse(loopFast.stdout.trim())).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining("ELOOP"),
+      })
+    })
+
+    it("F-16.1 & F-16.2: denies depth > 8 read payloads, allows Grep/grep_search regexes like process\\.env, and denies Glob/SearchPath secret targets", () => {
+      let deepObj: Record<string, unknown> = { secret: ".env" }
+      for (let i = 0; i < 10; i++) {
+        deepObj = { nested: deepObj }
+      }
+      const deepRes = runHookEntry(["guard", "--format=antigravity"], {
+        input: JSON.stringify({
+          tool_name: "Read",
+          tool_input: { file_path: "libs/a.ts", extra: deepObj },
+        }),
+      })
+      expect(deepRes.status).toBe(0)
+      expect(JSON.parse(deepRes.stdout.trim())).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining("maximum inspection depth"),
+      })
+
+      for (const allowedInput of [
+        JSON.stringify({
+          tool_name: "Grep",
+          tool_input: { pattern: "process\\.env", path: "libs/" },
+        }),
+        JSON.stringify({
+          tool_name: "Grep",
+          tool_input: { pattern: "process\\.env" },
+        }),
+        JSON.stringify({
+          toolCall: {
+            name: "grep_search",
+            args: { Query: "process.env", TargetContent: ".env", SearchPath: "libs/" },
+          },
+        }),
+      ]) {
+        const res = runHookEntry(["guard", "--format=antigravity"], { input: allowedInput })
+        expect(res.status, allowedInput).toBe(0)
+        expect(JSON.parse(res.stdout.trim()), allowedInput).toEqual({ decision: "allow" })
+      }
+
+      for (const deniedInput of [
+        JSON.stringify({
+          tool_name: "Glob",
+          tool_input: { pattern: "**/.env*" },
+        }),
+        JSON.stringify({
+          tool_name: "Grep",
+          tool_input: { pattern: ".", path: ".git", glob: "harness/**" },
+        }),
+        JSON.stringify({
+          tool_name: "Glob",
+          tool_input: { path: ".harness", pattern: "omnigraph-cluster/**" },
+        }),
+        JSON.stringify({
+          toolCall: {
+            name: "grep_search",
+            args: { Query: ".", SearchPath: ".harness", Includes: ["omnigraph-cluster/**"] },
+          },
+        }),
+        JSON.stringify({
+          toolCall: {
+            name: "grep_search",
+            args: { Query: "foo", SearchPath: ".git/harness/daemon.sock" },
+          },
+        }),
+        JSON.stringify({
+          toolCall: {
+            name: "read_file",
+            args: { file_path: ".harness/omnigraph-cluster/auth-tokens.json" },
+          },
+        }),
+      ]) {
+        const res = runHookEntry(["guard", "--format=antigravity"], {
+          input: deniedInput,
+          env: { HARNESS_UNIT_WORKER: "1" },
+        })
+        expect(res.status, deniedInput).toBe(0)
+        expect(JSON.parse(res.stdout.trim()), deniedInput).toMatchObject({ decision: "deny" })
+        const fullRes = runEntry(INDEX_PATH, ["guard", "--format=antigravity"], {
+          input: deniedInput,
+          env: { HARNESS_UNIT_WORKER: "1" },
+        })
+        expect(fullRes.status, deniedInput).toBe(0)
+        expect(JSON.parse(fullRes.stdout.trim()), deniedInput).toMatchObject({ decision: "deny" })
+      }
+    }, 15_000) // spawns multiple Node guard and full-entry subprocesses across Glob/Grep/read_file vectors
+  })
+
+  describe("done --format=antigravity fast-path", () => {
+    it("exits fast on fullyIdle=false without loading heavy modules and delegates fullyIdle=true", () => {
+      const { dir } = createTempGitRepo("harness-done-fastpath-")
+      const idleInspect = inspectLoadedModulesForHookEntry(["done", "--format=antigravity"], {
+        cwd: dir,
+        input: JSON.stringify({ fullyIdle: false }),
+        env: { HARNESS_TEST_ISOLATION: undefined },
+      })
+      expect(idleInspect.status).toBe(0)
+      expect(idleInspect.stdout).toBe("")
+      assertNoHeavyModulesLoaded(idleInspect.loadedUrls)
+      const telemetryLines = readFileSync(join(dir, ".harness", "telemetry-log.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { toolName: string; detail?: string })
+      expect(telemetryLines.at(-1)).toMatchObject({ toolName: "done", detail: "fullyIdle=false" })
+
+      const fullInspect = inspectLoadedModulesForHookEntry(["done", "--format=antigravity"], {
+        cwd: dir,
+        input: JSON.stringify({ fullyIdle: true }),
+      })
+      expect(fullInspect.status).toBe(0)
+      expect(JSON.parse(fullInspect.stdout.trim())).toMatchObject({ decision: "continue" })
+      expect(fullInspect.loadedUrls.some((u) => u.includes("hook-fallback.ts"))).toBe(true)
+    })
+
+    it("F-12 & F-9.1: asks on benign glob-expansion overflow while failing closed on combinatorial/secret glob overflow across fast-path and index", () => {
+      const manyGlobs = JSON.stringify({
+        tool_name: "Glob",
+        tool_input: {
+          path: "/repo/{a,b,c,d}/{e,f,g,h}/{i,j,k,l}/{m,n,o,p}",
+          pattern: "*.ts",
+        },
+      })
+      const fastRes = runHookEntry(["guard", "--format=antigravity"], { input: manyGlobs })
+      const fullRes = runEntry(INDEX_PATH, ["guard", "--format=antigravity"], { input: manyGlobs })
+      expect(fastRes.status).toBe(0)
+      expect(fullRes.status).toBe(0)
+      expect(JSON.parse(fastRes.stdout.trim())).toMatchObject({
+        decision: "ask",
+        reason: expect.stringContaining("Glob"),
+      })
+      expect(fullRes.stdout.trim()).toBe(fastRes.stdout.trim())
+
+      const comboOverflow = JSON.stringify({
+        tool_name: "Grep",
+        tool_input: {
+          path: "dir0",
+          glob: Array.from({ length: 65 }, (_, i) => `*.t${i}`),
+        },
+      })
+      const fastComboRes = runHookEntry(["guard", "--format=antigravity"], { input: comboOverflow })
+      const fullComboRes = runEntry(INDEX_PATH, ["guard", "--format=antigravity"], {
+        input: comboOverflow,
+      })
+      expect(fastComboRes.status).toBe(0)
+      expect(fullComboRes.status).toBe(0)
+      expect(JSON.parse(fastComboRes.stdout.trim())).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining("glob expansion combinations"),
+      })
+      expect(fullComboRes.stdout.trim()).toBe(fastComboRes.stdout.trim())
+
+      const secretOverflow = JSON.stringify({
+        tool_name: "Glob",
+        tool_input: {
+          path: "{a,b,c,d,e,f,g,h,i}/.env",
+          pattern: "*",
+        },
+      })
+      const fastSecretRes = runHookEntry(["guard", "--format=antigravity"], {
+        input: secretOverflow,
+      })
+      expect(fastSecretRes.status).toBe(0)
+      expect(JSON.parse(fastSecretRes.stdout.trim())).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining(".env"),
+      })
     })
   })
 })

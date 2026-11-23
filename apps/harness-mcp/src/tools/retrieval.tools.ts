@@ -72,7 +72,7 @@ const SearchKnowledgeInputSchema = Schema.Struct({
       }),
   ),
   status: Schema.optional(
-    Schema.Literals(["accepted", "proposed", "superseded", "deprecated"]).annotate({
+    Schema.Literals(["draft", "accepted", "proposed", "superseded", "deprecated"]).annotate({
       description: "Optional lifecycle status filter for AdrDoc and EarsRequirement",
     }),
   ),

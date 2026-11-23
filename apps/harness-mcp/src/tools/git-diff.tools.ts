@@ -1,7 +1,7 @@
 import * as path from "node:path"
 import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
-import { nodeSyncHostIo } from "@harness/infra"
+import { execFileAsyncEffect, nodeSyncHostIo } from "@harness/infra"
 import type { SyncHostExecExited } from "@harness/service/host-io"
 import {
   GitDiffErrorReason,
@@ -191,17 +191,10 @@ const execGit = (
   cwd: string,
   args: ReadonlyArray<string>,
 ): Effect.Effect<SyncHostExecExited, GitDiffExecutionError> =>
-  Effect.try({
-    try: () =>
-      nodeSyncHostIo.execFileSync("git", ["--no-optional-locks", "--literal-pathspecs", ...args], {
-        cwd,
-        timeoutMs: GIT_TIMEOUT_MS,
-        maxBufferBytes: GIT_MAX_BUFFER_BYTES,
-      }),
-    catch: (err) =>
-      new GitDiffExecutionError({
-        reason: toGitDiffReason(err instanceof Error ? err.message : String(err)),
-      }),
+  execFileAsyncEffect("git", ["--no-optional-locks", "--literal-pathspecs", ...args], {
+    cwd,
+    timeoutMs: GIT_TIMEOUT_MS,
+    maxBufferBytes: GIT_MAX_BUFFER_BYTES,
   }).pipe(
     Effect.flatMap((res) =>
       match(res)
@@ -385,19 +378,29 @@ export const executeGitDiffTool = Effect.fn("HarnessMcp.gitDiff")(function* (
   const pathArgs: ReadonlyArray<string> = relPaths.length > 0 ? ["--", ...relPaths] : []
   const { resolvedBase, diffBase } = yield* resolveDiffBase(root, input.baseRef)
 
-  const stat = (yield* execGitOk(root, [
-    "diff",
-    "--stat",
-    "--no-color",
-    diffBase,
-    ...pathArgs,
-  ])).trimEnd()
-  const changedFiles = parseNulList(
-    yield* execGitOk(root, ["diff", "--name-only", "-z", diffBase, ...pathArgs]),
-  )
-  const untrackedFiles = parseNulList(
-    yield* execGitOk(root, ["ls-files", "--others", "--exclude-standard", "-z", ...pathArgs]),
-  )
+  const [statRaw, nameOnlyRaw, untrackedRaw, fullDiffRaw] = yield* input.statOnly === true
+    ? Effect.all(
+        [
+          execGitOk(root, ["diff", "--stat", "--no-color", diffBase, ...pathArgs]),
+          execGitOk(root, ["diff", "--name-only", "-z", diffBase, ...pathArgs]),
+          execGitOk(root, ["ls-files", "--others", "--exclude-standard", "-z", ...pathArgs]),
+          Effect.succeed(""),
+        ],
+        { concurrency: "unbounded" },
+      )
+    : Effect.all(
+        [
+          execGitOk(root, ["diff", "--stat", "--no-color", diffBase, ...pathArgs]),
+          execGitOk(root, ["diff", "--name-only", "-z", diffBase, ...pathArgs]),
+          execGitOk(root, ["ls-files", "--others", "--exclude-standard", "-z", ...pathArgs]),
+          execGitOk(root, ["diff", "--no-color", "--no-ext-diff", diffBase, ...pathArgs]),
+        ],
+        { concurrency: "unbounded" },
+      )
+
+  const stat = statRaw.trimEnd()
+  const changedFiles = parseNulList(nameOnlyRaw)
+  const untrackedFiles = parseNulList(untrackedRaw)
 
   if (input.statOnly === true) {
     return {
@@ -412,13 +415,7 @@ export const executeGitDiffTool = Effect.fn("HarnessMcp.gitDiff")(function* (
     }
   }
 
-  const trackedTrimmed = (yield* execGitOk(root, [
-    "diff",
-    "--no-color",
-    "--no-ext-diff",
-    diffBase,
-    ...pathArgs,
-  ])).trimEnd()
+  const trackedTrimmed = fullDiffRaw.trimEnd()
 
   if (clampedMax === 0) {
     if (trackedTrimmed.length > 0 || untrackedFiles.length > 0) {

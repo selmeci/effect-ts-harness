@@ -1,9 +1,10 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { describe, expect, it } from "@effect/vitest"
 import {
+  FrictionEvent as FrictionEventSchema,
   appendFrictionEvent,
   clearFrictionEvents,
   decideFrictionClusters,
@@ -112,7 +113,10 @@ describe("Friction log and clustering", () => {
       expect(readBack[1]?.summary).toBe("rm -rf")
 
       // 3. Add malformed lines and empty lines to friction-log.jsonl
-      const filePath = join(resolveHarnessStateDir(tempDir, testHostIo.getEnv()), "friction-log.jsonl")
+      const filePath = join(
+        resolveHarnessStateDir(tempDir, testHostIo.getEnv()),
+        "friction-log.jsonl",
+      )
       const currentRaw = readFileSync(filePath, "utf-8")
       writeFileSync(
         filePath,
@@ -147,4 +151,35 @@ describe("Friction log and clustering", () => {
       rmSync(tempDir, { recursive: true, force: true })
     }
   })
+
+  it.effect.prop(
+    "Friction.decide property: cluster occurrences sum to event count and sort monotonically descending by occurrences then key ascending",
+    {
+      events: Schema.Array(FrictionEventSchema),
+    },
+    ({ events }) =>
+      Effect.gen(function* () {
+        const clusters = yield* decideFrictionClusters(events)
+        expect(summarizeFrictionEvents(events)).toEqual(clusters)
+
+        const totalOccurrences = clusters.reduce((sum, cluster) => sum + cluster.occurrences, 0)
+        expect(totalOccurrences).toBe(events.length)
+
+        const seenKeys = new Set<string>()
+        for (let i = 0; i < clusters.length; i++) {
+          const current = clusters[i]!
+          expect(current.occurrences).toBeGreaterThanOrEqual(1)
+          expect(seenKeys.has(current.key)).toBe(false)
+          seenKeys.add(current.key)
+
+          if (i > 0) {
+            const prev = clusters[i - 1]!
+            expect(prev.occurrences).toBeGreaterThanOrEqual(current.occurrences)
+            if (prev.occurrences === current.occurrences) {
+              expect(prev.key < current.key).toBe(true)
+            }
+          }
+        }
+      }),
+  )
 })

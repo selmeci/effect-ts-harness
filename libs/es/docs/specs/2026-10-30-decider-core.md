@@ -77,8 +77,8 @@ The `Verification` column in the EARS table maps each requirement to its determi
 
 | ID      | Pattern    | Requirement                                                                                                        | Effect Symbol | Verification |
 | ------- | ---------- | ------------------------------------------------------------------------------------------------------------------ | ------------- | ------------ |
-| REQ-3.1 | Ubiquitous | StreamVersion **shall** validate non-negative integers branded as StreamVersion at decode time.                    | StreamVersion | UnitTest     |
-| REQ-3.2 | Ubiquitous | PositiveInt **shall** validate strictly positive integers greater than zero branded as PositiveInt at decode time. | PositiveInt   | UnitTest     |
+| REQ-3.1 | Ubiquitous | StreamVersion **shall** validate non-negative integers branded as StreamVersion at decode time.                    | —             | UnitTest     |
+| REQ-3.2 | Ubiquitous | PositiveInt **shall** validate strictly positive integers greater than zero branded as PositiveInt at decode time. | —             | UnitTest     |
 
 ### 4 · Property-Based Algebraic Invariants
 

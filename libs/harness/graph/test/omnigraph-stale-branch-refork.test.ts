@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import * as path from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import { WorkspaceFilePath } from "@harness/contract"
-import { Cause, Effect, Schema } from "effect"
+import { Cause, Effect, Result, Schema } from "effect"
 import { type FetchLike, Omnigraph } from "@modernrelay/omnigraph"
 import { match } from "ts-pattern"
 import {
@@ -12,6 +12,7 @@ import {
   PackageTag,
   readGraphHeadMeta,
   syncToOmnigraphAndSnapshot,
+  toOmnigraphSplitNdjsonResult,
 } from "../src/index.js"
 import {
   executeLoadWithStaleRefork,
@@ -734,10 +735,7 @@ describe("OmnigraphSync stale diverged worktree branch self-healing (SPEC-0014 R
             })
           }
           if (method === "POST" && url.endsWith("/branches/merge")) {
-            return jsonResponse(
-              { code: "conflict", error: "stale conflict", conflicts: [] },
-              409,
-            )
+            return jsonResponse({ code: "conflict", error: "stale conflict", conflicts: [] }, 409)
           }
           if (method === "DELETE" && url.includes("/branches/")) {
             return jsonResponse({ deleted: true })
@@ -801,6 +799,124 @@ describe("OmnigraphSync stale diverged worktree branch self-healing (SPEC-0014 R
           ["merge", null],
         ])
         expect(reforkRes.commit?.graphCommitId).toBe("commit-5")
+      }),
+  )
+
+  it.effect(
+    "splits structural overwrite from chunked vector merge in syncToOmnigraphAndSnapshot and keeps overwrite atomic up to 16 MiB",
+    () =>
+      Effect.gen(function* () {
+        const tmpRepo = fs.mkdtempSync(path.join(tmpdir(), "omnigraph-two-pass-sync-"))
+        const snapPath = path.join(tmpRepo, ".harness", "plan-graph-snapshot.json")
+        try {
+          const graph = buildHarnessGraph({
+            patternDocs: [
+              {
+                slug: "errors",
+                path: "agent-patterns/errors.md",
+                summary: "Use Schema.TaggedError",
+              },
+              {
+                slug: "unembedded",
+                path: "agent-patterns/unembedded.md",
+                summary: "No embedding yet",
+              },
+            ],
+            adrDocs: [
+              {
+                id: "sample:ADR-0001",
+                title: "Persistence",
+                status: "accepted",
+                path: "libs/sample/docs/adr/0001.md",
+                enforcedByFiles: [],
+                searchText: "Use SQLite transactions",
+              },
+            ],
+          })
+          const embeddingsByNodeKey = new Map<string, ReadonlyArray<number>>([
+            ["PatternDoc:errors", [0.6, 0.8]],
+            ["AdrDoc:sample:ADR-0001", [1, 0]],
+          ])
+
+          const splitClear = Result.getOrThrow(
+            toOmnigraphSplitNdjsonResult(graph, embeddingsByNodeKey, {
+              clearMissingEmbeddings: true,
+            }),
+          )
+          const structuralRecords = splitClear.structuralNdjson
+            .split("\n")
+            .filter(Boolean)
+            .map(
+              (line) =>
+                JSON.parse(line) as { type?: string; id?: string; data?: Record<string, unknown> },
+            )
+          const unembeddedRow = structuralRecords.find(
+            (r) => r.type === "PatternDoc" && r.id === "unembedded",
+          )
+          const embeddedStructuralRow = structuralRecords.find(
+            (r) => r.type === "PatternDoc" && r.id === "errors",
+          )
+          expect(unembeddedRow?.data?.summaryEmbedding).toBeNull()
+          expect(embeddedStructuralRow?.data?.summaryEmbedding).toBeUndefined()
+          expect(splitClear.vectorOverlayNdjson).toContain('"summaryEmbedding":[0.6,0.8]')
+          expect(splitClear.vectorOverlayNdjson).toContain('"searchEmbedding":[1,0]')
+
+          const splitPreserve = Result.getOrThrow(
+            toOmnigraphSplitNdjsonResult(graph, embeddingsByNodeKey, {
+              clearMissingEmbeddings: false,
+            }),
+          )
+          expect(splitPreserve.structuralNdjson).not.toContain('"summaryEmbedding":null')
+
+          const loadCalls: Array<{
+            readonly mode: string | null
+            readonly from: string | null
+            readonly data: string
+          }> = []
+          const syncFetch: FetchLike = async (input, init) => {
+            const url =
+              typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+            const parsed =
+              typeof init?.body === "string"
+                ? (JSON.parse(init.body) as Record<string, unknown>)
+                : {}
+            if (url.endsWith("/load")) {
+              loadCalls.push({
+                mode: typeof parsed["mode"] === "string" ? parsed["mode"] : null,
+                from: typeof parsed["from"] === "string" ? parsed["from"] : null,
+                data: typeof parsed["data"] === "string" ? parsed["data"] : "",
+              })
+              return jsonResponse({
+                graph_id: "harness",
+                branch: "plan/two-pass",
+                branch_created: loadCalls.length === 1,
+                commit: { graph_commit_id: `commit-${loadCalls.length}` },
+              })
+            }
+            return jsonResponse({})
+          }
+
+          const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
+            baseUrl: "http://127.0.0.1:19999",
+            branch: "plan/two-pass",
+            from: "main",
+            snapshotPath: snapPath,
+            embeddingsByNodeKey,
+            fetch: syncFetch,
+          }).pipe(Effect.provide(OmnigraphSyncLive))
+
+          expect(syncRes.syncedToOmnigraph).toBe(true)
+          expect(syncRes.commitId).toBe("commit-2")
+          expect(loadCalls).toHaveLength(2)
+          expect(loadCalls[0]?.mode).toBe("overwrite")
+          expect(loadCalls[0]?.from).toBe("main")
+          expect(loadCalls[0]?.data).not.toContain("[0.6,0.8]")
+          expect(loadCalls[1]?.mode).toBe("merge")
+          expect(loadCalls[1]?.data).toContain("[0.6,0.8]")
+          expect(loadCalls[1]?.data).toContain("[1,0]")
+        } finally {
+          fs.rmSync(tmpRepo, { recursive: true, force: true })
+        }
       }),
   )
 })

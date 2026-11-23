@@ -248,36 +248,6 @@ describe("harness-mcp workflow daemon & linked worktrees", () => {
           const leaseEpoch = LeaseEpoch.make(7)
           const emptyFnIndex = new Map<string, IndexedEffectFn>()
 
-          // 0. Dead socket before daemon starts -> WorkflowStoreUnavailableError
-          const { result: deadSocketErr, spans: deadSpans } = yield* runWithTestTracer(
-            "HarnessDaemonClient.handshake::dead-socket",
-            handshakeWorkflowDaemon({
-              socketPath: expectedRuntimePaths.socketPath,
-              request: {
-                protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
-                repoRoot: validatedLinked.worktreeRoot,
-                commonGitDir: validatedLinked.commonGitDir,
-              },
-              requiredCapabilities: [WorkflowDaemonCapability.make("workflow.handshake")],
-            }).pipe(Effect.flip),
-            emptyFnIndex,
-          )
-          match(deadSocketErr)
-            .with({ _tag: "WorkflowStoreUnavailableError" }, (err) => {
-              expect(err).toBeInstanceOf(WorkflowStoreUnavailableError)
-              expect(err.operation).toBe(
-                WorkflowStoreOperation.make("HarnessDaemonClient.handshake"),
-              )
-              expect(err.reason).toContain(expectedRuntimePaths.socketPath)
-            })
-            .with({ _tag: "DaemonProtocolMismatchError" }, (err) => {
-              expect.unreachable(`Expected WorkflowStoreUnavailableError, got ${err.message}`)
-            })
-            .exhaustive()
-          const deadSpan = deadSpans.find((s) => s.name === "HarnessDaemonClient.handshake")
-          expect(deadSpan?.name).toBe("HarnessDaemonClient.handshake")
-          expect(deadSpan?.exitTag).toBe("Failure")
-
           let validateCallCount = 0
           const countingValidator = (absRoot: AbsoluteRepoRoot) => {
             validateCallCount += 1
@@ -431,106 +401,6 @@ describe("harness-mcp workflow daemon & linked worktrees", () => {
                   expect(rejectedReply.ok).toBe(false)
                   expect(String(rejectedReply.error)).toContain("escapes daemon root")
                 }
-
-                // 8. handshakeWorkflowDaemon fails with DaemonProtocolMismatchError on protocolVersion "2"
-                const { result: mismatchErr, spans: mismatchSpans } = yield* runWithTestTracer(
-                  "HarnessDaemonClient.handshake::version-mismatch",
-                  handshakeWorkflowDaemon({
-                    socketPath,
-                    request: {
-                      protocolVersion: WorkflowProtocolVersion.make("2"),
-                      repoRoot: validatedLinked.worktreeRoot,
-                      commonGitDir: validatedLinked.commonGitDir,
-                    },
-                    requiredCapabilities: [WorkflowDaemonCapability.make("workflow.handshake")],
-                  }).pipe(Effect.flip),
-                  emptyFnIndex,
-                )
-                match(mismatchErr)
-                  .with({ _tag: "DaemonProtocolMismatchError" }, (err) => {
-                    expect(err).toBeInstanceOf(DaemonProtocolMismatchError)
-                    expect(err.expectedVersion).toBe(WorkflowProtocolVersion.make("2"))
-                    expect(err.actualVersion).toBe(WORKFLOW_DAEMON_PROTOCOL_VERSION)
-                    expect(err.socketPath).toBe(socketPath)
-                    expect(err.detail).toContain("Unsupported daemon protocol version")
-                  })
-                  .with({ _tag: "WorkflowStoreUnavailableError" }, (err) => {
-                    expect.unreachable(`Expected DaemonProtocolMismatchError, got ${err.message}`)
-                  })
-                  .exhaustive()
-                const mismatchSpan = mismatchSpans.find(
-                  (s) => s.name === "HarnessDaemonClient.handshake",
-                )
-                expect(mismatchSpan?.name).toBe("HarnessDaemonClient.handshake")
-                expect(mismatchSpan?.exitTag).toBe("Failure")
-
-                // 9. handshakeWorkflowDaemon fails with DaemonProtocolMismatchError on missing required capability
-                const { result: missingCapErr, spans: missingCapSpans } = yield* runWithTestTracer(
-                  "HarnessDaemonClient.handshake::missing-capability",
-                  handshakeWorkflowDaemon({
-                    socketPath,
-                    request: {
-                      protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
-                      repoRoot: validatedLinked.worktreeRoot,
-                      commonGitDir: validatedLinked.commonGitDir,
-                    },
-                    requiredCapabilities: [
-                      WorkflowDaemonCapability.make("workflow.handshake"),
-                      WorkflowDaemonCapability.make("workflow.execute"),
-                    ],
-                  }).pipe(Effect.flip),
-                  emptyFnIndex,
-                )
-                match(missingCapErr)
-                  .with({ _tag: "DaemonProtocolMismatchError" }, (err) => {
-                    expect(err).toBeInstanceOf(DaemonProtocolMismatchError)
-                    expect(err.expectedVersion).toBe(WORKFLOW_DAEMON_PROTOCOL_VERSION)
-                    expect(err.actualVersion).toBe(WORKFLOW_DAEMON_PROTOCOL_VERSION)
-                    expect(err.socketPath).toBe(socketPath)
-                    expect(err.detail).toContain("workflow.execute")
-                  })
-                  .with({ _tag: "WorkflowStoreUnavailableError" }, (err) => {
-                    expect.unreachable(`Expected DaemonProtocolMismatchError, got ${err.message}`)
-                  })
-                  .exhaustive()
-                const missingCapSpan = missingCapSpans.find(
-                  (s) => s.name === "HarnessDaemonClient.handshake",
-                )
-                expect(missingCapSpan?.name).toBe("HarnessDaemonClient.handshake")
-                expect(missingCapSpan?.exitTag).toBe("Failure")
-
-                // 10. handshakeWorkflowDaemon fails with DaemonProtocolMismatchError on commonGitDir mismatch
-                const { result: wrongGitDirErr, spans: wrongGitDirSpans } =
-                  yield* runWithTestTracer(
-                    "HarnessDaemonClient.handshake::common-dir-mismatch",
-                    handshakeWorkflowDaemon({
-                      socketPath,
-                      request: {
-                        protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
-                        repoRoot: validatedLinked.worktreeRoot,
-                        commonGitDir: GitCommonDirPath.make("/other/repo/.git"),
-                      },
-                      requiredCapabilities: [WorkflowDaemonCapability.make("workflow.handshake")],
-                    }).pipe(Effect.flip),
-                    emptyFnIndex,
-                  )
-                match(wrongGitDirErr)
-                  .with({ _tag: "DaemonProtocolMismatchError" }, (err) => {
-                    expect(err).toBeInstanceOf(DaemonProtocolMismatchError)
-                    expect(err.expectedVersion).toBe(WORKFLOW_DAEMON_PROTOCOL_VERSION)
-                    expect(err.actualVersion).toBe(WORKFLOW_DAEMON_PROTOCOL_VERSION)
-                    expect(err.socketPath).toBe(socketPath)
-                    expect(err.detail).toContain("commonGitDir mismatch")
-                  })
-                  .with({ _tag: "WorkflowStoreUnavailableError" }, (err) => {
-                    expect.unreachable(`Expected DaemonProtocolMismatchError, got ${err.message}`)
-                  })
-                  .exhaustive()
-                const wrongGitDirSpan = wrongGitDirSpans.find(
-                  (s) => s.name === "HarnessDaemonClient.handshake",
-                )
-                expect(wrongGitDirSpan?.name).toBe("HarnessDaemonClient.handshake")
-                expect(wrongGitDirSpan?.exitTag).toBe("Failure")
               }),
           ).pipe(Effect.provide(UnixSocketDaemonLive))
 
@@ -540,7 +410,157 @@ describe("harness-mcp workflow daemon & linked worktrees", () => {
   )
 
   it.live(
-    "F-1.2 & F-1.3: workflow.status reports 'inactive' when writerLeaseEpoch === 0 or non-git, and handshakeWorkflowDaemon rejects epoch 0 unless requireActiveLease: false",
+    "handshakeWorkflowDaemon fails closed on dead socket, protocol version mismatch, missing capability, and commonGitDir mismatch",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { canonicalDir, linkedDir } = initGitRepoWithWorktree(dir)
+          const validatedCanonical = yield* validateWorktreeRepoRoot(
+            AbsoluteRepoRoot.make(canonicalDir),
+          )
+          const validatedLinked = yield* validateWorktreeRepoRoot(AbsoluteRepoRoot.make(linkedDir))
+          const expectedRuntimePaths = resolveWorkflowRuntimePaths(validatedCanonical.commonGitDir)
+          const leaseEpoch = LeaseEpoch.make(7)
+          const emptyFnIndex = new Map<string, IndexedEffectFn>()
+
+          // 0. Dead socket before daemon starts -> WorkflowStoreUnavailableError
+          const { result: deadSocketErr, spans: deadSpans } = yield* runWithTestTracer(
+            "HarnessDaemonClient.handshake::dead-socket",
+            handshakeWorkflowDaemon({
+              socketPath: expectedRuntimePaths.socketPath,
+              request: {
+                protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                repoRoot: validatedLinked.worktreeRoot,
+                commonGitDir: validatedLinked.commonGitDir,
+              },
+              requiredCapabilities: [WorkflowDaemonCapability.make("workflow.handshake")],
+            }).pipe(Effect.flip),
+            emptyFnIndex,
+          )
+          match(deadSocketErr)
+            .with({ _tag: "WorkflowStoreUnavailableError" }, (err) => {
+              expect(err).toBeInstanceOf(WorkflowStoreUnavailableError)
+              expect(err.operation).toBe(
+                WorkflowStoreOperation.make("HarnessDaemonClient.handshake"),
+              )
+              expect(err.reason).toContain(expectedRuntimePaths.socketPath)
+            })
+            .with({ _tag: "DaemonProtocolMismatchError" }, (err) => {
+              expect.unreachable(`Expected WorkflowStoreUnavailableError, got ${err.message}`)
+            })
+            .exhaustive()
+          const deadSpan = deadSpans.find((s) => s.name === "HarnessDaemonClient.handshake")
+          expect(deadSpan?.name).toBe("HarnessDaemonClient.handshake")
+          expect(deadSpan?.exitTag).toBe("Failure")
+
+          yield* withStartedDaemon(canonicalDir, { writerLeaseEpoch: leaseEpoch }, (socketPath) =>
+            Effect.gen(function* () {
+              // 8. handshakeWorkflowDaemon fails with DaemonProtocolMismatchError on protocolVersion "2"
+              const { result: mismatchErr, spans: mismatchSpans } = yield* runWithTestTracer(
+                "HarnessDaemonClient.handshake::version-mismatch",
+                handshakeWorkflowDaemon({
+                  socketPath,
+                  request: {
+                    protocolVersion: WorkflowProtocolVersion.make("2"),
+                    repoRoot: validatedLinked.worktreeRoot,
+                    commonGitDir: validatedLinked.commonGitDir,
+                  },
+                  requiredCapabilities: [WorkflowDaemonCapability.make("workflow.handshake")],
+                }).pipe(Effect.flip),
+                emptyFnIndex,
+              )
+              match(mismatchErr)
+                .with({ _tag: "DaemonProtocolMismatchError" }, (err) => {
+                  expect(err).toBeInstanceOf(DaemonProtocolMismatchError)
+                  expect(err.expectedVersion).toBe(WorkflowProtocolVersion.make("2"))
+                  expect(err.actualVersion).toBe(WORKFLOW_DAEMON_PROTOCOL_VERSION)
+                  expect(err.socketPath).toBe(socketPath)
+                  expect(err.detail).toContain("Unsupported daemon protocol version")
+                })
+                .with({ _tag: "WorkflowStoreUnavailableError" }, (err) => {
+                  expect.unreachable(`Expected DaemonProtocolMismatchError, got ${err.message}`)
+                })
+                .exhaustive()
+              const mismatchSpan = mismatchSpans.find(
+                (s) => s.name === "HarnessDaemonClient.handshake",
+              )
+              expect(mismatchSpan?.name).toBe("HarnessDaemonClient.handshake")
+              expect(mismatchSpan?.exitTag).toBe("Failure")
+
+              // 9. handshakeWorkflowDaemon fails with DaemonProtocolMismatchError on missing required capability
+              const { result: missingCapErr, spans: missingCapSpans } = yield* runWithTestTracer(
+                "HarnessDaemonClient.handshake::missing-capability",
+                handshakeWorkflowDaemon({
+                  socketPath,
+                  request: {
+                    protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                    repoRoot: validatedLinked.worktreeRoot,
+                    commonGitDir: validatedLinked.commonGitDir,
+                  },
+                  requiredCapabilities: [
+                    WorkflowDaemonCapability.make("workflow.handshake"),
+                    WorkflowDaemonCapability.make("workflow.execute"),
+                  ],
+                }).pipe(Effect.flip),
+                emptyFnIndex,
+              )
+              match(missingCapErr)
+                .with({ _tag: "DaemonProtocolMismatchError" }, (err) => {
+                  expect(err).toBeInstanceOf(DaemonProtocolMismatchError)
+                  expect(err.expectedVersion).toBe(WORKFLOW_DAEMON_PROTOCOL_VERSION)
+                  expect(err.actualVersion).toBe(WORKFLOW_DAEMON_PROTOCOL_VERSION)
+                  expect(err.socketPath).toBe(socketPath)
+                  expect(err.detail).toContain("workflow.execute")
+                })
+                .with({ _tag: "WorkflowStoreUnavailableError" }, (err) => {
+                  expect.unreachable(`Expected DaemonProtocolMismatchError, got ${err.message}`)
+                })
+                .exhaustive()
+              const missingCapSpan = missingCapSpans.find(
+                (s) => s.name === "HarnessDaemonClient.handshake",
+              )
+              expect(missingCapSpan?.name).toBe("HarnessDaemonClient.handshake")
+              expect(missingCapSpan?.exitTag).toBe("Failure")
+
+              // 10. handshakeWorkflowDaemon fails with DaemonProtocolMismatchError on commonGitDir mismatch
+              const { result: wrongGitDirErr, spans: wrongGitDirSpans } = yield* runWithTestTracer(
+                "HarnessDaemonClient.handshake::common-dir-mismatch",
+                handshakeWorkflowDaemon({
+                  socketPath,
+                  request: {
+                    protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                    repoRoot: validatedLinked.worktreeRoot,
+                    commonGitDir: GitCommonDirPath.make("/other/repo/.git"),
+                  },
+                  requiredCapabilities: [WorkflowDaemonCapability.make("workflow.handshake")],
+                }).pipe(Effect.flip),
+                emptyFnIndex,
+              )
+              match(wrongGitDirErr)
+                .with({ _tag: "DaemonProtocolMismatchError" }, (err) => {
+                  expect(err).toBeInstanceOf(DaemonProtocolMismatchError)
+                  expect(err.expectedVersion).toBe(WORKFLOW_DAEMON_PROTOCOL_VERSION)
+                  expect(err.actualVersion).toBe(WORKFLOW_DAEMON_PROTOCOL_VERSION)
+                  expect(err.socketPath).toBe(socketPath)
+                  expect(err.detail).toContain("commonGitDir mismatch")
+                })
+                .with({ _tag: "WorkflowStoreUnavailableError" }, (err) => {
+                  expect.unreachable(`Expected DaemonProtocolMismatchError, got ${err.message}`)
+                })
+                .exhaustive()
+              const wrongGitDirSpan = wrongGitDirSpans.find(
+                (s) => s.name === "HarnessDaemonClient.handshake",
+              )
+              expect(wrongGitDirSpan?.name).toBe("HarnessDaemonClient.handshake")
+              expect(wrongGitDirSpan?.exitTag).toBe("Failure")
+            }),
+          ).pipe(Effect.provide(UnixSocketDaemonLive))
+        }),
+      ),
+  )
+
+  it.live(
+    "F-1.2 & F-1.3: workflow.status reports 'inactive' when writerLeaseEpoch is omitted or non-git, and handshakeWorkflowDaemon rejects missing lease unless requireActiveLease: false",
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
@@ -564,46 +584,44 @@ describe("harness-mcp workflow daemon & linked worktrees", () => {
           })
           expect(nonGitEpochOneStatus.status).toBe("inactive")
 
-          yield* withStartedDaemon(
-            canonicalDir,
-            { writerLeaseEpoch: LeaseEpoch.make(0) },
-            (socketPath) =>
-              Effect.gen(function* () {
-                const statusReply = yield* queryWorkflowDaemonCommand({
-                  socketPath,
-                  command: "workflow.status",
-                  payload: { repoRoot: canonicalDir },
-                })
-                expect(statusReply).toMatchObject({
-                  ok: true,
-                  command: "workflow.status",
-                  status: "inactive",
-                  writerLeaseEpoch: 0,
-                })
+          yield* withStartedDaemon(canonicalDir, {}, (socketPath) =>
+            Effect.gen(function* () {
+              const statusReply = yield* queryWorkflowDaemonCommand({
+                socketPath,
+                command: "workflow.status",
+                payload: { repoRoot: canonicalDir },
+              })
+              expect(statusReply).toMatchObject({
+                ok: true,
+                command: "workflow.status",
+                status: "inactive",
+                result: { _tag: "DaemonOffline", outcome: { _tag: "NotFound" } },
+              })
+              expect(statusReply.writerLeaseEpoch).toBeUndefined()
 
-                const activeReqErr = yield* handshakeWorkflowDaemon({
-                  socketPath,
-                  request: {
-                    protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
-                    repoRoot: validatedCanonical.worktreeRoot,
-                    commonGitDir: validatedCanonical.commonGitDir,
-                  },
-                  requiredCapabilities: [WorkflowDaemonCapability.make("workflow.handshake")],
-                }).pipe(Effect.flip)
-                expect(activeReqErr._tag).toBe("DaemonProtocolMismatchError")
+              const activeReqErr = yield* handshakeWorkflowDaemon({
+                socketPath,
+                request: {
+                  protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                  repoRoot: validatedCanonical.worktreeRoot,
+                  commonGitDir: validatedCanonical.commonGitDir,
+                },
+                requiredCapabilities: [WorkflowDaemonCapability.make("workflow.handshake")],
+              }).pipe(Effect.flip)
+              expect(activeReqErr._tag).toBe("DaemonProtocolMismatchError")
 
-                const passiveRes = yield* handshakeWorkflowDaemon({
-                  socketPath,
-                  request: {
-                    protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
-                    repoRoot: validatedCanonical.worktreeRoot,
-                    commonGitDir: validatedCanonical.commonGitDir,
-                  },
-                  requiredCapabilities: [WorkflowDaemonCapability.make("workflow.handshake")],
-                  requireActiveLease: false,
-                })
-                expect(passiveRes.writerLeaseEpoch).toBe(0)
-              }),
+              const passiveRes = yield* handshakeWorkflowDaemon({
+                socketPath,
+                request: {
+                  protocolVersion: WORKFLOW_DAEMON_PROTOCOL_VERSION,
+                  repoRoot: validatedCanonical.worktreeRoot,
+                  commonGitDir: validatedCanonical.commonGitDir,
+                },
+                requiredCapabilities: [WorkflowDaemonCapability.make("workflow.handshake")],
+                requireActiveLease: false,
+              })
+              expect(passiveRes.writerLeaseEpoch).toBeUndefined()
+            }),
           ).pipe(Effect.provide(UnixSocketDaemonLive))
         }),
       ),
@@ -783,18 +801,15 @@ describe("harness-mcp workflow daemon & linked worktrees", () => {
           expect(scopeRejectedDir._tag).toBe("Rejected")
 
           // Live daemon bound to corruptGitDir rejects requests instead of running as non-git
-          yield* withStartedDaemon(
-            corruptGitDir,
-            { writerLeaseEpoch: LeaseEpoch.make(0) },
-            (socketPath) =>
-              Effect.gen(function* () {
-                const pingRes = yield* queryWorkflowDaemonCommand({
-                  socketPath,
-                  command: "ping",
-                })
-                expect(pingRes.ok).toBe(false)
-                expect(String(pingRes.error)).toContain("failed git worktree validation")
-              }),
+          yield* withStartedDaemon(corruptGitDir, {}, (socketPath) =>
+            Effect.gen(function* () {
+              const pingRes = yield* queryWorkflowDaemonCommand({
+                socketPath,
+                command: "ping",
+              })
+              expect(pingRes.ok).toBe(false)
+              expect(String(pingRes.error)).toContain("failed git worktree validation")
+            }),
           ).pipe(Effect.provide(UnixSocketDaemonLive))
         }),
       ),

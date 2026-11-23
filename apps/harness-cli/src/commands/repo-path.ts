@@ -146,9 +146,12 @@ export const shouldSuppressLiveRepoTestSideEffects = (
   targetRepoRoot: string,
   env: NodeJS.ProcessEnv = process.env,
 ): boolean =>
-  (env["HARNESS_DISABLE_LIVE_TELEMETRY"] === "1" || env["HARNESS_TEST_ISOLATION"] === "1") &&
+  (env["HARNESS_DISABLE_LIVE_TELEMETRY"] === "1" ||
+    env["HARNESS_TEST_ISOLATION"] === "1" ||
+    env["VITEST"] === "true" ||
+    env["NODE_ENV"] === "test") &&
   (env["HARNESS_STATE_DIR"] === undefined || env["HARNESS_STATE_DIR"].trim() === "") &&
-  resolve(targetRepoRoot) === resolve(CLI_REPO_ROOT)
+  isInsideRoot(CLI_REPO_ROOT, targetRepoRoot)
 
 export const findWorkspaceRoot = (startDir: string = process.cwd()): string =>
   walkUpForPnpmWorkspace(startDir) ?? CLI_REPO_ROOT

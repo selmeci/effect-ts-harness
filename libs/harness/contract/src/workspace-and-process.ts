@@ -11,7 +11,10 @@ export { WorkspaceFilePath }
 export const isPureInterruptCause = <E>(cause: Cause.Cause<E>): boolean =>
   Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)
 
-export const WorkspaceFileContent = Schema.String.pipe(Schema.brand("WorkspaceFileContent"))
+export const WorkspaceFileContent = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(16_777_216)),
+  Schema.brand("WorkspaceFileContent"),
+)
 export type WorkspaceFileContent = typeof WorkspaceFileContent.Type
 
 export const WorkspaceFsOperation = Schema.Literals(["read", "write", "stat", "readdir"])
@@ -99,7 +102,7 @@ export const SubprocessTimeoutMs = Schema.Int.pipe(
 export type SubprocessTimeoutMs = typeof SubprocessTimeoutMs.Type
 
 export const SubprocessMaxBufferBytes = Schema.Int.pipe(
-  Schema.check(Schema.isGreaterThanOrEqualTo(1024)),
+  Schema.check(Schema.isBetween({ minimum: 1024, maximum: 16_777_216 })),
   Schema.brand("SubprocessMaxBufferBytes"),
 )
 export type SubprocessMaxBufferBytes = typeof SubprocessMaxBufferBytes.Type
@@ -119,7 +122,10 @@ export const SubprocessSignalName = Schema.NonEmptyString.pipe(
 )
 export type SubprocessSignalName = typeof SubprocessSignalName.Type
 
-export const SubprocessOutput = Schema.String.pipe(Schema.brand("SubprocessOutput"))
+export const SubprocessOutput = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(16_777_216)),
+  Schema.brand("SubprocessOutput"),
+)
 export type SubprocessOutput = typeof SubprocessOutput.Type
 
 export const SubprocessFailureKind = Schema.Literals([
@@ -202,16 +208,57 @@ export const ActiveMutantId = Schema.NonEmptyString.pipe(
 )
 export type ActiveMutantId = typeof ActiveMutantId.Type
 
+const fnv1a64Hex = (raw: string): string => {
+  let hash = 0xcbf29ce484222325n
+  const prime = 0x100000001b3n
+  const mask64 = 0xffffffffffffffffn
+  for (let i = 0; i < raw.length; i += 1) {
+    hash ^= BigInt(raw.charCodeAt(i))
+    hash = (hash * prime) & mask64
+  }
+  return hash.toString(16).padStart(16, "0")
+}
+
+const isHighSurrogate = (code: number): boolean => code >= 0xd800 && code <= 0xdbff
+const isLowSurrogate = (code: number): boolean => code >= 0xdc00 && code <= 0xdfff
+
+const truncateWithHashDigest = (raw: string, maxLength: number): string => {
+  if (raw.length <= maxLength) {
+    return raw
+  }
+  const suffix = `…[len=${raw.length},h=${fnv1a64Hex(raw)}]`
+  let prefixEnd = maxLength - suffix.length
+  if (isHighSurrogate(raw.charCodeAt(prefixEnd - 1)) && isLowSurrogate(raw.charCodeAt(prefixEnd))) {
+    prefixEnd -= 1
+  }
+  return `${raw.slice(0, prefixEnd)}${suffix}`
+}
+
 export const CompilerRepoRootPath = WorkspaceFilePath.pipe(Schema.brand("CompilerRepoRootPath"))
 export type CompilerRepoRootPath = typeof CompilerRepoRootPath.Type
 
-export const CompilerRepoRootInput = Schema.String.pipe(Schema.brand("CompilerRepoRootInput"))
+export const CompilerRepoRootInput = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(4096)),
+  Schema.brand("CompilerRepoRootInput"),
+)
 export type CompilerRepoRootInput = typeof CompilerRepoRootInput.Type
 
+export const toCompilerRepoRootInput = (raw: string): CompilerRepoRootInput =>
+  CompilerRepoRootInput.make(truncateWithHashDigest(raw, 4096))
+
 export const CompilerOverlayErrorReason = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isMaxLength(8192)),
   Schema.brand("CompilerOverlayErrorReason"),
 )
 export type CompilerOverlayErrorReason = typeof CompilerOverlayErrorReason.Type
+
+export const toCompilerOverlayErrorReason = (
+  raw: string,
+  fallback = "Compiler overlay operation failed",
+): CompilerOverlayErrorReason => {
+  const normalized = raw.length > 0 ? raw : fallback.length > 0 ? fallback : "Unknown error"
+  return CompilerOverlayErrorReason.make(normalized.slice(0, 8192))
+}
 
 export class TsCompilerOverlayError extends Schema.TaggedError<TsCompilerOverlayError>()(
   "TsCompilerOverlayError",
@@ -221,10 +268,17 @@ export class TsCompilerOverlayError extends Schema.TaggedError<TsCompilerOverlay
   },
 ) {}
 
-export const CliCommandName = Schema.NonEmptyString.pipe(Schema.brand("CliCommandName"))
+export const CliCommandName = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(256)),
+  Schema.brand("CliCommandName"),
+)
 export type CliCommandName = typeof CliCommandName.Type
 
-export const CliCommandInput = Schema.String.pipe(Schema.brand("CliCommandInput"))
+export const CliCommandInput = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(65_536)),
+  Schema.brand("CliCommandInput"),
+)
 export type CliCommandInput = typeof CliCommandInput.Type
 
 export class CliCommandNotFoundError extends Schema.TaggedError<CliCommandNotFoundError>()(
@@ -235,33 +289,78 @@ export class CliCommandNotFoundError extends Schema.TaggedError<CliCommandNotFou
   },
 ) {}
 
-export const McpToolName = Schema.NonEmptyString.pipe(Schema.brand("McpToolName"))
+export const CanonicalCliCommandName = Schema.Literals([
+  "guard",
+  "route",
+  "plan-check",
+  "plan-synth",
+  "repair",
+  "verify",
+  "done",
+  "learn",
+  "gc",
+  "mutate",
+  "bench",
+  "benchmark",
+  "ingest",
+  "session",
+  "doctor",
+  "ontology",
+  "report",
+  "check-openapi",
+  "check-migrations",
+  "check-event-schemas",
+  "scenario",
+  "workflow",
+  "help",
+]).pipe(Schema.brand("CanonicalCliCommandName"))
+export type CanonicalCliCommandName = typeof CanonicalCliCommandName.Type
+
+export const CANONICAL_CLI_COMMAND_NAMES: ReadonlyArray<CliCommandName> =
+  CanonicalCliCommandName.schema.literals.map((name) => CliCommandName.make(name))
+
+export const McpToolName = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(256)),
+  Schema.brand("McpToolName"),
+)
 export type McpToolName = typeof McpToolName.Type
 
-export const CANONICAL_MCP_TOOL_NAMES: ReadonlyArray<McpToolName> = [
-  McpToolName.make("harness_resolve"),
-  McpToolName.make("harness_callers"),
-  McpToolName.make("harness_callees"),
-  McpToolName.make("harness_tests_reaching"),
-  McpToolName.make("harness_structural_search"),
-  McpToolName.make("harness_route"),
-  McpToolName.make("harness_review_route"),
-  McpToolName.make("harness_ontology_why"),
-  McpToolName.make("harness_ontology_impact"),
-  McpToolName.make("harness_ontology_check"),
-  McpToolName.make("harness_gq_query"),
-  McpToolName.make("harness_lsp_diagnostics"),
-  McpToolName.make("harness_telemetry_report"),
-  McpToolName.make("harness_graph_infer"),
-  McpToolName.make("harness_graph_complete"),
-  McpToolName.make("harness_graph_rewrite"),
-  McpToolName.make("harness_git_diff"),
-  McpToolName.make("harness_search_knowledge"),
-  McpToolName.make("harness_doc_tree"),
-]
+export const CanonicalMcpToolName = Schema.Literals([
+  "harness_resolve",
+  "harness_callers",
+  "harness_callees",
+  "harness_tests_reaching",
+  "harness_structural_search",
+  "harness_route",
+  "harness_review_route",
+  "harness_ontology_why",
+  "harness_ontology_impact",
+  "harness_ontology_check",
+  "harness_gq_query",
+  "harness_lsp_diagnostics",
+  "harness_telemetry_report",
+  "harness_graph_infer",
+  "harness_graph_complete",
+  "harness_graph_rewrite",
+  "harness_git_diff",
+  "harness_workflow_plan",
+  "harness_search_knowledge",
+  "harness_doc_tree",
+]).pipe(Schema.brand("CanonicalMcpToolName"))
+export type CanonicalMcpToolName = typeof CanonicalMcpToolName.Type
 
-export const McpToolInputName = Schema.String.pipe(Schema.brand("McpToolInputName"))
+export const CANONICAL_MCP_TOOL_NAMES: ReadonlyArray<McpToolName> =
+  CanonicalMcpToolName.schema.literals.map((name) => McpToolName.make(name))
+
+export const McpToolInputName = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(256)),
+  Schema.brand("McpToolInputName"),
+)
 export type McpToolInputName = typeof McpToolInputName.Type
+
+export const toMcpToolInputName = (raw: string): McpToolInputName =>
+  McpToolInputName.make(truncateWithHashDigest(raw, 256))
 
 export class UnknownToolError extends Schema.TaggedError<UnknownToolError>()("UnknownToolError", {
   toolName: McpToolInputName,

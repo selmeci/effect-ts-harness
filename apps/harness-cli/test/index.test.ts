@@ -34,6 +34,10 @@ import {
   SpanTraceReadError,
 } from "../src/commands/verify-delta-gates.js"
 import {
+  isReadOnlyStopTurn,
+  isSubagentStopContext,
+} from "../src/commands/stop-hook-and-transcript.js"
+import {
   buildOmnigraphClusterKillArgs,
   cleanSubprocessError,
   COMMANDS,
@@ -66,6 +70,7 @@ describe("harness cli baseline", () => {
       "check-migrations",
       "check-event-schemas",
       "scenario",
+      "workflow",
       "help",
     ])
   })
@@ -118,6 +123,7 @@ describe("harness-cli v2 commands", () => {
       const deny = await runCli(["guard", "rm -rf /tmp/outside"])
       expect(deny.exitCode).toBe(2)
       expect(deny.stderr).toContain("Blocked by harness guard")
+      expect(deny.telemetryDetail).toContain("static;verdict=deny;reason=")
 
       const allow = await runCli(["guard", "pnpm test"])
       expect(allow.exitCode).toBe(0)
@@ -196,6 +202,9 @@ describe("harness-cli v2 commands", () => {
         decisionLayer: failingLayer,
       })
       expect(fallbackAsk.exitCode).toBe(0)
+      expect(deny.telemetryDetail).toContain("escalated;verdict=deny;reason=")
+      expect(allow.telemetryDetail).toBe("escalated;verdict=allow")
+      expect(fallbackAsk.telemetryDetail).toContain("escalated;verdict=ask;reason=")
       expect(JSON.parse(fallbackAsk.stdout)).toMatchObject({
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
@@ -701,6 +710,42 @@ enforced_by:
         rmSync(dir, { recursive: true, force: true })
       }
     })
+
+    it("SPEC-0024 REQ-1.3/1.4: does not misclassify Antigravity worktrees or explicit CLI done as subagents, and reads Path arg in transcripts", async () => {
+      expect(isSubagentStopContext("/home/roan/.gemini/antigravity/worktrees/repo/feat")).toBe(
+        false,
+      )
+      expect(
+        isSubagentStopContext("/repo", {
+          workspacePaths: ["/home/roan/.gemini/antigravity/worktrees/repo/feat"],
+        }),
+      ).toBe(false)
+
+      const dir = mkdtempSync(join(tmpdir(), "harness-cli-subagent-test-explicit-"))
+      try {
+        const cliSubagentDir = join(dir, "subagent-explicit-cli")
+        mkdirSync(cliSubagentDir, { recursive: true })
+        const explicitRes = await runCli(["done"], { repoRoot: cliSubagentDir })
+        expect(explicitRes.telemetryDetail).not.toBe("subagent=true")
+        expect(JSON.parse(explicitRes.stdout).decision).toBe("block")
+
+        const brainTranscript = join(dir, "brain-only.jsonl")
+        writeFileSync(
+          brainTranscript,
+          `${JSON.stringify({ step_index: 0, source: "USER_EXPLICIT", content: "plan" })}\n${JSON.stringify({ step_index: 1, source: "PLANNER_RESPONSE", tool_calls: [{ name: "write_file", args: { Path: "/home/user/.gemini/antigravity/brain/conv-1/task.md" } }] })}\n`,
+        )
+        expect(isReadOnlyStopTurn({ transcriptPath: brainTranscript })).toBe(true)
+
+        const codeTranscript = join(dir, "code-edit.jsonl")
+        writeFileSync(
+          codeTranscript,
+          `${JSON.stringify({ step_index: 0, source: "USER_EXPLICIT", content: "edit" })}\n${JSON.stringify({ step_index: 1, source: "PLANNER_RESPONSE", tool_calls: [{ name: "edit_file", args: { Path: "libs/sample/src/index.ts" } }] })}\n`,
+        )
+        expect(isReadOnlyStopTurn({ transcriptPath: codeTranscript })).toBe(false)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
   })
 
   describe("doctor and session", () => {
@@ -1156,22 +1201,25 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
     }
   })
 
-  it("F-6.7: flags embeddingsMode and retrievalMode discriminant branching across dot, optional chaining, computed bracket, nullish fallback, destructured params/aliases, and collection callbacks in both syntax-bans and test-integrity while preserving lexical scope and ignoring 'source'", () => {
-    interface VisitorStub {
-      Program?: (node: unknown) => void
-      VariableDeclarator?: (node: unknown) => void
-      AssignmentExpression?: (node: unknown) => void
-      BlockStatement?: (node: unknown) => void
-      "BlockStatement:exit"?: () => void
-      FunctionDeclaration?: (node: unknown) => void
-      "FunctionDeclaration:exit"?: () => void
-      ArrowFunctionExpression?: (node: unknown) => void
-      "ArrowFunctionExpression:exit"?: () => void
-      IfStatement?: (node: unknown) => void
-      ConditionalExpression?: (node: unknown) => void
-      CallExpression?: (node: unknown) => void
-    }
+  interface DiscriminantRuleVisitorStub {
+    Program?: (node: unknown) => void
+    VariableDeclarator?: (node: unknown) => void
+    AssignmentExpression?: (node: unknown) => void
+    BlockStatement?: (node: unknown) => void
+    "BlockStatement:exit"?: () => void
+    FunctionDeclaration?: (node: unknown) => void
+    "FunctionDeclaration:exit"?: () => void
+    ArrowFunctionExpression?: (node: unknown) => void
+    "ArrowFunctionExpression:exit"?: () => void
+    IfStatement?: (node: unknown) => void
+    ConditionalExpression?: (node: unknown) => void
+    CallExpression?: (node: unknown) => void
+  }
 
+  const runDiscriminantRuleChecks = (
+    expectedReports: 0 | 1,
+    visit: (visitor: DiscriminantRuleVisitorStub) => void,
+  ): void => {
     const targets = [
       {
         rule: syntaxBans,
@@ -1182,44 +1230,29 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         filename: "/repo/apps/harness-cli/test/omnigraph-lifecycle.test.ts",
       },
     ] as const
-
-    const runBanChecks = (visit: (visitor: VisitorStub) => void) => {
-      for (const target of targets) {
-        const reports: Array<{ message: string }> = []
-        const visitor = target.rule.create({
-          filename: target.filename,
-          sourceCode: { text: "export const x = 1" },
-          report: (r: { message: string }) => {
-            reports.push(r)
-          },
-        }) as VisitorStub
-        visitor.Program?.({})
-        visit(visitor)
-        expect(reports).toHaveLength(1)
+    for (const target of targets) {
+      const reports: Array<{ message: string }> = []
+      const visitor = target.rule.create({
+        filename: target.filename,
+        sourceCode: { text: "export const x = 1" },
+        report: (r: { message: string }) => {
+          reports.push(r)
+        },
+      }) as DiscriminantRuleVisitorStub
+      visitor.Program?.({})
+      visit(visitor)
+      expect(reports).toHaveLength(expectedReports)
+      if (expectedReports === 1) {
         expect(reports[0]?.message).toContain(
           "Do not use if/else or ternary expressions to branch on discriminated unions",
         )
       }
     }
+  }
 
-    const runAllowedChecks = (visit: (visitor: VisitorStub) => void) => {
-      for (const target of targets) {
-        const reports: Array<{ message: string }> = []
-        const visitor = target.rule.create({
-          filename: target.filename,
-          sourceCode: { text: "export const x = 1" },
-          report: (r: { message: string }) => {
-            reports.push(r)
-          },
-        }) as VisitorStub
-        visitor.Program?.({})
-        visit(visitor)
-        expect(reports).toHaveLength(0)
-      }
-    }
-
+  it("F-6.7 (part 1): flags embeddingsMode and retrievalMode discriminant branching across dot, optional chaining, computed bracket, destructuring, and nullish fallback", () => {
     // 1. Plain dot access: meta.retrievalMode === "bm25-only"
-    runBanChecks((visitor) => {
+    runDiscriminantRuleChecks(1, (visitor) => {
       visitor.IfStatement?.({
         type: "IfStatement",
         test: {
@@ -1237,7 +1270,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
     })
 
     // 2. Optional chaining: serverMeta?.embeddingsMode === "live"
-    runBanChecks((visitor) => {
+    runDiscriminantRuleChecks(1, (visitor) => {
       visitor.IfStatement?.({
         type: "IfStatement",
         test: {
@@ -1259,7 +1292,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
     })
 
     // 3. Computed bracket access: meta["embeddingsMode"] === "mock"
-    runBanChecks((visitor) => {
+    runDiscriminantRuleChecks(1, (visitor) => {
       visitor.ConditionalExpression?.({
         type: "ConditionalExpression",
         test: {
@@ -1277,7 +1310,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
     })
 
     // 4. Nested destructured alias with default + inline nullish fallback
-    runBanChecks((visitor) => {
+    runDiscriminantRuleChecks(1, (visitor) => {
       visitor.VariableDeclarator?.({
         type: "VariableDeclarator",
         id: {
@@ -1323,7 +1356,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
     })
 
     // 5. Nullish fallback alias & reassignment: const raw = meta?.embeddingsMode ?? "mock"; if (raw === "live")
-    runBanChecks((visitor) => {
+    runDiscriminantRuleChecks(1, (visitor) => {
       visitor.VariableDeclarator?.({
         type: "VariableDeclarator",
         id: { type: "Identifier", name: "rawMode" },
@@ -1353,9 +1386,11 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         },
       })
     })
+  })
 
+  it("F-6.7 (part 2): flags embeddingsMode and retrievalMode in collection callbacks while preserving lexical scope and ignoring 'source'", () => {
     // 6. Collection callback variants (destructured param, block pre-order alias, optional/computed callee, Effect data-first Array.filter)
-    runBanChecks((visitor) => {
+    runDiscriminantRuleChecks(1, (visitor) => {
       visitor.CallExpression?.({
         type: "CallExpression",
         callee: {
@@ -1391,7 +1426,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       })
     })
 
-    runBanChecks((visitor) => {
+    runDiscriminantRuleChecks(1, (visitor) => {
       visitor.CallExpression?.({
         type: "CallExpression",
         callee: {
@@ -1442,7 +1477,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       })
     })
 
-    runBanChecks((visitor) => {
+    runDiscriminantRuleChecks(1, (visitor) => {
       visitor.CallExpression?.({
         type: "CallExpression",
         callee: {
@@ -1473,7 +1508,7 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
     })
 
     // 7. Lexical scope isolation and non-discriminant 'source' property must NOT be flagged
-    runAllowedChecks((visitor) => {
+    runDiscriminantRuleChecks(0, (visitor) => {
       visitor.ArrowFunctionExpression?.({
         type: "ArrowFunctionExpression",
         params: [
@@ -2235,7 +2270,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         "Do not use unbranded Schema.NonEmptyString for field 'albumId' in Schema.Struct",
       )
     }
+  })
 
+  it("flags raw primitive parameters at exported domain boundaries and unsafe brand casts", () => {
     // REQ-2.4: Raw primitive parameter in exported Effect.fn in type:domain
     {
       const reports: Array<{ message: string }> = []
@@ -2333,7 +2370,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       expect(reports[0]?.message).toContain("Brand.make")
       expect(reports[0]?.message).not.toContain("Brand.refined")
     }
+  })
 
+  it("flags duplicate Schema.brand keys and unbranded quantity/TaggedUnion contract schemas", () => {
     // F-1: Duplicate Schema.brand('<Key>') across multiple schemas in same file
     {
       const reports: Array<{ message: string }> = []
@@ -2477,7 +2516,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
         "Do not use unbranded Schema.String for field 'itemId' in Schema.TaggedUnion",
       )
     }
+  })
 
+  it("flags inline object type aliases, inline object/primitive domain boundaries, and Schema.Int quantity schemas", () => {
     // F-7 & User Request: Inline object type alias ban and inline object parameter/return ban on service & domain boundaries
     {
       const reports: Array<{ message: string }> = []
@@ -2726,7 +2767,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       expect(reports).toHaveLength(1)
       expect(reports[0]?.message).toContain("unmanaged-sql-ddl")
     }
+  })
 
+  it("validates SqliteMigrator.fromRecord migration keys, spread declarations, and duplicate numeric ids", () => {
     // 3. Named migration variable + spread: const aggregateCoreMigrations = { "1_init_tables": eff1, "bad_key_after": eff2 } followed by SqliteMigrator.fromRecord({ ...aggregateCoreMigrations }) flags "bad_key_after" with invalid-migrator-record-key
     {
       const reports: Array<{ message: string }> = []
@@ -2827,7 +2870,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       expect(reports[0]?.message).toContain("invalid-migrator-record-key")
       expect(reports[0]?.message).toContain("1_InitTables")
     }
+  })
 
+  it("rejects duplicate SqliteMigrator numeric migration ids and allows sequential snake_case keys", () => {
     // 5. Duplicate numeric IDs "1_first" and "1_duplicate" are flagged with invalid-migrator-record-key
     {
       const reports: Array<{ message: string }> = []
@@ -2972,7 +3017,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       }
       expect(validReports).toHaveLength(0)
     }
+  })
 
+  it("flags ignored-chmod-permission in Effect.try pipes while allowing fail-closed catch handlers", () => {
     // 2. ignored-chmod-permission: chmodSync/fchmodSync inside .pipe(Effect.ignore / Effect.orElseSucceed) is flagged; fail-closed is allowed
     {
       const reports: Array<{ message: string }> = []
@@ -3079,7 +3126,9 @@ describe("syntax-bans and test-integrity oxlint rules (effect-es#2 discovery)", 
       })
       expect(safeReports).toHaveLength(0)
     }
+  })
 
+  it("flags catch-cause-interrupts-only inside runPromiseExit / runSyncExit while allowing tests and Cause.hasInterrupts", () => {
     // 3. catch-cause-interrupts-only inside Effect.runPromiseExit / Effect.runSyncExit is flagged; test files and Cause.hasInterrupts are allowed
     {
       const reports: Array<{ message: string }> = []

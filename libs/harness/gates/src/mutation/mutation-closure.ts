@@ -390,8 +390,10 @@ const resolveWorkspacePackageImport = (
 }
 
 const extractPackageKey = (relPath: string): string | undefined => {
-  const m = /^libs\/([^/]+)\/([^/]+)\//.exec(relPath)
-  return m !== null ? `${m[1]!}/${m[2]!}` : undefined
+  const libMatch = /^libs\/([^/]+)\/([^/]+)\//.exec(relPath)
+  if (libMatch !== null) return `${libMatch[1]!}/${libMatch[2]!}`
+  const appMatch = /^apps\/([^/]+)\//.exec(relPath)
+  return appMatch !== null ? `apps/${appMatch[1]!}` : undefined
 }
 
 const formatDigestPresence = (digest: ContentSha256 | undefined): string =>

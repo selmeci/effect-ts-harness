@@ -190,7 +190,7 @@ export const buildGovAndPatternShaMaps = (
     govShaMap.set(
       d.path,
       computeContentSha256(
-        `${d.id}:${d.title}:${d.status}:${(d.referencedSpans ?? []).join(",")}:${(d.referencedServices ?? []).join(",")}:${(d.referencedErrors ?? []).join(",")}:${extraHash}`,
+        `${d.id}:${d.title}:${d.status}:${(d.enforcedByFiles ?? []).join(",")}:${(d.referencedSpans ?? []).join(",")}:${(d.referencedServices ?? []).join(",")}:${(d.referencedErrors ?? []).join(",")}:${extraHash}`,
       ),
     )
   }

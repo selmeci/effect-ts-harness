@@ -57,7 +57,6 @@ export {
   collectModularPluginFiles,
   IGNORED_SERVICES,
   IGNORED_ERRORS,
-  IGNORED_UNTESTED_FNS,
 } from "./plugins/gc/gc-helpers.js"
 export type { GovernanceDocStatus } from "@harness/graph"
 export {
@@ -69,6 +68,9 @@ export { evaluateTestAndDeciderPlugin } from "./plugins/gc/gc-test-and-decider.p
 export { evaluateGovernanceDocsPlugin } from "./plugins/gc/gc-governance-docs.plugin.js"
 export { evaluatePackageAndMigrationPlugin } from "./plugins/gc/gc-package-and-migration.plugin.js"
 export {
+  ADAPTER_SKILL_PARITY_CLAUSES,
+  auditAdapterSkillParityPair,
+  auditCatalogDocTruthInContent,
   evaluateDocTruthPlugin,
   extractGateRuleIdsFromSources,
 } from "./plugins/gc/gc-doc-truth.plugin.js"

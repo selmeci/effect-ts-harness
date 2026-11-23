@@ -21,11 +21,30 @@ export interface SessionHandoffSummary {
   readonly handoffMessage: string | null
 }
 
+const MAX_FRICTION_SUMMARY_CHARS = 120
+const MAX_HANDOFF_LIST_ITEMS = 8
+
+const formatCompactFrictionSummary = (summary: string): string => {
+  const collapsed = summary.replace(/\s+/g, " ").trim()
+  if (collapsed.length <= MAX_FRICTION_SUMMARY_CHARS) {
+    return collapsed
+  }
+  return `${collapsed.slice(0, MAX_FRICTION_SUMMARY_CHARS - 3)}...`
+}
+
+const formatBoundedItemList = (items: ReadonlyArray<string>): string => {
+  if (items.length <= MAX_HANDOFF_LIST_ITEMS) {
+    return items.join(", ")
+  }
+  const visible = items.slice(0, MAX_HANDOFF_LIST_ITEMS).join(", ")
+  return `${visible} (+${String(items.length - MAX_HANDOFF_LIST_ITEMS)} more)`
+}
+
 export const buildSessionHandoff = (input: SessionHandoffInput): SessionHandoffSummary => {
   const recentFrictionCount = input.frictionClusters.reduce((acc, c) => acc + c.occurrences, 0)
   const topFrictionSummary = input.frictionClusters
     .slice(0, 3)
-    .map((c) => `[${c.kind} x${c.occurrences}] ${c.summary}`)
+    .map((c) => `[${c.kind} x${c.occurrences}] ${formatCompactFrictionSummary(c.summary)}`)
 
   const isStuck = input.loopThrashing?.stuck === true
   const stuckLoopEscalation =
@@ -46,11 +65,11 @@ export const buildSessionHandoff = (input: SessionHandoffInput): SessionHandoffS
       lines.push(input.loopThrashing.escalationMessage)
     }
     if (input.activeStubs.length > 0) {
-      lines.push(`Active stub() skeletons remaining: ${input.activeStubs.join(", ")}`)
+      lines.push(`Active stub() skeletons remaining: ${formatBoundedItemList(input.activeStubs)}`)
     }
     if (input.missingPlannedFns.length > 0) {
       lines.push(
-        `Missing planned functions from plan-graph-snapshot: ${input.missingPlannedFns.join(", ")}`,
+        `Missing planned functions from plan-graph-snapshot: ${formatBoundedItemList(input.missingPlannedFns)}`,
       )
     }
     if (!input.stampValid) {

@@ -236,12 +236,19 @@ export interface OmnigraphNdjsonExportOptions {
   readonly clearMissingEmbeddings?: boolean | undefined
 }
 
-export const toOmnigraphServerNdjsonResult = (
+export interface OmnigraphSplitNdjsonPayload {
+  readonly structuralNdjson: string
+  readonly vectorOverlayNdjson: string
+}
+
+const buildOmnigraphNdjsonParts = (
   graph: HarnessGraph,
   embeddingsByNodeKey?: ReadonlyMap<string, ReadonlyArray<number>>,
   options?: OmnigraphNdjsonExportOptions,
-): Result.Result<string, OmnigraphLoadError> => {
+  splitVectors = false,
+): Result.Result<OmnigraphSplitNdjsonPayload, OmnigraphLoadError> => {
   const nodeLines: Array<string> = []
+  const vectorOverlayLines: Array<string> = []
   const seenNodes = new Set<string>()
   const nodeMetaByKey = new Map<
     string,
@@ -252,24 +259,41 @@ export const toOmnigraphServerNdjsonResult = (
   const lookupEmbedding = (key: string, id: string): ReadonlyArray<number> | undefined =>
     embeddingsByNodeKey?.get(key) ?? embeddingsByNodeKey?.get(id)
 
-  const toEmbeddingField = (
-    propName: "summaryEmbedding" | "searchEmbedding" | "clauseEmbedding",
-    vec: ReadonlyArray<number> | undefined,
-  ): Readonly<Record<string, ReadonlyArray<number> | null>> => {
-    if (vec !== undefined) {
-      return { [propName]: vec }
-    }
-    if (embeddingsByNodeKey !== undefined && clearMissing) {
-      return { [propName]: null }
-    }
-    return {}
-  }
-
   const pushNode = (type: string, id: string, data: Record<string, unknown>): void => {
     const dedupKey = `${type}::${id}`
     if (seenNodes.has(dedupKey)) return
     seenNodes.add(dedupKey)
     nodeLines.push(JSON.stringify({ type, id, data }))
+  }
+
+  const pushEmbeddableNode = (
+    type: string,
+    id: string,
+    propName: "summaryEmbedding" | "searchEmbedding" | "clauseEmbedding",
+    vec: ReadonlyArray<number> | undefined,
+    baseData: Record<string, unknown>,
+  ): void => {
+    if (seenNodes.has(`${type}::${id}`)) return
+    if (splitVectors) {
+      const clearField =
+        vec === undefined && embeddingsByNodeKey !== undefined && clearMissing
+          ? { [propName]: null }
+          : {}
+      pushNode(type, id, { ...baseData, ...clearField })
+      if (vec !== undefined) {
+        vectorOverlayLines.push(
+          JSON.stringify({ type, id, data: { ...baseData, [propName]: vec } }),
+        )
+      }
+      return
+    }
+    const inlineField =
+      vec !== undefined
+        ? { [propName]: vec }
+        : embeddingsByNodeKey !== undefined && clearMissing
+          ? { [propName]: null }
+          : {}
+    pushNode(type, id, { ...baseData, ...inlineField })
   }
 
   for (const [, node] of Graph.nodes(graph.graph)) {
@@ -373,8 +397,7 @@ export const toOmnigraphServerNdjsonResult = (
       .with({ _tag: "PatternDoc" }, (n) => {
         if (!n.slug) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.slug })
-        const embeddingField = toEmbeddingField("summaryEmbedding", lookupEmbedding(key, n.slug))
-        pushNode("PatternDoc", n.slug, {
+        pushEmbeddableNode("PatternDoc", n.slug, "summaryEmbedding", lookupEmbedding(key, n.slug), {
           slug: n.slug,
           qualname: n.slug,
           path: n.path,
@@ -382,15 +405,13 @@ export const toOmnigraphServerNdjsonResult = (
           ...(n.title ? { title: n.title } : {}),
           ...(n.coveredSpans ? { coveredSpans: n.coveredSpans } : {}),
           ...(n.coveredTags ? { coveredTags: n.coveredTags } : {}),
-          ...embeddingField,
           ...archimateFields,
         })
       })
       .with({ _tag: "AdrDoc" }, (n) => {
         if (!n.id) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.id })
-        const embeddingField = toEmbeddingField("searchEmbedding", lookupEmbedding(key, n.id))
-        pushNode("AdrDoc", n.id, {
+        pushEmbeddableNode("AdrDoc", n.id, "searchEmbedding", lookupEmbedding(key, n.id), {
           id: n.id,
           qualname: n.id,
           title: n.title,
@@ -402,7 +423,6 @@ export const toOmnigraphServerNdjsonResult = (
           ...(n.referencedServices ? { referencedServices: n.referencedServices } : {}),
           ...(n.referencedErrors ? { referencedErrors: n.referencedErrors } : {}),
           ...(n.searchText ? { searchText: n.searchText } : {}),
-          ...embeddingField,
           ...archimateFields,
         })
       })
@@ -427,8 +447,7 @@ export const toOmnigraphServerNdjsonResult = (
       .with({ _tag: "EarsRequirement" }, (n) => {
         if (!n.id) return
         nodeMetaByKey.set(key, { tag: n._tag, id: n.id })
-        const embeddingField = toEmbeddingField("clauseEmbedding", lookupEmbedding(key, n.id))
-        pushNode("EarsRequirement", n.id, {
+        pushEmbeddableNode("EarsRequirement", n.id, "clauseEmbedding", lookupEmbedding(key, n.id), {
           id: n.id,
           qualname: n.id,
           specId: n.specId,
@@ -441,7 +460,6 @@ export const toOmnigraphServerNdjsonResult = (
           path: n.path,
           line: n.line,
           status: n.status,
-          ...embeddingField,
           ...archimateFields,
         })
       })
@@ -596,8 +614,28 @@ export const toOmnigraphServerNdjsonResult = (
     }
   }
 
-  return Result.succeed([...nodeLines, ...validEdgeLines].join("\n"))
+  return Result.succeed({
+    structuralNdjson: [...nodeLines, ...validEdgeLines].join("\n"),
+    vectorOverlayNdjson: vectorOverlayLines.join("\n"),
+  })
 }
+
+export const toOmnigraphSplitNdjsonResult = (
+  graph: HarnessGraph,
+  embeddingsByNodeKey?: ReadonlyMap<string, ReadonlyArray<number>>,
+  options?: OmnigraphNdjsonExportOptions,
+): Result.Result<OmnigraphSplitNdjsonPayload, OmnigraphLoadError> =>
+  buildOmnigraphNdjsonParts(graph, embeddingsByNodeKey, options, true)
+
+export const toOmnigraphServerNdjsonResult = (
+  graph: HarnessGraph,
+  embeddingsByNodeKey?: ReadonlyMap<string, ReadonlyArray<number>>,
+  options?: OmnigraphNdjsonExportOptions,
+): Result.Result<string, OmnigraphLoadError> =>
+  Result.map(
+    buildOmnigraphNdjsonParts(graph, embeddingsByNodeKey, options, false),
+    ({ structuralNdjson }) => structuralNdjson,
+  )
 
 export const toOmnigraphServerNdjson = (graph: HarnessGraph): string =>
   Result.getOrThrow(toOmnigraphServerNdjsonResult(graph))

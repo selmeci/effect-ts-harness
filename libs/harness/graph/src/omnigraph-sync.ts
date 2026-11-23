@@ -45,6 +45,8 @@ import {
   resolveOmnigraphBaseUrl as resolveOmnigraphBaseUrlFromOps,
   toOmnigraphServerNdjson,
   toOmnigraphServerNdjsonResult,
+  type OmnigraphSplitNdjsonPayload,
+  toOmnigraphSplitNdjsonResult,
 } from "./omnigraph-operations.js"
 import { decodeStrictOptionalCommitId, executeLoadWithStaleRefork } from "./omnigraph-v014-ops.js"
 
@@ -53,6 +55,8 @@ export {
   OmnigraphLoadError,
   toOmnigraphServerNdjson,
   toOmnigraphServerNdjsonResult,
+  type OmnigraphSplitNdjsonPayload,
+  toOmnigraphSplitNdjsonResult,
   type OmnigraphNdjsonExportOptions,
   type OmnigraphBlobSelectorInput,
   type OmnigraphBlobStatResult,
@@ -217,15 +221,15 @@ export const makeOmnigraphSyncLayer = (
       sync: (graph, options) =>
         Effect.gen(function* () {
           const snapshotPath = options?.snapshotPath ?? ".harness/graph-snapshot.json"
-          const ndjsonRes = toOmnigraphServerNdjsonResult(graph, options?.embeddingsByNodeKey, {
+          const ndjsonRes = toOmnigraphSplitNdjsonResult(graph, options?.embeddingsByNodeKey, {
             clearMissingEmbeddings: options?.clearMissingEmbeddings,
           })
-          const ndjson = match(ndjsonRes)
+          const splitPayload = match(ndjsonRes)
             .with({ _tag: "Success" }, ({ success }) => success)
             .with({ _tag: "Failure" }, () => undefined)
             .exhaustive()
 
-          if (ndjson === undefined) {
+          if (splitPayload === undefined) {
             return match(ndjsonRes)
               .with({ _tag: "Failure" }, ({ failure }) => ({
                 syncedToOmnigraph: false,
@@ -239,7 +243,7 @@ export const makeOmnigraphSyncLayer = (
               .exhaustive()
           }
 
-          if (ndjson.trim().length === 0) {
+          if (splitPayload.structuralNdjson.trim().length === 0) {
             return {
               syncedToOmnigraph: false,
               snapshotPath,
@@ -257,12 +261,24 @@ export const makeOmnigraphSyncLayer = (
           const mode = options?.mode ?? (branch !== "main" ? "overwrite" : "merge")
           const fromOpt = branch !== "main" ? (options?.from ?? "main") : undefined
 
-          return yield* executeLoadWithStaleRefork(og, {
-            branch,
-            from: fromOpt,
-            mode,
-            data: ndjson,
-          }).pipe(
+          const runTwoPassLoad = Effect.gen(function* () {
+            const structuralRes = yield* executeLoadWithStaleRefork(og, {
+              branch,
+              from: fromOpt,
+              mode,
+              data: splitPayload.structuralNdjson,
+            })
+            if (splitPayload.vectorOverlayNdjson.trim().length > 0) {
+              return yield* executeLoadWithStaleRefork(og, {
+                branch,
+                mode: "merge",
+                data: splitPayload.vectorOverlayNdjson,
+              })
+            }
+            return structuralRes
+          })
+
+          return yield* runTwoPassLoad.pipe(
             Effect.flatMap((loadRes) => {
               return match(decodeStrictOptionalCommitId(loadRes.commit?.graphCommitId))
                 .with({ _tag: "Failure" }, ({ failure }) => Effect.fail(failure))

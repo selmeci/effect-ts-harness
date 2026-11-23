@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { dirname } from "node:path"
 import { NodeServices } from "@effect/platform-node"
-import { Effect, FileSystem, Layer, Path } from "effect"
+import { Effect, FileSystem, Layer, Path, Schema } from "effect"
 import { match, P } from "ts-pattern"
 import {
   toErrorReasonMessage,
@@ -36,7 +36,7 @@ const makeWorkspaceFsLayer = (
       const impl: WorkspaceFsShape = {
         readTextFile: (filePath) =>
           fs.readFileString(filePath).pipe(
-            Effect.map((content) => WorkspaceFileContent.make(content)),
+            Effect.flatMap((content) => Schema.decodeEffect(WorkspaceFileContent)(content)),
             Effect.mapError((err) => toWorkspaceFsError(filePath, "read", err)),
           ),
         writeTextFileAtomic: (filePath, content) =>

@@ -30,6 +30,16 @@
             "timeout": 15
           }
         ]
+      },
+      {
+        "matcher": "Read|Grep|Glob|LS|Find",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts guard || exit 2",
+            "timeout": 15
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -48,7 +58,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done || exit 2",
+            "command": "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/hook-entry.ts done || exit 2",
             "timeout": 30
           }
         ]

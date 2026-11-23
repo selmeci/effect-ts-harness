@@ -1769,6 +1769,1158 @@ function checkNeverParams(context, node) {
   }
 }
 
+const WF_FS_MODULES = new Set(["node:fs", "fs", "node:fs/promises", "fs/promises"])
+const WF_CHILD_PROCESS_MODULES = new Set(["node:child_process", "child_process"])
+const WF_NETWORK_MODULES = new Set(["node:http", "http", "node:https", "https", "node:net", "net"])
+const WF_CRYPTO_MODULES = new Set(["node:crypto", "crypto"])
+const WF_CRYPTO_RANDOM_EXPORTS = new Set([
+  "randomUUID",
+  "randomBytes",
+  "randomInt",
+  "randomFillSync",
+  "getRandomValues",
+])
+const WF_OMNIGRAPH_IMPORTS = new Set([
+  "OmnigraphClient",
+  "createOmnigraphClient",
+  "invokeStoredQuery",
+  "invokeWorkflowStoreQuery",
+  "invokeWorkflowStoreQueryWithMeta",
+])
+const WF_FS_DIRECT_CALLEES = new Set([
+  "readFileSync",
+  "writeFileSync",
+  "appendFileSync",
+  "mkdirSync",
+  "rmSync",
+  "unlinkSync",
+  "readdirSync",
+  "statSync",
+  "existsSync",
+  "readFile",
+  "writeFile",
+])
+const WF_SUBPROCESS_DIRECT_CALLEES = new Set([
+  "execFileSync",
+  "spawnSync",
+  "execSync",
+  "execFile",
+  "exec",
+  "spawn",
+  "execCheckedSubprocess",
+])
+const WF_NETWORK_MEMBER_CALLS = new Set([
+  "http.request",
+  "http.get",
+  "https.request",
+  "https.get",
+  "net.connect",
+  "net.createConnection",
+])
+const WF_OMNIGRAPH_METHODS = new Set(["invokeQuery", "runQuery", "executeQuery"])
+
+function checkWorkflowBodyDeterminismEstree(programNode, filename, reportOnce) {
+  if (programNode == null || !Array.isArray(programNode.body)) return
+  if (typeof filename !== "string" || isTestFilePath(filename)) return
+  if (!/(?:^|\/)(?:libs|apps)\/.*\/src\//.test(filename)) return
+
+  const wfAliases = new Set(["Workflow"])
+  const wfMakeAliases = new Set()
+  const actAliases = new Set(["Activity"])
+  const actMakeAliases = new Set()
+  const engineAliases = new Set(["WorkflowEngine"])
+  const effectAliases = new Set(["Effect"])
+  const bannedBindings = new Map()
+  const cryptoNsAliases = new Set(["crypto"])
+  const fsNsAliases = new Set()
+  const childProcessNsAliases = new Set()
+  const netNsAliases = new Set()
+
+  const recordBinding = (spec, localName, importedName) => {
+    if (localName == null) return
+    if (spec === "effect/workflow") {
+      if (importedName === "Workflow") wfAliases.add(localName)
+      if (importedName === "Activity") actAliases.add(localName)
+      if (importedName === "WorkflowEngine") engineAliases.add(localName)
+    } else if (spec === "effect/workflow/Workflow") {
+      if (importedName === "make") wfMakeAliases.add(localName)
+      if (importedName == null) wfAliases.add(localName)
+    } else if (spec === "effect/workflow/Activity") {
+      if (importedName === "make") actMakeAliases.add(localName)
+      if (importedName == null) actAliases.add(localName)
+    } else if (spec === "effect" && importedName === "Effect") {
+      effectAliases.add(localName)
+    } else if (spec === "effect/Effect" && importedName == null) {
+      effectAliases.add(localName)
+    }
+
+    if (WF_FS_MODULES.has(spec)) {
+      if (importedName == null) fsNsAliases.add(localName)
+      bannedBindings.set(localName, "filesystem")
+    } else if (WF_CHILD_PROCESS_MODULES.has(spec)) {
+      if (importedName == null) childProcessNsAliases.add(localName)
+      bannedBindings.set(localName, "subprocess")
+    } else if (WF_NETWORK_MODULES.has(spec)) {
+      if (importedName == null) netNsAliases.add(localName)
+      bannedBindings.set(localName, "network")
+    } else if (WF_CRYPTO_MODULES.has(spec)) {
+      if (importedName == null) {
+        cryptoNsAliases.add(localName)
+      } else if (WF_CRYPTO_RANDOM_EXPORTS.has(importedName)) {
+        bannedBindings.set(localName, "randomness")
+      }
+    }
+    if (importedName != null && WF_OMNIGRAPH_IMPORTS.has(importedName)) {
+      bannedBindings.set(localName, "omnigraph")
+    }
+  }
+
+  for (const stmt of programNode.body) {
+    if (stmt == null || stmt.type !== "ImportDeclaration" || stmt.importKind === "type") continue
+    const spec = stmt.source && typeof stmt.source.value === "string" ? stmt.source.value : null
+    if (spec == null || !Array.isArray(stmt.specifiers)) continue
+    for (const s of stmt.specifiers) {
+      if (s == null || s.importKind === "type") continue
+      if (s.type === "ImportDefaultSpecifier" || s.type === "ImportNamespaceSpecifier") {
+        recordBinding(spec, s.local?.name, undefined)
+      } else if (s.type === "ImportSpecifier") {
+        recordBinding(spec, s.local?.name, s.imported?.name ?? s.local?.name)
+      }
+    }
+  }
+
+  const unwrap = (node) => {
+    let curr = node
+    while (
+      curr != null &&
+      (curr.type === "TSAsExpression" ||
+        curr.type === "TSTypeAssertion" ||
+        curr.type === "TSSatisfiesExpression" ||
+        curr.type === "TSNonNullExpression" ||
+        curr.type === "ParenthesizedExpression" ||
+        curr.type === "ChainExpression")
+    ) {
+      curr = curr.expression
+    }
+    return curr
+  }
+
+  const getMemberParts = (expr) => {
+    const u = unwrap(expr)
+    if (u == null || u.type !== "MemberExpression") return null
+    if (u.computed !== true && u.property?.type === "Identifier") {
+      return { receiver: unwrap(u.object), name: u.property.name }
+    }
+    if (u.computed === true) {
+      const k = getStaticModuleString(u.property)
+      if (k != null) return { receiver: unwrap(u.object), name: k }
+    }
+    return null
+  }
+
+  const getRootedName = (expr) => {
+    const u = unwrap(expr)
+    if (u == null) return null
+    if (u.type === "Identifier") return u.name
+    const m = getMemberParts(u)
+    if (m == null) return null
+    if (m.receiver?.type === "Identifier") {
+      if (m.receiver.name === "globalThis") return m.name
+      return `${m.receiver.name}.${m.name}`
+    }
+    const outer = getMemberParts(m.receiver)
+    if (
+      outer != null &&
+      outer.receiver?.type === "Identifier" &&
+      outer.receiver.name === "globalThis"
+    ) {
+      return `${outer.name}.${m.name}`
+    }
+    return null
+  }
+
+  const isWfMakeCall = (callNode) => {
+    if (callNode == null || callNode.type !== "CallExpression") return false
+    const callee = unwrap(callNode.callee)
+    if (callee?.type === "Identifier") return wfMakeAliases.has(callee.name)
+    const m = getMemberParts(callee)
+    return (
+      m != null &&
+      m.name === "make" &&
+      m.receiver?.type === "Identifier" &&
+      wfAliases.has(m.receiver.name)
+    )
+  }
+
+  const isActMakeCall = (callNode) => {
+    if (callNode == null || callNode.type !== "CallExpression") return false
+    const callee = unwrap(callNode.callee)
+    if (callee?.type === "Identifier") return actMakeAliases.has(callee.name)
+    const m = getMemberParts(callee)
+    return (
+      m != null &&
+      m.name === "make" &&
+      m.receiver?.type === "Identifier" &&
+      actAliases.has(m.receiver.name)
+    )
+  }
+
+  const declaredWorkflowVars = new Set()
+  const isWorkflowReceiverExpr = (expr) => {
+    const u = unwrap(expr)
+    if (u?.type === "Identifier") return declaredWorkflowVars.has(u.name)
+    if (u?.type === "CallExpression") return isWfMakeCall(u)
+    return false
+  }
+
+  const isToLayerOrRegister = (callNode) => {
+    const m = getMemberParts(callNode.callee)
+    if (m == null) return false
+    if (
+      m.name === "toLayer" &&
+      Array.isArray(callNode.arguments) &&
+      callNode.arguments.length >= 1
+    ) {
+      return isWorkflowReceiverExpr(m.receiver)
+    }
+    return (
+      m.name === "register" &&
+      m.receiver?.type === "Identifier" &&
+      engineAliases.has(m.receiver.name) &&
+      Array.isArray(callNode.arguments) &&
+      callNode.arguments.length >= 2
+    )
+  }
+
+  const wfMakeCalls = []
+  const toLayerCalls = []
+
+  const visitAll = (node, fn) => {
+    if (node == null || typeof node !== "object") return
+    fn(node)
+    for (const key of Object.keys(node)) {
+      if (key === "parent" || key === "loc" || key === "range") continue
+      const child = node[key]
+      if (Array.isArray(child)) {
+        for (const item of child) visitAll(item, fn)
+      } else if (child != null && typeof child === "object" && child.type) {
+        visitAll(child, fn)
+      }
+    }
+  }
+
+  visitAll(programNode, (n) => {
+    if (n.type === "CallExpression" && isWfMakeCall(n)) wfMakeCalls.push(n)
+    if (n.type === "VariableDeclarator" && n.id?.type === "Identifier" && n.init != null) {
+      if (isWfMakeCall(unwrap(n.init))) declaredWorkflowVars.add(n.id.name)
+    }
+    if (
+      n.type === "ClassDeclaration" &&
+      n.id?.type === "Identifier" &&
+      n.superClass != null &&
+      isWorkflowReceiverExpr(n.superClass)
+    ) {
+      declaredWorkflowVars.add(n.id.name)
+    }
+  })
+
+  if (wfMakeCalls.length === 0) return
+
+  visitAll(programNode, (n) => {
+    if (n.type === "CallExpression" && isToLayerOrRegister(n)) toLayerCalls.push(n)
+  })
+
+  const unwrapEffectFn = (expr) => {
+    const u = unwrap(expr)
+    if (
+      u == null ||
+      u.type !== "CallExpression" ||
+      !Array.isArray(u.arguments) ||
+      u.arguments.length === 0
+    ) {
+      return u
+    }
+    const callee = unwrap(u.callee)
+    const m = getMemberParts(callee)
+    if (
+      m != null &&
+      m.name === "fnUntraced" &&
+      m.receiver?.type === "Identifier" &&
+      effectAliases.has(m.receiver.name)
+    ) {
+      return unwrap(u.arguments[0])
+    }
+    if (callee != null && callee.type === "CallExpression") {
+      const inner = getMemberParts(callee.callee)
+      if (
+        inner != null &&
+        inner.name === "fn" &&
+        inner.receiver?.type === "Identifier" &&
+        effectAliases.has(inner.receiver.name)
+      ) {
+        return unwrap(u.arguments[0])
+      }
+    }
+    return u
+  }
+
+  const localFunctions = new Map()
+  const topStmts = new Set(programNode.body)
+  const recordLocalFns = (stmt, isExportedStmt, currNode) => {
+    if (currNode == null || typeof currNode !== "object") return
+    if (
+      currNode.type === "FunctionDeclaration" &&
+      currNode.id?.type === "Identifier" &&
+      currNode.body != null
+    ) {
+      localFunctions.set(currNode.id.name, {
+        body: currNode.body,
+        isExported: isExportedStmt && topStmts.has(currNode === stmt.declaration ? stmt : currNode),
+        topStmt:
+          currNode === stmt ||
+          (stmt.type === "ExportNamedDeclaration" && stmt.declaration === currNode)
+            ? stmt
+            : null,
+      })
+    } else if (
+      currNode.type === "VariableDeclarator" &&
+      currNode.id?.type === "Identifier" &&
+      currNode.init != null
+    ) {
+      const impl = unwrapEffectFn(currNode.init)
+      if (
+        impl != null &&
+        (impl.type === "ArrowFunctionExpression" || impl.type === "FunctionExpression")
+      ) {
+        const declStmt =
+          stmt.type === "ExportNamedDeclaration" && stmt.declaration?.type === "VariableDeclaration"
+            ? stmt.declaration
+            : stmt.type === "VariableDeclaration"
+              ? stmt
+              : null
+        const isSingleTopDecl =
+          declStmt != null &&
+          Array.isArray(declStmt.declarations) &&
+          declStmt.declarations.length === 1 &&
+          declStmt.declarations[0] === currNode
+        localFunctions.set(currNode.id.name, {
+          body: impl.body,
+          isExported: isExportedStmt && isSingleTopDecl,
+          topStmt: isSingleTopDecl ? stmt : null,
+        })
+      }
+    }
+    for (const key of Object.keys(currNode)) {
+      if (key === "parent" || key === "loc" || key === "range") continue
+      const child = currNode[key]
+      if (Array.isArray(child)) {
+        for (const item of child) recordLocalFns(stmt, isExportedStmt, item)
+      } else if (child != null && typeof child === "object" && child.type) {
+        recordLocalFns(stmt, isExportedStmt, child)
+      }
+    }
+  }
+  for (const stmt of programNode.body) {
+    if (stmt == null) continue
+    const isExp = stmt.type === "ExportNamedDeclaration" || stmt.type === "ExportDefaultDeclaration"
+    recordLocalFns(stmt, isExp, stmt)
+  }
+
+  const getActivityPropName = (prop) => {
+    if (prop != null && prop.type === "Property" && prop.computed !== true) {
+      if (prop.key?.type === "Identifier") return prop.key.name
+      if (prop.key?.type === "Literal" && typeof prop.key.value === "string") return prop.key.value
+    }
+    return null
+  }
+
+  const collectActivityOnlyFns = () => {
+    const safeDirect = new Set()
+    const unsafeDirect = new Set()
+    const fnBodyRefs = new Map()
+    const bodyToFn = new Map()
+    for (const [name, info] of localFunctions) {
+      bodyToFn.set(info.body, name)
+      fnBodyRefs.set(name, new Set())
+      if (info.isExported) unsafeDirect.add(name)
+    }
+
+    const walkRefs = (node, inSafe, enclosingFn) => {
+      if (node == null || typeof node !== "object") return
+      if (
+        typeof node.type === "string" &&
+        node.type.startsWith("TS") &&
+        node.type !== "TSAsExpression" &&
+        node.type !== "TSTypeAssertion" &&
+        node.type !== "TSSatisfiesExpression" &&
+        node.type !== "TSNonNullExpression"
+      ) {
+        return
+      }
+      if (node.type === "ImportDeclaration") return
+      const nextFn = bodyToFn.get(node) ?? enclosingFn
+      if (node.type === "ExportDefaultDeclaration") {
+        const d = unwrap(node.declaration)
+        if (d?.type === "Identifier" && localFunctions.has(d.name)) unsafeDirect.add(d.name)
+      }
+      if (node.type === "ExportNamedDeclaration" && Array.isArray(node.specifiers)) {
+        for (const sp of node.specifiers) {
+          const nm = sp?.local?.name
+          if (nm != null && localFunctions.has(nm)) unsafeDirect.add(nm)
+        }
+      }
+      if (node.type === "Identifier" && localFunctions.has(node.name)) {
+        if (inSafe) safeDirect.add(node.name)
+        else if (nextFn != null) fnBodyRefs.get(nextFn)?.add(node.name)
+        else unsafeDirect.add(node.name)
+        return
+      }
+      if (node.type === "CallExpression") {
+        if (isActMakeCall(node)) {
+          const arg0 = unwrap(node.arguments?.[0])
+          if (arg0 != null && arg0.type === "ObjectExpression" && Array.isArray(arg0.properties)) {
+            for (const prop of arg0.properties) {
+              walkRefs(prop, inSafe || getActivityPropName(prop) === "execute", nextFn)
+            }
+            return
+          }
+        }
+        const cm = getMemberParts(node.callee)
+        if (cm?.name === "addFinalizer") {
+          for (const arg of node.arguments ?? []) walkRefs(arg, true, nextFn)
+          walkRefs(node.callee, inSafe, nextFn)
+          return
+        }
+        if (
+          cm?.name === "withCompensation" &&
+          Array.isArray(node.arguments) &&
+          node.arguments.length >= 2
+        ) {
+          node.arguments.forEach((arg, idx) => walkRefs(arg, idx === 1 ? true : inSafe, nextFn))
+          walkRefs(node.callee, inSafe, nextFn)
+          return
+        }
+      }
+      if (node.type === "MemberExpression") {
+        walkRefs(node.object, inSafe, nextFn)
+        if (node.computed === true) walkRefs(node.property, inSafe, nextFn)
+        return
+      }
+      if (node.type === "Property") {
+        if (node.computed === true) walkRefs(node.key, inSafe, nextFn)
+        walkRefs(node.value, inSafe, nextFn)
+        return
+      }
+      if (node.type === "VariableDeclarator") {
+        walkRefs(node.init, inSafe, nextFn)
+        return
+      }
+      if (
+        node.type === "FunctionDeclaration" ||
+        node.type === "FunctionExpression" ||
+        node.type === "ArrowFunctionExpression"
+      ) {
+        walkRefs(node.body, inSafe, nextFn)
+        return
+      }
+      if (node.type === "LabeledStatement") {
+        walkRefs(node.body, inSafe, nextFn)
+        return
+      }
+      if (node.type === "BreakStatement" || node.type === "ContinueStatement") return
+      if (node.type === "MethodDefinition" || node.type === "PropertyDefinition") {
+        if (node.computed === true) walkRefs(node.key, inSafe, nextFn)
+        walkRefs(node.value, inSafe, nextFn)
+        return
+      }
+      if (node.type === "ClassDeclaration" || node.type === "ClassExpression") {
+        walkRefs(node.superClass, inSafe, nextFn)
+        walkRefs(node.body, inSafe, nextFn)
+        return
+      }
+      for (const key of Object.keys(node)) {
+        if (key === "parent" || key === "loc" || key === "range") continue
+        const child = node[key]
+        if (Array.isArray(child)) {
+          for (const item of child) walkRefs(item, inSafe, nextFn)
+        } else if (child != null && typeof child === "object" && child.type) {
+          walkRefs(child, inSafe, nextFn)
+        }
+      }
+    }
+    walkRefs(programNode, false, null)
+
+    const expand = (seeds) => {
+      const out = new Set(seeds)
+      const q = [...seeds]
+      while (q.length > 0) {
+        const curr = q.pop()
+        for (const dep of fnBodyRefs.get(curr) ?? []) {
+          if (!out.has(dep)) {
+            out.add(dep)
+            q.push(dep)
+          }
+        }
+      }
+      return out
+    }
+    const safeReach = expand(safeDirect)
+    const unsafeReach = expand(unsafeDirect)
+    const out = new Set()
+    for (const name of safeReach) {
+      if (!unsafeReach.has(name)) out.add(name)
+    }
+    return out
+  }
+
+  const visitedFunctions = new Set()
+  const reportBody = (node, label, category) => {
+    reportOnce(
+      node,
+      `[nondeterministic-workflow-body] Nondeterministic ${category} access '${label}' inside workflow body outside Activity.make({ execute: ... }) — move side effects, wall-clock reads, randomness, env, fs, git, Omnigraph, and network calls into Activity.make handlers.`,
+    )
+  }
+  const reportCtor = (node, ctorName, prefix, suffix) => {
+    if (ctorName === "Date") reportBody(node, `${prefix}Date${suffix}`, "wall-clock")
+    else if (ctorName === "OmnigraphClient")
+      reportBody(node, `${prefix}OmnigraphClient${suffix}`, "omnigraph")
+    else if (ctorName === "WebSocket") reportBody(node, `${prefix}WebSocket${suffix}`, "network")
+  }
+
+  const walkBody = (node) => {
+    if (node == null || typeof node !== "object") return
+    if (
+      typeof node.type === "string" &&
+      node.type.startsWith("TS") &&
+      node.type !== "TSAsExpression" &&
+      node.type !== "TSTypeAssertion" &&
+      node.type !== "TSSatisfiesExpression" &&
+      node.type !== "TSNonNullExpression"
+    ) {
+      return
+    }
+    if (node.type === "ImportDeclaration") return
+
+    if (isProcessEnvMemberAst(node)) {
+      reportBody(node, "process.env", "environment")
+      return
+    }
+    if (isProcessEnvDestructuringAst(node)) {
+      reportBody(node, "process.env", "environment")
+    }
+
+    if (node.type === "NewExpression") {
+      reportCtor(node, getRootedName(node.callee), "new ", "()")
+    }
+
+    if (node.type === "MemberExpression") {
+      const qn = getRootedName(node)
+      if (qn === "Date.now" || qn === "Date.parse" || qn === "Date.UTC") {
+        reportBody(node, qn, "wall-clock")
+        return
+      }
+      if (qn === "Math.random") {
+        reportBody(node, qn, "randomness")
+        return
+      }
+      if (
+        qn != null &&
+        qn.startsWith("crypto.") &&
+        WF_CRYPTO_RANDOM_EXPORTS.has(qn.slice("crypto.".length))
+      ) {
+        reportBody(node, qn, "randomness")
+        return
+      }
+      const m = getMemberParts(node)
+      if (m != null && m.receiver?.type === "Identifier") {
+        if (cryptoNsAliases.has(m.receiver.name) && WF_CRYPTO_RANDOM_EXPORTS.has(m.name)) {
+          reportBody(node, `${m.receiver.name}.${m.name}`, "randomness")
+          return
+        }
+        if (fsNsAliases.has(m.receiver.name)) {
+          reportBody(node, `${m.receiver.name}.${m.name}`, "filesystem")
+          return
+        }
+        if (childProcessNsAliases.has(m.receiver.name)) {
+          reportBody(node, `${m.receiver.name}.${m.name}`, "subprocess")
+          return
+        }
+        if (netNsAliases.has(m.receiver.name)) {
+          reportBody(node, `${m.receiver.name}.${m.name}`, "network")
+          return
+        }
+      }
+      walkBody(node.object)
+      if (node.computed === true) walkBody(node.property)
+      return
+    }
+
+    if (node.type === "CallExpression") {
+      if (isActMakeCall(node)) {
+        const arg0 = unwrap(node.arguments?.[0])
+        if (arg0 != null && arg0.type === "ObjectExpression" && Array.isArray(arg0.properties)) {
+          for (const prop of arg0.properties) {
+            if (getActivityPropName(prop) === "execute") continue
+            walkBody(prop)
+          }
+          return
+        }
+      }
+
+      const cm = getMemberParts(node.callee)
+      if (cm != null && cm.name === "addFinalizer") return
+      if (
+        toLayerCalls.length === 0 &&
+        cm != null &&
+        cm.name === "toLayer" &&
+        !isToLayerOrRegister(node)
+      ) {
+        return
+      }
+      if (cm != null && cm.name === "withCompensation") {
+        if (
+          Array.isArray(node.arguments) &&
+          node.arguments.length >= 2 &&
+          node.arguments[0] != null
+        ) {
+          walkBody(node.arguments[0])
+        }
+        return
+      }
+
+      const qn = getRootedName(node.callee)
+      const calleeUnwrapped = unwrap(node.callee)
+      const calleeTermName =
+        calleeUnwrapped?.type === "Identifier" ? calleeUnwrapped.name : cm?.name
+      const isGit =
+        (calleeTermName != null &&
+          (/^(?:exec|run|spawn)Git/i.test(calleeTermName) || /^gitExec/i.test(calleeTermName))) ||
+        (calleeTermName != null &&
+          WF_SUBPROCESS_DIRECT_CALLEES.has(calleeTermName) &&
+          getStaticModuleString(unwrap(node.arguments?.[0])) === "git")
+
+      if (qn === "Date") {
+        reportBody(node, "Date()", "wall-clock")
+      } else if (
+        qn === "Reflect.get" &&
+        node.arguments?.[0] != null &&
+        node.arguments?.[1] != null &&
+        isProcessTargetAst(node.arguments[0]) &&
+        getStaticModuleString(unwrap(node.arguments[1])) === "env"
+      ) {
+        reportBody(node, 'Reflect.get(process, "env")', "environment")
+      } else if (qn === "Reflect.construct" && node.arguments?.[0] != null) {
+        reportCtor(node, getRootedName(node.arguments[0]), "", " (Reflect.construct)")
+      } else if (qn === "fetch") {
+        reportBody(node, "fetch()", "network")
+      } else if (qn != null && WF_NETWORK_MEMBER_CALLS.has(qn)) {
+        reportBody(node, `${qn}()`, "network")
+      } else if (qn != null && WF_FS_DIRECT_CALLEES.has(qn)) {
+        reportBody(node, `${qn}()`, "filesystem")
+      } else if (isGit) {
+        reportBody(node, qn ?? calleeTermName ?? "git", "git")
+      } else if (qn != null && WF_SUBPROCESS_DIRECT_CALLEES.has(qn)) {
+        reportBody(node, `${qn}()`, "subprocess")
+      } else if (
+        cm != null &&
+        (WF_OMNIGRAPH_METHODS.has(cm.name) ||
+          (cm.receiver?.type === "Identifier" && /omnigraph/i.test(cm.receiver.name)))
+      ) {
+        reportBody(node, `${cm.name}()`, "omnigraph")
+      }
+
+      if (calleeUnwrapped?.type === "Identifier") {
+        const localInfo = localFunctions.get(calleeUnwrapped.name)
+        if (localInfo != null && !visitedFunctions.has(calleeUnwrapped.name)) {
+          visitedFunctions.add(calleeUnwrapped.name)
+          walkBody(localInfo.body)
+        }
+      }
+    }
+
+    if (node.type === "Identifier") {
+      const cat = bannedBindings.get(node.name)
+      if (cat != null) {
+        reportBody(node, node.name, cat)
+        return
+      }
+      const localInfo = localFunctions.get(node.name)
+      if (localInfo != null && !visitedFunctions.has(node.name)) {
+        visitedFunctions.add(node.name)
+        walkBody(localInfo.body)
+      }
+      return
+    }
+
+    if (node.type === "Property") {
+      if (node.computed === true) walkBody(node.key)
+      walkBody(node.value)
+      return
+    }
+
+    if (node.type === "VariableDeclarator") {
+      walkBody(node.init)
+      return
+    }
+
+    if (
+      node.type === "FunctionDeclaration" ||
+      node.type === "FunctionExpression" ||
+      node.type === "ArrowFunctionExpression"
+    ) {
+      walkBody(node.body)
+      return
+    }
+
+    if (node.type === "LabeledStatement") {
+      walkBody(node.body)
+      return
+    }
+    if (node.type === "BreakStatement" || node.type === "ContinueStatement") return
+    if (node.type === "MethodDefinition" || node.type === "PropertyDefinition") {
+      if (node.computed === true) walkBody(node.key)
+      walkBody(node.value)
+      return
+    }
+    if (node.type === "ClassDeclaration" || node.type === "ClassExpression") {
+      walkBody(node.superClass)
+      walkBody(node.body)
+      return
+    }
+
+    for (const key of Object.keys(node)) {
+      if (key === "parent" || key === "loc" || key === "range") continue
+      const child = node[key]
+      if (Array.isArray(child)) {
+        for (const item of child) walkBody(item)
+      } else if (child != null && typeof child === "object" && child.type) {
+        walkBody(child)
+      }
+    }
+  }
+
+  for (const wfCall of wfMakeCalls) {
+    if (Array.isArray(wfCall.arguments) && wfCall.arguments[1] != null) {
+      walkBody(wfCall.arguments[1])
+    }
+  }
+  for (const regCall of toLayerCalls) {
+    const m = getMemberParts(regCall.callee)
+    const handler = m?.name === "register" ? regCall.arguments?.[1] : regCall.arguments?.[0]
+    if (handler != null) walkBody(handler)
+  }
+  if (toLayerCalls.length === 0) {
+    const activityOnlyFns = collectActivityOnlyFns()
+    const skippedTopStmts = new Set()
+    for (const fnName of activityOnlyFns) {
+      const topStmt = localFunctions.get(fnName)?.topStmt
+      if (topStmt != null) skippedTopStmts.add(topStmt)
+    }
+    for (const stmt of programNode.body) {
+      if (stmt != null && stmt.type !== "ImportDeclaration" && !skippedTopStmts.has(stmt)) {
+        walkBody(stmt)
+      }
+    }
+  }
+}
+
+const CONTRACT_SCHEMA_CHAIN_METHODS = new Set(["pipe", "check", "annotate"])
+const CONTRACT_STRING_BOUND_CALLS = new Set(["isTrimmed", "isPattern", "isMaxLength"])
+const VITEST_HYGIENE_BASE_NAMES = new Set(["it", "test"])
+const VITEST_HYGIENE_CURRIED_NAMES = new Set(["each", "for", "skipIf", "runIf"])
+
+function walkEstreeChildren(node, fn) {
+  if (node == null || typeof node !== "object") return
+  for (const key of Object.keys(node)) {
+    if (
+      key === "parent" ||
+      key === "loc" ||
+      key === "range" ||
+      key === "tokens" ||
+      key === "comments"
+    ) {
+      continue
+    }
+    const val = node[key]
+    if (Array.isArray(val)) {
+      for (const item of val) {
+        if (item != null && typeof item === "object" && typeof item.type === "string") fn(item)
+      }
+    } else if (val != null && typeof val === "object" && typeof val.type === "string") {
+      fn(val)
+    }
+  }
+}
+
+function unwrapEstreeTop(n) {
+  let cur = n
+  while (
+    cur != null &&
+    (cur.type === "TSAsExpression" ||
+      cur.type === "TSTypeAssertion" ||
+      cur.type === "TSSatisfiesExpression" ||
+      cur.type === "TSNonNullExpression" ||
+      cur.type === "ParenthesizedExpression")
+  ) {
+    cur = cur.expression
+  }
+  return cur
+}
+
+function isEstreeSchemaMember(expr, objName, propName) {
+  const u = unwrapEstreeTop(expr)
+  return (
+    u != null &&
+    u.type === "MemberExpression" &&
+    u.computed !== true &&
+    u.object?.type === "Identifier" &&
+    u.object.name === objName &&
+    u.property?.type === "Identifier" &&
+    u.property.name === propName
+  )
+}
+
+function checkContractShapeHardeningEstree(programNode, filename, report) {
+  if (typeof filename !== "string" || /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(filename)) return
+  if (!/(?:^|\/)libs\/[^/]+\/contract\/src\/.*\.ts$/.test(filename)) return
+  const allowUnknownRecord = /(?:^|\/)wire-(?:adapter|envelope)\.ts$/.test(filename)
+  const visitedChains = new Set()
+
+  const isPipeParent = (parent) => {
+    if (parent == null || parent.type !== "CallExpression") return false
+    const c = unwrapEstreeTop(parent.callee)
+    if (
+      c != null &&
+      c.type === "MemberExpression" &&
+      c.computed !== true &&
+      c.property?.type === "Identifier" &&
+      CONTRACT_SCHEMA_CHAIN_METHODS.has(c.property.name)
+    ) {
+      return true
+    }
+    return c != null && c.type === "Identifier" && c.name === "pipe"
+  }
+
+  const resolveRootSchema = (chainRoot) => {
+    let cur = chainRoot
+    while (cur != null && cur.type === "CallExpression") {
+      const c = unwrapEstreeTop(cur.callee)
+      if (
+        c != null &&
+        isEstreeSchemaMember(c.callee, "Schema", "brand") &&
+        getStaticModuleString(c.arguments?.[0]) != null &&
+        cur.arguments?.[0] != null
+      ) {
+        cur = unwrapEstreeTop(cur.arguments[0])
+        continue
+      }
+      if (
+        c != null &&
+        c.type === "MemberExpression" &&
+        c.computed !== true &&
+        c.property?.type === "Identifier" &&
+        CONTRACT_SCHEMA_CHAIN_METHODS.has(c.property.name) &&
+        c.object != null
+      ) {
+        cur = unwrapEstreeTop(c.object)
+        continue
+      }
+      if (c != null && c.type === "Identifier" && c.name === "pipe" && cur.arguments?.[0] != null) {
+        cur = unwrapEstreeTop(cur.arguments[0])
+        continue
+      }
+      break
+    }
+    return cur
+  }
+
+  const hasBoundCall = (root) => {
+    let found = false
+    const walk = (n) => {
+      if (found || n == null || typeof n !== "object") return
+      if (n.type === "CallExpression") {
+        const c = unwrapEstreeTop(n.callee)
+        if (c?.type === "Identifier" && CONTRACT_STRING_BOUND_CALLS.has(c.name)) {
+          found = true
+          return
+        }
+        if (
+          c?.type === "MemberExpression" &&
+          c.computed !== true &&
+          c.property?.type === "Identifier" &&
+          CONTRACT_STRING_BOUND_CALLS.has(c.property.name)
+        ) {
+          found = true
+          return
+        }
+      }
+      walkEstreeChildren(n, walk)
+    }
+    walk(root)
+    return found
+  }
+
+  const ancestors = []
+  const visit = (node) => {
+    if (node == null || typeof node !== "object") return
+    if (node.type === "CallExpression") {
+      if (
+        isEstreeSchemaMember(node.callee, "Schema", "brand") &&
+        getStaticModuleString(node.arguments?.[0]) != null
+      ) {
+        let chainRoot = null
+        let child = node
+        let idx = ancestors.length - 1
+        while (idx >= 0) {
+          const parent = ancestors[idx]
+          if (parent == null) break
+          if (parent.type === "ParenthesizedExpression" || parent.type === "ChainExpression") {
+            child = unwrapEstreeTop(parent)
+            idx--
+            continue
+          }
+          if (
+            chainRoot === null &&
+            parent.type === "CallExpression" &&
+            unwrapEstreeTop(parent.callee) === child
+          ) {
+            chainRoot = parent
+            child = parent
+            idx--
+            continue
+          }
+          if (
+            parent.type === "MemberExpression" &&
+            parent.computed !== true &&
+            parent.property?.type === "Identifier" &&
+            CONTRACT_SCHEMA_CHAIN_METHODS.has(parent.property.name) &&
+            unwrapEstreeTop(parent.object) === child &&
+            ancestors[idx - 1]?.type === "CallExpression" &&
+            unwrapEstreeTop(ancestors[idx - 1].callee) === parent
+          ) {
+            chainRoot = ancestors[idx - 1]
+            child = chainRoot
+            idx -= 2
+            continue
+          }
+          if (isPipeParent(parent)) {
+            const pCallee = unwrapEstreeTop(parent.callee)
+            const isMethodOnChild =
+              pCallee?.type === "MemberExpression" && unwrapEstreeTop(pCallee.object) === child
+            const isPipeArg =
+              (pCallee?.type === "Identifier" && pCallee.name === "pipe") ||
+              (chainRoot === null && pCallee?.type === "MemberExpression")
+            if (isMethodOnChild || isPipeArg) {
+              chainRoot = parent
+              child = parent
+              idx--
+              continue
+            }
+          }
+          break
+        }
+        if (chainRoot != null && !visitedChains.has(chainRoot)) {
+          visitedChains.add(chainRoot)
+          const rootSchema = resolveRootSchema(chainRoot)
+          const isUnboundedRoot =
+            isEstreeSchemaMember(rootSchema, "Schema", "String") ||
+            isEstreeSchemaMember(rootSchema, "Schema", "NonEmptyString")
+          if (isUnboundedRoot && !hasBoundCall(chainRoot)) {
+            report(
+              node,
+              `[contract-shape-hardening] Branded string schema in '${filename}' must constrain bounds with Schema.isTrimmed(), Schema.isPattern(...), or Schema.isMaxLength(...).`,
+            )
+          }
+        }
+      }
+      if (!allowUnknownRecord && isEstreeSchemaMember(node.callee, "Schema", "Record")) {
+        let keyArg = null
+        let valArg = null
+        if (Array.isArray(node.arguments) && node.arguments.length >= 2) {
+          keyArg = node.arguments[0]
+          valArg = node.arguments[1]
+        } else if (
+          Array.isArray(node.arguments) &&
+          node.arguments.length === 1 &&
+          unwrapEstreeTop(node.arguments[0])?.type === "ObjectExpression"
+        ) {
+          for (const prop of unwrapEstreeTop(node.arguments[0]).properties ?? []) {
+            if (
+              prop?.type !== "Property" ||
+              prop.computed === true ||
+              prop.key?.type !== "Identifier"
+            ) {
+              continue
+            }
+            if (prop.key.name === "key") keyArg = prop.value
+            if (prop.key.name === "value") valArg = prop.value
+          }
+        }
+        if (
+          isEstreeSchemaMember(keyArg, "Schema", "String") &&
+          isEstreeSchemaMember(valArg, "Schema", "Unknown")
+        ) {
+          report(
+            node,
+            `[contract-shape-hardening] Unguarded Schema.Record(Schema.String, Schema.Unknown) in '${filename}' is banned outside wire-adapter modules — use a named typed Struct or Schema.Record with branded keys and value schemas.`,
+          )
+        }
+      }
+    }
+    ancestors.push(node)
+    walkEstreeChildren(node, visit)
+    ancestors.pop()
+  }
+  visit(programNode)
+}
+
+function isEstreeWorkflowMake(expr) {
+  const u = unwrapEstreeTop(expr)
+  if (u == null || u.type !== "CallExpression") return false
+  const c = unwrapEstreeTop(u.callee)
+  if (c == null || c.type !== "MemberExpression" || c.computed === true) return false
+  if (c.property?.type !== "Identifier" || c.property.name !== "make") return false
+  const recv = unwrapEstreeTop(c.object)
+  return (
+    (recv?.type === "Identifier" && recv.name === "Workflow") ||
+    (recv?.type === "MemberExpression" &&
+      recv.computed !== true &&
+      recv.property?.type === "Identifier" &&
+      recv.property.name === "Workflow")
+  )
+}
+
+function checkWorkflowNameInsteadOfTagEstree(programNode, filename, report) {
+  const wfDefNames = new Set()
+  const wfNsImports = new Set()
+  const collect = (node) => {
+    if (node == null || typeof node !== "object") return
+    if (node.type === "ImportDeclaration" && node.importKind !== "type") {
+      const mod = node.source?.value
+      const isWsOrRel =
+        typeof mod === "string" && (mod.startsWith("@harness/") || mod.startsWith("."))
+      if (isWsOrRel && Array.isArray(node.specifiers)) {
+        for (const spec of node.specifiers) {
+          if (spec == null || spec.importKind === "type") continue
+          if (spec.type === "ImportNamespaceSpecifier" && spec.local?.name) {
+            wfNsImports.add(spec.local.name)
+          } else if (spec.type === "ImportSpecifier" && spec.local?.name) {
+            const imp = spec.imported?.name ?? spec.local.name
+            if (imp !== "Workflow" && /^[A-Z][A-Za-z0-9_]*Workflow$/.test(imp)) {
+              wfDefNames.add(spec.local.name)
+            }
+          }
+        }
+      }
+    } else if (
+      node.type === "VariableDeclarator" &&
+      node.id?.type === "Identifier" &&
+      node.init != null
+    ) {
+      const init = unwrapEstreeTop(node.init)
+      if (
+        isEstreeWorkflowMake(init) ||
+        (init?.type === "Identifier" && wfDefNames.has(init.name))
+      ) {
+        wfDefNames.add(node.id.name)
+      }
+    }
+    walkEstreeChildren(node, collect)
+  }
+  collect(programNode)
+
+  const isWfTarget = (expr) => {
+    const u = unwrapEstreeTop(expr)
+    if (u == null) return false
+    if (u.type === "Identifier") return wfDefNames.has(u.name)
+    if (isEstreeWorkflowMake(u)) return true
+    return (
+      u.type === "MemberExpression" &&
+      u.computed !== true &&
+      u.object?.type === "Identifier" &&
+      wfNsImports.has(u.object.name) &&
+      u.property?.type === "Identifier" &&
+      u.property.name !== "Workflow" &&
+      /^[A-Z][A-Za-z0-9_]*Workflow$/.test(u.property.name)
+    )
+  }
+
+  const visit = (node) => {
+    if (node == null || typeof node !== "object") return
+    if (node.type === "MemberExpression") {
+      const isNameProp =
+        (node.computed !== true &&
+          node.property?.type === "Identifier" &&
+          node.property.name === "name") ||
+        (node.computed === true && getStaticModuleString(node.property) === "name")
+      if (isNameProp && isWfTarget(node.object)) {
+        report(
+          node,
+          `[workflow-name-instead-of-tag] Do not read '.name' on a Workflow.make(...) definition in '${filename}' (evaluates to Function.prototype.name 'Workflow') — use '._tag' instead.`,
+        )
+      }
+    }
+    walkEstreeChildren(node, visit)
+  }
+  visit(programNode)
+}
+
+function isEstreeVitestChain(expr) {
+  const u = unwrapEstreeTop(expr)
+  if (u == null) return false
+  if (u.type === "Identifier") return VITEST_HYGIENE_BASE_NAMES.has(u.name)
+  if (u.type === "MemberExpression" && u.computed !== true) return isEstreeVitestChain(u.object)
+  if (u.type === "CallExpression") {
+    const inner = unwrapEstreeTop(u.callee)
+    if (
+      inner != null &&
+      inner.type === "MemberExpression" &&
+      inner.computed !== true &&
+      inner.property?.type === "Identifier" &&
+      VITEST_HYGIENE_CURRIED_NAMES.has(inner.property.name) &&
+      isEstreeVitestChain(inner.object)
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+function checkMaxTestCaseLinesEstree(programNode, filename, report) {
+  if (typeof filename !== "string" || !/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(filename)) return
+  const visit = (node) => {
+    if (node == null || typeof node !== "object") return
+    if (
+      node.type === "CallExpression" &&
+      isEstreeVitestChain(node.callee) &&
+      Array.isArray(node.arguments)
+    ) {
+      for (const arg of node.arguments) {
+        if (
+          arg == null ||
+          (arg.type !== "ArrowFunctionExpression" && arg.type !== "FunctionExpression")
+        ) {
+          continue
+        }
+        const s = arg.loc?.start?.line
+        const e = arg.loc?.end?.line
+        if (typeof s === "number" && typeof e === "number") {
+          const lineSpan = e - s + 1
+          if (lineSpan > 200) {
+            report(
+              node,
+              `[max-test-case-lines] Test callback in '${filename}' spans ${lineSpan} lines (max 200) — split into focused helpers or separate it(...) blocks.`,
+            )
+            break
+          }
+        }
+      }
+    }
+    walkEstreeChildren(node, visit)
+  }
+  visit(programNode)
+}
+
 const syntaxBans = {
   create(context) {
     const discriminantAliasNames = createDiscriminantAliasTracker()
@@ -2405,6 +3557,10 @@ const syntaxBans = {
         if (/^\s*(\/\/|\/\*)\s*@ts-(ignore|expect-error|nocheck)\b/m.test(text)) {
           context.report({ node, message: tsSuppressionMessage })
         }
+        const normalized = getNormalizedFilename()
+        checkWorkflowBodyDeterminismEstree(node, normalized, reportOnce)
+        checkContractShapeHardeningEstree(node, normalized, reportOnce)
+        checkWorkflowNameInsteadOfTagEstree(node, normalized, reportOnce)
       },
       ImportDeclaration(node) {
         recordContractImports(node)
@@ -3533,6 +4689,13 @@ const testIntegrity = {
         if (/^\s*(\/\/|\/\*)\s*@ts-(ignore|nocheck)\b/m.test(text)) {
           context.report({ node, message: testTsIgnoreMessage })
         }
+        const normalized = getNormalizedFilename()
+        checkWorkflowNameInsteadOfTagEstree(node, normalized, (target, message) => {
+          context.report({ node: target, message })
+        })
+        checkMaxTestCaseLinesEstree(node, normalized, (target, message) => {
+          context.report({ node: target, message })
+        })
       },
       ImportDeclaration(node) {
         const filename = getNormalizedFilename()
