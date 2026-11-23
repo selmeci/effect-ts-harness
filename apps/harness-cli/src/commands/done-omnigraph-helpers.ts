@@ -70,6 +70,22 @@ export const runPreMergeOmnigraphBranchVerify = (
     const syncLayer = makeOmnigraphSyncLayer(nodeSyncHostIo)
     const surface = isAntigravity ? "hook" : "cli"
     const failExitCode = isAntigravity ? 0 : 1
+    const failPreMergeVerify = (gateTag: string, reason: string, detail: string): CliResult => {
+      recordTelemetry(options, {
+        surface,
+        category: "graph_query",
+        toolName: "omnigraph:merge-main",
+        outcome: "fail",
+        durationMs: Math.max(0, Date.now() - startedAtMs),
+        engineSource: "omnigraph",
+        detail,
+      })
+      return {
+        exitCode: failExitCode,
+        stdout: JSON.stringify({ decision: blockDecision, reason }),
+        stderr: `[GATE FAILURE] ${gateTag}\n${detail}`,
+      }
+    }
     const hasPlanSnapshot = nodeSyncHostIo.existsSync(
       join(repoRoot, ".harness", "plan-graph-snapshot.json"),
     )
@@ -138,25 +154,13 @@ export const runPreMergeOmnigraphBranchVerify = (
     )
 
     const diffFailureResult: CliResult | undefined = match(branchDiffOpt)
-      .with({ _tag: "DiffFailed" }, ({ message }) => {
-        recordTelemetry(options, {
-          surface,
-          category: "graph_query",
-          toolName: "omnigraph:merge-main",
-          outcome: "fail",
-          durationMs: Math.max(0, Date.now() - startedAtMs),
-          engineSource: "omnigraph",
-          detail: message,
-        })
-        return {
-          exitCode: failExitCode,
-          stdout: JSON.stringify({
-            decision: blockDecision,
-            reason: `Omnigraph branch diff failed: ${message}`,
-          }),
-          stderr: `[GATE FAILURE] done:omnigraph-branch-diff\n${message}`,
-        }
-      })
+      .with({ _tag: "DiffFailed" }, ({ message }) =>
+        failPreMergeVerify(
+          "done:omnigraph-branch-diff",
+          `Omnigraph branch diff failed: ${message}`,
+          message,
+        ),
+      )
       .with({ _tag: "MissingMergeBase" }, { _tag: "Ok" }, () => undefined)
       .exhaustive()
     if (diffFailureResult !== undefined) {
@@ -179,12 +183,29 @@ export const runPreMergeOmnigraphBranchVerify = (
       .with({ _tag: "DiffFailed" }, { _tag: "MissingMergeBase" }, () => false)
       .exhaustive()
 
-    const planEffectFnQualnames = shouldLoadPlanSnapshot
-      ? yield* loadPlanEffectFnQualnames(
-          join(repoRoot, ".harness", "plan-graph-snapshot.json"),
-          nodeSyncHostIo,
+    let planEffectFnQualnames: ReadonlySet<string> | undefined
+    if (shouldLoadPlanSnapshot) {
+      const planQualnamesRes = yield* loadPlanEffectFnQualnames(
+        join(repoRoot, ".harness", "plan-graph-snapshot.json"),
+        nodeSyncHostIo,
+      )
+      const planSnapshotFailure = match(planQualnamesRes)
+        .with({ _tag: "Ok" }, ({ qualnames }) => {
+          planEffectFnQualnames = qualnames
+          return undefined
+        })
+        .with({ _tag: "Corrupt" }, ({ reason }) =>
+          failPreMergeVerify(
+            "done:omnigraph-plan-snapshot",
+            `Omnigraph plan snapshot decode failed: ${reason}`,
+            reason,
+          ),
         )
-      : undefined
+        .exhaustive()
+      if (planSnapshotFailure !== undefined) {
+        return planSnapshotFailure
+      }
+    }
 
     const diffState = match(branchDiffOpt)
       .with({ _tag: "DiffFailed" }, { _tag: "MissingMergeBase" }, () => ({
@@ -279,25 +300,15 @@ export const runPreMergeOmnigraphBranchVerify = (
     )
 
     return yield* match(dryRunOutcome)
-      .with({ _tag: "LoadErr" }, ({ message }) => {
-        recordTelemetry(options, {
-          surface,
-          category: "graph_query",
-          toolName: "omnigraph:merge-main",
-          outcome: "fail",
-          durationMs: Math.max(0, Date.now() - startedAtMs),
-          engineSource: "omnigraph",
-          detail: message,
-        })
-        return Effect.succeed<CliResult | undefined>({
-          exitCode: failExitCode,
-          stdout: JSON.stringify({
-            decision: blockDecision,
-            reason: `Omnigraph dry-run merge failed: ${message}`,
-          }),
-          stderr: `[GATE FAILURE] done:omnigraph-dry-run-merge\n${message}`,
-        })
-      })
+      .with({ _tag: "LoadErr" }, ({ message }) =>
+        Effect.succeed<CliResult | undefined>(
+          failPreMergeVerify(
+            "done:omnigraph-dry-run-merge",
+            `Omnigraph dry-run merge failed: ${message}`,
+            message,
+          ),
+        ),
+      )
       .with({ _tag: "Ok" }, { _tag: "Conflicts" }, ({ conflicts }) =>
         Effect.gen(function* () {
           const verifyReport = yield* decideOmnigraphBranchVerify({
@@ -311,24 +322,12 @@ export const runPreMergeOmnigraphBranchVerify = (
           return match(verifyReport)
             .with({ verdict: "clean" }, () => undefined)
             .with({ verdict: "violated" }, ({ violations }) => {
-              const reason = violations.map((v) => `[${v._tag}] ${v.message}`).join("; ")
-              recordTelemetry(options, {
-                surface,
-                category: "graph_query",
-                toolName: "omnigraph:merge-main",
-                outcome: "fail",
-                durationMs: Math.max(0, Date.now() - startedAtMs),
-                engineSource: "omnigraph",
-                detail: reason,
-              })
-              return {
-                exitCode: failExitCode,
-                stdout: JSON.stringify({
-                  decision: blockDecision,
-                  reason: `Omnigraph branch verification failed: ${reason}`,
-                }),
-                stderr: `[GATE FAILURE] done:omnigraph-branch-verify\n${reason}`,
-              } satisfies CliResult
+              const detail = violations.map((v) => `[${v._tag}] ${v.message}`).join("; ")
+              return failPreMergeVerify(
+                "done:omnigraph-branch-verify",
+                `Omnigraph branch verification failed: ${detail}`,
+                detail,
+              )
             })
             .exhaustive()
         }),

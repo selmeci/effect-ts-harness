@@ -9,23 +9,32 @@ import {
   ShardingConfig,
 } from "effect/cluster"
 import type { WorkflowEngine } from "effect/workflow"
-import type {
-  AbsoluteRepoRoot,
-  WorkflowStoreUnavailableError,
-  WriterLeaseHeldError,
+import { match } from "ts-pattern"
+import {
+  type AbsoluteRepoRoot,
+  WORKFLOW_TIMEOUT_BUDGETS,
+  WorkflowStoreOperation,
+  type WorkflowStoreUnavailableError,
+  type WorkflowTimeoutBudgets,
+  type WriterLeaseHeldError,
+  validateWorkflowTimeoutBudgets,
 } from "@harness/contract"
 import {
   makeOmnigraphMessageStorageLayer,
   type OmnigraphMessageStorageOptions,
   repairDanglingProcessedRequests,
 } from "./omnigraph-message-storage.js"
-import { quarantineOrphanEntityMessages } from "./omnigraph-workflow-store.js"
+import {
+  quarantineOrphanEntityMessages,
+  toWorkflowStoreUnavailableError,
+} from "./omnigraph-workflow-store.js"
 
 export interface HarnessWorkflowEngineOptions extends OmnigraphMessageStorageOptions {
   readonly knownEntityTypes?: ReadonlyArray<string> | undefined
   readonly shardsPerGroup?: number | undefined
   readonly entityMessagePollInterval?: Duration.Input | undefined
   readonly entityReplyPollInterval?: Duration.Input | undefined
+  readonly timeoutBudgets?: WorkflowTimeoutBudgets | undefined
 }
 
 export type HarnessWorkflowEngineLayerOptions = HarnessWorkflowEngineOptions
@@ -86,8 +95,29 @@ const makeHarnessShardingLayer = (
   )
 }
 
+const validateWorkflowBudgetsOrFail = (
+  budgets?: WorkflowTimeoutBudgets,
+): Effect.Effect<void, WorkflowStoreUnavailableError> => {
+  const result =
+    budgets !== undefined
+      ? validateWorkflowTimeoutBudgets(budgets)
+      : validateWorkflowTimeoutBudgets(WORKFLOW_TIMEOUT_BUDGETS)
+  return match(result)
+    .with({ _tag: "Success" }, () => Effect.void)
+    .with({ _tag: "Failure" }, ({ failure }) =>
+      Effect.fail(
+        toWorkflowStoreUnavailableError(
+          WorkflowStoreOperation.make("WorkflowEngine.validateTimeoutBudgets"),
+          `Invalid WORKFLOW_TIMEOUT_BUDGETS: ${failure}`,
+        ),
+      ),
+    )
+    .exhaustive()
+}
+
 /**
- * Builds `ClusterWorkflowEngine` over `OmnigraphMessageStorage` for `repoRoot`.
+ * Builds `ClusterWorkflowEngine` over `OmnigraphMessageStorage` for `repoRoot`,
+ * validating workflow timeout monotonicity (`SPEC-0027 REQ-2.2`) at layer initialization.
  */
 const makeHarnessWorkflowEngineLayer = (
   repoRoot: AbsoluteRepoRoot,
@@ -95,6 +125,15 @@ const makeHarnessWorkflowEngineLayer = (
 ): Layer.Layer<
   WorkflowEngine.WorkflowEngine,
   WorkflowStoreUnavailableError | WriterLeaseHeldError
-> => ClusterWorkflowEngine.layer.pipe(Layer.provide(makeHarnessShardingLayer(repoRoot, options)))
+> =>
+  Layer.unwrap(
+    validateWorkflowBudgetsOrFail(options?.timeoutBudgets).pipe(
+      Effect.as(
+        ClusterWorkflowEngine.layer.pipe(
+          Layer.provide(makeHarnessShardingLayer(repoRoot, options)),
+        ),
+      ),
+    ),
+  )
 
 export { makeHarnessShardingLayer, makeHarnessWorkflowEngineLayer }

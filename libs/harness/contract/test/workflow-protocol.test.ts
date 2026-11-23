@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest"
 import {
   AttemptNumber,
   EscalationOrdinal,
+  WORKFLOW_ACTIVITY_DECODERS,
+  WORKFLOW_DEFERRED_DECODERS,
   WORKFLOW_TIMEOUT_BUDGETS,
   WaveIndex,
   WorkUnitId,
@@ -519,7 +521,16 @@ describe("workflow-protocol & workflow-timeouts", () => {
     expect(deferredCheck._tag).toBe("Passed")
   })
 
-  it("validates WORKFLOW_TIMEOUT_BUDGETS and rejects equality or inverted timeout layers", () => {
+  it("ties WORKFLOW_ACTIVITY_DECODERS and WORKFLOW_DEFERRED_DECODERS exhaustively to union variants", () => {
+    expect(Object.keys(WORKFLOW_ACTIVITY_DECODERS).sort()).toEqual(
+      Object.keys(WorkflowActivityTag.cases).sort(),
+    )
+    expect(Object.keys(WORKFLOW_DEFERRED_DECODERS).sort()).toEqual(
+      Object.keys(WorkflowDeferredTag.cases).sort(),
+    )
+  })
+
+  it("validates WORKFLOW_TIMEOUT_BUDGETS schema defaults and strict default inequalities", () => {
     expect(Schema.decodeSync(WorkflowTimeoutBudgets)(WORKFLOW_TIMEOUT_BUDGETS)).toEqual(
       WORKFLOW_TIMEOUT_BUDGETS,
     )
@@ -537,7 +548,9 @@ describe("workflow-protocol & workflow-timeouts", () => {
         expect.unreachable(`Expected default WORKFLOW_TIMEOUT_BUDGETS to pass: ${failure}`),
       )
       .exhaustive()
+  })
 
+  it("rejects inverted server socket and workflowCompleteIpcMs timeout layers", () => {
     // Inequality 1: workflowServerSocketMs > workflowCompleteIpcMs
     expect(
       Result.isFailure(
@@ -599,7 +612,9 @@ describe("workflow-protocol & workflow-timeouts", () => {
         }),
       ),
     ).toBe(true)
+  })
 
+  it("rejects inverted default server socket and abort settle timeout layers", () => {
     // Inequality 3: defaultServerSocketMs > workflowIpcMs
     expect(
       Result.isFailure(

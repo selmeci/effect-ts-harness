@@ -266,14 +266,24 @@ export const extractGitDiffModifiedLinesChecked = (
     .exhaustive()
 }
 
+const CurrentBackupStruct = Schema.Struct({
+  filePath: Schema.NonEmptyString,
+  content: Schema.String,
+  originalSha256: Schema.optional(Schema.String),
+  mutatedSha256: Schema.optional(Schema.String),
+  originalSource: Schema.optional(Schema.String),
+})
+
+const LegacyBackupStruct = Schema.Struct({
+  filePath: Schema.NonEmptyString,
+  originalSource: Schema.String,
+  originalSha256: Schema.optional(Schema.String),
+  mutatedSha256: Schema.optional(Schema.String),
+  content: Schema.optional(Schema.String),
+})
+
 export const BackupSchema = Schema.fromJsonString(
-  Schema.Struct({
-    filePath: Schema.optional(Schema.String),
-    originalSha256: Schema.optional(Schema.String),
-    mutatedSha256: Schema.optional(Schema.String),
-    content: Schema.optional(Schema.String),
-    originalSource: Schema.optional(Schema.String),
-  }),
+  Schema.Union([CurrentBackupStruct, LegacyBackupStruct]),
 )
 
 const checkNonSymlinkIfPresent = (
@@ -418,9 +428,7 @@ export const recoverStartupBackup = (
         .with({ _tag: "Success" }, ({ success: rawBackup }) =>
           match(Schema.decodeOption(BackupSchema)(rawBackup))
             .with({ _tag: "Some" }, ({ value: decoded }) => {
-              const content = decoded.content ?? decoded.originalSource
-              if (decoded.filePath === undefined || content === undefined)
-                return "Backup JSON missing filePath or content"
+              const content = decoded.content ?? decoded.originalSource ?? ""
               const resolvedTarget = resolve(repoRoot, decoded.filePath)
               const relTarget = relative(resolve(repoRoot), resolvedTarget).replace(/\\/g, "/")
               if (

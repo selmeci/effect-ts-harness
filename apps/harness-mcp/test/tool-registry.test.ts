@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Cause, Effect, Exit, Layer, Schema } from "effect"
 import { match } from "ts-pattern"
+import { toMcpToolInputName } from "@harness/contract"
 import { decideSpanBudgets, type SpanSample } from "@harness/gates"
 import { runWithTestTracer, type IndexedEffectFn, type RecordedSpanEvent } from "@harness/ingest"
 import {
@@ -236,7 +237,8 @@ describe("HarnessMcp.dispatchTool (SPEC-0011 §4)", () => {
                 expect(value._tag).toBe("UnknownToolError")
                 if (value instanceof UnknownToolError) {
                   expect(value.toolName.length).toBe(256)
-                  expect(value.toolName).toBe(longToolName.slice(0, 256))
+                  expect(value.toolName).toBe(toMcpToolInputName(longToolName))
+                  expect(value.toolName).toContain(`…[len=${longToolName.length},h=`)
                 }
               })
               .with({ _tag: "None" }, () => {

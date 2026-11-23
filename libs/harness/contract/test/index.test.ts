@@ -13,7 +13,11 @@ import {
   AstSourceContent,
   AstSourceFilePath,
   AttemptNumber,
+  CANONICAL_CLI_COMMAND_NAMES,
   CANONICAL_MCP_TOOL_NAMES,
+  CanonicalCliCommandName,
+  CanonicalMcpToolName,
+  CliCommandName,
   CompiledPlan,
   CompiledWaves,
   type CompiledWorkUnit,
@@ -827,8 +831,37 @@ describe("@harness/contract schemas", () => {
     expect(Schema.is(SubprocessMaxBufferBytes)(1024)).toBe(true)
     expect(Schema.is(SubprocessMaxBufferBytes)(16_777_216)).toBe(true)
     expect(Schema.is(SubprocessMaxBufferBytes)(16_777_217)).toBe(false)
+    expect(toMcpToolInputName("t".repeat(256))).toBe("t".repeat(256))
+    expect(toMcpToolInputName("t".repeat(257))).toHaveLength(256)
     expect(toMcpToolInputName("t".repeat(300))).toHaveLength(256)
+    expect(toCompilerRepoRootInput("/".repeat(4096))).toBe("/".repeat(4096))
+    expect(toCompilerRepoRootInput("/".repeat(4097))).toHaveLength(4096)
     expect(toCompilerRepoRootInput("/".repeat(5000))).toHaveLength(4096)
+    const mcpLongA = toMcpToolInputName(`${"t".repeat(299)}a`)
+    const mcpLongB = toMcpToolInputName(`${"t".repeat(299)}b`)
+    expect(mcpLongA).not.toBe(mcpLongB)
+    expect(mcpLongA).toContain("…[len=300,h=")
+    const mcpSurrogateLowBound = toMcpToolInputName(
+      `${"x".repeat(226)}\uD800\uDC00${"y".repeat(60)}`,
+    )
+    expect(mcpSurrogateLowBound).toHaveLength(255)
+    expect(() => encodeURIComponent(mcpSurrogateLowBound)).not.toThrow()
+    const mcpSurrogateHighBound = toMcpToolInputName(
+      `${"x".repeat(226)}\uDBFF\uDFFF${"y".repeat(60)}`,
+    )
+    expect(mcpSurrogateHighBound).toHaveLength(255)
+    expect(() => encodeURIComponent(mcpSurrogateHighBound)).not.toThrow()
+    const mcpNonSurrogate = toMcpToolInputName(`${"x".repeat(226)}\uD7FF${"y".repeat(60)}`)
+    expect(mcpNonSurrogate).toHaveLength(256)
+    const rootLongA = toCompilerRepoRootInput(`${"/".repeat(4999)}a`)
+    const rootLongB = toCompilerRepoRootInput(`${"/".repeat(4999)}b`)
+    expect(rootLongA).not.toBe(rootLongB)
+    expect(rootLongA).toContain("…[len=5000,h=")
+    const rootSurrogateSplit = toCompilerRepoRootInput(
+      `${"/".repeat(4065)}\u{1F680}${"z".repeat(80)}`,
+    )
+    expect(rootSurrogateSplit).toHaveLength(4095)
+    expect(() => encodeURIComponent(rootSurrogateSplit)).not.toThrow()
     expect(toCompilerOverlayErrorReason("e".repeat(9000))).toHaveLength(8192)
     expect(toCompilerOverlayErrorReason("", "fallback")).toBe("fallback")
 
@@ -894,8 +927,25 @@ describe("@harness/contract schemas", () => {
     expect(() => Schema.decodeUnknownSync(NxTierTag)("type:unknown")).toThrow()
   })
 
-  it("validates review routing contracts, branded literals, and 18 canonical MCP tool names", () => {
-    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(18)
+  it("validates review routing contracts, branded literals, and canonical CLI/MCP schemas", () => {
+    expect(CANONICAL_CLI_COMMAND_NAMES).toHaveLength(CanonicalCliCommandName.schema.literals.length)
+    expect(CANONICAL_CLI_COMMAND_NAMES.map((n) => String(n))).toEqual([
+      ...CanonicalCliCommandName.schema.literals,
+    ])
+    for (const cmd of CANONICAL_CLI_COMMAND_NAMES) {
+      expect(Schema.decodeUnknownSync(CanonicalCliCommandName)(cmd)).toBe(cmd)
+      expect(Schema.decodeSync(CliCommandName)(cmd)).toBe(cmd)
+    }
+    expect(() => Schema.decodeUnknownSync(CanonicalCliCommandName)("not-a-cli-cmd")).toThrow()
+
+    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(CanonicalMcpToolName.schema.literals.length)
+    expect(CANONICAL_MCP_TOOL_NAMES.map((n) => String(n))).toEqual([
+      ...CanonicalMcpToolName.schema.literals,
+    ])
+    for (const tool of CANONICAL_MCP_TOOL_NAMES) {
+      expect(Schema.decodeUnknownSync(CanonicalMcpToolName)(tool)).toBe(tool)
+    }
+    expect(() => Schema.decodeUnknownSync(CanonicalMcpToolName)("not_an_mcp_tool")).toThrow()
     expect(CANONICAL_MCP_TOOL_NAMES).toContain(McpToolName.make("harness_review_route"))
     expect(CANONICAL_MCP_TOOL_NAMES).toContain(McpToolName.make("harness_git_diff"))
     expect(CANONICAL_MCP_TOOL_NAMES).toContain(McpToolName.make("harness_workflow_plan"))

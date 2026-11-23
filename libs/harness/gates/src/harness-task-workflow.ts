@@ -434,7 +434,7 @@ export const driveWorkUnit = Effect.fn("Harness.driveWorkUnit")(function* (
   return result.unitId
 })
 
-/** Executes the sequential shared step (`REQ-1.4`) when `plan.sharedStepPaths.length > 0`. */
+/** Executes the sequential shared step (`SPEC-0023 REQ-1.1` / `RFC-0013 REQ-1.4`) when `plan.sharedStepPaths.length > 0`. */
 export const driveSharedStep = Effect.fn("Harness.driveSharedStep")(function* (
   plan: CompiledPlan,
   cwd: AbsoluteRepoRoot,

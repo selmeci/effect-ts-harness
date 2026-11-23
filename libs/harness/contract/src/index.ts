@@ -36,6 +36,8 @@ export {
   BatchExitCode,
   CANONICAL_CLI_COMMAND_NAMES,
   CANONICAL_MCP_TOOL_NAMES,
+  CanonicalCliCommandName,
+  CanonicalMcpToolName,
   CliCommandInput,
   CliCommandName,
   CliCommandNotFoundError,
@@ -385,6 +387,8 @@ export {
   validateWorkflowTimeoutBudgets,
 } from "./workflow-timeouts.js"
 export {
+  WORKFLOW_ACTIVITY_DECODERS,
+  WORKFLOW_DEFERRED_DECODERS,
   WorkflowActivityName,
   WorkflowActivityTag,
   WorkflowDeferredTag,

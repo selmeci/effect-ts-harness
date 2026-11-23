@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Result } from "effect"
+import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import { AstSourceFilePath, computeContentSha256, SourceLineNumber } from "@harness/contract"
 import type { SyncHostExecResult, SyncHostIo } from "@harness/service/host-io"
@@ -24,6 +24,7 @@ import {
 } from "../src/mutation-subprocess-helpers.js"
 import { isAssertionFailure } from "../src/mutation/mutant-ast-generator.js"
 import {
+  BackupSchema,
   extractGitDiffModifiedLinesChecked,
   recoverStartupBackup,
   unlinkBackupChecked,
@@ -867,6 +868,30 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
 
       expect(recoverStartupBackup(repoRoot, backupPath, testHostIo)).toBeUndefined()
       expect(existsSync(`${domainFile}.tmp.${process.pid}`)).toBe(false)
+
+      // F-15.1: BackupSchema rejects empty/incomplete objects while accepting current & legacy payloads
+      expect(Schema.decodeOption(BackupSchema)("{}")._tag).toBe("None")
+      expect(
+        Schema.decodeOption(BackupSchema)(JSON.stringify({ filePath: "libs/a.ts" }))._tag,
+      ).toBe("None")
+      expect(Schema.decodeOption(BackupSchema)(JSON.stringify({ content: "x" }))._tag).toBe("None")
+      expect(
+        Schema.decodeOption(BackupSchema)(JSON.stringify({ filePath: "", content: "x" }))._tag,
+      ).toBe("None")
+      expect(
+        Schema.decodeOption(BackupSchema)(JSON.stringify({ filePath: "libs/a.ts", content: "" }))
+          ._tag,
+      ).toBe("Some")
+      expect(
+        Schema.decodeOption(BackupSchema)(
+          JSON.stringify({ filePath: "libs/a.ts", originalSource: "x" }),
+        )._tag,
+      ).toBe("Some")
+
+      writeFileSync(backupPath, "{}", "utf8")
+      expect(recoverStartupBackup(repoRoot, backupPath, testHostIo)).toContain(
+        "Backup JSON failed schema decoding",
+      )
     } finally {
       rmSync(repoRoot, { recursive: true, force: true })
     }

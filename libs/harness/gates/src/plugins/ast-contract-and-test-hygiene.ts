@@ -212,7 +212,7 @@ const getRecordKeyValueArgs = (
 /**
  * Flags unbounded branded string schemas (`Schema.String` / `Schema.NonEmptyString`
  * without `isTrimmed`, `isPattern`, or `isMaxLength`) and unguarded
- * `Schema.Record(Schema.String, Schema.Unknown)` bags in `type:contract` (`REQ-1.1`).
+ * `Schema.Record(Schema.String, Schema.Unknown)` bags in `type:contract` (`SPEC-0028 REQ-1.1`).
  */
 export const collectContractShapeViolations = (
   sourceFile: ts.SourceFile,
@@ -276,7 +276,7 @@ const WORKFLOW_SYMBOL_NAME_RE = /^[A-Z][A-Za-z0-9_]*Workflow$/
 
 /**
  * Flags `.name` / `["name"]` property reads on `Workflow.make(...)` definitions
- * across workspace source and test files (`REQ-1.2`), guiding callers to `._tag`.
+ * across workspace source and test files (`SPEC-0028 REQ-1.2`), guiding callers to `._tag`.
  */
 export const collectWorkflowNameAccessViolations = (
   sourceFile: ts.SourceFile,
@@ -379,7 +379,7 @@ const isVitestTestChain = (expr: ts.Expression): boolean => {
 
 /**
  * Flags Vitest `it` / `test` callbacks whose inclusive line span exceeds
- * `MAX_TEST_CASE_LINES` (`200`) (`REQ-3.1`).
+ * `MAX_TEST_CASE_LINES` (`200`) (`SPEC-0028 REQ-3.1`).
  */
 export const collectMaxTestCaseLineViolations = (
   sourceFile: ts.SourceFile,

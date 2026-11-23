@@ -15,7 +15,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { Effect, Fiber, Schema } from "effect"
 import { match } from "ts-pattern"
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import {
   AbsoluteRepoRoot,
   BackupDirPath,
@@ -222,6 +222,7 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
     const started = await startClusterAndServer(primaryClusterDir, cliToken)
     primaryBaseUrl = started.baseUrl
     primaryProc = started.proc
+    // 30_000ms: provisions primary Omnigraph cluster via `omnigraph cluster apply` and waits for `omnigraph-server /readyz`.
   }, 30_000)
 
   afterAll(async () => {
@@ -474,6 +475,7 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
 
     await stopChildProcess(restoreProc)
     restoreProc = undefined
+    // 30_000ms: starts a second real `omnigraph-server` cluster and performs export + merge/replace restore rounds.
   }, 30_000)
 
   it("rejects sha mismatch before og.load, missing files, corrupt NDJSON, and dead export servers", async () => {
@@ -552,6 +554,7 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
       }).pipe(Effect.provide(deadBackupLayer), Effect.flip),
     )
     expect(deadExportErr).toBeInstanceOf(WorkflowStoreUnavailableError)
+    // 30_000ms: exports live Omnigraph snapshot and runs negative restore/HTTP checks against live and dead servers.
   }, 30_000)
 
   it("runs offline maintenance, verifies safety export before cleanup, and preserves rows across restart", async () => {
@@ -704,6 +707,7 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
     } finally {
       await stopChildProcess(maintProc)
     }
+    // 45_000ms: starts/restarts real `omnigraph-server`, seeds 40 mutations, and executes full `omnigraph` CLI export/optimize/cleanup.
   }, 45_000)
 
   it("aborts offline maintenance on foreign __cluster/lock.json, corrupt export NDJSON, active startup.lock, and symlink clusterDir, and unlocks run-created lock", async () => {
@@ -837,6 +841,7 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
       })
       .exhaustive()
     expect(existsSync(stubLog)).toBe(false)
+    // 45_000ms: runs 5 sequential offline maintenance scenarios spawning `omnigraph-stub.sh` subprocesses and lock checks.
   }, 45_000)
 
   it("F-22: runOmnigraphCli interruption escalates SIGTERM -> SIGKILL and awaits child termination BEFORE force-unlock or fiber interrupt resolves", async () => {
@@ -928,5 +933,79 @@ describe("WorkflowGraphBackup (export, merge/replace, WfReply parity, partial-re
     expect(unlockEvent.childAliveAtUnlock).toBe(false)
     expect(unlockEvent.lockId).toBe("adm-interrupt-1")
     expect(existsSync(stubLockJson)).toBe(false)
+    // 15_000ms: spawns Node stub trapping SIGTERM, exercises 500ms SIGKILL escalation on interrupt, and runs post-interrupt force-unlock.
   }, 15_000)
+
+  it("S-5.3: writes stderr diagnostic and appends unlock failure reason when force-unlock fails after maintenance step error", async () => {
+    const stubRoot = mkdtempSync(join(tmpdir(), "wf2-maint-unlock-err-"))
+    tempDirs.push(stubRoot)
+    const stubGit = GitCommonDirPath.make(join(stubRoot, ".git"))
+    const stubCluster = join(stubRoot, "cluster")
+    const stubClusterMeta = join(stubCluster, "__cluster")
+    const stubLockJson = join(stubClusterMeta, "lock.json")
+    const stubBackupDir = BackupDirPath.make(join(stubRoot, "backups"))
+    mkdirSync(stubGit, { recursive: true })
+    mkdirSync(stubClusterMeta, { recursive: true })
+
+    const stubBin = join(stubRoot, "omnigraph-unlock-fail.sh")
+    writeFileSync(
+      stubBin,
+      [
+        "#!/bin/sh",
+        'if [ "$1" = "export" ]; then',
+        `  printf '{"lock_id":"adm-fail-unlock-1"}' > '${stubLockJson}'`,
+        '  printf "primary export failed\\n" >&2',
+        "  exit 1",
+        "fi",
+        'if [ "$1" = "cluster" ] && [ "$2" = "force-unlock" ]; then',
+        '  printf "force-unlock permission denied\\n" >&2',
+        "  exit 2",
+        "fi",
+        "exit 0",
+      ].join("\n"),
+      "utf8",
+    )
+    chmodSync(stubBin, 0o755)
+
+    const stderrChunks: Array<string> = []
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+      return true
+    })
+
+    const err = await (async () => {
+      try {
+        return await Effect.runPromise(
+          runOfflineWorkflowMaintenance({
+            repoRoot: AbsoluteRepoRoot.make(stubRoot),
+            commonGitDir: stubGit,
+            backupDir: stubBackupDir,
+            omnigraphBin: stubBin,
+            clusterDir: stubCluster,
+          }).pipe(Effect.flip),
+        )
+      } finally {
+        stderrSpy.mockRestore()
+      }
+    })()
+
+    match(err)
+      .with({ _tag: "WorkflowStoreUnavailableError" }, (storeErr) => {
+        expect(storeErr.reason).toContain("primary export failed")
+        expect(storeErr.reason).toContain(
+          "Failed to force-unlock cluster admission locks after export failure",
+        )
+        expect(storeErr.reason).toContain("force-unlock permission denied")
+      })
+      .with({ _tag: "WorkspaceFsError" }, (fsErr) => {
+        throw new Error(`Expected WorkflowStoreUnavailableError, got ${fsErr.message}`)
+      })
+      .exhaustive()
+
+    const stderrText = stderrChunks.join("")
+    expect(stderrText).toContain(
+      "[harness] Failed to force-unlock cluster admission locks after export failure:",
+    )
+    expect(stderrText).toContain("force-unlock permission denied")
+  })
 })

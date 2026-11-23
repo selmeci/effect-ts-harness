@@ -323,14 +323,21 @@ const collectFilesChecked = (
 const NON_DOC_MARKDOWN_DIR_RE =
   /(?:^|\/)(?:adapters|agent-patterns|src|test|tests|__tests__|fixtures)\//i
 
+const ROOT_TEST_ASSERTED_DOC_RE = /^(?:README|AGENTS)\.md$/i
+
 /**
  * Returns true iff a repo-relative path is a non-executable markdown documentation file
- * outside `adapters/`, `agent-patterns/`, source directories, and test/fixture directories
+ * outside `adapters/`, `agent-patterns/`, source directories, test/fixture directories,
+ * and root `README.md`/`AGENTS.md` (which are asserted on by adapter/doc-truth tests),
  * excluded from mutable code stamps (`mutate-stamp.json`).
  */
 export const isMarkdownDocPath = (relPath: string): boolean => {
   const norm = relPath.replace(/\\/g, "/").replace(/^\.\//, "")
-  return /\.(?:md|mdx)$/i.test(norm) && !NON_DOC_MARKDOWN_DIR_RE.test(norm)
+  return (
+    /\.(?:md|mdx)$/i.test(norm) &&
+    !NON_DOC_MARKDOWN_DIR_RE.test(norm) &&
+    !ROOT_TEST_ASSERTED_DOC_RE.test(norm)
+  )
 }
 
 const computeFilteredWorkspaceTreeHashChecked = (
@@ -576,9 +583,22 @@ export const writeMutateStamp = (
   return stamp
 }
 
-const isEnoentError = (err: unknown): boolean =>
-  (typeof err === "object" && err !== null && "code" in err && err.code === "ENOENT") ||
-  /\bENOENT\b/.test(formatErr(err))
+const extractErrorCode = (err: unknown): string | undefined => {
+  let curr: unknown = err
+  for (let depth = 0; depth < 4 && typeof curr === "object" && curr !== null; depth += 1) {
+    if ("code" in curr && typeof curr.code === "string") {
+      return curr.code
+    }
+    curr = "cause" in curr ? curr.cause : undefined
+  }
+  return undefined
+}
+
+const isEnoentError = (err: unknown): boolean => {
+  const code = extractErrorCode(err)
+  if (code !== undefined) return code === "ENOENT"
+  return /^ENOENT(?::|\s|$)/.test(formatErr(err))
+}
 
 export const removeMutateStamp = (
   repoRoot: string,

@@ -840,6 +840,7 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
       const specNode = resolveNode(graph, "sample:SPEC-0001")
       expect(specNode).toBeDefined()
       expect(specNode?._tag).toBe("EarsSpec")
+      // 15s budget: cold full-workspace TypeScript compiler extraction & governance graph assembly across process.cwd()
     }, 15_000)
 
     it("F-06: preserves governance status violations across topology snapshot hit and invalidates when test, pattern, or gov map size shrinks", () => {

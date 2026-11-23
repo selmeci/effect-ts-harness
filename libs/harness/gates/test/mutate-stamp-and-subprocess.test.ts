@@ -1476,9 +1476,10 @@ if (id === "m-sigterm") {
     }
   })
 
-  it("REQ-4.1 & REQ-4.2: mutate stamp uses mutable-only tree hash and LIBS_EXCLUDED_DIRS excludes libs/*/docs while digesting apps/", () => {
+  it("SPEC-0026 REQ-4.1 & REQ-4.2: mutate stamp uses mutable-only tree hash and LIBS_EXCLUDED_DIRS excludes libs/*/docs while digesting apps/", () => {
     const dir = mkdtempSync(join(tmpdir(), "mut-mutable-hash-"))
     try {
+      mkdirSync(join(dir, "docs"), { recursive: true })
       mkdirSync(join(dir, "libs", "demo", "gates", "src"), { recursive: true })
       mkdirSync(join(dir, "libs", "demo", "gates", "docs"), { recursive: true })
       mkdirSync(join(dir, "apps", "demo-cli", "src"), { recursive: true })
@@ -1515,6 +1516,7 @@ if (id === "m-sigterm") {
         "export const t = 1\n",
         "utf8",
       )
+      writeFileSync(join(dir, "docs", "overview.md"), "# docs overview\n", "utf8")
       writeFileSync(join(dir, "README.md"), "# root doc\n", "utf8")
 
       const mutableBefore = computeMutableTreeHashChecked(dir, testHostIo)
@@ -1539,13 +1541,19 @@ if (id === "m-sigterm") {
 
       const digestBefore = computeMutationContextDigestsChecked(dir, testHostIo)
 
-      // Modify markdown files in both root and libs/*/docs/ -> mutate stamp stays Valid and allLibsSrcDigest stays unchanged
-      writeFileSync(join(dir, "README.md"), "# updated root doc\n", "utf8")
+      // Modify markdown files in docs/ and libs/*/docs/ -> mutate stamp stays Valid and allLibsSrcDigest stays unchanged
+      writeFileSync(join(dir, "docs", "overview.md"), "# updated docs overview\n", "utf8")
       writeFileSync(
         join(dir, "libs", "demo", "gates", "docs", "spec.md"),
         "# updated spec\n",
         "utf8",
       )
+      expect(checkMutateStamp(dir, testHostIo)._tag).toBe("Valid")
+
+      // F-2.1: root README.md IS included in mutableTreeHash (asserted by adapter-config/doc-truth tests)
+      writeFileSync(join(dir, "README.md"), "# updated root doc\n", "utf8")
+      expect(checkMutateStamp(dir, testHostIo)._tag).toBe("Invalid")
+      writeFileSync(join(dir, "README.md"), "# root doc\n", "utf8")
       expect(checkMutateStamp(dir, testHostIo)._tag).toBe("Valid")
 
       const digestAfterDocEdit = computeMutationContextDigestsChecked(dir, testHostIo)
@@ -1579,8 +1587,13 @@ if (id === "m-sigterm") {
     }
   })
 
-  it("isMarkdownDocPath rejects markdown files inside executable/test/adapter directories per ADR-0019", () => {
+  it("F-2.1: isMarkdownDocPath excludes root README.md/AGENTS.md and executable/test/adapter directories per ADR-0019", () => {
     for (const nonDocPath of [
+      "README.md",
+      "./README.md",
+      "readme.md",
+      "AGENTS.md",
+      "./agents.md",
       "adapters/antigravity/README.md",
       "adapters/claude-code/skills/effect-lfg/SKILL.md",
       "agent-patterns/planning.md",
@@ -1592,13 +1605,18 @@ if (id === "m-sigterm") {
     ]) {
       expect(isMarkdownDocPath(nonDocPath), nonDocPath).toBe(false)
     }
-    for (const docPath of ["README.md", "docs/adr/0019.md", "libs/harness/docs/spec.mdx"]) {
+    for (const docPath of [
+      "docs/adr/0019.md",
+      "docs/README.md",
+      "libs/harness/docs/spec.mdx",
+      "notes.md",
+    ]) {
       expect(isMarkdownDocPath(docPath), docPath).toBe(true)
     }
   })
 
   it.prop(
-    "isMarkdownDocPath property: recognizes .md/.mdx case-insensitively outside non-doc directories and rejects code extensions",
+    "isMarkdownDocPath property: recognizes .md/.mdx case-insensitively outside non-doc directories and root README/AGENTS.md",
     {
       prefixDir: Schema.Literals([
         "",
@@ -1612,7 +1630,7 @@ if (id === "m-sigterm") {
         "libs/demo/__tests__/",
         "libs/demo/fixtures/",
       ]),
-      fileName: Schema.Literals(["README", "0019-note", "design-spec"]),
+      fileName: Schema.Literals(["README", "AGENTS", "0019-note", "design-spec"]),
       leadingDotSlash: Schema.Boolean,
       useBackslash: Schema.Boolean,
       ext: Schema.Literals([".md", ".MD", ".mdx", ".MDX", ".ts", ".tsx", ".json"]),
@@ -1631,7 +1649,86 @@ if (id === "m-sigterm") {
       const rawRel = `${leadingDotSlash ? "./" : ""}${prefixDir}${fileName}${ext}`
       const rel = useBackslash ? rawRel.replace(/\//g, "\\") : rawRel
       const isDocExt = lower === ".md" || lower === ".mdx"
-      expect(isMarkdownDocPath(rel)).toBe(isDocExt && !excludedPrefixes.has(prefixDir))
+      const isRootTestAsserted =
+        prefixDir === "" && /^(?:README|AGENTS)\.md$/i.test(`${fileName}${ext}`)
+      expect(isMarkdownDocPath(rel)).toBe(
+        isDocExt && !excludedPrefixes.has(prefixDir) && !isRootTestAsserted,
+      )
     },
   )
+
+  it("F-8.1: removeMutateStamp inspects structured code/cause before anchored ENOENT fallback and never ignores EACCES mentioning ENOENT", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mut-enoent-"))
+    try {
+      mkdirSync(join(dir, "libs", "demo", "core", "src"), { recursive: true })
+      writeFileSync(join(dir, "libs", "demo", "core", "src", "x.ts"), "export const x = 1\n")
+      writeMutateStamp(dir, testHostIo, {
+        enforcementMode: "strict",
+        diffMode: "working-tree",
+        scannedCandidateFiles: MutantCount.make(1),
+        scannedFiles: [StampRelFilePath.make("libs/demo/core/src/x.ts")],
+        diffMatchedFiles: [StampRelFilePath.make("libs/demo/core/src/x.ts")],
+        evaluatedFiles: [StampRelFilePath.make("libs/demo/core/src/x.ts")],
+        totalMutants: MutantCount.make(1),
+        killedCount: MutantCount.make(1),
+        survivedCount: MutantCount.make(0),
+        equivalentCount: MutantCount.make(0),
+        passed: MutateStampPassed.make(true),
+      })
+
+      const eaccesWithEnoentPath: SyncHostIo = {
+        ...testHostIo,
+        unlinkSync: () => {
+          throw Object.assign(
+            new Error("EACCES: permission denied, unlink '/tmp/ENOENT/mutate-stamp.json'"),
+            { code: "EACCES" },
+          )
+        },
+      }
+      const eaccesRes = removeMutateStamp(dir, eaccesWithEnoentPath)
+      match(eaccesRes)
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          expect(failure).toContain("EACCES")
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("Expected Failure for EACCES error mentioning ENOENT")
+        })
+        .exhaustive()
+
+      const uncodedMessageWithEnoentPath: SyncHostIo = {
+        ...testHostIo,
+        unlinkSync: () => {
+          throw new Error("EACCES: permission denied, unlink '/tmp/ENOENT/mutate-stamp.json'")
+        },
+      }
+      match(removeMutateStamp(dir, uncodedMessageWithEnoentPath))
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          expect(failure).toContain("EACCES")
+        })
+        .with({ _tag: "Success" }, () => {
+          expect.unreachable("Expected Failure for uncoded error mentioning ENOENT")
+        })
+        .exhaustive()
+
+      const nestedCauseEnoent: SyncHostIo = {
+        ...testHostIo,
+        unlinkSync: () => {
+          throw new Error("unlink wrapper failed", {
+            cause: Object.assign(new Error("missing"), { code: "ENOENT" }),
+          })
+        },
+      }
+      expect(removeMutateStamp(dir, nestedCauseEnoent)).toEqual(Result.succeed(undefined))
+
+      const anchoredEnoentMsg: SyncHostIo = {
+        ...testHostIo,
+        unlinkSync: () => {
+          throw new Error("ENOENT: no such file or directory")
+        },
+      }
+      expect(removeMutateStamp(dir, anchoredEnoentMsg)).toEqual(Result.succeed(undefined))
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

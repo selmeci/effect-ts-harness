@@ -257,13 +257,17 @@ export const handleVerify = (options: CliEnv | undefined): Effect.Effect<CliResu
       if (verifySyncFail !== undefined) return verifySyncFail
     }
 
-    const docOnlyResult = yield* tryRunDocOnlyVerifyFastPath({
+    const docOnlyOutcome = yield* tryRunDocOnlyVerifyFastPath({
       repoRoot,
       graph,
       governanceDocs,
       implBranch: taskBranches.implBranch,
       options,
     })
+    const docOnlyResult = match(docOnlyOutcome)
+      .with({ _tag: "Executed" }, ({ result }) => result)
+      .with({ _tag: "Skipped" }, () => undefined)
+      .exhaustive()
     if (docOnlyResult !== undefined) return docOnlyResult
 
     if (

@@ -52,9 +52,21 @@ const DISALLOWED_PACKAGE_EXACT: ReadonlySet<string> = new Set([
   "effect/FileSystem",
   "effect/Terminal",
   "effect/ChildProcess",
+  "effect/Stdio",
   "effect/workflow",
   "effect/ai",
   "effect/sql",
+  "effect/http",
+  "effect/http-api",
+  "effect/process",
+  "effect/rpc",
+  "effect/cli",
+  "effect/socket",
+  "effect/net",
+  "effect/workers",
+  "effect/persistence",
+  "effect/eventlog",
+  "effect/devtools",
   "@harness/infra",
 ])
 
@@ -69,13 +81,27 @@ const DISALLOWED_PACKAGE_PREFIXES: ReadonlyArray<string> = [
   "effect/cluster/",
   "effect/sql/",
   "effect/ai/",
-  "effect/unstable/sql",
+  "effect/http/",
+  "effect/http-api/",
+  "effect/process/",
+  "effect/rpc/",
+  "effect/cli/",
+  "effect/socket/",
+  "effect/net/",
+  "effect/workers/",
+  "effect/persistence/",
+  "effect/eventlog/",
+  "effect/Stdio/",
+  "effect/devtools/",
+  "effect/workflow/",
+  "effect/unstable/",
   "@harness/infra/",
 ]
 
 const DISALLOWED_EFFECT_IO_SYMBOLS: ReadonlySet<string> = new Set([
   "FileSystem",
   "Terminal",
+  "Stdio",
   "Command",
   "HttpClient",
   "HttpServer",
@@ -347,6 +373,13 @@ export const analyzeModulePurityAst = (
 
   const visit = (node: ts.Node): void => {
     if (exclusionReason !== undefined) return
+    if (ts.isHeritageClause(node) && node.token === ts.SyntaxKind.ImplementsKeyword) {
+      return
+    }
+    if (ts.isExpressionWithTypeArguments(node)) {
+      visit(node.expression)
+      return
+    }
     if (ts.isTypeNode(node) || ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) {
       return
     }

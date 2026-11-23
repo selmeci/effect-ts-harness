@@ -3,7 +3,6 @@
  * "ask" means "always confirm with the human first" (alchemy deploy/destroy/profile,
  * matching Alchemy's own advice to confirm every deploy). */
 
-import * as path from "node:path"
 import {
   ALLOWLIST,
   ASKLIST,
@@ -57,6 +56,13 @@ import {
   type CommandView,
   type UnwrappedSegment,
 } from "./policy-shell-parser.js"
+import {
+  matchesGovernanceAskGlob,
+  matchesProtectedStateGlob,
+  matchesReadonlySubtreeGlob,
+  matchesSecretFileGlob,
+  normalizeFilePathCandidates as normalizeFilePathCandidatesShared,
+} from "./policy-worker-paths.js"
 
 export {
   ALLOWLIST,
@@ -212,6 +218,94 @@ const extractEchoInlineCommand = (snippet: string): string | undefined => {
   return rest.length > 0 ? rest : undefined
 }
 
+const CASE_INSENSITIVE_GLOB_FLAG_PATTERN = /(?:^|\s)(?:-iname|-ipath|-iwholename|--iglob)(?:=|\s|$)/
+const UNQUOTED_BRACE_EXPANSION_PATTERN = /\{[^}\s]*(?:,|\.\.)[^}\s]*\}/
+
+const isHandledByUnquotedEscalate = (
+  tok: string,
+  rawCommand: string,
+  unquoted: string,
+): boolean => {
+  if (/[*?]/.test(tok)) return false
+  const bracketGroups = tok.match(/\[[^\]\s]+\]/g) ?? []
+  const braceGroups = (tok.match(/\{[^}\s]+\}/g) ?? []).filter((g) => /(?:,|\.\.)/.test(g))
+  if (bracketGroups.length === 0 && braceGroups.length === 0) return false
+  if (
+    bracketGroups.length > 0 &&
+    (!bracketGroups.every((g) => unquoted.includes(g)) ||
+      !hasUnquotedAdjacentBracketGlob(rawCommand, unquoted))
+  ) {
+    return false
+  }
+  if (
+    braceGroups.length > 0 &&
+    (!braceGroups.every((g) => unquoted.includes(g)) ||
+      !UNQUOTED_BRACE_EXPANSION_PATTERN.test(unquoted))
+  ) {
+    return false
+  }
+  return true
+}
+
+const extractCommandGlobSubTokens = (
+  argv: string,
+  rawCommand: string,
+  unquoted: string,
+): ReadonlyArray<string> => {
+  const rawTokens = argv.trim().split(/\s+/)
+  const hasCaseInsensitive = CASE_INSENSITIVE_GLOB_FLAG_PATTERN.test(argv)
+  const out: Array<string> = []
+  const seen = new Set<string>()
+  const pushSub = (val: string): void => {
+    if (val === "" || !/[*?[\]{}]/.test(val)) return
+    if (isHandledByUnquotedEscalate(val, rawCommand, unquoted)) return
+    const add = (candidate: string): void => {
+      if (candidate !== "" && !seen.has(candidate)) {
+        seen.add(candidate)
+        out.push(candidate)
+      }
+    }
+    add(val)
+    if (val.includes("\\")) {
+      add(val.replace(/\\(.)/g, "$1"))
+    }
+    if (hasCaseInsensitive) {
+      add(val.toLowerCase())
+      if (val.includes("\\")) {
+        add(val.replace(/\\(.)/g, "$1").toLowerCase())
+      }
+    }
+  }
+  for (const tok of rawTokens) {
+    if (tok === "") continue
+    pushSub(tok)
+    const eqIdx = tok.indexOf("=")
+    if (eqIdx > 0) {
+      pushSub(tok.slice(eqIdx + 1))
+    }
+    if (/^-[gf].+/.test(tok)) {
+      pushSub(tok.slice(2))
+    }
+  }
+  return out
+}
+
+const argvMatchesSecretGlobToken = (argv: string, rawCommand: string, unquoted: string): boolean =>
+  extractCommandGlobSubTokens(argv, rawCommand, unquoted).some((sub) =>
+    normalizeFilePathCandidates(sub).candidates.some(isSecretFileReadPath),
+  )
+
+const argvMatchesProtectedStateGlobToken = (
+  argv: string,
+  rawCommand: string,
+  unquoted: string,
+): boolean =>
+  extractCommandGlobSubTokens(argv, rawCommand, unquoted).some((sub) =>
+    normalizeFilePathCandidates(sub).candidates.some(
+      (p) => PROTECTED_HARNESS_FILE_WRITE_PATTERN.test(p) || matchesProtectedStateGlob(p),
+    ),
+  )
+
 const explainDirectCommandDenyRule = (
   trimmed: string,
   expandedText: string,
@@ -273,12 +367,15 @@ const explainDirectCommandDenyRule = (
         "Mutating or directly probing protected harness runtime state (<git-common-dir>/harness/**, auth-tokens.json, daemon.sock, daemon.lock, workflow-backups/, pending-workflow-restore.json, stamps, caches, repos/**, oxlint policy) is banned by harness policy.",
     }
   }
-  const expandedArgv = toCommandView(expandedText).argv
+  const expandedView = toCommandView(expandedText)
+  const expandedArgv = expandedView.argv
   if (
     SECRET_FILE_PATTERN.test(view.argv) ||
     SECRET_FILE_PATTERN.test(view.argv.replace(/\\(.)/g, "$1")) ||
     SECRET_FILE_PATTERN.test(expandedArgv) ||
-    SECRET_FILE_PATTERN.test(expandedArgv.replace(/\\(.)/g, "$1"))
+    SECRET_FILE_PATTERN.test(expandedArgv.replace(/\\(.)/g, "$1")) ||
+    argvMatchesSecretGlobToken(view.argv, trimmed, view.unquoted) ||
+    argvMatchesSecretGlobToken(expandedArgv, expandedText, expandedView.unquoted)
   ) {
     return {
       ruleId: "secret-file-access",
@@ -286,7 +383,11 @@ const explainDirectCommandDenyRule = (
         "Accessing or exposing secret/credential files (.env, .dev.vars, mutation-hmac*.key, auth-tokens.json) in shell commands is banned by harness policy.",
     }
   }
-  if (isHarnessStateAccessCommand(trimmed)) {
+  if (
+    isHarnessStateAccessCommand(trimmed) ||
+    argvMatchesProtectedStateGlobToken(view.argv, trimmed, view.unquoted) ||
+    argvMatchesProtectedStateGlobToken(expandedArgv, expandedText, expandedView.unquoted)
+  ) {
     return {
       ruleId: "harness-state-mutation",
       reason:
@@ -379,7 +480,7 @@ export const classifyCommand = (command: string, options?: PolicyGuardOptions): 
   }
   const view = toCommandView(norm)
   const hasBgOp = hasUnquotedBackgroundOperator(view.unquoted)
-  const hasUnquotedBraceExpansion = /\{[^}\s,]*,[^}\s]*\}/.test(view.unquoted)
+  const hasUnquotedBraceExpansion = /\{[^}\s]*(?:,|\.\.)[^}\s]*\}/.test(view.unquoted)
   if (
     ASKLIST.some((token) => containsToken(view.argv, token)) ||
     matchesAny(view.argv, GIT_DISCARD_PATTERNS)
@@ -490,169 +591,26 @@ export type FileReadDenyRuleId =
   | "worker-daemon-credential-access"
 
 export interface FileReadGuardResult {
-  readonly verdict: "allow" | "deny"
+  readonly verdict: "allow" | "deny" | "ask"
   readonly ruleId?: FileReadDenyRuleId | undefined
   readonly reason?: string | undefined
 }
 
-const expandBracketBody = (body: string): ReadonlyArray<string> | undefined => {
-  if (body.length === 0 || body.startsWith("!") || body.startsWith("^")) {
-    return undefined
-  }
-  const chars: Array<string> = []
-  for (let i = 0; i < body.length;) {
-    if (i + 2 < body.length && body[i + 1] === "-") {
-      const start = body.charCodeAt(i)
-      const end = body.charCodeAt(i + 2)
-      if (end < start || end - start + 1 > 8) {
-        return undefined
-      }
-      for (let code = start; code <= end; code++) {
-        chars.push(String.fromCharCode(code))
-      }
-      i += 3
-      continue
-    }
-    chars.push(body[i]!)
-    i += 1
-  }
-  const unique = [...new Set(chars)]
-  return unique.length > 0 && unique.length <= 8 ? unique : undefined
-}
-
-const isBracketSensitivePath = (s: string): boolean =>
-  /(?:^|\/)\./.test(s) ||
-  /(?:^|\/)\[[^\]]*\](?:env|en\?|e\?v|nv|dev|git|harness|cache|oxlint)/i.test(s) ||
-  /(?:^|\/)(?:repos|tools\/oxlint|common-dir|harness|workflow-backups|mutation|auth|daemon|pending-workflow-restore)/i.test(
-    s,
-  ) ||
-  /\.[^/]*\[[^\]]*\][^/]*$/.test(s)
-
-const stripGlobCharClasses = (
-  p: string,
-): { readonly candidates: ReadonlyArray<string>; readonly truncated: boolean } => {
-  const unescaped = p.replace(/\\(.)/g, "$1").replace(/\[([^\]!^-])\]/g, "$1")
-  const out: Array<string> = []
-  let truncated = false
-  let queue: Array<string> = [unescaped]
-  for (let pass = 0; pass < 3; pass++) {
-    const nextQueue: Array<string> = []
-    for (const item of queue) {
-      const m = /\[([^\]/\s]+)\]/.exec(item)
-      if (m === null) {
-        nextQueue.push(item)
-        continue
-      }
-      const alts = expandBracketBody(m[1]!)
-      if (alts === undefined) {
-        if (isBracketSensitivePath(item)) truncated = true
-        nextQueue.push(item)
-        continue
-      }
-      const prefix = item.slice(0, m.index)
-      const suffix = item.slice(m.index + m[0].length)
-      for (const ch of alts) {
-        if (nextQueue.length >= 32) {
-          if (isBracketSensitivePath(item)) truncated = true
-          break
-        }
-        nextQueue.push(`${prefix}${ch}${suffix}`.replace(/\[([^\]!^-])\]/g, "$1"))
-      }
-    }
-    queue = nextQueue
-  }
-  for (const item of queue) {
-    if (/\[[^\]/\s]+\]/.test(item) && isBracketSensitivePath(item)) {
-      truncated = true
-    }
-    if (!out.includes(item)) out.push(item)
-  }
-  const wildcarded = unescaped.replace(/\[[^\]/\s]+\]/g, "?")
-  if (!out.includes(wildcarded)) out.push(wildcarded)
-  return { candidates: out, truncated }
-}
-
-const expandGlobObfuscationCandidates = (
-  raw: string,
-): { readonly candidates: ReadonlyArray<string>; readonly truncated: boolean } => {
-  const out: Array<string> = []
-  let truncated = false
-  const pushUnique = (val: string): void => {
-    if (val.length > 0 && !out.includes(val)) out.push(val)
-  }
-  const queue: Array<string> = [raw]
-  for (let pass = 0; pass < 2; pass++) {
-    const nextQueue: Array<string> = []
-    for (const item of queue) {
-      const brace = /\{([^{}]{1,128})\}/.exec(item)
-      if (brace === null || !brace[1]!.includes(",")) {
-        nextQueue.push(item)
-        continue
-      }
-      const rawAlts = brace[1]!.split(",")
-      if (rawAlts.length > 8) {
-        truncated = true
-      }
-      const alts = rawAlts.slice(0, 8)
-      const prefix = item.slice(0, brace.index)
-      const suffix = item.slice(brace.index + brace[0].length)
-      for (const alt of alts) {
-        if (nextQueue.length >= 16) {
-          truncated = true
-          break
-        }
-        nextQueue.push(`${prefix}${alt}${suffix}`)
-      }
-    }
-    queue.splice(0, queue.length, ...nextQueue)
-  }
-  for (const item of queue) {
-    if (/\{[^{}]*,[^{}]*\}/.test(item)) {
-      truncated = true
-    }
-    pushUnique(item)
-    const strippedResult = stripGlobCharClasses(item)
-    if (strippedResult.truncated) truncated = true
-    for (const stripped of strippedResult.candidates) {
-      pushUnique(stripped)
-      pushUnique(path.posix.normalize(stripped))
-    }
-  }
-  return { candidates: out, truncated }
-}
-
-const normalizeFilePathCandidates = (
-  filePath: string,
-): { readonly candidates: ReadonlyArray<string>; readonly truncated: boolean } => {
-  const trimmed = filePath.trim()
-  if (trimmed === "") {
-    return { candidates: [], truncated: false }
-  }
-  const rawNorm = trimmed.replace(/\\/g, "/")
-  const norm = path.posix.normalize(rawNorm)
-  const bases = new Set<string>([trimmed, rawNorm, norm])
-  const out: Array<string> = []
-  let truncated = false
-  for (const base of bases) {
-    const expanded = expandGlobObfuscationCandidates(base)
-    if (expanded.truncated) truncated = true
-    for (const variant of expanded.candidates) {
-      if (!out.includes(variant)) out.push(variant)
-    }
-  }
-  return { candidates: out, truncated }
-}
+const normalizeFilePathCandidates = normalizeFilePathCandidatesShared
 
 const isSecretFileWritePath = (p: string): boolean =>
-  /(^|\/)(\.(?:env\??|en\?|e\?v)(?:\.[a-zA-Z0-9_*?-]+)*\*?\??|\.(?:dev\.vars\??|dev\.var\?)(?:\.[a-zA-Z0-9_*?-]+)*\*?\??|mutation-hma[c*?][^/]*(?:\.ke?[y*?]?|\*|\?|\]|\})|.*\.(pem|key))$/.test(
-    p,
-  ) && !/\.(example|template|sample)$/i.test(p)
-
-const isSecretFileReadPath = (p: string): boolean =>
-  (/(^|\/)(\.(?:env\??|en\?|e\?v)(?:\.[a-zA-Z0-9_*?-]+)*\*?\??|\.(?:dev\.vars\??|dev\.var\?)(?:\.[a-zA-Z0-9_*?-]+)*\*?\??|mutation-hma[c*?][^/]*(?:\.ke?[y*?]?|\*|\?|\]|\})|.*\.(?:pem|key))$/.test(
+  (/(^|\/)(\.(?:env\??|en\?|e\?v|\?nv)(?:\.[a-zA-Z0-9_*?-]+)*\*?\??|\.(?:dev\.vars\??|dev\.var\?)(?:\.[a-zA-Z0-9_*?-]+)*\*?\??|mutation-hma[c*?][^/]*(?:\.ke?[y*?]?|\*|\?|\]|\})|.*\.(pem|key))$/.test(
     p,
   ) ||
-    /(^|\/)\.cache\/effect-harness(\/|$)/.test(p)) &&
+    matchesSecretFileGlob(p)) &&
+  !/\.(example|template|sample)$/i.test(p)
+
+const isSecretFileReadPath = (p: string): boolean =>
+  (/(^|\/)(\.(?:env\??|en\?|e\?v|\?nv)(?:\.[a-zA-Z0-9_*?-]+)*\*?\??|\.(?:dev\.vars\??|dev\.var\?)(?:\.[a-zA-Z0-9_*?-]+)*\*?\??|mutation-hma[c*?][^/]*(?:\.ke?[y*?]?|\*|\?|\]|\})|.*\.(?:pem|key))$/.test(
+    p,
+  ) ||
+    /(^|\/)\.cache\/effect-harness(\/|$)/.test(p) ||
+    matchesSecretFileGlob(p)) &&
   !/\.(example|template|sample)$/i.test(p)
 
 const findWorkerCredentialCandidate = (
@@ -670,13 +628,6 @@ export const classifyFileRead = (
   options?: PolicyGuardOptions,
 ): FileReadGuardResult => {
   const { candidates, truncated } = normalizeFilePathCandidates(filePath)
-  if (truncated) {
-    return {
-      verdict: "deny",
-      ruleId: "harness-common-dir-state",
-      reason: `Glob expansion complexity limit exceeded; failing closed on file read: ${filePath}`,
-    }
-  }
   if (candidates.length === 0) {
     return { verdict: "allow" }
   }
@@ -684,7 +635,11 @@ export const classifyFileRead = (
   if (workerTarget !== undefined) {
     return classifyWorkerFileAccess(workerTarget, true)
   }
-  if (candidates.some((p) => PROTECTED_HARNESS_FILE_WRITE_PATTERN.test(p))) {
+  if (
+    candidates.some(
+      (p) => PROTECTED_HARNESS_FILE_WRITE_PATTERN.test(p) || matchesProtectedStateGlob(p),
+    )
+  ) {
     return {
       verdict: "deny",
       ruleId: "harness-common-dir-state",
@@ -698,6 +653,12 @@ export const classifyFileRead = (
       reason: `Secret or credential file read is forbidden by harness guard: ${filePath}`,
     }
   }
+  if (truncated) {
+    return {
+      verdict: "ask",
+      reason: `Glob expansion complexity limit exceeded; human confirmation required for file read: ${filePath}`,
+    }
+  }
   return { verdict: "allow" }
 }
 
@@ -706,13 +667,6 @@ export const classifyFileWrite = (
   options?: PolicyGuardOptions,
 ): FileWriteGuardResult => {
   const { candidates, truncated } = normalizeFilePathCandidates(filePath)
-  if (truncated) {
-    return {
-      verdict: "deny",
-      ruleId: "harness-common-dir-state",
-      reason: `Glob expansion complexity limit exceeded; failing closed on file write: ${filePath}`,
-    }
-  }
   if (candidates.length === 0) {
     return { verdict: "allow" }
   }
@@ -721,7 +675,11 @@ export const classifyFileWrite = (
     return classifyWorkerFileAccess(workerTarget, true)
   }
 
-  if (candidates.some((p) => /(^|\/)repos\/(effect|alchemy)(\/|$)/.test(p))) {
+  if (
+    candidates.some(
+      (p) => /(^|\/)repos\/(effect|alchemy)(\/|$)/.test(p) || matchesReadonlySubtreeGlob(p),
+    )
+  ) {
     return {
       verdict: "deny",
       ruleId: "readonly-subtree",
@@ -759,7 +717,11 @@ export const classifyFileWrite = (
     }
   }
 
-  if (candidates.some((p) => PROTECTED_HARNESS_FILE_WRITE_PATTERN.test(p))) {
+  if (
+    candidates.some(
+      (p) => PROTECTED_HARNESS_FILE_WRITE_PATTERN.test(p) || matchesProtectedStateGlob(p),
+    )
+  ) {
     return {
       verdict: "deny",
       ruleId: "harness-common-dir-state",
@@ -775,10 +737,23 @@ export const classifyFileWrite = (
     }
   }
 
-  if (candidates.some((p) => /(^|\/)(\.oxlintrc\.json|tools\/oxlint\/.*|.*\.cedar)$/.test(p))) {
+  if (
+    candidates.some(
+      (p) =>
+        /(^|\/)(\.oxlintrc\.json|tools\/oxlint\/.*|.*\.cedar)$/.test(p) ||
+        matchesGovernanceAskGlob(p),
+    )
+  ) {
     return {
       verdict: "ask",
       reason: `Modifying harness governance/linter policy requires human confirmation: ${filePath}`,
+    }
+  }
+
+  if (truncated) {
+    return {
+      verdict: "ask",
+      reason: `Glob expansion complexity limit exceeded; human confirmation required for file write: ${filePath}`,
     }
   }
 

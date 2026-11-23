@@ -539,7 +539,7 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
     serverProc.stdout?.resume()
     serverProc.stderr?.resume()
     await waitForServerReady(serverBaseUrl, serverProc)
-  }, 30_000)
+  }, 30_000) // spawns live omnigraph-server subprocess and polls /readyz over loopback HTTP
 
   afterAll(async () => {
     await stopChildProcess(serverProc)
@@ -638,7 +638,7 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
     } finally {
       await daemon.close()
     }
-  }, 45_000)
+  }, 45_000) // exercises multi-step unix-socket workflow daemon IPC, git repo setup, and live omnigraph-server queries
 
   const makeRetryAfterEscalationVerifierLayer = (
     recordedSharedInputs: Array<CompleteSharedStepInput>,
@@ -904,7 +904,7 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
     } finally {
       await daemon.close()
     }
-  }, 45_000)
+  }, 45_000) // exercises 3x verification failure -> escalation -> retry -> shared-step -> friction gate against live daemon & omnigraph-server
 
   it("enforces F-1.1 epic worktree cwd (<canonicalRepoRoot>/.harness/workflow-worktrees/<runId>/<unitId>), abort compensation, and F-15.1 Interrupted status", async () => {
     const { canonicalDir, baseSha } = createWorkRepo("epic-abort")
@@ -1021,7 +1021,7 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
     } finally {
       await daemon.close()
     }
-  }, 45_000)
+  }, 45_000) // spawns git worktrees + daemon IPC + omnigraph-server writes for F-1.1/F-15.1 abort compensation
 
   it("propagates slice siblingInFlightOwnedPaths and classifies TaskRunAbortedError into WorkflowTerminalError.Aborted (F-15.1)", async () => {
     const { canonicalDir, baseSha } = createWorkRepo("slice-aborted")
@@ -1160,7 +1160,7 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
     } finally {
       await daemon.close()
     }
-  }, 45_000)
+  }, 45_000) // exercises slice siblingInFlightOwnedPaths propagation & TaskRunAbortedError over live daemon IPC
 
   it("F-17.1: rejects Automatic mode when placeholder dispatcher is active, and runs Automatic mode when runnerKind: 'live'", async () => {
     const { canonicalDir, baseSha } = createWorkRepo("auto-gate")
@@ -1252,7 +1252,7 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
     } finally {
       await liveDaemon.close()
     }
-  }, 45_000)
+  }, 45_000) // boots placeholder & live workflow daemon dispatchers over Unix socket and awaits live omnigraph-server persistence
 
   it("F-6.1 & F-6.2: workflow.start fails closed on missing/corrupt WfRun.planJson and on engine execution without stored plan", async () => {
     const { canonicalDir, baseSha } = createWorkRepo("start-plan-verify")
@@ -1376,7 +1376,7 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
     } finally {
       await daemon2.close()
     }
-  }, 45_000)
+  }, 45_000) // restarts daemon across corrupt/missing planJson cases and validates fail-closed Unix-socket RPC responses
 
   it("F-23.2: covers daemon runtime inactive, malformed RPC payload, unknown RPC method, and concurrent same-run calls", async () => {
     const { canonicalDir, baseSha } = createWorkRepo("edge-cases")
@@ -1461,12 +1461,19 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
     } finally {
       await liveDaemon.close()
     }
-  }, 45_000)
+  }, 45_000) // tests concurrent Unix-socket RPC calls, malformed payloads, and inactive daemon runtime handling
 
-  it("F-7.1, F-8.1, F-8.2, F-12.1, F-2.4/F-2.5: tests lease epoch change mid-request, doctor lease checks, rebuild fail-closed, timeout constants, and immediate poll failure", async () => {
-    expect(WORKFLOW_COMPLETE_IPC_TIMEOUT_MS).toBe(150_000)
-    expect(WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS).toBe(160_000)
-    const { canonicalDir } = createWorkRepo("lease-poll-doc")
+  const withStatefulLeaseDoctorDaemon = async (
+    name: string,
+    fn: (ctx: {
+      readonly worktreeRoot: AbsoluteRepoRoot
+      readonly lockFilePath: string
+      readonly getStoredLease: () => Record<string, unknown> | null
+      readonly setOverriddenLease: (row: Record<string, unknown> | null | undefined) => void
+      readonly setForceCorruptJournal: (flag: boolean) => void
+    }) => Promise<void>,
+  ): Promise<void> => {
+    const { canonicalDir } = createWorkRepo(name)
     const validatedCanonical = await Effect.runPromise(
       validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
     )
@@ -1550,92 +1557,123 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
       workflowEngine: {
         mode: "required",
         client: statefulClient,
-        heartbeatIntervalMs: 60_000,
+        heartbeatIntervalMs: 30_000,
         unitVerifierLayer: makeCompletedVerifierLayer(),
         worktreePortLayer: makeNoopWorktreeLayer(validatedCanonical.worktreeRoot),
         reviewRouterLayer: makeReviewStubLayer(),
       },
     })
-
     try {
-      // 1. Healthy lease check passes
-      const healthyDoc = await Effect.runPromise(
-        doctorWorkflowViaDaemon({
-          repoRoot: validatedCanonical.worktreeRoot,
-          mode: WorkflowDoctorMode.make("check-only"),
-        }),
-      )
-      expect(healthyDoc.checks.find((c) => c.name === "writer-lease")?.status).toBe("ok")
-
-      // 2. Stale heartbeat TTL -> warn (F-8.2)
-      const currentStoredLease = leaseBox.row
-      if (currentStoredLease === null) {
-        expect.unreachable("Expected storedLease to be populated")
-        return
-      }
-      overriddenLease = {
-        ...currentStoredLease,
-        heartbeatMs: Date.now() - WRITER_LEASE_HEARTBEAT_TTL_MS - 1_000,
-      }
-      const staleDoc = await Effect.runPromise(
-        doctorWorkflowViaDaemon({
-          repoRoot: validatedCanonical.worktreeRoot,
-          mode: WorkflowDoctorMode.make("check-only"),
-        }),
-      )
-      expect(staleDoc.checks.find((c) => c.name === "writer-lease")?.status).toBe("warn")
-
-      // 3. Missing meta.json -> warn (F-8.2)
-      overriddenLease = undefined
-      const metaPath = `${runtimePaths.lockFilePath}.meta.json`
-      const savedMeta = readFileSync(metaPath, "utf8")
-      unlinkSync(metaPath)
-      const missingMetaDoc = await Effect.runPromise(
-        doctorWorkflowViaDaemon({
-          repoRoot: validatedCanonical.worktreeRoot,
-          mode: WorkflowDoctorMode.make("check-only"),
-        }),
-      )
-      expect(missingMetaDoc.checks.find((c) => c.name === "writer-lease")?.status).toBe("warn")
-      writeFileSync(metaPath, savedMeta, "utf8")
-
-      // 4. F-2.5: corrupt journal fails doctor rebuild closed instead of swallowing/skipping
-      forceCorruptJournal = true
-      const corruptRebuildErr = await Effect.runPromise(
-        doctorWorkflowViaDaemon({
-          repoRoot: validatedCanonical.worktreeRoot,
-          mode: WorkflowDoctorMode.make("rebuild"),
-        }).pipe(Effect.flip),
-      )
-      expect(corruptRebuildErr.message).toContain("Corrupt")
-      forceCorruptJournal = false
-
-      // 5. Writer lease epoch change mid-request (F-8.1, F-8.2, F-23.2) -> doctor reports fail, status/getRun fails closed
-      overriddenLease = {
-        name: "engine",
-        owner: "rival-daemon#999",
-        leaseEpoch: 99,
-        heartbeatMs: Date.now(),
-      }
-      const mismatchedDoc = await Effect.runPromise(
-        doctorWorkflowViaDaemon({
-          repoRoot: validatedCanonical.worktreeRoot,
-          mode: WorkflowDoctorMode.make("check-only"),
-        }),
-      )
-      expect(mismatchedDoc.checks.find((c) => c.name === "writer-lease")?.status).toBe("fail")
-
-      const fencedStatusErr = await Effect.runPromise(
-        getWorkflowStatusViaDaemon({
-          repoRoot: validatedCanonical.worktreeRoot,
-          runId: WorkflowRunId.make("run-fenced-01"),
-        }).pipe(Effect.flip),
-      )
-      expect(fencedStatusErr.message).toContain("rival-daemon")
+      await fn({
+        worktreeRoot: validatedCanonical.worktreeRoot,
+        lockFilePath: runtimePaths.lockFilePath,
+        getStoredLease: () => leaseBox.row,
+        setOverriddenLease: (row) => {
+          overriddenLease = row
+        },
+        setForceCorruptJournal: (flag) => {
+          forceCorruptJournal = flag
+        },
+      })
     } finally {
       await daemon.close()
     }
-  }, 45_000)
+  }
+
+  it("F-8.2, F-12.1: verifies canonical timeout constants and writer-lease doctor statuses (ok, stale-TTL warn, missing meta warn)", async () => {
+    expect(WORKFLOW_COMPLETE_IPC_TIMEOUT_MS).toBe(150_000)
+    expect(WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS).toBe(160_000)
+    await withStatefulLeaseDoctorDaemon(
+      "lease-doc-health",
+      async ({ worktreeRoot, lockFilePath, getStoredLease, setOverriddenLease }) => {
+        // 1. Healthy lease check passes
+        const healthyDoc = await Effect.runPromise(
+          doctorWorkflowViaDaemon({
+            repoRoot: worktreeRoot,
+            mode: WorkflowDoctorMode.make("check-only"),
+          }),
+        )
+        expect(healthyDoc.checks.find((c) => c.name === "writer-lease")?.status).toBe("ok")
+
+        // 2. Stale heartbeat TTL -> warn (F-8.2)
+        const currentStoredLease = getStoredLease()
+        if (currentStoredLease === null) {
+          expect.unreachable("Expected storedLease to be populated")
+          return
+        }
+        setOverriddenLease({
+          ...currentStoredLease,
+          heartbeatMs: Date.now() - WRITER_LEASE_HEARTBEAT_TTL_MS - 1_000,
+        })
+        const staleDoc = await Effect.runPromise(
+          doctorWorkflowViaDaemon({
+            repoRoot: worktreeRoot,
+            mode: WorkflowDoctorMode.make("check-only"),
+          }),
+        )
+        expect(staleDoc.checks.find((c) => c.name === "writer-lease")?.status).toBe("warn")
+
+        // 3. Missing meta.json -> warn (F-8.2)
+        setOverriddenLease(undefined)
+        const metaPath = `${lockFilePath}.meta.json`
+        const savedMeta = readFileSync(metaPath, "utf8")
+        unlinkSync(metaPath)
+        const missingMetaDoc = await Effect.runPromise(
+          doctorWorkflowViaDaemon({
+            repoRoot: worktreeRoot,
+            mode: WorkflowDoctorMode.make("check-only"),
+          }),
+        )
+        expect(missingMetaDoc.checks.find((c) => c.name === "writer-lease")?.status).toBe("warn")
+        writeFileSync(metaPath, savedMeta, "utf8")
+      },
+    )
+  }, 45_000) // boots live Unix socket daemon with mock Omnigraph store and runs sequential doctor RPC checks
+
+  it("F-2.5: corrupt journal fails doctor rebuild closed instead of swallowing/skipping", async () => {
+    await withStatefulLeaseDoctorDaemon(
+      "lease-doc-corrupt",
+      async ({ worktreeRoot, setForceCorruptJournal }) => {
+        setForceCorruptJournal(true)
+        const corruptRebuildErr = await Effect.runPromise(
+          doctorWorkflowViaDaemon({
+            repoRoot: worktreeRoot,
+            mode: WorkflowDoctorMode.make("rebuild"),
+          }).pipe(Effect.flip),
+        )
+        expect(corruptRebuildErr.message).toContain("Corrupt")
+      },
+    )
+  }, 45_000) // boots live Unix socket daemon with mock Omnigraph store and executes doctor rebuild RPC
+
+  it("F-7.1, F-8.1, F-8.2, F-23.2: lease epoch change mid-request reports doctor fail and fails closed on status RPC", async () => {
+    await withStatefulLeaseDoctorDaemon(
+      "lease-doc-fence",
+      async ({ worktreeRoot, setOverriddenLease }) => {
+        setOverriddenLease({
+          name: "engine",
+          owner: "rival-daemon#999",
+          leaseEpoch: 99,
+          heartbeatMs: Date.now(),
+        })
+        const mismatchedDoc = await Effect.runPromise(
+          doctorWorkflowViaDaemon({
+            repoRoot: worktreeRoot,
+            mode: WorkflowDoctorMode.make("check-only"),
+          }),
+        )
+        expect(mismatchedDoc.checks.find((c) => c.name === "writer-lease")?.status).toBe("fail")
+
+        const fencedStatusErr = await Effect.runPromise(
+          getWorkflowStatusViaDaemon({
+            repoRoot: worktreeRoot,
+            runId: WorkflowRunId.make("run-fenced-01"),
+          }).pipe(Effect.flip),
+        )
+        expect(fencedStatusErr.message).toContain("rival-daemon")
+      },
+    )
+  }, 45_000) // boots live Unix socket daemon with mock Omnigraph store and executes fenced doctor/status RPCs
 
   it("F-12.1: workflow.complete polling fails immediately on WorkflowStoreUnavailableError", async () => {
     // 6. F-12.1: polling loop in workflow.complete fails immediately on WorkflowStoreUnavailableError
@@ -1704,7 +1742,7 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
     } finally {
       await pollDaemon.close()
     }
-  }, 45_000)
+  }, 45_000) // boots daemon with failing WorkflowStore mock and polls Unix socket until WorkflowStoreUnavailableError surfaces
 
   it("F-21.1 & F-21.3: fails closed on missing rejection or corrupt EscalationResolution deferred payload", async () => {
     const unitId = WorkUnitId.make("unit-corrupt")
@@ -1869,7 +1907,7 @@ describe("WF-3 Unix-socket daemon workflow RPCs & harness_workflow_plan", () => 
     } finally {
       await daemon.close()
     }
-  }, 45_000)
+  }, 45_000) // boots live daemon & omnigraph-server to assert doctor --rebuild-views writer-lease conflict refusal
 
   it("directly exercises all WorkflowRpcDaemon EffectFns fail-closed and in-memory", async () => {
     const workBase = mkdtempSync(join(tmpdir(), "wf3-direct-rpc-"))

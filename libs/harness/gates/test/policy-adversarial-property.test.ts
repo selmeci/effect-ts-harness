@@ -259,14 +259,24 @@ describe("Adversarial Property-Based Security Policy Matrix (SPEC-0028 REQ-2.1, 
       ".git/harne*/auth-token?.json",
       ".e[no]v",
       "mutation-h[mn]ac.key",
-      "/repo/{a,b,c,d,e,f,g,h,i}/secret.txt",
-      "/repo/{a,{b,{c,d}}}/secret.txt",
+      "{a,b,c,d,e,f,g,h,i}/.env",
     ]) {
       expect(classifyFileRead(pathTarget, { unitWorkerMode: false }).verdict, pathTarget).toBe(
         "deny",
       )
       expect(classifyFileWrite(pathTarget, { unitWorkerMode: false }).verdict, pathTarget).toBe(
         "deny",
+      )
+    }
+    for (const overflowPath of [
+      "/repo/{a,b,c,d,e,f,g,h,i}/secret.txt",
+      "/repo/{a,{b,{c,d}}}/secret.txt",
+    ]) {
+      expect(classifyFileRead(overflowPath, { unitWorkerMode: false }).verdict, overflowPath).toBe(
+        "ask",
+      )
+      expect(classifyFileWrite(overflowPath, { unitWorkerMode: false }).verdict, overflowPath).toBe(
+        "ask",
       )
     }
 

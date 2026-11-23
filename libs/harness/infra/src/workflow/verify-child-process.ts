@@ -7,6 +7,8 @@ import type { SyncHostExecResult } from "@harness/service/host-io"
 const MAX_CAPTURE_BYTES = 64 * 1024
 const STDIO_DRAIN_GRACE_MS = 100
 const KILL_GRACE_MS = 500
+const POST_KILL_SETTLE_MS = 150
+const GROUP_POLL_INTERVAL_MS = 10
 
 interface BoundedTailBuffer {
   chunks: Array<Buffer>
@@ -47,6 +49,21 @@ const readBoundedTailText = (state: BoundedTailBuffer): string =>
   state.totalBytes === 0 ? "" : Buffer.concat(state.chunks, state.totalBytes).toString("utf8")
 
 /**
+ * Sends a signal to a POSIX process group (`-pgid`) without checking `child.exitCode`,
+ * allowing callers to signal or reap surviving descendants after the direct child exits.
+ */
+const killProcessGroupPosix = (pgid: number, signal: NodeJS.Signals | 0): boolean =>
+  process.platform !== "win32" &&
+  match(
+    Result.try(() => {
+      process.kill(-pgid, signal)
+    }),
+  )
+    .with({ _tag: "Success" }, () => true)
+    .with({ _tag: "Failure" }, () => false)
+    .exhaustive()
+
+/**
  * Sends a signal to the detached child's process group on POSIX when `child.pid` is available,
  * falling back cleanly to `child.kill(signal)` on Windows or ESRCH/exit races.
  */
@@ -54,19 +71,8 @@ const signalChildProcessGroup = (child: ChildProcess, signal: NodeJS.Signals): v
   if (child.exitCode !== null || child.signalCode !== null) {
     return
   }
-  if (process.platform !== "win32" && child.pid !== undefined) {
-    const pid = child.pid
-    const sentGroup = match(
-      Result.try(() => {
-        process.kill(-pid, signal)
-      }),
-    )
-      .with({ _tag: "Success" }, () => true)
-      .with({ _tag: "Failure" }, () => false)
-      .exhaustive()
-    if (sentGroup) {
-      return
-    }
+  if (child.pid !== undefined && killProcessGroupPosix(child.pid, signal)) {
+    return
   }
   match(
     Result.try(() => {
@@ -78,20 +84,90 @@ const signalChildProcessGroup = (child: ChildProcess, signal: NodeJS.Signals): v
     .exhaustive()
 }
 
-const isProcessGroupAlive = (pgid: number): boolean =>
-  process.platform !== "win32" &&
-  match(
-    Result.try(() => {
-      process.kill(-pgid, 0)
-    }),
-  )
-    .with({ _tag: "Success" }, () => true)
-    .with({ _tag: "Failure" }, () => false)
-    .exhaustive()
+const isProcessGroupAlive = (pgid: number): boolean => killProcessGroupPosix(pgid, 0)
+
+interface ReapProcessGroupOptions {
+  readonly pgid: number | undefined
+  readonly termGraceMs: number
+  readonly sigtermSent: boolean
+  readonly sigkillSent: boolean
+  readonly onSigtermSent: () => void
+  readonly onSigkillSent: () => void
+  readonly onSettled: () => void
+}
+
+/**
+ * Reaps any remaining members of a POSIX process group with bounded
+ * `SIGTERM` grace -> `SIGKILL` (`-pgid`) -> post-kill settle timing.
+ * Does not gate on `child.exitCode`, so grandchildren surviving after direct child exit are still killed.
+ */
+const reapProcessGroup = (opts: ReapProcessGroupOptions): (() => void) => {
+  const { pgid } = opts
+  if (pgid === undefined || !isProcessGroupAlive(pgid)) {
+    opts.onSettled()
+    return () => {}
+  }
+
+  let sigtermSent = opts.sigtermSent
+  let sigkillSent = opts.sigkillSent
+  if (!sigtermSent && !sigkillSent) {
+    sigtermSent = true
+    opts.onSigtermSent()
+    killProcessGroupPosix(pgid, "SIGTERM")
+  }
+
+  const now0 = Date.now()
+  let postKillDeadlineMs: number | undefined = sigkillSent ? now0 + POST_KILL_SETTLE_MS : undefined
+  const termDeadlineMs = now0 + Math.max(0, opts.termGraceMs)
+
+  if (postKillDeadlineMs === undefined && now0 >= termDeadlineMs) {
+    sigkillSent = true
+    opts.onSigkillSent()
+    killProcessGroupPosix(pgid, "SIGKILL")
+    postKillDeadlineMs = now0 + POST_KILL_SETTLE_MS
+  }
+
+  let done = false
+  const groupPoll = setInterval(() => {
+    if (done) {
+      return
+    }
+    if (!isProcessGroupAlive(pgid)) {
+      done = true
+      clearInterval(groupPoll)
+      opts.onSettled()
+      return
+    }
+    const nowMs = Date.now()
+    if (postKillDeadlineMs !== undefined) {
+      if (nowMs >= postKillDeadlineMs) {
+        done = true
+        clearInterval(groupPoll)
+        opts.onSettled()
+      }
+      return
+    }
+    if (nowMs >= termDeadlineMs) {
+      sigkillSent = true
+      opts.onSigkillSent()
+      killProcessGroupPosix(pgid, "SIGKILL")
+      postKillDeadlineMs = nowMs + POST_KILL_SETTLE_MS
+    }
+  }, GROUP_POLL_INTERVAL_MS)
+  groupPoll.unref()
+
+  return () => {
+    if (done) {
+      return
+    }
+    done = true
+    clearInterval(groupPoll)
+  }
+}
 
 /**
  * Spawns a verification command in its own process group with bounded tail stdio capture,
- * timeout enforcement, and deterministic process-group termination on fiber interruption.
+ * timeout enforcement, and deterministic process-group termination on timeout or fiber interruption.
  */
 const spawnVerifyCommand = (
   cmd: string,
@@ -106,8 +182,15 @@ const spawnVerifyCommand = (
     let settled = false
     let timedOut = false
     let childExited = false
+    let childClosed = false
     let sigtermSent = false
+    let sigtermSentAtMs: number | undefined = undefined
     let sigkillSent = false
+    let reapComplete = false
+    let reapCancel: (() => void) | undefined = undefined
+    let exitOutcome:
+      | { readonly code: number | null; readonly signal: NodeJS.Signals | null }
+      | undefined = undefined
     const stdoutBuf = createBoundedTailBuffer()
     const stderrBuf = createBoundedTailBuffer()
     let killGraceTimer: ReturnType<typeof setTimeout> | undefined = undefined
@@ -129,23 +212,38 @@ const spawnVerifyCommand = (
       appendBoundedTailChunk(stderrBuf, chunk)
     })
 
-    const terminateChild = (): void => {
-      if (childExited || child.exitCode !== null || child.signalCode !== null) {
+    const sendGroupOrChildSignal = (signal: NodeJS.Signals): void => {
+      if (child.pid !== undefined && killProcessGroupPosix(child.pid, signal)) {
         return
       }
+      signalChildProcessGroup(child, signal)
+    }
+
+    const terminateChild = (): void => {
       if (sigtermSent || child.killed) {
         if (!sigkillSent) {
-          sigkillSent = true
-          signalChildProcessGroup(child, "SIGKILL")
+          const groupAlive = child.pid !== undefined && isProcessGroupAlive(child.pid)
+          if (!childExited || groupAlive) {
+            sigkillSent = true
+            sendGroupOrChildSignal("SIGKILL")
+          }
         }
         return
       }
+      if (childExited || child.exitCode !== null || child.signalCode !== null) {
+        return
+      }
       sigtermSent = true
-      signalChildProcessGroup(child, "SIGTERM")
+      sigtermSentAtMs = Date.now()
+      sendGroupOrChildSignal("SIGTERM")
       killGraceTimer = setTimeout(() => {
-        if (!childExited && child.exitCode === null && child.signalCode === null && !sigkillSent) {
+        if (sigkillSent) {
+          return
+        }
+        const groupAlive = child.pid !== undefined && isProcessGroupAlive(child.pid)
+        if ((!childExited && child.exitCode === null && child.signalCode === null) || groupAlive) {
           sigkillSent = true
-          signalChildProcessGroup(child, "SIGKILL")
+          sendGroupOrChildSignal("SIGKILL")
         }
       }, KILL_GRACE_MS)
       killGraceTimer.unref()
@@ -196,6 +294,8 @@ const spawnVerifyCommand = (
         return
       }
       settled = true
+      reapCancel?.()
+      reapCancel = undefined
       cleanupTimers()
       destroyStdio()
       const stdout = readBoundedTailText(stdoutBuf)
@@ -232,12 +332,78 @@ const spawnVerifyCommand = (
       )
     }
 
+    const scheduleStdioDrainOrSettle = (
+      code: number | null,
+      signal: NodeJS.Signals | null,
+    ): void => {
+      if (settled) {
+        return
+      }
+      if (childClosed) {
+        settleWithExit(code, signal)
+        return
+      }
+      if (stdioDrainTimer === undefined) {
+        stdioDrainTimer = setTimeout(() => {
+          settleWithExit(code, signal)
+        }, STDIO_DRAIN_GRACE_MS)
+        stdioDrainTimer.unref()
+      }
+    }
+
+    const handleTimedOutChildEvent = (code: number | null, signal: NodeJS.Signals | null): void => {
+      if (settled) {
+        return
+      }
+      exitOutcome = { code, signal }
+      const pgid = child.pid
+      if (reapComplete || pgid === undefined || !isProcessGroupAlive(pgid)) {
+        reapComplete = true
+        scheduleStdioDrainOrSettle(code, signal)
+        return
+      }
+      if (reapCancel !== undefined) {
+        return
+      }
+      if (killGraceTimer !== undefined) {
+        clearTimeout(killGraceTimer)
+        killGraceTimer = undefined
+      }
+      const elapsedSinceTermMs =
+        sigtermSentAtMs !== undefined ? Math.max(0, Date.now() - sigtermSentAtMs) : 0
+      const remainingGraceMs = Math.max(0, KILL_GRACE_MS - elapsedSinceTermMs)
+      reapCancel = reapProcessGroup({
+        pgid,
+        termGraceMs: remainingGraceMs,
+        sigtermSent,
+        sigkillSent,
+        onSigtermSent: () => {
+          sigtermSent = true
+          sigtermSentAtMs = Date.now()
+        },
+        onSigkillSent: () => {
+          sigkillSent = true
+        },
+        onSettled: () => {
+          reapCancel = undefined
+          reapComplete = true
+          if (settled) {
+            return
+          }
+          const finalOutcome = exitOutcome ?? { code, signal }
+          scheduleStdioDrainOrSettle(finalOutcome.code, finalOutcome.signal)
+        },
+      })
+    }
+
     child.once("error", (err) => {
       notifyChildExit()
       if (settled) {
         return
       }
       settled = true
+      reapCancel?.()
+      reapCancel = undefined
       cleanupTimers()
       destroyStdio()
       resume(
@@ -255,67 +421,75 @@ const spawnVerifyCommand = (
       if (timeoutTimer !== undefined) {
         clearTimeout(timeoutTimer)
       }
-      if (settled || stdioDrainTimer !== undefined) {
+      if (settled) {
         return
       }
-      stdioDrainTimer = setTimeout(() => {
-        settleWithExit(code, signal)
-      }, STDIO_DRAIN_GRACE_MS)
-      stdioDrainTimer.unref()
+      if (timedOut) {
+        handleTimedOutChildEvent(code, signal)
+        return
+      }
+      if (stdioDrainTimer === undefined) {
+        stdioDrainTimer = setTimeout(() => {
+          settleWithExit(code, signal)
+        }, STDIO_DRAIN_GRACE_MS)
+        stdioDrainTimer.unref()
+      }
     })
 
     child.once("close", (code, signal) => {
       notifyChildExit()
+      childClosed = true
+      if (settled) {
+        return
+      }
+      if (timedOut) {
+        handleTimedOutChildEvent(code, signal)
+        return
+      }
       settleWithExit(code, signal)
     })
 
     return Effect.callback<void>((done) => {
+      const sigtermAlreadySentBeforeInterrupt = sigtermSent
       settled = true
-      if (timeoutTimer !== undefined) {
-        clearTimeout(timeoutTimer)
+      reapCancel?.()
+      reapCancel = undefined
+      cleanupTimers()
+
+      let finalized = false
+      const finishInterrupt = (): void => {
+        if (finalized) {
+          return
+        }
+        finalized = true
+        reapCancel = undefined
+        done(Effect.void)
       }
-      if (stdioDrainTimer !== undefined) {
-        clearTimeout(stdioDrainTimer)
-      }
+
       const awaitProcessGroupExit = (): void => {
         cleanupTimers()
         destroyStdio()
-        const pgid = child.pid
-        if (pgid === undefined || !isProcessGroupAlive(pgid)) {
-          done(Effect.void)
-          return
-        }
-        const termDeadlineMs = Date.now() + KILL_GRACE_MS
-        let postKillDeadlineMs: number | undefined = sigkillSent ? Date.now() + 150 : undefined
-        const groupPoll = setInterval(() => {
-          if (!isProcessGroupAlive(pgid)) {
-            clearInterval(groupPoll)
-            done(Effect.void)
-            return
-          }
-          const nowMs = Date.now()
-          if (postKillDeadlineMs !== undefined) {
-            if (nowMs >= postKillDeadlineMs) {
-              clearInterval(groupPoll)
-              done(Effect.void)
-            }
-            return
-          }
-          if (nowMs >= termDeadlineMs) {
+        const termGraceMs = sigtermAlreadySentBeforeInterrupt
+          ? 0
+          : sigtermSentAtMs !== undefined
+            ? Math.max(0, sigtermSentAtMs + KILL_GRACE_MS - Date.now())
+            : KILL_GRACE_MS
+        reapCancel = reapProcessGroup({
+          pgid: child.pid,
+          termGraceMs,
+          sigtermSent,
+          sigkillSent,
+          onSigtermSent: () => {
+            sigtermSent = true
+            sigtermSentAtMs = Date.now()
+          },
+          onSigkillSent: () => {
             sigkillSent = true
-            match(
-              Result.try(() => {
-                process.kill(-pgid, "SIGKILL")
-              }),
-            )
-              .with({ _tag: "Success" }, () => undefined)
-              .with({ _tag: "Failure" }, () => undefined)
-              .exhaustive()
-            postKillDeadlineMs = nowMs + 150
-          }
-        }, 10)
-        groupPoll.unref()
+          },
+          onSettled: finishInterrupt,
+        })
       }
+
       if (childExited || child.exitCode !== null || child.signalCode !== null) {
         awaitProcessGroupExit()
         return

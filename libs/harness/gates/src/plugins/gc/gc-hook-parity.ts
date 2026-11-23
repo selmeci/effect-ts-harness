@@ -443,6 +443,20 @@ export const checkHookMatcherToolParity = (
 ): void => {
   const payloadAbs = join(repoRoot, GUARD_PAYLOAD_REL_PATH)
   if (!hostIo.existsSync(payloadAbs)) {
+    const hasHarnessHookArtifacts =
+      hostIo.existsSync(join(repoRoot, CLAUDE_HOOKS_REL_PATH)) ||
+      hostIo.existsSync(join(repoRoot, ANTIGRAVITY_HOOKS_REL_PATH)) ||
+      hostIo.existsSync(join(repoRoot, "apps/harness-cli/package.json"))
+    if (hasHarnessHookArtifacts) {
+      findings.push(
+        makeParityFinding(
+          GUARD_PAYLOAD_REL_PATH,
+          GUARD_PAYLOAD_REL_PATH,
+          `Missing required hook guard payload module '${GUARD_PAYLOAD_REL_PATH}'.`,
+          `Restore '${GUARD_PAYLOAD_REL_PATH}' for adapter hook parity.`,
+        ),
+      )
+    }
     return
   }
   const readReq = (relPath: string): string | undefined => {

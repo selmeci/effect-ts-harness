@@ -35,7 +35,7 @@ const initGitRepo = (baseDir: string): string => {
   return canonicalDir
 }
 
-describe("REQ-3.2: WorktreeRepoRoot.validate x policy worker isolation seam invariants", () => {
+describe("SPEC-0026 REQ-3.2: WorktreeRepoRoot.validate x policy worker isolation seam invariants", () => {
   it.effect(
     "allows source writes inside validated resolveWorkflowWorktreeDir while denying .harness state, .env, daemon.sock, and auth-tokens.json",
     () =>
@@ -96,7 +96,7 @@ describe("REQ-3.2: WorktreeRepoRoot.validate x policy worker isolation seam inva
   )
 
   it.prop(
-    "REQ-3.2 property: resolveWorkflowWorktreeDir preserves allow-source / deny-harness-and-secrets seam across arbitrary valid runId and unitId slugs",
+    "SPEC-0026 REQ-3.2 property: resolveWorkflowWorktreeDir preserves allow-source / deny-harness-and-secrets seam across arbitrary valid runId and unitId slugs",
     {
       runSlug: RunSlugSchema,
       unitSlug: UnitSlugSchema,

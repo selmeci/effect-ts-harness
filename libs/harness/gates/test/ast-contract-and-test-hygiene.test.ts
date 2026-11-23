@@ -51,7 +51,7 @@ const CaseKindArb = Schema.Literals([
 
 describe("SPEC-0028 AST Contract Shape, Workflow Name, and Test Hygiene Gates", () => {
   it.effect(
-    "REQ-1.1 flags unbounded branded strings and Schema.Record(String, Unknown) outside wire adapters",
+    "SPEC-0028 REQ-1.1 flags unbounded branded strings and Schema.Record(String, Unknown) outside wire adapters",
     () =>
       Effect.gen(function* () {
         const badContract = [
@@ -78,7 +78,7 @@ describe("SPEC-0028 AST Contract Shape, Workflow Name, and Test Hygiene Gates", 
   )
 
   it.effect(
-    "REQ-1.1 allows bounded branded strings, non-string brands, non-contract files, and wire-adapter bags",
+    "SPEC-0028 REQ-1.1 allows bounded branded strings, non-string brands, non-contract files, and wire-adapter bags",
     () =>
       Effect.gen(function* () {
         const goodContract = [
@@ -124,7 +124,7 @@ describe("SPEC-0028 AST Contract Shape, Workflow Name, and Test Hygiene Gates", 
   )
 
   it.effect(
-    "REQ-1.2 detects .name and ['name'] reads on Workflow.make definitions and imported *Workflow symbols",
+    "SPEC-0028 REQ-1.2 detects .name and ['name'] reads on Workflow.make definitions and imported *Workflow symbols",
     () =>
       Effect.gen(function* () {
         const badCode = [
@@ -182,7 +182,7 @@ describe("SPEC-0028 AST Contract Shape, Workflow Name, and Test Hygiene Gates", 
   )
 
   it.effect(
-    "REQ-3.1 enforces MAX_TEST_CASE_LINES boundary (200 passes, 201 fails) across Vitest forms",
+    "SPEC-0028 REQ-3.1 enforces MAX_TEST_CASE_LINES boundary (200 passes, 201 fails) across Vitest forms",
     () =>
       Effect.gen(function* () {
         expect(MAX_TEST_CASE_LINES).toBe(200)

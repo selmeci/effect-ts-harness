@@ -1,12 +1,13 @@
 /**
  * Test & Pure Decider Entropy Gate Plugin.
  *
- * Verifies test reachability and property-based test coverage for domain functions.
+ * Verifies test reachability and property-based test coverage for EffectFn symbols,
+ * `.decide` deciders, and `Schema.TaggedUnion` variants.
  *
  * Rules owned:
- * - untested-effect-fn: Flags domain/contract EffectFn symbols with 0 reaching tests.
- * - missing-decider-property-test: Flags domain deciders lacking property-based test coverage.
- * - shallow-decider-property-test: Flags deciders exercised only by scalar/primitive arbitraries.
+ * - untested-effect-fn: Flags `domain`/`contract`/`infra`/`app` `EffectFn` symbols with 0 reaching tests.
+ * - missing-decider-property-test: Flags `domain`/`contract` `.decide` deciders lacking property-based test coverage.
+ * - shallow-decider-property-test: Flags `domain`/`contract` `.decide` deciders exercised only by scalar/primitive arbitraries.
  * - untested-union-variant: Flags exported `Schema.TaggedUnion` variants in `type:contract` with 0 test references.
  */
 import { join } from "node:path"

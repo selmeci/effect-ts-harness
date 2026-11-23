@@ -132,7 +132,7 @@ describe("ReviewRouterV1 and monotonic hybrid review routing", () => {
   )
 
   it.effect(
-    "REQ-1.2: rejects empty, null-byte, absolute, drive, and evasion paths with InvalidReviewRouteInputError",
+    "SPEC-0013 REQ-1.2: rejects empty, null-byte, absolute, drive, and evasion paths with InvalidReviewRouteInputError",
     () =>
       Effect.gen(function* () {
         const badPaths = [
@@ -277,7 +277,7 @@ describe("ReviewRouterV1 and monotonic hybrid review routing", () => {
   )
 
   it.effect(
-    "REQ-2.1 & REQ-2.2: returns SkipReviewPlan for trivial non-governance docs < 40 lines, and promotes at 40 lines",
+    "SPEC-0013 REQ-2.1 & REQ-2.2: returns SkipReviewPlan for trivial non-governance docs < 40 lines, and promotes at 40 lines",
     () =>
       Effect.gen(function* () {
         const doc39Plan = yield* routeDeterministicOnly(
@@ -428,7 +428,7 @@ describe("ReviewRouterV1 and monotonic hybrid review routing", () => {
   )
 
   it.effect(
-    "S-5.2 / S-2.1 / REQ-2.3 (3): security lens floors single security-surface selection at focused depth",
+    "S-5.2 / S-2.1 / SPEC-0013 REQ-2.3 (3): security lens floors single security-surface selection at focused depth",
     () =>
       Effect.gen(function* () {
         const secPlan = yield* routeDeterministicOnly(
@@ -820,7 +820,7 @@ describe("ReviewRouterV1 and monotonic hybrid review routing", () => {
   )
 
   it.effect(
-    "REQ-3.2 / F-9.1b: returns deterministic floor with degraded-fallback and degradedReason when DecisionModel fails",
+    "SPEC-0013 REQ-3.2 / F-9.1b: returns deterministic floor with degraded-fallback and degradedReason when DecisionModel fails",
     () =>
       Effect.gen(function* () {
         const input = ReviewRawDiffInput.make({
@@ -1045,15 +1045,20 @@ describe("ReviewRouterV1 and monotonic hybrid review routing", () => {
             expect(sliceIds).toContain("apps/harness-mcp")
             expect(sliceIds).toContain("adapters/claude-code")
             expect(sliceIds).toContain("tools/oxlint")
-            expect(sliceIds).toContain("leading-dash")
+            const leadingDashId = resolveReviewSliceUnitKey(
+              ReviewSignalPath.make("-leading-dash/item.ts"),
+            )
+            const weirdId = resolveReviewSliceUnitKey(ReviewSignalPath.make("@@/weird.ts"))
+            expect(leadingDashId).toMatch(/^leading-dash-[0-9a-f]{8}$/)
+            expect(weirdId).toMatch(/^root-[0-9a-f]{8}$/)
+            expect(sliceIds).toContain(leadingDashId)
+            expect(sliceIds).toContain(weirdId)
             expect(sliceIds).toContain("docs")
             const flattened = slices.flatMap((s) => s.files)
             expect(flattened).toHaveLength(mixedPaths.length)
             expect(new Set(flattened)).toEqual(new Set(mixedPaths))
-            expect(slices.find((s) => s.sliceId === "root")?.files).toEqual([
-              "@@/weird.ts",
-              "README.md",
-            ])
+            expect(slices.find((s) => s.sliceId === "root")?.files).toEqual(["README.md"])
+            expect(slices.find((s) => s.sliceId === weirdId)?.files).toEqual(["@@/weird.ts"])
             expect(resolveReviewSliceUnitKey(ReviewSignalPath.make("libs/sample/README.md"))).toBe(
               "libs",
             )
@@ -1381,11 +1386,21 @@ describe("ReviewRouterV1 and monotonic hybrid review routing", () => {
             for (const id of sliceIds) {
               expect(Schema.is(ReviewSliceId)(id)).toBe(true)
             }
-            expect(sliceIds).toContain("s-.github")
+            const dotGithubId = resolveReviewSliceUnitKey(
+              ReviewSignalPath.make(".github/workflows/ci.yml"),
+            )
+            const underscoreScriptsId = resolveReviewSliceUnitKey(
+              ReviewSignalPath.make("_scripts/check.ts"),
+            )
+            const dotColonId = resolveReviewSliceUnitKey(ReviewSignalPath.make("._:/weird.ts"))
+            expect(dotGithubId).toMatch(/^s-\.github-[0-9a-f]{8}$/)
+            expect(underscoreScriptsId).toMatch(/^s-_scripts-[0-9a-f]{8}$/)
+            expect(dotColonId).toMatch(/^s-\._:-[0-9a-f]{8}$/)
+            expect(sliceIds).toContain(dotGithubId)
             expect(sliceIds).toContain("github")
-            expect(sliceIds).toContain("s-_scripts")
+            expect(sliceIds).toContain(underscoreScriptsId)
             expect(sliceIds).toContain("scripts")
-            expect(sliceIds).toContain("s-._:")
+            expect(sliceIds).toContain(dotColonId)
 
             const wholeReviewers = new Set(active.selections.map((s) => s.reviewer))
             expect(wholeReviewers.has(ReviewerId.make("effect-architecture-reviewer"))).toBe(true)
@@ -1446,6 +1461,94 @@ describe("ReviewRouterV1 and monotonic hybrid review routing", () => {
           })
           .with({ _tag: "SkipReviewPlan" }, () => {
             expect.unreachable("Expected Skip->Active promotion")
+          })
+          .exhaustive()
+      }),
+  )
+
+  it.effect(
+    "F-14.2 / SPEC-0030 REQ-1.2: collision-resistant slice IDs separate .github vs s-.github, foo@bar vs foo-bar, and >112-char shared prefixes without throwing",
+    () =>
+      Effect.gen(function* () {
+        const shared115 = "p".repeat(115)
+        const exact112 = "k".repeat(112)
+        const over112 = "k".repeat(113)
+        const longPrefixA = `${shared115}-alpha`
+        const longPrefixB = `${shared115}-beta`
+        const longChunkRoot = `libs/sample/${"q".repeat(115)}-gamma`
+
+        expect(resolveReviewSliceUnitKey(ReviewSignalPath.make(`${exact112}/a.ts`))).toBe(exact112)
+        const over112Key = resolveReviewSliceUnitKey(ReviewSignalPath.make(`${over112}/a.ts`))
+        expect(over112Key).toHaveLength(112)
+        expect(over112Key).toMatch(/^k{103}-[0-9a-f]{8}$/)
+
+        const collisionFiles = [
+          ".github/workflows/ci.yml",
+          "s-.github/workflows/ci.yml",
+          "foo@bar/a.ts",
+          "foo-bar/a.ts",
+          `${longPrefixA}/a.ts`,
+          `${longPrefixB}/b.ts`,
+          ...Array.from(
+            { length: 13 },
+            (_, idx) => `${longChunkRoot}/file-${String(idx).padStart(2, "0")}.ts`,
+          ),
+        ]
+
+        const routed = yield* routeReviewDiff(
+          ReviewRawDiffInput.make({
+            changedFiles: collisionFiles.map((p) => ReviewRawFileInput.make(p)),
+            diffSummary: ReviewSummaryText.make("Collision and long-root slice test"),
+            changedLineCount: ReviewChangedLines.make(50),
+            touchedTiers: [],
+            touchedScopes: [],
+          }),
+        ).pipe(Effect.provide(makeMockDecisionModelLayer()))
+
+        match(routed)
+          .with({ _tag: "ActiveReviewPlan" }, (active) => {
+            const slices = active.reviewSlices ?? []
+            expect(slices.length).toBe(8)
+            const sliceIds = slices.map((s) => s.sliceId)
+            expect(new Set(sliceIds).size).toBe(slices.length)
+            for (const slice of slices) {
+              expect(Schema.is(ReviewSliceId)(slice.sliceId)).toBe(true)
+              expect(slice.sliceId.length).toBeLessThanOrEqual(128)
+            }
+
+            const dotGithubSlice = slices.find((s) => s.files[0] === ".github/workflows/ci.yml")
+            const literalSGithubSlice = slices.find(
+              (s) => s.files[0] === "s-.github/workflows/ci.yml",
+            )
+            expect(dotGithubSlice?.sliceId).toMatch(/^s-\.github-[0-9a-f]{8}$/)
+            expect(literalSGithubSlice?.sliceId).toBe("s-.github")
+            expect(dotGithubSlice?.sliceId).not.toBe(literalSGithubSlice?.sliceId)
+
+            const atSlice = slices.find((s) => s.files[0] === "foo@bar/a.ts")
+            const dashSlice = slices.find((s) => s.files[0] === "foo-bar/a.ts")
+            expect(atSlice?.sliceId).toMatch(/^foo-bar-[0-9a-f]{8}$/)
+            expect(dashSlice?.sliceId).toBe("foo-bar")
+            expect(atSlice?.sliceId).not.toBe(dashSlice?.sliceId)
+
+            const longSliceA = slices.find((s) => s.files[0] === `${longPrefixA}/a.ts`)
+            const longSliceB = slices.find((s) => s.files[0] === `${longPrefixB}/b.ts`)
+            expect(longSliceA?.sliceId).toHaveLength(112)
+            expect(longSliceB?.sliceId).toHaveLength(112)
+            expect(longSliceA?.sliceId).not.toBe(longSliceB?.sliceId)
+
+            const chunkedSlices = slices.filter((s) =>
+              s.files.some((f) => f.startsWith(`${longChunkRoot}/`)),
+            )
+            expect(chunkedSlices).toHaveLength(2)
+            expect(chunkedSlices[0]?.sliceId).toMatch(/#1$/)
+            expect(chunkedSlices[1]?.sliceId).toMatch(/#2$/)
+            expect(chunkedSlices[0]?.sliceId.length).toBeLessThanOrEqual(115)
+
+            const flattened = slices.flatMap((s) => s.files)
+            expect(new Set(flattened)).toEqual(new Set(collisionFiles))
+          })
+          .with({ _tag: "SkipReviewPlan" }, () => {
+            expect.unreachable("Expected ActiveReviewPlan for collision diff")
           })
           .exhaustive()
       }),

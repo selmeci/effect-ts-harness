@@ -40,8 +40,7 @@ export const WorkflowTimeoutBudgets = Schema.Struct({
 })
 export type WorkflowTimeoutBudgets = typeof WorkflowTimeoutBudgets.Type
 
-/** Single-source canonical timeout budgets consumed across daemon, verifier, store, and MCP RPC layers. */
-export const WORKFLOW_TIMEOUT_BUDGETS: WorkflowTimeoutBudgets = {
+const RAW_WORKFLOW_TIMEOUT_BUDGETS: WorkflowTimeoutBudgets = {
   defaultSocketMs: WorkflowTimeoutMs.make(5_000),
   defaultServerSocketMs: WorkflowTimeoutMs.make(35_000),
   workflowIpcMs: WorkflowTimeoutMs.make(30_000),
@@ -57,7 +56,7 @@ export const WORKFLOW_TIMEOUT_BUDGETS: WorkflowTimeoutBudgets = {
   writerLeaseHeartbeatTtlMs: WorkflowTimeoutMs.make(45_000),
 }
 
-/** Validates strict monotonicity invariants across nested workflow timeout and settle-loop layers (`REQ-2.2`). */
+/** Validates strict monotonicity invariants across nested workflow timeout and settle-loop layers (`SPEC-0027 REQ-2.2`). */
 export const validateWorkflowTimeoutBudgets = (
   budgets: WorkflowTimeoutBudgets,
 ): Result.Result<WorkflowTimeoutBudgets, ErrorReasonMessage> => {
@@ -95,3 +94,9 @@ export const validateWorkflowTimeoutBudgets = (
 
   return Result.succeed(budgets)
 }
+
+/** Single-source canonical timeout budgets consumed across daemon, verifier, store, and MCP RPC layers, validated at module initialization (`SPEC-0027 REQ-2.2`). */
+export const WORKFLOW_TIMEOUT_BUDGETS: WorkflowTimeoutBudgets = Result.getOrThrowWith(
+  validateWorkflowTimeoutBudgets(RAW_WORKFLOW_TIMEOUT_BUDGETS),
+  (reason) => new Error(`Invalid WORKFLOW_TIMEOUT_BUDGETS: ${reason}`),
+)

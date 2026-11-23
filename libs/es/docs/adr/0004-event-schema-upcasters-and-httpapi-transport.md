@@ -5,11 +5,9 @@ status: accepted
 date: 2026-11-04
 enforced_by:
   - libs/es/contract/src/index.ts
-  - libs/es/core/src/index.ts
   - libs/es/core/src/evolution.ts
   - libs/es/core/src/testing.ts
   - libs/es/core/test/fixtures/cart.ts
-  - libs/es/infra/src/index.ts
   - libs/es/infra/src/http.ts
   - libs/es/infra/src/outbox.ts
   - libs/es/infra/test/fixtures/cart-sqlite.ts
@@ -106,4 +104,4 @@ At the same time, exposing commands, strongly consistent single-aggregate local 
 | Command Execution & Multi-Batch Outbox Relay | `libs/es/infra/src/http.ts`, `libs/es/infra/src/outbox.ts`, `libs/es/infra/test/fixtures/cart-sqlite.ts` | `executeAggregateCommandAndSync`, `relayAggregateOutbox`, `CommandAggregateMismatchError`, `OutboxPublishError`                  | `AggregateHttp.executeCommand`, `Outbox.relay`, `CommandAggregateMismatchError`, `OutboxPublishError`, `ProjectionArchiveCorruptionError` |
 | Local Projection Parity Query                | `libs/es/infra/src/http.ts`, `libs/es/contract/src/index.ts`                                             | `queryAggregateReadModel`, `AggregateNotFoundError`, `LocalProjectionNotFoundError`                                              | `AggregateHttp.queryLocal`, `AggregateNotFoundError`, `LocalProjectionNotFoundError`                                                      |
 | Cross-Aggregate Projection Query             | `libs/es/infra/src/http.ts`, `libs/es/contract/src/index.ts`                                             | `queryCrossAggregateReadModel`, `CrossProjectionNotFoundError`                                                                   | `AggregateHttp.queryCross`, `CrossProjectionNotFoundError`                                                                                |
-| Upcaster & V2 Cart Fixture Parity            | `libs/es/core/test/fixtures/cart.ts`, `libs/es/core/src/index.ts`, `libs/es/infra/src/index.ts`          | `cartCheckedOutV1ToV2`, `CartEventV2Codec`, `cartDeciderV2`, `evolveCartV2`                                                      | `EventSchemaEvolution.decide`, `AggregateHttp.queryLocal`, `CartV2.evolve`                                                                |
+| Upcaster & V2 Cart Fixture Parity            | `libs/es/core/test/fixtures/cart.ts`                                                                     | `cartCheckedOutV1ToV2`, `CartEventV2Codec`, `cartDeciderV2`, `evolveCartV2`                                                      | `EventSchemaEvolution.decide`, `AggregateHttp.queryLocal`, `CartV2.evolve`                                                                |

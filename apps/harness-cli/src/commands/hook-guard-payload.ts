@@ -147,6 +147,10 @@ export const evaluateFileReadDecision = (
       verdict: "deny",
       reason: access.reason ?? `Blocked file read: ${filePath}`,
     }))
+    .with("ask", () => ({
+      verdict: "ask",
+      reason: access.reason ?? `File read requires human confirmation: ${filePath}`,
+    }))
     .with("allow", () => ({ verdict: "allow" }))
     .exhaustive()
 }

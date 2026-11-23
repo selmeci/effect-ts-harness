@@ -350,25 +350,33 @@ export const collectPlanEffectFnQualnames = (graph: HarnessGraph): ReadonlySet<s
   return qualnames
 }
 
+export type PlanEffectFnQualnamesLoadResult =
+  | { readonly _tag: "Ok"; readonly qualnames: ReadonlySet<string> }
+  | { readonly _tag: "Corrupt"; readonly reason: string }
+
 export const loadPlanEffectFnQualnames = (
   planSnapshotPath: string,
   hostIo: SyncHostIo,
-): Effect.Effect<ReadonlySet<string> | undefined> =>
+): Effect.Effect<PlanEffectFnQualnamesLoadResult> =>
   Effect.gen(function* () {
     const loadExit = yield* Effect.exit(loadGraphSnapshotEffect(planSnapshotPath, hostIo))
     return yield* match(loadExit)
-      .with({ _tag: "Success" }, ({ value }) => Effect.succeed(collectPlanEffectFnQualnames(value)))
+      .with({ _tag: "Success" }, ({ value }) =>
+        Effect.succeed<PlanEffectFnQualnamesLoadResult>({
+          _tag: "Ok",
+          qualnames: collectPlanEffectFnQualnames(value),
+        }),
+      )
       .with({ _tag: "Failure" }, ({ cause }) => {
         if (isPureInterruptCause(cause)) {
           return Effect.failCause(
             Cause.fromReasons<never>(cause.reasons.filter(Cause.isInterruptReason)),
           )
         }
+        const reason = `Failed to decode plan snapshot '${planSnapshotPath}': ${Cause.pretty(cause)}`
         return Effect.sync(() => {
-          process.stderr.write(
-            `[harness:done] Warning: failed to decode plan snapshot '${planSnapshotPath}': ${Cause.pretty(cause)}\n`,
-          )
-          return undefined
+          process.stderr.write(`[harness:done] Error: ${reason}\n`)
+          return { _tag: "Corrupt" as const, reason }
         })
       })
       .exhaustive()
@@ -518,9 +526,23 @@ export const formatDiffErrorMessage = (err: unknown): string => {
   return err instanceof Error ? err.message : String(err)
 }
 
-const isEnoentErr = (err: unknown): boolean =>
-  (typeof err === "object" && err !== null && "code" in err && err.code === "ENOENT") ||
-  /\bENOENT\b/.test(formatDiffErrorMessage(err))
+const extractStructuredErrorCode = (err: unknown): string | undefined => {
+  let curr: unknown = err
+  for (let depth = 0; depth < 4 && typeof curr === "object" && curr !== null; depth++) {
+    const code: unknown = Reflect.get(curr, "code")
+    if (typeof code === "string") return code
+    curr = "cause" in curr ? Reflect.get(curr, "cause") : undefined
+  }
+  return undefined
+}
+
+const isEnoentErr = (err: unknown): boolean => {
+  const code = extractStructuredErrorCode(err)
+  if (code !== undefined) {
+    return code === "ENOENT"
+  }
+  return /^ENOENT(?::|\s|$)/.test(formatDiffErrorMessage(err))
+}
 
 export const cleanupStalePlanSnapshotAfterDone = (
   repoRoot: string,

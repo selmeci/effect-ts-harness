@@ -189,6 +189,11 @@ export const checkAdapterSkillParity = (
   hostIo: SyncHostIo,
   findings: Array<GcFinding>,
 ): void => {
+  const hasHarnessAdaptersOrCli =
+    hostIo.existsSync(join(repoRoot, "adapters/antigravity/plugins/effect-harness/skills")) ||
+    hostIo.existsSync(join(repoRoot, "adapters/claude-code/skills")) ||
+    hostIo.existsSync(join(repoRoot, "apps/harness-cli/package.json"))
+
   for (const clause of ADAPTER_SKILL_PARITY_CLAUSES) {
     const agyRel = `adapters/antigravity/plugins/effect-harness/skills/${clause.skillName}/SKILL.md`
     const claudeRel = `adapters/claude-code/skills/${clause.skillName}/SKILL.md`
@@ -198,6 +203,15 @@ export const checkAdapterSkillParity = (
     const claudeExists = hostIo.existsSync(claudeAbs)
 
     if (!agyExists && !claudeExists) {
+      if (hasHarnessAdaptersOrCli) {
+        findings.push({
+          kind: "adapter-skill-parity",
+          nodeId: `adapter-skill-parity:${clause.skillName}:both-missing`,
+          location: agyRel,
+          message: `Adapter skill parity failed: missing both "${agyRel}" and "${claudeRel}" for "${clause.skillName}".`,
+          action: `Restore matching "${agyRel}" and "${claudeRel}" for "${clause.skillName}".`,
+        })
+      }
       continue
     }
     if (!agyExists || !claudeExists) {

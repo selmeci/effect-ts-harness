@@ -1,3 +1,5 @@
+import { Schema } from "effect"
+import { match } from "ts-pattern"
 import {
   type ActiveReviewPlan,
   REVIEW_SLICE_FILE_THRESHOLD,
@@ -12,16 +14,45 @@ import {
 } from "@harness/contract"
 
 const NON_SLICE_ID_CHAR_RE = /[^a-z0-9._:/-]/g
+const MAX_SLICE_ID_BASE_LEN = 112
+const SLICE_DIGEST_LEN = 9
+
+const fnv1a32Hex = (raw: string): string => {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < raw.length; i += 1) {
+    hash ^= raw.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0")
+}
 
 const toSafeSliceIdBase = (raw: string): string => {
-  const cleaned = raw.toLowerCase().replaceAll(NON_SLICE_ID_CHAR_RE, "-").replace(/^-+/, "")
-  if (cleaned.length === 0) {
-    return "root"
+  const lower = raw.toLowerCase()
+  const cleaned = lower.replaceAll(NON_SLICE_ID_CHAR_RE, "-").replace(/^-+/, "")
+  const candidate =
+    cleaned.length === 0 ? "root" : /^[a-z0-9]/.test(cleaned) ? cleaned : `s-${cleaned}`
+  const normalized = candidate.slice(0, MAX_SLICE_ID_BASE_LEN)
+  if (normalized === lower) {
+    return normalized
   }
-  const safeStart = /^[a-z0-9]/.test(cleaned) ? cleaned : `s-${cleaned}`
-  const sliced = safeStart.slice(0, 112)
-  return sliced.length > 0 ? sliced : "root"
+  const prefix = normalized.slice(0, MAX_SLICE_ID_BASE_LEN - SLICE_DIGEST_LEN)
+  return `${prefix}-${fnv1a32Hex(raw)}`
 }
+
+const decodeReviewSliceId = Schema.decodeUnknownOption(ReviewSliceId)
+const decodeReviewRoutingReason = Schema.decodeUnknownOption(ReviewRoutingReason)
+
+const toSafeSliceId = (sliceKey: string): ReviewSliceId =>
+  match(decodeReviewSliceId(sliceKey))
+    .with({ _tag: "Some" }, ({ value }) => value)
+    .with({ _tag: "None" }, () => ReviewSliceId.make(`s-${fnv1a32Hex(sliceKey)}`))
+    .exhaustive()
+
+const toSafeSliceLabel = (label: string, unitKey: string): ReviewRoutingReason =>
+  match(decodeReviewRoutingReason(label.trim()))
+    .with({ _tag: "Some" }, ({ value }) => value)
+    .with({ _tag: "None" }, () => ReviewRoutingReason.make(`slice-${fnv1a32Hex(unitKey)}`))
+    .exhaustive()
 
 /** Resolves a deterministic Nx package or top-level directory unit key for a relative path. */
 export const resolveReviewSliceUnitKey = (filePath: ReviewSignalPath): string => {
@@ -52,8 +83,8 @@ const toSliceChunk = (
     ...files.slice(1),
   ]
   return ReviewSlicePlan.make({
-    sliceId: ReviewSliceId.make(unitKey),
-    label: ReviewRoutingReason.make(label),
+    sliceId: toSafeSliceId(unitKey),
+    label: toSafeSliceLabel(label, unitKey),
     files: nonEmptyFiles,
     selections: routeSliceSelections(nonEmptyFiles),
   })

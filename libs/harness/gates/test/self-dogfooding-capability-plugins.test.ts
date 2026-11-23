@@ -1573,7 +1573,6 @@ describe("Self-Dogfooding Capability Plugins & AST Gate Rules (SPEC-0011)", () =
                   "declare const cond: boolean",
                   'export const okRead = invokeWorkflowStoreQuery({ queryName: "wf_get_run", expectMutation: false })',
                   'export const okNoFlag = invokeWorkflowStoreQuery({ queryName: "wf_get_run" })',
-                  "export const okNonObj = invokeWorkflowStoreQuery(fenceConfig)",
                   "export const okZeroArg = invokeWorkflowStoreQuery()",
                   'export const okExplicit = invokeWorkflowStoreQuery({ queryName: "wf_insert_run", expectMutation: true, expectedLeaseEpoch: expectedLeaseEpoch })',
                   'export const okTemplateProp = invokeWorkflowStoreQuery({ [`queryName`]: "wf_insert_run", ["expectMutation"]: true, [`expectedLeaseEpoch`]: expectedLeaseEpoch })',
@@ -1688,6 +1687,70 @@ describe("Self-Dogfooding Capability Plugins & AST Gate Rules (SPEC-0011)", () =
       }),
   )
 
+  it.effect(
+    "F-5.3 (SPEC-0027 REQ-3.1): fails closed on dynamic/unresolved WorkflowStore payloads while exempting internal omnigraph-workflow-store pass-through wrappers",
+    () =>
+      Effect.gen(function* () {
+        const report = yield* SelfDogfooding.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make(
+                "libs/harness/infra/src/omnigraph-workflow-store.ts",
+              ),
+              content: AstSourceContent.make(
+                [
+                  "declare function invokeWorkflowStoreQueryOnce(input: unknown): unknown",
+                  "declare function retryWorkflowStoreAttempt(opts: { runAttempt: () => unknown }): unknown",
+                  "export const invokeWorkflowStoreQueryWithMeta = Effect.fn('WorkflowStore.invokeWithMeta')(function* (input: unknown) {",
+                  "  return yield* retryWorkflowStoreAttempt({ runAttempt: () => invokeWorkflowStoreQueryOnce(input) })",
+                  "})",
+                  "export const invokeWorkflowStoreQuery = Effect.fn('WorkflowStore.invoke')(function* (input: unknown) {",
+                  "  const res = yield* retryWorkflowStoreAttempt({ runAttempt: () => invokeWorkflowStoreQueryOnce(input) })",
+                  "  return res",
+                  "})",
+                  "export const otherFnInStore = (input: unknown) => invokeWorkflowStoreQueryOnce(input)",
+                ].join("\n") + "\n",
+              ),
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/harness/infra/src/dynamic-fence.ts"),
+              content: AstSourceContent.make(
+                [
+                  "declare function invokeWorkflowStoreQuery(input: unknown): unknown",
+                  "declare function invokeWorkflowStoreQueryOnce(input: unknown): unknown",
+                  "declare function verifyOfflineClusterAccess(): void",
+                  "declare function buildParams(): object",
+                  "declare const fenceConfig: object",
+                  "export const badVar = invokeWorkflowStoreQuery(fenceConfig)",
+                  "export const badHelper = invokeWorkflowStoreQuery(buildParams())",
+                  "export const badSpread = (req: object) => invokeWorkflowStoreQuery({ ...req })",
+                  "export const badHelperSpread = () => invokeWorkflowStoreQuery({ ...buildParams() })",
+                  "export const badDynMut = (mut: boolean) => invokeWorkflowStoreQuery({ queryName: 'wf_insert_run', expectMutation: mut })",
+                  "export const okReadSpread = (storeConfig: object) => invokeWorkflowStoreQuery({ ...storeConfig, queryName: 'wf_get_run', expectMutation: false })",
+                  "export const badDirectOnce = (input: unknown) => invokeWorkflowStoreQueryOnce(input)",
+                  "export const okOfflineDynamic = () => {",
+                  "  verifyOfflineClusterAccess()",
+                  "  return invokeWorkflowStoreQuery(buildParams())",
+                  "}",
+                ].join("\n") + "\n",
+              ),
+            },
+          ],
+          maxPluginFileLines: MaxPluginFileLines.make(800),
+        })
+        const violations = report.violations.filter((v) => v.rule === "omnigraph-fenced-mutation")
+        expect(violations.map((v) => `${v.file}:${v.line}`)).toEqual([
+          "libs/harness/infra/src/omnigraph-workflow-store.ts:10",
+          "libs/harness/infra/src/dynamic-fence.ts:6",
+          "libs/harness/infra/src/dynamic-fence.ts:7",
+          "libs/harness/infra/src/dynamic-fence.ts:8",
+          "libs/harness/infra/src/dynamic-fence.ts:9",
+          "libs/harness/infra/src/dynamic-fence.ts:10",
+          "libs/harness/infra/src/dynamic-fence.ts:12",
+        ])
+      }),
+  )
+
   it.effect.prop(
     "SPEC-0027 REQ-3.1 determinism: SelfDogfooding.decide emits deterministic omnigraph-fenced-mutation verdicts",
     {
@@ -1726,6 +1789,39 @@ describe("Self-Dogfooding Capability Plugins & AST Gate Rules (SPEC-0011)", () =
         expect(first.violations.some((v) => v.rule === "omnigraph-fenced-mutation")).toBe(
           shouldViolate,
         )
+      }),
+  )
+
+  it.effect(
+    "F-5.3 flags trailing spreads, non-exempt spread overrides, and dynamic/shorthand queryName overrides after exempt values",
+    () =>
+      Effect.gen(function* () {
+        const report = yield* SelfDogfooding.decide({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/harness/infra/src/spread-order.ts"),
+              content: AstSourceContent.make(
+                [
+                  "declare function invokeWorkflowStoreQuery(input: unknown): unknown",
+                  "declare const dynamicPayload: Record<string, unknown>",
+                  "declare const dynamicQuery: string",
+                  "const nonExempt = { queryName: 'wf_insert_run' } as const",
+                  "const queryName = dynamicQuery",
+                  "export const bad1 = invokeWorkflowStoreQuery({ expectMutation: false, ...dynamicPayload })",
+                  "export const bad2 = invokeWorkflowStoreQuery({ queryName: 'wf_cas_writer_lease', ...dynamicPayload })",
+                  "export const bad3 = invokeWorkflowStoreQuery({ queryName: 'wf_cas_writer_lease', queryName: dynamicQuery, expectMutation: true })",
+                  "export const bad4 = invokeWorkflowStoreQuery({ queryName: 'wf_cas_writer_lease', ...nonExempt, expectMutation: true })",
+                  "export const bad5 = invokeWorkflowStoreQuery({ queryName: 'wf_cas_writer_lease', queryName, expectMutation: true })",
+                  "export const ok1 = invokeWorkflowStoreQuery({ ...dynamicPayload, expectMutation: false })",
+                  "export const ok2 = invokeWorkflowStoreQuery({ ...dynamicPayload, queryName: 'wf_cas_writer_lease' })",
+                ].join("\n") + "\n",
+              ),
+            },
+          ],
+          maxPluginFileLines: MaxPluginFileLines.make(800),
+        })
+        const violations = report.violations.filter((v) => v.rule === "omnigraph-fenced-mutation")
+        expect(violations.map((v) => v.line)).toEqual([6, 7, 8, 9, 10])
       }),
   )
 })

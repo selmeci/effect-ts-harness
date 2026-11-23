@@ -117,7 +117,7 @@ describe("worker isolation and workflow worktree policy", () => {
     }
   })
 
-  it("REQ-4.6 / F-3.4 blocks recursive workflow orchestration, doctor, complete --phase llm, and harness done under HARNESS_UNIT_WORKER=1", () => {
+  it("SPEC-0023 REQ-4.1 / RFC-0013 REQ-4.6 / F-3.4 blocks recursive workflow orchestration, doctor, complete --phase llm, and harness done under HARNESS_UNIT_WORKER=1", () => {
     const recursiveDenied: ReadonlyArray<string> = [
       "harness done",
       "pnpm harness done",
@@ -274,7 +274,7 @@ describe("worker isolation and workflow worktree policy", () => {
     expect(classifyCommand(depth4Benign, { unitWorkerMode: true })).toBe("escalate")
   })
 
-  it("REQ-4.6 / F-3.4 keeps workflow complete --phase unit, workflow status, verify, and non-worker mode allowed", () => {
+  it("SPEC-0023 REQ-4.1 / RFC-0013 REQ-4.6 / F-3.4 keeps workflow complete --phase unit, workflow status, verify, and non-worker mode allowed", () => {
     const nonRecursiveAllowed: ReadonlyArray<{
       readonly cmd: string
       readonly expectedVerdict: "allow" | "escalate"
@@ -328,7 +328,7 @@ describe("worker isolation and workflow worktree policy", () => {
     expect(classifyCommand("pnpm harness done")).toBe("allow")
   })
 
-  it("REQ-4.6 blocks daemon socket and auth-tokens shell/file access under HARNESS_UNIT_WORKER=1", () => {
+  it("SPEC-0023 REQ-4.1 / RFC-0013 REQ-4.6 blocks daemon socket and auth-tokens shell/file access under HARNESS_UNIT_WORKER=1", () => {
     expect(classifyWorkerFileAccessFromFastpath("auth-tokens.json", true).verdict).toBe("deny")
     expect(classifyWorkerFileAccessFromIndex("daemon.sock", true).verdict).toBe("deny")
 

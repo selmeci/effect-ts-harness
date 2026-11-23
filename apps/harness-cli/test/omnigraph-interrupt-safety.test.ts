@@ -12,13 +12,17 @@ import {
   resolveOmnigraphTaskBranches,
 } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
+import type { SyncHostIo } from "@harness/service/host-io"
 import {
   CLUSTER_SCHEMA_EPOCH,
   evaluateClusterConfigDrift,
   writeClusterDriftReceipts,
 } from "../src/commands/omnigraph-auth-and-drift.js"
 import { syncOmnigraphOnDone } from "../src/commands/done-omnigraph-helpers.js"
-import { loadPlanEffectFnQualnames } from "../src/commands/omnigraph-safety-helpers.js"
+import {
+  cleanupStalePlanSnapshotAfterDone,
+  loadPlanEffectFnQualnames,
+} from "../src/commands/omnigraph-safety-helpers.js"
 
 let injectSnapshotInterrupt = false
 
@@ -79,24 +83,200 @@ describe("F-25: CLI omnigraph safety helpers preserve pure fiber interruption", 
     }
   })
 
-  it("loadPlanEffectFnQualnames re-fails on pure interrupt while returning undefined on corrupt snapshot", async () => {
+  it("F-7.1: loadPlanEffectFnQualnames returns Corrupt on corrupt snapshot and re-fails on pure interrupt", async () => {
     const repoRoot = makeTempRepo("harness-f25-plan-qualnames-")
     const snapshotPath = join(repoRoot, ".harness", "plan-graph-snapshot.json")
     writeFileSync(snapshotPath, "{corrupt-snapshot-json", "utf8")
 
     injectSnapshotInterrupt = false
-    const warnSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
-    const fallbackRes = await Effect.runPromise(
+    const errSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+    const corruptRes = await Effect.runPromise(
       loadPlanEffectFnQualnames(snapshotPath, nodeSyncHostIo),
     )
-    expect(fallbackRes).toBeUndefined()
-    expect(warnSpy).toHaveBeenCalled()
+    match(corruptRes)
+      .with({ _tag: "Corrupt" }, ({ reason }) => {
+        expect(reason).toContain("Failed to decode plan snapshot")
+      })
+      .with({ _tag: "Ok" }, () => {
+        expect.unreachable("Expected Corrupt result for corrupt plan snapshot")
+      })
+      .exhaustive()
+    expect(errSpy).toHaveBeenCalled()
 
     injectSnapshotInterrupt = true
     const interruptExit = await Effect.runPromiseExit(
       loadPlanEffectFnQualnames(snapshotPath, nodeSyncHostIo),
     )
     expectPureInterruptExit(interruptExit)
+  })
+
+  it("F-7.1: syncOmnigraphOnDone fails closed on corrupt plan-graph-snapshot.json before inspecting deleted EffectFns", async () => {
+    const repoRoot = makeTempRepo("harness-f71-done-corrupt-plan-")
+    const configDir = join(repoRoot, "libs", "harness", "graph")
+    const clusterDir = resolveOmnigraphClusterDir(repoRoot, nodeSyncHostIo)
+    mkdirSync(clusterDir, { recursive: true })
+    const initialDrift = await Effect.runPromise(
+      evaluateClusterConfigDrift(clusterDir, configDir, false),
+    )
+    writeClusterDriftReceipts(clusterDir, initialDrift.expectedStamp, configDir)
+    writeFileSync(join(clusterDir, ".cluster-schema-epoch"), CLUSTER_SCHEMA_EPOCH, "utf8")
+    writeFileSync(
+      join(repoRoot, ".harness", "plan-graph-snapshot.json"),
+      "{corrupt-plan-snapshot",
+      "utf8",
+    )
+
+    const canonicalRoot = resolveCanonicalRepoRoot(repoRoot, nodeSyncHostIo)
+    const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
+    let dryRunMergeCalled = false
+
+    const headers = {
+      "Content-Type": "application/json",
+      "Omnigraph-Http-Api": "0.14",
+    } as const
+    const server = createServer((req, res) => {
+      const url = req.url ?? ""
+      if (url === "/readyz") {
+        res.writeHead(200, headers)
+        res.end(JSON.stringify({ ready: true, status: "serving", ready_graph_count: 1 }))
+        return
+      }
+      if (url === "/healthz") {
+        res.writeHead(200, { "Omnigraph-Http-Api": "0.14" })
+        res.end()
+        return
+      }
+      if (url.includes("/branches/diff")) {
+        res.writeHead(200, headers)
+        res.end(
+          JSON.stringify({
+            outcome: "ok",
+            serverRef: "srv-1",
+            from_commit_id: "c1",
+            to_commit_id: "c2",
+            changes: [
+              {
+                id: "libs/sample/domain/src/index.ts#deletedFn",
+                kind: "node",
+                op: "delete",
+                type: { id: "t1", name: "EffectFn" },
+                before: { properties: { isStub: false, spanName: "Sample.deletedFn" } },
+                after: null,
+              },
+            ],
+            netNodeCount: -1,
+            netEdgeCount: 0,
+          }),
+        )
+        return
+      }
+      if (url.includes("/branches/merge")) {
+        dryRunMergeCalled = true
+      }
+      res.writeHead(200, headers)
+      res.end(
+        JSON.stringify({
+          outcome: "ok",
+          branches: [taskBranches.mainBranch, taskBranches.planBranch, taskBranches.implBranch],
+          serverRef: "srv-1",
+        }),
+      )
+    })
+
+    await new Promise<void>((resolvePromise, rejectPromise) => {
+      server.once("error", rejectPromise)
+      server.listen(0, "127.0.0.1", () => resolvePromise())
+    })
+    const addr = Schema.decodeUnknownSync(Schema.Struct({ port: Schema.Int }))(server.address())
+    writeFileSync(
+      join(clusterDir, "server.json"),
+      JSON.stringify({
+        pid: process.pid,
+        port: addr.port,
+        baseUrl: `http://127.0.0.1:${addr.port}`,
+        canonicalRepoRoot: canonicalRoot,
+        updatedAt: null,
+      }),
+      "utf8",
+    )
+
+    try {
+      const errSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+      const doneRes = await Effect.runPromise(
+        syncOmnigraphOnDone(repoRoot, { repoRoot }, false, "block"),
+      )
+      expect(errSpy).toHaveBeenCalled()
+      expect(doneRes).toBeDefined()
+      expect(doneRes?.exitCode).toBe(1)
+      expect(doneRes?.stderr).toContain("[GATE FAILURE] done:omnigraph-plan-snapshot")
+      expect(dryRunMergeCalled).toBe(false)
+    } finally {
+      server.closeAllConnections()
+      server.close()
+    }
+  })
+
+  it("F-8.1: cleanupStalePlanSnapshotAfterDone does not treat EACCES containing 'ENOENT' as silent ENOENT success", () => {
+    const repoRoot = makeTempRepo("harness-f81-enoent-code-")
+    const planSnapPath = join(repoRoot, ".harness", "plan-graph-snapshot.json")
+    writeFileSync(planSnapPath, "{}", "utf8")
+
+    const makeUnlinkThrowIo = (err: unknown): SyncHostIo => ({
+      ...nodeSyncHostIo,
+      isSymbolicLinkSync: () => false,
+      unlinkSync: () => {
+        throw err
+      },
+    })
+
+    // 1. Structured EACCES error whose path/message contains "ENOENT" must fail (never return undefined)
+    const eaccesWithEnoentPath = Object.assign(
+      new Error("EACCES: permission denied, unlink '/tmp/ENOENT/plan-graph-snapshot.json'"),
+      { code: "EACCES" },
+    )
+    const directRes = cleanupStalePlanSnapshotAfterDone(
+      repoRoot,
+      makeUnlinkThrowIo(eaccesWithEnoentPath),
+    )
+    expect(directRes).toBeDefined()
+    expect(directRes).toContain("EACCES")
+
+    // 2. Nested cause (depth 1 and depth 2) with structured code: "EACCES" and "ENOENT" in message must fail
+    const wrappedEacces = new Error("outer wrapper ENOENT", {
+      cause: Object.assign(new Error("EACCES: ENOENT"), { code: "EACCES" }),
+    })
+    const nestedRes = cleanupStalePlanSnapshotAfterDone(repoRoot, makeUnlinkThrowIo(wrappedEacces))
+    expect(nestedRes).toBeDefined()
+    expect(nestedRes).toContain("EACCES")
+
+    const doubleWrappedEacces = new Error("ENOENT: outer wrapper", {
+      cause: new Error("ENOENT: middle wrapper", {
+        cause: Object.assign(new Error("EACCES: inner permission denied"), { code: "EACCES" }),
+      }),
+    })
+    const doubleNestedRes = cleanupStalePlanSnapshotAfterDone(
+      repoRoot,
+      makeUnlinkThrowIo(doubleWrappedEacces),
+    )
+    expect(doubleNestedRes).toBe("ENOENT: middle wrapper")
+
+    // 3. Uncoded message containing "ENOENT" in the middle must fail (requires anchored /^ENOENT(?::|\s|$)/)
+    const uncodedEacces = new Error("EACCES: cannot unlink /tmp/ENOENT/file")
+    const uncodedRes = cleanupStalePlanSnapshotAfterDone(repoRoot, makeUnlinkThrowIo(uncodedEacces))
+    expect(uncodedRes).toBeDefined()
+    expect(uncodedRes).toContain("EACCES")
+
+    // 4. Real ENOENT (structured code or anchored ENOENT message) cleanly returns undefined
+    const realEnoent = Object.assign(new Error("no such file"), { code: "ENOENT" })
+    expect(
+      cleanupStalePlanSnapshotAfterDone(repoRoot, makeUnlinkThrowIo(realEnoent)),
+    ).toBeUndefined()
+    expect(
+      cleanupStalePlanSnapshotAfterDone(
+        repoRoot,
+        makeUnlinkThrowIo(new Error("ENOENT: no such file or directory")),
+      ),
+    ).toBeUndefined()
   })
 
   it("syncOmnigraphOnDone re-fails on pure interrupt during snapshot load and branch merge instead of returning CliResult", async () => {

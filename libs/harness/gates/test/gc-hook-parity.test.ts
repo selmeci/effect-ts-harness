@@ -241,8 +241,43 @@ describe("hook-matcher-tool-parity (SPEC-0025 REQ-1.1..REQ-1.3)", () => {
       const missingFindings: Array<GcFinding> = []
       checkHookMatcherToolParity(dir, testHostIo, missingFindings)
       expect(missingFindings.some((f) => f.nodeId === "adapters/claude-code/README.md")).toBe(true)
+
+      // F-5.1: removing hook-guard-payload.ts when harness hook/CLI artifacts exist emits hook-matcher-tool-parity
+      rmSync(join(dir, "apps/harness-cli/src/commands/hook-guard-payload.ts"))
+      const missingPayloadFindings: Array<GcFinding> = []
+      checkHookMatcherToolParity(dir, testHostIo, missingPayloadFindings)
+      expect(missingPayloadFindings).toEqual([
+        expect.objectContaining({
+          kind: "hook-matcher-tool-parity",
+          nodeId: "apps/harness-cli/src/commands/hook-guard-payload.ts",
+          location: "apps/harness-cli/src/commands/hook-guard-payload.ts",
+        }),
+      ])
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+
+    // F-5.1: unrelated non-harness workspace without hook/CLI artifacts returns cleanly
+    const nonHarnessDir = mkdtempSync(join(tmpdir(), "non-harness-hook-parity-"))
+    try {
+      writeFileSync(join(nonHarnessDir, "README.md"), "# Sample\n", "utf8")
+      const unrelatedFindings: Array<GcFinding> = []
+      checkHookMatcherToolParity(nonHarnessDir, testHostIo, unrelatedFindings)
+      expect(unrelatedFindings).toEqual([])
+
+      // Adding apps/harness-cli/package.json activates fail-closed payload check
+      mkdirSync(join(nonHarnessDir, "apps/harness-cli"), { recursive: true })
+      writeFileSync(join(nonHarnessDir, "apps/harness-cli/package.json"), "{}\n", "utf8")
+      const cliOnlyFindings: Array<GcFinding> = []
+      checkHookMatcherToolParity(nonHarnessDir, testHostIo, cliOnlyFindings)
+      expect(cliOnlyFindings).toEqual([
+        expect.objectContaining({
+          kind: "hook-matcher-tool-parity",
+          nodeId: "apps/harness-cli/src/commands/hook-guard-payload.ts",
+        }),
+      ])
+    } finally {
+      rmSync(nonHarnessDir, { recursive: true, force: true })
     }
   })
 

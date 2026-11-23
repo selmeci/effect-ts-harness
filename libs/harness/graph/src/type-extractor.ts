@@ -1,32 +1,27 @@
 import * as path from "node:path"
+import { type ErrorReasonMessage, toErrorReasonMessage } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { Effect } from "effect"
-import * as Graph from "effect/Graph"
 import { Project, ts } from "ts-morph"
-import { match } from "ts-pattern"
 import { buildHarnessGraph } from "./graph-engine.js"
 import {
-  type BranchingViolation, type EffectFnNode, type HarnessEdge, type HarnessGraph,
-  type HarnessNode, type SchemaDefNode, type ServiceLayerNode, type ServiceTagNode,
-  type TaggedErrorNode, type UnresolvedGraphReference,
+  type BranchingViolation, type EffectFnNode, type HarnessGraph,
+  type SchemaDefNode, type ServiceLayerNode, type ServiceTagNode, type TaggedErrorNode,
 } from "./model.js"
-import { loadPatternDocs } from "./pattern-index.js"
 import {
   type TaggedSchemaInfo, computeDynamicPaths, resolveContainedRelPath,
-  resolveImportSpecToRelFile, resolvePackageTag, resolveRepoRoot, sha256Hex,
+  resolveImportSpecToRelFile, resolvePackageTag, resolveRepoRoot,
 } from "./extractor/extractor-types-and-helpers.js"
 import {
   type ExtractTypeGraphOptions, type SourceFileInput, type TypeExtractorOptions,
-  checkTopologySnapshotMatch, checkWorkspaceSnapshotMatch, computeBaseTopologyHash,
-  createTypeScriptProgramSession, findWorkspaceSrcFiles, findWorkspaceTestFiles, loadFileGraphFragmentsFromDisk,
 } from "./extractor/compiler-session.js"
 import { checkPass0ZeroToleranceAst, runAstPolicyChecks } from "./extractor/ast-policy-extractor.js"
 import { checkBrandedDomainTypesAndPrimitiveBoundaries, checkSchemaBooleanStateAndBrandedFields, extractSchemaDefinitions } from "./extractor/schema-and-brand-extractor.js"
 import { autoRegisterReferencedEntities, commitSessionFragments, extractLayers, extractServicesAndErrors, syncSessionCacheAndProject } from "./extractor/service-and-layer-extractor.js"
 import { extractEffectFns } from "./extractor/effect-fn-extractor.js"
 import { checkDeciderTracing, checkEventSourcingReducers, checkMissingAggregateIdGuard } from "./extractor/decider-reducer-extractor.js"
-import { assembleTestAndGovernanceGraph, checkNodeSqliteTestViolations, checkUnassertedStateFieldsForInputs } from "./extractor/test-and-governance-extractor.js"
-import { loadWorkspaceGovernanceDocsWithViolations } from "./extractor/governance-doc-parser.js"
+import { checkUnassertedStateFieldsForInputs } from "./extractor/test-and-governance-extractor.js"
+import { runExtractWorkspaceTypeAwareGraph } from "./extractor/workspace-graph-runner.js"
 
 export {
   computeDynamicPaths, resolveContainedRelPath, resolveImportSpecToRelFile,
@@ -165,76 +160,27 @@ export const extractWorkspaceTypeAwareGraph = Effect.fnUntraced(function* (
   hostIo: SyncHostIo,
   options?: Omit<ExtractTypeGraphOptions, "repoRoot" | "hostIo">,
 ): Effect.fn.Return<HarnessGraph> {
-  return yield* Effect.sync(() => {
-    const root = resolveRepoRoot(repoRoot, hostIo), session = options?.session ?? (() => {
-      const s = createTypeScriptProgramSession(root, hostIo); s.persistToDisk = true; loadFileGraphFragmentsFromDisk(s.repoRoot, s, hostIo); return s
-    })()
-    if (options?.previousProgram !== undefined) session.oldProgram = options.previousProgram
-    const overlays = new Map<string, string>()
-    if (options?.overlays) for (const [k, v] of Object.entries(options.overlays)) {
-      const rel = resolveContainedRelPath(root, k, hostIo)
-      if (rel !== null) overlays.set(rel, v)
-    }
-    const relFileSet = new Set<string>(findWorkspaceSrcFiles(root, hostIo)), testFileSet = new Set<string>(findWorkspaceTestFiles(root, hostIo))
-    for (const ov of overlays.keys()) {
-      if ((ov.endsWith(".test.ts") || ov.endsWith(".spec.ts") || ov.includes("/test/")) && !ov.endsWith(".d.ts")) { testFileSet.add(ov); continue }
-      if ((ov.endsWith(".ts") || ov.endsWith(".tsx")) && !ov.endsWith(".d.ts") && !ov.endsWith(".config.ts")) relFileSet.add(ov)
-    }
-    const relFiles = Array.from(relFileSet).sort((a, b) => a.localeCompare(b)), testFiles = Array.from(testFileSet).sort((a, b) => a.localeCompare(b))
-    const inputs: Array<SourceFileInput> = [], inputShaMap = new Map<string, string>()
-    for (const rel of relFiles) {
-      const content = overlays.get(rel) ?? hostIo.readTextSync(path.join(root, rel))
-      inputs.push({ filePath: rel, content, packageTag: resolvePackageTag(root, rel, hostIo) }); inputShaMap.set(rel, sha256Hex(content))
-    }
-    const testShaMap = new Map<string, string>(), testContentMap = new Map<string, string>()
-    for (const rel of testFiles) {
-      const content = overlays.get(rel) ?? hostIo.readTextSync(path.join(root, rel))
-      testShaMap.set(rel, sha256Hex(content)); testContentMap.set(rel, content)
-    }
-    const { docs: governanceDocs, violations: governanceStatusViolations } = loadWorkspaceGovernanceDocsWithViolations(root, hostIo), govShaMap = new Map<string, string>()
-    for (const d of governanceDocs) govShaMap.set(d.path, sha256Hex(`${d.id}:${d.title}:${d.status}:${(d.referencedSpans ?? []).join(",")}:${(d.referencedServices ?? []).join(",")}:${(d.referencedErrors ?? []).join(",")}`))
-    for (const v of governanceStatusViolations) govShaMap.set(v.file, sha256Hex(`invalid-gov-status:${v.enclosingSymbol}:${v.message}`))
-    const patternDocs = loadPatternDocs(root, hostIo), patternShaMap = new Map<string, string>()
-    for (const p of patternDocs) patternShaMap.set(p.path, sha256Hex(`${p.slug}:${p.summary}:${(p.coveredSpans ?? []).join(",")}:${(p.coveredTags ?? []).join(",")}`))
-    const fastSnap = checkWorkspaceSnapshotMatch(session, testShaMap, govShaMap, patternShaMap, inputShaMap)
-    if (fastSnap !== null) return fastSnap
-    const baseGraph = extractTypeAwareGraphFromSource(inputs, {
-      repoRoot: root, hostIo, patternDocs, session,
-      ...(options?.overlays !== undefined ? { overlays: options.overlays } : {}),
-      ...(options?.previousProgram !== undefined ? { previousProgram: options.previousProgram } : {}),
-    })
-    const topoSnap = checkTopologySnapshotMatch(session, baseGraph, inputShaMap, testShaMap, govShaMap, patternShaMap, inputs)
-    if (topoSnap !== null) return topoSnap
-    const effectFns: Array<EffectFnNode> = [], serviceTags: Array<ServiceTagNode> = [], taggedErrors: Array<TaggedErrorNode> = []
-    for (const [, node] of Graph.nodes(baseGraph.graph)) {
-      match(node)
-        .with({ _tag: "EffectFn" }, (n) => { effectFns.push(n) })
-        .with({ _tag: "ServiceTag" }, (n) => { serviceTags.push(n) })
-        .with({ _tag: "TaggedError" }, (n) => { taggedErrors.push(n) })
-        .with({ _tag: "ServiceLayer" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" }, () => undefined)
-        .exhaustive()
-    }
-    const updatedNodeIndexByKey = new Map<string, Graph.NodeIndex>(baseGraph.nodeIndexByKey)
-    const testFilesWithContent = testFiles.map((rel) => ({ filePath: rel, getContent: () => testContentMap.get(rel) ?? "" }))
-    const unassertedStateViolations = checkUnassertedStateFieldsForInputs(inputs, testFilesWithContent)
-    const nodeSqliteTestViolations = checkNodeSqliteTestViolations(testFiles, testContentMap)
-    const unresolvedReferences: Array<UnresolvedGraphReference> = []
-    const augmentedGraph = Graph.mutate<HarnessNode, HarnessEdge>(baseGraph.graph, (mutable) => {
-      assembleTestAndGovernanceGraph(mutable, testFiles, testContentMap, governanceDocs, effectFns, serviceTags, taggedErrors, inputs, updatedNodeIndexByKey, unresolvedReferences, root, hostIo)
-    })
-    const resultGraph: HarnessGraph = {
-      graph: augmentedGraph, nodeIndexByKey: updatedNodeIndexByKey,
-      branchingViolations: [...(baseGraph.branchingViolations ?? []), ...unassertedStateViolations, ...nodeSqliteTestViolations, ...governanceStatusViolations],
-      unresolvedReferences: [...(baseGraph.unresolvedReferences ?? []), ...unresolvedReferences],
-    }
-    session.lastWorkspaceSnapshot = {
-      inputShaMap, testShaMap, govShaMap, patternShaMap, baseTopologyHash: computeBaseTopologyHash(session),
-      domainContractInputHash: sha256Hex(inputs.filter((i) => i.packageTag === "contract" || i.packageTag === "domain").map((i) => `${i.filePath}:${inputShaMap.get(i.filePath) ?? ""}`).join("|")),
-      unassertedStateViolations, nodeSqliteTestViolations, governanceStatusViolations, graph: resultGraph,
-    }
-    return resultGraph
-  })
+  return yield* Effect.sync(() =>
+    runExtractWorkspaceTypeAwareGraph(repoRoot, hostIo, extractTypeAwareGraphFromSource, options),
+  )
 })
+
+/**
+ * Checked workspace extraction mapping synchronous FS/TS compiler errors into `ErrorReasonMessage`.
+ */
+export const extractTypeGraphChecked = (
+  options: ExtractTypeGraphOptions,
+): Effect.Effect<HarnessGraph, ErrorReasonMessage> =>
+  Effect.try({
+    try: () =>
+      runExtractWorkspaceTypeAwareGraph(
+        options.repoRoot,
+        options.hostIo,
+        extractTypeAwareGraphFromSource,
+        options,
+      ),
+    catch: (err) => toErrorReasonMessage(err, "TypeGraph.extract failed with an unexpected error."),
+  })
 
 /**
  * TypeExtractor.extractWorkspace effectful entrypoint.

@@ -83,7 +83,7 @@ Leave interrupt-cause handling, silent decode fallbacks, `infra` FS error swallo
 ### Positive Consequences
 
 - Remediated live repository bugs immediately: added missing read tools to `adapters/antigravity/plugins/effect-harness/README.md`, replaced `Effect.tapError` inside `Effect.acquireRelease` in `unix-socket-daemon-live.ts` with `Effect.onExit` + exhaustive `match(exit)`, logged failures in `workflow-maintenance.ts`, and restored 100% `enforced_by` table parity across 12 existing ADRs.
-- All newly introduced rule modules (`gc-hook-parity.ts`, `ast-fail-closed-laws.ts`, `adr-enforcement-table-lint.ts`) remain compact (`<= 400` lines) with 100% mutation kill coverage.
+- All newly introduced rule modules (`gc-hook-parity.ts` at 500 lines, `ast-fail-closed-laws.ts` at 556 lines, `adr-enforcement-table-lint.ts` at 238 lines) stay within the `<= 800`-line self-dogfooding module budget and pass strict `pnpm harness mutate --strict`.
 
 ### Negative Consequences and Trade-offs
 

@@ -1142,4 +1142,46 @@ describe("evaluateDocTruthPlugin (SPEC / S-4.4)", () => {
       rmSync(tempDir, { recursive: true, force: true })
     }
   })
+
+  it("F-5.2: emits adapter-skill-parity:both-missing in harness repos when all skill pairs are deleted, while skipping unrelated repos", () => {
+    const unrelatedDir = mkdtempSync(join(tmpdir(), "harness-unrelated-skill-parity-"))
+    try {
+      writeFileSync(join(unrelatedDir, "README.md"), "# Unrelated\n", "utf8")
+      const unrelatedFindings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: unrelatedDir,
+        hostIo: testHostIo,
+      })
+      expect(unrelatedFindings.filter((f) => f.kind === "adapter-skill-parity")).toEqual([])
+    } finally {
+      rmSync(unrelatedDir, { recursive: true, force: true })
+    }
+
+    const harnessCliDir = mkdtempSync(join(tmpdir(), "harness-cli-both-missing-"))
+    try {
+      mkdirSync(join(harnessCliDir, "apps/harness-cli"), { recursive: true })
+      writeFileSync(join(harnessCliDir, "apps/harness-cli/package.json"), "{}\n", "utf8")
+      const cliFindings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: harnessCliDir,
+        hostIo: testHostIo,
+      })
+      for (const clause of ADAPTER_SKILL_PARITY_CLAUSES) {
+        const bothMissing = cliFindings.find(
+          (f) =>
+            f.kind === "adapter-skill-parity" &&
+            f.nodeId === `adapter-skill-parity:${clause.skillName}:both-missing`,
+        )
+        expect(bothMissing, clause.skillName).toBeDefined()
+        expect(bothMissing?.message).toContain(
+          `adapters/antigravity/plugins/effect-harness/skills/${clause.skillName}/SKILL.md`,
+        )
+        expect(bothMissing?.message).toContain(
+          `adapters/claude-code/skills/${clause.skillName}/SKILL.md`,
+        )
+      }
+    } finally {
+      rmSync(harnessCliDir, { recursive: true, force: true })
+    }
+  })
 })

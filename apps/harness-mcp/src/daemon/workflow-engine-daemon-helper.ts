@@ -23,9 +23,12 @@ import {
   LeaseHolderId,
   LeaseHolderPid,
   toBoundedReason,
+  validateWorkflowTimeoutBudgets,
+  WORKFLOW_TIMEOUT_BUDGETS,
   type WorkflowRunId,
   WorkflowStoreOperation,
   WorkflowStoreUnavailableError,
+  type WorkflowTimeoutBudgets,
   WriterLeaseHeldError,
 } from "@harness/contract"
 import { HarnessTaskWorkflowLayer } from "@harness/gates"
@@ -40,7 +43,6 @@ import {
   makeWorkflowReviewRouterLayer,
   makeWorkflowWorktreePortLayer,
   nodeSyncHostIo,
-  refreshWriterLease,
   resolveWorkflowRuntimePaths,
   UnitAgentDispatcherLive,
   type WorkflowReadModelLeaseFence,
@@ -63,10 +65,15 @@ import {
 } from "@harness/service"
 import type { ExtendedHostIo } from "@harness/service/host-io"
 import type { StartupWorktreeState } from "./workflow-daemon-helper.js"
+import {
+  DEFAULT_WRITER_LEASE_HEARTBEAT_INTERVAL_MS,
+  forkWorkflowLeaseWatchers,
+  invokeOnLeaseLost,
+} from "./workflow-lease-watchers.js"
 
 type Omnigraph = InstanceType<typeof OmnigraphClient>
 
-export const DEFAULT_WRITER_LEASE_HEARTBEAT_INTERVAL_MS = 10_000
+export { DEFAULT_WRITER_LEASE_HEARTBEAT_INTERVAL_MS, forkWorkflowLeaseWatchers, invokeOnLeaseLost }
 export const MAX_CONCURRENT_RUN_LOCKS = 1024
 const WORKFLOW_DAEMON_ENGINE_OP = WorkflowStoreOperation.make("HarnessDaemon.workflowEngine")
 
@@ -401,6 +408,46 @@ const acquireLeaseAndBuildEngineInScope = (input: {
   })
 
 /**
+ * Validates `WORKFLOW_TIMEOUT_BUDGETS` monotonicity invariants (`F-13.1`) and
+ * ensures any configured `heartbeatIntervalMs` is finite, positive, and strictly
+ * less than `writerLeaseHeartbeatTtlMs`.
+ */
+export const validateWorkflowDaemonTimeoutBudgets = (
+  options?: WorkflowEngineDaemonOptions,
+  budgets: WorkflowTimeoutBudgets = WORKFLOW_TIMEOUT_BUDGETS,
+): Effect.Effect<void, WorkflowStoreUnavailableError> => {
+  const budgetFailure = match(validateWorkflowTimeoutBudgets(budgets))
+    .with({ _tag: "Success" }, () => undefined)
+    .with({ _tag: "Failure" }, ({ failure }) => failure)
+    .exhaustive()
+  if (budgetFailure !== undefined) {
+    return Effect.fail(
+      new WorkflowStoreUnavailableError({
+        operation: WORKFLOW_DAEMON_ENGINE_OP,
+        reason: toBoundedReason(`Invalid workflow timeout budgets: ${budgetFailure}`),
+      }),
+    )
+  }
+  const effectiveHeartbeatMs =
+    options?.heartbeatIntervalMs ?? DEFAULT_WRITER_LEASE_HEARTBEAT_INTERVAL_MS
+  if (
+    !Number.isFinite(effectiveHeartbeatMs) ||
+    effectiveHeartbeatMs <= 0 ||
+    effectiveHeartbeatMs >= budgets.writerLeaseHeartbeatTtlMs
+  ) {
+    return Effect.fail(
+      new WorkflowStoreUnavailableError({
+        operation: WORKFLOW_DAEMON_ENGINE_OP,
+        reason: toBoundedReason(
+          `Invalid workflow heartbeatIntervalMs (${String(effectiveHeartbeatMs)}): must be > 0 and < writerLeaseHeartbeatTtlMs (${budgets.writerLeaseHeartbeatTtlMs})`,
+        ),
+      }),
+    )
+  }
+  return Effect.void
+}
+
+/**
  * Acquires the single-writer `WfWriterLease` and builds `makeHarnessWorkflowEngineLayer`
  * inside `daemonScope` according to `workflowEngineOptions.mode` (`auto`, `required`, `disabled`).
  */
@@ -416,6 +463,7 @@ export const acquireWorkflowEngineInScope = Effect.fn("HarnessDaemon.acquireWork
     WriterLeaseHeldError | WorkflowStoreUnavailableError
   > {
     const opts = input.workflowEngineOptions
+    yield* validateWorkflowDaemonTimeoutBudgets(opts)
     if (opts === undefined) {
       return {
         _tag: "Inactive",
@@ -550,86 +598,3 @@ export const acquireWorkflowEngineInScope = Effect.fn("HarnessDaemon.acquireWork
       .exhaustive()
   },
 )
-
-/**
- * Forks background heartbeat (`refreshWriterLease`) and immediate OS `flock` loss
- * shutdown fibers inside `daemonScope` for an active leased daemon.
- */
-export const forkWorkflowLeaseWatchers = (input: {
-  readonly daemonScope: Scope.Scope
-  readonly activeState: Extract<StartedWorkflowEngineState, { readonly _tag: "Active" }>
-  readonly options?: WorkflowEngineDaemonOptions | undefined
-  readonly triggerShutdown: () => void
-}): Effect.Effect<void> =>
-  Effect.gen(function* () {
-    const opts = input.options
-    const heartbeatIntervalMs = Math.max(
-      10,
-      opts?.heartbeatIntervalMs ?? DEFAULT_WRITER_LEASE_HEARTBEAT_INTERVAL_MS,
-    )
-    const maxConsecutiveStoreFailures = 3
-    let consecutiveStoreFailures = 0
-
-    yield* Effect.forever(
-      Effect.sleep(heartbeatIntervalMs).pipe(
-        Effect.andThen(
-          refreshWriterLease({
-            commonGitDir: input.activeState.commonGitDir,
-            holderId: input.activeState.lease.holderId,
-            holderPid: input.activeState.lease.holderPid,
-            lockFilePath: input.activeState.lockFilePath,
-            leaseEpoch: input.activeState.lease.leaseEpoch,
-            repoRoot: input.activeState.repoRoot,
-            ...(opts?.client !== undefined ? { client: opts.client } : {}),
-            ...(opts?.hostIo !== undefined ? { hostIo: opts.hostIo } : {}),
-            ...(opts?.env !== undefined ? { env: opts.env } : {}),
-            ...(opts?.nowMs !== undefined ? { nowMs: opts.nowMs } : {}),
-            ...(opts?.readProcessStartTime !== undefined
-              ? { readProcessStartTime: opts.readProcessStartTime }
-              : {}),
-          }).pipe(
-            Effect.tap(() =>
-              Effect.sync(() => {
-                consecutiveStoreFailures = 0
-              }),
-            ),
-            Effect.catchTags({
-              WriterLeaseHeldError: (err) =>
-                Effect.sync(() => {
-                  process.stderr.write(
-                    `[harness-mcp] Workflow writer lease lost during heartbeat; shutting down daemon: ${err.message}\n`,
-                  )
-                  input.triggerShutdown()
-                  Result.try(() => opts?.onLeaseLost?.(err.message))
-                }).pipe(Effect.andThen(Effect.interrupt)),
-              WorkflowStoreUnavailableError: (err) => {
-                consecutiveStoreFailures += 1
-                process.stderr.write(
-                  `[harness-mcp] Workflow writer lease heartbeat warning (${consecutiveStoreFailures}/${maxConsecutiveStoreFailures}): ${err.message}\n`,
-                )
-                if (consecutiveStoreFailures >= maxConsecutiveStoreFailures) {
-                  input.triggerShutdown()
-                  Result.try(() => opts?.onLeaseLost?.(err.message))
-                  return Effect.fail(err)
-                }
-                return Effect.void
-              },
-            }),
-          ),
-        ),
-      ),
-    ).pipe(Effect.forkIn(input.daemonScope))
-
-    yield* input.activeState.lease.waitForFlockLoss.pipe(
-      Effect.andThen(
-        Effect.sync(() => {
-          process.stderr.write(
-            "[harness-mcp] OS flock lease lost unexpectedly; shutting down workflow daemon\n",
-          )
-          input.triggerShutdown()
-          Result.try(() => opts?.onLeaseLost?.("OS flock lock lost"))
-        }),
-      ),
-      Effect.forkIn(input.daemonScope),
-    )
-  })

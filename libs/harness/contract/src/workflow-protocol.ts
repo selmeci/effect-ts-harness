@@ -145,9 +145,11 @@ export const encodeWorkflowDeferredName = (tag: WorkflowDeferredTag): PendingDef
     )
     .exhaustive()
 
-const ATTEMPT_SEGMENT_RE = /^[1-3]$/
 const POSITIVE_INT_SEGMENT_RE = /^[1-9]\d*$/
 const NON_NEGATIVE_INT_SEGMENT_RE = /^(?:0|[1-9]\d*)$/
+const decodeAttemptNumberOption = Schema.decodeUnknownOption(AttemptNumber)
+const decodeEscalationOrdinalOption = Schema.decodeUnknownOption(EscalationOrdinal)
+const decodeWaveIndexOption = Schema.decodeUnknownOption(WaveIndex)
 const decodeWorkUnitIdOption = Schema.decodeUnknownOption(WorkUnitId)
 
 const parseSafeInt = (rawDigits: string, pattern: RegExp): number | undefined => {
@@ -159,13 +161,25 @@ const parseSafeInt = (rawDigits: string, pattern: RegExp): number | undefined =>
 }
 
 const parseAttemptSegment = (seg: string): AttemptNumber | undefined => {
-  const n = parseSafeInt(seg, ATTEMPT_SEGMENT_RE)
-  return n !== undefined ? AttemptNumber.make(n) : undefined
+  const n = parseSafeInt(seg, POSITIVE_INT_SEGMENT_RE)
+  if (n === undefined) {
+    return undefined
+  }
+  return match(decodeAttemptNumberOption(n))
+    .with({ _tag: "Some" }, ({ value }) => value)
+    .with({ _tag: "None" }, () => undefined)
+    .exhaustive()
 }
 
 const parseEscalationOrdinalSegment = (seg: string): EscalationOrdinal | undefined => {
   const n = parseSafeInt(seg, POSITIVE_INT_SEGMENT_RE)
-  return n !== undefined ? EscalationOrdinal.make(n) : undefined
+  if (n === undefined) {
+    return undefined
+  }
+  return match(decodeEscalationOrdinalOption(n))
+    .with({ _tag: "Some" }, ({ value }) => value)
+    .with({ _tag: "None" }, () => undefined)
+    .exhaustive()
 }
 
 const parseCycleSuffixOrdinal = (seg: string | undefined): EscalationOrdinal | undefined => {
@@ -175,13 +189,19 @@ const parseCycleSuffixOrdinal = (seg: string | undefined): EscalationOrdinal | u
   if (!seg.startsWith("r")) {
     return undefined
   }
-  const n = parseSafeInt(seg.slice(1), POSITIVE_INT_SEGMENT_RE)
-  return n !== undefined && n >= 2 ? EscalationOrdinal.make(n) : undefined
+  const parsed = parseEscalationOrdinalSegment(seg.slice(1))
+  return parsed !== undefined && parsed >= 2 ? parsed : undefined
 }
 
 const parseWaveIndexSegment = (seg: string): WaveIndex | undefined => {
   const n = parseSafeInt(seg, NON_NEGATIVE_INT_SEGMENT_RE)
-  return n !== undefined ? WaveIndex.make(n) : undefined
+  if (n === undefined) {
+    return undefined
+  }
+  return match(decodeWaveIndexOption(n))
+    .with({ _tag: "Some" }, ({ value }) => value)
+    .with({ _tag: "None" }, () => undefined)
+    .exhaustive()
 }
 
 const parseWorkUnitIdSegment = (seg: string): WorkUnitId | undefined =>
@@ -230,78 +250,72 @@ const parseUnitCycleSegments = (
     : undefined
 }
 
-const ZERO_ARG_ACTIVITY_FACTORIES = new Map<string, () => WorkflowActivityTag>([
-  ["ProvisionWorktrees", () => WorkflowActivityTag.cases.ProvisionWorktrees.make({})],
-  ["ProjectRunStarted", () => WorkflowActivityTag.cases.ProjectRunStarted.make({})],
-  ["ProjectRunWaitingLlmPhase", () => WorkflowActivityTag.cases.ProjectRunWaitingLlmPhase.make({})],
-  ["ProjectRunCompleted", () => WorkflowActivityTag.cases.ProjectRunCompleted.make({})],
-  ["RouteReview", () => WorkflowActivityTag.cases.RouteReview.make({})],
-])
-
-const UNIT_ATTEMPT_ACTIVITY_FACTORIES = new Map<
-  string,
-  (args: {
-    readonly unitId: WorkUnitId
-    readonly attempt: AttemptNumber
-    readonly escalationOrdinal: EscalationOrdinal
-  }) => WorkflowActivityTag
->([
-  ["ProjectUnitDispatched", (args) => WorkflowActivityTag.cases.ProjectUnitDispatched.make(args)],
-  ["ProjectUnitCompleted", (args) => WorkflowActivityTag.cases.ProjectUnitCompleted.make(args)],
-  ["ProjectUnitRejected", (args) => WorkflowActivityTag.cases.ProjectUnitRejected.make(args)],
-  [
-    "ProjectUnitAttemptEscalated",
-    (args) => WorkflowActivityTag.cases.ProjectUnitAttemptEscalated.make(args),
-  ],
-  ["DispatchUnitAgent", (args) => WorkflowActivityTag.cases.DispatchUnitAgent.make(args)],
-  ["VerifyUnit", (args) => WorkflowActivityTag.cases.VerifyUnit.make(args)],
-])
-
-const UNIT_ESCALATION_ACTIVITY_FACTORIES = new Map<
-  string,
-  (unitId: WorkUnitId, escalationOrdinal: EscalationOrdinal) => WorkflowActivityTag
->([
-  [
-    "ProjectUnitEscalated",
-    (unitId, escalationOrdinal) =>
-      WorkflowActivityTag.cases.ProjectUnitEscalated.make({ unitId, escalationOrdinal }),
-  ],
-  [
-    "ProjectUnitEscalationRetried",
-    (unitId, escalationOrdinal) =>
-      WorkflowActivityTag.cases.ProjectUnitEscalationRetried.make({ unitId, escalationOrdinal }),
-  ],
-])
-
-const WAVE_ESCALATION_ACTIVITY_FACTORIES = new Map<
-  string,
-  (waveIndex: WaveIndex, escalationOrdinal: EscalationOrdinal) => WorkflowActivityTag
->([
-  [
-    "ProjectWaveMergeEscalated",
-    (waveIndex, escalationOrdinal) =>
-      WorkflowActivityTag.cases.ProjectWaveMergeEscalated.make({ waveIndex, escalationOrdinal }),
-  ],
-  [
-    "ProjectWaveMergeRetried",
-    (waveIndex, escalationOrdinal) =>
-      WorkflowActivityTag.cases.ProjectWaveMergeRetried.make({ waveIndex, escalationOrdinal }),
-  ],
-])
-
-/** Strictly decodes a persisted journal activity string into a `WorkflowActivityTag`. */
-export const decodeWorkflowActivityName = (
+type ActivitySegmentDecoder = (
   raw: string,
-): Result.Result<WorkflowActivityTag, ErrorReasonMessage> => {
-  const segs = raw.split("/")
-  const head = segs[0]!
-  const zeroFactory = ZERO_ARG_ACTIVITY_FACTORIES.get(head)
-  if (zeroFactory !== undefined) {
-    return segs.length === 1
-      ? Result.succeed(zeroFactory())
-      : failProtocol("activity", raw, "extra segments")
+  segs: ReadonlyArray<string>,
+) => Result.Result<WorkflowActivityTag, ErrorReasonMessage>
+
+const makeZeroArgActivityDecoder =
+  (build: () => WorkflowActivityTag): ActivitySegmentDecoder =>
+  (raw, segs) =>
+    segs.length === 1 ? Result.succeed(build()) : failProtocol("activity", raw, "extra segments")
+
+const makeUnitAttemptActivityDecoder =
+  (
+    tagName: string,
+    build: (args: {
+      readonly unitId: WorkUnitId
+      readonly attempt: AttemptNumber
+      readonly escalationOrdinal: EscalationOrdinal
+    }) => WorkflowActivityTag,
+  ): ActivitySegmentDecoder =>
+  (raw, segs) => {
+    const args = parseUnitCycleSegments(segs)
+    return args !== undefined
+      ? Result.succeed(build(args))
+      : failProtocol("activity", raw, `invalid ${tagName} identifiers`)
   }
-  if (head === "ProjectRunAborted") {
+
+const makeUnitEscalationActivityDecoder =
+  (
+    tagName: string,
+    build: (unitId: WorkUnitId, escalationOrdinal: EscalationOrdinal) => WorkflowActivityTag,
+  ): ActivitySegmentDecoder =>
+  (raw, segs) => {
+    const pair = parsePairSegments(segs, parseWorkUnitIdSegment, parseEscalationOrdinalSegment)
+    return pair !== undefined
+      ? Result.succeed(build(pair[0], pair[1]))
+      : failProtocol("activity", raw, `invalid ${tagName} identifiers`)
+  }
+
+const makeWaveEscalationActivityDecoder =
+  (
+    tagName: string,
+    build: (waveIndex: WaveIndex, escalationOrdinal: EscalationOrdinal) => WorkflowActivityTag,
+  ): ActivitySegmentDecoder =>
+  (raw, segs) => {
+    const pair = parsePairSegments(segs, parseWaveIndexSegment, parseEscalationOrdinalSegment)
+    return pair !== undefined
+      ? Result.succeed(build(pair[0], pair[1]))
+      : failProtocol("activity", raw, `invalid ${tagName} identifiers`)
+  }
+
+/** Compile-time exhaustive activity decoder dispatch table tied directly to `WorkflowActivityTag["_tag"]`. */
+export const WORKFLOW_ACTIVITY_DECODERS = {
+  ProvisionWorktrees: makeZeroArgActivityDecoder(() =>
+    WorkflowActivityTag.cases.ProvisionWorktrees.make({}),
+  ),
+  ProjectRunStarted: makeZeroArgActivityDecoder(() =>
+    WorkflowActivityTag.cases.ProjectRunStarted.make({}),
+  ),
+  ProjectRunWaitingLlmPhase: makeZeroArgActivityDecoder(() =>
+    WorkflowActivityTag.cases.ProjectRunWaitingLlmPhase.make({}),
+  ),
+  ProjectRunCompleted: makeZeroArgActivityDecoder(() =>
+    WorkflowActivityTag.cases.ProjectRunCompleted.make({}),
+  ),
+  RouteReview: makeZeroArgActivityDecoder(() => WorkflowActivityTag.cases.RouteReview.make({})),
+  ProjectRunAborted: (raw, segs) => {
     if (segs.length === 4 && segs[1] === "merge") {
       const waveIndex = parseWaveIndexSegment(segs[2]!)
       const escalationOrdinal = parseEscalationOrdinalSegment(segs[3]!)
@@ -324,70 +338,112 @@ export const decodeWorkflowActivityName = (
           }),
         )
       : failProtocol("activity", raw, "invalid abort identifiers")
-  }
-  if (head === "MergeSliceWave" || head === "VerifySharedStep") {
+  },
+  MergeSliceWave: (raw, segs) => {
     if (segs.length < 2 || segs.length > 3) {
-      return failProtocol("activity", raw, `invalid ${head} segment count`)
+      return failProtocol("activity", raw, "invalid MergeSliceWave segment count")
     }
     const escalationOrdinal = parseCycleSuffixOrdinal(segs[2])
-    if (head === "MergeSliceWave") {
-      const waveIndex = parseWaveIndexSegment(segs[1]!)
-      return waveIndex !== undefined && escalationOrdinal !== undefined
-        ? Result.succeed(
-            WorkflowActivityTag.cases.MergeSliceWave.make({ waveIndex, escalationOrdinal }),
-          )
-        : failProtocol("activity", raw, "invalid MergeSliceWave identifiers")
+    const waveIndex = parseWaveIndexSegment(segs[1]!)
+    return waveIndex !== undefined && escalationOrdinal !== undefined
+      ? Result.succeed(
+          WorkflowActivityTag.cases.MergeSliceWave.make({ waveIndex, escalationOrdinal }),
+        )
+      : failProtocol("activity", raw, "invalid MergeSliceWave identifiers")
+  },
+  ProjectWaveMergeEscalated: makeWaveEscalationActivityDecoder(
+    "ProjectWaveMergeEscalated",
+    (waveIndex, escalationOrdinal) =>
+      WorkflowActivityTag.cases.ProjectWaveMergeEscalated.make({ waveIndex, escalationOrdinal }),
+  ),
+  ProjectWaveMergeRetried: makeWaveEscalationActivityDecoder(
+    "ProjectWaveMergeRetried",
+    (waveIndex, escalationOrdinal) =>
+      WorkflowActivityTag.cases.ProjectWaveMergeRetried.make({ waveIndex, escalationOrdinal }),
+  ),
+  ProjectUnitDispatched: makeUnitAttemptActivityDecoder("ProjectUnitDispatched", (args) =>
+    WorkflowActivityTag.cases.ProjectUnitDispatched.make(args),
+  ),
+  ProjectUnitCompleted: makeUnitAttemptActivityDecoder("ProjectUnitCompleted", (args) =>
+    WorkflowActivityTag.cases.ProjectUnitCompleted.make(args),
+  ),
+  ProjectUnitRejected: makeUnitAttemptActivityDecoder("ProjectUnitRejected", (args) =>
+    WorkflowActivityTag.cases.ProjectUnitRejected.make(args),
+  ),
+  ProjectUnitAttemptEscalated: makeUnitAttemptActivityDecoder(
+    "ProjectUnitAttemptEscalated",
+    (args) => WorkflowActivityTag.cases.ProjectUnitAttemptEscalated.make(args),
+  ),
+  DispatchUnitAgent: makeUnitAttemptActivityDecoder("DispatchUnitAgent", (args) =>
+    WorkflowActivityTag.cases.DispatchUnitAgent.make(args),
+  ),
+  VerifyUnit: makeUnitAttemptActivityDecoder("VerifyUnit", (args) =>
+    WorkflowActivityTag.cases.VerifyUnit.make(args),
+  ),
+  ProjectUnitEscalated: makeUnitEscalationActivityDecoder(
+    "ProjectUnitEscalated",
+    (unitId, escalationOrdinal) =>
+      WorkflowActivityTag.cases.ProjectUnitEscalated.make({ unitId, escalationOrdinal }),
+  ),
+  ProjectUnitEscalationRetried: makeUnitEscalationActivityDecoder(
+    "ProjectUnitEscalationRetried",
+    (unitId, escalationOrdinal) =>
+      WorkflowActivityTag.cases.ProjectUnitEscalationRetried.make({ unitId, escalationOrdinal }),
+  ),
+  VerifySharedStep: (raw, segs) => {
+    if (segs.length < 2 || segs.length > 3) {
+      return failProtocol("activity", raw, "invalid VerifySharedStep segment count")
     }
+    const escalationOrdinal = parseCycleSuffixOrdinal(segs[2])
     const attempt = parseAttemptSegment(segs[1]!)
     return attempt !== undefined && escalationOrdinal !== undefined
       ? Result.succeed(
           WorkflowActivityTag.cases.VerifySharedStep.make({ attempt, escalationOrdinal }),
         )
       : failProtocol("activity", raw, "invalid VerifySharedStep identifiers")
-  }
-  const waveFactory = WAVE_ESCALATION_ACTIVITY_FACTORIES.get(head)
-  if (waveFactory !== undefined) {
-    const pair = parsePairSegments(segs, parseWaveIndexSegment, parseEscalationOrdinalSegment)
-    return pair !== undefined
-      ? Result.succeed(waveFactory(pair[0], pair[1]))
-      : failProtocol("activity", raw, `invalid ${head} identifiers`)
-  }
-  const unitAttemptFactory = UNIT_ATTEMPT_ACTIVITY_FACTORIES.get(head)
-  if (unitAttemptFactory !== undefined) {
-    const args = parseUnitCycleSegments(segs)
-    return args !== undefined
-      ? Result.succeed(unitAttemptFactory(args))
-      : failProtocol("activity", raw, `invalid ${head} identifiers`)
-  }
-  const unitEscFactory = UNIT_ESCALATION_ACTIVITY_FACTORIES.get(head)
-  if (unitEscFactory !== undefined) {
-    const pair = parsePairSegments(segs, parseWorkUnitIdSegment, parseEscalationOrdinalSegment)
-    return pair !== undefined
-      ? Result.succeed(unitEscFactory(pair[0], pair[1]))
-      : failProtocol("activity", raw, `invalid ${head} identifiers`)
-  }
-  return failProtocol("activity", raw, `unrecognized activity prefix '${head}'`)
-}
+  },
+} as const satisfies Readonly<Record<WorkflowActivityTag["_tag"], ActivitySegmentDecoder>>
 
-/** Strictly decodes a persisted journal deferred string into a `WorkflowDeferredTag`. */
-export const decodeWorkflowDeferredName = (
+const WORKFLOW_ACTIVITY_DECODER_MAP: ReadonlyMap<string, ActivitySegmentDecoder> = new Map(
+  Object.entries(WORKFLOW_ACTIVITY_DECODERS),
+)
+
+/** Strictly decodes a persisted journal activity string into a `WorkflowActivityTag`. */
+export const decodeWorkflowActivityName = (
   raw: string,
-): Result.Result<WorkflowDeferredTag, ErrorReasonMessage> => {
-  if (raw === "llm-phase-done") {
-    return Result.succeed(WorkflowDeferredTag.cases.LlmPhaseDone.make({}))
-  }
-  if (raw === "Workflow/InterruptSignal") {
-    return Result.succeed(WorkflowDeferredTag.cases.InterruptSignal.make({}))
-  }
+): Result.Result<WorkflowActivityTag, ErrorReasonMessage> => {
   const segs = raw.split("/")
   const head = segs[0]!
-  if (head === "unit") {
+  const decoder = WORKFLOW_ACTIVITY_DECODER_MAP.get(head)
+  return decoder !== undefined
+    ? decoder(raw, segs)
+    : failProtocol("activity", raw, `unrecognized activity prefix '${head}'`)
+}
+
+type DeferredWireDecoder = (
+  raw: string,
+  segs: ReadonlyArray<string>,
+) => Result.Result<WorkflowDeferredTag, ErrorReasonMessage> | undefined
+
+/** Compile-time exhaustive deferred decoder table tied directly to `WorkflowDeferredTag["_tag"]`. */
+export const WORKFLOW_DEFERRED_DECODERS = {
+  LlmPhaseDone: (raw) =>
+    raw === "llm-phase-done"
+      ? Result.succeed(WorkflowDeferredTag.cases.LlmPhaseDone.make({}))
+      : undefined,
+  InterruptSignal: (raw) =>
+    raw === "Workflow/InterruptSignal"
+      ? Result.succeed(WorkflowDeferredTag.cases.InterruptSignal.make({}))
+      : undefined,
+  UnitCompletion: (raw, segs) => {
+    if (segs[0] !== "unit") return undefined
     const args = parseUnitCycleSegments(segs)
     return args !== undefined
       ? Result.succeed(WorkflowDeferredTag.cases.UnitCompletion.make(args))
       : failProtocol("deferred", raw, "invalid unit deferred identifiers")
-  }
-  if (head === "escalation") {
+  },
+  UnitEscalation: (raw, segs) => {
+    if (segs[0] !== "escalation") return undefined
     const pair = parsePairSegments(segs, parseWorkUnitIdSegment, parseEscalationOrdinalSegment)
     return pair !== undefined
       ? Result.succeed(
@@ -397,6 +453,23 @@ export const decodeWorkflowDeferredName = (
           }),
         )
       : failProtocol("deferred", raw, "invalid escalation deferred identifiers")
+  },
+} as const satisfies Readonly<Record<WorkflowDeferredTag["_tag"], DeferredWireDecoder>>
+
+const WORKFLOW_DEFERRED_DECODER_LIST: ReadonlyArray<DeferredWireDecoder> = Object.values(
+  WORKFLOW_DEFERRED_DECODERS,
+)
+
+/** Strictly decodes a persisted journal deferred string into a `WorkflowDeferredTag`. */
+export const decodeWorkflowDeferredName = (
+  raw: string,
+): Result.Result<WorkflowDeferredTag, ErrorReasonMessage> => {
+  const segs = raw.split("/")
+  for (const tryDecode of WORKFLOW_DEFERRED_DECODER_LIST) {
+    const matched = tryDecode(raw, segs)
+    if (matched !== undefined) {
+      return matched
+    }
   }
   return failProtocol("deferred", raw, `unrecognized deferred name '${raw}'`)
 }

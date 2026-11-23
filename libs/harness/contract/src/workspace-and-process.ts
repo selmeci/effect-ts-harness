@@ -208,6 +208,32 @@ export const ActiveMutantId = Schema.NonEmptyString.pipe(
 )
 export type ActiveMutantId = typeof ActiveMutantId.Type
 
+const fnv1a64Hex = (raw: string): string => {
+  let hash = 0xcbf29ce484222325n
+  const prime = 0x100000001b3n
+  const mask64 = 0xffffffffffffffffn
+  for (let i = 0; i < raw.length; i += 1) {
+    hash ^= BigInt(raw.charCodeAt(i))
+    hash = (hash * prime) & mask64
+  }
+  return hash.toString(16).padStart(16, "0")
+}
+
+const isHighSurrogate = (code: number): boolean => code >= 0xd800 && code <= 0xdbff
+const isLowSurrogate = (code: number): boolean => code >= 0xdc00 && code <= 0xdfff
+
+const truncateWithHashDigest = (raw: string, maxLength: number): string => {
+  if (raw.length <= maxLength) {
+    return raw
+  }
+  const suffix = `…[len=${raw.length},h=${fnv1a64Hex(raw)}]`
+  let prefixEnd = maxLength - suffix.length
+  if (isHighSurrogate(raw.charCodeAt(prefixEnd - 1)) && isLowSurrogate(raw.charCodeAt(prefixEnd))) {
+    prefixEnd -= 1
+  }
+  return `${raw.slice(0, prefixEnd)}${suffix}`
+}
+
 export const CompilerRepoRootPath = WorkspaceFilePath.pipe(Schema.brand("CompilerRepoRootPath"))
 export type CompilerRepoRootPath = typeof CompilerRepoRootPath.Type
 
@@ -218,7 +244,7 @@ export const CompilerRepoRootInput = Schema.String.pipe(
 export type CompilerRepoRootInput = typeof CompilerRepoRootInput.Type
 
 export const toCompilerRepoRootInput = (raw: string): CompilerRepoRootInput =>
-  CompilerRepoRootInput.make(raw.slice(0, 4096))
+  CompilerRepoRootInput.make(truncateWithHashDigest(raw, 4096))
 
 export const CompilerOverlayErrorReason = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isMaxLength(8192)),
@@ -263,31 +289,35 @@ export class CliCommandNotFoundError extends Schema.TaggedError<CliCommandNotFou
   },
 ) {}
 
-export const CANONICAL_CLI_COMMAND_NAMES: ReadonlyArray<CliCommandName> = [
-  CliCommandName.make("guard"),
-  CliCommandName.make("route"),
-  CliCommandName.make("plan-check"),
-  CliCommandName.make("plan-synth"),
-  CliCommandName.make("repair"),
-  CliCommandName.make("verify"),
-  CliCommandName.make("done"),
-  CliCommandName.make("learn"),
-  CliCommandName.make("gc"),
-  CliCommandName.make("mutate"),
-  CliCommandName.make("bench"),
-  CliCommandName.make("benchmark"),
-  CliCommandName.make("ingest"),
-  CliCommandName.make("session"),
-  CliCommandName.make("doctor"),
-  CliCommandName.make("ontology"),
-  CliCommandName.make("report"),
-  CliCommandName.make("check-openapi"),
-  CliCommandName.make("check-migrations"),
-  CliCommandName.make("check-event-schemas"),
-  CliCommandName.make("scenario"),
-  CliCommandName.make("workflow"),
-  CliCommandName.make("help"),
-]
+export const CanonicalCliCommandName = Schema.Literals([
+  "guard",
+  "route",
+  "plan-check",
+  "plan-synth",
+  "repair",
+  "verify",
+  "done",
+  "learn",
+  "gc",
+  "mutate",
+  "bench",
+  "benchmark",
+  "ingest",
+  "session",
+  "doctor",
+  "ontology",
+  "report",
+  "check-openapi",
+  "check-migrations",
+  "check-event-schemas",
+  "scenario",
+  "workflow",
+  "help",
+]).pipe(Schema.brand("CanonicalCliCommandName"))
+export type CanonicalCliCommandName = typeof CanonicalCliCommandName.Type
+
+export const CANONICAL_CLI_COMMAND_NAMES: ReadonlyArray<CliCommandName> =
+  CanonicalCliCommandName.schema.literals.map((name) => CliCommandName.make(name))
 
 export const McpToolName = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),
@@ -296,26 +326,30 @@ export const McpToolName = Schema.NonEmptyString.pipe(
 )
 export type McpToolName = typeof McpToolName.Type
 
-export const CANONICAL_MCP_TOOL_NAMES: ReadonlyArray<McpToolName> = [
-  McpToolName.make("harness_resolve"),
-  McpToolName.make("harness_callers"),
-  McpToolName.make("harness_callees"),
-  McpToolName.make("harness_tests_reaching"),
-  McpToolName.make("harness_structural_search"),
-  McpToolName.make("harness_route"),
-  McpToolName.make("harness_review_route"),
-  McpToolName.make("harness_ontology_why"),
-  McpToolName.make("harness_ontology_impact"),
-  McpToolName.make("harness_ontology_check"),
-  McpToolName.make("harness_gq_query"),
-  McpToolName.make("harness_lsp_diagnostics"),
-  McpToolName.make("harness_telemetry_report"),
-  McpToolName.make("harness_graph_infer"),
-  McpToolName.make("harness_graph_complete"),
-  McpToolName.make("harness_graph_rewrite"),
-  McpToolName.make("harness_git_diff"),
-  McpToolName.make("harness_workflow_plan"),
-]
+export const CanonicalMcpToolName = Schema.Literals([
+  "harness_resolve",
+  "harness_callers",
+  "harness_callees",
+  "harness_tests_reaching",
+  "harness_structural_search",
+  "harness_route",
+  "harness_review_route",
+  "harness_ontology_why",
+  "harness_ontology_impact",
+  "harness_ontology_check",
+  "harness_gq_query",
+  "harness_lsp_diagnostics",
+  "harness_telemetry_report",
+  "harness_graph_infer",
+  "harness_graph_complete",
+  "harness_graph_rewrite",
+  "harness_git_diff",
+  "harness_workflow_plan",
+]).pipe(Schema.brand("CanonicalMcpToolName"))
+export type CanonicalMcpToolName = typeof CanonicalMcpToolName.Type
+
+export const CANONICAL_MCP_TOOL_NAMES: ReadonlyArray<McpToolName> =
+  CanonicalMcpToolName.schema.literals.map((name) => McpToolName.make(name))
 
 export const McpToolInputName = Schema.String.pipe(
   Schema.check(Schema.isMaxLength(256)),
@@ -324,7 +358,7 @@ export const McpToolInputName = Schema.String.pipe(
 export type McpToolInputName = typeof McpToolInputName.Type
 
 export const toMcpToolInputName = (raw: string): McpToolInputName =>
-  McpToolInputName.make(raw.slice(0, 256))
+  McpToolInputName.make(truncateWithHashDigest(raw, 256))
 
 export class UnknownToolError extends Schema.TaggedError<UnknownToolError>()("UnknownToolError", {
   toolName: McpToolInputName,

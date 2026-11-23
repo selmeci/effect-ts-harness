@@ -40,23 +40,37 @@ export const verifyFailureWithThrashing = (
   return { exitCode: 1, stdout: "", stderr: stderrMsg }
 }
 
+export type DocOnlyVerifyFastPathOutcome =
+  | { readonly _tag: "Executed"; readonly result: CliResult }
+  | { readonly _tag: "Skipped"; readonly reason: string }
+
+const fastPathSkipped = (reason: string): DocOnlyVerifyFastPathOutcome => ({
+  _tag: "Skipped",
+  reason,
+})
+
+const fastPathExecuted = (result: CliResult): DocOnlyVerifyFastPathOutcome => ({
+  _tag: "Executed",
+  result,
+})
+
 export const tryRunDocOnlyVerifyFastPath = (input: {
   readonly repoRoot: string
   readonly graph: HarnessGraph
   readonly governanceDocs: ReadonlyArray<GovernanceDocReference>
   readonly implBranch: string
   readonly options: CliEnv | undefined
-}): Effect.Effect<CliResult | undefined> =>
+}): Effect.Effect<DocOnlyVerifyFastPathOutcome> =>
   Effect.gen(function* () {
     if (input.options?.skipSubprocessVerify === true) {
-      return undefined
+      return fastPathSkipped("skipSubprocessVerify flag enabled")
     }
     const existingStamp = readExistingVerifyStamp(input.repoRoot, nodeSyncHostIo)
     if (
       existingStamp?.mutableTreeHash === undefined ||
       existingStamp.taskBranch !== input.implBranch
     ) {
-      return undefined
+      return fastPathSkipped("no valid prior verify-stamp or taskBranch mismatch")
     }
 
     const seedRes = Result.try(() => parseDstSeedEnv(process.env["DST_SEED"]))
@@ -71,39 +85,49 @@ export const tryRunDocOnlyVerifyFastPath = (input: {
       }))
       .exhaustive()
     if (seedOutcome.errorReason !== undefined) {
-      return {
+      return fastPathExecuted({
         exitCode: 1,
         stdout: "",
         stderr: `[GATE FAILURE] verify:dst-seed\n${seedOutcome.errorReason}`,
-      }
+      })
     }
     if (seedOutcome.pinnedSeed !== undefined && existingStamp.dstSeed !== seedOutcome.pinnedSeed) {
-      return undefined
+      return fastPathSkipped("DST_SEED mismatch")
     }
 
     const requiredSeeds = resolveDstSeedCount(
       DstExecutionTier.make(process.env.CI === "true" ? "ci_full" : "fast_local"),
     )
     if ((existingStamp.dstSeedsRun ?? 0) < requiredSeeds) {
-      return undefined
+      return fastPathSkipped("insufficient dstSeedsRun")
     }
 
     const currentMutableRes = computeMutableTreeHashChecked(input.repoRoot, nodeSyncHostIo)
-    const mutableMatched = match(currentMutableRes)
-      .with({ _tag: "Success" }, ({ success }) => success === existingStamp.mutableTreeHash)
-      .with({ _tag: "Failure" }, () => false)
+    const mutableOutcome = match(currentMutableRes)
+      .with({ _tag: "Success" }, ({ success }) =>
+        success === existingStamp.mutableTreeHash
+          ? undefined
+          : fastPathSkipped("mutableTreeHash mismatch"),
+      )
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        fastPathExecuted({
+          exitCode: 1,
+          stdout: "",
+          stderr: `[GATE FAILURE] verify:mutable-tree-hash\n${failure}`,
+        }),
+      )
       .exhaustive()
-    if (!mutableMatched) {
-      return undefined
+    if (mutableOutcome !== undefined) {
+      return mutableOutcome
     }
 
     const mutateReason = evaluateVerifyMutateStampGate(input.repoRoot, input.options)
     if (mutateReason !== undefined) {
-      return {
+      return fastPathExecuted({
         exitCode: 1,
         stdout: "",
         stderr: `[GATE FAILURE] verify:mutate-stamp\n${mutateReason}`,
-      }
+      })
     }
 
     const hasPatternsDir = nodeSyncHostIo.existsSync(join(input.repoRoot, "agent-patterns"))
@@ -120,11 +144,11 @@ export const tryRunDocOnlyVerifyFastPath = (input: {
       const msg = gcReport.findings
         .map((f) => `[${f.kind}] ${f.location ?? f.nodeId}: ${f.message}`)
         .join("\n")
-      return {
+      return fastPathExecuted({
         exitCode: 1,
         stdout: "",
         stderr: `[GATE FAILURE] verify:gc-doc-only\n${msg}`,
-      }
+      })
     }
 
     const spanReadResult = yield* readRecordedSpans(input.repoRoot).pipe(
@@ -147,11 +171,11 @@ export const tryRunDocOnlyVerifyFastPath = (input: {
       )
       .exhaustive()
     if (spanBudgetFailure !== undefined) {
-      return {
+      return fastPathExecuted({
         exitCode: 1,
         stdout: "",
         stderr: `[GATE FAILURE] verify:span-budget\n${spanBudgetFailure}`,
-      }
+      })
     }
 
     const mutateMeta = isVerifyMutateStampGateEnforced(input.repoRoot, input.options)
@@ -179,15 +203,19 @@ export const tryRunDocOnlyVerifyFastPath = (input: {
       ),
     )
     return match(writeRes)
-      .with({ _tag: "Failure" }, ({ failure }) => ({
-        exitCode: 1,
-        stdout: "",
-        stderr: `[GATE FAILURE] verify:stamp-write\n${failure instanceof Error ? failure.message : String(failure)}`,
-      }))
-      .with({ _tag: "Success" }, ({ success: refreshed }) => ({
-        exitCode: 0,
-        stdout: JSON.stringify(refreshed),
-        stderr: "",
-      }))
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        fastPathExecuted({
+          exitCode: 1,
+          stdout: "",
+          stderr: `[GATE FAILURE] verify:stamp-write\n${failure instanceof Error ? failure.message : String(failure)}`,
+        }),
+      )
+      .with({ _tag: "Success" }, ({ success: refreshed }) =>
+        fastPathExecuted({
+          exitCode: 0,
+          stdout: JSON.stringify(refreshed),
+          stderr: "",
+        }),
+      )
       .exhaustive()
   })

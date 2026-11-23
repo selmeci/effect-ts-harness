@@ -36,6 +36,7 @@ import {
   UnitAgentDispatchResult,
   UnitOutcome,
   UnitRejection,
+  WORKFLOW_TIMEOUT_BUDGETS,
   WaveIndex,
   WorkUnitId,
   type WorkflowAttemptKey,
@@ -1073,7 +1074,7 @@ const waitForWaitingRun = Effect.fnUntraced(function* (runId: WorkflowRunId) {
   expect.unreachable(`Timed out waiting for WfRun '${runId}' to enter state='waiting'`)
 })
 
-describe("REQ-3.1: Differential live HarnessTaskWorkflow projections vs rebuildWorkflowReadModelViews", () => {
+describe("SPEC-0026 REQ-3.1: Differential live HarnessTaskWorkflow projections vs rebuildWorkflowReadModelViews", () => {
   it.live(
     "matches exactly across multi-wave + sharedStep completion and paused LlmPhaseDone waiting state",
     () =>
@@ -1173,6 +1174,7 @@ describe("REQ-3.1: Differential live HarnessTaskWorkflow projections vs rebuildW
           expect(completedLive.state).toBe("completed")
         }).pipe(Effect.provide(stack))
       }),
+    // 20_000ms: executes multi-wave Effect Cluster Sharding workflow run, LlmPhaseDone pause, and journal replay comparison.
     20_000,
   )
 
@@ -1306,6 +1308,7 @@ describe("REQ-3.1: Differential live HarnessTaskWorkflow projections vs rebuildW
           expect(finalRun.state).toBe("completed")
         }).pipe(Effect.provide(stack))
       }),
+    // 20_000ms: drives L1 merge-conflict escalation, retry resolution, and Effect Cluster journal replay comparison.
     20_000,
   )
 
@@ -1424,6 +1427,7 @@ describe("REQ-3.1: Differential live HarnessTaskWorkflow projections vs rebuildW
           expect(abortedRun.state).toBe("aborted")
         }).pipe(Effect.provide(stack))
       }),
+    // 20_000ms: runs 3 verification rejection attempts, escalation abort, and full journal replay comparison.
     20_000,
   )
 
@@ -1873,6 +1877,7 @@ describe("REQ-3.1: Differential live HarnessTaskWorkflow projections vs rebuildW
           expect(rebuiltAttempts[1]?.runner).toBe(runner)
         }).pipe(Effect.provide(stack))
       }),
+    // 20_000ms: executes Automatic-mode agent failure, retry completion, and Effect Cluster journal replay comparison.
     20_000,
   )
 
@@ -2129,6 +2134,32 @@ describe("REQ-3.1: Differential live HarnessTaskWorkflow projections vs rebuildW
         )
         expect(attemptsMap.get(k2)?.verdict).toBe("rejected")
         expect(attemptsMap.get(k2)?.runner).toBe(runner)
+      }),
+  )
+
+  it.effect(
+    "F-13.1 / SPEC-0027 REQ-2.2: makeHarnessWorkflowEngineLayer fails with WorkflowStoreUnavailableError on non-monotonic timeoutBudgets at initialization",
+    () =>
+      Effect.gen(function* () {
+        const invalidBudgets = {
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          workflowServerSocketMs: WORKFLOW_TIMEOUT_BUDGETS.workflowCompleteIpcMs,
+        }
+        const err = yield* Effect.scoped(
+          Layer.build(
+            makeHarnessWorkflowEngineLayer(CANONICAL_ROOT, {
+              timeoutBudgets: invalidBudgets,
+            }),
+          ),
+        ).pipe(Effect.flip)
+        match(err)
+          .with({ _tag: "WorkflowStoreUnavailableError" }, (storeErr) => {
+            expect(storeErr.reason).toContain("workflowServerSocketMs")
+          })
+          .with({ _tag: "WriterLeaseHeldError" }, () => {
+            expect.unreachable("Expected WorkflowStoreUnavailableError on inverted timeout budgets")
+          })
+          .exhaustive()
       }),
   )
 })

@@ -188,6 +188,47 @@ describe("Harness daemon shared AST gate cache", () => {
         expect(res.id).toBe("req-oversized")
         expect(res.ok).toBe(false)
         expect(res.error).toContain("exceeds bounded size")
+        expect(res.error).toContain("4194304")
+      } finally {
+        await handle.close()
+      }
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("F-12.1: ast-gates returns concrete AstSourceFilePath schema error (not 'exceeds bounded size') for malformed relative paths", async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "harness-daemon-bad-path-"))
+    try {
+      const srcDir = path.join(tmpRoot, "libs", "sample", "domain", "src")
+      fs.mkdirSync(srcDir, { recursive: true })
+      fs.writeFileSync(path.join(srcDir, " spaced.ts "), "export const x = 1\n", "utf8")
+
+      const handle = await startHarnessDaemonServer(tmpRoot)
+      try {
+        const socketPath = DaemonSocketPath.make(handle.socketPath)
+        for (const badPath of [
+          "",
+          "libs/sample/domain/src/ spaced.ts ",
+          "libs/sample/domain/src/null\0byte.ts",
+        ]) {
+          const req = JSON.stringify({
+            id: `req-bad-path-${badPath.length}`,
+            command: "ast-gates",
+            files: [badPath],
+          })
+          const raw = await Effect.runPromise(
+            queryUnixSocketLine(socketPath, req, 5000).pipe(Effect.provide(UnixSocketDaemonLive)),
+          )
+          const res = JSON.parse(Option.getOrThrow(raw)) as {
+            readonly id: string
+            readonly ok: boolean
+            readonly error?: string
+          }
+          expect(res.ok).toBe(false)
+          expect(res.error).toContain("invalid relative path")
+          expect(res.error).not.toContain("exceeds bounded size")
+        }
       } finally {
         await handle.close()
       }

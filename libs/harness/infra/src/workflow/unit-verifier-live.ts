@@ -497,7 +497,7 @@ export const completeUnitImpl = Effect.fn("Harness.completeUnit")(function* (
     .exhaustive()
 })
 
-/** Verifies sequential `sharedStepPaths` changes on canonical checkout (`REQ-1.4`). */
+/** Verifies sequential `sharedStepPaths` changes on canonical checkout (`SPEC-0023 REQ-2.1` / `RFC-0013 REQ-1.4`). */
 export const completeSharedStepImpl = Effect.fn("Harness.completeSharedStep")(function* (
   input: CompleteSharedStepInput,
   options?: UnitVerifierOptions,

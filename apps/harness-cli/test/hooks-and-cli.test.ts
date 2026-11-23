@@ -818,7 +818,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         decision: "continue",
         reason: expect.stringContaining("interrupted"),
       })
-    }, 25_000)
+    }, 25_000) // spawns 4 real Node hook child processes with SIGTERM/SIGINT signal delivery and teardown
 
     it("F-1.1 & M-4.1: real subprocess SIGTERM and SIGINT detected from Antigravity stdin payloads fail closed", async () => {
       // 5. Antigravity guard WITHOUT --format=antigravity (detected from stdin payload) SIGTERM
@@ -960,7 +960,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
         hangingServer.closeAllConnections()
         hangingServer.close()
       }
-    }, 25_000)
+    }, 25_000) // exercises hanging Omnigraph HTTP socket timeout and SIGTERM/SIGKILL cleanup in child process
   })
 
   describe("F-10.1: omnigraph-lifecycle safety checks", () => {
@@ -2036,7 +2036,7 @@ describe("hooks, stdin, teardown, omnigraph-lifecycle, and subprocess CLI", () =
     }
   })
 
-  it("REQ-4.1: handleGuard enforces HARNESS_UNIT_WORKER=1 via CliEnv.env across commands and file reads while allowing complete/status/verify", async () => {
+  it("SPEC-0023 REQ-4.1: handleGuard enforces HARNESS_UNIT_WORKER=1 via CliEnv.env across commands and file reads while allowing complete/status/verify", async () => {
     const workerEnv = { HARNESS_UNIT_WORKER: "1" } as const
     const nonWorkerEnv = { HARNESS_UNIT_WORKER: "0" } as const
 

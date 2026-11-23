@@ -86,43 +86,45 @@ describe("HarnessCli.dispatchCommand (SPEC-0011 §4)", () => {
       }),
   )
 
-  it.effect("REQ-4.1: executes custom command registered via makeHarnessCommandRegistryLayer", () =>
-    Effect.gen(function* () {
-      const testId = "HarnessCli.dispatchCommand::custom-layer"
-      const emptyFnIndex = new Map<string, IndexedEffectFn>()
+  it.effect(
+    "SPEC-0011 REQ-4.1: executes custom command registered via makeHarnessCommandRegistryLayer",
+    () =>
+      Effect.gen(function* () {
+        const testId = "HarnessCli.dispatchCommand::custom-layer"
+        const emptyFnIndex = new Map<string, IndexedEffectFn>()
 
-      const customDescriptor: CliCommandPluginDescriptor = {
-        name: CliCommandName.make("custom-cmd"),
-        summary: "Custom test command",
-        execute: (args) =>
-          Effect.succeed({
-            exitCode: 0,
-            stdout: `custom:${args.join(",")}`,
-            stderr: "",
-          }),
-      }
+        const customDescriptor: CliCommandPluginDescriptor = {
+          name: CliCommandName.make("custom-cmd"),
+          summary: "Custom test command",
+          execute: (args) =>
+            Effect.succeed({
+              exitCode: 0,
+              stdout: `custom:${args.join(",")}`,
+              stderr: "",
+            }),
+        }
 
-      const customLayer = makeHarnessCommandRegistryLayer([customDescriptor])
+        const customLayer = makeHarnessCommandRegistryLayer([customDescriptor])
 
-      const { result, spans } = yield* runWithTestTracer(
-        testId,
-        dispatchCliCommand({
-          command: "custom-cmd",
-          args: ["alpha", "beta"],
-        }).pipe(Effect.provide(customLayer)),
-        emptyFnIndex,
-      )
+        const { result, spans } = yield* runWithTestTracer(
+          testId,
+          dispatchCliCommand({
+            command: "custom-cmd",
+            args: ["alpha", "beta"],
+          }).pipe(Effect.provide(customLayer)),
+          emptyFnIndex,
+        )
 
-      expect(result.exitCode).toBe(0)
-      expect(result.stdout).toBe("custom:alpha,beta")
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout).toBe("custom:alpha,beta")
 
-      const dispatchSpan = spans.find((s) => s.name === "HarnessCli.dispatchCommand")
-      expect(dispatchSpan?.name).toBe("HarnessCli.dispatchCommand")
-      expect(dispatchSpan?.exitTag).toBe("Success")
+        const dispatchSpan = spans.find((s) => s.name === "HarnessCli.dispatchCommand")
+        expect(dispatchSpan?.name).toBe("HarnessCli.dispatchCommand")
+        expect(dispatchSpan?.exitTag).toBe("Success")
 
-      const violations = yield* decideSpanBudgets({ spans: toSpanSamples(spans) })
-      expect(violations).toHaveLength(0)
-    }),
+        const violations = yield* decideSpanBudgets({ spans: toSpanSamples(spans) })
+        expect(violations).toHaveLength(0)
+      }),
   )
 
   it.effect(

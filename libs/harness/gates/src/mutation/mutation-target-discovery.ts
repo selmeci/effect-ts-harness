@@ -336,9 +336,14 @@ export const findDomainFilesChecked = (
   scope?: string,
   targetFiles?: ReadonlyArray<string>,
 ):
-  | { readonly _tag: "Ok"; readonly files: ReadonlyArray<DomainFile> }
+  | {
+      readonly _tag: "Ok"
+      readonly files: ReadonlyArray<DomainFile>
+      readonly unclassifiedPackages: ReadonlyArray<string>
+    }
   | { readonly _tag: "Error"; readonly reason: string } => {
   const results: Array<DomainFile> = []
+  const unclassifiedPackages: Array<string> = []
   const libsDir = join(repoRoot, "libs")
   const libsExistsRes = existsGuarded(libsDir, hostIo)
   const libsExists = match(libsExistsRes)
@@ -404,7 +409,12 @@ export const findDomainFilesChecked = (
           .with({ _tag: "CorruptManifest" }, ({ reason }) => reason)
           .with({ _tag: "Ok" }, ({ classification, pkgName, tags }) =>
             match(classification)
-              .with("unclassified", () => undefined)
+              .with("unclassified", () => {
+                if (scope === undefined || matchesScopeFilter(scope, sDir, pkgDir, pkgName)) {
+                  unclassifiedPackages.push(`libs/${sDir}/${pkgDir}`)
+                }
+                return undefined
+              })
               .with("excluded", () => {
                 const pureResults: Array<PureDiscoveredFile> = []
                 const err = collectExcludedLibPureFilesChecked({
@@ -481,7 +491,7 @@ export const findDomainFilesChecked = (
   })
   if (appErr !== undefined) return { _tag: "Error", reason: appErr }
   results.push(...appPureResults)
-  return { _tag: "Ok", files: results }
+  return { _tag: "Ok", files: results, unclassifiedPackages }
 }
 
 export const findDomainFiles = (

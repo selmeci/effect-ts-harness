@@ -2,7 +2,7 @@ import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { lstatSync } from "node:fs"
 import { join } from "node:path"
-import { Effect, Result, Schema } from "effect"
+import { Cause, Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   type AbsoluteRepoRoot,
@@ -405,36 +405,107 @@ const forceUnlockClusterAdmissionLocks = (
   hostIo: ExtendedHostIo,
   env: Readonly<Record<string, string | undefined>>,
   extraOutputs: ReadonlyArray<string>,
-): Effect.Effect<void, WorkflowStoreUnavailableError> => {
-  const operation = WorkflowStoreOperation.make("WorkflowMaintenance.forceUnlock")
-  const lockIds = collectAdmissionLockIds(clusterDir, hostIo, extraOutputs)
-  return Effect.forEach(
-    lockIds,
-    (lockId) =>
-      runOmnigraphCli(
-        omnigraphBin,
-        ["cluster", "force-unlock", lockId, "--target", `file://${clusterDir}`],
-        operation,
-        env,
-      ).pipe(Effect.asVoid),
-    { discard: true },
-  )
+): Effect.Effect<void, WorkflowStoreUnavailableError> =>
+  Effect.suspend(() => {
+    const operation = WorkflowStoreOperation.make("WorkflowMaintenance.forceUnlock")
+    const lockIds = collectAdmissionLockIds(clusterDir, hostIo, extraOutputs)
+    return Effect.forEach(
+      lockIds,
+      (lockId) =>
+        runOmnigraphCli(
+          omnigraphBin,
+          ["cluster", "force-unlock", lockId, "--target", `file://${clusterDir}`],
+          operation,
+          env,
+        ).pipe(Effect.asVoid),
+      { discard: true },
+    )
+  })
+
+const MAX_MAINTENANCE_REASON_LEN = 1024
+
+const combineMaintenanceErrorReason = (primaryReason: string, unlockDiagnostic: string): string => {
+  const combined = `${primaryReason}; ${unlockDiagnostic}`
+  if (combined.length <= MAX_MAINTENANCE_REASON_LEN) {
+    return combined
+  }
+  const boundedUnlock = unlockDiagnostic.slice(0, 512)
+  const remainingPrimary = Math.max(0, MAX_MAINTENANCE_REASON_LEN - boundedUnlock.length - 2)
+  return `${primaryReason.slice(0, remainingPrimary)}; ${boundedUnlock}`
 }
 
-const unlockAdmissionLocksOnError = (
-  omnigraphBin: string,
-  clusterDir: string,
-  hostIo: ExtendedHostIo,
-  env: Readonly<Record<string, string | undefined>>,
+const reportUnlockFailure = (
   stepName: string,
-): Effect.Effect<void> =>
-  forceUnlockClusterAdmissionLocks(omnigraphBin, clusterDir, hostIo, env, []).pipe(
-    Effect.catch((err) =>
-      Effect.logWarning(
-        `Failed to force-unlock cluster admission locks after ${stepName} failure: ${err.reason}`,
+  unlockErr: WorkflowStoreUnavailableError,
+): string => {
+  const diagnostic = `Failed to force-unlock cluster admission locks after ${stepName} failure: ${unlockErr.reason}`
+  process.stderr.write(`[harness] ${diagnostic}\n`)
+  return diagnostic
+}
+
+const runMaintenanceCliStep = (opts: {
+  readonly omnigraphBin: string
+  readonly clusterDir: string
+  readonly hostIo: ExtendedHostIo
+  readonly env: Readonly<Record<string, string | undefined>>
+  readonly stepName: string
+  readonly args: ReadonlyArray<string>
+  readonly operation: WorkflowStoreOperation
+}): Effect.Effect<
+  { readonly stdout: string; readonly stderr: string },
+  WorkflowStoreUnavailableError
+> =>
+  Effect.gen(function* () {
+    const unlockOnFailure = forceUnlockClusterAdmissionLocks(
+      opts.omnigraphBin,
+      opts.clusterDir,
+      opts.hostIo,
+      opts.env,
+      [],
+    )
+    const res = yield* runOmnigraphCli(opts.omnigraphBin, opts.args, opts.operation, opts.env).pipe(
+      Effect.onError((cause) => {
+        if (Cause.hasFails(cause)) {
+          return Effect.void
+        }
+        return unlockOnFailure.pipe(
+          Effect.catch((unlockErr) =>
+            Effect.sync(() => {
+              reportUnlockFailure(opts.stepName, unlockErr)
+            }),
+          ),
+        )
+      }),
+      Effect.catch((primaryError) =>
+        Effect.uninterruptible(
+          unlockOnFailure.pipe(
+            Effect.matchEffect({
+              onFailure: (unlockErr) =>
+                Effect.sync(() => reportUnlockFailure(opts.stepName, unlockErr)).pipe(
+                  Effect.flatMap((diagnostic) =>
+                    Effect.fail(
+                      toWorkflowStoreUnavailableError(
+                        primaryError.operation,
+                        combineMaintenanceErrorReason(primaryError.reason, diagnostic),
+                      ),
+                    ),
+                  ),
+                ),
+              onSuccess: () => Effect.fail(primaryError),
+            }),
+          ),
+        ),
       ),
-    ),
-  )
+    )
+    yield* forceUnlockClusterAdmissionLocks(
+      opts.omnigraphBin,
+      opts.clusterDir,
+      opts.hostIo,
+      opts.env,
+      [res.stdout, res.stderr],
+    )
+    return res
+  })
 
 const assertOmnigraphServerStopped = (
   clusterDir: string,
@@ -562,20 +633,26 @@ export const runOfflineWorkflowMaintenance = Effect.fn("WorkflowMaintenance.runO
       .exhaustive()
     const startedAtMs = Math.max(0, Math.floor(nowMsFn()))
 
+    const runStep = (stepName: string, args: ReadonlyArray<string>) =>
+      runMaintenanceCliStep({
+        omnigraphBin,
+        clusterDir,
+        hostIo,
+        env,
+        stepName,
+        args,
+        operation: WorkflowStoreOperation.make(`WorkflowMaintenance.${stepName}`),
+      })
+
     // 1. Export offline safety backup before destructive cleanup (no --as on file://).
-    const exportAttempt = yield* runOmnigraphCli(
-      omnigraphBin,
-      ["export", "--target", targetUri, "--graph", WORKFLOW_OMNIGRAPH_GRAPH_ID, "--branch", "main"],
-      WorkflowStoreOperation.make("WorkflowMaintenance.export"),
-      env,
-    ).pipe(
-      Effect.onError(() =>
-        unlockAdmissionLocksOnError(omnigraphBin, clusterDir, hostIo, env, "export"),
-      ),
-    )
-    yield* forceUnlockClusterAdmissionLocks(omnigraphBin, clusterDir, hostIo, env, [
-      exportAttempt.stderr,
-      exportAttempt.stdout,
+    const exportAttempt = yield* runStep("export", [
+      "export",
+      "--target",
+      targetUri,
+      "--graph",
+      WORKFLOW_OMNIGRAPH_GRAPH_ID,
+      "--branch",
+      "main",
     ])
 
     const backupFile = WorkflowBackupFilePath.make(
@@ -643,46 +720,24 @@ export const runOfflineWorkflowMaintenance = Effect.fn("WorkflowMaintenance.runO
       )
 
     // 2. Offline optimize (never pass --as to optimize/cleanup per omnigraph 0.14.0 behavior)
-    const optimizeRes = yield* runOmnigraphCli(
-      omnigraphBin,
-      ["optimize", "--target", targetUri, "--graph", WORKFLOW_OMNIGRAPH_GRAPH_ID],
-      WorkflowStoreOperation.make("WorkflowMaintenance.optimize"),
-      env,
-    ).pipe(
-      Effect.onError(() =>
-        unlockAdmissionLocksOnError(omnigraphBin, clusterDir, hostIo, env, "optimize"),
-      ),
-    )
-    yield* forceUnlockClusterAdmissionLocks(omnigraphBin, clusterDir, hostIo, env, [
-      optimizeRes.stdout,
-      optimizeRes.stderr,
+    yield* runStep("optimize", [
+      "optimize",
+      "--target",
+      targetUri,
+      "--graph",
+      WORKFLOW_OMNIGRAPH_GRAPH_ID,
     ])
 
-    // 3. Offline cleanup with --keep <n> --confirm (never pass --as)
-    const cleanupRes = yield* runOmnigraphCli(
-      omnigraphBin,
-      [
-        "cleanup",
-        "--target",
-        targetUri,
-        "--graph",
-        WORKFLOW_OMNIGRAPH_GRAPH_ID,
-        "--keep",
-        String(keepVersions),
-        "--confirm",
-      ],
-      WorkflowStoreOperation.make("WorkflowMaintenance.cleanup"),
-      env,
-    ).pipe(
-      Effect.onError(() =>
-        unlockAdmissionLocksOnError(omnigraphBin, clusterDir, hostIo, env, "cleanup"),
-      ),
-    )
-
-    // 4. Always finish with post-quiescence force-unlock
-    yield* forceUnlockClusterAdmissionLocks(omnigraphBin, clusterDir, hostIo, env, [
-      cleanupRes.stdout,
-      cleanupRes.stderr,
+    // 3. Offline cleanup with --keep <n> --confirm + post-quiescence force-unlock (never pass --as)
+    yield* runStep("cleanup", [
+      "cleanup",
+      "--target",
+      targetUri,
+      "--graph",
+      WORKFLOW_OMNIGRAPH_GRAPH_ID,
+      "--keep",
+      String(keepVersions),
+      "--confirm",
     ])
 
     const bytesAfter = yield* match(measureTreeBytes(workflowGraphDir, hostIo))

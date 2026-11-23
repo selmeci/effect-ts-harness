@@ -1,11 +1,10 @@
 import { resolve } from "node:path"
 import type { SyncHostIo } from "@harness/service/host-io"
-import { Cause, Context, Effect, Layer, Semaphore } from "effect"
+import { Context, Effect, Layer, Semaphore } from "effect"
 import {
   CompilerOverlayErrorReason,
   CompilerRepoRootInput,
   CompilerRepoRootPath,
-  isPureInterruptCause,
   toCompilerOverlayErrorReason,
   toCompilerRepoRootInput,
   TsCompilerOverlayError,
@@ -14,7 +13,7 @@ import { type HarnessGraph } from "../model.js"
 import {
   createTypeScriptProgramSession as createWarmProgramSession,
   type ExtractTypeGraphOptions,
-  extractTypeGraph,
+  extractTypeGraphChecked,
   type TypeScriptProgramSession,
 } from "../type-extractor.js"
 
@@ -166,25 +165,19 @@ export const makeTsCompilerOverlayLayer = (
                   registry.all.add(session)
                 }
               }
-              return yield* extractTypeGraph({
+              return yield* extractTypeGraphChecked({
                 ...options,
                 repoRoot: resolvedRoot,
                 hostIo: activeHostIo,
                 session,
               }).pipe(
-                Effect.catchCause((cause) => {
-                  if (isPureInterruptCause(cause)) {
-                    return Effect.failCause(cause)
-                  }
-                  const defectMsg = Cause.pretty(cause)
-                  return Effect.fail(
-                    makeOverlayError(
-                      options.repoRoot,
-                      defectMsg.trim().length > 0 ? defectMsg : "",
-                      "TypeGraph.extract failed with an unexpected error.",
-                    ),
-                  )
-                }),
+                Effect.mapError((reason) =>
+                  makeOverlayError(
+                    options.repoRoot,
+                    reason,
+                    "TypeGraph.extract failed with an unexpected error.",
+                  ),
+                ),
               )
             }),
           ),

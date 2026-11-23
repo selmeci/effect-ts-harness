@@ -176,66 +176,187 @@ const resolvePayloadObjectLiteral = (
   return ts.isObjectLiteralExpression(curr) ? curr : undefined
 }
 
-const isTrueFlagExpr = (
+type ExpectMutationFlagKind = "true" | "false" | "dynamic"
+
+const resolveExpectMutationFlag = (
   expr: ts.Expression,
   refNode: ts.Node,
   sourceFile: ts.SourceFile,
-): boolean => {
+): ExpectMutationFlagKind => {
   let curr = unwrapExpr(expr)
   for (let hop = 0; hop < 4; hop++) {
-    if (curr.kind === ts.SyntaxKind.TrueKeyword) return true
-    if (curr.kind === ts.SyntaxKind.FalseKeyword) return false
-    if (!ts.isIdentifier(curr)) return false
+    if (curr.kind === ts.SyntaxKind.TrueKeyword) return "true"
+    if (curr.kind === ts.SyntaxKind.FalseKeyword) return "false"
+    if (!ts.isIdentifier(curr)) return "dynamic"
     const init = resolveScopedInitializer(curr.text, refNode, sourceFile)
-    if (init === undefined) return false
+    if (init === undefined) return "dynamic"
     curr = unwrapExpr(init)
   }
-  return curr.kind === ts.SyntaxKind.TrueKeyword
+  if (curr.kind === ts.SyntaxKind.TrueKeyword) return "true"
+  if (curr.kind === ts.SyntaxKind.FalseKeyword) return "false"
+  return "dynamic"
+}
+
+interface PayloadFlagInspection {
+  readonly hasExpectMutationTrue: boolean
+  readonly hasExpectMutationFalse: boolean
+  readonly hasQueryName: boolean
+  readonly isExemptLeaseQuery: boolean
+  readonly hasUnresolvedSpread: boolean
 }
 
 const inspectPayloadFlags = (
   obj: ts.ObjectLiteralExpression,
   sourceFile: ts.SourceFile,
   depth = 0,
-): { readonly hasExpectMutationTrue: boolean; readonly isExemptLeaseQuery: boolean } => {
+): PayloadFlagInspection => {
   let hasExpectMutationTrue = false
+  let hasExpectMutationFalse = false
+  let hasQueryName = false
   let isExemptLeaseQuery = false
+  let hasUnresolvedSpread = false
   for (const prop of obj.properties) {
     if (ts.isShorthandPropertyAssignment(prop)) {
       if (prop.name.text === "expectMutation") {
-        const init = resolveScopedInitializer("expectMutation", prop, sourceFile)
-        hasExpectMutationTrue = init === undefined || init.kind !== ts.SyntaxKind.FalseKeyword
+        match(resolveExpectMutationFlag(prop.name, prop, sourceFile))
+          .with("true", "dynamic", () => {
+            hasExpectMutationTrue = true
+            hasExpectMutationFalse = false
+          })
+          .with("false", () => {
+            hasExpectMutationTrue = false
+            hasExpectMutationFalse = true
+          })
+          .exhaustive()
+      }
+      if (prop.name.text === "queryName") {
+        hasQueryName = true
+        const init = resolveScopedInitializer("queryName", prop, sourceFile)
+        const qInit = init === undefined ? undefined : unwrapExpr(init)
+        isExemptLeaseQuery =
+          qInit !== undefined &&
+          (ts.isStringLiteral(qInit) || ts.isNoSubstitutionTemplateLiteral(qInit)) &&
+          LEASE_MANAGEMENT_QUERY_NAMES.has(qInit.text)
       }
       continue
     }
-    if (ts.isSpreadAssignment(prop) && depth < 3) {
-      const spreadObj = resolvePayloadObjectLiteral(prop.expression, prop, sourceFile)
+    if (ts.isSpreadAssignment(prop)) {
+      const spreadObj =
+        depth < 3 ? resolvePayloadObjectLiteral(prop.expression, prop, sourceFile) : undefined
       if (spreadObj !== undefined) {
         const nested = inspectPayloadFlags(spreadObj, sourceFile, depth + 1)
-        if (nested.hasExpectMutationTrue) hasExpectMutationTrue = true
-        if (nested.isExemptLeaseQuery) isExemptLeaseQuery = true
+        if (nested.hasExpectMutationTrue) {
+          hasExpectMutationTrue = true
+          hasExpectMutationFalse = false
+        }
+        if (!nested.hasExpectMutationTrue && nested.hasExpectMutationFalse) {
+          hasExpectMutationTrue = false
+          hasExpectMutationFalse = true
+        }
+        if (nested.hasQueryName) {
+          hasQueryName = true
+          isExemptLeaseQuery = nested.isExemptLeaseQuery
+        }
+        if (nested.hasUnresolvedSpread) {
+          hasUnresolvedSpread = true
+          if (!nested.hasExpectMutationFalse) {
+            hasExpectMutationFalse = false
+          }
+          if (!nested.isExemptLeaseQuery) {
+            isExemptLeaseQuery = false
+          }
+        }
+      } else {
+        hasUnresolvedSpread = true
+        hasExpectMutationFalse = false
+        isExemptLeaseQuery = false
       }
       continue
     }
     if (!ts.isPropertyAssignment(prop)) continue
     match(getPropName(prop.name))
       .with("expectMutation", () => {
-        hasExpectMutationTrue = isTrueFlagExpr(prop.initializer, prop, sourceFile)
+        match(resolveExpectMutationFlag(prop.initializer, prop, sourceFile))
+          .with("true", "dynamic", () => {
+            hasExpectMutationTrue = true
+            hasExpectMutationFalse = false
+          })
+          .with("false", () => {
+            hasExpectMutationTrue = false
+            hasExpectMutationFalse = true
+          })
+          .exhaustive()
       })
       .with("queryName", () => {
+        hasQueryName = true
         const qInit = unwrapExpr(prop.initializer)
-        if (ts.isStringLiteral(qInit) || ts.isNoSubstitutionTemplateLiteral(qInit)) {
-          isExemptLeaseQuery = LEASE_MANAGEMENT_QUERY_NAMES.has(qInit.text)
-        }
+        isExemptLeaseQuery =
+          (ts.isStringLiteral(qInit) || ts.isNoSubstitutionTemplateLiteral(qInit)) &&
+          LEASE_MANAGEMENT_QUERY_NAMES.has(qInit.text)
       })
       .otherwise(() => undefined)
   }
-  return { hasExpectMutationTrue, isExemptLeaseQuery }
+  return {
+    hasExpectMutationTrue,
+    hasExpectMutationFalse,
+    hasQueryName,
+    isExemptLeaseQuery,
+    hasUnresolvedSpread,
+  }
+}
+
+const ENCLOSING_STORE_WRAPPERS: ReadonlySet<string> = new Set([
+  "invokeWorkflowStoreQuery",
+  "invokeWorkflowStoreQueryWithMeta",
+])
+
+const isInternalStoreWrapperForwardCall = (
+  node: ts.CallExpression,
+  arg0: ts.Expression,
+  sourceFile: ts.SourceFile,
+): boolean => {
+  const normFile = sourceFile.fileName.replace(/\\/g, "/")
+  if (
+    normFile !== "libs/harness/infra/src/omnigraph-workflow-store.ts" &&
+    !normFile.endsWith("/libs/harness/infra/src/omnigraph-workflow-store.ts")
+  ) {
+    return false
+  }
+  const callee = unwrapExpr(node.expression)
+  if (!ts.isIdentifier(callee) || callee.text !== "invokeWorkflowStoreQueryOnce") {
+    return false
+  }
+  const uArg = unwrapExpr(arg0)
+  if (!ts.isIdentifier(uArg) || uArg.text !== "input") {
+    return false
+  }
+  if (resolveScopedInitializer("input", node, sourceFile) !== undefined) {
+    return false
+  }
+  let hasInputParam = false
+  let curr: ts.Node | undefined = node.parent
+  while (curr !== undefined) {
+    if (
+      ts.isFunctionLike(curr) &&
+      curr.parameters.some((p) => ts.isIdentifier(p.name) && p.name.text === "input")
+    ) {
+      hasInputParam = true
+    }
+    if (
+      ts.isVariableDeclaration(curr) &&
+      ts.isIdentifier(curr.name) &&
+      ENCLOSING_STORE_WRAPPERS.has(curr.name.text)
+    ) {
+      return hasInputParam
+    }
+    curr = curr.parent
+  }
+  return false
 }
 
 /**
  * Flags non-lease `expectMutation: true` Omnigraph workflow store calls in production `src/`
- * that fail to propagate `expectedLeaseEpoch` (`REQ-3.1`).
+ * that fail to propagate `expectedLeaseEpoch` (`SPEC-0027 REQ-3.1`).
  */
 export const isUnfencedOmnigraphMutationCall = (
   node: ts.CallExpression,
@@ -247,12 +368,19 @@ export const isUnfencedOmnigraphMutationCall = (
   }
   const obj = resolvePayloadObjectLiteral(arg0, node, sourceFile)
   if (obj === undefined) {
-    return false
+    if (isInternalStoreWrapperForwardCall(node, arg0, sourceFile)) {
+      return false
+    }
+    return !hasPrecedingVerifyOfflineClusterAccess(node, sourceFile)
   }
 
-  const { hasExpectMutationTrue, isExemptLeaseQuery } = inspectPayloadFlags(obj, sourceFile)
+  const { hasExpectMutationTrue, hasExpectMutationFalse, isExemptLeaseQuery, hasUnresolvedSpread } =
+    inspectPayloadFlags(obj, sourceFile)
 
-  if (!hasExpectMutationTrue || isExemptLeaseQuery) {
+  if (isExemptLeaseQuery) {
+    return false
+  }
+  if (!hasExpectMutationTrue && !(hasUnresolvedSpread && !hasExpectMutationFalse)) {
     return false
   }
   if (hasLeaseEpochProperty(obj)) {

@@ -25,6 +25,7 @@ import {
 import { extractGitDiffModifiedLinesChecked } from "../src/mutation/mutation-backup.js"
 import {
   findDomainFiles,
+  findDomainFilesChecked,
   findReachingTestFiles,
   findUnclassifiedModifiedLibFiles,
   partitionReachingTestFiles,
@@ -587,7 +588,7 @@ describe("mutation-target-discovery: tag classification, scope/target filtering,
     )
   })
 
-  it("REQ-2.2 & REQ-2.3: classifyMutationModulePurity excludes runtime I/O while permitting type-only imports and failing strict mode on 0 reaching tests", () => {
+  it("SPEC-0026 REQ-2.2 & REQ-2.3: classifyMutationModulePurity excludes runtime I/O while permitting type-only imports and failing strict mode on 0 reaching tests", () => {
     const pureSource = [
       'import type { Stats } from "node:fs"',
       'import type { OmnigraphClient } from "@harness/graph"',
@@ -667,7 +668,7 @@ describe("mutation-target-discovery: tag classification, scope/target filtering,
       _tag: "Pure",
     })
 
-    // REQ-2.3: pure infra module with 0 reaching test files fails strict mutation check, and
+    // SPEC-0026 REQ-2.3: pure infra module with 0 reaching test files fails strict mutation check, and
     // locally pure module importing relative impure module is transitively excluded
     const dir = mkdtempSync(join(tmpdir(), "mut-pure-untested-"))
     try {
@@ -893,6 +894,50 @@ describe("mutation-check: strict fail-closed modes and primary/fallback test par
       const unclassReport = runDomainMutationSuite(dir, gitHostIo, { enforcementMode: "strict" })
       expect(unclassReport.passed).toBe(false)
       expect(unclassReport.diagnostic).toContain("Unclassified modified lib file")
+
+      // S-5.1: findDomainFilesChecked surfaces unclassifiedPackages and advisory mode emits stderr diagnostic
+      const corePkg = writePkg(dir, "demo", "core", {
+        type: "package.json",
+        name: "@demo/core",
+        tags: ["type:core"],
+      })
+      writeFileSync(join(corePkg, "src", "c.ts"), "export const c = 1\n", "utf8")
+      const checkedAll = findDomainFilesChecked(dir, testHostIo)
+      match(checkedAll)
+        .with({ _tag: "Ok" }, ({ files, unclassifiedPackages }) => {
+          expect(files.map((f) => f.relFile)).toEqual(["libs/demo/core/src/c.ts"])
+          expect(unclassifiedPackages).toEqual(["libs/demo/mystery"])
+        })
+        .with({ _tag: "Error" }, ({ reason }) =>
+          expect.unreachable(`Expected Ok discovery result, got Error: ${reason}`),
+        )
+        .exhaustive()
+
+      const checkedScoped = findDomainFilesChecked(dir, testHostIo, "@demo/core")
+      match(checkedScoped)
+        .with({ _tag: "Ok" }, ({ unclassifiedPackages }) => {
+          expect(unclassifiedPackages).toEqual([])
+        })
+        .with({ _tag: "Error" }, ({ reason }) =>
+          expect.unreachable(`Expected Ok scoped discovery result, got Error: ${reason}`),
+        )
+        .exhaustive()
+
+      const stderrChunks: Array<string> = []
+      const origStderrWrite = process.stderr.write.bind(process.stderr)
+      process.stderr.write = ((chunk: string | Uint8Array) => {
+        stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+        return true
+      }) as typeof process.stderr.write
+      try {
+        const advisoryRes = runDomainMutationSuite(dir, testHostIo, { enforcementMode: "advisory" })
+        expect(advisoryRes.passed).toBe(true)
+      } finally {
+        process.stderr.write = origStderrWrite
+      }
+      expect(stderrChunks.join("")).toContain(
+        "Skipped unclassified library package(s): libs/demo/mystery",
+      )
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

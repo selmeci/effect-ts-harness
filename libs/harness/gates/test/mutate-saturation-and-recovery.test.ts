@@ -338,34 +338,39 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
     }
   })
 
-  it("5b. mutation-check: post-diff abort, strict/advisory matrix, diff filtering, unclassified libs, and testRunner env restoration", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mut-check-63b-"))
-    const prevEnvMut = process.env["HARNESS_ACTIVE_MUTANT_ID"]
-    try {
-      const corePkg = writePkg(dir, "demo", "core", {
-        type: "package.json",
-        name: "@demo/core",
-        tags: ["type:core"],
-      })
-      const unclassPkg = writePkg(dir, "demo", "mystery", {
-        type: "package.json",
-        name: "@demo/mystery",
-        tags: [],
-      })
-      mkdirSync(join(corePkg, "test"), { recursive: true })
-      const twoLineRel = "libs/demo/core/src/two.ts"
-      writeFileSync(
-        join(corePkg, "src", "two.ts"),
-        "export const f1 = (a: number) => a === 1\nexport const f2 = (b: number) => b === 2\n",
-        "utf8",
-      )
-      writeFileSync(join(corePkg, "test", "two.test.ts"), "export const t = 1\n", "utf8")
-      writeFileSync(
-        join(unclassPkg, "src", "u.ts"),
-        "export const u = (n: number) => n === 1\n",
-        "utf8",
-      )
+  const setupCoreAndMysteryRepo = (
+    prefix: string,
+  ): { readonly dir: string; readonly twoLineRel: string } => {
+    const dir = mkdtempSync(join(tmpdir(), prefix))
+    const corePkg = writePkg(dir, "demo", "core", {
+      type: "package.json",
+      name: "@demo/core",
+      tags: ["type:core"],
+    })
+    const unclassPkg = writePkg(dir, "demo", "mystery", {
+      type: "package.json",
+      name: "@demo/mystery",
+      tags: [],
+    })
+    mkdirSync(join(corePkg, "test"), { recursive: true })
+    const twoLineRel = "libs/demo/core/src/two.ts"
+    writeFileSync(
+      join(corePkg, "src", "two.ts"),
+      "export const f1 = (a: number) => a === 1\nexport const f2 = (b: number) => b === 2\n",
+      "utf8",
+    )
+    writeFileSync(join(corePkg, "test", "two.test.ts"), "export const t = 1\n", "utf8")
+    writeFileSync(
+      join(unclassPkg, "src", "u.ts"),
+      "export const u = (n: number) => n === 1\n",
+      "utf8",
+    )
+    return { dir, twoLineRel }
+  }
 
+  it("5b-1. mutation-check: post-diff abort, empty repo strict fail, and strict/advisory scope matrix", () => {
+    const { dir } = setupCoreAndMysteryRepo("mut-check-63b1-")
+    try {
       const postDiffAbort = runDomainMutationSuite(dir, testHostIo, {
         includeAllLines: true,
         scope: "@demo/core",
@@ -406,7 +411,14 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
       } finally {
         rmSync(emptyDir, { recursive: true, force: true })
       }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 
+  it("5b-2. mutation-check: branch-base fallback, diff filtering, explicitTargets, includeAllLines, and unclassified lib matrix", () => {
+    const { dir, twoLineRel } = setupCoreAndMysteryRepo("mut-check-63b2-")
+    try {
       const branchFallbackIo: SyncHostIo = {
         ...testHostIo,
         execFileSync: (_cmd, args) => {
@@ -488,7 +500,15 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
       })
       expect(allLinesRes.diffMode).toBe("all-lines")
       expect(allLinesRes.totalMutants).toBe(2)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 
+  it("5b-3. mutation-check: testRunner restores prior HARNESS_ACTIVE_MUTANT_ID across baseline and mutant runs", () => {
+    const { dir, twoLineRel } = setupCoreAndMysteryRepo("mut-check-63b3-")
+    const prevEnvMut = process.env["HARNESS_ACTIVE_MUTANT_ID"]
+    try {
       for (const initialActive of ["outer-mut", undefined]) {
         setActiveMutantId(initialActive)
         const observedActive: Array<string | undefined> = []
@@ -758,8 +778,8 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
     }
   })
 
-  it("P0/P1/P2b saturation: checkMutateStamp modes, equivalencePriors, readPackageManifest, removeMutateStamp, and treeHash boundary", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mut-p0p1p2b-"))
+  it("P0/P1/P2b-1: checkMutateStamp modes (all-lines, explicit-files, not-git, branch-base) and equivalencePriors", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mut-p0p1p2b1-"))
     try {
       mkdirSync(join(dir, "libs", "demo", "core", "src"), { recursive: true })
       writeFileSync(
@@ -850,7 +870,14 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
       )
       expect("equivalentMutants" in eqReport).toBe(true)
       expect(eqReport.equivalentMutants).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 
+  it("P0/P1/P2b-2: readPackageManifest merge precedence and findUnclassifiedModifiedLibFilesChecked filtering", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mut-p0p1p2b2-"))
+    try {
       const mergedPkgDir = join(dir, "libs", "demo", "merged")
       mkdirSync(mergedPkgDir, { recursive: true })
       writeFileSync(join(mergedPkgDir, "package.json"), JSON.stringify({ name: "@demo/from-pkg" }))
@@ -883,6 +910,20 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
           testHostIo,
         ),
       ).toEqual({ _tag: "Ok", files: [] })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("P0/P1/P2b-3: writeVerifyStamp branch trimming, removeMutateStamp ENOENT/error handling, and .harness treeHash isolation", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mut-p0p1p2b3-"))
+    try {
+      mkdirSync(join(dir, "libs", "demo", "core", "src"), { recursive: true })
+      writeFileSync(
+        join(dir, "libs", "demo", "core", "src", "dollar.ts"),
+        "export const x = 1\n",
+        "utf8",
+      )
 
       expect(writeVerifyStamp(dir, testHostIo, "impl/custom").taskBranch).toBe("impl/custom")
       expect(writeVerifyStamp(dir, testHostIo, "   ").taskBranch).toBe("unknown")
