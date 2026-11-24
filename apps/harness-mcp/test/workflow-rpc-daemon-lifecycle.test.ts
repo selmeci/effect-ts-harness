@@ -506,7 +506,7 @@ describe("WF-3 Unix-socket daemon doctor, lease fencing, offline & pause lifecyc
     )
 
     const offlinePlanOut = await Effect.runPromise(
-      executeWorkflowPlanTool({ repoRoot: canonicalDir }),
+      executeWorkflowPlanTool({ repoRoot: canonicalDir }, { repoRoot: canonicalDir }),
     )
     expect(offlinePlanOut.resolvedRepoRoot).toBe(validatedCanonical.worktreeRoot)
     expect(offlinePlanOut.commonGitDir).toBe(validatedCanonical.commonGitDir)
@@ -514,9 +514,14 @@ describe("WF-3 Unix-socket daemon doctor, lease fencing, offline & pause lifecyc
     expect("writerLeaseEpoch" in offlinePlanOut.status).toBe(false)
 
     const invalidErr = await Effect.runPromise(
-      executeWorkflowPlanTool({ repoRoot: outsideDir }).pipe(Effect.flip),
+      executeWorkflowPlanTool({ repoRoot: outsideDir }, { repoRoot: outsideDir }).pipe(Effect.flip),
     )
     expect(toErrorReasonMessage(invalidErr)).toContain("git")
+
+    const unconfiguredEscapeErr = await Effect.runPromise(
+      executeWorkflowPlanTool({ repoRoot: otherGitRepo }).pipe(Effect.flip),
+    )
+    expect(unconfiguredEscapeErr._tag).toBe("ProjectPathEscapeError")
 
     const escapeErr = await Effect.runPromise(
       executeWorkflowPlanTool({ repoRoot: "../outside-nongit" }, { repoRoot: canonicalDir }).pipe(

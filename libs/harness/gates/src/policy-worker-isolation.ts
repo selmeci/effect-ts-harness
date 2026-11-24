@@ -31,7 +31,7 @@ export interface PolicyGuardOptions {
 
 export const MAX_SUBSHELL_INSPECT_DEPTH = 4
 const HARNESS_INSPECT_BINARIES: ReadonlySet<string> = new Set(
-  "rg grep egrep fgrep ag ack fd find ls tree cat head tail less more bat sed awk strings xxd od hexdump base64 tar zip cp mv".split(
+  "rg grep egrep fgrep ag ack fd find ls tree cat head tail less more bat sed awk cut strings xxd od hexdump base64 tar zip cp mv".split(
     " ",
   ),
 )

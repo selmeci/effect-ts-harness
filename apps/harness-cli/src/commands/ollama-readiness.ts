@@ -21,11 +21,11 @@ export function checkOllamaServerReadyDetailed(
   const normalizedUrl = baseUrl.startsWith("http") ? baseUrl : `http://${baseUrl}`
   const targetUrl = `${normalizedUrl.replace(/\/$/, "")}/api/tags`
   return Effect.tryPromise({
-    try: () =>
+    try: (signal) =>
       globalThis
         .fetch(targetUrl, {
           method: "GET",
-          signal: AbortSignal.timeout(2000),
+          signal: AbortSignal.any([signal, AbortSignal.timeout(2000)]),
         })
         .then((r): Promise<OllamaProbeResult> =>
           match(r.status)

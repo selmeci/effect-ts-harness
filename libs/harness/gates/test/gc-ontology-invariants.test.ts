@@ -463,6 +463,14 @@ errors:
         join(tempDir, "apps", "harness-cli", "src", "commands", "guard-and-route.command.ts"),
         'import { check } from "./guard-helper.js"\nexport const run = () => check()\n',
       )
+      writeFileSync(
+        join(tempDir, "apps", "harness-cli", "src", "commands", "session-learn-report.command.ts"),
+        'export const ok = () => "allow"\n',
+      )
+      writeFileSync(
+        join(tempDir, "apps", "harness-cli", "src", "commands", "learn-and-report.command.ts"),
+        'export const ok = () => "allow"\n',
+      )
     }
 
     it.effect(
@@ -965,6 +973,158 @@ errors:
         expect(
           fDemo3.some((f) => f.nodeId === "libs/demo3/infra/src/consumer.ts:sequence-gap-1-3"),
         ).toBe(true)
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    })
+
+    it("enforces session-no-infra-barrel profile on session-learn-report and learn-and-report commands", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "gc-session-no-infra-barrel-"))
+      try {
+        mkdirSync(join(tempDir, "apps", "harness-cli", "src", "commands"), { recursive: true })
+        mkdirSync(join(tempDir, "libs", "harness", "infra", "src"), { recursive: true })
+        writeFileSync(
+          join(tempDir, "libs", "harness", "infra", "package.json"),
+          JSON.stringify({
+            name: "@harness/infra",
+            exports: {
+              ".": "./src/index.ts",
+              "./hook-fastpath": "./src/hook-fastpath.ts",
+              "./hook-io": "./src/hook-io.ts",
+            },
+          }),
+        )
+        writeFileSync(
+          join(tempDir, "libs", "harness", "infra", "src", "index.ts"),
+          "export const heavy = 1\n",
+        )
+        writeFileSync(
+          join(tempDir, "libs", "harness", "infra", "src", "hook-fastpath.ts"),
+          "export const fastpath = 1\n",
+        )
+        writeFileSync(
+          join(tempDir, "libs", "harness", "infra", "src", "hook-io.ts"),
+          "export const hookIo = 1\n",
+        )
+
+        const sessionLearnPath = join(
+          tempDir,
+          "apps",
+          "harness-cli",
+          "src",
+          "commands",
+          "session-learn-report.command.ts",
+        )
+        const learnAndReportPath = join(
+          tempDir,
+          "apps",
+          "harness-cli",
+          "src",
+          "commands",
+          "learn-and-report.command.ts",
+        )
+
+        // Violation when importing @harness/infra barrel
+        writeFileSync(
+          sessionLearnPath,
+          'import { heavy } from "@harness/infra"\nexport const cmd = heavy\n',
+        )
+        writeFileSync(
+          learnAndReportPath,
+          'import { hookIo } from "@harness/infra/hook-io"\nexport const cmd2 = hookIo\n',
+        )
+        const badFindings: Array<GcFinding> = []
+        evaluateHookFastpathImportClosure(tempDir, testHostIo, badFindings)
+        const sessionBadFindings = badFindings.filter(
+          (f) => f.location === "apps/harness-cli/src/commands/session-learn-report.command.ts",
+        )
+        expect(
+          sessionBadFindings.some(
+            (f) =>
+              f.kind === "hook-fastpath-forbidden-import" && f.message.includes("@harness/infra"),
+          ),
+        ).toBe(true)
+        expect(
+          badFindings.filter(
+            (f) => f.location === "apps/harness-cli/src/commands/learn-and-report.command.ts",
+          ),
+        ).toEqual([])
+
+        // Clean when importing @harness/infra/hook-fastpath and type-only @harness/infra
+        writeFileSync(
+          sessionLearnPath,
+          'import type { heavy as HeavyType } from "@harness/infra"\nimport { fastpath } from "@harness/infra/hook-fastpath"\nexport const cmd: HeavyType | number = fastpath\n',
+        )
+        const cleanFindings: Array<GcFinding> = []
+        evaluateHookFastpathImportClosure(tempDir, testHostIo, cleanFindings)
+        expect(
+          cleanFindings.filter(
+            (f) =>
+              f.location === "apps/harness-cli/src/commands/session-learn-report.command.ts" ||
+              f.location === "apps/harness-cli/src/commands/learn-and-report.command.ts",
+          ),
+        ).toEqual([])
+
+        // Negative fixtures: (a) learn-and-report imports @harness/infra,
+        // (b) session-learn-report dynamically imports relative ./helper.js that imports @harness/infra,
+        // (c) session-learn-report uses non-literal import(pkg)
+        const helperPath = join(tempDir, "apps", "harness-cli", "src", "commands", "helper.ts")
+        writeFileSync(
+          helperPath,
+          'import { heavy } from "@harness/infra"\nexport const helperHeavy = heavy\n',
+        )
+        writeFileSync(
+          learnAndReportPath,
+          'import { heavy } from "@harness/infra"\nexport const cmd2 = heavy\n',
+        )
+        writeFileSync(
+          sessionLearnPath,
+          [
+            'export const dynRel = async () => import("./helper.js")',
+            "export const dynNonLit = async (pkg: string) => import(pkg)",
+          ].join("\n") + "\n",
+        )
+        const hookEntryPath = join(tempDir, "apps", "harness-cli", "src", "hook-entry.ts")
+        const stdIndexPath = join(tempDir, "apps", "harness-cli", "src", "index.ts")
+        writeFileSync(hookEntryPath, "export const dynHook = async (pkg: string) => import(pkg)\n")
+        writeFileSync(stdIndexPath, "export const dynStd = async (pkg: string) => import(pkg)\n")
+        const evasionFindings: Array<GcFinding> = []
+        evaluateHookFastpathImportClosure(tempDir, testHostIo, evasionFindings)
+        expect(
+          evasionFindings.some(
+            (f) =>
+              f.kind === "hook-fastpath-forbidden-import" &&
+              f.location === "apps/harness-cli/src/commands/learn-and-report.command.ts" &&
+              f.message.includes("@harness/infra"),
+          ),
+        ).toBe(true)
+        const sessionEvasionMsgs = evasionFindings
+          .filter(
+            (f) =>
+              f.kind === "hook-fastpath-forbidden-import" &&
+              f.location === "apps/harness-cli/src/commands/session-learn-report.command.ts",
+          )
+          .map((f) => f.message)
+          .join("\n")
+        expect(sessionEvasionMsgs).toContain(
+          "apps/harness-cli/src/commands/helper.ts -> @harness/infra",
+        )
+        expect(sessionEvasionMsgs).toContain("<non-literal-dynamic-import>")
+        expect(
+          evasionFindings.some(
+            (f) =>
+              f.kind === "hook-fastpath-forbidden-import" &&
+              f.location === "apps/harness-cli/src/hook-entry.ts" &&
+              f.message.includes("<non-literal-dynamic-import>"),
+          ),
+        ).toBe(true)
+        expect(
+          evasionFindings.some(
+            (f) =>
+              f.location === "apps/harness-cli/src/index.ts" &&
+              f.message.includes("<non-literal-dynamic-import>"),
+          ),
+        ).toBe(false)
       } finally {
         rmSync(tempDir, { recursive: true, force: true })
       }

@@ -4,6 +4,7 @@ import * as DecisionModel from "effect/ai/DecisionModel"
 import { TestClock } from "effect/testing"
 import { SKIP_NX_CACHE_BANNED_REASON } from "@harness/gates/hook-fastpath"
 import {
+  GUARD_DECISION_TIMEOUT_MS,
   decideGuardCommand,
   makeFailingDecisionModelLayer,
   makeMockDecisionModelLayer,
@@ -329,9 +330,10 @@ describe("Harness guard & triage decision definitions", () => {
   )
 
   it.effect(
-    "logs a 1500ms timeout warning and returns 'ask' when GuardV1 DecisionModel times out (S-4.1)",
+    "logs a 2500ms timeout warning and returns 'ask' when GuardV1 DecisionModel times out (S-4.1, REQ-1.9)",
     () =>
       Effect.gen(function* () {
+        expect(GUARD_DECISION_TIMEOUT_MS).toBe(2500)
         const warnings: Array<string> = []
         const captureLogger = Logger.make(({ message }) => {
           warnings.push(String(message))
@@ -348,21 +350,64 @@ describe("Harness guard & triage decision definitions", () => {
           Effect.forkChild,
         )
 
-        yield* TestClock.adjust("1499 millis")
+        yield* TestClock.adjust("2499 millis")
         expect(fiber.pollUnsafe()).toBeUndefined()
 
         yield* TestClock.adjust("1 millis")
         const res = yield* Fiber.join(fiber)
 
         expect(res.verdict).toBe("ask")
-        expect(res.reason).toContain("timed out after 1500ms")
+        expect(res.reason).toContain(`timed out after ${GUARD_DECISION_TIMEOUT_MS}ms`)
         expect(
           warnings.some((w) =>
             w.includes(
-              "GuardV1 DecisionModel timed out after 1500ms; requiring human confirmation.",
+              `GuardV1 DecisionModel timed out after ${GUARD_DECISION_TIMEOUT_MS}ms; requiring human confirmation.`,
             ),
           ),
         ).toBe(true)
+      }),
+  )
+
+  it.effect(
+    "REQ-1.9: allows GuardV1 DecisionModel completing in 2000ms while timing out past 2500ms",
+    () =>
+      Effect.gen(function* () {
+        const makeDelayedSafeLayer = (delay: "2000 millis" | "2600 millis") =>
+          Layer.effect(
+            DecisionModel.DecisionModel,
+            DecisionModel.make({
+              decide: () =>
+                Effect.sleep(delay).pipe(
+                  Effect.as({
+                    answers: {
+                      destructive: { _tag: "Probability", probability: 0.0 },
+                      secretAccess: { _tag: "Probability", probability: 0.0 },
+                      exfiltration: { _tag: "Probability", probability: 0.0 },
+                    },
+                    usage: { inputTokens: 0, outputTokens: 0 },
+                  }),
+                ),
+            }),
+          )
+
+        const fastEnoughFiber = yield* decideGuardCommand("curl https://unknown.example").pipe(
+          Effect.provide(makeDelayedSafeLayer("2000 millis")),
+          Effect.forkChild,
+        )
+
+        yield* TestClock.adjust("2000 millis")
+        const fastEnoughRes = yield* Fiber.join(fastEnoughFiber)
+        expect(fastEnoughRes.verdict).toBe("allow")
+
+        const tooSlowFiber = yield* decideGuardCommand("curl https://unknown.example").pipe(
+          Effect.provide(makeDelayedSafeLayer("2600 millis")),
+          Effect.forkChild,
+        )
+
+        yield* TestClock.adjust("2500 millis")
+        const tooSlowRes = yield* Fiber.join(tooSlowFiber)
+        expect(tooSlowRes.verdict).toBe("ask")
+        expect(tooSlowRes.reason).toContain("timed out after 2500ms")
       }),
   )
 

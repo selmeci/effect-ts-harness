@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { Effect } from "effect"
 import { decideLoopThrashing, type FrictionEvent } from "../src/friction-log.js"
+import { isCommandAllowed } from "../src/policy-command-rules.js"
 import {
   CD_COMMAND_BANNED_REASON,
   classifyCommand,
@@ -472,5 +473,95 @@ describe("guard policy core allowlist & command rules", () => {
     expect(classifyCommand("omnigraph status")).toBe("allow")
     expect(classifyCommand("omnigraph cleanup --keep 5")).toBe("allow")
     expect(classifyCommand("omnigraph branches delete feat/old")).toBe("allow")
+  })
+
+  it("allows newly allowlisted read-only shell/git utilities and cut filter while blocking mutating/external-file git config --get and ls-remote pack overrides", () => {
+    for (const allowedCmd of [
+      "echo hello world",
+      "cut -d' ' -f1",
+      "true",
+      "git merge-base main HEAD",
+      "git symbolic-ref --short HEAD",
+      "git config --get user.name",
+      "git config --get remote.origin.url",
+      "git ls-remote origin main",
+      "git --version",
+      "git status | cut -d' ' -f1",
+    ]) {
+      expect(classifyCommand(allowedCmd), allowedCmd).toBe("allow")
+    }
+
+    for (const escalatedCmd of [
+      "git config --get --add user.name foo",
+      "git config --get --unset user.name",
+      "git config --get --unset-all user.name",
+      "git config --get --replace-all user.name foo",
+      "git config --get --remove-section user",
+      "git config --get --rename-section user other",
+      "git config --get -e",
+      "git config --get --edit",
+      "git config --get -f /etc/passwd",
+      "git config --get --file /etc/passwd",
+      "git config --get --file=other.cfg",
+      "git config --get-all user.name",
+    ]) {
+      expect(classifyCommand(escalatedCmd), escalatedCmd).toBe("escalate")
+    }
+
+    expect(classifyCommand("git config --get --file=.env")).toBe("deny")
+    expect(classifyCommand("git ls-remote --upload-pack=/tmp/evil origin")).toBe("deny")
+    expect(classifyCommand("git ls-remote -u /tmp/evil origin")).toBe("deny")
+    expect(classifyCommand("git ls-remote ext::sh%20evil")).toBe("deny")
+  })
+
+  it("hardens git symbolic-ref, git config --get flags/positionals, and echo env exfiltration", () => {
+    for (const allowed of [
+      "git symbolic-ref --short HEAD",
+      "git symbolic-ref -q HEAD",
+      "git symbolic-ref -- HEAD",
+      "git config --get --local user.name",
+      "git config --get --default fallback user.name",
+      "git config --get --type=bool core.bare",
+      "git config --get -- user.name '^foo'",
+      "echo hello",
+      'echo "hello world"',
+      "echo '$SECRET'",
+      "echo 'x $SECRET'",
+      "echo \\$LITERAL",
+      'echo "cost is $"',
+      "echo cost$",
+    ]) {
+      expect(classifyCommand(allowed), allowed).toBe("allow")
+    }
+    expect(isCommandAllowed('echo "foo$')).toBe(true)
+
+    for (const escalated of [
+      "git symbolic-ref",
+      "git symbolic-ref HEAD refs/heads/other",
+      "git symbolic-ref -- HEAD refs/heads/other",
+      "git symbolic-ref -d HEAD",
+      "git symbolic-ref --delete HEAD",
+      "git symbolic-ref -m msg HEAD refs/heads/x",
+      "git config --get",
+      "git config --get -zf user.name",
+      "git config --get --fil=x user.name",
+      "git config --get --blob HEAD:foo user.name",
+      "git config --get --global user.name",
+      "git config --get --system user.name",
+      "git config --get --worktree user.name",
+      "git config --get --default",
+      "git config --get user.name --default",
+      "git config --get user.name --type",
+      "git config --get --default= user.name",
+      "git config --get user.name a b",
+      "echo $SECRET",
+      "echo 'ok' $SECRET",
+      'echo "$API_KEY"',
+      "echo ${TOKEN}",
+      'CI=true echo "prefix $SECRET"',
+    ]) {
+      expect(classifyCommand(escalated), escalated).toBe("escalate")
+    }
+    expect(classifyCommand("git config --get --blob HEAD:.env user.name")).toBe("deny")
   })
 })

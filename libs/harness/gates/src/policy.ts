@@ -516,6 +516,8 @@ export const classifyCommand = (command: string, options?: PolicyGuardOptions): 
         argv.startsWith("wc ") ||
         argv === "cat" ||
         argv.startsWith("cat ") ||
+        argv === "cut" ||
+        argv.startsWith("cut ") ||
         ((argv === "sort" || argv.startsWith("sort ")) &&
           !/(?:^|\s)(?:-[^\s-]*o|--output(?:=|\s|$))/.test(argv))
       )

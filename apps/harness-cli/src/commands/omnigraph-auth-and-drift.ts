@@ -20,7 +20,7 @@ import {
   releaseOmnigraphClusterLock,
   tryAcquireOmnigraphClusterLock,
   withOmnigraphClusterStartupLock,
-} from "@harness/infra"
+} from "@harness/infra/omnigraph-session"
 import {
   isProcessPidAlive,
   isSafeOmnigraphPidToKill,

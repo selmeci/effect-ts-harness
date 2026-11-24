@@ -329,7 +329,51 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
   const guardTimeouts = input.events.filter(
     (e) =>
       e.category === "guard" &&
-      ((e.detail?.includes("timeout") ?? false) || (e.outcome === "ask" && e.durationMs >= 1450)),
+      (/timed out|timeout/i.test(e.detail ?? "") ||
+        (e.outcome === "ask" &&
+          e.durationMs >= 2450 &&
+          !/fastpath=hit|Ambiguous risk|DecisionModel unavailable|Worker isolation mode|requires human confirmation/i.test(
+            e.detail ?? "",
+          ))),
+  ).length
+  const degradedMcpCalls = input.events.filter(
+    (e) =>
+      e.surface === "mcp" &&
+      e.outcome === "fallback" &&
+      (e.detail?.startsWith("degraded=") ?? false),
+  ).length
+  let gcFreshOk = false
+  let ontologyFreshOk = false
+  let allVerifyPreceded = true
+  for (const e of input.events) {
+    match(e.toolName)
+      .with("gc", () => {
+        gcFreshOk = e.outcome === "ok"
+      })
+      .with("ontology:check", "harness_ontology_check", () => {
+        ontologyFreshOk = e.outcome === "ok"
+      })
+      .with("ingest", "mutate", () => {
+        gcFreshOk = false
+        ontologyFreshOk = false
+      })
+      .with("verify", () => {
+        if (!gcFreshOk || !ontologyFreshOk) {
+          allVerifyPreceded = false
+        }
+        if (e.outcome === "fail") {
+          gcFreshOk = false
+          ontologyFreshOk = false
+        }
+      })
+      .otherwise(() => {})
+  }
+  const allVerifyPrecededByGcAndOntology = verifyEvents.length > 0 && allVerifyPreceded
+  const verifyTimeoutFailures = verifyEvents.filter(
+    (e) =>
+      e.outcome === "fail" &&
+      ((e.detail?.includes("timeout-contention") ?? false) ||
+        /Test timed out in \d+\s*ms/i.test(e.detail ?? "")),
   ).length
   const sessionHookEvents = input.events.filter(
     (e) => e.surface === "hook" && e.toolName === "session",
@@ -360,6 +404,7 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
   healthScore -= Math.min(20, frictionCount * 5)
   healthScore -= Math.min(15, otherGateFailures * 5)
   healthScore -= Math.min(15, guardTimeouts * 5)
+  healthScore -= Math.min(15, degradedMcpCalls * 5)
   healthScore -= Math.min(10, sessionHookFails * 5)
   if (graphDiscoveryCalls > 0 && firstPassVerify === true) {
     healthScore += 5
@@ -370,9 +415,14 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
     healthScore >= 90 ? "A" : healthScore >= 75 ? "B" : healthScore >= 60 ? "C" : "D"
 
   const recommendations: Array<string> = []
-  if (fixUpIterations > 0) {
+  if (fixUpIterations > 0 && !allVerifyPrecededByGcAndOntology) {
     recommendations.push(
       "Run 'harness gc --strict' and 'harness ontology check --strict' before 'harness verify' to reduce fix-up iterations.",
+    )
+  }
+  if (verifyTimeoutFailures > 0) {
+    recommendations.push(
+      "Verify failed due to test timeout contention; reduce concurrency with HARNESS_VERIFY_PARALLEL=1 or HARNESS_VERIFY_PARALLEL=2 before retrying 'pnpm harness verify'.",
     )
   }
   if (!planBeforeVerify && verifyAttempts > 0) {
@@ -408,6 +458,11 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
   if (guardTimeouts > 0) {
     recommendations.push(
       "Guard escalated to DecisionModel and timed out; allowlist safe command patterns or check local Ollama (clef-flash) latency.",
+    )
+  }
+  if (degradedMcpCalls > 0) {
+    recommendations.push(
+      "Degraded MCP responses detected (corrupt/missing graph snapshot or stale workspace); refresh snapshot via 'pnpm harness gc --strict' or reload MCP server.",
     )
   }
   if (sessionHookFails > 0) {

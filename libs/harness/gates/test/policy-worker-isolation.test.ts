@@ -309,7 +309,7 @@ describe("guard policy wrapper isolation, glob hardening & worktree mode", () =>
       expect(classifyCommand(allowedCmd), allowedCmd).toBe("allow")
     }
 
-    expect(classifyCommand("git ls-remote origin main")).toBe("escalate")
+    expect(classifyCommand("git ls-remote origin main")).toBe("allow")
     expect(classifyCommand("git ls-files-evil")).toBe("escalate")
     expect(classifyCommand("git ls-remote-evil")).toBe("escalate")
     expect(classifyCommand("git ls-remote origin main ; rm -rf /")).toBe("deny")
@@ -822,5 +822,13 @@ describe("guard policy wrapper isolation, glob hardening & worktree mode", () =>
     ]) {
       expect(isWorkerRecursiveWorkflowCommand(nonRecursiveCmd), nonRecursiveCmd).toBe(false)
     }
+
+    expect(
+      classifyCommand("cut -d: -f1 .git/harness/auth-tokens.json", { unitWorkerMode: true }),
+    ).toBe("deny")
+    expect(
+      explainCommandDenyRule("cut -d: -f1 .git/harness/auth-tokens.json", { unitWorkerMode: true })
+        ?.ruleId,
+    ).toBe("worker-daemon-credential-access")
   })
 })

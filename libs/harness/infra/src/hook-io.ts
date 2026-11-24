@@ -762,6 +762,8 @@ const resolveRealPathLite = (targetPath: string): Option.Option<string> =>
     .with({ _tag: "Failure" }, () => Option.none())
     .exhaustive()
 
+export { availableParallelism as getHostAvailableParallelism } from "node:os"
+
 export {
   GIT_FINGERPRINT_MAX_BUFFER_BYTES,
   GIT_FINGERPRINT_STATUS_ARGS,

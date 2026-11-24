@@ -34,11 +34,12 @@ const execFileAsync = promisify(execFile)
 
 const execGitWorktreeList = (cwd: string): Effect.Effect<string, WorkflowStoreUnavailableError> =>
   Effect.tryPromise({
-    try: () =>
+    try: (signal) =>
       execFileAsync("git", ["worktree", "list", "--porcelain"], {
         cwd,
         encoding: "utf8",
         timeout: GIT_WORKTREE_LIST_TIMEOUT_MS,
+        signal,
         windowsHide: true,
       }),
     catch: (err) =>

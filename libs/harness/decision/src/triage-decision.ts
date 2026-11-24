@@ -127,6 +127,12 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
     "Run `pnpm harness mutate --strict` after all edits so every modified domain/core/contract file is covered by passing mutants.",
   ),
   makeTriageRule(
+    "test-timeout-contention",
+    /Test timed out in \d+\s*ms/i,
+    "mechanical",
+    "Test timed out under parallel load (timeout-contention) — cap Nx verify parallelism via HARNESS_VERIFY_PARALLEL or rerun/optimize the slow test.",
+  ),
+  makeTriageRule(
     "schema-decode-sync-unknown-input",
     /decodeSync[\s\S]{0,160}Argument of type .* is not assignable to parameter of type|Argument of type .* is not assignable to parameter of type[\s\S]{0,160}decodeSync/i,
     "compile",
@@ -509,9 +515,166 @@ export const DETERMINISTIC_TRIAGE_RULES: ReadonlyArray<DeterministicTriageRule> 
   },
 ]
 
+const PASSING_VITEST_LINE_RE = /^\s*[✓✔]\s+.*$/gm
+
+const NX_RUN_HEADER_RE = /^\s*>\s*nx run\s+(\S+)/
+const FAILED_TASKS_HEADER_RE = /^\s*Failed tasks:\s*$/
+const FAILED_TASK_ITEM_RE = /^\s*-\s+(\S+)/
+
+const RUNNER_FOOTER_START_PATTERNS: ReadonlyArray<RegExp> = [
+  FAILED_TASKS_HEADER_RE,
+  /ERR_PNPM_/,
+  /ELIFECYCLE/,
+  /Command failed with exit code/,
+]
+
+const PRIMARY_VITEST_FAILURE_HEADER_PATTERNS: ReadonlyArray<RegExp> = [
+  /Failed Tests\s+\d+/,
+  /^\s*FAIL\s+\S+/,
+  /Unhandled Errors/,
+]
+
+const VITEST_FAILURE_MARKER_PATTERNS: ReadonlyArray<RegExp> = [
+  ...PRIMARY_VITEST_FAILURE_HEADER_PATTERNS,
+  /Test timed out in \d+\s*ms/i,
+]
+
+const COMPILER_OR_LINTER_FAILURE_PATTERNS: ReadonlyArray<RegExp> = [
+  /error TS\d+:/,
+  /^\s*[×✘]\s+/,
+  /harness(?:\/|\()syntax-bans\)?/,
+]
+
+const UNATTRIBUTED_FAILURE_MARKER_PATTERNS: ReadonlyArray<RegExp> = [
+  ...VITEST_FAILURE_MARKER_PATTERNS,
+  ...COMPILER_OR_LINTER_FAILURE_PATTERNS,
+  ...RUNNER_FOOTER_START_PATTERNS,
+]
+
+interface NxTaskBlock {
+  readonly taskName: string | undefined
+  readonly lines: Array<string>
+}
+
+const collectFailedTaskNames = (lines: ReadonlyArray<string>): ReadonlySet<string> => {
+  const failedTaskNames = new Set<string>()
+  let inFailedTasksList = false
+
+  for (const line of lines) {
+    if (FAILED_TASKS_HEADER_RE.test(line)) {
+      inFailedTasksList = true
+      continue
+    }
+    if (!inFailedTasksList) {
+      continue
+    }
+    if (line.trim().length === 0) {
+      continue
+    }
+    const itemMatch = FAILED_TASK_ITEM_RE.exec(line)
+    const failedTaskName = itemMatch?.[1]
+    if (failedTaskName !== undefined) {
+      failedTaskNames.add(failedTaskName)
+      continue
+    }
+    inFailedTasksList = false
+  }
+
+  return failedTaskNames
+}
+
+const partitionNxTaskBlocks = (lines: ReadonlyArray<string>): ReadonlyArray<NxTaskBlock> => {
+  const blocks: Array<NxTaskBlock> = []
+  let current: NxTaskBlock = { taskName: undefined, lines: [] }
+
+  for (const line of lines) {
+    const headerMatch = NX_RUN_HEADER_RE.exec(line)
+    const taskName = headerMatch?.[1]
+    if (taskName !== undefined) {
+      if (current.lines.length > 0) {
+        blocks.push(current)
+      }
+      current = { taskName, lines: [line] }
+      continue
+    }
+    if (
+      current.taskName !== undefined &&
+      RUNNER_FOOTER_START_PATTERNS.some((pattern) => pattern.test(line))
+    ) {
+      blocks.push(current)
+      current = { taskName: undefined, lines: [line] }
+      continue
+    }
+    current.lines.push(line)
+  }
+
+  if (current.lines.length > 0) {
+    blocks.push(current)
+  }
+
+  return blocks
+}
+
+const isFailedTaskBlock = (block: NxTaskBlock, failedTaskNames: ReadonlySet<string>): boolean => {
+  if (block.taskName !== undefined) {
+    if (failedTaskNames.has(block.taskName)) {
+      return true
+    }
+    return block.lines.some(
+      (line) =>
+        VITEST_FAILURE_MARKER_PATTERNS.some((pattern) => pattern.test(line)) ||
+        COMPILER_OR_LINTER_FAILURE_PATTERNS.some((pattern) => pattern.test(line)),
+    )
+  }
+  return block.lines.some((line) =>
+    UNATTRIBUTED_FAILURE_MARKER_PATTERNS.some((pattern) => pattern.test(line)),
+  )
+}
+
+const sliceFailedTaskBlock = (block: NxTaskBlock): ReadonlyArray<string> => {
+  const vitestHeaderIdx = block.lines.findIndex((line) =>
+    PRIMARY_VITEST_FAILURE_HEADER_PATTERNS.some((pattern) => pattern.test(line)),
+  )
+  if (vitestHeaderIdx === -1) {
+    return block.lines
+  }
+  const hasPrecedingCompilerOrLinterError = block.lines
+    .slice(0, vitestHeaderIdx)
+    .some((line) => COMPILER_OR_LINTER_FAILURE_PATTERNS.some((pattern) => pattern.test(line)))
+  return hasPrecedingCompilerOrLinterError ? block.lines : block.lines.slice(vitestHeaderIdx)
+}
+
+/**
+ * Extracts failure-relevant lines from raw Nx/Vitest/compiler output while
+ * isolating per-task `> nx run` blocks so passing tasks cannot pollute triage.
+ */
+export const extractTriageFailureScope = (failureOutput: string): string => {
+  const stripped = failureOutput.replace(PASSING_VITEST_LINE_RE, "").trim()
+  if (stripped.length === 0) {
+    return failureOutput
+  }
+
+  const lines = stripped.split("\n")
+  const failedTaskNames = collectFailedTaskNames(lines)
+  const blocks = partitionNxTaskBlocks(lines)
+  const retainedSlices: Array<string> = []
+
+  for (const block of blocks) {
+    if (!isFailedTaskBlock(block, failedTaskNames)) {
+      continue
+    }
+    const sliced = sliceFailedTaskBlock(block)
+    if (sliced.length > 0) {
+      retainedSlices.push(sliced.join("\n"))
+    }
+  }
+
+  const scoped = retainedSlices.join("\n")
+  return scoped.length > 0 ? scoped : stripped
+}
+
 export const triageFailure = Effect.fn("Harness.triageFailure")(function* (failureOutput: string) {
-  const strippedOutput = failureOutput.replace(/^\s*[✓✔]\s+.*$/gm, "").trim()
-  const targetOutput = strippedOutput.length > 0 ? strippedOutput : failureOutput
+  const targetOutput = extractTriageFailureScope(failureOutput)
   for (const rule of DETERMINISTIC_TRIAGE_RULES) {
     const matches =
       typeof rule.pattern === "string"
@@ -522,7 +685,9 @@ export const triageFailure = Effect.fn("Harness.triageFailure")(function* (failu
     }
   }
 
-  const outcome = yield* DecisionModel.decide(TriageV1, { input: { failureOutput } }).pipe(
+  const outcome = yield* DecisionModel.decide(TriageV1, {
+    input: { failureOutput: targetOutput },
+  }).pipe(
     Effect.timeoutOption("1500 millis"),
     Effect.catchCauseIf(
       (cause) => !isPureInterruptCause(cause),

@@ -150,7 +150,10 @@ describe("WF-3 Unix-socket daemon workflow RPCs (start, retry, epic & slice isol
       expect(prematureResumeErr.message).toContain("escalated")
 
       const mcpStatus = await Effect.runPromise(
-        executeWorkflowPlanTool({ repoRoot: linkedDir, runId: plan.runId }),
+        executeWorkflowPlanTool(
+          { repoRoot: linkedDir, runId: plan.runId },
+          { repoRoot: canonicalDir },
+        ),
       )
       expect(mcpStatus.resolvedRepoRoot).toBe(validatedLinked.worktreeRoot)
       expect(mcpStatus.commonGitDir).toBe(validatedCanonical.commonGitDir)
@@ -670,7 +673,10 @@ describe("WF-3 Unix-socket daemon workflow RPCs (start, retry, epic & slice isol
       })
 
       const mcpToolOut = await Effect.runPromise(
-        executeWorkflowPlanTool({ repoRoot: canonicalDir, runId: l2RunId }),
+        executeWorkflowPlanTool(
+          { repoRoot: canonicalDir, runId: l2RunId },
+          { repoRoot: canonicalDir },
+        ),
       )
       expect(
         mcpToolOut.status._tag === "Ready" &&

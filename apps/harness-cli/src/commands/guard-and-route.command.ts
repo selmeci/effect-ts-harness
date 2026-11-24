@@ -101,19 +101,33 @@ const evaluateCommandDecision = (
     }
 
     if (options?.decisionLayer === undefined && options?.skipBackgroundDaemons !== true) {
-      const ollamaProbe = yield* ensureLocalOllamaReady().pipe(Effect.timeoutOption("2500 millis"))
-      match(ollamaProbe)
+      const ollamaProbe = yield* ensureLocalOllamaReady().pipe(Effect.timeoutOption("1000 millis"))
+      const isOllamaReady = match(ollamaProbe)
         .with({ _tag: "None" }, () => {
-          process.stderr.write("[harness:guard] Ollama readiness probe timed out after 2500ms.\n")
+          process.stderr.write("[harness:guard] Ollama readiness probe timed out after 1000ms.\n")
+          return false
         })
         .with({ _tag: "Some" }, ({ value: ready }) => {
           if (!ready) {
             process.stderr.write(
-              "[harness:guard] Ollama server is not ready; continuing with DecisionModel.\n",
+              "[harness:guard] Ollama server is not ready; escalating without DecisionModel.\n",
             )
           }
+          return ready
         })
         .exhaustive()
+      if (!isOllamaReady) {
+        const reason = "DecisionModel unavailable (Ollama readiness probe failed)"
+        recordFriction(options, {
+          kind: "guard_escalation",
+          summary: command,
+          detail: `verdict=ask; reason=${reason}`,
+        })
+        return {
+          decision: { verdict: "ask" as const, reason },
+          source: "escalated" as const,
+        }
+      }
     }
     const decision = yield* decideGuardCommand({ command, unitWorkerMode }).pipe(
       Effect.provide(decisionLayer),

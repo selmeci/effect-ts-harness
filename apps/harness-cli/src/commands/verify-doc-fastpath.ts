@@ -31,13 +31,24 @@ export const verifyFailureWithThrashing = (
   summary: string,
   detail: string,
   stderrMsg: string,
+  telemetryDetail?: string,
 ): CliResult => {
   recordFriction(options, { kind: "verify_failure", summary, detail })
   const thrashing = checkLoopThrashing(readFrictionEvents(repoRoot, nodeSyncHostIo))
   if (thrashing.stuck && thrashing.escalationMessage !== null) {
-    return { exitCode: 2, stdout: "", stderr: `${thrashing.escalationMessage}\n${stderrMsg}` }
+    return {
+      exitCode: 2,
+      stdout: "",
+      stderr: `${thrashing.escalationMessage}\n${stderrMsg}`,
+      ...(telemetryDetail !== undefined ? { telemetryDetail } : {}),
+    }
   }
-  return { exitCode: 1, stdout: "", stderr: stderrMsg }
+  return {
+    exitCode: 1,
+    stdout: "",
+    stderr: stderrMsg,
+    ...(telemetryDetail !== undefined ? { telemetryDetail } : {}),
+  }
 }
 
 export type DocOnlyVerifyFastPathOutcome =

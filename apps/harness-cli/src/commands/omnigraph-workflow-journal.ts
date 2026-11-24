@@ -28,7 +28,7 @@ import {
   nodeSyncHostIo,
   resolveWorkflowRuntimePaths,
   withAdvisoryFlock,
-} from "@harness/infra"
+} from "@harness/infra/omnigraph-session"
 
 export type WorkflowBeforeRebuildResult =
   | { readonly _tag: "Skipped"; readonly reason: "no-cluster" | "no-workflow-graph" }

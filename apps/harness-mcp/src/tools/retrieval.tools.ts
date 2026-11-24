@@ -1,4 +1,3 @@
-import * as path from "node:path"
 import { Effect, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
@@ -24,12 +23,11 @@ import {
 import { EmbeddingClient } from "@harness/service"
 import { nodeSyncHostIo, OllamaEmbeddingClientLive, WorkspaceFsLive } from "@harness/infra"
 import {
-  isPathInsideRoot,
+  graphStatusMeta,
   McpToolName,
   type McpToolExecutionError,
   type McpToolPluginDescriptor,
-  ProjectPathEscapeError,
-  resolveDefaultRepoRoot,
+  resolveContainedRepoRoot,
   resolveGraphWithStatus,
   type ServerOptions,
 } from "./mcp-helpers.js"
@@ -123,30 +121,6 @@ const decodeDocTreeToolInput = Schema.decodeUnknownEffect(DocTreeToolInputSchema
 export type SearchKnowledgeRawArgs = typeof SearchKnowledgeInputSchema.Type
 export type DocTreeRawArgs = typeof DocTreeToolInputSchema.Type
 
-export const resolveContainedRepoRoot = (
-  rawRepoRoot: string | undefined,
-  options?: ServerOptions,
-): Effect.Effect<string, ProjectPathEscapeError> => {
-  const boundaryRoot = options?.repoRoot ?? resolveDefaultRepoRoot(undefined, options)
-  if (rawRepoRoot === undefined) {
-    return Effect.succeed(boundaryRoot)
-  }
-  const trimmed = rawRepoRoot.trim()
-  if (trimmed.length === 0 || !isPathInsideRoot(boundaryRoot, trimmed)) {
-    return Effect.fail(
-      new ProjectPathEscapeError({
-        projectPath: rawRepoRoot,
-        repoRoot: boundaryRoot,
-        message: "repoRoot escapes configured workspace root",
-      }),
-    )
-  }
-  const resolved = path.isAbsolute(trimmed)
-    ? path.resolve(trimmed)
-    : path.resolve(boundaryRoot, trimmed)
-  return Effect.succeed(resolved)
-}
-
 interface EmbedProbeReady {
   readonly _tag: "Ready"
   readonly components: ReadonlyArray<number>
@@ -232,8 +206,11 @@ export const executeSearchKnowledgeTool = Effect.fn("HarnessMcp.searchKnowledge"
     options?.omnigraphSyncLayer === undefined
 
   let anyBm25Fallback = false
-  let anyLexicalFallback = false
+  let anyLexicalFallback = graphStatus.degraded
   const degradedReasons: Array<string> = []
+  if (graphStatus.degraded) {
+    pushDistinctReason(degradedReasons, graphStatus.degradedReason ?? "degraded-graph-snapshot")
+  }
   let queryVector: ReadonlyArray<number> | undefined
 
   const embedResult = yield* Effect.gen(function* () {
@@ -418,11 +395,18 @@ export const executeDocTreeTool = Effect.fn("HarnessMcp.docTree")(function* (
 
   const decodedDocInput = yield* Schema.decodeUnknownEffect(DocTreeInput)(rawDocInput)
 
-  return yield* inspectDocTree({
+  const docTreeRes = yield* inspectDocTree({
     repoRoot: WorkspaceFilePath.make(root),
     input: decodedDocInput,
     graph: graphStatus.graph,
   }).pipe(Effect.provide(fsLayer))
+  if (mode === "catalog" && graphStatus.degraded) {
+    return {
+      ...docTreeRes,
+      ...graphStatusMeta(graphStatus),
+    }
+  }
+  return docTreeRes
 })
 
 export const buildRetrievalToolDescriptors = (

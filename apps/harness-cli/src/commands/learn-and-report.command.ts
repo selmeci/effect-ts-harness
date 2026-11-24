@@ -19,7 +19,7 @@ import {
   type TelemetryEvent,
   writeSessionReportFiles,
 } from "@harness/gates"
-import { nodeSyncHostIo } from "@harness/infra"
+import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
 import type { SyncHostIo } from "@harness/service/host-io"
 import {
   type CliEnv,

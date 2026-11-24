@@ -81,6 +81,7 @@ import {
   readRecordedSpans,
   runDeltaAstAndPluginGates,
 } from "./verify-delta-gates.js"
+import { resolveVerifyParallelCap, resolveVitestMaxWorkers } from "./repo-path.js"
 import { tryRunDocOnlyVerifyFastPath, verifyFailureWithThrashing } from "./verify-doc-fastpath.js"
 
 export const handleVerify = (options: CliEnv | undefined): Effect.Effect<CliResult> =>
@@ -289,12 +290,14 @@ export const handleVerify = (options: CliEnv | undefined): Effect.Effect<CliResu
         for (const df of deltaFiles) findTestsReaching(graph, df)
       }
       const nxArgs = resolveNxAffectedArgs(repoRoot, ["verify"], scopedFiles)
+      const verifyCap = resolveVerifyParallelCap()
       const subprocessErr = yield* Effect.try({
         try: () => {
           const { HARNESS_STATE_DIR: _dropStateDir, ...cleanEnv } = process.env
+          const vitestMaxWorkers = resolveVitestMaxWorkers(cleanEnv, verifyCap)
           const res = nodeSyncHostIo.execFileSync("pnpm", nxArgs, {
             cwd: repoRoot,
-            env: { ...cleanEnv, CI: "true" },
+            env: { ...cleanEnv, CI: "true", VITEST_MAX_WORKERS: vitestMaxWorkers },
           })
           return match(res)
             .with({ _tag: "Exited" }, (exited) =>
@@ -311,12 +314,18 @@ export const handleVerify = (options: CliEnv | undefined): Effect.Effect<CliResu
       if (subprocessErr !== null) {
         const triage = yield* triageFailure(subprocessErr).pipe(Effect.provide(decisionLayer))
         const formattedErr = `[GATE FAILURE] [triage:${triage.kind}] ${triage.hint}\n\nFAILED OUTPUT:\n${subprocessErr}`
+        const isTimeoutContention =
+          triage.hint.includes("timeout-contention") ||
+          /Test timed out in \d+\s*ms/i.test(subprocessErr)
         return verifyFailureWithThrashing(
           options,
           repoRoot,
           `verify:${triage.kind}`,
           formattedErr,
           formattedErr,
+          isTimeoutContention
+            ? "[triage:mechanical] timeout-contention — Test timed out under parallel Nx load"
+            : undefined,
         )
       }
     }

@@ -1,7 +1,7 @@
 ---
 id: harness:SPEC-0033
 title: Harness Worktree MCP Routing, Inner-Loop Latency Speedups, Accurate Triage, and Preventive AST/GC Gates
-status: draft
+status: proposed
 archetype: framework
 date: 2026-11-24
 owners:
@@ -19,21 +19,44 @@ informed_by:
   - harness:ADR-0026
 enforced_by:
   - apps/harness-mcp/src/tools/mcp-helpers.ts
+  - apps/harness-mcp/src/tools/mcp-repo-root.ts
   - apps/harness-mcp/src/tools/retrieval.tools.ts
   - apps/harness-mcp/src/tools/graph-navigation.tools.ts
+  - apps/harness-mcp/src/tools/ontology-and-gq.tools.ts
+  - apps/harness-mcp/src/tools/datalog-and-dpo.tools.ts
+  - apps/harness-mcp/src/tools/git-diff.tools.ts
+  - apps/harness-mcp/src/tools/workflow-plan.tools.ts
   - apps/harness-mcp/src/tools/review-route-helpers.ts
   - apps/harness-mcp/src/tools/lsp-and-telemetry.tools.ts
+  - apps/harness-cli/src/commands/declarative-cli.ts
   - apps/harness-cli/src/commands/session-learn-report.command.ts
   - apps/harness-cli/src/commands/session-fastpath.ts
   - apps/harness-cli/src/commands/verify-and-done.command.ts
+  - apps/harness-cli/src/commands/verify-doc-fastpath.ts
   - apps/harness-cli/src/commands/plan-and-repair.command.ts
+  - apps/harness-cli/src/commands/repo-path.ts
+  - apps/harness-cli/src/commands/daemon-and-omnigraph.service.ts
+  - apps/harness-cli/src/commands/nx-affected-git.helpers.ts
+  - apps/harness-cli/src/commands/learn-and-report.command.ts
+  - apps/harness-cli/src/commands/guard-and-route.command.ts
+  - apps/harness-cli/src/commands/ollama-readiness.ts
+  - apps/harness-cli/src/commands/omnigraph-auth-and-drift.ts
+  - apps/harness-cli/src/commands/omnigraph-lifecycle-setup.ts
+  - apps/harness-cli/src/commands/omnigraph-lifecycle.ts
+  - apps/harness-cli/src/commands/omnigraph-lint-gate.ts
+  - apps/harness-cli/src/commands/omnigraph-safety-helpers.ts
+  - apps/harness-cli/src/commands/omnigraph-workflow-backup.ts
+  - apps/harness-cli/src/commands/omnigraph-workflow-journal.ts
   - apps/harness-cli/test/adapter-config.test.ts
   - libs/harness/contract/src/workflow-ship.ts
   - libs/harness/contract/src/workflow-timeouts.ts
   - libs/harness/decision/src/triage-decision.ts
   - libs/harness/decision/src/guard-decision.ts
   - libs/harness/gates/src/telemetry.ts
+  - libs/harness/gates/src/policy.ts
+  - libs/harness/gates/src/policy-command-lists.ts
   - libs/harness/gates/src/policy-command-rules.ts
+  - libs/harness/gates/src/policy-worker-isolation.ts
   - libs/harness/gates/src/ears-lint.ts
   - libs/harness/gates/src/plugins/ast-gate-visitors.ts
   - libs/harness/gates/src/plugins/ast-fail-closed-laws.ts
@@ -43,9 +66,15 @@ enforced_by:
   - libs/harness/gates/src/plugins/gc/gc-hook-fastpath.ts
   - libs/harness/gates/src/mutation/mutation-test-reachability.ts
   - libs/harness/graph/src/extractor/ast-policy-extractor.ts
+  - libs/harness/infra/src/node-host-io.ts
+  - libs/harness/infra/src/hook-fastpath.ts
+  - libs/harness/infra/src/hook-io.ts
+  - libs/harness/infra/src/omnigraph-session.ts
+  - libs/harness/infra/src/worktree-repo-root.ts
   - tools/oxlint/syntax-bans.js
 spans:
   - HarnessMcp.dispatchTool
+  - HarnessMcp.resolveContainedRepoRoot
   - HarnessMcp.routeReview
   - SessionReport.decide
   - SessionHandoff.decide
@@ -85,19 +114,19 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ### 1 · Wave 1 — Worktree MCP Routing, Degraded Telemetry Truth, Accurate Triage, and Hook Isolation
 
-**Source (`apps/harness-mcp/src/tools/mcp-helpers.ts`, `retrieval.tools.ts`, `graph-navigation.tools.ts`, `apps/harness-cli/src/commands/session-learn-report.command.ts`, `verify-and-done.command.ts`, `libs/harness/decision/src/triage-decision.ts`, `guard-decision.ts`, `libs/harness/gates/src/policy-command-rules.ts`, `telemetry.ts`):** Immediate correctness and observability fixes that restore MCP reliability across linked worktrees, eliminate misleading telemetry and triage hints, and harden `session`/`guard` hooks.
+**Source (`apps/harness-mcp/src/tools/mcp-helpers.ts`, `mcp-repo-root.ts`, `retrieval.tools.ts`, `graph-navigation.tools.ts`, `ontology-and-gq.tools.ts`, `datalog-and-dpo.tools.ts`, `git-diff.tools.ts`, `workflow-plan.tools.ts`, `apps/harness-cli/src/commands/declarative-cli.ts`, `session-learn-report.command.ts`, `verify-and-done.command.ts`, `verify-doc-fastpath.ts`, `repo-path.ts`, `daemon-and-omnigraph.service.ts`, `nx-affected-git.helpers.ts`, `learn-and-report.command.ts`, `guard-and-route.command.ts`, `ollama-readiness.ts`, `omnigraph-lifecycle.ts`, `libs/harness/decision/src/triage-decision.ts`, `guard-decision.ts`, `libs/harness/gates/src/policy.ts`, `policy-command-lists.ts`, `policy-command-rules.ts`, `policy-worker-isolation.ts`, `telemetry.ts`, `libs/harness/infra/src/node-host-io.ts`, `hook-fastpath.ts`, `hook-io.ts`, `omnigraph-session.ts`, `worktree-repo-root.ts`):** Immediate correctness and observability fixes that restore MCP reliability across linked worktrees, eliminate misleading telemetry and triage hints, and harden `session`/`guard` hooks.
 
-| ID      | Pattern            | Requirement                                                                                                                                                                                                                                                                                                                                                                             | Effect Symbol              | Verification |
-| ------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- | ------------ |
-| REQ-1.1 | Event-driven       | **When** `resolveDefaultRepoRoot` inspects `process.cwd()` inside a directory lacking `pnpm-workspace.yaml`, `resolveDefaultRepoRoot` **shall** skip the invalid `cwdRoot` and resolve the newest valid workspace path from canonical `active-workspace.json` before falling back to `SERVER_REPO_ROOT`.                                                                                | HarnessMcp.dispatchTool    | UnitTest     |
-| REQ-1.2 | Event-driven       | **When** `resolveContainedRepoRoot` receives an explicit `repoRoot` pointing to a linked git worktree sharing the repository `git-common-dir`, `resolveContainedRepoRoot` **shall** accept that worktree path via `validateWorktreeRepoRoot`.                                                                                                                                           | HarnessMcp.dispatchTool    | UnitTest     |
-| REQ-1.3 | Unwanted behaviour | **If** `resolveContainedRepoRoot` receives a `repoRoot` path outside the repository worktree set or escaping via symlinks, **then** `resolveContainedRepoRoot` **shall** fail with `ProjectPathEscapeError`.                                                                                                                                                                            | ProjectPathEscapeError     | UnitTest     |
-| REQ-1.4 | Event-driven       | **When** `recordMcpToolTelemetry` records an MCP response whose payload has `degraded` equal to `true`, `recordMcpToolTelemetry` **shall** log `outcome` as `"fallback"` with `degradedReason` attached in `detail` so `SessionReport.decide` deducts health score and emits a degraded-MCP recommendation.                                                                             | SessionReport.decide       | UnitTest     |
-| REQ-1.5 | State-driven       | **While** every `verify` attempt in the session window is preceded by passing `gc` and `ontology:check` events, `SessionReport.decide` **shall** omit the pre-verify `gc` and `ontology` reminder and emit targeted diagnostics for degraded MCP calls or verify test timeouts.                                                                                                         | SessionReport.decide       | PropertyTest |
-| REQ-1.6 | Event-driven       | **When** `Harness.triageFailure` classifies a failed `verify` or Nx subprocess log, `Harness.triageFailure` **shall** restrict pattern matching to extracted failure blocks after `FAIL` or `Failed Tests` markers and classify `Test timed out in` failures with a timeout-contention triage hint.                                                                                     | Harness.triageFailure      | UnitTest     |
-| REQ-1.7 | Event-driven       | **When** `handleVerify` constructs Nx arguments via `resolveNxAffectedArgs` for multi-project verification, `resolveNxAffectedArgs` **shall** enforce a bounded `--parallel` concurrency cap to prevent parallel Vitest CPU timeout storms.                                                                                                                                             | —                          | UnitTest     |
-| REQ-1.8 | Ubiquitous         | `session-learn-report.command.ts` and all hook-reachable command modules **shall** import host I/O strictly from lightweight hook subpaths (`@harness/infra/hook-fastpath` or `@harness/infra/hook-io`) instead of the root `@harness/infra` barrel under `hook-fastpath-forbidden-import`.                                                                                             | GraphGc.decide             | AstGate      |
-| REQ-1.9 | Event-driven       | **When** `classifyCommand` evaluates benign read-only commands including `echo`, `cut`, `true`, `git merge-base`, `git symbolic-ref`, `git config --get`, `git ls-remote`, and `git --version` without deny or redirection tokens, `Harness.decideGuardCommand` **shall** allow them on the deterministic fast-path and enforce a `2500ms` timeout budget on escalated `GuardV1` calls. | Harness.decideGuardCommand | UnitTest     |
+| ID      | Pattern            | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Effect Symbol                       | Verification |
+| ------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- | ------------ |
+| REQ-1.1 | Event-driven       | **When** `resolveDefaultRepoRoot` inspects `process.cwd()` inside a directory lacking `pnpm-workspace.yaml`, `resolveDefaultRepoRoot` **shall** skip the invalid `cwdRoot` and resolve the newest valid workspace path from canonical `active-workspace.json` before falling back to `SERVER_REPO_ROOT`.                                                                                                                                                      | HarnessMcp.dispatchTool             | UnitTest     |
+| REQ-1.2 | Event-driven       | **When** `resolveContainedRepoRoot` receives an explicit `repoRoot` pointing to a linked git worktree sharing the repository `git-common-dir`, `resolveContainedRepoRoot` **shall** accept that worktree path via `validateWorktreeRepoRoot`.                                                                                                                                                                                                                 | HarnessMcp.resolveContainedRepoRoot | UnitTest     |
+| REQ-1.3 | Unwanted behaviour | **If** `resolveContainedRepoRoot` receives a `repoRoot` path outside the repository worktree set or escaping via symlinks, **then** `resolveContainedRepoRoot` **shall** fail with `ProjectPathEscapeError`.                                                                                                                                                                                                                                                  | ProjectPathEscapeError              | UnitTest     |
+| REQ-1.4 | Event-driven       | **When** `recordMcpToolTelemetry` records an MCP response whose payload has `degraded` equal to `true` or a non-empty `degradedReason`, `recordMcpToolTelemetry` **shall** log `outcome` as `"fallback"` with `"degraded=<reason>"` (up to `160` chars, defaulting blank reasons to `"degraded=degraded"`) attached in `detail` so `SessionReport.decide` deducts health score and emits a degraded-MCP recommendation.                                       | SessionReport.decide                | UnitTest     |
+| REQ-1.5 | State-driven       | **While** every `verify` attempt in the session window is preceded by passing `gc` and `ontology:check` events, `SessionReport.decide` **shall** omit the pre-verify `gc` and `ontology` reminder and emit targeted diagnostics for degraded MCP calls or verify test timeouts.                                                                                                                                                                               | SessionReport.decide                | PropertyTest |
+| REQ-1.6 | Event-driven       | **When** `Harness.triageFailure` classifies a failed `verify` or Nx subprocess log, `Harness.triageFailure` **shall** restrict pattern matching to extracted Vitest failure blocks after `FAIL` or `Failed Tests` markers alongside compiler/linter pre-footer diagnostics and classify `Test timed out in` failures with a timeout-contention triage hint.                                                                                                   | Harness.triageFailure               | UnitTest     |
+| REQ-1.7 | Event-driven       | **When** `handleVerify` constructs Nx arguments via `resolveNxAffectedArgs` for multi-project verification, `handleVerify` and `resolveNxAffectedArgs` **shall** enforce a bounded `--parallel` concurrency cap and derived `VITEST_MAX_WORKERS` budget to prevent parallel Vitest CPU timeout storms.                                                                                                                                                        | —                                   | UnitTest     |
+| REQ-1.8 | Ubiquitous         | `session-learn-report.command.ts` and all hook-reachable command modules **shall** import host I/O strictly from lightweight hook subpaths (`@harness/infra/hook-fastpath`, `@harness/infra/hook-io`, or `@harness/infra/omnigraph-session`) instead of the root `@harness/infra` barrel under `hook-fastpath-forbidden-import`.                                                                                                                              | GraphGc.decide                      | AstGate      |
+| REQ-1.9 | Event-driven       | **When** `classifyCommand` evaluates benign read-only commands including literal `echo` (without expansion or redirection), `cut`, `true`, `git merge-base`, read-only `git symbolic-ref` / `git config --get` flag allowlists, `git ls-remote`, and `git --version` without deny or redirection tokens, `Harness.decideGuardCommand` **shall** allow them on the deterministic fast-path and enforce a `2500ms` timeout budget on escalated `GuardV1` calls. | Harness.decideGuardCommand          | UnitTest     |
 
 ### 2 · Wave 2 — Inner-Loop Latency Speedups (Warm LSP, Scoped Mutation Fallback, Lean Session Cache, Incremental Plan-Check)
 
@@ -130,7 +159,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ## Assumptions
 
-- **REQ-1.7:** Default `nx affected` parallelism cap in `handleVerify` is `Math.min(4, os.availableParallelism())`, overrideable via `HARNESS_VERIFY_PARALLEL` for CI benchmarking.
+- **REQ-1.7:** Default `nx affected` parallelism cap in `handleVerify` is `Math.min(4, getHostAvailableParallelism())` (capped at `MAX_VERIFY_PARALLEL_CAP = 32` via `HARNESS_VERIFY_PARALLEL`), with derived `VITEST_MAX_WORKERS = Math.max(1, Math.floor(cpuCount / cap))` via `resolveVitestMaxWorkers`.
 - **REQ-1.9:** `GuardV1` `DecisionModel` timeout increases from `1500ms` to `2500ms` to absorb brief Ollama contention without exceeding interactive hook UX latency limits.
 - **REQ-2.1:** Warm `TypeScriptProgramSession` cache in `harness-mcp` is bounded (e.g. LRU of up to `4` `repoRoot` entries) and evicted on `tsconfig*.json` `mtimeMs` change or server shutdown.
 - **REQ-2.3:** Excluding routine source-file diffs from the `session` pre-invocation fingerprint preserves full freshness for `.harness/friction-log.jsonl`, `verify-stamp.json`, `last-done.json`, `graph-snapshot.json`, `HEAD` SHA, and active branch changes; source-file freshness continues to be enforced by `ingest`, `verify`, and `done`.
@@ -152,5 +181,5 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 ## Acceptance criteria
 
 - All three waves (`REQ-1.1..1.9`, `REQ-2.1..2.4`, `REQ-3.1..3.11`) are promoted from `status: draft` to `status: proposed` per wave when entering `planning-effect-skeletons` and to `status: accepted` upon completion with 100% mutant kill on modified pure modules.
-- While in `status: draft`, `pnpm harness gc --strict` and `pnpm harness ontology check --strict` pass with zero findings and zero semantic conflicts.
+- While in `status: draft` or `status: proposed`, `pnpm harness gc --strict` and `pnpm harness ontology check --strict` pass with zero findings and zero semantic conflicts.
 - Upon Wave 1–3 completion, `harness_lsp_diagnostics` p95 drops below `5s` on warm calls, `hook:session` zero-crash isolation holds during `@harness/infra` edits, `harness-mcp` resolves sibling worktrees with `0` spurious `ProjectPathEscapeError` rejections, and all Wave 3 AST/GC gates pass `CI=true pnpm harness verify` and `CI=true pnpm harness done --cli`.

@@ -4,6 +4,7 @@ import { Result } from "effect"
 import { match } from "ts-pattern"
 import { resolveCanonicalRepoRoot } from "@harness/graph/cluster-resolver"
 import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
+import { getHostAvailableParallelism } from "@harness/infra/hook-io"
 import type { SyncHostIo } from "@harness/service/host-io"
 
 export const buildOmnigraphClusterKillArgs = (
@@ -243,3 +244,36 @@ export const resolveRepoPathOrMessage = (
       message: `Cannot resolve ${label} '${userPath}' (${code}: ${message})`,
     }))
     .exhaustive()
+
+export const DEFAULT_VERIFY_MAX_PARALLEL = 4
+export const MAX_VERIFY_PARALLEL_CAP = 32
+
+export const resolveVerifyParallelCap = (
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  cpuCount: number = getHostAvailableParallelism(),
+): number => {
+  const raw = env["HARNESS_VERIFY_PARALLEL"]?.trim()
+  if (raw !== undefined && /^[1-9]\d*$/.test(raw)) {
+    const parsed = Number.parseInt(raw, 10)
+    if (Number.isSafeInteger(parsed) && parsed > 0) {
+      return Math.min(MAX_VERIFY_PARALLEL_CAP, parsed)
+    }
+  }
+  const normalizedCpu = Number.isFinite(cpuCount) && cpuCount >= 1 ? Math.floor(cpuCount) : 1
+  return Math.min(DEFAULT_VERIFY_MAX_PARALLEL, normalizedCpu)
+}
+
+export const resolveVitestMaxWorkers = (
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  parallelCap: number = resolveVerifyParallelCap(env),
+  cpuCount: number = getHostAvailableParallelism(),
+): string => {
+  const raw = env["VITEST_MAX_WORKERS"]?.trim()
+  if (raw !== undefined && /^[1-9]\d*$/.test(raw)) {
+    return raw
+  }
+  const normalizedCpu = Number.isFinite(cpuCount) && cpuCount >= 1 ? Math.floor(cpuCount) : 1
+  const normalizedCap =
+    Number.isFinite(parallelCap) && parallelCap >= 1 ? Math.floor(parallelCap) : 1
+  return String(Math.max(1, Math.floor(normalizedCpu / normalizedCap)))
+}

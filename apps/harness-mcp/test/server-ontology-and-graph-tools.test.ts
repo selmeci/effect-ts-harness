@@ -116,10 +116,19 @@ describe("harness-mcp daemon, LSP, ontology & knowledge tools", () => {
     expect(res.diagnostics).toEqual([])
   })
 
-  it("isPathInsideRoot correctly identifies child, self, and sibling prefix paths", () => {
-    expect(isPathInsideRoot("/tmp/repo", "/tmp/repo/libs/a")).toBe(true)
-    expect(isPathInsideRoot("/tmp/repo", "/tmp/repo")).toBe(true)
-    expect(isPathInsideRoot("/tmp/repo", "/tmp/repo-other/libs/a")).toBe(false)
+  it("isPathInsideRoot correctly identifies child, self, sibling prefix, and missing root paths", () => {
+    const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), "harness-ispath-"))
+    const repoDir = path.join(tmpBase, "repo")
+    const missingDir = path.join(tmpBase, "missing-repo")
+    fs.mkdirSync(repoDir, { recursive: true })
+    try {
+      expect(isPathInsideRoot(repoDir, path.join(repoDir, "libs", "a"))).toBe(true)
+      expect(isPathInsideRoot(repoDir, repoDir)).toBe(true)
+      expect(isPathInsideRoot(repoDir, path.join(tmpBase, "repo-other", "libs", "a"))).toBe(false)
+      expect(isPathInsideRoot(missingDir, path.join(missingDir, "libs", "a"))).toBe(false)
+    } finally {
+      fs.rmSync(tmpBase, { recursive: true, force: true })
+    }
   })
 
   it("runDefaultLspDiagnostics fails cleanly on non-existent repo root", async () => {

@@ -21,6 +21,8 @@ import {
 } from "./unix-socket-daemon-live.js"
 import { makeWorkspaceFsLayer } from "./workspace-fs-live.js"
 
+export { getHostAvailableParallelism } from "./hook-io.js"
+
 export {
   LocalDecisionModel,
   makeLocalDecisionModelLayer,

@@ -11,7 +11,7 @@ import {
   type McpToolExecutionError,
   type McpToolPluginDescriptor,
   ProjectPathEscapeError,
-  resolveDefaultRepoRoot,
+  resolveContainedRepoRoot,
   type ServerOptions,
 } from "./mcp-helpers.js"
 
@@ -368,12 +368,7 @@ export const executeGitDiffTool = Effect.fn("HarnessMcp.gitDiff")(function* (
   options?: ServerOptions,
 ): Effect.fn.Return<GitDiffToolResult, McpToolExecutionError> {
   const clampedMax = yield* validateDirectInput(input)
-  const root =
-    options?.repoRoot ??
-    resolveDefaultRepoRoot(
-      input.repoRoot !== undefined ? { repoRoot: input.repoRoot } : undefined,
-      options,
-    )
+  const root = yield* resolveContainedRepoRoot(input.repoRoot, options)
   const relPaths = input.paths !== undefined ? yield* confineRepoPaths(root, input.paths) : []
   const pathArgs: ReadonlyArray<string> = relPaths.length > 0 ? ["--", ...relPaths] : []
   const { resolvedBase, diffBase } = yield* resolveDiffBase(root, input.baseRef)

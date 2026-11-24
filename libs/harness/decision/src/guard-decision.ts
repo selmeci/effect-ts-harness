@@ -36,6 +36,8 @@ export interface GuardDecisionResult {
   readonly reason: string
 }
 
+export const GUARD_DECISION_TIMEOUT_MS = 2500
+
 const WORKER_SENSITIVE_FALLBACK_PATTERN =
   /\bharness(?:-cli)?\b|auth-tokens|daemon\.soc|\.harness\/omnigraph-cluster/i
 
@@ -86,17 +88,17 @@ export const decideGuardCommand = Effect.fn("Harness.decideGuardCommand")(functi
             },
           ),
           Effect.orElseSucceed(() => ({ _tag: "ModelError" as const, detail: "unknown error" })),
-          Effect.timeoutOption("1500 millis"),
+          Effect.timeoutOption(`${GUARD_DECISION_TIMEOUT_MS} millis`),
         )
 
         return yield* match(timedResult)
           .with({ _tag: "None" }, () =>
             Effect.logWarning(
-              "GuardV1 DecisionModel timed out after 1500ms; requiring human confirmation.",
+              `GuardV1 DecisionModel timed out after ${GUARD_DECISION_TIMEOUT_MS}ms; requiring human confirmation.`,
             ).pipe(
               Effect.as({
                 verdict: "ask" as const,
-                reason: "DecisionModel timed out after 1500ms; requires human confirmation.",
+                reason: `DecisionModel timed out after ${GUARD_DECISION_TIMEOUT_MS}ms; requires human confirmation.`,
               }),
             ),
           )

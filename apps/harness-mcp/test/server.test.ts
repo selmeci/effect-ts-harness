@@ -615,10 +615,14 @@ describe("harness-mcp core tools, search, routing & snapshot loading", () => {
 
       // 1. Case A: graph-snapshot.json is absent, plan-graph-snapshot.json is present
       saveGraphSnapshot(planGraph, planPath, nodeSyncHostIo)
-      const resPlanOnly = await executeTool("harness_resolve", {
-        symbolOrSpan: "Sample.planFn",
-        repoRoot: tmpDir,
-      })
+      const resPlanOnly = await executeTool(
+        "harness_resolve",
+        {
+          symbolOrSpan: "Sample.planFn",
+          repoRoot: tmpDir,
+        },
+        { repoRoot: tmpDir },
+      )
       expect(resPlanOnly).toMatchObject({
         degraded: false,
         node: {
@@ -633,10 +637,14 @@ describe("harness-mcp core tools, search, routing & snapshot loading", () => {
       fs.utimesSync(verifyPath, past, past)
       fs.utimesSync(planPath, now, now)
 
-      const resNewerPlan = await executeTool("harness_resolve", {
-        symbolOrSpan: "Sample.planFn",
-        repoRoot: tmpDir,
-      })
+      const resNewerPlan = await executeTool(
+        "harness_resolve",
+        {
+          symbolOrSpan: "Sample.planFn",
+          repoRoot: tmpDir,
+        },
+        { repoRoot: tmpDir },
+      )
       expect(resNewerPlan).toMatchObject({
         degraded: false,
         node: {
@@ -648,10 +656,14 @@ describe("harness-mcp core tools, search, routing & snapshot loading", () => {
       const future = new Date(Date.now() + 100000)
       fs.utimesSync(verifyPath, future, future)
 
-      const resNewerVerify = await executeTool("harness_resolve", {
-        symbolOrSpan: "Sample.verifyFn",
-        repoRoot: tmpDir,
-      })
+      const resNewerVerify = await executeTool(
+        "harness_resolve",
+        {
+          symbolOrSpan: "Sample.verifyFn",
+          repoRoot: tmpDir,
+        },
+        { repoRoot: tmpDir },
+      )
       expect(resNewerVerify).toMatchObject({
         degraded: false,
         node: {
@@ -671,7 +683,7 @@ describe("harness-mcp core tools, search, routing & snapshot loading", () => {
         params: { spanOrQualname: "Sample.greet" },
         repoRoot: "/tmp/custom-repo",
       },
-      { graph },
+      { graph, repoRoot: "/tmp/custom-repo" },
     )
     expect(res).toMatchObject({
       source: "memory-fallback",

@@ -26,7 +26,7 @@ import {
   syncToOmnigraphAndSnapshot,
   writeGraphHeadMeta,
 } from "@harness/graph"
-import { nodeSyncHostIo } from "@harness/infra"
+import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
 import { hasAntigravityFormat } from "./hook-format.js"
 import {
   handleLearn,
