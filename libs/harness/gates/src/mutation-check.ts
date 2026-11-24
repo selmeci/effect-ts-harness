@@ -574,7 +574,7 @@ export const runDomainMutationSuite = (
       .with({ _tag: "Error" }, ({ reason }) => reason)
       .exhaustive()
     if (typeof partition === "string") return abortWith(outcomes, `[mutation-check] ${partition}`)
-    const { primaryTests, fallbackTests } = partition
+    const { primaryTests, scopedFallbackTests, packageFallbackTests, fallbackTests } = partition
     if (primaryTests.length === 0 && fallbackTests.length === 0) {
       untestedFiles.push({
         file: file.relFile,
@@ -617,6 +617,8 @@ export const runDomainMutationSuite = (
           mutants,
           uncachedMutants,
           primaryTests,
+          scopedFallbackTests,
+          packageFallbackTests,
           fallbackTests,
           cachedHitIds,
         },
@@ -636,7 +638,8 @@ export const runDomainMutationSuite = (
       mutants,
       uncachedMutants,
       primaryTests,
-      fallbackTests,
+      scopedFallbackTests,
+      packageFallbackTests,
       cachedHitIds,
       pkgBaselinePassed,
     })

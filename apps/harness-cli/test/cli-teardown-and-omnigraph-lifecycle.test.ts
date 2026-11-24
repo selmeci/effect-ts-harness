@@ -818,34 +818,53 @@ describe("teardownCliMain subprocess, omnigraph-lifecycle & worker isolation", (
         })
         .exhaustive()
 
-      // Untracked file invalidates
+      // Routine untracked, renamed, and deleted source files keep fingerprint stable (cache hit)
       const untracked = join(dir, "libs", "demo", "src", "new file.ts")
       writeFileSync(untracked, "export const b = 2\n", "utf8")
       const fpUntracked = computePreInvocationFingerprint(dir, hDir, nodeSyncHostIo)
-      expect(fpUntracked._tag).toBe("Some")
-      expect(fpUntracked).not.toEqual(fp0)
+      expect(fpUntracked).toEqual(fp0)
       rmSync(untracked, { force: true })
 
-      // S-2.1: Renamed file with spaces invalidates
       const renamed = join(dir, "libs", "demo", "src", "renamed file.ts")
       renameSync(tracked, renamed)
       const fpRenamed = computePreInvocationFingerprint(dir, hDir, nodeSyncHostIo)
-      expect(fpRenamed._tag).toBe("Some")
-      expect(fpRenamed).not.toEqual(fp0)
+      expect(fpRenamed).toEqual(fp0)
 
-      // Deleted file invalidates
       rmSync(renamed, { force: true })
       const fpDeleted = computePreInvocationFingerprint(dir, hDir, nodeSyncHostIo)
-      expect(fpDeleted._tag).toBe("Some")
-      expect(fpDeleted).not.toEqual(fpRenamed)
+      expect(fpDeleted).toEqual(fp0)
       execFileSync("git", ["checkout", "--", "."], { cwd: dir })
+
+      // New git commit invalidates
+      writeFileSync(tracked, "export const a = 2\n", "utf8")
+      execFileSync("git", ["add", "."], { cwd: dir })
+      execFileSync("git", ["commit", "-m", "second"], { cwd: dir })
+      const fpCommit = computePreInvocationFingerprint(dir, hDir, nodeSyncHostIo)
+      expect(fpCommit._tag).toBe("Some")
+      expect(fpCommit).not.toEqual(fp0)
+
+      // Branch switch invalidates
+      execFileSync("git", ["checkout", "-b", "feat/other"], { cwd: dir })
+      const fpBranch = computePreInvocationFingerprint(dir, hDir, nodeSyncHostIo)
+      expect(fpBranch._tag).toBe("Some")
+      expect(fpBranch).not.toEqual(fpCommit)
 
       // .env change invalidates
       writeFileSync(join(dir, ".env"), "FOO=bar\n", "utf8")
       const fpEnv = computePreInvocationFingerprint(dir, hDir, nodeSyncHostIo)
       expect(fpEnv._tag).toBe("Some")
-      expect(fpEnv).not.toEqual(fp0)
+      expect(fpEnv).not.toEqual(fpBranch)
       rmSync(join(dir, ".env"), { force: true })
+
+      // tsconfig.base.json change invalidates
+      writeFileSync(
+        join(dir, "tsconfig.base.json"),
+        JSON.stringify({ compilerOptions: { strict: true } }),
+        "utf8",
+      )
+      const fpTsconfig = computePreInvocationFingerprint(dir, hDir, nodeSyncHostIo)
+      expect(fpTsconfig._tag).toBe("Some")
+      expect(fpTsconfig).not.toEqual(fpBranch)
 
       // HARNESS_OLLAMA_URL change invalidates
       const prevOllamaUrl = process.env.HARNESS_OLLAMA_URL
@@ -853,7 +872,7 @@ describe("teardownCliMain subprocess, omnigraph-lifecycle & worker isolation", (
       try {
         const fpUrl = computePreInvocationFingerprint(dir, hDir, nodeSyncHostIo)
         expect(fpUrl._tag).toBe("Some")
-        expect(fpUrl).not.toEqual(fp0)
+        expect(fpUrl).not.toEqual(fpTsconfig)
       } finally {
         if (prevOllamaUrl === undefined) Reflect.deleteProperty(process.env, "HARNESS_OLLAMA_URL")
         else process.env.HARNESS_OLLAMA_URL = prevOllamaUrl
@@ -864,12 +883,17 @@ describe("teardownCliMain subprocess, omnigraph-lifecycle & worker isolation", (
       expect(computePreInvocationFingerprint(dir, hDir, nodeSyncHostIo)._tag).toBe("None")
       rmSync(join(dir, ".env"), { force: true })
 
-      // F-11.1: Git timeout aborts fingerprinting to Option.none()
-      const timedOutIo = {
+      // REQ-2.3: Zero execFileSync subprocess calls during fingerprinting
+      let execCalls = 0
+      const noSubprocessIo = {
         ...nodeSyncHostIo,
-        execFileSync: () => ({ _tag: "TimedOut" as const, stdout: "", stderr: "" }),
+        execFileSync: (...args: Parameters<typeof nodeSyncHostIo.execFileSync>) => {
+          execCalls += 1
+          return nodeSyncHostIo.execFileSync(...args)
+        },
       }
-      expect(computePreInvocationFingerprint(dir, hDir, timedOutIo)._tag).toBe("None")
+      expect(computePreInvocationFingerprint(dir, hDir, noSubprocessIo)._tag).toBe("Some")
+      expect(execCalls).toBe(0)
 
       // S-5.1: Failed cache write emits stderr warning
       const errLogs: Array<string> = []

@@ -1,7 +1,8 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
+import { computeContentSha256 } from "@harness/contract"
 import { buildHarnessGraph } from "@harness/graph"
 import {
   checkVerifyStamp,
@@ -375,5 +376,42 @@ describe("verify-stamp and plan/impl graph diff", () => {
     expect(diff.reasons).toContain(
       "Planned TaggedError 'GreeterError' is missing in implementation graph",
     )
+  })
+
+  it("binds graphSnapshotSha256 into VerifyStamp when .harness/graph-snapshot.json exists and omits it when missing or symlinked", () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-stamp-snapshot-"))
+    try {
+      writeFileSync(join(dir, "file.ts"), "export const x = 1\n")
+
+      const missingStamp = writeVerifyStamp(dir, testHostIo, "impl/current")
+      expect(missingStamp.graphSnapshotSha256).toBeUndefined()
+      expect(
+        Object.hasOwn(
+          JSON.parse(readFileSync(join(dir, ".harness", "verify-stamp.json"), "utf8")),
+          "graphSnapshotSha256",
+        ),
+      ).toBe(false)
+
+      const snapshotContent = '{"version":1,"nodes":[]}\n'
+      const snapshotPath = join(dir, ".harness", "graph-snapshot.json")
+      writeFileSync(snapshotPath, snapshotContent, "utf8")
+      const presentStamp = writeVerifyStamp(dir, testHostIo, "impl/current")
+      const expectedSha = computeContentSha256(snapshotContent)
+      expect(presentStamp.graphSnapshotSha256).toBe(expectedSha)
+      const checked = checkVerifyStamp(dir, testHostIo)
+      expect(checked.valid).toBe(true)
+      if (checked.valid) {
+        expect(checked.stamp.graphSnapshotSha256).toBe(expectedSha)
+      }
+
+      rmSync(snapshotPath)
+      const externalTarget = join(dir, "external-snapshot.json")
+      writeFileSync(externalTarget, snapshotContent, "utf8")
+      symlinkSync(externalTarget, snapshotPath)
+      const symlinkStamp = writeVerifyStamp(dir, testHostIo, "impl/current")
+      expect(symlinkStamp.graphSnapshotSha256).toBeUndefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

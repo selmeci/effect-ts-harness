@@ -460,18 +460,23 @@ export const createWarmVitestWorker = async ({
   tracker,
   isolate = true,
 }) => {
-  const child = fork(WARM_WORKER_SCRIPT, [], {
-    cwd,
-    env: {
-      ...childBaseEnv,
-      HARNESS_WARM_MODE: "worker",
-      HARNESS_WARM_VITEST_NODE_ENTRY: vitestNodeEntry,
-      HARNESS_WARM_CWD: cwd,
-      HARNESS_WARM_TESTS_JSON: JSON.stringify(allTests),
-      HARNESS_WARM_ISOLATE: isolate ? "1" : "0",
-    },
-    stdio: ["ignore", "pipe", "pipe", "ipc"],
-  })
+  let child
+  try {
+    child = fork(WARM_WORKER_SCRIPT, [], {
+      cwd,
+      env: {
+        ...childBaseEnv,
+        HARNESS_WARM_MODE: "worker",
+        HARNESS_WARM_VITEST_NODE_ENTRY: vitestNodeEntry,
+        HARNESS_WARM_CWD: cwd,
+        HARNESS_WARM_TESTS_JSON: JSON.stringify(allTests),
+        HARNESS_WARM_ISOLATE: isolate ? "1" : "0",
+      },
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
+    })
+  } catch {
+    return null
+  }
   tracker.activeChildren.add(child)
 
   let tailStdout = ""

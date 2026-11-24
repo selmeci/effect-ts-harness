@@ -48,10 +48,12 @@ const restoreActiveMutationSync = () => {
   activeMutation = null
   if (cur.wroteSchema) {
     try {
-      const currentDisk = readFileSync(cur.fullPath, "utf8")
-      const diskSha = sha256Hex(currentDisk)
-      if (diskSha !== cur.mutatedSha256) {
-        return `[mutation-check] CRITICAL: Target '${cur.relFile}' was modified externally mid-run (sha256=${diskSha}); refusing to overwrite user edits. Preserving '${backupPath}'.`
+      if (!cur.writeFailed) {
+        const currentDisk = readFileSync(cur.fullPath, "utf8")
+        const diskSha = sha256Hex(currentDisk)
+        if (diskSha !== cur.mutatedSha256) {
+          return `[mutation-check] CRITICAL: Target '${cur.relFile}' was modified externally mid-run (sha256=${diskSha}); refusing to overwrite user edits. Preserving '${backupPath}'.`
+        }
       }
       writeFileSync(cur.fullPath, cur.originalSource, "utf8")
     } catch (err) {
@@ -348,14 +350,45 @@ const broadcastInvalidate = async (workerRefs, filesToInvalidate) => {
   )
 }
 
+const runFallbackStagePass = async ({
+  workerRefs,
+  targetTests,
+  mutantIds,
+  timeoutMs,
+  targetFilePath,
+  relFile,
+}) => {
+  if (mutantIds.length === 0 || !Array.isArray(targetTests) || targetTests.length === 0) {
+    return { results: [], baselineError: undefined }
+  }
+  const pass = await runTwoPhasePass({
+    workerRefs,
+    targetTests,
+    mutantIds,
+    timeoutMs,
+    targetFilePath,
+    relFile,
+    requireBaseline: true,
+  })
+  return pass.baselineError !== undefined
+    ? { results: [], baselineError: pass.baselineError }
+    : { results: pass.results, baselineError: undefined }
+}
+
 const fileReports = []
-const workerRefs = useWarmMode
-  ? await Promise.all(
-      Array.from({ length: concurrency }, async () => ({ current: await spawnWorker() })),
-    )
-  : []
+const workerRefs = []
 
 try {
+  if (useWarmMode) {
+    for (let i = 0; i < concurrency; i += 1) {
+      workerRefs.push({ current: null })
+    }
+    await Promise.all(
+      workerRefs.map(async (ref) => {
+        ref.current = await spawnWorker()
+      }),
+    )
+  }
   let prevFullPath = null
   for (const file of files) {
     activeMutation = {
@@ -365,6 +398,7 @@ try {
       originalSha256: file.originalSha256,
       mutatedSha256: file.mutatedSha256,
       wroteSchema: false,
+      writeFailed: false,
     }
     try {
       mkdirSync(dirname(backupPath), { recursive: true })
@@ -378,16 +412,22 @@ try {
         }),
         "utf8",
       )
-      writeFileSync(file.fullPath, file.schemaSource, "utf8")
       activeMutation.wroteSchema = true
+      writeFileSync(file.fullPath, file.schemaSource, "utf8")
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      restoreActiveMutationSync()
+      activeMutation.writeFailed = true
+      const cleanupErr = restoreActiveMutationSync()
+      const restoreError =
+        cleanupErr !== undefined
+          ? `[mutation-check] Failed to write mutated schema for '${file.relFile}': ${msg}; ${cleanupErr}`
+          : `[mutation-check] Failed to write mutated schema for '${file.relFile}': ${msg}`
       fileReports.push({
         relFile: file.relFile,
         primaryResults: [],
-        fallbackResults: [],
-        restoreError: `[mutation-check] Failed to write mutated schema for '${file.relFile}': ${msg}`,
+        scopedFallbackResults: [],
+        packageFallbackResults: [],
+        restoreError,
       })
       break
     }
@@ -405,40 +445,50 @@ try {
       requireBaseline: false,
     })
 
-    const survivingIds = primaryResults
+    const survivingAfterPrimary = primaryResults
       .filter((entry) => isCleanSurvivorResult(entry?.result))
       .map((entry) => entry.id)
 
-    let fallbackResults = []
-    let fallbackBaselineError
-    if (
-      survivingIds.length > 0 &&
-      Array.isArray(file.fallbackTests) &&
-      file.fallbackTests.length > 0
-    ) {
-      const fbPass = await runTwoPhasePass({
-        workerRefs,
-        targetTests: file.fallbackTests,
-        mutantIds: survivingIds,
-        timeoutMs: file.fallbackTimeoutMs,
-        targetFilePath: file.fullPath,
-        relFile: file.relFile,
-        requireBaseline: true,
-      })
-      if (fbPass.baselineError !== undefined) {
-        fallbackBaselineError = fbPass.baselineError
-      } else {
-        fallbackResults = fbPass.results
-      }
-    }
+    const scopedPass = await runFallbackStagePass({
+      workerRefs,
+      targetTests: file.scopedFallbackTests,
+      mutantIds: survivingAfterPrimary,
+      timeoutMs: file.scopedFallbackTimeoutMs ?? 30_000,
+      targetFilePath: file.fullPath,
+      relFile: file.relFile,
+    })
+    const scopedFallbackResults = scopedPass.results
+    const scopedBaselineError = scopedPass.baselineError
+
+    const killedInScoped = new Set(
+      scopedFallbackResults
+        .filter((entry) => entry?.result?._tag === "Exited" && entry.result.exitCode === 1)
+        .map((entry) => entry.id),
+    )
+    const survivingAfterScoped = survivingAfterPrimary.filter((id) => !killedInScoped.has(id))
+
+    const pkgPass =
+      scopedBaselineError === undefined
+        ? await runFallbackStagePass({
+            workerRefs,
+            targetTests: file.packageFallbackTests,
+            mutantIds: survivingAfterScoped,
+            timeoutMs: file.packageFallbackTimeoutMs ?? 30_000,
+            targetFilePath: file.fullPath,
+            relFile: file.relFile,
+          })
+        : { results: [], baselineError: undefined }
+    const packageFallbackResults = pkgPass.results
+    const packageBaselineError = pkgPass.baselineError
 
     const restoreErr = restoreActiveMutationSync()
     prevFullPath = file.fullPath
-    const reportErr = restoreErr ?? fallbackBaselineError
+    const reportErr = restoreErr ?? scopedBaselineError ?? packageBaselineError
     fileReports.push({
       relFile: file.relFile,
       primaryResults,
-      fallbackResults,
+      scopedFallbackResults,
+      packageFallbackResults,
       ...(reportErr !== undefined ? { restoreError: reportErr } : {}),
     })
     if (reportErr !== undefined) break

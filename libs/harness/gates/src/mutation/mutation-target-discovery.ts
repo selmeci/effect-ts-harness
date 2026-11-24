@@ -29,6 +29,8 @@ export type PackageTierClassification = "domain" | "core" | "contract" | "exclud
 
 export interface TestPartition {
   readonly primaryTests: ReadonlyArray<string>
+  readonly scopedFallbackTests: ReadonlyArray<string>
+  readonly packageFallbackTests: ReadonlyArray<string>
   readonly fallbackTests: ReadonlyArray<string>
 }
 

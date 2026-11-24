@@ -21,8 +21,6 @@ import * as HttpClientResponse from "effect/http/HttpClientResponse"
 import { match } from "ts-pattern"
 import { LocalDecisionModel, makeLocalDecisionModelLayer } from "../src/hook-fastpath.js"
 import {
-  GIT_FINGERPRINT_MAX_BUFFER_BYTES,
-  GIT_FINGERPRINT_STATUS_ARGS,
   appendHookTelemetryLite,
   findWorkspaceRootLite,
   type HookStdinReadResult,
@@ -169,6 +167,9 @@ describe("hook-io lite helpers and lazy LocalDecisionModel", () => {
             Option.none(),
           )
           expect(resolveHarnessStateDirLite(tempDir, { HARNESS_STATE_DIR: "bad\0dir" })).toEqual(
+            Option.none(),
+          )
+          expect(resolveHarnessStateDirLite(tempDir, { HARNESS_STATE_DIR: "/" })).toEqual(
             Option.none(),
           )
 
@@ -587,15 +588,24 @@ describe("hook-io lite helpers and lazy LocalDecisionModel", () => {
             stderr: "cached-stderr",
           })
 
-          // 3. Post-hit tracked edit invalidates cache and returns updated fingerprint
+          // 3. Routine tracked edit keeps cache hit; .env edit invalidates cache and returns updated fingerprint
           writeFile(join(workRepo, "README.md"), "modified\n")
-          const editedMiss = tryReadPreInvocationCacheLite({
+          const editedHit = tryReadPreInvocationCacheLite({
             repoRoot: workRepo,
             cliRepoRoot: cliRepo,
             env: {},
           })
-          expect(editedMiss._tag).toBe("Miss")
+          expect(editedHit._tag).toBe("Hit")
           writeFile(join(workRepo, "README.md"), "hello\n")
+
+          writeFile(join(workRepo, ".env"), "FOO=bar\n")
+          const envMiss = tryReadPreInvocationCacheLite({
+            repoRoot: workRepo,
+            cliRepoRoot: cliRepo,
+            env: {},
+          })
+          expect(envMiss._tag).toBe("Miss")
+          rmSync(join(workRepo, ".env"), { force: true })
 
           // 4. Whitespace-only OMNIGRAPH_URL does not trigger requireOllama on external repo
           const wsEnv = { OMNIGRAPH_URL: "   " }
@@ -965,13 +975,10 @@ describe("hook-io lite helpers and lazy LocalDecisionModel", () => {
   )
 
   it.effect(
-    "excludes .nx/cache/terminalOutputs and configures >=16MB git maxBuffer without breaking stamp-included ignored invalidation",
+    "keeps session cache hit across .nx and ignored source writes while invalidating on .harness metadata changes",
     () =>
       withTempDir("hook-io-nx-", (dir) =>
         Effect.sync(() => {
-          expect(GIT_FINGERPRINT_MAX_BUFFER_BYTES).toBeGreaterThanOrEqual(16 * 1024 * 1024)
-          expect(GIT_FINGERPRINT_STATUS_ARGS).toContain("--ignored=matching")
-
           initGitRepo(dir)
           writeFile(join(dir, ".gitignore"), ".nx/\nlibs/demo/src/ignored.ts\n")
           execFileSync("git", ["add", ".gitignore"], { cwd: dir, stdio: "ignore" })
@@ -1027,14 +1034,22 @@ describe("hook-io lite helpers and lazy LocalDecisionModel", () => {
           expect(hitAfterNx._tag).toBe("Hit")
 
           writeFile(join(dir, "libs", "demo", "src", "ignored.ts"), "export const x = 42\n")
-          const missAfterSrc = tryReadPreInvocationCacheLite({
+          const hitAfterIgnoredSrc = tryReadPreInvocationCacheLite({
             repoRoot: dir,
             cliRepoRoot: dir,
             env: {},
           })
-          expect(missAfterSrc._tag).toBe("Miss")
+          expect(hitAfterIgnoredSrc._tag).toBe("Hit")
+
+          writeFile(join(dir, ".harness", "verify-stamp.json"), JSON.stringify({ ok: true }))
+          const missAfterHarnessState = tryReadPreInvocationCacheLite({
+            repoRoot: dir,
+            cliRepoRoot: dir,
+            env: {},
+          })
+          expect(missAfterHarnessState._tag).toBe("Miss")
           const nextFp = Option.getOrThrow(
-            match(missAfterSrc)
+            match(missAfterHarnessState)
               .with({ _tag: "Miss" }, ({ fingerprint }) => fingerprint)
               .with({ _tag: "Hit" }, () => Option.none<string>())
               .exhaustive(),

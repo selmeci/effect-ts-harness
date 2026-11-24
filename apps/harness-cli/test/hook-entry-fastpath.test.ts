@@ -817,40 +817,90 @@ describe("hook-entry.ts fast-path", () => {
 
       writeFileSync(join(dir, "src-tracked.ts"), "export const v = 2\n", "utf8")
       const fpEdited = assertParity("tracked edit")
-      expect(fpEdited).not.toBe(fpClean)
+      expect(fpEdited).toBe(fpClean)
 
       execFileSync("git", ["mv", "src-tracked.ts", "src-renamed.ts"], {
         cwd: dir,
         encoding: "utf8",
       })
       const fpRenamed = assertParity("renamed file")
-      expect(fpRenamed).not.toBe(fpEdited)
+      expect(fpRenamed).toBe(fpClean)
 
       writeFileSync(join(dir, "untracked.ts"), "export const u = 1\n", "utf8")
       const fpUntracked = assertParity("untracked file")
-      expect(fpUntracked).not.toBe(fpRenamed)
+      expect(fpUntracked).toBe(fpClean)
 
       mkdirSync(join(dir, ".nx"), { recursive: true })
       writeFileSync(join(dir, ".nx", "cache.bin"), "ignored-nx", "utf8")
       const fpNxIgnored = assertParity(".nx/ ignored file")
-      expect(fpNxIgnored).toBe(fpUntracked)
+      expect(fpNxIgnored).toBe(fpClean)
 
       writeFileSync(join(dir, "libs", "demo", "src", "ignored.ts"), "export const i = 1\n", "utf8")
       const fpDemoIgnored = assertParity("libs/demo/src/ ignored file")
-      expect(fpDemoIgnored).not.toBe(fpNxIgnored)
+      expect(fpDemoIgnored).toBe(fpClean)
 
       writeFileSync(join(harnessDir, "verify-stamp.json"), JSON.stringify({ ok: true }), "utf8")
-      const fpStateUpdated = assertParity(".harness/ state-file update")
-      expect(fpStateUpdated).not.toBe(fpDemoIgnored)
+      const fpVerifyStamp = assertParity(".harness/verify-stamp.json update")
+      expect(fpVerifyStamp).not.toBe(fpClean)
 
-      mkdirSync(join(dir, "libs", "demo", "src", "nested"), { recursive: true })
+      writeFileSync(join(harnessDir, "friction-log.jsonl"), '{"kind":"test"}\n', "utf8")
+      const fpFriction = assertParity(".harness/friction-log.jsonl update")
+      expect(fpFriction).not.toBe(fpVerifyStamp)
+
       writeFileSync(
-        join(dir, "libs", "demo", "src", "nested", "deep.ts"),
-        "export const d = 1\n",
+        join(harnessDir, "last-done.json"),
+        JSON.stringify({ completedAt: "2026-01-01T00:00:00Z" }),
         "utf8",
       )
-      const fpNestedIgnored = assertParity("nested ignored dir file")
-      expect(fpNestedIgnored).not.toBe(fpStateUpdated)
+      const fpLastDone = assertParity(".harness/last-done.json update")
+      expect(fpLastDone).not.toBe(fpFriction)
+
+      writeFileSync(join(harnessDir, "graph-snapshot.json"), JSON.stringify({ nodes: [] }), "utf8")
+      const fpGraphSnap = assertParity(".harness/graph-snapshot.json update")
+      expect(fpGraphSnap).not.toBe(fpLastDone)
+
+      writeFileSync(join(harnessDir, "mutate-stamp.json"), JSON.stringify({ passed: true }), "utf8")
+      const fpMutateStamp = assertParity(".harness/mutate-stamp.json update")
+      expect(fpMutateStamp).not.toBe(fpGraphSnap)
+
+      writeFileSync(
+        join(harnessDir, "plan-graph-snapshot.json"),
+        JSON.stringify({ nodes: [], edges: [] }),
+        "utf8",
+      )
+      const fpPlanSnap = assertParity(".harness/plan-graph-snapshot.json update")
+      expect(fpPlanSnap).not.toBe(fpMutateStamp)
+
+      writeFileSync(
+        join(harnessDir, "graph-head.json"),
+        JSON.stringify({ headSha: "1111111111111111111111111111111111111111", gitBranch: "main" }),
+        "utf8",
+      )
+      const fpGraphHead = assertParity(".harness/graph-head.json update")
+      expect(fpGraphHead).not.toBe(fpPlanSnap)
+
+      writeFileSync(join(dir, ".env"), "HARNESS_TEST_ENV=1\n", "utf8")
+      const fpEnvFile = assertParity(".env update")
+      expect(fpEnvFile).not.toBe(fpGraphHead)
+
+      writeFileSync(
+        join(dir, "tsconfig.base.json"),
+        JSON.stringify({
+          compilerOptions: { strict: true, plugins: [{ name: "@effect/language-service" }] },
+        }),
+        "utf8",
+      )
+      const fpTsconfig = assertParity("tsconfig.base.json update")
+      expect(fpTsconfig).not.toBe(fpEnvFile)
+
+      execFileSync("git", ["add", "src-renamed.ts", "untracked.ts"], { cwd: dir, encoding: "utf8" })
+      execFileSync("git", ["commit", "-m", "commit changes"], { cwd: dir, encoding: "utf8" })
+      const fpCommitted = assertParity("new git commit")
+      expect(fpCommitted).not.toBe(fpTsconfig)
+
+      execFileSync("git", ["checkout", "-b", "feat/lean-fp"], { cwd: dir, encoding: "utf8" })
+      const fpBranch = assertParity("branch switch")
+      expect(fpBranch).not.toBe(fpCommitted)
     })
 
     it("miss avoids @effect/ai-typesafe and warm hit loads fewer modules without fallback", () => {
