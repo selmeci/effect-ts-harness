@@ -143,6 +143,7 @@ export class ShipGateFailedError extends Schema.TaggedError<ShipGateFailedError>
     stderrSummary: GateStderrSummary,
     circuitBreakerStatus: CircuitBreakerStatus,
     escalationMessage: Schema.optional(ShipFailureMessage),
+    durationMs: Schema.optional(GateDurationMs),
   },
 ) {
   override get message(): string {
@@ -175,13 +176,14 @@ export class MutationRestoreError extends Schema.TaggedError<MutationRestoreErro
   "MutationRestoreError",
   {
     expected: WorkspaceTreeHash,
-    actual: WorkspaceTreeHash,
+    actual: Schema.optional(WorkspaceTreeHash),
     detail: Schema.optional(ShipFailureMessage),
   },
 ) {
   override get message(): string {
+    const actualPart = this.actual !== undefined ? `got ${this.actual}` : "actual hash unavailable"
     const detailPart = this.detail !== undefined ? ` (${this.detail})` : ""
-    return `Mutation backup restore or tree check failed: expected ${this.expected}, got ${this.actual}${detailPart}`
+    return `Mutation backup restore or tree check failed: expected ${this.expected}, ${actualPart}${detailPart}`
   }
 }
 
@@ -341,17 +343,54 @@ export const WorkflowShipResponse = Schema.Struct({
 })
 export type WorkflowShipResponse = typeof WorkflowShipResponse.Type
 
+const MAX_FAILURE_MESSAGE_CHARS = 2048
+
+const formatBoundedShipGateFailure = (error: ShipGateFailedError): string => {
+  const full = error.message.trim()
+  if (full.length < MAX_FAILURE_MESSAGE_CHARS) {
+    return full
+  }
+  const breakerNote = match(error.circuitBreakerStatus)
+    .with("tripped", () => " [circuit breaker tripped]")
+    .with("clear", () => "")
+    .exhaustive()
+  const prefix = `Ship gate '${error.stage}' failed with exit code ${error.exitCode}${breakerNote}`
+  const escSuffix = error.escalationMessage !== undefined ? ` — ${error.escalationMessage}` : ""
+  const stderrSeparator = ": "
+  const stderrBudget =
+    MAX_FAILURE_MESSAGE_CHARS - prefix.length - escSuffix.length - stderrSeparator.length
+  if (stderrBudget <= 0) {
+    const withoutStderr = `${prefix}${escSuffix}`
+    if (withoutStderr.length < MAX_FAILURE_MESSAGE_CHARS) {
+      return withoutStderr
+    }
+    const escBudget = MAX_FAILURE_MESSAGE_CHARS - prefix.length
+    return `${prefix}${escSuffix.slice(0, escBudget)}`.trim()
+  }
+  const stderrTail = error.stderrSummary.slice(-stderrBudget)
+  return `${prefix}${stderrSeparator}${stderrTail}${escSuffix}`.trim()
+}
+
+const formatBoundedMutationRestore = (error: MutationRestoreError): string => {
+  const full = error.message.trim()
+  if (full.length < MAX_FAILURE_MESSAGE_CHARS) {
+    return full
+  }
+  const actualPart = error.actual !== undefined ? `got ${error.actual}` : "actual hash unavailable"
+  const base = `Mutation backup restore or tree check failed: expected ${error.expected}, ${actualPart}`
+  const detailBudget = MAX_FAILURE_MESSAGE_CHARS - base.length - 3
+  const detailText = error.detail ?? ""
+  return `${base} (${detailText.slice(-detailBudget)})`.trim()
+}
+
 /** Extracts a typed `ShipWorkflowError` message safely as a bounded `ShipFailureMessage`. */
 export const toShipFailureMessage = (error: ShipWorkflowError): ShipFailureMessage => {
-  const raw = match(error)
-    .with(
-      { _tag: "ShipGateFailedError" },
-      { _tag: "ShipTreeMismatchError" },
-      { _tag: "MutationRestoreError" },
-      { _tag: "ShipTreeDriftError" },
-      (e) => e.message,
+  const bounded = match(error)
+    .with({ _tag: "ShipGateFailedError" }, formatBoundedShipGateFailure)
+    .with({ _tag: "MutationRestoreError" }, formatBoundedMutationRestore)
+    .with({ _tag: "ShipTreeMismatchError" }, { _tag: "ShipTreeDriftError" }, (e) =>
+      e.message.trim().slice(0, MAX_FAILURE_MESSAGE_CHARS).trim(),
     )
     .exhaustive()
-  const sanitized = raw.trim().slice(0, 2048).trim()
-  return ShipFailureMessage.make(sanitized.length > 0 ? sanitized : "Ship workflow failed")
+  return ShipFailureMessage.make(bounded.length > 0 ? bounded : "Ship workflow failed")
 }

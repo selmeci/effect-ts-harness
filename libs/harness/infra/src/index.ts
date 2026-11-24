@@ -245,10 +245,13 @@ export {
 } from "./workflow/worktree-port-live.js"
 export {
   computeTreeHashImpl,
+  createShipActiveGateController,
   executeStageCommandImpl,
   makeShipGateRunnerLayer,
   recoverMutationBackupImpl,
+  reportStageProgressImpl,
   ShipGateRunnerLive,
+  type ShipActiveGateController,
   type ShipGateRunnerOptions,
 } from "./workflow/ship-gate-runner-live.js"
 export {

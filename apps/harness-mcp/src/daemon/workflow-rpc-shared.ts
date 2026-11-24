@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto"
 import { Cause, Context, Effect, Exit, Option, Schema, Semaphore, SynchronizedRef } from "effect"
 import { WorkflowEngine } from "effect/workflow"
 import { match } from "ts-pattern"
@@ -162,11 +161,6 @@ const RebuildRpcGateHeldRef = Context.Reference<boolean>("WorkflowRpcDaemon/Rebu
   defaultValue: () => false,
 })
 
-const toWorktreeShipFallbackRunId = (worktreeRoot: AbsoluteRepoRoot): WorkflowRunId => {
-  const hashHex = createHash("sha256").update(worktreeRoot).digest("hex").slice(0, 16)
-  return WorkflowRunId.make(`wt-${hashHex}`)
-}
-
 const withRebuildRpcGate = <A, E>(
   runtime: WorkflowDaemonRuntime,
   effect: Effect.Effect<A, E>,
@@ -194,14 +188,6 @@ const acquireMutexFromRef = <K>(
     return Effect.succeed([sem, new Map(map).set(key, sem)] as const)
   })
 
-const acquireWorktreeShipSemaphore = (
-  runtime: WorkflowDaemonRuntime,
-  worktreeRoot: AbsoluteRepoRoot,
-): Effect.Effect<Semaphore.Semaphore> =>
-  runtime.shipWorktreeMutexesRef !== undefined
-    ? acquireMutexFromRef(runtime.shipWorktreeMutexesRef, worktreeRoot)
-    : acquireMutexFromRef(runtime.runMutexesRef, toWorktreeShipFallbackRunId(worktreeRoot))
-
 /** Serializes RPC operations targeting the same `runId` under `rebuildRpcGateSemaphore`. */
 export const withRunLock = <A, E>(
   runtime: WorkflowDaemonRuntime,
@@ -226,7 +212,7 @@ export const withWorktreeShipLock = <A, E>(
 ): Effect.Effect<A, E> =>
   withRebuildRpcGate(
     runtime,
-    acquireWorktreeShipSemaphore(runtime, worktreeRoot).pipe(
+    acquireMutexFromRef(runtime.shipWorktreeMutexesRef, worktreeRoot).pipe(
       Effect.flatMap((sem) => sem.withPermit(effect)),
     ),
   )

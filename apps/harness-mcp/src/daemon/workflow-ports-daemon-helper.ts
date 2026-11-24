@@ -9,6 +9,7 @@ import type {
 } from "@harness/contract"
 import type { OmnigraphClient } from "@harness/graph"
 import {
+  type ShipActiveGateController,
   makeShipAttemptStoreLayer,
   makeShipGateRunnerLayer,
   makeUnitVerifierLayer,
@@ -109,6 +110,7 @@ export const buildWorkflowPortsLayer = (
   runLock: <A, E>(runId: WorkflowRunId, effect: Effect.Effect<A, E>) => Effect.Effect<A, E>,
   readGate: <A, E>(effect: Effect.Effect<A, E>) => Effect.Effect<A, E>,
   shipProgressListeners: Map<string, (event: ShipStreamProgressEvent) => void>,
+  activeGateController?: ShipActiveGateController,
 ): Layer.Layer<WorkflowPortsServices> => {
   const readModelOptions: WorkflowReadModelOptions = {
     repoRoot,
@@ -146,6 +148,7 @@ export const buildWorkflowPortsLayer = (
         ...(options.shipGateRunCommand !== undefined
           ? { runCommand: options.shipGateRunCommand }
           : {}),
+        ...(activeGateController !== undefined ? { activeGateController } : {}),
         onProgress: (event) => {
           const cb = shipProgressListeners.get(`${event.runId}:${event.attempt}`)
           cb?.(event)

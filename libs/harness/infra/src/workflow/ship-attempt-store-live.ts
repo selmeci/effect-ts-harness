@@ -1,4 +1,5 @@
 import { Effect, Layer, Result, Schema } from "effect"
+import { match } from "ts-pattern"
 import {
   AbsoluteRepoRoot,
   type AllocateShipAttemptInput,
@@ -272,6 +273,35 @@ export const updateShipAttemptStatusImpl = Effect.fn("ShipAttemptStore.updateSta
           }
 
           const current = yield* decodeShipAttemptRowForCas(UPDATE_OPERATION, firstRow)
+          yield* match(current.status)
+            .with("running", () =>
+              match(input.status)
+                .with("passed", "failed", () => Effect.void)
+                .with("running", () =>
+                  Effect.fail<WorkflowStoreAttemptFailure>({
+                    _tag: "WorkflowStoreAttemptFailure",
+                    operation: UPDATE_OPERATION,
+                    cause: new WorkflowStoreUnavailableError({
+                      operation: UPDATE_OPERATION,
+                      reason: toBoundedReason("Invalid transition 'running' -> 'running'"),
+                    }),
+                  }),
+                )
+                .exhaustive(),
+            )
+            .with("passed", "failed", (terminalStatus) =>
+              Effect.fail<WorkflowStoreAttemptFailure>({
+                _tag: "WorkflowStoreAttemptFailure",
+                operation: UPDATE_OPERATION,
+                cause: new WorkflowStoreUnavailableError({
+                  operation: UPDATE_OPERATION,
+                  reason: toBoundedReason(
+                    `Cannot transition terminal WfShipAttempt '${shipKey}' from '${terminalStatus}' to '${input.status}'`,
+                  ),
+                }),
+              }),
+            )
+            .exhaustive()
           const updatedMs = WorkflowTimestampMs.make(Math.max(0, Math.floor(nowMs())))
 
           yield* invokeWorkflowStoreQueryOnce({

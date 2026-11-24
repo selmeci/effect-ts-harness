@@ -2,7 +2,18 @@ import * as nodeFs from "node:fs"
 import * as net from "node:net"
 import * as nodePath from "node:path"
 import { NodeServices } from "@effect/platform-node"
-import { Cause, Effect, FileSystem, Layer, Option, Path, Queue, Schema, type Scope } from "effect"
+import {
+  Cause,
+  Effect,
+  Fiber,
+  FileSystem,
+  Layer,
+  Option,
+  Path,
+  Queue,
+  Schema,
+  type Scope,
+} from "effect"
 import { match } from "ts-pattern"
 import {
   DaemonServerError,
@@ -326,6 +337,19 @@ const handleDefaultServerLine = (line: string, socket: net.Socket): void => {
     .exhaustive()
 }
 
+const applySocketTimeout = (
+  socket: net.Socket,
+  ms: number,
+  onTimeout: () => void = () => {
+    socket.destroy()
+  },
+): void => {
+  if (!socket.destroyed) {
+    socket.removeAllListeners("timeout")
+    socket.setTimeout(ms, onTimeout)
+  }
+}
+
 const createDaemonNetServer = (
   openSockets: Set<net.Socket>,
   runLineHandler?: (line: string, socket: net.Socket) => void,
@@ -336,9 +360,7 @@ const createDaemonNetServer = (
     socket.once("close", () => {
       openSockets.delete(socket)
     })
-    socket.setTimeout(socketTimeoutMs, () => {
-      socket.destroy()
-    })
+    applySocketTimeout(socket, socketTimeoutMs)
     socket.on("error", () => {
       socket.destroy()
     })
@@ -400,15 +422,38 @@ const processDaemonQueuedLine = (
         }
       },
       setSocketTimeoutMs: (ms: number) => {
-        if (!socket.destroyed) {
-          socket.removeAllListeners("timeout")
-          socket.setTimeout(ms, () => {
-            socket.destroy()
-          })
-        }
+        applySocketTimeout(socket, ms)
       },
     }
-    const exit = yield* Effect.exit(Effect.suspend(() => lineHandler(line, controls)))
+    let clientClosed = false
+    const handlerFiber = yield* Effect.suspend(() => lineHandler(line, controls)).pipe(
+      Effect.forkChild,
+    )
+    const closeWatcherFiber = yield* Effect.callback<void>((resume) => {
+      const onClose = () => {
+        clientClosed = true
+        resume(Effect.void)
+      }
+      if (socket.destroyed || socket.closed) {
+        onClose()
+        return Effect.void
+      }
+      socket.once("close", onClose)
+      return Effect.sync(() => {
+        socket.removeListener("close", onClose)
+      })
+    }).pipe(
+      Effect.andThen(Fiber.interrupt(handlerFiber)),
+      Effect.forkChild({ startImmediately: true }),
+    )
+    const exit = yield* Fiber.await(handlerFiber).pipe(
+      Effect.onInterrupt(() =>
+        Effect.all([Fiber.interrupt(closeWatcherFiber), Fiber.interrupt(handlerFiber)], {
+          concurrency: "unbounded",
+        }).pipe(Effect.ignore),
+      ),
+      Effect.ensuring(Fiber.interrupt(closeWatcherFiber).pipe(Effect.ignore)),
+    )
     yield* match(exit)
       .with({ _tag: "Success" }, ({ value: responseLine }) =>
         Effect.sync(() => {
@@ -421,7 +466,7 @@ const processDaemonQueuedLine = (
       )
       .with({ _tag: "Failure" }, ({ cause }) => {
         if (isPureInterruptCause(cause)) {
-          return Effect.interrupt
+          return clientClosed ? Effect.void : Effect.interrupt
         }
         return Effect.sync(() => {
           const causeText = Cause.pretty(cause)
@@ -509,7 +554,11 @@ const makeUnixSocketDaemonLayer = (
               }).pipe(Effect.ignore),
             )
             runLineHandler = (line: string, socket: net.Socket): void => {
-              const targetQueue = isShipCommandLine(line) ? shipQueue : lineQueue
+              const isShip = isShipCommandLine(line)
+              if (isShip) {
+                applySocketTimeout(socket, SHIP_DAEMON_SERVER_SOCKET_TIMEOUT_MS)
+              }
+              const targetQueue = isShip ? shipQueue : lineQueue
               if (!Queue.offerUnsafe(targetQueue, { socket, line })) {
                 if (!socket.destroyed && socket.writable) {
                   socket.end(

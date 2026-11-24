@@ -45,7 +45,7 @@ The plugin registers four lifecycle hooks to enforce safety constraints and inde
    - Blocks direct writes to `.harness/verify-stamp.json` (stamp forgery prevention).
    - Blocks reads of secret files and protected harness runtime state (`daemon.sock`, `auth-tokens.json`, `<git-common-dir>/harness/**`).
    - Blocks destructive shell commands (`git push --force`, `rm -rf`).
-   - When `HARNESS_UNIT_WORKER=1` is set on unit worker invocations (automatic runner spawning lands in WF-5), blocks recursive `harness workflow start|resume|abort|doctor|complete --phase llm`, `harness done`, and direct access to `daemon.sock` or `auth-tokens.json`.
+   - When `HARNESS_UNIT_WORKER=1` is set on unit worker invocations (automatic runner spawning lands in WF-5), blocks recursive `harness workflow start|resume|ship|abort|doctor|complete --phase llm`, `harness done`, and direct access to `daemon.sock` or `auth-tokens.json`.
    - Requires explicit human approval for `alchemy deploy` and `alchemy destroy`.
 3. **`PostToolUse` (`harness ingest --format=antigravity`):**
    Matcher `edit_file|write_file|replace_file_content|multi_replace_file_content|write_to_file` — executes immediately following file write or replacement operations. Incrementally parses modified TypeScript ASTs, EARS specifications, and ADR documents into `.harness/index.sqlite` and the resident Omnigraph property graph.

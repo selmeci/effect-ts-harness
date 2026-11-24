@@ -4,16 +4,20 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Result } from "effect"
+import { Cause, Deferred, Effect, Fiber, Result } from "effect"
 import { match } from "ts-pattern"
 import {
   AbsoluteRepoRoot,
   ErrorReasonMessage,
+  GateDurationMs,
   GateExitCode,
   MutationRestoreError,
   SHIP_STAGES,
   ShipAttempt,
+  ShipErrorTag,
+  ShipFailureMessage,
   ShipGateFailedError,
+  ShipStageFailed,
   ShipStagePassed,
   ShipStreamProgressEvent,
   WORKFLOW_TIMEOUT_BUDGETS,
@@ -22,6 +26,7 @@ import {
   WorkspaceFsError,
   WorkspaceFsOperation,
   WorkspaceTreeHash,
+  toShipFailureMessage,
 } from "@harness/contract"
 import { appendFrictionEvent, readFrictionEvents } from "@harness/gates"
 import { ShipGateRunner } from "@harness/service"
@@ -29,10 +34,12 @@ import type { SyncHostExecResult, SyncHostIo } from "@harness/service/host-io"
 import { nodeSyncHostIo } from "../src/node-host-io.js"
 import {
   computeTreeHashImpl,
+  createShipActiveGateController,
   executeStageCommandImpl,
   extractDoneStdoutBlockReason,
   makeShipGateRunnerLayer,
   recoverMutationBackupImpl,
+  reportStageProgressImpl,
   resolveShipFormatCheckFiles,
   resolveShipGateCommand,
 } from "../src/workflow/ship-gate-runner-live.js"
@@ -271,10 +278,15 @@ describe("ShipGateRunnerLive & pure helpers", () => {
           const normHostIo: SyncHostIo = {
             ...nodeSyncHostIo,
             execFileSync: (_cmd, args) => {
-              if (args[0] === "rev-parse")
-                return { _tag: "Exited", exitCode: 0, stdout: "abc\n", stderr: "" }
-              if (args[0] === "merge-base")
-                return { _tag: "Exited", exitCode: 0, stdout: "def\n", stderr: "" }
+              if (args[0] === "symbolic-ref" || args[0] === "config") {
+                return { _tag: "Exited", exitCode: 1, stdout: "", stderr: "" }
+              }
+              if (args[0] === "rev-parse") {
+                return { _tag: "Exited", exitCode: 0, stdout: `${"a".repeat(40)}\n`, stderr: "" }
+              }
+              if (args[0] === "merge-base") {
+                return { _tag: "Exited", exitCode: 0, stdout: `${"b".repeat(40)}\n`, stderr: "" }
+              }
               if (args.includes("ls-files")) {
                 return { _tag: "Exited", exitCode: 0, stdout: ".\\./src\\staged.ts\0", stderr: "" }
               }
@@ -311,7 +323,6 @@ describe("ShipGateRunnerLive & pure helpers", () => {
           expect(failed?.stage).toBe("format-check")
         }
 
-        const events: Array<ShipStreamProgressEvent> = []
         const stageErr = yield* Effect.flip(
           executeStageCommandImpl(
             {
@@ -331,14 +342,12 @@ describe("ShipGateRunnerLive & pure helpers", () => {
                   stderr: "",
                 }),
               },
-              onProgress: (ev) => events.push(ev),
             },
           ),
         )
         expect(stageErr).toBeInstanceOf(ShipGateFailedError)
         expect(stageErr.stderrSummary).toContain("ENOBUFS")
-        expect(events).toHaveLength(2)
-        expect(events[1]?._tag).toBe("StageFinished")
+        expect(stageErr.durationMs).toBeDefined()
       }),
     ),
   )
@@ -485,7 +494,20 @@ describe("ShipGateRunnerLive & pure helpers", () => {
             },
           })
 
-          // 0 changed files -> format-check passes without spawning
+          // 0 changed files -> format-check passes without spawning; reportStageProgress streams to onProgress
+          const startedEvent = ShipStreamProgressEvent.cases.StageStarted.make({
+            runId: makeRunId(),
+            attempt: makeAttempt(),
+            stage: "format-check",
+          })
+          const finishedEvent = ShipStreamProgressEvent.cases.StageFinished.make({
+            runId: makeRunId(),
+            attempt: makeAttempt(),
+            progress: ShipStagePassed.make({
+              stage: "format-check",
+              durationMs: GateDurationMs.make(25),
+            }),
+          })
           yield* Effect.gen(function* () {
             const runner = yield* ShipGateRunner
             for (const stage of SHIP_STAGES) {
@@ -497,6 +519,8 @@ describe("ShipGateRunnerLive & pure helpers", () => {
               })
               expect(res).toEqual(ShipStagePassed.make({ stage, durationMs: res.durationMs }))
             }
+            yield* runner.reportStageProgress(startedEvent)
+            yield* runner.reportStageProgress(finishedEvent)
           }).pipe(Effect.provide(layer))
 
           // format-check skipped -> 5 commands spawned
@@ -513,10 +537,7 @@ describe("ShipGateRunnerLive & pure helpers", () => {
             expect(call.env.HARNESS_STATE_DIR).toBeUndefined()
             expect(call.timeoutMs).toBe(WORKFLOW_TIMEOUT_BUDGETS.shipGateCommandMs)
           }
-          // 6 StageStarted + 6 StageFinished events
-          expect(events).toHaveLength(12)
-          expect(events[0]?._tag).toBe("StageStarted")
-          expect(events[1]?._tag).toBe("StageFinished")
+          expect(events).toEqual([startedEvent, finishedEvent])
         }),
       ),
   )
@@ -528,8 +549,7 @@ describe("ShipGateRunnerLive & pure helpers", () => {
         Effect.gen(function* () {
           initRepoWithMain(repoRoot)
 
-          // 1. done exitCode 0 with {"decision":"block"} fails
-          const doneEvents: Array<ShipStreamProgressEvent> = []
+          // 1. done exitCode 0 with {"decision":"block"} fails with durationMs populated
           const doneFail = yield* Effect.flip(
             executeStageCommandImpl(
               {
@@ -540,7 +560,13 @@ describe("ShipGateRunnerLive & pure helpers", () => {
                 repoRoot,
               },
               {
-                onProgress: (ev) => doneEvents.push(ev),
+                nowMs: (() => {
+                  let t = 100
+                  return () => {
+                    t += 35
+                    return t
+                  }
+                })(),
                 runCommand: () =>
                   Effect.succeed({
                     _tag: "Exited",
@@ -555,16 +581,7 @@ describe("ShipGateRunnerLive & pure helpers", () => {
           expect(doneFail.exitCode).toBe(GateExitCode.make(1))
           expect(doneFail.stderrSummary).toBe("Verify stamp missing")
           expect(doneFail.circuitBreakerStatus).toBe("clear")
-          expect(doneEvents).toHaveLength(2)
-          const lastDoneEvent = doneEvents[1]
-          expect(lastDoneEvent?._tag).toBe("StageFinished")
-          if (lastDoneEvent !== undefined) {
-            const progressTag = match(lastDoneEvent)
-              .with({ _tag: "StageFinished" }, ({ progress }) => progress._tag)
-              .with({ _tag: "StageStarted" }, () => "StageStarted" as const)
-              .exhaustive()
-            expect(progressTag).toBe("Failed")
-          }
+          expect(doneFail.durationMs).toBe(GateDurationMs.make(35))
 
           // 2. verify stage that already wrote verify_failure to friction-log.jsonl is NOT double-counted
           const verifyFail = yield* Effect.flip(
@@ -670,7 +687,7 @@ describe("ShipGateRunnerLive & pure helpers", () => {
   )
 
   it.live(
-    "strips HARNESS_WORKTREE_ID/HARNESS_STATE_DIR in computeTreeHashImpl and uses sentinel hash on recoverMutationBackupImpl hash failure",
+    "strips HARNESS_WORKTREE_ID/HARNESS_STATE_DIR in computeTreeHashImpl and omits actual hash when recoverMutationBackupImpl hash fails",
     () =>
       withTempRepo((repoRoot) =>
         Effect.gen(function* () {
@@ -694,7 +711,7 @@ describe("ShipGateRunnerLive & pure helpers", () => {
           )
           expect(envHash).toBe(cleanHash)
 
-          // Corrupt backup + post-recovery tree hash failure -> sentinel != expectedTreeHash
+          // Corrupt backup + post-recovery tree hash failure -> actual is omitted (undefined)
           mkdirSync(join(repoRoot, ".harness"), { recursive: true })
           writeFileSync(join(repoRoot, ".harness", "mutation-backup.json"), "{corrupt")
           const failingHashHostIo: typeof nodeSyncHostIo = {
@@ -713,19 +730,9 @@ describe("ShipGateRunnerLive & pure helpers", () => {
             ),
           )
           expect(err1).toBeInstanceOf(MutationRestoreError)
-          expect(err1.actual).toBe(WorkspaceTreeHash.make("0".repeat(64)))
-          expect(err1.actual).not.toBe(err1.expected)
+          expect(err1.actual).toBeUndefined()
+          expect(err1.message).toContain("actual hash unavailable")
           expect(err1.detail).toContain("Post-recovery tree hash failed")
-
-          // When expectedTreeHash happens to be all zeros, fallback switches to "f".repeat(64)
-          const zeroHash = WorkspaceTreeHash.make("0".repeat(64))
-          const err2 = yield* Effect.flip(
-            recoverMutationBackupImpl(
-              { runId: makeRunId(), attempt: makeAttempt(), expectedTreeHash: zeroHash, repoRoot },
-              { hostIo: failingHashHostIo },
-            ),
-          )
-          expect(err2.actual).toBe(WorkspaceTreeHash.make("f".repeat(64)))
         }),
       ),
   )
@@ -864,8 +871,7 @@ describe("ShipGateRunnerLive & pure helpers", () => {
             return val
           }
 
-          // 1. Over-length 4097-char stderr, exitCode > 255 -> 255, negative duration -> 0, StageFinished.detail <= 2048
-          const events1: Array<ShipStreamProgressEvent> = []
+          // 1. Over-length 4097-char stderr, exitCode > 255 -> 255, negative duration -> 0, toShipFailureMessage <= 2048
           const hugeErr = `HEAD${"x".repeat(4093)}`
           expect(hugeErr.length).toBe(4097)
           const errBig = yield* Effect.flip(
@@ -879,34 +885,18 @@ describe("ShipGateRunnerLive & pure helpers", () => {
               },
               {
                 nowMs,
-                onProgress: (ev) => events1.push(ev),
                 runCommand: () =>
                   Effect.succeed({ _tag: "Exited", exitCode: 999, stdout: "", stderr: hugeErr }),
               },
             ),
           )
           expect(errBig.exitCode).toBe(GateExitCode.make(255))
+          expect(errBig.durationMs).toBe(GateDurationMs.make(0))
           expect(errBig.stderrSummary.length).toBe(4096)
           expect(errBig.stderrSummary.startsWith("EAD")).toBe(true)
-          const finished1 = events1[1]
-          expect(finished1?._tag).toBe("StageFinished")
-          if (finished1 !== undefined) {
-            match(finished1)
-              .with({ _tag: "StageFinished" }, ({ progress }) => {
-                expect(progress.durationMs).toBe(0)
-                match(progress)
-                  .with({ _tag: "Failed" }, (failed) => {
-                    expect(failed.detail.length).toBe(2048)
-                  })
-                  .with({ _tag: "Passed" }, () => expect.unreachable())
-                  .exhaustive()
-              })
-              .with({ _tag: "StageStarted" }, () => expect.unreachable())
-              .exhaustive()
-          }
+          expect(toShipFailureMessage(errBig).length).toBe(2048)
 
-          // Boundary: 2049-char stderr fits within stderrSummary (4096) while StageFinished.detail truncates to 2048
-          const events2049: Array<ShipStreamProgressEvent> = []
+          // Boundary: 2049-char stderr fits within stderrSummary (4096) while toShipFailureMessage truncates to 2048
           const err2049 = yield* Effect.flip(
             executeStageCommandImpl(
               {
@@ -917,7 +907,6 @@ describe("ShipGateRunnerLive & pure helpers", () => {
                 treeHash: makeSampleHash(),
               },
               {
-                onProgress: (ev) => events2049.push(ev),
                 runCommand: () =>
                   Effect.succeed({
                     _tag: "Exited",
@@ -929,18 +918,7 @@ describe("ShipGateRunnerLive & pure helpers", () => {
             ),
           )
           expect(err2049.stderrSummary.length).toBe(2049)
-          const fin2049 = events2049[1]
-          if (fin2049 !== undefined) {
-            match(fin2049)
-              .with({ _tag: "StageFinished" }, ({ progress }) =>
-                match(progress)
-                  .with({ _tag: "Failed" }, (failed) => expect(failed.detail.length).toBe(2048))
-                  .with({ _tag: "Passed" }, () => expect.unreachable())
-                  .exhaustive(),
-              )
-              .with({ _tag: "StageStarted" }, () => expect.unreachable())
-              .exhaustive()
-          }
+          expect(toShipFailureMessage(err2049).length).toBe(2048)
 
           // 2. exitCode < 1 (-5) -> clamped to 1, empty stderr + stdout -> fallback message
           const errNegCode = yield* Effect.flip(
@@ -1024,6 +1002,422 @@ describe("ShipGateRunnerLive & pure helpers", () => {
             ),
           )
           expect(errStdoutExit.stderrSummary).toBe("stdout exit")
+        }),
+      ),
+  )
+
+  it.live(
+    "resolveShipFormatCheckFiles excludes pnpm-lock.yaml, coverage/**, .worktrees/**, .idea/**, and custom .oxfmtrc.json patterns while keeping nested repos/ and src/dist/",
+    () =>
+      withTempRepo((repoRoot) =>
+        Effect.sync(() => {
+          initRepoWithMain(repoRoot)
+          execFileSync("git", ["checkout", "-b", "feat/ignore-patterns"], {
+            cwd: repoRoot,
+            stdio: "ignore",
+          })
+
+          writeFileSync(
+            join(repoRoot, ".oxfmtrc.json"),
+            `${JSON.stringify({ ignorePatterns: ["generated/**"] }, null, 2)}\n`,
+          )
+          writeFileSync(join(repoRoot, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")
+          mkdirSync(join(repoRoot, "coverage"), { recursive: true })
+          writeFileSync(join(repoRoot, "coverage", "x.js"), "export {}\n")
+          mkdirSync(join(repoRoot, ".worktrees", "u1"), { recursive: true })
+          writeFileSync(join(repoRoot, ".worktrees", "u1", "x.ts"), "export const w = 1\n")
+          mkdirSync(join(repoRoot, ".idea"), { recursive: true })
+          writeFileSync(join(repoRoot, ".idea", "x.json"), "{}\n")
+          mkdirSync(join(repoRoot, "generated", "sub"), { recursive: true })
+          writeFileSync(join(repoRoot, "generated", "sub", "x.ts"), "export const g = 1\n")
+          mkdirSync(join(repoRoot, "libs", "demo", "repos"), { recursive: true })
+          writeFileSync(join(repoRoot, "libs", "demo", "repos", "kept.yml"), "key: val\n")
+          mkdirSync(join(repoRoot, "libs", "demo", "src", "dist"), { recursive: true })
+          writeFileSync(join(repoRoot, "libs", "demo", "src", "dist", "kept.js"), "export {}\n")
+
+          const res = resolveShipFormatCheckFiles(repoRoot, nodeSyncHostIo, process.env)
+          expect(res).toEqual(
+            Result.succeed([
+              ".oxfmtrc.json",
+              "libs/demo/repos/kept.yml",
+              "libs/demo/src/dist/kept.js",
+            ]),
+          )
+        }),
+      ),
+  )
+
+  it.live(
+    "resolveShipFormatCheckFiles resolves dynamic default branch via refs/remotes/origin/HEAD across multi-commit trunk branch",
+    () =>
+      withTempRepo((repoRoot) =>
+        Effect.sync(() => {
+          execFileSync("git", ["init", "-b", "trunk"], { cwd: repoRoot, stdio: "ignore" })
+          execFileSync("git", ["config", "user.email", "wf4@example.com"], {
+            cwd: repoRoot,
+            stdio: "ignore",
+          })
+          execFileSync("git", ["config", "user.name", "WF4 Tester"], {
+            cwd: repoRoot,
+            stdio: "ignore",
+          })
+          mkdirSync(join(repoRoot, "src"), { recursive: true })
+          writeFileSync(join(repoRoot, "src", "root.ts"), "export const root = 1\n")
+          execFileSync("git", ["add", "."], { cwd: repoRoot, stdio: "ignore" })
+          execFileSync("git", ["commit", "-m", "trunk root"], { cwd: repoRoot, stdio: "ignore" })
+          execFileSync("git", ["update-ref", "refs/remotes/origin/trunk", "HEAD"], {
+            cwd: repoRoot,
+            stdio: "ignore",
+          })
+          execFileSync(
+            "git",
+            ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"],
+            { cwd: repoRoot, stdio: "ignore" },
+          )
+
+          execFileSync("git", ["checkout", "-b", "feat/multi"], { cwd: repoRoot, stdio: "ignore" })
+          writeFileSync(join(repoRoot, "src", "commit1.ts"), "export const c1 = 1\n")
+          execFileSync("git", ["add", "."], { cwd: repoRoot, stdio: "ignore" })
+          execFileSync("git", ["commit", "-m", "commit 1"], { cwd: repoRoot, stdio: "ignore" })
+          writeFileSync(join(repoRoot, "src", "commit2.ts"), "export const c2 = 2\n")
+          execFileSync("git", ["add", "."], { cwd: repoRoot, stdio: "ignore" })
+          execFileSync("git", ["commit", "-m", "commit 2"], { cwd: repoRoot, stdio: "ignore" })
+
+          const res = resolveShipFormatCheckFiles(repoRoot, nodeSyncHostIo, process.env)
+          expect(res).toEqual(Result.succeed(["src/commit1.ts", "src/commit2.ts"]))
+        }),
+      ),
+  )
+
+  it.live(
+    "ShipActiveGateController cancelAndAwait aborts an in-flight slow command and waits for it to settle",
+    () =>
+      withTempRepo((repoRoot) =>
+        Effect.gen(function* () {
+          initRepoWithMain(repoRoot)
+          const controller = createShipActiveGateController()
+          const commandStarted = yield* Deferred.make<void>()
+          const commandReaped = yield* Deferred.make<void>()
+          let settledBeforeCancelReturned = false
+
+          const layer = makeShipGateRunnerLayer({
+            repoRoot,
+            activeGateController: controller,
+            runCommand: () =>
+              Effect.sync(() => {
+                Deferred.doneUnsafe(commandStarted, Effect.void)
+              }).pipe(
+                Effect.andThen(Effect.never),
+                Effect.onInterrupt(() =>
+                  Effect.sleep("25 millis").pipe(
+                    Effect.andThen(
+                      Effect.sync(() => {
+                        settledBeforeCancelReturned = true
+                        Deferred.doneUnsafe(commandReaped, Effect.void)
+                      }),
+                    ),
+                  ),
+                ),
+              ),
+          })
+
+          const runId = makeRunId()
+          const attempt = makeAttempt()
+          const key = `${runId}:${attempt}`
+
+          const execFiber = yield* Effect.gen(function* () {
+            const runner = yield* ShipGateRunner
+            return yield* Effect.exit(
+              runner.executeStageCommand({
+                runId,
+                attempt,
+                stage: "verify",
+                treeHash: makeSampleHash(),
+              }),
+            )
+          }).pipe(Effect.provide(layer), Effect.forkChild)
+
+          yield* Deferred.await(commandStarted)
+          yield* controller.cancelAndAwait(key)
+          expect(settledBeforeCancelReturned).toBe(true)
+          yield* Deferred.await(commandReaped)
+
+          const exit = yield* Fiber.await(execFiber)
+          const failCause = match(exit)
+            .with({ _tag: "Success" }, ({ value }) =>
+              match(value)
+                .with({ _tag: "Failure" }, ({ cause }) => cause)
+                .with({ _tag: "Success" }, () =>
+                  expect.unreachable("Expected inner executeStageCommand Failure"),
+                )
+                .exhaustive(),
+            )
+            .with({ _tag: "Failure" }, ({ cause }) =>
+              expect.unreachable(
+                `Expected outer fiber Success wrapping Exit, got ${Cause.pretty(cause)}`,
+              ),
+            )
+            .exhaustive()
+          expect(Cause.hasDies(failCause)).toBe(false)
+          expect(Cause.hasFails(failCause)).toBe(true)
+          match(Cause.findErrorOption(failCause))
+            .with({ _tag: "None" }, () => expect.unreachable("Expected typed ShipGateFailedError"))
+            .with({ _tag: "Some" }, ({ value: gateErr }) => {
+              expect(gateErr).toBeInstanceOf(ShipGateFailedError)
+              expect(gateErr.stage).toBe("verify")
+              expect(gateErr.exitCode).toBe(GateExitCode.make(1))
+              expect(gateErr.stderrSummary).toContain("cancelled")
+            })
+            .exhaustive()
+
+          // Pre-cancelled key before starting fails immediately without spawning
+          const preCancelErr = yield* Effect.flip(
+            executeStageCommandImpl(
+              {
+                runId,
+                attempt,
+                stage: "gc-strict",
+                treeHash: makeSampleHash(),
+                repoRoot,
+              },
+              {
+                activeGateController: controller,
+                runCommand: () => Effect.die(new Error("Should not spawn when pre-cancelled")),
+              },
+            ),
+          )
+          expect(preCancelErr.stderrSummary).toContain("cancelled before starting")
+          controller.clear(key)
+
+          // reportStageProgress delivers Failed progress events directly
+          const reported: Array<ShipStreamProgressEvent> = []
+          const progressLayer = makeShipGateRunnerLayer({
+            repoRoot,
+            onProgress: (ev) => reported.push(ev),
+          })
+          const failProgressEvent = ShipStreamProgressEvent.cases.StageFinished.make({
+            runId,
+            attempt,
+            progress: ShipStageFailed.make({
+              stage: "verify",
+              durationMs: GateDurationMs.make(42),
+              errorTag: ShipErrorTag.make("ShipGateFailedError"),
+              detail: ShipFailureMessage.make("verify failed"),
+            }),
+          })
+          yield* Effect.gen(function* () {
+            const runner = yield* ShipGateRunner
+            yield* runner.reportStageProgress(failProgressEvent)
+          }).pipe(Effect.provide(progressLayer))
+          const directEvent = ShipStreamProgressEvent.cases.StageStarted.make({
+            runId,
+            attempt,
+            stage: "gc-strict",
+          })
+          yield* reportStageProgressImpl(directEvent, { onProgress: (ev) => reported.push(ev) })
+          yield* reportStageProgressImpl(directEvent)
+          expect(reported).toEqual([failProgressEvent, directEvent])
+        }),
+      ),
+  )
+
+  it.live(
+    "ship-format-files covers wildcards, non-trailing **, ReDoS protection, slashless boundary, and corrupt/symlink .oxfmtrc.json",
+    () =>
+      withTempRepo((repoRoot) =>
+        Effect.sync(() => {
+          initRepoWithMain(repoRoot)
+          execFileSync("git", ["checkout", "-b", "feat/glob-branches"], {
+            cwd: repoRoot,
+            stdio: "ignore",
+          })
+
+          writeFileSync(
+            join(repoRoot, ".oxfmtrc.json"),
+            JSON.stringify({
+              ignorePatterns: [
+                "./leading-dot/",
+                "/leading-slash/**",
+                "!kept/not-ignored.ts",
+                "a/**/**/b/**/gen/*.ts",
+                "foo*bar.ts",
+                "v?.js",
+                "a*b*c.ts",
+                "*.min.js",
+                "**/x/**/x/**/x/**/x/**/x/**/x/**/x/**/x/**/x/**/x/**/x/**/needle.ts",
+              ],
+            }),
+          )
+          for (const rel of [
+            "leading-dot/skip.ts",
+            "leading-slash/skip.ts",
+            "kept/not-ignored.ts",
+            "a/b/gen/zero-seg.ts",
+            "a/mid1/b/mid2/gen/deep.ts",
+            "foo-mid-bar.ts",
+            "foo/nested-bar.ts",
+            "v1.js",
+            "v12.js",
+            "aaXXbbYYc.ts",
+            "app.min.js",
+            "x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/other.ts",
+          ]) {
+            const full = join(repoRoot, rel)
+            mkdirSync(join(full, ".."), { recursive: true })
+            writeFileSync(full, "// x\n")
+          }
+
+          const started = performance.now()
+          const res = resolveShipFormatCheckFiles(repoRoot, nodeSyncHostIo, process.env)
+          expect(performance.now() - started).toBeLessThan(1000)
+          expect(res).toEqual(
+            Result.succeed([
+              ".oxfmtrc.json",
+              "foo/nested-bar.ts",
+              "kept/not-ignored.ts",
+              "v12.js",
+              "x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/other.ts",
+            ]),
+          )
+
+          // Corrupt .oxfmtrc.json falls back cleanly to DEFAULT_OXFMT_IGNORE_PATTERNS
+          writeFileSync(join(repoRoot, ".oxfmtrc.json"), "{not-valid-json")
+          writeFileSync(join(repoRoot, "pnpm-lock.yaml"), "lock\n")
+          const corruptRes = resolveShipFormatCheckFiles(repoRoot, nodeSyncHostIo, process.env)
+          expect(Result.isSuccess(corruptRes)).toBe(true)
+          expect(Result.getOrElse(corruptRes, () => [])).not.toContain("pnpm-lock.yaml")
+
+          // Symlinked .oxfmtrc.json is rejected safely and falls back to defaults
+          writeFileSync(
+            join(repoRoot, "real-cfg.json"),
+            JSON.stringify({ ignorePatterns: ["foo/*"] }),
+          )
+          rmSync(join(repoRoot, ".oxfmtrc.json"))
+          symlinkSync(join(repoRoot, "real-cfg.json"), join(repoRoot, ".oxfmtrc.json"))
+          const symRes = resolveShipFormatCheckFiles(repoRoot, nodeSyncHostIo, process.env)
+          expect(Result.getOrElse(symRes, () => [])).toContain("foo/nested-bar.ts")
+        }),
+      ),
+  )
+
+  it.live(
+    "ship-format-files covers init.defaultBranch, non-origin symref, unsafe ref rejection, invalid SHA, and 128/129 fail-closed exits",
+    () =>
+      withTempRepo((repoRoot) =>
+        Effect.sync(() => {
+          execFileSync("git", ["init", "-b", "develop"], { cwd: repoRoot, stdio: "ignore" })
+          execFileSync("git", ["config", "user.email", "wf4@example.com"], {
+            cwd: repoRoot,
+            stdio: "ignore",
+          })
+          execFileSync("git", ["config", "user.name", "WF4 Tester"], {
+            cwd: repoRoot,
+            stdio: "ignore",
+          })
+          execFileSync("git", ["config", "init.defaultBranch", "develop"], {
+            cwd: repoRoot,
+            stdio: "ignore",
+          })
+          mkdirSync(join(repoRoot, "src"), { recursive: true })
+          writeFileSync(join(repoRoot, "src", "root.ts"), "export const r = 1\n")
+          execFileSync("git", ["add", "."], { cwd: repoRoot, stdio: "ignore" })
+          execFileSync("git", ["commit", "-m", "root"], { cwd: repoRoot, stdio: "ignore" })
+          execFileSync("git", ["checkout", "-b", "feat/dev"], { cwd: repoRoot, stdio: "ignore" })
+          writeFileSync(join(repoRoot, "src", "d1.ts"), "export const d1 = 1\n")
+          execFileSync("git", ["add", "."], { cwd: repoRoot, stdio: "ignore" })
+          execFileSync("git", ["commit", "-m", "c1"], { cwd: repoRoot, stdio: "ignore" })
+          writeFileSync(join(repoRoot, "src", "d2.ts"), "export const d2 = 2\n")
+          execFileSync("git", ["add", "."], { cwd: repoRoot, stdio: "ignore" })
+          execFileSync("git", ["commit", "-m", "c2"], { cwd: repoRoot, stdio: "ignore" })
+
+          expect(resolveShipFormatCheckFiles(repoRoot, nodeSyncHostIo, process.env)).toEqual(
+            Result.succeed(["src/d1.ts", "src/d2.ts"]),
+          )
+
+          // Fake IO checks: non-origin/ symref + unsafe candidate rejected, 128/129 fail closed, invalid mbSha fail closed
+          const shaA = "a".repeat(40)
+          const shaB = "b".repeat(40)
+          const seenRefs: Array<ReadonlyArray<string>> = []
+          const symAndUnsafeHostIo: SyncHostIo = {
+            ...nodeSyncHostIo,
+            execFileSync: (_cmd, args) => {
+              if (args[0] === "symbolic-ref") {
+                return { _tag: "Exited", exitCode: 0, stdout: "upstream/trunk\n", stderr: "" }
+              }
+              if (args[0] === "config") {
+                return { _tag: "Exited", exitCode: 0, stdout: "--default=HEAD\n", stderr: "" }
+              }
+              if (args[0] === "rev-parse") {
+                seenRefs.push(args)
+                return {
+                  _tag: "Exited",
+                  exitCode: args[args.length - 1] === "HEAD" ? 0 : 1,
+                  stdout: `${shaA}\n`,
+                  stderr: "",
+                }
+              }
+              return { _tag: "Exited", exitCode: 0, stdout: "", stderr: "" }
+            },
+          }
+          expect(
+            Result.isSuccess(resolveShipFormatCheckFiles(repoRoot, symAndUnsafeHostIo, {})),
+          ).toBe(true)
+          expect(seenRefs.some((a) => a.includes("--default=HEAD"))).toBe(false)
+          expect(seenRefs.some((a) => a.includes("upstream/trunk"))).toBe(true)
+
+          for (const exitCode of [128, 129]) {
+            const symFailIo: SyncHostIo = {
+              ...nodeSyncHostIo,
+              execFileSync: (_cmd, args) =>
+                args[0] === "symbolic-ref"
+                  ? { _tag: "Exited", exitCode, stdout: "", stderr: `symref ${exitCode}` }
+                  : { _tag: "Exited", exitCode: 0, stdout: `${shaA}\n`, stderr: "" },
+            }
+            expect(Result.isFailure(resolveShipFormatCheckFiles(repoRoot, symFailIo, {}))).toBe(
+              true,
+            )
+
+            const cfgFailIo: SyncHostIo = {
+              ...nodeSyncHostIo,
+              execFileSync: (_cmd, args) =>
+                args[0] === "config"
+                  ? { _tag: "Exited", exitCode, stdout: "", stderr: `config ${exitCode}` }
+                  : args[0] === "symbolic-ref"
+                    ? { _tag: "Exited", exitCode: 1, stdout: "", stderr: "" }
+                    : { _tag: "Exited", exitCode: 0, stdout: `${shaA}\n`, stderr: "" },
+            }
+            expect(Result.isFailure(resolveShipFormatCheckFiles(repoRoot, cfgFailIo, {}))).toBe(
+              true,
+            )
+          }
+
+          const badMbShaIo: SyncHostIo = {
+            ...nodeSyncHostIo,
+            execFileSync: (_cmd, args) => {
+              if (args[0] === "symbolic-ref" || args[0] === "config") {
+                return { _tag: "Exited", exitCode: 1, stdout: "", stderr: "" }
+              }
+              if (args[0] === "merge-base") {
+                return { _tag: "Exited", exitCode: 0, stdout: "--not-a-sha\n", stderr: "" }
+              }
+              return { _tag: "Exited", exitCode: 0, stdout: `${shaA}\n`, stderr: "" }
+            },
+          }
+          const badMbRes = resolveShipFormatCheckFiles(repoRoot, badMbShaIo, {})
+          expect(Result.isFailure(badMbRes)).toBe(true)
+
+          const badHeadShaIo: SyncHostIo = {
+            ...nodeSyncHostIo,
+            execFileSync: () => ({
+              _tag: "Exited",
+              exitCode: 0,
+              stdout: `${shaB.slice(0, 5)}\n`,
+              stderr: "",
+            }),
+          }
+          expect(Result.isFailure(resolveShipFormatCheckFiles(repoRoot, badHeadShaIo, {}))).toBe(
+            true,
+          )
         }),
       ),
   )

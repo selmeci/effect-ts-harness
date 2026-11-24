@@ -3,8 +3,10 @@ import { EventEmitter } from "node:events"
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Effect } from "effect"
+import { Duration, Effect, Layer } from "effect"
+import * as DecisionModel from "effect/ai/DecisionModel"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { makeMockDecisionModelLayer } from "@harness/decision"
 import { DstSeed, writeVerifyStamp } from "@harness/gates"
 import { nodeSyncHostIo } from "@harness/infra"
 import { runDeclarativeCli } from "../src/commands/declarative-cli.js"
@@ -389,6 +391,71 @@ describe("done-cli-helper & done --cli mode", () => {
       )
       expect(cliEnforcedRes.exitCode).toBe(1)
       expect(cliEnforcedRes.stderr).toContain("verify")
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it("SPEC-0032 REQ-2.3: bypasses HARNESS_DONE_DEADLINE_MS timeout in --cli mode while enforcing it for Stop hooks", async () => {
+    const dir = createTempGitRepo("harness-done-cli-deadline-")
+    writeVerifyStamp(dir, nodeSyncHostIo, "impl/test", {
+      dstSeed: DstSeed.make(1),
+      dstSeedsRun: 1,
+    })
+
+    const baseLayer = makeMockDecisionModelLayer({
+      implementedProb: 0.95,
+      noOutOfScopeProb: 0.95,
+    })
+    const slowDecisionLayer = Layer.effect(
+      DecisionModel.DecisionModel,
+      Effect.gen(function* () {
+        const model = yield* Effect.provide(DecisionModel.DecisionModel, baseLayer)
+        const delayedModel: DecisionModel.DecisionModel = {
+          ...model,
+          decide: (definition, options) =>
+            Effect.sleep(Duration.millis(60)).pipe(
+              Effect.andThen(model.decide(definition, options)),
+            ),
+        }
+        return delayedModel
+      }),
+    )
+    const planSteps = [
+      {
+        stepId: "step-1",
+        planStep: "Verify deadline bypass in --cli mode",
+        stepDiff: "+ export const ok = true",
+      },
+    ]
+
+    vi.stubEnv("HARNESS_DONE_DEADLINE_MS", "20")
+    try {
+      const hookRes = await Effect.runPromise(
+        handleDone(["done"], {
+          repoRoot: dir,
+          stdin: JSON.stringify({ stop_hook_active: false }),
+          planSteps,
+          decisionLayer: slowDecisionLayer,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(hookRes.exitCode).toBe(2)
+      expect(JSON.parse(hookRes.stdout)).toEqual({
+        decision: "block",
+        reason: expect.stringContaining("Stop hook verification exceeded internal deadline"),
+      })
+
+      const cliRes = await Effect.runPromise(
+        handleDone(["done", "--cli"], {
+          repoRoot: dir,
+          planSteps,
+          decisionLayer: slowDecisionLayer,
+          skipBackgroundDaemons: true,
+        }),
+      )
+      expect(cliRes.exitCode).toBe(0)
+      expect(cliRes.telemetryDetail).toBe("completed")
     } finally {
       vi.unstubAllEnvs()
     }

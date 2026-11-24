@@ -795,6 +795,10 @@ describe("guard policy wrapper isolation, glob hardening & worktree mode", () =>
       )
     }
 
+    expect(
+      explainCommandDenyReason("pnpm harness workflow ship", { unitWorkerMode: true }),
+    ).toContain("ship")
+
     for (const allowedWorkerCmd of [
       "pnpm harness gc --strict",
       "pnpm harness workflow status",

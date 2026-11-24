@@ -13,6 +13,7 @@ import type {
   ShipRecoverBackupInput,
   ShipStageCommandInput,
   ShipStagePassed,
+  ShipStreamProgressEvent,
   ShipTreeHashInput,
   UnitAgentDispatchResult,
   UnitAgentRequest,
@@ -174,6 +175,7 @@ export interface ShipGateRunnerShape {
   readonly executeStageCommand: (
     input: ShipStageCommandInput,
   ) => Effect.Effect<ShipStagePassed, ShipGateFailedError>
+  readonly reportStageProgress: (event: ShipStreamProgressEvent) => Effect.Effect<void>
 }
 
 export class ShipGateRunner extends Context.Service<ShipGateRunner, ShipGateRunnerShape>()(

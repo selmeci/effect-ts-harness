@@ -1478,21 +1478,21 @@ describe("Antigravity adapter & plugin configuration", () => {
     }
   })
 
-  it("SPEC-0032 REQ-3.2: AGENTS.md & effect-lfg docs cover ShipWorkflow & LLM phase", () => {
+  it("SPEC-0032 REQ-3.2: AGENTS.md, adapter READMEs & skills cover ShipWorkflow & worker isolation", () => {
     const read = (p: string) => readFileSync(resolve(repoRoot, p), "utf8")
     const agents = read("AGENTS.md")
     expect(read("adapters/claude-code/rules/AGENTS.md")).toBe(agents)
     expect(read("adapters/antigravity/plugins/effect-harness/rules/AGENTS.md")).toBe(agents)
-    const files = [
-      "skills/effect-lfg/SKILL.md",
-      "skills/effect-lfg/references/review-and-shipping.md",
-    ]
     const toks = ["pnpm harness workflow ship", "workflow complete --phase llm", "ShipWorkflow"]
-    for (const d of [pluginDir, resolve(repoRoot, "adapters/claude-code")])
-      for (const f of files)
-        for (const t of toks) {
-          expect(agents).toContain(t)
-          expect(readFileSync(resolve(d, f), "utf8")).toContain(t)
-        }
+    for (const t of toks) expect(agents).toContain(t)
+    for (const d of [pluginDir, resolve(repoRoot, "adapters/claude-code")]) {
+      for (const f of ["effect-lfg/SKILL.md", "effect-lfg/references/review-and-shipping.md"])
+        for (const t of toks) expect(readFileSync(resolve(d, "skills", f), "utf8")).toContain(t)
+      for (const p of ["README.md", "skills/effect-harness/SKILL.md"]) {
+        const s = readFileSync(resolve(d, p), "utf8")
+        expect(s).toContain("start|resume|ship|abort|doctor|complete --phase llm")
+        expect(s).not.toContain("start|resume|abort|doctor|complete --phase llm")
+      }
+    }
   })
 })

@@ -574,6 +574,9 @@ export const handleDone = (
       })
     })
 
+    if (isCliMode) {
+      return normalizeDoneResultForCli(yield* verificationEffect, true)
+    }
     const remainingDeadlineMs = Math.max(20, totalDeadlineMs - (Date.now() - entryStartedAtMs))
     const timedResult = yield* verificationEffect.pipe(
       Effect.timeoutOption(Duration.millis(remainingDeadlineMs)),

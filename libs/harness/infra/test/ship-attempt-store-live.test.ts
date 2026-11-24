@@ -633,4 +633,73 @@ describe("ShipAttemptStoreLive", () => {
         expect(attemptMismatchErr.message).toContain("does not match")
       }),
   )
+
+  it.live(
+    "rejects invalid state transitions (passed -> failed, failed -> passed, running -> running) with WorkflowStoreUnavailableError",
+    () =>
+      Effect.gen(function* () {
+        const state: MockOmnigraphState = {
+          graphCommitSeq: 1,
+          currentCommitId: "commit-1",
+          attempts: new Map(),
+          lease: { owner: "daemon-1#100", leaseEpoch: 2 },
+          inject412Count: 0,
+          inject429Count: 0,
+        }
+        const client = makeMockOmnigraphClient(state)
+        const runId = makeRunId("transitions")
+        const opts = {
+          repoRoot,
+          client,
+          expectedLeaseEpoch: LeaseEpoch.make(2),
+          lockFilePath,
+          nowMs: () => 8000,
+        }
+
+        const runningAttempt = yield* allocateShipAttemptImpl(
+          { runId, treeHash: makeHash("a") },
+          opts,
+        )
+        const runningToRunningErr = yield* Effect.flip(
+          updateShipAttemptStatusImpl(
+            { runId, attempt: runningAttempt.attempt, status: "running" },
+            opts,
+          ),
+        )
+        expect(runningToRunningErr).toBeInstanceOf(WorkflowStoreUnavailableError)
+        expect(runningToRunningErr.message).toContain("Invalid transition 'running' -> 'running'")
+
+        yield* updateShipAttemptStatusImpl(
+          { runId, attempt: runningAttempt.attempt, status: "passed" },
+          opts,
+        )
+        const passedToFailedErr = yield* Effect.flip(
+          updateShipAttemptStatusImpl(
+            { runId, attempt: runningAttempt.attempt, status: "failed" },
+            opts,
+          ),
+        )
+        expect(passedToFailedErr).toBeInstanceOf(WorkflowStoreUnavailableError)
+        expect(passedToFailedErr.message).toContain("Cannot transition terminal WfShipAttempt")
+        expect(passedToFailedErr.message).toContain("from 'passed' to 'failed'")
+
+        const failedAttempt = yield* allocateShipAttemptImpl(
+          { runId, treeHash: makeHash("b") },
+          opts,
+        )
+        yield* updateShipAttemptStatusImpl(
+          { runId, attempt: failedAttempt.attempt, status: "failed" },
+          opts,
+        )
+        const failedToPassedErr = yield* Effect.flip(
+          updateShipAttemptStatusImpl(
+            { runId, attempt: failedAttempt.attempt, status: "passed" },
+            opts,
+          ),
+        )
+        expect(failedToPassedErr).toBeInstanceOf(WorkflowStoreUnavailableError)
+        expect(failedToPassedErr.message).toContain("Cannot transition terminal WfShipAttempt")
+        expect(failedToPassedErr.message).toContain("from 'failed' to 'passed'")
+      }),
+  )
 })

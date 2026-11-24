@@ -35,7 +35,9 @@ import { HarnessTaskWorkflowLayer, ShipWorkflowLayer } from "@harness/gates"
 import type { OmnigraphClient } from "@harness/graph"
 import {
   type ActiveWriterLease,
+  type ShipActiveGateController,
   acquireWriterLease,
+  createShipActiveGateController,
   makeHarnessWorkflowEngineLayer,
   nodeSyncHostIo,
   resolveWorkflowRuntimePaths,
@@ -105,7 +107,7 @@ const decodeExistingLockMetaOption = Schema.decodeUnknownOption(ExistingLockMeta
 
 export interface WorkflowDaemonRuntime {
   readonly workflowContext: Context.Context<WorkflowTaskDaemonServices>
-  readonly shipWorkflowContext?: Context.Context<WorkflowDaemonServices> | undefined
+  readonly shipWorkflowContext: Context.Context<WorkflowDaemonServices>
   readonly engine: WorkflowEngine.WorkflowEngine["Service"]
   readonly projectionWriter: WorkflowProjectionWriterShape
   readonly readModelQuery: WorkflowReadModelQueryShape
@@ -113,17 +115,18 @@ export interface WorkflowDaemonRuntime {
   readonly unitAgentDispatcher: UnitAgentDispatcherShape
   readonly worktreePort: WorkflowWorktreePortShape
   readonly reviewRouter: WorkflowReviewRouterShape
-  readonly shipGateRunner?: ShipGateRunnerShape | undefined
-  readonly shipAttemptStore?: ShipAttemptStoreShape | undefined
-  readonly shipProgressListeners?: Map<string, (event: ShipStreamProgressEvent) => void> | undefined
+  readonly shipGateRunner: ShipGateRunnerShape
+  readonly shipAttemptStore: ShipAttemptStoreShape
+  readonly shipProgressListeners: Map<string, (event: ShipStreamProgressEvent) => void>
+  readonly shipGateController: ShipActiveGateController
   readonly leaseFence: WorkflowReadModelLeaseFence
   readonly plansRef: SynchronizedRef.SynchronizedRef<ReadonlyMap<WorkflowRunId, CompiledPlan>>
   readonly runMutexesRef: SynchronizedRef.SynchronizedRef<
     ReadonlyMap<WorkflowRunId, Semaphore.Semaphore>
   >
-  readonly shipWorktreeMutexesRef?:
-    | SynchronizedRef.SynchronizedRef<ReadonlyMap<AbsoluteRepoRoot, Semaphore.Semaphore>>
-    | undefined
+  readonly shipWorktreeMutexesRef: SynchronizedRef.SynchronizedRef<
+    ReadonlyMap<AbsoluteRepoRoot, Semaphore.Semaphore>
+  >
   readonly rebuildMutex: Semaphore.Semaphore
   readonly rebuildRpcGateSemaphore: Semaphore.Semaphore
   readonly rebuildProjectionGateSemaphore: Semaphore.Semaphore
@@ -265,6 +268,7 @@ const acquireLeaseAndBuildEngineInScope = (input: {
       ReadonlyMap<WorkflowRunId, Semaphore.Semaphore>
     >(new Map())
     const shipProgressListeners = new Map<string, (event: ShipStreamProgressEvent) => void>()
+    const shipGateController = createShipActiveGateController()
     const rebuildMutex = Semaphore.makeUnsafe(1)
     const rebuildRpcGateSemaphore = Semaphore.makeUnsafe(MAX_CONCURRENT_RUN_LOCKS)
     const rebuildProjectionGateSemaphore = Semaphore.makeUnsafe(MAX_CONCURRENT_RUN_LOCKS)
@@ -302,6 +306,7 @@ const acquireLeaseAndBuildEngineInScope = (input: {
       projectionRunLock,
       readModelReadGate,
       shipProgressListeners,
+      shipGateController,
     )
     const workflowStackLayer = Layer.merge(HarnessTaskWorkflowLayer, ShipWorkflowLayer).pipe(
       Layer.provideMerge(Layer.merge(engineLayer, portsLayer)),
@@ -321,6 +326,7 @@ const acquireLeaseAndBuildEngineInScope = (input: {
       shipGateRunner: Context.get(workflowContext, ShipGateRunner),
       shipAttemptStore: Context.get(workflowContext, ShipAttemptStore),
       shipProgressListeners,
+      shipGateController,
       leaseFence,
       plansRef,
       runMutexesRef,

@@ -16,12 +16,14 @@ import {
   PlanSha256,
   SHIP_STAGES,
   ShipAttempt,
+  type ShipErrorTag,
   ShipFailureMessage,
   ShipGateFailedError,
   type ShipRecoverBackupInput,
   ShipStage,
   type ShipStageCommandInput,
   ShipStagePassed,
+  type ShipStreamProgressEvent,
   ShipTreeDriftError,
   type ShipTreeHashInput,
   ShipTreeMismatchError,
@@ -54,6 +56,7 @@ interface ShipSpy {
   readonly computeInputs: Array<ShipTreeHashInput>
   readonly recoverInputs: Array<ShipRecoverBackupInput>
   readonly executeInputs: Array<ShipStageCommandInput>
+  readonly progressEvents: Array<ShipStreamProgressEvent>
 }
 
 const makeShipSpy = (): ShipSpy => ({
@@ -61,6 +64,7 @@ const makeShipSpy = (): ShipSpy => ({
   computeInputs: [],
   recoverInputs: [],
   executeInputs: [],
+  progressEvents: [],
 })
 
 interface FakeRunnerHandlers {
@@ -74,6 +78,7 @@ interface FakeRunnerHandlers {
   readonly executeStageCommand?: (
     input: ShipStageCommandInput,
   ) => Effect.Effect<ShipStagePassed, ShipGateFailedError>
+  readonly reportStageProgress?: (event: ShipStreamProgressEvent) => Effect.Effect<void>
 }
 
 const makeRunnerLayer = (spy: ShipSpy, handlers: FakeRunnerHandlers = {}) => {
@@ -106,6 +111,13 @@ const makeRunnerLayer = (spy: ShipSpy, handlers: FakeRunnerHandlers = {}) => {
               durationMs: GateDurationMs.make(10),
             })
       }),
+    reportStageProgress: (event) =>
+      Effect.gen(function* () {
+        spy.progressEvents.push(event)
+        if (handlers.reportStageProgress !== undefined) {
+          yield* handlers.reportStageProgress(event)
+        }
+      }),
   })
 
   return ShipWorkflowLayer.pipe(
@@ -135,6 +147,7 @@ const makeGateFailedError = (
     readonly stderr?: string
     readonly breaker?: CircuitBreakerStatus
     readonly escalation?: string
+    readonly durationMs?: number
   } = {},
 ): ShipGateFailedError =>
   new ShipGateFailedError({
@@ -145,7 +158,36 @@ const makeGateFailedError = (
     ...(opts.escalation !== undefined
       ? { escalationMessage: ShipFailureMessage.make(opts.escalation) }
       : {}),
+    ...(opts.durationMs !== undefined ? { durationMs: GateDurationMs.make(opts.durationMs) } : {}),
   })
+
+const expectStageFailedEvent = (
+  events: ReadonlyArray<ShipStreamProgressEvent>,
+  stage: ShipStage,
+  errorTag: ShipErrorTag,
+  expectedDurationMs?: number,
+): void => {
+  const finishedForStage = events.filter(
+    (event): event is Extract<ShipStreamProgressEvent, { readonly _tag: "StageFinished" }> =>
+      event._tag === "StageFinished" && event.progress.stage === stage,
+  )
+  expect(finishedForStage).toHaveLength(1)
+  const finished = finishedForStage[0]
+  if (finished === undefined) {
+    expect.unreachable(`Expected StageFinished for ${stage}`)
+  }
+  match(finished.progress)
+    .with({ _tag: "Passed" }, () =>
+      expect.unreachable(`Expected StageFinished(Failed) for ${stage}, got Passed`),
+    )
+    .with({ _tag: "Failed" }, (failed) => {
+      expect(failed.errorTag).toBe(errorTag)
+      if (expectedDurationMs !== undefined) {
+        expect(failed.durationMs).toBe(expectedDurationMs)
+      }
+    })
+    .exhaustive()
+}
 
 const emptyFnIndex: ReadonlyMap<string, IndexedEffectFn> = new Map()
 
@@ -233,6 +275,40 @@ describe("ShipWorkflow", () => {
           "executeStageCommand:done",
           "computeTreeHash:done:8",
         ])
+        expect(spyWithOpt.progressEvents).toHaveLength(SHIP_STAGES.length * 2)
+        for (const [idx, stage] of SHIP_STAGES.entries()) {
+          const startedEvt = spyWithOpt.progressEvents[idx * 2]
+          const finishedEvt = spyWithOpt.progressEvents[idx * 2 + 1]
+          expect(startedEvt).toBeDefined()
+          if (startedEvt !== undefined) {
+            match(startedEvt)
+              .with({ _tag: "StageStarted" }, (e) => {
+                expect(e.stage).toBe(stage)
+              })
+              .with({ _tag: "StageFinished" }, () =>
+                expect.unreachable(`Expected StageStarted for ${stage}`),
+              )
+              .exhaustive()
+          }
+          expect(finishedEvt).toBeDefined()
+          if (finishedEvt !== undefined) {
+            match(finishedEvt)
+              .with({ _tag: "StageFinished" }, (e) => {
+                match(e.progress)
+                  .with({ _tag: "Passed" }, (passed) => {
+                    expect(passed.stage).toBe(stage)
+                  })
+                  .with({ _tag: "Failed" }, () =>
+                    expect.unreachable(`Expected Passed for ${stage}`),
+                  )
+                  .exhaustive()
+              })
+              .with({ _tag: "StageStarted" }, () =>
+                expect.unreachable(`Expected StageFinished for ${stage}`),
+              )
+              .exhaustive()
+          }
+        }
 
         const spyNoOpt = makeShipSpy()
         const payloadNoOpt: ShipWorkflowPayload = {
@@ -326,6 +402,7 @@ describe("ShipWorkflow", () => {
             SHIP_STAGES.slice(0, SHIP_STAGES.indexOf(mismatchStage)),
           )
           expect(spy.recoverInputs.length).toBe(mismatchStage === "done" ? 1 : 0)
+          expectStageFailedEvent(spy.progressEvents, mismatchStage, "ShipTreeMismatchError", 0)
         }
       }),
     15_000,
@@ -366,6 +443,12 @@ describe("ShipWorkflow", () => {
           "gc-strict",
           "ontology-check-strict",
         ])
+        expectStageFailedEvent(
+          recoverFailSpy.progressEvents,
+          "mutate-strict",
+          "MutationRestoreError",
+          0,
+        )
 
         // 2. Post-mutate computeTreeHash differs -> MutationRestoreError with expected/actual
         const driftSpy = makeShipSpy()
@@ -393,6 +476,7 @@ describe("ShipWorkflow", () => {
           "ontology-check-strict",
           "mutate-strict",
         ])
+        expectStageFailedEvent(driftSpy.progressEvents, "mutate-strict", "MutationRestoreError", 10)
 
         // 3. Post-mutate computeTreeHash fails -> propagates ShipGateFailedError cleanly via ShipWorkflow.execute
         const hashErrSpy = makeShipSpy()
@@ -424,8 +508,14 @@ describe("ShipWorkflow", () => {
           expect(postHashErr.exitCode).toBe(7)
           expect(postHashErr.stderrSummary).toBe("git status failed")
         }
+        expectStageFailedEvent(
+          hashErrSpy.progressEvents,
+          "mutate-strict",
+          "ShipGateFailedError",
+          10,
+        )
 
-        // 4. mutate-strict executeStageCommand failure runs backup cleanup while preserving original error
+        // 4a. mutate-strict executeStageCommand failure + recoverMutationBackup failure surfaces MutationRestoreError immediately
         const cmdFailSpy = makeShipSpy()
         const cmdFailPayload: ShipWorkflowPayload = {
           runId: WorkflowRunId.make("ship-mutate-cmd-fail-1"),
@@ -444,7 +534,7 @@ describe("ShipWorkflow", () => {
                       new MutationRestoreError({
                         expected: TREE_HASH_A,
                         actual: TREE_HASH_B,
-                        detail: ShipFailureMessage.make("cleanup error ignored"),
+                        detail: ShipFailureMessage.make("cleanup error surfaced"),
                       }),
                     )
                   : Effect.void
@@ -467,14 +557,201 @@ describe("ShipWorkflow", () => {
           ),
         )
         const cmdFailErr = expectFailureError(cmdFailExit)
-        expect(cmdFailErr).toBeInstanceOf(ShipGateFailedError)
-        if (cmdFailErr instanceof ShipGateFailedError) {
-          expect(cmdFailErr.stage).toBe("mutate-strict")
-          expect(cmdFailErr.exitCode).toBe(9)
+        expect(cmdFailErr).toBeInstanceOf(MutationRestoreError)
+        if (cmdFailErr instanceof MutationRestoreError) {
+          expect(cmdFailErr.expected).toBe(TREE_HASH_A)
+          expect(cmdFailErr.actual).toBe(TREE_HASH_B)
+          expect(cmdFailErr.detail).toBe("cleanup error surfaced")
         }
         expect(cmdFailSpy.recoverInputs).toHaveLength(2)
+        expectStageFailedEvent(
+          cmdFailSpy.progressEvents,
+          "mutate-strict",
+          "MutationRestoreError",
+          0,
+        )
+      }),
+    15_000,
+  )
 
-        // 5. mutate-strict fiber interruption runs backup cleanup while preserving interrupt cause
+  it.live(
+    "SPEC-0032 REQ-1.3 / F-2.1 / F-2.2: verifies clean failure recovery, post-failure computeTreeHash drift/error, and fiber interruption cleanup",
+    () =>
+      Effect.gen(function* () {
+        // 4b. mutate-strict executeStageCommand failure with clean recovery & matching post-hash propagates original ShipGateFailedError
+        const cleanRecoverSpy = makeShipSpy()
+        const cleanRecoverPayload: ShipWorkflowPayload = {
+          runId: WorkflowRunId.make("ship-mutate-clean-recover-1"),
+          treeHash: TREE_HASH_A,
+          attempt: ShipAttempt.make(1),
+        }
+        const cleanRecoverExit = yield* ShipWorkflow.execute(cleanRecoverPayload).pipe(
+          Effect.exit,
+          Effect.provide(
+            makeRunnerLayer(cleanRecoverSpy, {
+              executeStageCommand: (input) =>
+                input.stage === "mutate-strict"
+                  ? Effect.fail(
+                      makeGateFailedError("mutate-strict", {
+                        exitCode: 9,
+                        stderr: "mutant survived",
+                        durationMs: 42,
+                      }),
+                    )
+                  : Effect.succeed(
+                      ShipStagePassed.make({
+                        stage: input.stage,
+                        durationMs: GateDurationMs.make(5),
+                      }),
+                    ),
+            }),
+          ),
+        )
+        const cleanRecoverErr = expectFailureError(cleanRecoverExit)
+        expect(cleanRecoverErr).toBeInstanceOf(ShipGateFailedError)
+        if (cleanRecoverErr instanceof ShipGateFailedError) {
+          expect(cleanRecoverErr.stage).toBe("mutate-strict")
+          expect(cleanRecoverErr.exitCode).toBe(9)
+        }
+        expect(cleanRecoverSpy.recoverInputs).toHaveLength(2)
+        expect(
+          cleanRecoverSpy.computeInputs.filter((i) => i.stage === "mutate-strict"),
+        ).toHaveLength(2)
+        expectStageFailedEvent(
+          cleanRecoverSpy.progressEvents,
+          "mutate-strict",
+          "ShipGateFailedError",
+          42,
+        )
+
+        // 4c. mutate-strict executeStageCommand failure + clean backup recovery + post-failure computeTreeHash drift -> MutationRestoreError(TREE_HASH_C)
+        const postFailDriftSpy = makeShipSpy()
+        const postFailDriftPayload: ShipWorkflowPayload = {
+          runId: WorkflowRunId.make("ship-mutate-post-fail-drift-1"),
+          treeHash: TREE_HASH_A,
+          attempt: ShipAttempt.make(1),
+        }
+        const postFailDriftExit = yield* ShipWorkflow.execute(postFailDriftPayload).pipe(
+          Effect.exit,
+          Effect.provide(
+            makeRunnerLayer(postFailDriftSpy, {
+              computeTreeHash: (input, callIndex) =>
+                Effect.succeed(
+                  input.stage === "mutate-strict" && callIndex === 5 ? TREE_HASH_C : TREE_HASH_A,
+                ),
+              executeStageCommand: (input) =>
+                input.stage === "mutate-strict"
+                  ? Effect.fail(makeGateFailedError("mutate-strict", { exitCode: 9 }))
+                  : Effect.succeed(
+                      ShipStagePassed.make({
+                        stage: input.stage,
+                        durationMs: GateDurationMs.make(5),
+                      }),
+                    ),
+            }),
+          ),
+        )
+        const postFailDriftErr = expectFailureError(postFailDriftExit)
+        expect(postFailDriftErr).toBeInstanceOf(MutationRestoreError)
+        if (postFailDriftErr instanceof MutationRestoreError) {
+          expect(postFailDriftErr.expected).toBe(TREE_HASH_A)
+          expect(postFailDriftErr.actual).toBe(TREE_HASH_C)
+          expect(postFailDriftErr.detail).toBeUndefined()
+        }
+        expectStageFailedEvent(
+          postFailDriftSpy.progressEvents,
+          "mutate-strict",
+          "MutationRestoreError",
+          0,
+        )
+
+        // 4d. mutate-strict executeStageCommand failure + clean backup recovery + post-failure computeTreeHash error -> MutationRestoreError with actual === undefined
+        const postFailHashErrSpy = makeShipSpy()
+        const postFailHashErrPayload: ShipWorkflowPayload = {
+          runId: WorkflowRunId.make("ship-mutate-post-fail-hash-err-1"),
+          treeHash: TREE_HASH_A,
+          attempt: ShipAttempt.make(1),
+        }
+        const postFailHashErrExit = yield* ShipWorkflow.execute(postFailHashErrPayload).pipe(
+          Effect.exit,
+          Effect.provide(
+            makeRunnerLayer(postFailHashErrSpy, {
+              computeTreeHash: (input, callIndex) =>
+                input.stage === "mutate-strict" && callIndex === 5
+                  ? Effect.fail(
+                      makeGateFailedError("mutate-strict", {
+                        exitCode: 8,
+                        stderr: "post-failure hash failed",
+                      }),
+                    )
+                  : Effect.succeed(TREE_HASH_A),
+              executeStageCommand: (input) =>
+                input.stage === "mutate-strict"
+                  ? Effect.fail(makeGateFailedError("mutate-strict", { exitCode: 9 }))
+                  : Effect.succeed(
+                      ShipStagePassed.make({
+                        stage: input.stage,
+                        durationMs: GateDurationMs.make(5),
+                      }),
+                    ),
+            }),
+          ),
+        )
+        const postFailHashErr = expectFailureError(postFailHashErrExit)
+        expect(postFailHashErr).toBeInstanceOf(MutationRestoreError)
+        if (postFailHashErr instanceof MutationRestoreError) {
+          expect(postFailHashErr.expected).toBe(TREE_HASH_A)
+          expect(postFailHashErr.actual).toBeUndefined()
+          expect(postFailHashErr.detail).toContain("post-failure hash failed")
+        }
+        expectStageFailedEvent(
+          postFailHashErrSpy.progressEvents,
+          "mutate-strict",
+          "MutationRestoreError",
+          0,
+        )
+      }),
+    15_000,
+  )
+
+  it.live(
+    "SPEC-0032 REQ-1.3 / F-2.2: propagates post-failure computeTreeHash defect and verifies fiber interruption post-recovery hash",
+    () =>
+      Effect.gen(function* () {
+        // 4e. Post-failure computeTreeHash defect (non-Error Cause.die) propagates die cause cleanly
+        const postFailDefectSpy = makeShipSpy()
+        const postFailDefectExit = yield* ShipWorkflow.execute({
+          runId: WorkflowRunId.make("ship-mutate-post-defect-1"),
+          treeHash: TREE_HASH_A,
+          attempt: ShipAttempt.make(1),
+        }).pipe(
+          Effect.exit,
+          Effect.provide(
+            makeRunnerLayer(postFailDefectSpy, {
+              computeTreeHash: (input, callIndex) =>
+                input.stage === "mutate-strict" && callIndex === 5
+                  ? Effect.die(new Error("fatal post-failure hash defect"))
+                  : Effect.succeed(TREE_HASH_A),
+              executeStageCommand: (input) =>
+                input.stage === "mutate-strict"
+                  ? Effect.fail(makeGateFailedError("mutate-strict", { exitCode: 6 }))
+                  : Effect.succeed(
+                      ShipStagePassed.make({
+                        stage: input.stage,
+                        durationMs: GateDurationMs.make(5),
+                      }),
+                    ),
+            }),
+          ),
+        )
+        match(postFailDefectExit)
+          .with({ _tag: "Success" }, () => expect.unreachable("Expected defect exit"))
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            expect(Cause.hasDies(cause)).toBe(true)
+          })
+          .exhaustive()
+
+        // 5. mutate-strict fiber interruption runs backup cleanup and post-recovery tree hash check while preserving interrupt cause
         const interruptSpy = makeShipSpy()
         const interruptPayload: ShipWorkflowPayload = {
           runId: WorkflowRunId.make("ship-mutate-interrupt-1"),
@@ -508,6 +785,9 @@ describe("ShipWorkflow", () => {
           })
           .exhaustive()
         expect(interruptSpy.recoverInputs).toHaveLength(2)
+        expect(interruptSpy.computeInputs.filter((i) => i.stage === "mutate-strict")).toHaveLength(
+          2,
+        )
       }),
     15_000,
   )
@@ -541,6 +821,7 @@ describe("ShipWorkflow", () => {
           expect(driftErr.expected).toBe(TREE_HASH_A)
           expect(driftErr.actual).toBe(TREE_HASH_B)
         }
+        expectStageFailedEvent(driftSpy.progressEvents, "done", "ShipTreeDriftError", 10)
 
         // 2. done post-gate computeTreeHash failure propagates ShipGateFailedError directly via ShipWorkflow.execute
         const doneHashFailSpy = makeShipSpy()
@@ -566,6 +847,7 @@ describe("ShipWorkflow", () => {
           expect(doneFailErr.stage).toBe("done")
           expect(doneFailErr.exitCode).toBe(3)
         }
+        expectStageFailedEvent(doneHashFailSpy.progressEvents, "done", "ShipGateFailedError", 10)
 
         // 3. executeStageCommand ShipGateFailedError stops at failing stage and preserves all fields
         const gateFailSpy = makeShipSpy()
@@ -608,6 +890,7 @@ describe("ShipWorkflow", () => {
         }
         expect(gateFailSpy.executeInputs.map((i) => i.stage)).toEqual(["format-check", "gc-strict"])
         expect(gateFailSpy.computeInputs.map((i) => i.stage)).toEqual(["format-check", "gc-strict"])
+        expectStageFailedEvent(gateFailSpy.progressEvents, "gc-strict", "ShipGateFailedError", 0)
       }),
     15_000,
   )

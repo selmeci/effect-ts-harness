@@ -327,6 +327,14 @@ describe("workflow-ship contracts", () => {
       `Mutation backup restore or tree check failed: expected ${sampleTreeHashA}, got ${sampleTreeHashB} (tar extract failed)`,
     )
 
+    const restoreUnavailableErr = new MutationRestoreError({
+      expected: sampleTreeHashA,
+    })
+    expect(restoreUnavailableErr.actual).toBeUndefined()
+    expect(restoreUnavailableErr.message).toBe(
+      `Mutation backup restore or tree check failed: expected ${sampleTreeHashA}, actual hash unavailable`,
+    )
+
     const driftErr = new ShipTreeDriftError({
       stage: ShipStage.make("done"),
       expected: sampleTreeHashA,
@@ -336,12 +344,22 @@ describe("workflow-ship contracts", () => {
       `Workspace tree hash drifted after 'done': expected ${sampleTreeHashA}, got ${sampleTreeHashB}`,
     )
 
+    const durationGateErr = new ShipGateFailedError({
+      stage: ShipStage.make("verify"),
+      exitCode: GateExitCode.make(1),
+      stderrSummary: GateStderrSummary.make("timed out"),
+      circuitBreakerStatus: CircuitBreakerStatus.make("clear"),
+      durationMs: GateDurationMs.make(42),
+    })
+
     const allErrors: ReadonlyArray<ShipWorkflowError> = [
       clearGateErr,
+      durationGateErr,
       trippedGateErr,
       mismatchErr,
       restoreNoDetailErr,
       restoreWithDetailErr,
+      restoreUnavailableErr,
       driftErr,
     ]
     for (const err of allErrors) {
@@ -369,6 +387,63 @@ describe("workflow-ship contracts", () => {
     const bounded = toShipFailureMessage(oversizedGateErr)
     expect(bounded.length).toBe(2048)
     expect(Schema.decodeSync(ShipFailureMessage)(bounded)).toBe(bounded)
+
+    const oversizedEscGateErr = new ShipGateFailedError({
+      stage: ShipStage.make("verify"),
+      exitCode: GateExitCode.make(2),
+      stderrSummary: GateStderrSummary.make(`${"A".repeat(3500)}TAIL_STDERR_MARKER`),
+      circuitBreakerStatus: CircuitBreakerStatus.make("tripped"),
+      escalationMessage: ShipFailureMessage.make("[ESCALATE: STUCK LOOP DETECTED] retry limit"),
+    })
+    const escBounded = toShipFailureMessage(oversizedEscGateErr)
+    expect(escBounded.length).toBe(2048)
+    expect(escBounded).toContain(
+      "Ship gate 'verify' failed with exit code 2 [circuit breaker tripped]",
+    )
+    expect(escBounded).toContain("TAIL_STDERR_MARKER")
+    expect(escBounded).toContain("— [ESCALATE: STUCK LOOP DETECTED] retry limit")
+
+    const exactZeroBudgetErr = new ShipGateFailedError({
+      stage: ShipStage.make("verify"),
+      exitCode: GateExitCode.make(1),
+      stderrSummary: GateStderrSummary.make("SHOULD_NOT_APPEAR"),
+      circuitBreakerStatus: CircuitBreakerStatus.make("clear"),
+      escalationMessage: ShipFailureMessage.make("Z".repeat(2001)),
+    })
+    const zeroBudgetBounded = toShipFailureMessage(exactZeroBudgetErr)
+    expect(zeroBudgetBounded.length).toBe(2046)
+    expect(zeroBudgetBounded).not.toContain("SHOULD_NOT_APPEAR")
+    expect(Schema.decodeSync(ShipFailureMessage)(zeroBudgetBounded)).toBe(zeroBudgetBounded)
+
+    const oversizedEscOnlyErr = new ShipGateFailedError({
+      stage: ShipStage.make("verify"),
+      exitCode: GateExitCode.make(1),
+      stderrSummary: GateStderrSummary.make("stderr-ignored"),
+      circuitBreakerStatus: CircuitBreakerStatus.make("clear"),
+      escalationMessage: ShipFailureMessage.make("E".repeat(2048)),
+    })
+    const escOnlyBounded = toShipFailureMessage(oversizedEscOnlyErr)
+    expect(escOnlyBounded.length).toBe(2048)
+    expect(escOnlyBounded.startsWith("Ship gate 'verify' failed with exit code 1 — ")).toBe(true)
+
+    const oversizedRestoreErr = new MutationRestoreError({
+      expected: sampleTreeHashA,
+      actual: sampleTreeHashB,
+      detail: ShipFailureMessage.make(`${"R".repeat(2020)}RESTORE_TAIL_MARKER`),
+    })
+    const restoreBounded = toShipFailureMessage(oversizedRestoreErr)
+    expect(restoreBounded.length).toBe(2048)
+    expect(restoreBounded).toContain(`got ${sampleTreeHashB}`)
+    expect(restoreBounded).toContain("RESTORE_TAIL_MARKER)")
+
+    const oversizedUnavailRestoreErr = new MutationRestoreError({
+      expected: sampleTreeHashA,
+      detail: ShipFailureMessage.make(`${"U".repeat(2020)}UNAVAIL_TAIL_MARKER`),
+    })
+    const unavailBounded = toShipFailureMessage(oversizedUnavailRestoreErr)
+    expect(unavailBounded.length).toBe(2048)
+    expect(unavailBounded).toContain("actual hash unavailable")
+    expect(unavailBounded).toContain("UNAVAIL_TAIL_MARKER)")
   })
 
   it("bounds ShipAttempt to I32 range and keeps ShipAttemptKey and decodeShipAttemptKey symmetric", () => {

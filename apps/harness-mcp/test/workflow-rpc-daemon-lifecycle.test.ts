@@ -10,17 +10,24 @@ import {
   type CompiledPlan,
   DaemonSocketPath,
   EscalationOrdinal,
+  GateDurationMs,
   LeaseEpoch,
   OwnedRelPath,
+  ShipAttempt,
+  ShipAttemptKey,
+  ShipStagePassed,
+  type ShipStreamProgressEvent,
   WaveIndex,
   WorkUnitId,
   WorkflowDoctorMode,
   WorkflowExecutionId,
   WorkflowRunId,
   WorkflowRunOutcome,
+  type WorkflowShipAttemptRecord,
   WorkflowStoreOperation,
   WorkflowStoreUnavailableError,
   WorkflowTimestampMs,
+  WorkspaceTreeHash,
   makeWorkflowUnitKey,
   toBoundedReason,
   toErrorReasonMessage,
@@ -34,6 +41,7 @@ import {
   WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
   WRITER_LEASE_HEARTBEAT_TTL_MS,
   completeWorkflowViaDaemon,
+  createShipActiveGateController,
   doctorWorkflowViaDaemon,
   getWorkflowStatusViaDaemon,
   nodeSyncHostIo,
@@ -44,6 +52,8 @@ import {
   validateWorktreeRepoRoot,
 } from "@harness/infra"
 import {
+  ShipAttemptStore,
+  ShipGateRunner,
   UnitAgentDispatcher,
   UnitVerifier,
   WorkflowProjectionWriter,
@@ -51,7 +61,7 @@ import {
   WorkflowReviewRouter,
   WorkflowWorktreePort,
 } from "@harness/service"
-import { HarnessTaskWorkflowLayer } from "@harness/gates"
+import { HarnessTaskWorkflowLayer, ShipWorkflowLayer } from "@harness/gates"
 import { startHarnessDaemonServer } from "../src/daemon/unix-socket-daemon.js"
 import { handleDaemonWorkflowCompleteRequest } from "../src/daemon/workflow-rpc-complete-helper.js"
 import {
@@ -717,6 +727,37 @@ describe("WF-3 Unix-socket daemon doctor, lease fencing, offline & pause lifecyc
             listAttempts: () => Effect.succeed([]),
             probeAvailability: Effect.succeed("ready" as const),
           })
+          const shipGateRunnerLayer = Layer.succeed(ShipGateRunner, {
+            computeTreeHash: () => Effect.succeed(WorkspaceTreeHash.make("a".repeat(64))),
+            recoverMutationBackup: () => Effect.void,
+            executeStageCommand: (input) =>
+              Effect.succeed(
+                ShipStagePassed.make({
+                  stage: input.stage,
+                  durationMs: GateDurationMs.make(1),
+                }),
+              ),
+            reportStageProgress: () => Effect.void,
+          })
+          const makeShipAttemptRecord = (
+            runId: WorkflowRunId,
+            attempt: ShipAttempt,
+            status: WorkflowShipAttemptRecord["status"],
+          ): WorkflowShipAttemptRecord => ({
+            shipKey: ShipAttemptKey.make(`${runId}#${attempt}`),
+            runId,
+            attempt,
+            treeHash: WorkspaceTreeHash.make("a".repeat(64)),
+            status,
+            updatedMs: WorkflowTimestampMs.make(1),
+          })
+          const shipAttemptStoreLayer = Layer.succeed(ShipAttemptStore, {
+            allocateAttempt: ({ runId }) =>
+              Effect.succeed(makeShipAttemptRecord(runId, ShipAttempt.make(1), "running")),
+            updateStatus: ({ runId, attempt, status }) =>
+              Effect.succeed(makeShipAttemptRecord(runId, attempt, status)),
+            listAttemptsForRun: () => Effect.succeed([]),
+          })
           const portsLayer = Layer.mergeAll(
             makeCompletedVerifierLayer(),
             makeNoopWorktreeLayer(validatedCanonical.worktreeRoot),
@@ -724,8 +765,10 @@ describe("WF-3 Unix-socket daemon doctor, lease fencing, offline & pause lifecyc
             reviewStubLayer,
             projectionWriterLayer,
             readModelLayer,
+            shipGateRunnerLayer,
+            shipAttemptStoreLayer,
           )
-          const fullLayer = HarnessTaskWorkflowLayer.pipe(
+          const fullLayer = Layer.merge(HarnessTaskWorkflowLayer, ShipWorkflowLayer).pipe(
             Layer.provideMerge(Layer.merge(WorkflowEngine.layerMemory, portsLayer)),
           )
           const workflowContext = yield* Layer.buildWithScope(fullLayer, scope)
@@ -735,8 +778,14 @@ describe("WF-3 Unix-socket daemon doctor, lease fencing, offline & pause lifecyc
           const runMutexesRef = yield* SynchronizedRef.make<
             ReadonlyMap<WorkflowRunId, Semaphore.Semaphore>
           >(new Map())
+          const shipWorktreeMutexesRef = yield* SynchronizedRef.make<
+            ReadonlyMap<AbsoluteRepoRoot, Semaphore.Semaphore>
+          >(new Map())
+          const shipProgressListeners = new Map<string, (event: ShipStreamProgressEvent) => void>()
+          const shipGateController = createShipActiveGateController()
           const runtime: WorkflowDaemonRuntime = {
             workflowContext,
+            shipWorkflowContext: workflowContext,
             engine: Context.get(workflowContext, WorkflowEngine.WorkflowEngine),
             projectionWriter: Context.get(workflowContext, WorkflowProjectionWriter),
             readModelQuery: Context.get(workflowContext, WorkflowReadModelQuery),
@@ -744,9 +793,14 @@ describe("WF-3 Unix-socket daemon doctor, lease fencing, offline & pause lifecyc
             unitAgentDispatcher: Context.get(workflowContext, UnitAgentDispatcher),
             worktreePort: Context.get(workflowContext, WorkflowWorktreePort),
             reviewRouter: Context.get(workflowContext, WorkflowReviewRouter),
+            shipGateRunner: Context.get(workflowContext, ShipGateRunner),
+            shipAttemptStore: Context.get(workflowContext, ShipAttemptStore),
+            shipProgressListeners,
+            shipGateController,
             leaseFence: { commonGitDir: validatedCanonical.commonGitDir },
             plansRef,
             runMutexesRef,
+            shipWorktreeMutexesRef,
             rebuildMutex: Semaphore.makeUnsafe(1),
             rebuildRpcGateSemaphore: Semaphore.makeUnsafe(16),
             rebuildProjectionGateSemaphore: Semaphore.makeUnsafe(16),

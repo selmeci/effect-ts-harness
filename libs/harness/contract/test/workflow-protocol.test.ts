@@ -694,16 +694,15 @@ describe("workflow-protocol & workflow-timeouts", () => {
     ).toBe(true)
   })
 
-  it("rejects inverted ship timeout layers (shipServerSocketMs > shipWorkflowIpcMs > shipWorkflowSettleMs > shipGateCommandMs > workflowServerSocketMs)", () => {
+  it("rejects inverted ship timeout layers (shipServerSocketMs > shipWorkflowIpcMs > shipWorkflowSettleMs > SHIP_STAGES.length * shipGateCommandMs > workflowServerSocketMs)", () => {
+    const exactShipStageBudget = SHIP_STAGES.length * WORKFLOW_TIMEOUT_BUDGETS.shipGateCommandMs
     expect(WORKFLOW_TIMEOUT_BUDGETS.shipServerSocketMs).toBeGreaterThan(
       WORKFLOW_TIMEOUT_BUDGETS.shipWorkflowIpcMs,
     )
     expect(WORKFLOW_TIMEOUT_BUDGETS.shipWorkflowIpcMs).toBeGreaterThan(
       WORKFLOW_TIMEOUT_BUDGETS.shipWorkflowSettleMs,
     )
-    expect(WORKFLOW_TIMEOUT_BUDGETS.shipWorkflowSettleMs).toBeGreaterThan(
-      WORKFLOW_TIMEOUT_BUDGETS.shipGateCommandMs,
-    )
+    expect(WORKFLOW_TIMEOUT_BUDGETS.shipWorkflowSettleMs).toBeGreaterThan(exactShipStageBudget)
     expect(WORKFLOW_TIMEOUT_BUDGETS.shipGateCommandMs).toBeGreaterThan(
       WORKFLOW_TIMEOUT_BUDGETS.workflowServerSocketMs,
     )
@@ -748,12 +747,22 @@ describe("workflow-protocol & workflow-timeouts", () => {
       ),
     ).toBe(true)
 
-    // Inequality 7: shipWorkflowSettleMs > shipGateCommandMs
+    // Inequality 7: shipWorkflowSettleMs > SHIP_STAGES.length * shipGateCommandMs
     expect(
       Result.isFailure(
         validateWorkflowTimeoutBudgets({
           ...WORKFLOW_TIMEOUT_BUDGETS,
-          shipWorkflowSettleMs: WORKFLOW_TIMEOUT_BUDGETS.shipGateCommandMs,
+          shipWorkflowSettleMs: WorkflowTimeoutMs.make(
+            WORKFLOW_TIMEOUT_BUDGETS.shipGateCommandMs + 1,
+          ),
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      Result.isFailure(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          shipWorkflowSettleMs: WorkflowTimeoutMs.make(exactShipStageBudget),
         }),
       ),
     ).toBe(true)
@@ -761,9 +770,7 @@ describe("workflow-protocol & workflow-timeouts", () => {
       Result.isSuccess(
         validateWorkflowTimeoutBudgets({
           ...WORKFLOW_TIMEOUT_BUDGETS,
-          shipWorkflowSettleMs: WorkflowTimeoutMs.make(
-            WORKFLOW_TIMEOUT_BUDGETS.shipGateCommandMs + 1,
-          ),
+          shipWorkflowSettleMs: WorkflowTimeoutMs.make(exactShipStageBudget + 1),
         }),
       ),
     ).toBe(true)

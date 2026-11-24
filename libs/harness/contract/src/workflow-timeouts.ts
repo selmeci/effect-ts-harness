@@ -1,4 +1,5 @@
 import { Result, Schema } from "effect"
+import { SHIP_STAGES } from "./workflow.js"
 import { ErrorReasonMessage } from "./workspace-and-process.js"
 
 /** Branded positive integer duration in milliseconds used across workflow IPC, verification, and lease timeouts. */
@@ -56,9 +57,9 @@ const RAW_WORKFLOW_TIMEOUT_BUDGETS: WorkflowTimeoutBudgets = {
   workflowCompleteIpcMs: WorkflowTimeoutMs.make(150_000),
   workflowServerSocketMs: WorkflowTimeoutMs.make(160_000),
   shipGateCommandMs: WorkflowTimeoutMs.make(300_000),
-  shipWorkflowSettleMs: WorkflowTimeoutMs.make(870_000),
-  shipWorkflowIpcMs: WorkflowTimeoutMs.make(900_000),
-  shipServerSocketMs: WorkflowTimeoutMs.make(930_000),
+  shipWorkflowSettleMs: WorkflowTimeoutMs.make(SHIP_STAGES.length * 300_000 + 60_000),
+  shipWorkflowIpcMs: WorkflowTimeoutMs.make(1_890_000),
+  shipServerSocketMs: WorkflowTimeoutMs.make(1_920_000),
   httpRequestTimeoutMs: WorkflowTimeoutMs.make(15_000),
   claimTimeoutMs: WorkflowTimeoutMs.make(6 * 60 * 60 * 1_000),
   writerLeaseHeartbeatTtlMs: WorkflowTimeoutMs.make(45_000),
@@ -113,10 +114,11 @@ export const validateWorkflowTimeoutBudgets = (
       ),
     )
   }
-  if (budgets.shipWorkflowSettleMs <= budgets.shipGateCommandMs) {
+  const minShipStageBudgetMs = SHIP_STAGES.length * budgets.shipGateCommandMs
+  if (budgets.shipWorkflowSettleMs <= minShipStageBudgetMs) {
     return Result.fail(
       ErrorReasonMessage.make(
-        `shipWorkflowSettleMs (${budgets.shipWorkflowSettleMs}) must exceed shipGateCommandMs (${budgets.shipGateCommandMs})`,
+        `shipWorkflowSettleMs (${budgets.shipWorkflowSettleMs}) must exceed ${SHIP_STAGES.length} * shipGateCommandMs (${minShipStageBudgetMs})`,
       ),
     )
   }

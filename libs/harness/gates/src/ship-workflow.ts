@@ -1,14 +1,17 @@
-import { Effect } from "effect"
+import { Cause, Effect, Exit } from "effect"
 import { Activity, Workflow, WorkflowEngine } from "effect/workflow"
 import { match } from "ts-pattern"
 import {
+  GateDurationMs,
   MutationRestoreError,
   SHIP_STAGES,
   ShipReceipt,
   type ShipRecoverBackupInput,
   ShipStage,
   type ShipStageCommandInput,
+  ShipStageFailed,
   ShipStagePassed,
+  ShipStreamProgressEvent,
   ShipTreeDriftError,
   type ShipTreeHashInput,
   ShipTreeMismatchError,
@@ -17,6 +20,7 @@ import {
   WorkflowActivityTag,
   WorkflowExecutionId,
   encodeWorkflowActivityName,
+  toShipFailureMessage,
 } from "@harness/contract"
 import { ShipGateRunner } from "@harness/service"
 
@@ -71,67 +75,147 @@ export const runGateAssertingTree = Effect.fn("ShipWorkflow.runGate")(function* 
 ): Effect.fn.Return<ShipStagePassed, ShipWorkflowError, ShipGateRunner> {
   const runner = yield* ShipGateRunner
   const treeHashInput = toTreeHashInput(payload, stage)
+  let stageDurationMs = GateDurationMs.make(0)
 
-  const preHash = yield* runner.computeTreeHash(treeHashInput)
-  if (preHash !== payload.treeHash) {
-    return yield* new ShipTreeMismatchError({
+  yield* runner.reportStageProgress(
+    ShipStreamProgressEvent.cases.StageStarted.make({
+      runId: payload.runId,
+      attempt: payload.attempt,
       stage,
-      expected: payload.treeHash,
-      actual: preHash,
-    })
-  }
+    }),
+  )
 
-  yield* match(stage)
-    .with("mutate-strict", () => runner.recoverMutationBackup(toRecoverBackupInput(payload)))
-    .with("format-check", "gc-strict", "ontology-check-strict", "verify", "done", () => Effect.void)
-    .exhaustive()
+  return yield* Effect.gen(function* () {
+    const preHash = yield* runner.computeTreeHash(treeHashInput)
+    if (preHash !== payload.treeHash) {
+      return yield* new ShipTreeMismatchError({
+        stage,
+        expected: payload.treeHash,
+        actual: preHash,
+      })
+    }
 
-  const stageResult = yield* match(stage)
-    .with("mutate-strict", () =>
-      runner.executeStageCommand(toStageCommandInput(payload, stage)).pipe(
-        Effect.onExit((exit) =>
-          match(exit)
-            .with({ _tag: "Success" }, () => Effect.void)
-            .with({ _tag: "Failure" }, () =>
-              runner.recoverMutationBackup(toRecoverBackupInput(payload)).pipe(Effect.ignore),
+    yield* match(stage)
+      .with("mutate-strict", () => runner.recoverMutationBackup(toRecoverBackupInput(payload)))
+      .with(
+        "format-check",
+        "gc-strict",
+        "ontology-check-strict",
+        "verify",
+        "done",
+        () => Effect.void,
+      )
+      .exhaustive()
+
+    const stageResult = yield* match(stage)
+      .with("mutate-strict", () =>
+        Effect.uninterruptibleMask((restore) =>
+          Effect.gen(function* () {
+            const cmdExit = yield* Effect.exit(
+              restore(runner.executeStageCommand(toStageCommandInput(payload, stage))),
             )
-            .exhaustive(),
+            return yield* Exit.match(cmdExit, {
+              onSuccess: (passed) => Effect.succeed(passed),
+              onFailure: (cmdCause) =>
+                Effect.gen(function* () {
+                  yield* runner.recoverMutationBackup(toRecoverBackupInput(payload))
+                  const postHashExit = yield* Effect.exit(runner.computeTreeHash(treeHashInput))
+                  return yield* Exit.match(postHashExit, {
+                    onSuccess: (postHash) =>
+                      postHash !== payload.treeHash
+                        ? Effect.fail(
+                            new MutationRestoreError({
+                              expected: payload.treeHash,
+                              actual: postHash,
+                            }),
+                          )
+                        : Effect.failCause(cmdCause),
+                    onFailure: (hashCause) =>
+                      match(Cause.findErrorOption(hashCause))
+                        .with({ _tag: "Some" }, ({ value: gateErr }) =>
+                          Effect.fail(
+                            new MutationRestoreError({
+                              expected: payload.treeHash,
+                              detail: toShipFailureMessage(gateErr),
+                            }),
+                          ),
+                        )
+                        .with({ _tag: "None" }, () => Effect.failCause(hashCause))
+                        .exhaustive(),
+                  })
+                }),
+            })
+          }),
         ),
+      )
+      .with("format-check", "gc-strict", "ontology-check-strict", "verify", "done", () =>
+        runner.executeStageCommand(toStageCommandInput(payload, stage)),
+      )
+      .exhaustive()
+
+    stageDurationMs = stageResult.durationMs
+
+    yield* match(stage)
+      .with("mutate-strict", () =>
+        Effect.gen(function* () {
+          const postHash = yield* runner.computeTreeHash(treeHashInput)
+          if (postHash !== payload.treeHash) {
+            return yield* new MutationRestoreError({
+              expected: payload.treeHash,
+              actual: postHash,
+            })
+          }
+        }),
+      )
+      .with("done", () =>
+        Effect.gen(function* () {
+          const postHash = yield* runner.computeTreeHash(treeHashInput)
+          if (postHash !== payload.treeHash) {
+            return yield* new ShipTreeDriftError({
+              stage,
+              expected: payload.treeHash,
+              actual: postHash,
+            })
+          }
+        }),
+      )
+      .with("format-check", "gc-strict", "ontology-check-strict", "verify", () => Effect.void)
+      .exhaustive()
+
+    return stageResult
+  }).pipe(
+    Effect.tap((stageResult) =>
+      runner.reportStageProgress(
+        ShipStreamProgressEvent.cases.StageFinished.make({
+          runId: payload.runId,
+          attempt: payload.attempt,
+          progress: stageResult,
+        }),
       ),
-    )
-    .with("format-check", "gc-strict", "ontology-check-strict", "verify", "done", () =>
-      runner.executeStageCommand(toStageCommandInput(payload, stage)),
-    )
-    .exhaustive()
-
-  yield* match(stage)
-    .with("mutate-strict", () =>
-      Effect.gen(function* () {
-        const postHash = yield* runner.computeTreeHash(treeHashInput)
-        if (postHash !== payload.treeHash) {
-          return yield* new MutationRestoreError({
-            expected: payload.treeHash,
-            actual: postHash,
-          })
-        }
-      }),
-    )
-    .with("done", () =>
-      Effect.gen(function* () {
-        const postHash = yield* runner.computeTreeHash(treeHashInput)
-        if (postHash !== payload.treeHash) {
-          return yield* new ShipTreeDriftError({
+    ),
+    Effect.tapError((err) =>
+      runner.reportStageProgress(
+        ShipStreamProgressEvent.cases.StageFinished.make({
+          runId: payload.runId,
+          attempt: payload.attempt,
+          progress: ShipStageFailed.make({
             stage,
-            expected: payload.treeHash,
-            actual: postHash,
-          })
-        }
-      }),
-    )
-    .with("format-check", "gc-strict", "ontology-check-strict", "verify", () => Effect.void)
-    .exhaustive()
-
-  return stageResult
+            durationMs: match(err)
+              .with({ _tag: "ShipGateFailedError" }, (e) => e.durationMs ?? stageDurationMs)
+              .with(
+                { _tag: "ShipTreeMismatchError" },
+                { _tag: "MutationRestoreError" },
+                { _tag: "ShipTreeDriftError" },
+                () => stageDurationMs,
+              )
+              .exhaustive(),
+            errorTag: err._tag,
+            detail: toShipFailureMessage(err),
+          }),
+        }),
+      ),
+    ),
+  )
 })
 
 /** Orchestrates `SHIP_STAGES` strictly in canonical order inside deterministic `Activity.make` steps. */

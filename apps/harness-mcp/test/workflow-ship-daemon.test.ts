@@ -1,4 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs"
+import { createConnection } from "node:net"
 import { join } from "node:path"
 import { Context, Deferred, Effect, Fiber, Layer, Scope } from "effect"
 import { WorkflowEngine } from "effect/workflow"
@@ -27,7 +28,7 @@ import {
   WorkflowDaemonCapability,
   isPureInterruptCause,
 } from "@harness/contract"
-import { computeWorkspaceTreeHashChecked } from "@harness/gates"
+import { ShipWorkflow, computeWorkspaceTreeHashChecked, shipExecutionIdOf } from "@harness/gates"
 import {
   type ShipGateRunnerOptions,
   UnixSocketDaemonLive,
@@ -56,7 +57,6 @@ import {
   buildWorkflowPortsLayer,
   resolveDaemonKnownEntityTypes,
 } from "../src/daemon/workflow-ports-daemon-helper.js"
-import { withWorktreeShipLock } from "../src/daemon/workflow-rpc-shared.js"
 import {
   handleDaemonWorkflowShipRequest,
   resolveShipRunTarget,
@@ -149,6 +149,7 @@ const makeFailingShipGateRunnerLayer = (
               durationMs: GateDurationMs.make(3),
             }),
           ),
+    reportStageProgress: () => Effect.void,
   })
 }
 
@@ -823,35 +824,9 @@ describe("WF-4 Unix-socket daemon workflow.ship RPC", () => {
     )
   }
 
-  it("guards inactive ship services, fallback withWorktreeShipLock, and normalizes progress requestId", async () => {
+  it("normalizes padded workflow.ship progress requestId", async () => {
     await withActiveShipRuntime("ship-guards-and-id", ({ worktreeRoot, runtime, allowedScope }) =>
       Effect.gen(function* () {
-        const missingShipServicesEnvelope = yield* handleDaemonWorkflowShipRequest({
-          requestId: "  req-missing-ship-services  ",
-          rawPayload: { repoRoot: worktreeRoot },
-          scope: allowedScope,
-          runtime: { ...runtime, shipWorkflowContext: undefined },
-        })
-        expect(missingShipServicesEnvelope).toMatchObject({
-          id: "req-missing-ship-services",
-          ok: false,
-          command: "workflow.ship",
-        })
-        if (missingShipServicesEnvelope.ok) {
-          expect.unreachable("Expected missing ship services envelope to fail")
-        }
-        expect(missingShipServicesEnvelope.error).toContain(
-          "Workflow ship runtime services are inactive",
-        )
-
-        const customRuntime = { ...runtime, shipWorktreeMutexesRef: undefined }
-        const lockedVal = yield* withWorktreeShipLock(
-          customRuntime,
-          worktreeRoot,
-          Effect.succeed("fallback-lock-ok"),
-        )
-        expect(lockedVal).toBe("fallback-lock-ok")
-
         const paddedLines: Array<string> = []
         const paddedEnvelope = yield* handleDaemonWorkflowShipRequest({
           requestId: "  req-padded-pass  ",
@@ -875,7 +850,7 @@ describe("WF-4 Unix-socket daemon workflow.ship RPC", () => {
     )
   }, 45_000)
 
-  it("triggers ShipWorkflow.interrupt on timeout and cleans listeners on external Fiber.interrupt", async () => {
+  it("triggers ShipWorkflow.interrupt on timeout and settles attempts on external Fiber.interrupt", async () => {
     let currentGate:
       | {
           readonly started?: Deferred.Deferred<void> | undefined
@@ -903,7 +878,7 @@ describe("WF-4 Unix-socket daemon workflow.ship RPC", () => {
       "ship-timeout-and-interrupt",
       ({ worktreeRoot, runtime, allowedScope, ephemeralRunId }) =>
         Effect.gen(function* () {
-          const shipContext = runtime.shipWorkflowContext!
+          const shipContext = runtime.shipWorkflowContext
           const origEngine = Context.get(shipContext, WorkflowEngine.WorkflowEngine)
           const interruptedExecutions: Array<string> = []
           const releaseTimeoutGate = yield* Deferred.make<void>()
@@ -939,7 +914,7 @@ describe("WF-4 Unix-socket daemon workflow.ship RPC", () => {
           }
           expect(timeoutEnvelope.error).toContain("timed out after 100ms")
           expect(interruptedExecutions).toHaveLength(1)
-          expect(runtime.shipProgressListeners?.size).toBe(0)
+          expect(runtime.shipProgressListeners.size).toBe(0)
 
           const gateStarted2 = yield* Deferred.make<void>()
           const releaseGate2 = yield* Deferred.make<void>()
@@ -953,7 +928,7 @@ describe("WF-4 Unix-socket daemon workflow.ship RPC", () => {
           }).pipe(Effect.forkChild)
 
           yield* Deferred.await(gateStarted2)
-          expect(runtime.shipProgressListeners?.size).toBe(1)
+          expect(runtime.shipProgressListeners.size).toBe(1)
           yield* Fiber.interrupt(interruptFiber)
           const interruptExit = yield* Fiber.await(interruptFiber)
           match(interruptExit)
@@ -965,16 +940,273 @@ describe("WF-4 Unix-socket daemon workflow.ship RPC", () => {
             })
             .exhaustive()
           yield* Deferred.succeed(releaseGate2, undefined)
-          expect(runtime.shipProgressListeners?.size).toBe(0)
+          expect(runtime.shipProgressListeners.size).toBe(0)
 
-          const attempts = yield* runtime.shipAttemptStore!.listAttemptsForRun(ephemeralRunId)
+          const attempts = yield* runtime.shipAttemptStore.listAttemptsForRun(ephemeralRunId)
           expect(attempts.map((a) => [a.attempt, a.status])).toEqual([
             [1, "failed"],
-            [2, "running"],
+            [2, "failed"],
           ])
         }),
       gatedRunCommand,
     )
+  }, 45_000)
+
+  it("holds withWorktreeShipLock across timeout until an uninterruptible gate exits and ShipWorkflow.poll completes before running a concurrent ship", async () => {
+    const slowGateStarted = await Effect.runPromise(Deferred.make<void>())
+    const releaseSlowGate = await Effect.runPromise(Deferred.make<void>())
+    const interruptInvoked = await Effect.runPromise(Deferred.make<void>())
+    let slowGateCompleted = false
+    let secondCallStartedWhileSlowGateActive = false
+    let callPhase: "slow-first" | "fast-second" = "slow-first"
+
+    const slowUninterruptibleCommand: ShipGateRunnerOptions["runCommand"] = (_cmd, args) =>
+      Effect.gen(function* () {
+        if (callPhase === "slow-first" && args.includes("gc")) {
+          yield* Deferred.succeed(slowGateStarted, undefined)
+          yield* Effect.uninterruptible(
+            Deferred.await(releaseSlowGate).pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  slowGateCompleted = true
+                }),
+              ),
+            ),
+          )
+        } else if (callPhase === "fast-second" && !slowGateCompleted) {
+          secondCallStartedWhileSlowGateActive = true
+        }
+        return {
+          _tag: "Exited" as const,
+          exitCode: 0,
+          stdout: args.includes("done") ? JSON.stringify({ decision: "stop" }) : "",
+          stderr: "",
+          durationMs: 2,
+        }
+      })
+
+    await withActiveShipRuntime(
+      "ship-uninterruptible-lock-hold",
+      ({ worktreeRoot, runtime, allowedScope, ephemeralRunId }) =>
+        Effect.gen(function* () {
+          const origEngine = Context.get(runtime.shipWorkflowContext, WorkflowEngine.WorkflowEngine)
+          const spiedContext = Context.add(
+            runtime.shipWorkflowContext,
+            WorkflowEngine.WorkflowEngine,
+            {
+              ...origEngine,
+              interrupt: (workflow, executionId) =>
+                Deferred.succeed(interruptInvoked, undefined).pipe(
+                  Effect.andThen(origEngine.interrupt(workflow, executionId)),
+                ),
+            },
+          )
+          const spiedRuntime: WorkflowDaemonRuntime = {
+            ...runtime,
+            shipWorkflowContext: spiedContext,
+          }
+
+          const treeHash = match(computeWorkspaceTreeHashChecked(worktreeRoot, nodeSyncHostIo))
+            .with({ _tag: "Success" }, ({ success }) => success)
+            .with({ _tag: "Failure" }, ({ failure }) =>
+              expect.unreachable(`Expected tree hash computation to succeed: ${failure}`),
+            )
+            .exhaustive()
+          const executionId1 = yield* shipExecutionIdOf({
+            runId: ephemeralRunId,
+            treeHash,
+            attempt: ShipAttempt.make(1),
+            repoRoot: worktreeRoot,
+          })
+
+          const firstFiber = yield* handleDaemonWorkflowShipRequest({
+            requestId: "req-slow-timeout-1",
+            rawPayload: { repoRoot: worktreeRoot },
+            scope: allowedScope,
+            runtime: spiedRuntime,
+            settleTimeoutMs: WorkflowTimeoutMs.make(1500),
+          }).pipe(Effect.forkChild)
+
+          yield* Deferred.await(slowGateStarted)
+
+          callPhase = "fast-second"
+          const secondFiber = yield* handleDaemonWorkflowShipRequest({
+            requestId: "req-concurrent-after-timeout-2",
+            rawPayload: { repoRoot: worktreeRoot },
+            scope: allowedScope,
+            runtime: spiedRuntime,
+          }).pipe(Effect.forkChild)
+
+          // Wait until settleTimeoutMs fires and interruptAndSettleShipAttempt begins,
+          // then hold the uninterruptible gate open 150ms longer to verify lock retention.
+          yield* Deferred.await(interruptInvoked)
+          yield* Effect.sleep("150 millis")
+          expect(slowGateCompleted).toBe(false)
+          expect(secondCallStartedWhileSlowGateActive).toBe(false)
+
+          yield* Deferred.succeed(releaseSlowGate, undefined)
+
+          const firstEnvelope = yield* Fiber.join(firstFiber)
+          const secondEnvelope = yield* Fiber.join(secondFiber)
+
+          expect(firstEnvelope).toMatchObject({
+            id: "req-slow-timeout-1",
+            ok: false,
+            command: "workflow.ship",
+          })
+          if (firstEnvelope.ok) {
+            expect.unreachable("Expected first timed-out ship to fail")
+          }
+          expect(firstEnvelope.error).toContain("timed out after 1500ms")
+
+          expect(secondEnvelope).toMatchObject({
+            id: "req-concurrent-after-timeout-2",
+            ok: true,
+            command: "workflow.ship",
+            result: {
+              attempt: 2,
+              outcome: { _tag: "Passed" },
+            },
+          })
+
+          expect(slowGateCompleted).toBe(true)
+          expect(secondCallStartedWhileSlowGateActive).toBe(false)
+          expect(runtime.shipProgressListeners.size).toBe(0)
+
+          const polledFirst = yield* ShipWorkflow.poll(executionId1).pipe(
+            Effect.provideContext(runtime.shipWorkflowContext),
+          )
+          match(polledFirst)
+            .with({ _tag: "Some" }, ({ value }) => {
+              expect(value._tag).toBe("Complete")
+            })
+            .with({ _tag: "None" }, () => {
+              expect.unreachable("Expected timed-out ShipWorkflow execution to reach Complete")
+            })
+            .exhaustive()
+
+          const attempts = yield* runtime.shipAttemptStore.listAttemptsForRun(ephemeralRunId)
+          expect(attempts.map((a) => [a.attempt, a.status])).toEqual([
+            [1, "failed"],
+            [2, "passed"],
+          ])
+        }),
+      slowUninterruptibleCommand,
+    )
+  }, 45_000)
+
+  it("cancels active gate and marks WfShipAttempt failed when client destroys raw Unix socket mid-flight", async () => {
+    const { canonicalDir, baseSha } = createWorkRepo("socket-disconnect-cancel")
+    const validatedCanonical = await Effect.runPromise(
+      validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
+    )
+    const gateStarted = await Effect.runPromise(Deferred.make<void>())
+    const gateInterrupted = await Effect.runPromise(Deferred.make<void>())
+    let holdGateOpen = true
+
+    const daemon = await startHarnessDaemonServer(canonicalDir, {
+      workflowEngine: {
+        mode: "required",
+        client: createClient(),
+        entityReplyPollInterval: "50 millis",
+        unitVerifierLayer: makeCompletedVerifierLayer(),
+        worktreePortLayer: makeNoopWorktreeLayer(validatedCanonical.worktreeRoot),
+        reviewRouterLayer: reviewStubLayer,
+        shipGateRunCommand: (_cmd, args) =>
+          Effect.gen(function* () {
+            if (holdGateOpen && args.includes("gc")) {
+              yield* Deferred.succeed(gateStarted, undefined)
+              return yield* Effect.never.pipe(
+                Effect.onInterrupt(() =>
+                  Deferred.succeed(gateInterrupted, undefined).pipe(Effect.ignore),
+                ),
+              )
+            }
+            return {
+              _tag: "Exited" as const,
+              exitCode: 0,
+              stdout: args.includes("done") ? JSON.stringify({ decision: "stop" }) : "",
+              stderr: "",
+              durationMs: 2,
+            }
+          }),
+      },
+    })
+
+    try {
+      const plan = await completeSingleUnitManualRun(
+        validatedCanonical.worktreeRoot,
+        "run-socket-disconnect-01",
+        baseSha,
+      )
+      const socketPath = resolveWorkflowRuntimePaths(validatedCanonical.commonGitDir).socketPath
+
+      await new Promise<void>((resolveDisconnect, rejectDisconnect) => {
+        const socket = createConnection(socketPath)
+        let buffer = ""
+        let stageStartedSeen = false
+        socket.on("error", rejectDisconnect)
+        socket.on("connect", () => {
+          socket.write(
+            `${JSON.stringify({
+              id: "req-socket-disconnect-1",
+              command: "workflow.ship",
+              repoRoot: validatedCanonical.worktreeRoot,
+              runId: plan.runId,
+            })}\n`,
+          )
+        })
+        socket.on("data", (chunk) => {
+          buffer += chunk.toString("utf8")
+          if (!stageStartedSeen && buffer.includes('"gc-strict"')) {
+            stageStartedSeen = true
+            void Effect.runPromise(Deferred.await(gateStarted)).then(() => {
+              socket.destroy()
+              resolveDisconnect()
+            }, rejectDisconnect)
+          }
+        })
+      })
+
+      await Effect.runPromise(Deferred.await(gateInterrupted))
+
+      holdGateOpen = false
+      const followUpRes = await Effect.runPromise(
+        shipWorkflowViaDaemon({
+          repoRoot: validatedCanonical.worktreeRoot,
+          runId: plan.runId,
+        }),
+      )
+      expect(followUpRes.attempt).toBe(2)
+      expect(followUpRes.outcome._tag).toBe("Passed")
+
+      const status = await Effect.runPromise(
+        getWorkflowStatusViaDaemon({
+          repoRoot: validatedCanonical.worktreeRoot,
+          runId: plan.runId,
+        }),
+      )
+      match(status)
+        .with({ _tag: "Ready" }, ({ outcome }) => {
+          match(outcome)
+            .with({ _tag: "Completed" }, ({ shipAttempts }) => {
+              expect(shipAttempts?.map((a) => [a.attempt, a.status])).toEqual([
+                [1, "failed"],
+                [2, "passed"],
+              ])
+            })
+            .with({ _tag: "NotFound" }, { _tag: "Active" }, { _tag: "Failed" }, () => {
+              expect.unreachable("Expected Completed run outcome")
+            })
+            .exhaustive()
+        })
+        .with({ _tag: "DaemonOffline" }, { _tag: "StorePaused" }, () => {
+          expect.unreachable("Expected Ready status")
+        })
+        .exhaustive()
+    } finally {
+      await daemon.close()
+    }
   }, 45_000)
 
   it("supports buildWorkflowPortsLayer layer overrides and safely ignores progress events without a registered listener", async () => {
@@ -1059,7 +1291,7 @@ describe("WF-4 Unix-socket daemon workflow.ship RPC", () => {
             [],
           )
 
-          // Execute a stage command with no listener registered for this key (exercises cb?.(event) no-op)
+          // Emit a progress event with no listener registered for this key (exercises cb?.(event) no-op)
           const treeHash = match(
             computeWorkspaceTreeHashChecked(validatedCanonical.worktreeRoot, nodeSyncHostIo),
           )
@@ -1068,6 +1300,12 @@ describe("WF-4 Unix-socket daemon workflow.ship RPC", () => {
               expect.unreachable(`Expected tree hash computation to succeed: ${failure}`),
             )
             .exhaustive()
+          yield* runner.reportStageProgress({
+            _tag: "StageStarted",
+            runId: WorkflowRunId.make("run-unregistered-listener"),
+            attempt: ShipAttempt.make(1),
+            stage: "format-check",
+          })
           const stageRes = yield* runner.executeStageCommand({
             runId: WorkflowRunId.make("run-unregistered-listener"),
             attempt: ShipAttempt.make(1),
