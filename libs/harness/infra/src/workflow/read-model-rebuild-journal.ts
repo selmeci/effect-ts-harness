@@ -359,6 +359,7 @@ const replayActivityMessage = Effect.fnUntraced(function* (params: {
       { _tag: "ProvisionWorktrees" },
       { _tag: "ProjectRunStarted" },
       { _tag: "RouteReview" },
+      { _tag: "RunGate" },
       { _tag: "ProjectUnitCompleted" },
       { _tag: "ProjectUnitRejected" },
       { _tag: "ProjectUnitAttemptEscalated" },

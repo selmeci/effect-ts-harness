@@ -505,7 +505,7 @@ const splitCommandTokens = (command: string): ReadonlyArray<string> => {
   return tokens
 }
 
-const PNPM_VALUE_FLAGS: ReadonlySet<string> = new Set([
+export const PNPM_VALUE_FLAGS: ReadonlySet<string> = new Set([
   "-F",
   "--filter",
   "--filter-prod",
@@ -630,7 +630,7 @@ const PNPM_FILTER_EXEC_PATTERN =
 const PNPM_FILTER_DLX_PATTERN =
   /^pnpm\s+(?:(?:(?:-F|--filter|--filter-prod|-C|--dir)(?:=\S+|\s+\S+))\s+)+dlx(?:\s|$)/
 
-const hasTokenReferencingHarnessCli = (tokens: ReadonlyArray<string>): boolean =>
+export const hasTokenReferencingHarnessCli = (tokens: ReadonlyArray<string>): boolean =>
   tokens.some((tok) => /(?:^|[=,/:.{*'"@])harness-cli(?:$|[=,/:.}*'"@])/.test(tok))
 
 const hasNxStartTarget = (tokens: ReadonlyArray<string>): boolean => {

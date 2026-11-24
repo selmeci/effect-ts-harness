@@ -4,11 +4,13 @@ import {
   type DaemonProtocolMismatchError,
   MaxConcurrency,
   RunnerId,
+  type ShipStreamProgressEvent,
   type StdinReadError,
   type UnitMode,
   UnitMode as UnitModeSchema,
   type UnitOutcome,
   WorkflowRunId,
+  WorkflowShipResponse,
   type WorkflowStoreUnavailableError,
   toErrorReasonMessage,
 } from "@harness/contract"
@@ -21,13 +23,14 @@ export const WORKFLOW_ACTIONS = [
   "status",
   "complete",
   "resume",
+  "ship",
   "doctor",
   "abort",
 ] as const
 export type WorkflowAction = (typeof WORKFLOW_ACTIONS)[number]
 
 export const WORKFLOW_USAGE =
-  "usage: harness workflow <compile|start|status|complete|resume|doctor|abort> [options]"
+  "usage: harness workflow <compile|start|status|complete|resume|ship|doctor|abort> [options]"
 
 export const VALUE_FLAG_LIST = [
   "level",
@@ -36,6 +39,7 @@ export const VALUE_FLAG_LIST = [
   "max-concurrency",
   "input",
   "plan",
+  "run",
   "run-id",
   "unit",
   "phase",
@@ -190,6 +194,94 @@ export const requireRunId = (rawRunId: string | undefined, action: string) =>
   rawRunId === undefined
     ? Effect.fail(validationFail(`workflow ${action} requires --run-id <id>`))
     : decodeWithLabel(WorkflowRunId, rawRunId.trim(), "--run-id")
+
+/** Resolves an optional `--run` or `--run-id` flag, rejecting conflicting values. */
+export const resolveOptionalRunId = (
+  values: ParsedWorkflowFlags["values"],
+): Effect.Effect<WorkflowRunId | undefined, WorkflowCliValidationError> => {
+  const rawRun = values.run?.trim()
+  const rawRunId = values["run-id"]?.trim()
+  if (rawRun !== undefined && rawRunId !== undefined) {
+    if (rawRun !== rawRunId) {
+      return Effect.fail(
+        validationFail(
+          `Conflicting --run ('${rawRun}') and --run-id ('${rawRunId}') values; specify only one or ensure both match`,
+        ),
+      )
+    }
+    return decodeWithLabel(WorkflowRunId, rawRun, "--run")
+  }
+  if (rawRun !== undefined) {
+    return decodeWithLabel(WorkflowRunId, rawRun, "--run")
+  }
+  if (rawRunId !== undefined) {
+    return decodeWithLabel(WorkflowRunId, rawRunId, "--run-id")
+  }
+  return Effect.map(Effect.succeed(Option.none<WorkflowRunId>()), Option.getOrUndefined)
+}
+
+/** Formats a single-line human status for streaming `workflow.ship` progress to stderr. */
+export const formatWorkflowShipProgressLine = (event: ShipStreamProgressEvent): string =>
+  match(event)
+    .with(
+      { _tag: "StageStarted" },
+      ({ runId, attempt, stage }) =>
+        `[workflow:ship] ${runId} attempt=${attempt} stage=${stage} started`,
+    )
+    .with({ _tag: "StageFinished" }, ({ runId, attempt, progress }) =>
+      match(progress)
+        .with(
+          { _tag: "Passed" },
+          ({ stage, durationMs }) =>
+            `[workflow:ship] ${runId} attempt=${attempt} stage=${stage} passed (${durationMs}ms)`,
+        )
+        .with(
+          { _tag: "Failed" },
+          ({ stage, durationMs, errorTag, detail }) =>
+            `[workflow:ship] ${runId} attempt=${attempt} stage=${stage} failed (${durationMs}ms, ${errorTag}): ${detail}`,
+        )
+        .exhaustive(),
+    )
+    .exhaustive()
+
+/** Formats a terminal `WorkflowShipResponse` into a `CliResult` with exit codes 0 (Passed), 2 (circuit breaker tripped), or 1 (other failure). */
+export const formatWorkflowShipOutcome = (
+  response: WorkflowShipResponse,
+  compactJson: boolean,
+  encodedPayload?: typeof WorkflowShipResponse.Encoded,
+): CliResult => {
+  const stdout = formatOutput(
+    encodedPayload ?? Schema.encodeSync(WorkflowShipResponse)(response),
+    compactJson,
+  )
+  return match(response.outcome)
+    .with({ _tag: "Passed" }, () => ({
+      exitCode: 0,
+      stdout,
+      stderr: "",
+    }))
+    .with({ _tag: "Failed" }, ({ error }) =>
+      match(error)
+        .with({ _tag: "ShipGateFailedError", circuitBreakerStatus: "tripped" }, (gateErr) => ({
+          exitCode: 2,
+          stdout,
+          stderr: `${gateErr.escalationMessage ?? gateErr.message}\n`,
+        }))
+        .with(
+          { _tag: "ShipGateFailedError", circuitBreakerStatus: "clear" },
+          { _tag: "ShipTreeMismatchError" },
+          { _tag: "MutationRestoreError" },
+          { _tag: "ShipTreeDriftError" },
+          (err) => ({
+            exitCode: 1,
+            stdout,
+            stderr: `${err.message}\n`,
+          }),
+        )
+        .exhaustive(),
+    )
+    .exhaustive()
+}
 
 export const formatUnitRejectionSummary = (
   outcome: Extract<UnitOutcome, { readonly _tag: "Rejected" }>,

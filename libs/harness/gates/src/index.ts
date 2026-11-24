@@ -514,6 +514,7 @@ export {
 } from "./mutation/mutant-ast-generator.js"
 export {
   extractGitDiffModifiedLinesChecked,
+  recoverStartupBackup,
   type GitDiffExtractionResult,
 } from "./mutation/mutation-backup.js"
 export { readAndVerifyWorkspaceFile, statAndReadWorkspaceFiles } from "./services/workspace-fs.js"
@@ -544,6 +545,13 @@ export {
   unitCompletionDeferredName,
   unitEscalationDeferredName,
 } from "./harness-task-workflow.js"
+export {
+  ShipWorkflow,
+  ShipWorkflowLayer,
+  executeShipWorkflow,
+  runGateAssertingTree,
+  shipExecutionIdOf,
+} from "./ship-workflow.js"
 export {
   collectWorkflowBodyViolations,
   type WorkflowBodyViolation,

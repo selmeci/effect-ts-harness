@@ -4,6 +4,10 @@ import { describe, expect, it } from "vitest"
 import {
   AttemptNumber,
   EscalationOrdinal,
+  SHIP_STAGES,
+  ShipAttempt,
+  ShipAttemptKey,
+  ShipStage,
   WORKFLOW_ACTIVITY_DECODERS,
   WORKFLOW_DEFERRED_DECODERS,
   WORKFLOW_TIMEOUT_BUDGETS,
@@ -15,10 +19,13 @@ import {
   WorkflowPollAttempts,
   WorkflowPollBudget,
   WorkflowRunAbortTarget,
+  WorkflowRunId,
   WorkflowTimeoutBudgets,
   WorkflowTimeoutMs,
+  decodeShipAttemptKey,
   decodeWorkflowActivityName,
   decodeWorkflowDeferredName,
+  encodeShipAttemptKey,
   encodeWorkflowActivityName,
   encodeWorkflowDeferredName,
   validateWorkflowTimeoutBudgets,
@@ -90,6 +97,8 @@ const abortTargetArb: Arbitrary.Arbitrary<WorkflowRunAbortTarget> = Arbitrary.ma
       .exhaustive(),
 )
 
+const shipStageArb: Arbitrary.Arbitrary<ShipStage> = Arbitrary.schema(ShipStage)
+
 const activityTagArb: Arbitrary.Arbitrary<WorkflowActivityTag> = Arbitrary.map(
   Arbitrary.all({
     kind: Arbitrary.schema(
@@ -99,6 +108,7 @@ const activityTagArb: Arbitrary.Arbitrary<WorkflowActivityTag> = Arbitrary.map(
         "ProjectRunWaitingLlmPhase",
         "ProjectRunCompleted",
         "RouteReview",
+        "RunGate",
         "ProjectRunAborted",
         "MergeSliceWave",
         "ProjectWaveMergeEscalated",
@@ -115,12 +125,13 @@ const activityTagArb: Arbitrary.Arbitrary<WorkflowActivityTag> = Arbitrary.map(
       ]),
     ),
     abortTarget: abortTargetArb,
+    shipStage: shipStageArb,
     unitId: workUnitIdArb,
     attempt: attemptArb,
     escalationOrdinal: escalationArb,
     waveIndex: waveArb,
   }),
-  ({ kind, abortTarget, unitId, attempt, escalationOrdinal, waveIndex }) =>
+  ({ kind, abortTarget, shipStage, unitId, attempt, escalationOrdinal, waveIndex }) =>
     match(kind)
       .with("ProvisionWorktrees", () => WorkflowActivityTag.cases.ProvisionWorktrees.make({}))
       .with("ProjectRunStarted", () => WorkflowActivityTag.cases.ProjectRunStarted.make({}))
@@ -129,6 +140,7 @@ const activityTagArb: Arbitrary.Arbitrary<WorkflowActivityTag> = Arbitrary.map(
       )
       .with("ProjectRunCompleted", () => WorkflowActivityTag.cases.ProjectRunCompleted.make({}))
       .with("RouteReview", () => WorkflowActivityTag.cases.RouteReview.make({}))
+      .with("RunGate", () => WorkflowActivityTag.cases.RunGate.make({ stage: shipStage }))
       .with("ProjectRunAborted", () =>
         WorkflowActivityTag.cases.ProjectRunAborted.make({ target: abortTarget }),
       )
@@ -220,7 +232,7 @@ const deferredTagArb: Arbitrary.Arbitrary<WorkflowDeferredTag> = Arbitrary.map(
 )
 
 describe("workflow-protocol & workflow-timeouts", () => {
-  it("encodes and decodes all 18 WorkflowActivityTag variants including 'merge' WorkUnitId disambiguation", () => {
+  it("encodes and decodes all 19 WorkflowActivityTag variants including 'merge' WorkUnitId disambiguation", () => {
     const unitId = WorkUnitId.make("unit-a")
     const mergeNamedUnit = WorkUnitId.make("merge")
     const a1 = AttemptNumber.make(1)
@@ -236,6 +248,9 @@ describe("workflow-protocol & workflow-timeouts", () => {
       [WorkflowActivityTag.cases.ProjectRunWaitingLlmPhase.make({}), "ProjectRunWaitingLlmPhase"],
       [WorkflowActivityTag.cases.ProjectRunCompleted.make({}), "ProjectRunCompleted"],
       [WorkflowActivityTag.cases.RouteReview.make({}), "RouteReview"],
+      ...SHIP_STAGES.map(
+        (stage) => [WorkflowActivityTag.cases.RunGate.make({ stage }), `RunGate/${stage}`] as const,
+      ),
       [
         WorkflowActivityTag.cases.ProjectRunAborted.make({
           target: WorkflowRunAbortTarget.cases.Unit.make({ unitId, escalationOrdinal: o1 }),
@@ -400,6 +415,10 @@ describe("workflow-protocol & workflow-timeouts", () => {
       "NoopTick/0",
       "ProvisionWorktrees/extra",
       "RouteReview/",
+      "RunGate",
+      "RunGate/",
+      "RunGate/bogus",
+      "RunGate/verify/extra",
       "ProjectRunAborted",
       "ProjectRunAborted/u1",
       "ProjectRunAborted/u1/0",
@@ -673,5 +692,150 @@ describe("workflow-protocol & workflow-timeouts", () => {
         }),
       ),
     ).toBe(true)
+  })
+
+  it("rejects inverted ship timeout layers (shipServerSocketMs > shipWorkflowIpcMs > shipWorkflowSettleMs > shipGateCommandMs > workflowServerSocketMs)", () => {
+    expect(WORKFLOW_TIMEOUT_BUDGETS.shipServerSocketMs).toBeGreaterThan(
+      WORKFLOW_TIMEOUT_BUDGETS.shipWorkflowIpcMs,
+    )
+    expect(WORKFLOW_TIMEOUT_BUDGETS.shipWorkflowIpcMs).toBeGreaterThan(
+      WORKFLOW_TIMEOUT_BUDGETS.shipWorkflowSettleMs,
+    )
+    expect(WORKFLOW_TIMEOUT_BUDGETS.shipWorkflowSettleMs).toBeGreaterThan(
+      WORKFLOW_TIMEOUT_BUDGETS.shipGateCommandMs,
+    )
+    expect(WORKFLOW_TIMEOUT_BUDGETS.shipGateCommandMs).toBeGreaterThan(
+      WORKFLOW_TIMEOUT_BUDGETS.workflowServerSocketMs,
+    )
+
+    // Inequality 5: shipServerSocketMs > shipWorkflowIpcMs
+    expect(
+      Result.isFailure(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          shipServerSocketMs: WORKFLOW_TIMEOUT_BUDGETS.shipWorkflowIpcMs,
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      Result.isSuccess(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          shipServerSocketMs: WorkflowTimeoutMs.make(
+            WORKFLOW_TIMEOUT_BUDGETS.shipWorkflowIpcMs + 1,
+          ),
+        }),
+      ),
+    ).toBe(true)
+
+    // Inequality 6: shipWorkflowIpcMs > shipWorkflowSettleMs
+    expect(
+      Result.isFailure(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          shipWorkflowIpcMs: WORKFLOW_TIMEOUT_BUDGETS.shipWorkflowSettleMs,
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      Result.isSuccess(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          shipWorkflowIpcMs: WorkflowTimeoutMs.make(
+            WORKFLOW_TIMEOUT_BUDGETS.shipWorkflowSettleMs + 1,
+          ),
+        }),
+      ),
+    ).toBe(true)
+
+    // Inequality 7: shipWorkflowSettleMs > shipGateCommandMs
+    expect(
+      Result.isFailure(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          shipWorkflowSettleMs: WORKFLOW_TIMEOUT_BUDGETS.shipGateCommandMs,
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      Result.isSuccess(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          shipWorkflowSettleMs: WorkflowTimeoutMs.make(
+            WORKFLOW_TIMEOUT_BUDGETS.shipGateCommandMs + 1,
+          ),
+        }),
+      ),
+    ).toBe(true)
+
+    // Inequality 8: shipGateCommandMs > workflowServerSocketMs
+    expect(
+      Result.isFailure(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          shipGateCommandMs: WORKFLOW_TIMEOUT_BUDGETS.workflowServerSocketMs,
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      Result.isSuccess(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          shipGateCommandMs: WorkflowTimeoutMs.make(
+            WORKFLOW_TIMEOUT_BUDGETS.workflowServerSocketMs + 1,
+          ),
+        }),
+      ),
+    ).toBe(true)
+  })
+
+  it("encodes, decodes, and validates ShipAttemptKey round-trips and malformed rejections", () => {
+    const runId = WorkflowRunId.make("ship-run-001")
+    const attempt1 = ShipAttempt.make(1)
+    const attempt42 = ShipAttempt.make(42)
+
+    const encoded1 = encodeShipAttemptKey(runId, attempt1)
+    expect(encoded1).toBe(ShipAttemptKey.make("ship-run-001#1"))
+    expect(Schema.decodeSync(ShipAttemptKey)(encoded1)).toBe(encoded1)
+
+    const encoded42 = encodeShipAttemptKey(runId, attempt42)
+    expect(encoded42).toBe(ShipAttemptKey.make("ship-run-001#42"))
+
+    for (const [key, expectedRunId, expectedAttempt] of [
+      [encoded1, runId, attempt1],
+      [encoded42, runId, attempt42],
+    ] as const) {
+      const decoded = decodeShipAttemptKey(key)
+      match(decoded)
+        .with({ _tag: "Success" }, ({ success }) => {
+          expect(success.runId).toBe(expectedRunId)
+          expect(success.attempt).toBe(expectedAttempt)
+          expect(encodeShipAttemptKey(success.runId, success.attempt)).toBe(key)
+        })
+        .with({ _tag: "Failure" }, ({ failure }) =>
+          expect.unreachable(`Expected ShipAttemptKey decode success for '${key}': ${failure}`),
+        )
+        .exhaustive()
+    }
+
+    const badShipKeys = [
+      "",
+      "ship-run-001",
+      "#1",
+      "ship-run-001#",
+      "ship-run-001#0",
+      "ship-run-001#-1",
+      "ship-run-001#01",
+      "ship-run-001#abc",
+      "ship-run-001#1#2",
+      "ship-run-001#9007199254740992",
+      "short#1",
+      "SHIP-RUN-001#1",
+      "ship_run_001#1",
+      `${"a".repeat(65)}#1`,
+    ]
+    for (const bad of badShipKeys) {
+      expect(Result.isFailure(decodeShipAttemptKey(bad))).toBe(true)
+    }
   })
 })

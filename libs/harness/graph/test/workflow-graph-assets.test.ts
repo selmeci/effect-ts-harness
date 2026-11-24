@@ -41,7 +41,7 @@ describe("Workflow graph assets, WF-3 entity lifecycles & client config", () => 
       (match) => match[1] ?? "",
     )
     expect(declaredQueryNames).toEqual([...WORKFLOW_GQ_QUERY_NAMES])
-    expect(declaredQueryNames).toHaveLength(51)
+    expect(declaredQueryNames).toHaveLength(55)
 
     const out = execFileSync(
       omnigraphBin,
@@ -435,6 +435,141 @@ describe("Workflow graph assets, WF-3 entity lifecycles & client config", () => 
     })
   })
 
+  it("executes WfShipAttempt lifecycle (wf_insert_ship_attempt, wf_get_ship_attempt, wf_update_ship_attempt, wf_ship_attempts_for_run)", async () => {
+    const og = createCliClient()
+    const runId = "wf4-ship-run-1"
+    const shipKey1 = `${runId}#1`
+    const shipKey2 = `${runId}#2`
+    const treeHash1 = "d".repeat(64)
+    const treeHash2 = "e".repeat(64)
+
+    expect(
+      requireRows(
+        await og.queries.invoke("wf_get_ship_attempt", {
+          branch: "main",
+          expectMutation: false,
+          params: { shipKey: shipKey1 },
+        }),
+      ),
+    ).toEqual([])
+    expect(
+      requireRows(
+        await og.queries.invoke("wf_ship_attempts_for_run", {
+          branch: "main",
+          expectMutation: false,
+          params: { runId },
+        }),
+      ),
+    ).toEqual([])
+
+    await og.queries.invoke("wf_insert_ship_attempt", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        shipKey: shipKey2,
+        runId,
+        attempt: 2,
+        treeHash: treeHash2,
+        status: "running",
+        updatedMs: 2_600,
+      },
+    })
+    const beforeAttempt1 = await og.queries.invoke("wf_get_ship_attempt", {
+      branch: "main",
+      expectMutation: false,
+      params: { shipKey: shipKey1 },
+    })
+    expect(requireRows(beforeAttempt1)).toEqual([])
+    const commitBeforeAttempt1 =
+      "graphCommitId" in beforeAttempt1 && typeof beforeAttempt1.graphCommitId === "string"
+        ? beforeAttempt1.graphCommitId
+        : undefined
+    if (commitBeforeAttempt1 === undefined) {
+      expect.unreachable("Expected non-null graphCommitId before inserting attempt 1")
+    }
+
+    await og.queries.invoke(
+      "wf_insert_ship_attempt",
+      {
+        branch: "main",
+        expectMutation: true,
+        params: {
+          shipKey: shipKey1,
+          runId,
+          attempt: 1,
+          treeHash: treeHash1,
+          status: "failed",
+          updatedMs: 2_300,
+        },
+      },
+      { ifGraphCommit: commitBeforeAttempt1 },
+    )
+
+    await expect(
+      og.queries.invoke(
+        "wf_insert_ship_attempt",
+        {
+          branch: "main",
+          expectMutation: true,
+          params: {
+            shipKey: shipKey1,
+            runId,
+            attempt: 1,
+            treeHash: treeHash1,
+            status: "running",
+            updatedMs: 2_400,
+          },
+        },
+        { ifGraphCommit: commitBeforeAttempt1 },
+      ),
+    ).rejects.toBeInstanceOf(PreconditionFailedError)
+
+    const gotShip1 = requireRows(
+      await og.queries.invoke("wf_get_ship_attempt", {
+        branch: "main",
+        expectMutation: false,
+        params: { shipKey: shipKey1 },
+      }),
+    )
+    expect(gotShip1).toHaveLength(1)
+    expect(gotShip1[0]).toMatchObject({
+      shipKey: shipKey1,
+      runId,
+      attempt: 1,
+      treeHash: treeHash1,
+      status: "failed",
+      updatedMs: 2_300,
+    })
+
+    await og.queries.invoke("wf_update_ship_attempt", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        shipKey: shipKey2,
+        status: "passed",
+        updatedMs: 2_900,
+      },
+    })
+
+    const shipsForRun = requireRows(
+      await og.queries.invoke("wf_ship_attempts_for_run", {
+        branch: "main",
+        expectMutation: false,
+        params: { runId },
+      }),
+    )
+    expect(shipsForRun.map((s) => s.shipKey)).toEqual([shipKey1, shipKey2])
+    expect(shipsForRun.map((s) => s.attempt)).toEqual([1, 2])
+    expect(shipsForRun[1]).toMatchObject({
+      shipKey: shipKey2,
+      runId,
+      attempt: 2,
+      treeHash: treeHash2,
+      status: "passed",
+      updatedMs: 2_900,
+    })
+  })
+
   it("deletes target run views via wf_delete_run_views while preserving sibling runs", async () => {
     const og = createCliClient()
     const runId1 = "wf3-del-run-1"
@@ -519,6 +654,18 @@ describe("Workflow graph assets, WF-3 entity lifecycles & client config", () => 
         updatedMs: 2_200,
       },
     })
+    await og.queries.invoke("wf_insert_ship_attempt", {
+      branch: "main",
+      expectMutation: true,
+      params: {
+        shipKey: `${runId1}#1`,
+        runId: runId1,
+        attempt: 1,
+        treeHash: "d".repeat(64),
+        status: "running",
+        updatedMs: 1_250,
+      },
+    })
 
     await og.queries.invoke("wf_delete_run_views", {
       branch: "main",
@@ -553,6 +700,15 @@ describe("Workflow graph assets, WF-3 entity lifecycles & client config", () => 
         }),
       ),
     ).toEqual([])
+    expect(
+      requireRows(
+        await og.queries.invoke("wf_ship_attempts_for_run", {
+          branch: "main",
+          expectMutation: false,
+          params: { runId: runId1 },
+        }),
+      ).map((s) => s.shipKey),
+    ).toEqual([`${runId1}#1`])
     expect(
       requireRows(
         await og.queries.invoke("wf_list_runs", {

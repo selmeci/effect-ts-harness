@@ -1,15 +1,23 @@
 import { Context, type Effect, type Option } from "effect"
 import type {
+  AllocateShipAttemptInput,
   BackupDirPath,
   CompiledPlan,
   CompleteSharedStepInput,
   CompleteUnitInput,
   MergeSliceWaveInput,
   MergeSliceWaveOutcome,
+  MutationRestoreError,
   ReviewRoutingPlan,
+  ShipGateFailedError,
+  ShipRecoverBackupInput,
+  ShipStageCommandInput,
+  ShipStagePassed,
+  ShipTreeHashInput,
   UnitAgentDispatchResult,
   UnitAgentRequest,
   UnitOutcome,
+  UpdateShipAttemptStatusInput,
   WorkflowAttemptRecord,
   WorkflowBackupSummary,
   WorkflowRestoreRequest,
@@ -17,11 +25,13 @@ import type {
   WorkflowRouteReviewInput,
   WorkflowRunId,
   WorkflowRunRecord,
+  WorkflowShipAttemptRecord,
   WorkflowStoreAvailabilityState,
   WorkflowStoreUnavailableError,
   WorkflowUnitRecord,
-  WorktreeProvisionReceipt,
   WorkspaceFsError,
+  WorkspaceTreeHash,
+  WorktreeProvisionReceipt,
   WriterLeaseHeldError,
 } from "@harness/contract"
 
@@ -152,3 +162,46 @@ export class WorkflowReadModelQuery extends Context.Service<
   WorkflowReadModelQuery,
   WorkflowReadModelQueryShape
 >()("@harness/service/WorkflowReadModelQuery") {}
+
+/** Executes deterministic tree-hash checks, mutation backup recovery, and `ShipStage` commands for `ShipWorkflow`. */
+export interface ShipGateRunnerShape {
+  readonly computeTreeHash: (
+    input: ShipTreeHashInput,
+  ) => Effect.Effect<WorkspaceTreeHash, ShipGateFailedError>
+  readonly recoverMutationBackup: (
+    input: ShipRecoverBackupInput,
+  ) => Effect.Effect<void, MutationRestoreError>
+  readonly executeStageCommand: (
+    input: ShipStageCommandInput,
+  ) => Effect.Effect<ShipStagePassed, ShipGateFailedError>
+}
+
+export class ShipGateRunner extends Context.Service<ShipGateRunner, ShipGateRunnerShape>()(
+  "@harness/service/ShipGateRunner",
+) {}
+
+/** Allocates monotonic OCC `WfShipAttempt` rows and tracks `running | passed | failed` ship states. */
+export interface ShipAttemptStoreShape {
+  readonly allocateAttempt: (
+    input: AllocateShipAttemptInput,
+  ) => Effect.Effect<
+    WorkflowShipAttemptRecord,
+    WorkflowStoreUnavailableError | WriterLeaseHeldError
+  >
+  readonly updateStatus: (
+    input: UpdateShipAttemptStatusInput,
+  ) => Effect.Effect<
+    WorkflowShipAttemptRecord,
+    WorkflowStoreUnavailableError | WriterLeaseHeldError
+  >
+  readonly listAttemptsForRun: (
+    runId: WorkflowRunId,
+  ) => Effect.Effect<
+    ReadonlyArray<WorkflowShipAttemptRecord>,
+    WorkflowStoreUnavailableError | WriterLeaseHeldError
+  >
+}
+
+export class ShipAttemptStore extends Context.Service<ShipAttemptStore, ShipAttemptStoreShape>()(
+  "@harness/service/ShipAttemptStore",
+) {}

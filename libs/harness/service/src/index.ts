@@ -66,6 +66,10 @@ export {
 } from "./cache-and-daemon-ports.js"
 
 export {
+  ShipAttemptStore,
+  type ShipAttemptStoreShape,
+  ShipGateRunner,
+  type ShipGateRunnerShape,
   UnitAgentDispatcher,
   type UnitAgentDispatcherShape,
   UnitVerifier,

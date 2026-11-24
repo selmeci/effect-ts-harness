@@ -9,12 +9,16 @@ import {
   PackageStampHash,
   PlanSha256,
   RunnerId,
+  ShipAttempt,
   WaveIndex,
   WorkUnitId,
   WorkflowExecutionId,
   WorkflowLevel,
   WorkflowRunId,
+  WorkflowTimestampMs,
+  WorkspaceTreeHash,
 } from "./workflow.js"
+import type { ShipAttemptKey, ShipAttemptStatus } from "./workflow-ship.js"
 import { ErrorReasonMessage, toErrorReasonMessage } from "./workspace-and-process.js"
 
 const SEQ_KEY_WIDTH = 20
@@ -402,6 +406,10 @@ export const WORKFLOW_GQ_QUERY_NAMES = [
   "wf_get_attempt",
   "wf_insert_attempt",
   "wf_update_attempt",
+  "wf_ship_attempts_for_run",
+  "wf_get_ship_attempt",
+  "wf_insert_ship_attempt",
+  "wf_update_ship_attempt",
   "wf_delete_run_views",
   "wf_probe_runs",
 ] as const
@@ -413,9 +421,7 @@ const WORKFLOW_UNIT_KEY_RE = /^[a-z0-9][a-z0-9-]{7,63}\/[a-z0-9][a-z0-9_.:-]{0,6
 const WORKFLOW_ATTEMPT_KEY_RE =
   /^[a-z0-9][a-z0-9-]{7,63}\/[a-z0-9][a-z0-9_.:-]{0,63}#[1-3](?:\/r[1-9]\d*)?$/
 
-/** Non-negative epoch millisecond timestamp recorded in workflow read-model records. */
-export const WorkflowTimestampMs = NonNegativeInt.pipe(Schema.brand("WorkflowTimestampMs"))
-export type WorkflowTimestampMs = typeof WorkflowTimestampMs.Type
+export { WorkflowTimestampMs }
 
 /** Composite key `<runId>/<unitId>` identifying a `WfUnit` read-model node. */
 export const WorkflowUnitKey = Schema.NonEmptyString.pipe(
@@ -696,6 +702,21 @@ export interface WorkflowGqParamsMap {
     readonly runner: RunnerId | null
     readonly rejection: RejectionJsonPayload | null
     readonly packageStampHash: PackageStampHash | null
+    readonly updatedMs: WorkflowTimestampMs
+  }
+  readonly wf_ship_attempts_for_run: { readonly runId: WorkflowRunId }
+  readonly wf_get_ship_attempt: { readonly shipKey: ShipAttemptKey }
+  readonly wf_insert_ship_attempt: {
+    readonly shipKey: ShipAttemptKey
+    readonly runId: WorkflowRunId
+    readonly attempt: ShipAttempt
+    readonly treeHash: WorkspaceTreeHash
+    readonly status: ShipAttemptStatus
+    readonly updatedMs: WorkflowTimestampMs
+  }
+  readonly wf_update_ship_attempt: {
+    readonly shipKey: ShipAttemptKey
+    readonly status: ShipAttemptStatus
     readonly updatedMs: WorkflowTimestampMs
   }
   readonly wf_delete_run_views: { readonly runId: WorkflowRunId }

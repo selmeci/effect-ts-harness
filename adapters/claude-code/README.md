@@ -77,7 +77,7 @@ Use the workflow skills to drive task progress through each lifecycle stage or e
 
 ### 2. `effect-lfg` (`/effect-lfg`)
 
-- **When to Use:** Autonomous end-to-end pipeline orchestrator. Use when you want to pass a requirement, bug report, or EARS spec and have the harness run hands-off from start to finish (EARS spec with explicit `## Assumptions` $\rightarrow$ `stub<A, E, R>()` & `plan-check` $\rightarrow$ subagent implementation $\rightarrow$ 7-lens specialist review & auto-fix $\rightarrow$ `learn`, `gc --strict`, `mutate --strict`, `verify`, `done` $\rightarrow$ git commit & optional PR).
+- **When to Use:** Autonomous end-to-end pipeline orchestrator. Use when you want to pass a requirement, bug report, or EARS spec and have the harness run hands-off from start to finish (EARS spec with explicit `## Assumptions` $\rightarrow$ `stub<A, E, R>()` & `plan-check` $\rightarrow$ subagent implementation $\rightarrow$ 7-lens specialist review & auto-fix $\rightarrow$ `learn`, `workflow complete --phase llm`, `workflow ship` (`format-check`, `gc --strict`, `ontology check --strict`, `mutate --strict`, `verify`, `done --cli`) $\rightarrow$ git commit & optional PR).
 - **Trigger / Starter Prompt:**
   ```text
   "/effect-lfg Add a Sample.archiveAlbum use-case to libs/sample that marks an album archived or fails with AlbumNotFoundError."
@@ -166,5 +166,5 @@ Invoke specialist review subagents as read-only inspectors during implementation
    CI=true node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts verify
    ```
 4. **Orchestrate Durable Task Workflows & Determinism Gates:**
-   - Control `HarnessTaskWorkflow` runs via `harness workflow` (`compile | start | status | complete | resume | doctor | abort`) over `<git-common-dir>/harness/daemon.sock`, and inspect status read-only with `harness_workflow_plan`.
+   - Control `HarnessTaskWorkflow` and `ShipWorkflow` runs via `harness workflow` (`compile | start | status | complete | resume | ship | doctor | abort`) over `<git-common-dir>/harness/daemon.sock`, and inspect status read-only with `harness_workflow_plan`.
    - Workflow definition modules containing `Workflow.make(...)` are checked across `toLayer`/`register` handlers and same-module helper functions by the `nondeterministic-workflow-body` AST and `oxlint` rule (`harness/syntax-bans`), requiring side effects, clock/randomness, env, fs, git, Omnigraph, and network calls to run inside `Activity.make({ execute: ... })`.

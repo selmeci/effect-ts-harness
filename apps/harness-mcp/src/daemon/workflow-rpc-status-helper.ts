@@ -433,6 +433,15 @@ export const buildStatusSummaryForRuntime = Effect.fn("WorkflowRpcDaemon.buildSt
             return WorkflowRunOutcome.cases.NotFound.make({})
           }
 
+          const shipAttempts =
+            runtime.shipAttemptStore !== undefined
+              ? yield* runtime.shipAttemptStore
+                  .listAttemptsForRun(effectiveRun.runId)
+                  .pipe(Effect.mapError(storeOrLeaseToBoundedReason))
+              : []
+          const shipAttemptsField =
+            shipAttempts.length > 0 ? { shipAttempts: [...shipAttempts] } : {}
+
           const projectionStatus = computeProjectionStatus(target.runRecord, polledOpt)
 
           const terminalOutcome = match(polledOpt)
@@ -450,6 +459,7 @@ export const buildStatusSummaryForRuntime = Effect.fn("WorkflowRpcDaemon.buildSt
                         pendingDeferreds: [],
                         review: receipt.review,
                         terminalReceipt: receipt,
+                        ...shipAttemptsField,
                         projectionStatus,
                       }),
                     onFailure: (cause): WorkflowRunOutcome =>
@@ -459,6 +469,7 @@ export const buildStatusSummaryForRuntime = Effect.fn("WorkflowRpcDaemon.buildSt
                         attempts,
                         pendingDeferreds: [],
                         terminalError: classifyWorkflowTerminalError(cause),
+                        ...shipAttemptsField,
                         projectionStatus,
                       }),
                   }),
@@ -483,6 +494,7 @@ export const buildStatusSummaryForRuntime = Effect.fn("WorkflowRpcDaemon.buildSt
                     runId: effectiveRun.runId,
                     reason: toBoundedReason("Workflow run marked aborted in read-model"),
                   }),
+                  ...shipAttemptsField,
                   projectionStatus,
                 }),
               ),
@@ -505,6 +517,7 @@ export const buildStatusSummaryForRuntime = Effect.fn("WorkflowRpcDaemon.buildSt
                   units,
                   attempts,
                   pendingDeferreds,
+                  ...shipAttemptsField,
                   projectionStatus,
                 })
               }),

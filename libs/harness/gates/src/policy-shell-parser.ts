@@ -1,4 +1,5 @@
 import { decodeAnsiCEscape, normalizeShellLineContinuations } from "./policy-ansi-c.js"
+import { PNPM_VALUE_FLAGS } from "./policy-command-rules.js"
 
 export { normalizeShellLineContinuations }
 
@@ -33,12 +34,8 @@ export const hasUnquotedBackgroundOperator = (unquoted: string): boolean =>
   /(?<![>&])&(?![>&])/.test(unquoted)
 
 const WRAPPER_BINARIES: ReadonlySet<string> = new Set("pnpm npm npx pnpx yarn bunx".split(" "))
-const WRAPPER_VALUE_FLAGS: ReadonlySet<string> = new Set(
-  "--filter -F --dir -C --cwd --prefix --package -p --loglevel --reporter --store-dir --cache-dir --config -c --userconfig".split(
-    " ",
-  ),
-)
-const WRAPPER_SUBCOMMANDS: ReadonlySet<string> = new Set(["exec", "run", "dlx"])
+const WRAPPER_VALUE_FLAGS: ReadonlySet<string> = PNPM_VALUE_FLAGS
+const WRAPPER_SUBCOMMANDS: ReadonlySet<string> = new Set(["exec", "run", "run-script", "dlx"])
 const BUN_PACKAGE_RUNNER_SUBCOMMANDS: ReadonlySet<string> = new Set(["x", "run", "exec"])
 const BUN_EVAL_FLAGS: ReadonlySet<string> = new Set(["-e", "--eval", "-p", "--print"])
 const BUN_VALUE_FLAGS: ReadonlySet<string> = new Set(

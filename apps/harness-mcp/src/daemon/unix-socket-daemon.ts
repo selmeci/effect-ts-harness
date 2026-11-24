@@ -17,12 +17,14 @@ import {
 import { type DatalogSessionShape, extractWorkspaceTypeAwareGraph } from "@harness/graph"
 import {
   type AstGateCacheRuleSourceConfig,
+  type DaemonLineHandlerControls,
   DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
   nodeSyncHostIo,
   resolveDiskGateRuleVersion,
   type ResolvedGateRuleVersion,
   resolveHarnessDaemonSocketPath,
   resolveWorkflowRuntimePaths,
+  SHIP_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
   WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
@@ -61,6 +63,7 @@ import {
   handleDaemonWorkflowStartRequest,
   handleDaemonWorkflowStatusRpcRequest,
 } from "./workflow-rpc-daemon-helper.js"
+import { handleDaemonWorkflowShipRequest } from "./workflow-rpc-ship-helper.js"
 
 export type { WorkflowEngineDaemonMode, WorkflowEngineDaemonOptions }
 
@@ -101,6 +104,7 @@ const DaemonRequestSchema = Schema.Struct({
     "workflow.resume",
     "workflow.abort",
     "workflow.doctor",
+    "workflow.ship",
   ]),
   argv: Schema.optional(Schema.Array(Schema.String)),
   repoRoot: Schema.optional(Schema.String),
@@ -142,7 +146,7 @@ const createDaemonLineHandler =
     readonly socketPath?: DaemonSocketPath | undefined
     readonly workflowRuntime?: WorkflowDaemonRuntime | undefined
   }) =>
-  (line: string): Effect.Effect<string> => {
+  (line: string, controls?: DaemonLineHandlerControls): Effect.Effect<string> => {
     const trimmedLine = line.trim()
     const baseOpt = decodeBaseDaemonRequest(trimmedLine)
     const reqOpt = decodeDaemonRequest(trimmedLine)
@@ -219,6 +223,13 @@ const createDaemonLineHandler =
                 .with("workflow.resume", () => handleDaemonWorkflowResumeRequest(workflowInput))
                 .with("workflow.abort", () => handleDaemonWorkflowAbortRequest(workflowInput))
                 .with("workflow.doctor", () => handleDaemonWorkflowDoctorRequest(workflowInput))
+                .with("workflow.ship", () => {
+                  controls?.setSocketTimeoutMs(SHIP_DAEMON_SERVER_SOCKET_TIMEOUT_MS)
+                  return handleDaemonWorkflowShipRequest({
+                    ...workflowInput,
+                    ...(controls !== undefined ? { emitLine: controls.emitLine } : {}),
+                  })
+                })
                 .with("extract-graph", () =>
                   Effect.gen(function* () {
                     const versionCheck = yield* verifyWorktreeRuleVersionConsistency({

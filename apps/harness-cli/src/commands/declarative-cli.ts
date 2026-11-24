@@ -12,7 +12,13 @@ import {
   toLazyImportError,
 } from "./command-registry.js"
 import { COMMANDS, type CliEnv, type CliResult, isCommand } from "./daemon-and-omnigraph.service.js"
+import { appendBoolFlag, appendNumberFlag, appendStringFlag } from "./declarative-cli-flags.js"
 import { makeWorkflowSubcommand } from "./declarative-cli-workflow.js"
+import {
+  hasDoneCliFlag,
+  makeDoneDeclarativeCommand,
+  normalizeDoneResultForCli,
+} from "./done-cli-helper.js"
 import {
   createHookStdinTracker,
   detectAntigravityHookPayload,
@@ -25,38 +31,6 @@ import type { HarnessInfraLive as HarnessInfraLiveType } from "./mutate-and-benc
 
 const variadicArgs = Argument.String("args").pipe(Argument.variadic())
 const boolFlag = (name: string) => Flag.Boolean(name).pipe(Flag.withDefault(false))
-
-const appendStringFlag = (
-  out: Array<string>,
-  flagName: string,
-  opt: Option.Option<string>,
-): void => {
-  match(opt)
-    .with({ _tag: "Some" }, ({ value }) => {
-      out.push(`--${flagName}=${value}`)
-    })
-    .with({ _tag: "None" }, () => {})
-    .exhaustive()
-}
-
-const appendNumberFlag = (
-  out: Array<string>,
-  flagName: string,
-  opt: Option.Option<number>,
-): void => {
-  match(opt)
-    .with({ _tag: "Some" }, ({ value }) => {
-      out.push(`--${flagName}=${value}`)
-    })
-    .with({ _tag: "None" }, () => {})
-    .exhaustive()
-}
-
-const appendBoolFlag = (out: Array<string>, flagName: string, enabled: boolean): void => {
-  if (enabled) {
-    out.push(`--${flagName}`)
-  }
-}
 
 export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.Effect<void>) => {
   const runSubcommand = (
@@ -80,7 +54,7 @@ export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.E
     })
 
   const forwardFormatSubcommand = (
-    name: "route" | "verify" | "done" | "ingest" | "session" | "doctor" | "help",
+    name: "route" | "verify" | "ingest" | "session" | "doctor" | "help",
   ) =>
     CliCommand.make(
       name,
@@ -337,6 +311,8 @@ export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.E
     },
   )
 
+  const doneCommand = makeDoneDeclarativeCommand(runSubcommand)
+
   return CliCommand.make("harness").pipe(
     CliCommand.withSubcommands([
       guardCommand,
@@ -345,7 +321,7 @@ export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.E
       planSynthCommand,
       repairCommand,
       forwardFormatSubcommand("verify"),
-      forwardFormatSubcommand("done"),
+      doneCommand,
       learnCommand,
       gcCommand,
       mutateCommand,
@@ -383,7 +359,10 @@ const makeFailClosedHookResult = (
       : (hookStdinTracker?.isAntigravityDetected() ?? false))
   return requested === "guard"
     ? makeGuardDenyResult(isAntigravity, reason, extraStderr)
-    : makeDoneBlockResult(isAntigravity, reason, extraStderr)
+    : normalizeDoneResultForCli(
+        makeDoneBlockResult(isAntigravity, reason, extraStderr),
+        hasDoneCliFlag(argv),
+      )
 }
 
 export const resolveCliInfraLayer = Effect.fnUntraced(function* (

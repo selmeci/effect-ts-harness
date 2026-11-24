@@ -43,6 +43,7 @@ import {
 import {
   DAEMON_SOCKET_TIMEOUT_MS,
   DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
+  SHIP_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
   WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
   makeUnixSocketDaemonLayer,
   queryUnixSocketLine,
@@ -50,6 +51,7 @@ import {
   resolveHarnessDaemonSocketPath,
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
+  type DaemonLineHandlerControls,
   type UnixSocketDaemonLayerOptions,
   type UnixSocketQueryOptions,
   type UnixSocketQueryReason,
@@ -101,6 +103,7 @@ export {
 export {
   DAEMON_SOCKET_TIMEOUT_MS,
   DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
+  SHIP_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
   WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS,
   makeUnixSocketDaemonLayer,
   queryUnixSocketLine,
@@ -108,6 +111,7 @@ export {
   resolveHarnessDaemonSocketPath,
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
+  type DaemonLineHandlerControls,
   type UnixSocketDaemonLayerOptions,
   type UnixSocketQueryOptions,
   type UnixSocketQueryReason,
@@ -239,6 +243,27 @@ export {
   type WorkflowWorktreePortOptions,
   WorkflowWorktreePortLive,
 } from "./workflow/worktree-port-live.js"
+export {
+  computeTreeHashImpl,
+  executeStageCommandImpl,
+  makeShipGateRunnerLayer,
+  recoverMutationBackupImpl,
+  ShipGateRunnerLive,
+  type ShipGateRunnerOptions,
+} from "./workflow/ship-gate-runner-live.js"
+export {
+  allocateShipAttemptImpl,
+  listShipAttemptsForRunImpl,
+  makeShipAttemptStoreLayer,
+  ShipAttemptStoreLive,
+  type ShipAttemptStoreOptions,
+  updateShipAttemptStatusImpl,
+} from "./workflow/ship-attempt-store-live.js"
+export {
+  SHIP_WORKFLOW_IPC_TIMEOUT_MS,
+  shipWorkflowViaDaemon,
+  type WorkflowShipRpcOptions,
+} from "./workflow/ship-daemon-client.js"
 
 export const TsCompilerOverlayServiceLive: Layer.Layer<TsCompilerOverlayService> =
   makeTsCompilerOverlayLayer(nodeSyncHostIo)

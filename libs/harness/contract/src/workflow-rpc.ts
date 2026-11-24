@@ -42,6 +42,7 @@ import {
   makeWorkflowAttemptKey,
   makeWorkflowUnitKey,
 } from "./workflow-storage.js"
+import { WorkflowShipAttemptRecord, WorkflowShipResponse } from "./workflow-ship.js"
 import { WorkspaceFsOperation } from "./workspace-and-process.js"
 
 export {
@@ -223,6 +224,7 @@ export const WorkflowRunOutcome = Schema.TaggedUnion({
     units: Schema.Array(WorkflowUnitRecord),
     attempts: Schema.Array(WorkflowAttemptRecord),
     pendingDeferreds: Schema.Array(WorkflowPendingDeferred),
+    shipAttempts: Schema.optional(Schema.Array(WorkflowShipAttemptRecord)),
     projectionStatus: WorkflowProjectionStatus,
   },
   Completed: {
@@ -232,6 +234,7 @@ export const WorkflowRunOutcome = Schema.TaggedUnion({
     pendingDeferreds: Schema.Array(WorkflowPendingDeferred),
     review: ReviewRoutingPlan,
     terminalReceipt: TaskRunReceipt,
+    shipAttempts: Schema.optional(Schema.Array(WorkflowShipAttemptRecord)),
     projectionStatus: WorkflowProjectionStatus,
   },
   Failed: {
@@ -240,6 +243,7 @@ export const WorkflowRunOutcome = Schema.TaggedUnion({
     attempts: Schema.Array(WorkflowAttemptRecord),
     pendingDeferreds: Schema.Array(WorkflowPendingDeferred),
     terminalError: WorkflowTerminalError,
+    shipAttempts: Schema.optional(Schema.Array(WorkflowShipAttemptRecord)),
     projectionStatus: WorkflowProjectionStatus,
   },
 })
@@ -414,6 +418,7 @@ export const WorkflowRpcResult = Schema.Union([
   WorkflowResumeResponse,
   WorkflowAbortResponse,
   WorkflowDoctorResponse,
+  WorkflowShipResponse,
 ])
 export type WorkflowRpcResult = typeof WorkflowRpcResult.Type
 

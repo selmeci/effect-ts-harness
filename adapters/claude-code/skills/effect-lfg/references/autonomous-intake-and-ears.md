@@ -38,7 +38,7 @@ Classify the input request using bounded Graph MCP queries (`harness_resolve`, `
 - **Trigger:** The prompt provides a GitHub PR number/URL (`#42`, `https://github.com/.../pull/42`) or pasted review markdown (from Grok, Codex, Claude, or a human reviewer) asking to resolve feedback.
 - **Action:**
   1. Execute the 5-phase `resolving-effect-review-feedback` workflow autonomously (Ingest -> Central Graph MCP Adjudication -> Spec/ADR Sync -> Package-Isolated `haiku` Fixers).
-  2. Advance directly to **Stage 5 (Compounding Learnings & Final Deterministic Gate Sequence)** and **Stage 6 (Shipping)**.
+  2. Advance directly to **Stage 5 (Stamp-Safe LLM Phase & Durable `ShipWorkflow` Pipeline)** and **Stage 6 (Shipping)**.
 
 ### Route D — Multi-Phase RFC or Multi-Slice Epic (Worktree-per-Slice DAG)
 
@@ -49,7 +49,7 @@ Classify the input request using bounded Graph MCP queries (`harness_resolve`, `
   2. Read [multi-slice-worktree-execution.md](multi-slice-worktree-execution.md) and decompose the epic into topological **Waves of Disjoint Slices** (`Wave 1 -> Wave 2 -> ... -> Wave K`).
   3. Record `EPIC_BASE_SHA=$(git rev-parse HEAD)` on `feat/<epic-slug>` and dispatch each slice in Wave `w` to an isolated sibling git worktree subagent (with `HARNESS_WORKTREE_ID` unset). Each slice worker runs `plan-check` -> implements -> runs `gc --strict` / `ontology check --strict` / `mutate --strict` / `CI=true pnpm harness verify` (never `harness done`), and commits to `slice/<epic-slug>-<slice-id>`.
   4. In the controller worktree on `feat/<epic-slug>`, merge completed slice branches (`git merge --no-ff slice/<epic-slug>-<slice-id>`), update the cumulative `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (`status: proposed`), run inter-wave `pnpm harness plan-check`, `pnpm harness gc --strict`, and `pnpm harness ontology check --strict`, clean up slice worktrees (`git worktree prune`), and advance to Wave `w + 1`.
-  5. Once all Waves are integrated, promote the full epic ADR (`status: accepted`), refresh `pnpm harness plan-check` on the controller workspace, and advance to **Stage 4 (Signal-Routed 7-Lens Review)**, **Stage 5 (Final Gates + Single `done`)**, and **Stage 6 (Shipping)**.
+  5. Once all Waves are integrated, promote the full epic ADR (`status: accepted`), refresh `pnpm harness plan-check` on the controller workspace, and advance to **Stage 4 (Signal-Routed 7-Lens Review)**, **Stage 5 (LLM Phase + `pnpm harness workflow ship [--run <id>]`)**, and **Stage 6 (Shipping)**.
 
 ### Route A — Existing Single-Slice EARS Specification Path
 

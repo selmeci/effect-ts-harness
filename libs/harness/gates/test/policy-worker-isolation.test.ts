@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { unwrapCommandSegment } from "../src/policy-shell-parser.js"
 import { stripSafeLeadingEnvVarsDetailed } from "../src/policy-command-rules.js"
+import { isWorkerRecursiveWorkflowCommand } from "../src/policy-worker-isolation.js"
 import {
   classifyCommand,
   classifyFileRead,
@@ -746,5 +747,76 @@ describe("guard policy wrapper isolation, glob hardening & worktree mode", () =>
     expect(classifyFileWrite(brace65Secret).ruleId).toBe("secret-file")
     expect(classifyFileRead(brace65Secret).verdict).toBe("deny")
     expect(classifyFileRead(brace65Secret).ruleId).toBe("secret-file")
+  })
+
+  it("blocks workflow ship and --run variants under HARNESS_UNIT_WORKER=1 across direct and wrapped forms", () => {
+    for (const blockedCmd of [
+      "pnpm harness workflow ship",
+      "pnpm harness workflow ship --run my-run-id-1",
+      "pnpm harness workflow --run my-run-id-1 ship",
+      "pnpm harness workflow --run-id my-run-id-1 ship",
+      "harness workflow ship",
+      "harness --repo-root /tmp workflow ship --run my-run-id-1",
+      "timeout 5 pnpm harness workflow ship --run my-run-id-1",
+      "env -u NX_DAEMON pnpm --filter harness-cli start -- workflow ship --run my-run-id-1",
+      'sh -c "pnpm harness workflow ship --run my-run-id-1"',
+      "pnpm --filter . run -- harness workflow ship --run my-run-id-1",
+      "node apps/harness-cli/src/index.ts workflow ship --run my-run-id-1",
+      "pnpm --filter . --workspace-concurrency 1 harness workflow ship",
+      "pnpm --filter . --lockfile-dir . harness done --cli",
+      "pnpm --filter . --filter-prod harness-cli start -- workflow ship",
+      "pnpm --filter . --filter-prod=harness-cli run start -- workflow ship",
+      "pnpm --filter harness-cli run start -- workflow ship",
+      "pnpm --filter harness-cli run-script start -- workflow ship",
+      "env --chdir=apps/harness-cli pnpm start -- done",
+      'env "--split-string=pnpm harness done"',
+      "command env --chdir=apps/harness-cli pnpm start -- done",
+      'command env --split-string="pnpm harness done"',
+      "echo done | xargs env --chdir=apps/harness-cli pnpm start --",
+      'echo x | xargs env "--split-string=pnpm harness done"',
+      "pnpm --filter . --modules-dir nm --virtual-store-dir vs --globalconfig gc --script-shell /bin/sh harness workflow ship",
+      "pnpm --filter . --test-pattern '*.ts' --changed-files-ignore-pattern '*.md' harness workflow ship",
+      "pnpm harness workflow --log-level info ship --run r1",
+      "pnpm harness workflow --json false ship --run r1",
+      "pnpm harness workflow --rebuild-views true ship --run r1",
+      "pnpm harness workflow --json 0 ship --run r1",
+      "pnpm harness workflow --json yes abort --run r1",
+      "pnpm harness --log-level info done --cli",
+      "pnpm harness --cli true done",
+      "pnpm harness workflow --log-level info complete --unit u1 --phase llm",
+      "node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts workflow --log-level info ship",
+      "node --experimental-specifier-resolution node apps/harness-cli/src/index.ts workflow ship",
+      "node --disable-proto throw apps/harness-cli/src/index.ts workflow --json false ship",
+    ]) {
+      expect(isWorkerRecursiveWorkflowCommand(blockedCmd), blockedCmd).toBe(true)
+      expect(classifyCommand(blockedCmd, { unitWorkerMode: true }), blockedCmd).toBe("deny")
+      expect(explainCommandDenyRule(blockedCmd, { unitWorkerMode: true })?.ruleId, blockedCmd).toBe(
+        "worker-recursive-workflow-command",
+      )
+    }
+
+    for (const allowedWorkerCmd of [
+      "pnpm harness gc --strict",
+      "pnpm harness workflow status",
+      "pnpm harness workflow status --run my-run-id-1",
+      "pnpm harness workflow --json false status",
+      "pnpm harness workflow --log-level info status",
+      "pnpm harness workflow complete --unit u1 --phase unit",
+      "pnpm --filter @harness/gates run test",
+    ]) {
+      expect(isWorkerRecursiveWorkflowCommand(allowedWorkerCmd), allowedWorkerCmd).toBe(false)
+      expect(classifyCommand(allowedWorkerCmd, { unitWorkerMode: true }), allowedWorkerCmd).toBe(
+        "allow",
+      )
+    }
+
+    for (const nonRecursiveCmd of [
+      "pnpm --filter",
+      "pnpm -C",
+      "env --chdir=libs/foo pnpm test",
+      'env "--split-string=pnpm test"',
+    ]) {
+      expect(isWorkerRecursiveWorkflowCommand(nonRecursiveCmd), nonRecursiveCmd).toBe(false)
+    }
   })
 })

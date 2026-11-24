@@ -1,8 +1,11 @@
 import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import { ErrorReasonMessage } from "./workspace-and-process.js"
-import { AttemptNumber, EscalationOrdinal, WaveIndex, WorkUnitId } from "./workflow.js"
+import { AttemptNumber, EscalationOrdinal, ShipStage, WaveIndex, WorkUnitId } from "./workflow.js"
 import { PendingDeferredName } from "./workflow-rpc.js"
+import { decodeShipAttemptKey, encodeShipAttemptKey } from "./workflow-ship.js"
+
+export { decodeShipAttemptKey, encodeShipAttemptKey }
 
 /** Branded persisted workflow activity name stored inside Effect Workflow journal rows. */
 export const WorkflowActivityName = Schema.NonEmptyString.pipe(
@@ -19,13 +22,14 @@ export const WorkflowRunAbortTarget = Schema.TaggedUnion({
 })
 export type WorkflowRunAbortTarget = typeof WorkflowRunAbortTarget.Type
 
-/** Closed 18-variant union of canonical `HarnessTaskWorkflow` activity names. */
+/** Closed 19-variant union of canonical `HarnessTaskWorkflow` and `ShipWorkflow` activity names. */
 export const WorkflowActivityTag = Schema.TaggedUnion({
   ProvisionWorktrees: {},
   ProjectRunStarted: {},
   ProjectRunWaitingLlmPhase: {},
   ProjectRunCompleted: {},
   RouteReview: {},
+  RunGate: { stage: ShipStage },
   ProjectRunAborted: { target: WorkflowRunAbortTarget },
   MergeSliceWave: { waveIndex: WaveIndex, escalationOrdinal: EscalationOrdinal },
   ProjectWaveMergeEscalated: { waveIndex: WaveIndex, escalationOrdinal: EscalationOrdinal },
@@ -130,6 +134,7 @@ export const encodeWorkflowActivityName = (tag: WorkflowActivityTag): WorkflowAc
     .with({ _tag: "VerifySharedStep" }, ({ attempt, escalationOrdinal }) =>
       WorkflowActivityName.make(`VerifySharedStep/${attempt}${cycleSuffix(escalationOrdinal)}`),
     )
+    .with({ _tag: "RunGate" }, ({ stage }) => WorkflowActivityName.make(`RunGate/${stage}`))
     .exhaustive()
 
 /** Encodes a `WorkflowDeferredTag` into its canonical wire `PendingDeferredName`. */
@@ -149,6 +154,7 @@ const POSITIVE_INT_SEGMENT_RE = /^[1-9]\d*$/
 const NON_NEGATIVE_INT_SEGMENT_RE = /^(?:0|[1-9]\d*)$/
 const decodeAttemptNumberOption = Schema.decodeUnknownOption(AttemptNumber)
 const decodeEscalationOrdinalOption = Schema.decodeUnknownOption(EscalationOrdinal)
+const decodeShipStageOption = Schema.decodeUnknownOption(ShipStage)
 const decodeWaveIndexOption = Schema.decodeUnknownOption(WaveIndex)
 const decodeWorkUnitIdOption = Schema.decodeUnknownOption(WorkUnitId)
 
@@ -315,6 +321,17 @@ export const WORKFLOW_ACTIVITY_DECODERS = {
     WorkflowActivityTag.cases.ProjectRunCompleted.make({}),
   ),
   RouteReview: makeZeroArgActivityDecoder(() => WorkflowActivityTag.cases.RouteReview.make({})),
+  RunGate: (raw, segs) => {
+    if (segs.length !== 2) {
+      return failProtocol("activity", raw, "invalid RunGate segment count")
+    }
+    return match(decodeShipStageOption(segs[1]!))
+      .with({ _tag: "Some" }, ({ value: stage }) =>
+        Result.succeed(WorkflowActivityTag.cases.RunGate.make({ stage })),
+      )
+      .with({ _tag: "None" }, () => failProtocol("activity", raw, "invalid RunGate stage"))
+      .exhaustive()
+  },
   ProjectRunAborted: (raw, segs) => {
     if (segs.length === 4 && segs[1] === "merge") {
       const waveIndex = parseWaveIndexSegment(segs[2]!)

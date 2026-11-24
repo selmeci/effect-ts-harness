@@ -1,4 +1,5 @@
 import * as path from "node:path"
+import { PNPM_VALUE_FLAGS, hasTokenReferencingHarnessCli } from "./policy-command-rules.js"
 import {
   binaryBasename,
   expandCommandVariables,
@@ -13,12 +14,8 @@ import {
   type DetailedCommandSegment,
 } from "./policy-shell-parser.js"
 import {
-  classifyWorkerFileAccess,
   isProtectedDotHarnessInspectArg,
-  isWorkerDaemonCredentialFilePath,
   matchesWorkerDaemonCredentialText,
-  type WorkerFileAccessDenyRuleId,
-  type WorkerFileAccessResult,
 } from "./policy-worker-paths.js"
 
 export {
@@ -26,7 +23,7 @@ export {
   isWorkerDaemonCredentialFilePath,
   type WorkerFileAccessDenyRuleId,
   type WorkerFileAccessResult,
-}
+} from "./policy-worker-paths.js"
 
 export interface PolicyGuardOptions {
   readonly unitWorkerMode?: boolean | undefined
@@ -48,20 +45,24 @@ const LOCAL_HARNESS_CLI_ENTRY_PATTERN: RegExp =
 const wordsSet = (s: string): ReadonlySet<string> => new Set(s.split(" "))
 const JS_RUNTIME_BINARIES = wordsSet("node nodejs bun tsx ts-node deno")
 const JS_RUNTIME_VALUE_FLAGS = wordsSet(
-  "--import -r --require --loader --experimental-loader --conditions -C --env-file --env-file-if-exists --preload --tsconfig --tsconfig-override --watch-path --diagnostic-dir --redirect-warnings --title --max-old-space-size --dns-result-order",
+  "--import -r --require --loader --experimental-loader --conditions -C --env-file --env-file-if-exists --preload --tsconfig --tsconfig-override --watch-path --diagnostic-dir --redirect-warnings --title --max-old-space-size --dns-result-order --experimental-specifier-resolution --disable-proto",
 )
 const DENO_VALUE_FLAGS = wordsSet("-c --config --import-map --lock --cert --location --seed --ext")
 const DENO_RUN_SUBCOMMANDS = wordsSet("run test bench serve")
 const DENO_EVAL_SUBCOMMANDS = wordsSet("eval repl compile fmt lint check info")
 const SHELL_EXEC_BINARIES = wordsSet("sh bash zsh dash ksh ash")
-const HARNESS_GLOBAL_VALUE_FLAGS = wordsSet("--cwd --dir -C --repo-root --format --config -c")
-const HARNESS_WORKFLOW_VALUE_FLAGS = wordsSet(
-  "--level --mode --runner --max-concurrency --input --plan --run-id --unit --phase --repo-root --decision --cwd --dir -C --format",
+const HARNESS_GLOBAL_VALUE_FLAGS = wordsSet(
+  "--cwd --dir -C --repo-root --format --config -c --log-level",
 )
+const HARNESS_WORKFLOW_VALUE_FLAGS = wordsSet(
+  "--level --mode --runner --max-concurrency --input --plan --run-id --run --unit --phase --repo-root --decision --cwd --dir -C --format --log-level",
+)
+const HARNESS_OPTIONAL_BOOL_VALUE_FLAGS = wordsSet("--json --rebuild-views --cli")
+const BOOLEAN_FLAG_VALUE_PATTERN = /^(?:true|false|yes|no|on|off|1|0)$/i
 const NX_RUN_VALUE_FLAGS = wordsSet(
   "--configuration -c --runner --output-style --args --exclude --base --head --files --parallel",
 )
-const WORKER_BLOCKED_WORKFLOW_ACTIONS = wordsSet("start resume abort doctor done")
+const WORKER_BLOCKED_WORKFLOW_ACTIONS = wordsSet("start resume abort doctor done ship")
 const ENV_SIMPLE_FLAGS = wordsSet("-i --ignore-environment -0 --null -v --debug")
 const ENV_VALUE_FLAGS = wordsSet("-u -C --unset --chdir")
 const XARGS_VALUE_FLAGS = wordsSet(
@@ -85,6 +86,17 @@ const isHarnessCliTargetToken = (raw: string): boolean => {
   )
 }
 
+const PACKAGE_TARGET_FLAGS = wordsSet("--filter -F --filter-prod")
+const PACKAGE_DIR_FLAGS = wordsSet("-C --dir --cwd --prefix")
+
+const extractPrefixedFlagValue = (
+  arg: string,
+  prefixes: ReadonlyArray<string>,
+): string | undefined => {
+  const matchPrefix = prefixes.find((prefix) => arg.startsWith(prefix))
+  return matchPrefix !== undefined ? arg.slice(matchPrefix.length) : undefined
+}
+
 const collectPackageTargetsAndDirs = (
   prefixWords: ReadonlyArray<string>,
   targetOut: Array<string>,
@@ -92,32 +104,31 @@ const collectPackageTargetsAndDirs = (
 ): void => {
   for (let i = 0; i < prefixWords.length; i++) {
     const w = prefixWords[i]!
-    if ((w === "--filter" || w === "-F") && i + 1 < prefixWords.length) {
+    const targetEq =
+      w.startsWith("-F") && w.length > 2
+        ? w.slice(2)
+        : extractPrefixedFlagValue(w, ["--filter=", "--filter-prod="])
+    if (targetEq !== undefined) {
+      targetOut.push(targetEq)
+      continue
+    }
+    if (PACKAGE_TARGET_FLAGS.has(w) && i + 1 < prefixWords.length) {
       targetOut.push(prefixWords[++i]!)
       continue
     }
-    if (w.startsWith("--filter=")) {
-      targetOut.push(w.slice("--filter=".length))
+    const dirEq =
+      w.startsWith("-C") && w.length > 2
+        ? w.slice(2)
+        : extractPrefixedFlagValue(w, ["--dir=", "--cwd=", "--prefix="])
+    if (dirEq !== undefined) {
+      dirOut.push(dirEq)
       continue
     }
-    if (w.startsWith("-F") && w.length > 2) {
-      targetOut.push(w.slice(2))
-      continue
-    }
-    if (
-      (w === "-C" || w === "--dir" || w === "--cwd" || w === "--prefix") &&
-      i + 1 < prefixWords.length
-    ) {
+    if (PACKAGE_DIR_FLAGS.has(w) && i + 1 < prefixWords.length) {
       dirOut.push(prefixWords[++i]!)
       continue
     }
-    if (w.startsWith("-C") && w.length > 2) {
-      dirOut.push(w.slice(2))
-      continue
-    }
-    for (const prefix of ["--dir=", "--cwd=", "--prefix="]) {
-      if (w.startsWith(prefix)) dirOut.push(w.slice(prefix.length))
-    }
+    if (PNPM_VALUE_FLAGS.has(w)) i++
   }
 }
 
@@ -225,13 +236,9 @@ const unwrapEnvWords = (
       i += 2
       continue
     }
-    if (arg.startsWith("--chdir=")) {
-      wrapperDirs.push(arg.slice("--chdir=".length))
-      i++
-      continue
-    }
-    if (arg.startsWith("-C") && arg.length > 2) {
-      wrapperDirs.push(arg.slice(2))
+    const chdirEq = extractPrefixedFlagValue(arg, ["--chdir=", "-C"])
+    if (chdirEq !== undefined) {
+      wrapperDirs.push(chdirEq)
       i++
       continue
     }
@@ -326,12 +333,9 @@ export const extractEmbeddedCommandPayloads = (
         const p = words[i + 1]!.trim()
         return p.length > 0 ? [p] : []
       }
-      if (arg.startsWith("--split-string=")) {
-        const p = arg.slice("--split-string=".length).trim()
-        return p.length > 0 ? [p] : []
-      }
-      if (arg.startsWith("-S") && arg.length > 2) {
-        const p = arg.slice(2).trim()
+      const splitEq = extractPrefixedFlagValue(arg, ["--split-string=", "-S"])
+      if (splitEq !== undefined) {
+        const p = splitEq.trim()
         return p.length > 0 ? [p] : []
       }
     }
@@ -500,14 +504,14 @@ const extractSegmentHarnessCliArgs = (
   const isTargetPkg =
     unwrapped.wrapperDirs.some(isHarnessCliTargetToken) ||
     (unwrapped.sawPackageRunner &&
-      unwrapped.packageTargets.some((tok) => isHarnessCliTargetToken(tok) || /[*?[\]!]/.test(tok)))
+      (hasTokenReferencingHarnessCli(unwrapped.packageTargets) ||
+        unwrapped.packageTargets.some(
+          (tok) => isHarnessCliTargetToken(tok) || /[*?[\]!]/.test(tok),
+        )))
   const runtimeArgs = extractHarnessCliArgs(unwrapped.commandWords, isTargetPkg)
   if (runtimeArgs !== undefined) return runtimeArgs
   if (isTargetPkg && unwrapped.commandWords[0] === "start") {
     return unwrapped.commandWords.slice(1)
-  }
-  if (isTargetPkg && unwrapped.commandWords[0] === "run" && unwrapped.commandWords[1] === "start") {
-    return unwrapped.commandWords.slice(2)
   }
   return extractNxHarnessCliArgs(unwrapped.commandWords)
 }
@@ -521,6 +525,15 @@ const findFirstPositionalArg = (
     const arg = args[i]!
     if (arg === "--") continue
     if (valueFlags.has(arg)) {
+      i++
+      continue
+    }
+    const nextBoolArg = args[i + 1]
+    if (
+      HARNESS_OPTIONAL_BOOL_VALUE_FLAGS.has(arg) &&
+      nextBoolArg !== undefined &&
+      BOOLEAN_FLAG_VALUE_PATTERN.test(nextBoolArg)
+    ) {
       i++
       continue
     }

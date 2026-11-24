@@ -22,7 +22,7 @@ Understanding how the CLI resolves `.harness/` files prevents snapshot clobberin
 3. **Why Slice Workers Run `verify` (and Never `done`):**
    - Inside each slice worktree, `CI=true pnpm harness verify` already enforces RFC-0010's offline `omnigraph lint` (`OmnigraphLint.decide`), `mode: "overwrite"` load to `impl/wt-<worktree-basename>`, `diffOmnigraphBranches` (`impl/wt-*` vs `plan/wt-*`), `dryRunMergeOmnigraphBranches` (`impl/wt-*` -> `main`, `dryRun: true`), and `OmnigraphBranchVerify.decide`. By contrast, `pnpm harness done` executes `mergeOmnigraphBranch` (`deleteBranch: true`) into Omnigraph `main` followed by `omnigraph optimize` / `cleanup --keep 5` (`apps/harness-cli/src/commands/done-omnigraph-helpers.ts`). If a slice worker ran `done` before the controller merged its Git branch (or concurrently with another slice), a failed sibling slice or Git merge conflict would leave Omnigraph `main` out of sync with Git.
    - Furthermore, `isSubagentStopContext` (`apps/harness-cli/src/commands/stop-hook-and-transcript.ts`) automatically bypasses the session `Stop` hook for subagents.
-   - Therefore, every Route D slice worker ends its gate sequence at **`CI=true pnpm harness verify` + `git commit`**, leaving `pnpm harness done` exclusively to the Epic Controller at the end of Step D5 (Stage 5).
+   - Therefore, every Route D slice worker ends its gate sequence at **`CI=true pnpm harness verify` + `git commit`**, leaving `pnpm harness workflow complete --phase llm` and `pnpm harness workflow ship` exclusively to the Epic Controller at the end of Step D5 (Stage 5).
 
 ---
 
@@ -147,21 +147,19 @@ Once the final Wave (`Wave K`) is integrated into `feat/<epic-slug>`:
 1. **Promote Full Epic ADR & Finalize EARS Spec Parity:**
    - Author/update `libs/<scope>/docs/adr/NNNN-<slug>.md` (`id: <scope>:ADR-NNNN`, `status: accepted`) using the canonical 6-section MADR structure (`## Context and Problem Statement`, `## Decision Drivers`, `## Considered Options` with `* **Option N:**`, `## Decision Outcome` opening with `**Chosen option:** "..."`, `## Rejected Alternatives` with `### N · <Name>` and `**Why rejected:**`, `## Consequences and Enforcement`).
    - Confirm `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` includes the complete union of `enforced_by`, `spans`, `services`, `errors`, and `informed_by: [<scope>:ADR-NNNN]`, then run `pnpm harness plan-check` on the controller workspace to refresh `<controllerRoot>/.harness/plan-graph-snapshot.json` and `## 4. Verified Plan Topology Graph`.
-2. **Execute Stage 4 (Signal-Routed 7-Lens Specialist Review Across Full Integrated Diff):**
-   - Dispatch the parallel read-only specialist reviewers (`effect-ears-test-reviewer`, `effect-adversarial-reviewer`, `effect-security-reviewer`, `effect-reliability-reviewer`) once across `git diff main...HEAD`, adjudicate findings via Graph MCP, and apply all valid `fix`, `class-fix`, and `doc-sync-fix` items.
+2. **Execute Stage 4 (Signal-Routed 7-Lens Specialist Review Across Full Integrated Diff — `routeReview`):**
+   - Dispatch the parallel read-only specialist reviewers via `harness_review_route` (`effect-ears-test-reviewer`, `effect-adversarial-reviewer`, `effect-security-reviewer`, `effect-reliability-reviewer`, plus triggered lenses) once across `git diff main...HEAD`, adjudicate findings via Graph MCP, apply all valid `fix`, `class-fix`, and `doc-sync-fix` items, and complete the mandatory second-pass remediation re-audit when any `blocker`/`critical`/`major` finding was resolved.
    - **Post-Review Snapshot Sync:** If Stage 4 review fixes added, renamed, or altered any `Effect.fn` signature, `Schema.TaggedError`, `Context.Service`, or spec/ADR frontmatter symbol, re-run `pnpm harness plan-check` and update `## 4. Verified Plan Topology Graph` so `<controllerRoot>/.harness/plan-graph-snapshot.json` matches the post-review graph before Stage 5.
-3. **Execute Stage 5 (Stamp-Safe `learn` & Final Deterministic Gates Including Single `done`):**
+3. **Execute Stage 5 (Stamp-Safe LLM Phase & Durable `ShipWorkflow` Pipeline):**
    - Set `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` frontmatter to `status: accepted`.
-   - Run `pnpm harness learn` and `pnpm harness learn --clear`.
-   - Run the final gate sequence on the controller workspace:
+   - Run `pnpm harness learn`, format only your modified files (`pnpm oxfmt --write <explicit touched paths>`), clear friction logs (`pnpm harness learn --clear`), and complete the LLM phase (`pnpm harness workflow complete --phase llm --run-id <id> --repo-root <abs>` when running under `HarnessTaskWorkflow`).
+   - Run the durable ship pipeline once on the controller workspace:
      ```bash
-     pnpm harness gc --strict
-     pnpm harness ontology check --strict
-     pnpm harness mutate --strict
-     CI=true pnpm harness verify
-     CI=true pnpm harness done
+     pnpm harness workflow ship --run <id> [--repo-root <abs>]
+     # Or in ephemeral mode if no compiled workflow run is active:
+     pnpm harness workflow ship
      ```
-     (`CI=true pnpm harness done` validates `<controllerRoot>/.harness/verify-stamp.json` against the final tree hash and merges `impl/branch-feat_<epic-slug>` into Omnigraph `main` once for the entire epic.)
+     (`ShipWorkflow` executes `format-check -> gc-strict -> ontology-check-strict -> mutate-strict -> verify -> done --cli` with pre/post `treeHash` checks, startup mutation backup recovery before `mutate --strict`, monotonic `WfShipAttempt` OCC allocation, and `LoopCircuitBreaker.decide` escalation on exit code `2` — never retry blindly. Once `done --cli` merges `impl/branch-feat_<epic-slug>` into Omnigraph `main`, do not edit any tracked file.)
 4. **Execute Stage 6 (Final Commit, Optional Push/PR & `<promise>DONE</promise>`).**
 
 ---

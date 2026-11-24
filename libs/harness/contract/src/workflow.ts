@@ -81,9 +81,9 @@ export const AttemptNumber = Schema.Int.pipe(
 )
 export type AttemptNumber = typeof AttemptNumber.Type
 
-/** 1-based ship-gate attempt counter (`>= 1`). */
+/** 1-based bounded I32 ship-gate attempt counter (`1..2_147_483_647`). */
 export const ShipAttempt = Schema.Int.pipe(
-  Schema.check(Schema.isGreaterThanOrEqualTo(1)),
+  Schema.check(Schema.isBetween({ minimum: 1, maximum: 2_147_483_647 })),
   Schema.brand("ShipAttempt"),
 )
 export type ShipAttempt = typeof ShipAttempt.Type
@@ -94,6 +94,13 @@ export const WaveIndex = Schema.Int.pipe(
   Schema.brand("WaveIndex"),
 )
 export type WaveIndex = typeof WaveIndex.Type
+
+/** Non-negative epoch millisecond timestamp recorded in workflow read-model records. */
+export const WorkflowTimestampMs = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+  Schema.brand("WorkflowTimestampMs"),
+)
+export type WorkflowTimestampMs = typeof WorkflowTimestampMs.Type
 
 /**
  * Normalized repo-relative file path or directory subtree prefix (`1..512` chars).
