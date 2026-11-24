@@ -86,6 +86,7 @@ export const evaluateGovernanceDocsPlugin = (
           { _tag: "PatternDoc" },
           { _tag: "SchemaDef" },
           { _tag: "ServiceLayer" },
+          { _tag: "EarsRequirement" },
           { _tag: "EffectSignature" },
           { _tag: "LayerFlow" },
           { _tag: "TraceabilityTuple" },
@@ -117,6 +118,7 @@ export const evaluateGovernanceDocsPlugin = (
           .with(
             { _tag: "AdrDoc" },
             { _tag: "EarsSpec" },
+            { _tag: "EarsRequirement" },
             { _tag: "PatternDoc" },
             { _tag: "SchemaDef" },
             { _tag: "ServiceLayer" },

@@ -360,6 +360,7 @@ export const buildReviewGraphContextBundle = (
             "SchemaDef",
             "VitestCase",
             "PatternDoc",
+            "EarsRequirement",
             "EffectSignature",
             "LayerFlow",
             "TraceabilityTuple",

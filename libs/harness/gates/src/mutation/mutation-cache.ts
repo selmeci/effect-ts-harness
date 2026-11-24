@@ -442,31 +442,137 @@ export const loadMutationCacheWithStatus = (
     )
     .exhaustive()
 
+const isDirSafe = (p: string, hostIo: SyncHostIo): boolean =>
+  unwrapOption(unwrapResult(Result.try(() => hostIo.isDirectorySync(p)))) ?? false
+
+export const resolveLinkedWorktreeCommonRepoRoot = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): string | undefined => {
+  if (!isNonSymlink(repoRoot, hostIo)) return undefined
+  const dotGit = join(repoRoot, ".git")
+  if (
+    checkExists(dotGit, hostIo) !== true ||
+    !isNonSymlink(dotGit, hostIo) ||
+    !isFileSafe(dotGit, hostIo)
+  ) {
+    return undefined
+  }
+  const dotGitRaw = unwrapOption(readSafeText(dotGit, hostIo))
+  if (dotGitRaw === undefined) return undefined
+  const gitDirMatch = /^gitdir:\s*(.+)$/m.exec(dotGitRaw)
+  if (gitDirMatch === null) return undefined
+  const gitDir = resolve(repoRoot, gitDirMatch[1]!.trim())
+  if (!isNonSymlink(gitDir, hostIo) || !isDirSafe(gitDir, hostIo)) return undefined
+
+  const commonDirFile = join(gitDir, "commondir")
+  if (
+    checkExists(commonDirFile, hostIo) !== true ||
+    !isNonSymlink(commonDirFile, hostIo) ||
+    !isFileSafe(commonDirFile, hostIo)
+  ) {
+    return undefined
+  }
+  const commonDirRaw = unwrapOption(readSafeText(commonDirFile, hostIo))
+  if (commonDirRaw === undefined || commonDirRaw.trim().length === 0) return undefined
+  const commonGitDir = resolve(gitDir, commonDirRaw.trim())
+  if (!isNonSymlink(commonGitDir, hostIo) || !isDirSafe(commonGitDir, hostIo)) return undefined
+
+  const commonRepoRoot = dirname(commonGitDir)
+  if (!isNonSymlink(commonRepoRoot, hostIo) || !isDirSafe(commonRepoRoot, hostIo)) return undefined
+  const repoReal = realpathOrUndefined(repoRoot, hostIo)
+  const commonReal = realpathOrUndefined(commonRepoRoot, hostIo)
+  if (repoReal === undefined || commonReal === undefined || repoReal === commonReal) {
+    return undefined
+  }
+  return commonRepoRoot
+}
+
+const loadReadOnlySharedCacheEntries = (
+  commonRepoRoot: string,
+  hostIo: SyncHostIo,
+  hmacSecret: RedactedMutationCacheHmacSecret,
+): Record<ContentSha256, MutationCacheEntry> => {
+  const cleanHostIo: SyncHostIo = { ...hostIo, getEnv: () => ({}) }
+  return match(resolveCachePaths(commonRepoRoot, cleanHostIo))
+    .with({ _tag: "Unsafe" }, () => ({}))
+    .with({ _tag: "Ok" }, ({ stateDir, cacheDir, cacheFile }) => {
+      if (checkExists(cacheFile, cleanHostIo) !== true) return {}
+      if (
+        validateCachePathSafety(
+          commonRepoRoot,
+          stateDir,
+          cacheDir,
+          cacheFile,
+          true,
+          cleanHostIo,
+        ) !== undefined
+      ) {
+        return {}
+      }
+      const raw = unwrapOption(readSafeText(cacheFile, cleanHostIo))
+      if (raw === undefined) return {}
+      return match(Schema.decodeExit(TopLevelCacheEnvelopeSchema)(raw))
+        .with({ _tag: "Failure" }, () => ({}))
+        .with({ _tag: "Success" }, ({ value: envelope }) => {
+          if (envelope.version !== MUTATION_CACHE_SCHEMA_VERSION) return {}
+          const validEntries: Record<ContentSha256, MutationCacheEntry> = {}
+          for (const [k, rawEntry] of Object.entries(envelope.entries)) {
+            const validEntry = match(Schema.decodeUnknownExit(MutationCacheEntry)(rawEntry))
+              .with({ _tag: "Failure" }, () => undefined)
+              .with({ _tag: "Success" }, ({ value: entry }) =>
+                entry.key === k && verifyMutationEntryMac(hmacSecret, entry) ? entry : undefined,
+              )
+              .exhaustive()
+            if (validEntry !== undefined) validEntries[validEntry.key] = validEntry
+          }
+          return validEntries
+        })
+        .exhaustive()
+    })
+    .exhaustive()
+}
+
 export const loadMutationCache = (
   repoRoot: string,
   hostIo: SyncHostIo,
   cacheAuth?: MutationCacheAuth,
-): MutationCacheStore =>
-  match(loadMutationCacheWithStatus(repoRoot, hostIo, cacheAuth))
+): MutationCacheStore => {
+  const localOutcome = match(loadMutationCacheWithStatus(repoRoot, hostIo, cacheAuth))
     .with({ _tag: "Loaded" }, ({ store, droppedEntryCount }) => {
       if (droppedEntryCount > 0)
         process.stderr.write(
           `[mutation-cache] Warning: Dropped ${droppedEntryCount} invalid/tampered cache entry(ies).\n`,
         )
-      return store
+      return { allowShared: true, store }
     })
-    .with({ _tag: "Missing" }, () => emptyMutationCacheStore())
+    .with({ _tag: "Missing" }, () => ({ allowShared: true, store: emptyMutationCacheStore() }))
     .with({ _tag: "Corrupt" }, ({ reason, quarantinedPath }) => {
       process.stderr.write(
         `[mutation-cache] Warning: Corrupt cache (${reason})${quarantinedPath !== undefined ? ` (quarantined to ${quarantinedPath})` : ""}.\n`,
       )
-      return emptyMutationCacheStore()
+      return { allowShared: true, store: emptyMutationCacheStore() }
     })
     .with({ _tag: "Unsafe" }, ({ reason }) => {
       process.stderr.write(`[mutation-cache] Warning: Unsafe cache path (${reason}).\n`)
-      return emptyMutationCacheStore()
+      return { allowShared: false, store: emptyMutationCacheStore() }
     })
     .exhaustive()
+
+  if (!localOutcome.allowShared) return localOutcome.store
+  const hmacSecret = match(resolveCacheAuth(cacheAuth))
+    .with({ _tag: "Ok" }, ({ hmacSecret: secret }) => secret)
+    .with({ _tag: "Disabled" }, () => undefined)
+    .exhaustive()
+  if (hmacSecret === undefined) return localOutcome.store
+  const commonRepoRoot = resolveLinkedWorktreeCommonRepoRoot(repoRoot, hostIo)
+  if (commonRepoRoot === undefined) return localOutcome.store
+  const sharedEntries = loadReadOnlySharedCacheEntries(commonRepoRoot, hostIo, hmacSecret)
+  return {
+    version: MUTATION_CACHE_SCHEMA_VERSION,
+    entries: { ...sharedEntries, ...localOutcome.store.entries },
+  }
+}
 
 const pruneCacheStore = (store: MutationCacheStore): MutationCacheStore => {
   const entriesList = Object.entries(store.entries)

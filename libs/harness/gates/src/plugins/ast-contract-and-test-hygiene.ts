@@ -5,10 +5,18 @@ import { unwrapExpr } from "./ast-gate-law-helpers.js"
 /** Maximum permitted inclusive line span (`endLine - startLine + 1`) for a Vitest test callback. */
 export const MAX_TEST_CASE_LINES = 200
 
+/** Maximum permitted total line count for a single workspace test file. */
+export const MAX_TEST_FILE_LINES = 1500
+
+/** Maximum permitted Vitest test registrations (`it`/`test`) per test file. */
+export const MAX_TESTS_PER_FILE = 30
+
 export type AstHygieneRuleId =
   | "contract-shape-hardening"
   | "workflow-name-instead-of-tag"
   | "max-test-case-lines"
+  | "max-test-file-lines"
+  | "max-tests-per-file"
 
 export interface AstHygieneFinding {
   readonly rule: AstHygieneRuleId
@@ -20,6 +28,7 @@ const SCHEMA_CHAIN_METHODS = new Set(["pipe", "check", "annotate"])
 const STRING_BOUND_CALLS = new Set(["isTrimmed", "isPattern", "isMaxLength"])
 const VITEST_BASE_IDENTIFIERS = new Set(["it", "test"])
 const VITEST_CURRIED_METHODS = new Set(["each", "for", "skipIf", "runIf"])
+const VITEST_NON_REGISTRATION_METHODS = new Set([...VITEST_CURRIED_METHODS, "extend"])
 
 const isContractSourcePath = (normPath: string): boolean =>
   !isTestPath(normPath) && /(?:^|\/)libs\/[^/]+\/contract\/src\/.*\.ts$/.test(normPath)
@@ -27,7 +36,7 @@ const isContractSourcePath = (normPath: string): boolean =>
 const isWireAdapterContractPath = (normPath: string): boolean =>
   /(?:^|\/)wire-(?:adapter|envelope)\.ts$/.test(normPath)
 
-const isTestPath = (normPath: string): boolean => /\.(?:test|spec)\.tsx?$/.test(normPath)
+const isTestPath = (normPath: string): boolean => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(normPath)
 
 const staticStringExpr = (expr: ts.Expression): string | undefined => {
   const u = unwrapExpr(expr)
@@ -409,4 +418,70 @@ export const collectMaxTestCaseLineViolations = (
   }
   visit(sourceFile)
   return findings
+}
+
+const isVitestTestRegistrationCall = (node: ts.CallExpression): boolean => {
+  if (!isVitestTestChain(node.expression) || node.arguments.length < 2) {
+    return false
+  }
+  const callee = unwrapExpr(node.expression)
+  if (
+    ts.isPropertyAccessExpression(callee) &&
+    VITEST_NON_REGISTRATION_METHODS.has(callee.name.text)
+  ) {
+    return false
+  }
+  return true
+}
+
+/**
+ * Flags test files exceeding `MAX_TEST_FILE_LINES` (`1500`) total source lines so
+ * monolithic multi-domain test suites are split into focused domain files.
+ */
+export const collectMaxTestFileLineViolations = (
+  sourceFile: ts.SourceFile,
+  normPath: string,
+): ReadonlyArray<AstHygieneFinding> => {
+  if (!isTestPath(normPath)) return []
+  const text = sourceFile.text
+  const lineCount = text.length === 0 ? 0 : text.split(/\r?\n/).length
+  if (lineCount <= MAX_TEST_FILE_LINES) return []
+  return [
+    {
+      rule: "max-test-file-lines",
+      message: `[max-test-file-lines] Test file '${normPath}' has ${lineCount} lines (max ${MAX_TEST_FILE_LINES}) — split tests by domain into focused *.test.ts files.`,
+      node: sourceFile,
+    },
+  ]
+}
+
+/**
+ * Flags test files declaring more than `MAX_TESTS_PER_FILE` (`30`) Vitest test
+ * registrations (`it`/`test`), keeping suites parallelizable across Vitest workers.
+ */
+export const collectMaxTestsPerFileViolations = (
+  sourceFile: ts.SourceFile,
+  normPath: string,
+): ReadonlyArray<AstHygieneFinding> => {
+  if (!isTestPath(normPath)) return []
+  let count = 0
+  let overflowNode: ts.CallExpression | undefined
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && isVitestTestRegistrationCall(node)) {
+      count += 1
+      if (count === MAX_TESTS_PER_FILE + 1) {
+        overflowNode = node
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sourceFile)
+  if (count <= MAX_TESTS_PER_FILE) return []
+  return [
+    {
+      rule: "max-tests-per-file",
+      message: `[max-tests-per-file] Test file '${normPath}' declares ${count} test cases (max ${MAX_TESTS_PER_FILE}) — split suites by domain into focused *.test.ts files for Vitest parallelism and targeted mutation reachability.`,
+      node: overflowNode ?? sourceFile,
+    },
+  ]
 }

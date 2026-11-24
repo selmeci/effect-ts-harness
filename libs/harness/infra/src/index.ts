@@ -20,6 +20,19 @@ import {
   resolveHarnessStateDir,
 } from "./cache-helpers.js"
 import { DecisionCacheLive, makeDecisionCacheLayer } from "./decision-cache-live.js"
+import {
+  FileEmbeddingCacheLive,
+  makeFileEmbeddingCacheLayer,
+  readEmbeddingCacheFile,
+  type FileEmbeddingCacheOptions,
+  writeEmbeddingCacheFile,
+} from "./embedding-cache-live.js"
+import {
+  OllamaEmbeddingClientLive,
+  embedBatchViaOllama,
+  makeOllamaEmbeddingClientLayer,
+  type OllamaEmbeddingClientOptions,
+} from "./embedding-client-live.js"
 import { LocalDecisionModel, makeLocalDecisionModelLayer } from "./local-decision-model-live.js"
 import { execFileAsyncEffect, nodeSyncHostIo } from "./node-host-io.js"
 import {
@@ -67,6 +80,19 @@ export {
 }
 export { resolveAstGateCachePath, resolveDecisionCachePath, resolveHarnessStateDir }
 export { DecisionCacheLive, makeDecisionCacheLayer }
+export {
+  FileEmbeddingCacheLive,
+  makeFileEmbeddingCacheLayer,
+  readEmbeddingCacheFile,
+  type FileEmbeddingCacheOptions,
+  writeEmbeddingCacheFile,
+}
+export {
+  OllamaEmbeddingClientLive,
+  embedBatchViaOllama,
+  makeOllamaEmbeddingClientLayer,
+  type OllamaEmbeddingClientOptions,
+}
 export { LocalDecisionModel, makeLocalDecisionModelLayer }
 export {
   resolveOrCreateMutationCacheHmacSecret,
@@ -239,6 +265,8 @@ const makeHarnessInfraLayer = (options?: {
     ActiveMutantContextLive,
     TsCompilerOverlayServiceLive,
     OmnigraphSyncLive,
+    OllamaEmbeddingClientLive,
+    FileEmbeddingCacheLive,
   ).pipe(Layer.provide(NodeServices.layer))
 }
 

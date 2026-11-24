@@ -16,6 +16,7 @@ import {
   UnknownToolError,
 } from "./mcp-helpers.js"
 import { buildOntologyAndGqToolDescriptors } from "./ontology-and-gq.tools.js"
+import { buildRetrievalToolDescriptors } from "./retrieval.tools.js"
 import { buildWorkflowPlanToolDescriptors } from "./workflow-plan.tools.js"
 
 export {
@@ -71,6 +72,7 @@ export const buildLiveMcpToolDescriptors = (
   ...buildDatalogAndDpoToolDescriptors(options),
   ...buildGitDiffToolDescriptors(options),
   ...buildWorkflowPlanToolDescriptors(options),
+  ...buildRetrievalToolDescriptors(options),
 ]
 
 const STATIC_LIVE_TOOL_DESCRIPTORS: ReadonlyArray<McpToolPluginDescriptor> =

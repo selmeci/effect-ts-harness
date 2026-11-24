@@ -36,6 +36,7 @@ export const resolveNode = (
     harnessGraph.nodeIndexByKey.get(`PatternDoc:${symbolOrSpan}`) ??
     harnessGraph.nodeIndexByKey.get(`AdrDoc:${symbolOrSpan}`) ??
     harnessGraph.nodeIndexByKey.get(`EarsSpec:${symbolOrSpan}`) ??
+    harnessGraph.nodeIndexByKey.get(`EarsRequirement:${symbolOrSpan}`) ??
     harnessGraph.nodeIndexByKey.get(`EffectSignature:${symbolOrSpan}`) ??
     harnessGraph.nodeIndexByKey.get(`LayerFlow:${symbolOrSpan}`) ??
     harnessGraph.nodeIndexByKey.get(`TraceabilityTuple:${symbolOrSpan}`) ??
@@ -48,12 +49,39 @@ export const resolveNode = (
 
   for (const [, node] of Graph.nodes(harnessGraph.graph)) {
     const matched = match(node)
-      .with({ _tag: "EffectFn" }, (n) => matchesNodeTarget(n, symbolOrSpan) || n.qualname.endsWith(`#${symbolOrSpan}`))
-      .with({ _tag: "ServiceLayer" }, (n) => matchesNodeTarget(n, symbolOrSpan) || n.qualname.endsWith(`#${symbolOrSpan}`))
-      .with({ _tag: "ServiceTag" }, (n) => matchesNodeTarget(n, symbolOrSpan) || n.tagId.endsWith(`#${symbolOrSpan}`))
-      .with({ _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, (n) => matchesNodeTarget(n, symbolOrSpan) || n.path.endsWith(`/${symbolOrSpan}`) || n.path.includes(symbolOrSpan))
-      .with({ _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, (n) => matchesNodeTarget(n, symbolOrSpan))
-      .with({ _tag: "EffectSignature" }, { _tag: "LayerFlow" }, { _tag: "TraceabilityTuple" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" }, (n) => n.relationId === symbolOrSpan)
+      .with(
+        { _tag: "EffectFn" },
+        (n) => matchesNodeTarget(n, symbolOrSpan) || n.qualname.endsWith(`#${symbolOrSpan}`),
+      )
+      .with(
+        { _tag: "ServiceLayer" },
+        (n) => matchesNodeTarget(n, symbolOrSpan) || n.qualname.endsWith(`#${symbolOrSpan}`),
+      )
+      .with(
+        { _tag: "ServiceTag" },
+        (n) => matchesNodeTarget(n, symbolOrSpan) || n.tagId.endsWith(`#${symbolOrSpan}`),
+      )
+      .with(
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
+        (n) =>
+          matchesNodeTarget(n, symbolOrSpan) ||
+          n.path.endsWith(`/${symbolOrSpan}`) ||
+          n.path.includes(symbolOrSpan),
+      )
+      .with({ _tag: "TaggedError" }, { _tag: "SchemaDef" }, { _tag: "VitestCase" }, (n) =>
+        matchesNodeTarget(n, symbolOrSpan),
+      )
+      .with(
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
+        (n) => n.relationId === symbolOrSpan,
+      )
       .exhaustive()
     if (matched) return node
   }
@@ -89,7 +117,7 @@ const mapRoleToEdgeKind = (role: RoleName): string =>
     .with("provided-service", () => "ProvidesService")
     .with("required-service", () => "LayerRequires")
     .with("governing-adr", () => "GovernsSymbol")
-    .with("specifying-ears", () => "SpecifiesSymbol")
+    .with("specifying-ears", "specified-requirement", () => "SpecifiesSymbol")
     .with("exercising-test", "exercised-span", "verifying-test", () => "ExercisesSpan")
     .with("enforcing-pattern", () => "CoversPattern")
     .otherwise((r) => r)
@@ -112,13 +140,51 @@ const buildCallerMatchFromPeer = (
 
   return match(peerNode)
     .with({ _tag: "EffectFn" }, (n) => ({ ...base, qualname: n.qualname, spanName: n.spanName }))
-    .with({ _tag: "ServiceTag" }, (n) => ({ ...base, qualname: n.tagId, tagId: n.tagId, name: n.name }))
+    .with({ _tag: "ServiceTag" }, (n) => ({
+      ...base,
+      qualname: n.tagId,
+      tagId: n.tagId,
+      name: n.name,
+    }))
     .with({ _tag: "ServiceLayer" }, (n) => ({ ...base, qualname: n.qualname }))
-    .with({ _tag: "TaggedError" }, (n) => ({ ...base, qualname: n.errorTag, errorTag: n.errorTag, spanName: n.errorTag }))
-    .with({ _tag: "SchemaDef" }, (n) => ({ ...base, qualname: n.schemaName, schemaName: n.schemaName }))
-    .with({ _tag: "VitestCase" }, (n) => ({ ...base, qualname: n.testId, testId: n.testId, testFile: n.testFile, testName: n.testName }))
-    .with({ _tag: "PatternDoc" }, (n) => ({ ...base, qualname: n.slug, docId: n.slug, docPath: n.path }))
-    .with({ _tag: "AdrDoc" }, { _tag: "EarsSpec" }, (n) => ({ ...base, qualname: n.id, spanName: n.title, docId: n.id, docPath: n.path }))
+    .with({ _tag: "TaggedError" }, (n) => ({
+      ...base,
+      qualname: n.errorTag,
+      errorTag: n.errorTag,
+      spanName: n.errorTag,
+    }))
+    .with({ _tag: "SchemaDef" }, (n) => ({
+      ...base,
+      qualname: n.schemaName,
+      schemaName: n.schemaName,
+    }))
+    .with({ _tag: "VitestCase" }, (n) => ({
+      ...base,
+      qualname: n.testId,
+      testId: n.testId,
+      testFile: n.testFile,
+      testName: n.testName,
+    }))
+    .with({ _tag: "PatternDoc" }, (n) => ({
+      ...base,
+      qualname: n.slug,
+      docId: n.slug,
+      docPath: n.path,
+    }))
+    .with({ _tag: "AdrDoc" }, { _tag: "EarsSpec" }, (n) => ({
+      ...base,
+      qualname: n.id,
+      spanName: n.title,
+      docId: n.id,
+      docPath: n.path,
+    }))
+    .with({ _tag: "EarsRequirement" }, (n) => ({
+      ...base,
+      qualname: n.id,
+      spanName: n.requirementId,
+      docId: n.specId,
+      docPath: n.path,
+    }))
     .exhaustive()
 }
 
@@ -128,6 +194,7 @@ const SUBJECT_ROLES_BY_RELATION: Readonly<Record<RelationTag, ReadonlySet<string
   TraceabilityTuple: new Set([
     "governing-adr",
     "specifying-ears",
+    "specified-requirement",
     "verifying-test",
     "exercising-test",
     "enforcing-pattern",
@@ -189,7 +256,13 @@ export const findCallers = (
 
       const effectiveRole = match(relNode._tag)
         .with("TraceabilityTuple", () => outEdge.data.role)
-        .with("EffectSignature", "LayerFlow", "HttpEndpointTuple", "MigrationTuple", () => inEdge.data.role)
+        .with(
+          "EffectSignature",
+          "LayerFlow",
+          "HttpEndpointTuple",
+          "MigrationTuple",
+          () => inEdge.data.role,
+        )
         .exhaustive()
       const matchEntry = buildCallerMatchFromPeer(
         peerNode,
@@ -233,14 +306,7 @@ export const findCallees = (
       if (outEdge === undefined) continue
       const peerNode = Option.getOrUndefined(Graph.getNode(harnessGraph.graph, outEdge.target))
       if (peerNode === undefined || !isEntityNode(peerNode)) continue
-      results.push(
-        buildCallerMatchFromPeer(
-          peerNode,
-          sourceNode,
-          outEdge.data,
-          outEdge.data.role,
-        ),
-      )
+      results.push(buildCallerMatchFromPeer(peerNode, sourceNode, outEdge.data, outEdge.data.role))
     }
     return results
   }
@@ -268,18 +334,25 @@ export const findCallees = (
       const effectiveRole = match(relNode._tag)
         .with("TraceabilityTuple", () =>
           match<string>(inEdge.data.role)
-            .with("governing-adr", "specifying-ears", "verifying-test", "exercising-test", () => inEdge.data.role)
+            .with(
+              "governing-adr",
+              "specifying-ears",
+              "verifying-test",
+              "exercising-test",
+              () => inEdge.data.role,
+            )
             .otherwise(() => outEdge.data.role),
         )
-        .with("EffectSignature", "LayerFlow", "HttpEndpointTuple", "MigrationTuple", () => outEdge.data.role)
+        .with(
+          "EffectSignature",
+          "LayerFlow",
+          "HttpEndpointTuple",
+          "MigrationTuple",
+          () => outEdge.data.role,
+        )
         .exhaustive()
 
-      const matchEntry = buildCallerMatchFromPeer(
-        peerNode,
-        relNode,
-        outEdge.data,
-        effectiveRole,
-      )
+      const matchEntry = buildCallerMatchFromPeer(peerNode, relNode, outEdge.data, effectiveRole)
       const dedupKey = `${relNode.relationId}:${getNodeKey(peerNode)}:${effectiveRole}`
       if (!seen.has(dedupKey)) {
         seen.add(dedupKey)
@@ -332,7 +405,12 @@ export const findTestsReaching = (
           { _tag: "TraceabilityTuple" },
           () => inEdge.data.role === "exercised-span" || inEdge.data.role === "realizing-symbol",
         )
-        .with({ _tag: "LayerFlow" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" }, () => false)
+        .with(
+          { _tag: "LayerFlow" },
+          { _tag: "HttpEndpointTuple" },
+          { _tag: "MigrationTuple" },
+          () => false,
+        )
         .exhaustive()
 
       if (!isTargetRole) continue
@@ -347,7 +425,12 @@ export const findTestsReaching = (
             { _tag: "TraceabilityTuple" },
             () => outEdge.data.role === "exercising-test" || outEdge.data.role === "verifying-test",
           )
-          .with({ _tag: "LayerFlow" }, { _tag: "HttpEndpointTuple" }, { _tag: "MigrationTuple" }, () => false)
+          .with(
+            { _tag: "LayerFlow" },
+            { _tag: "HttpEndpointTuple" },
+            { _tag: "MigrationTuple" },
+            () => false,
+          )
           .exhaustive()
 
         if (isSourceRole && !visited.has(outEdge.target)) {
@@ -377,6 +460,7 @@ export const renderMermaid = (harnessGraph: HarnessGraph): string =>
         .with({ _tag: "PatternDoc" }, (n) => `Pattern: ${n.slug}`)
         .with({ _tag: "AdrDoc" }, (n) => `ADR:${n.id} (${n.title})`)
         .with({ _tag: "EarsSpec" }, (n) => `Spec:${n.id} (${n.title})`)
+        .with({ _tag: "EarsRequirement" }, (n) => `Req:${n.specId}#${n.requirementId}`)
         .with({ _tag: "EffectSignature" }, (n) => `Sig: ${n.callerQualname}`)
         .with({ _tag: "LayerFlow" }, (n) => `LayerFlow: ${n.layerQualname}`)
         .with({ _tag: "TraceabilityTuple" }, (n) => `Trace: ${n.relationId}`)

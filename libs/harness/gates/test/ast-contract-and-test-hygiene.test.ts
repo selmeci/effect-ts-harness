@@ -8,6 +8,8 @@ import {
   decideSyntaxBansGate,
   decideTestIntegrityGate,
   MAX_TEST_CASE_LINES,
+  MAX_TEST_FILE_LINES,
+  MAX_TESTS_PER_FILE,
 } from "../src/index.js"
 
 interface OxlintPluginMod {
@@ -41,12 +43,41 @@ const buildSizedTestFile = (callee: string, totalLines: number, useFnExpr = fals
   return [callOpen, ...padLines, `})`].join("\n")
 }
 
+const buildPaddedLinesFile = (totalLines: number): string =>
+  Array.from({ length: totalLines }, (_, idx) => `const row_${idx} = ${idx}`).join("\n")
+
+const buildManyTestsFile = (
+  testCount: number,
+  options?: { readonly includeEach?: boolean; readonly includeNamedHandler?: boolean },
+): string => {
+  const lines: Array<string> = [
+    'const rx = /abc/; export const rxOk = rx.test("abc")',
+    "const myHandler = () => {}",
+  ]
+  const regCount =
+    testCount -
+    (options?.includeEach === true ? 1 : 0) -
+    (options?.includeNamedHandler === true ? 1 : 0)
+  for (let i = 0; i < regCount; i += 1) {
+    lines.push(`it.effect("case_${i}", () => Effect.void)`)
+  }
+  if (options?.includeEach === true) {
+    lines.push(`it.each([1])("each_case_%s", () => {})`)
+  }
+  if (options?.includeNamedHandler === true) {
+    lines.push(`test("named_case", myHandler)`)
+  }
+  return lines.join("\n")
+}
+
 const CaseKindArb = Schema.Literals([
   "clean-contract",
   "unbounded-brand",
   "unknown-record",
   "wf-name-access",
   "oversized-test",
+  "oversized-test-file",
+  "too-many-tests",
 ])
 
 describe("SPEC-0028 AST Contract Shape, Workflow Name, and Test Hygiene Gates", () => {
@@ -492,6 +523,18 @@ describe("SPEC-0028 AST Contract Shape, Workflow Name, and Test Hygiene Gates", 
               content: AstSourceContent.make(buildSizedTestFile("it", 201)),
             }
           }
+          if (k === "oversized-test-file") {
+            return {
+              filePath: AstSourceFilePath.make(`libs/demo/core/test/fl-${idx}.test.ts`),
+              content: AstSourceContent.make(buildPaddedLinesFile(1501)),
+            }
+          }
+          if (k === "too-many-tests") {
+            return {
+              filePath: AstSourceFilePath.make(`libs/demo/core/test/cnt-${idx}.test.ts`),
+              content: AstSourceContent.make(buildManyTestsFile(31)),
+            }
+          }
           return {
             filePath: AstSourceFilePath.make(`libs/demo/contract/src/c-${idx}.ts`),
             content: AstSourceContent.make(
@@ -511,6 +554,157 @@ describe("SPEC-0028 AST Contract Shape, Workflow Name, and Test Hygiene Gates", 
         expect(first.violations.filter((v) => v.rule === "max-test-case-lines")).toHaveLength(
           kinds.filter((k) => k === "oversized-test").length,
         )
+        expect(first.violations.filter((v) => v.rule === "max-test-file-lines")).toHaveLength(
+          kinds.filter((k) => k === "oversized-test-file").length,
+        )
+        expect(first.violations.filter((v) => v.rule === "max-tests-per-file")).toHaveLength(
+          kinds.filter((k) => k === "too-many-tests").length,
+        )
+      }),
+  )
+
+  it.effect(
+    "REQ-3.3 enforces MAX_TEST_FILE_LINES (1500 passes, 1501 fails) and MAX_TESTS_PER_FILE (30 passes, 31 fails) across Vitest forms",
+    () =>
+      Effect.gen(function* () {
+        expect(MAX_TEST_FILE_LINES).toBe(1500)
+        expect(MAX_TESTS_PER_FILE).toBe(30)
+
+        const cleanReport = yield* decideTestIntegrityGate({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/demo/domain/test/exact-1500.test.ts"),
+              content: AstSourceContent.make(buildPaddedLinesFile(1500)),
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/demo/domain/test/empty.test.ts"),
+              content: AstSourceContent.make(""),
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/demo/domain/test/exact-30.test.ts"),
+              content: AstSourceContent.make(
+                `${buildManyTestsFile(30, { includeEach: true, includeNamedHandler: true })}\ntest.extend({ x: 1 }, { auto: true })\nit.skipIf(true, () => {})`,
+              ),
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/demo/domain/src/helper.ts"),
+              content: AstSourceContent.make(
+                `${buildPaddedLinesFile(1550)}\n${buildManyTestsFile(35)}`,
+              ),
+            },
+          ],
+        })
+        expect(
+          cleanReport.violations.filter(
+            (v) => v.rule === "max-test-file-lines" || v.rule === "max-tests-per-file",
+          ),
+        ).toEqual([])
+
+        const badReport = yield* decideTestIntegrityGate({
+          files: [
+            {
+              filePath: AstSourceFilePath.make("libs/demo/domain/test/over-1501.test.ts"),
+              content: AstSourceContent.make(buildPaddedLinesFile(1501)),
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/demo/domain/test/over-31.test.ts"),
+              content: AstSourceContent.make(
+                buildManyTestsFile(31, { includeEach: true, includeNamedHandler: true }),
+              ),
+            },
+            {
+              filePath: AstSourceFilePath.make("libs/demo/domain/test/over-32.test.ts"),
+              content: AstSourceContent.make(buildManyTestsFile(32)),
+            },
+          ],
+        })
+        const fileHits = badReport.violations.filter((v) => v.rule === "max-test-file-lines")
+        const countHits = badReport.violations.filter((v) => v.rule === "max-tests-per-file")
+        expect(fileHits).toHaveLength(1)
+        expect(fileHits[0]?.message).toContain("1501 lines (max 1500)")
+        expect(countHits).toHaveLength(2)
+        expect(countHits[0]?.message).toContain("31 test cases (max 30)")
+        expect(countHits[1]?.message).toContain("32 test cases (max 30)")
+        expect(countHits[1]?.line).toBe(33)
+      }),
+  )
+
+  it.effect(
+    "mirrors [max-test-file-lines] and [max-tests-per-file] in tools/oxlint/syntax-bans.js",
+    () =>
+      Effect.gen(function* () {
+        const plugin = yield* loadOxlintPlugin()
+        const makeTestCallNode = (withEach: boolean) => ({
+          type: "ExpressionStatement",
+          expression: withEach
+            ? {
+                type: "CallExpression",
+                callee: {
+                  type: "CallExpression",
+                  callee: {
+                    type: "MemberExpression",
+                    computed: false,
+                    object: { type: "Identifier", name: "it" },
+                    property: { type: "Identifier", name: "each" },
+                  },
+                  arguments: [
+                    { type: "ArrayExpression", elements: [{ type: "Literal", value: 1 }] },
+                  ],
+                },
+                arguments: [
+                  { type: "Literal", value: "each" },
+                  { type: "ArrowFunctionExpression", body: { type: "BlockStatement", body: [] } },
+                ],
+              }
+            : {
+                type: "CallExpression",
+                callee: {
+                  type: "MemberExpression",
+                  computed: false,
+                  object: { type: "Identifier", name: "it" },
+                  property: { type: "Identifier", name: "effect" },
+                },
+                arguments: [
+                  { type: "Literal", value: "case" },
+                  { type: "ArrowFunctionExpression", body: { type: "BlockStatement", body: [] } },
+                ],
+              },
+        })
+
+        const cleanMsgs: Array<string> = []
+        plugin.rules["test-integrity"]
+          .create({
+            filename: "/repo/libs/demo/domain/test/exact-bounds.test.ts",
+            sourceCode: { text: buildPaddedLinesFile(1500) },
+            report: (r: { readonly message: string }) => cleanMsgs.push(r.message),
+          })
+          .Program?.({
+            type: "Program",
+            body: [
+              ...Array.from({ length: 29 }, () => makeTestCallNode(false)),
+              makeTestCallNode(true),
+            ],
+          })
+        expect(cleanMsgs.some((m) => m.includes("[max-test-file-lines]"))).toBe(false)
+        expect(cleanMsgs.some((m) => m.includes("[max-tests-per-file]"))).toBe(false)
+
+        const badMsgs: Array<string> = []
+        plugin.rules["test-integrity"]
+          .create({
+            filename: "/repo/libs/demo/domain/test/too-big.test.ts",
+            sourceCode: { text: buildPaddedLinesFile(1501) },
+            report: (r: { readonly message: string }) => badMsgs.push(r.message),
+          })
+          .Program?.({
+            type: "Program",
+            body: [
+              ...Array.from({ length: 30 }, () => makeTestCallNode(false)),
+              makeTestCallNode(true),
+            ],
+          })
+        expect(badMsgs.some((m) => m.includes("[max-test-file-lines]"))).toBe(true)
+        expect(badMsgs.some((m) => m.includes("[max-tests-per-file]"))).toBe(true)
+        expect(badMsgs.some((m) => m.includes("31 test cases (max 30)"))).toBe(true)
       }),
   )
 

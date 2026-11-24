@@ -2,7 +2,7 @@ import { join, resolve } from "node:path"
 import { Effect } from "effect"
 import { match } from "ts-pattern"
 import {
-  deriveRepoOmnigraphPort,
+  deriveClusterOmnigraphPort,
   resolveCanonicalRepoRoot,
   resolveOmnigraphClusterDir,
 } from "@harness/graph"
@@ -18,6 +18,7 @@ import {
   cleanupSpawnedOmnigraphServer,
   readClusterPoliciesFlag,
   readOmnigraphServerMetaChecked,
+  resolveDesiredOmnigraphEmbeddingsMode,
   restorePendingWorkflowOnLiveServer,
   setupAndSpawnOmnigraphCluster,
   waitForSpawnedOmnigraphReady,
@@ -65,7 +66,9 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
     const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
     const canonicalRepoRoot = resolveCanonicalRepoRoot(clusterRepoRoot, nodeSyncHostIo)
     const clusterRootDir = resolveOmnigraphClusterDir(clusterRepoRoot, nodeSyncHostIo)
-    const defaultPort = deriveRepoOmnigraphPort(canonicalRepoRoot, nodeSyncHostIo)
+    const isSharedCanonicalCluster =
+      resolve(clusterRootDir) === resolve(join(canonicalRepoRoot, ".harness", "omnigraph-cluster"))
+    const defaultPort = deriveClusterOmnigraphPort(clusterRepoRoot, nodeSyncHostIo)
     const explicitEnvUrl =
       process.env.OMNIGRAPH_URL && process.env.OMNIGRAPH_URL !== "http://127.0.0.1:8080"
         ? process.env.OMNIGRAPH_URL
@@ -77,7 +80,12 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
       return false
     }
 
-    const candidateConfigDir = resolveOmnigraphConfigDir(repoRoot, canonicalRepoRoot)
+    const candidateConfigDir = resolveOmnigraphConfigDir(
+      repoRoot,
+      canonicalRepoRoot,
+      process.env.HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD === "1",
+      !isSharedCanonicalCluster,
+    )
     const configDir = nodeSyncHostIo.existsSync(join(candidateConfigDir, "cluster.yaml"))
       ? candidateConfigDir
       : join(CLI_REPO_ROOT, "libs", "harness", "graph")
@@ -175,8 +183,15 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
           Effect.gen(function* () {
             if (
               resolve(clusterRepoRoot) !== resolve(canonicalRepoRoot) &&
+              isSharedCanonicalCluster &&
               process.env.HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD !== "1"
             ) {
+              if (drift.epochMismatch) {
+                process.stderr.write(
+                  `[harness:omnigraph] Error: refusing destructive RequiresCleanRebuild of incompatible shared canonical cluster '${clusterRootDir}' across CLUSTER_SCHEMA_EPOCH mismatch from linked worktree '${repoRoot}' (canonical: '${canonicalRepoRoot}'). Set HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD=1 or rebuild from canonical repo.\n`,
+                )
+                return { _tag: "Done" as const, ok: false }
+              }
               const probe = yield* probeOmnigraphServerReady(targetBaseUrl)
               const alreadyReady = match(probe)
                 .with({ _tag: "Ready" }, () => true)
@@ -215,6 +230,30 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
                 .with({ _tag: "NotReady" }, () => false)
                 .exhaustive()
               if (alreadyReady) {
+                const serverIsMock = match(serverMeta?.embeddingsMode)
+                  .with("mock", () => true)
+                  .with("live", undefined, () => false)
+                  .exhaustive()
+                if (explicitEnvUrl === undefined && serverIsMock && serverAlive) {
+                  const desiredMode = yield* resolveDesiredOmnigraphEmbeddingsMode
+                  const wantsLive = match(desiredMode)
+                    .with("live", () => true)
+                    .with("mock", () => false)
+                    .exhaustive()
+                  if (wantsLive) {
+                    const blockedByWorktreeGuard =
+                      resolve(clusterRepoRoot) !== resolve(canonicalRepoRoot) &&
+                      isSharedCanonicalCluster &&
+                      process.env.HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD !== "1"
+                    if (blockedByWorktreeGuard) {
+                      process.stderr.write(
+                        `[harness:omnigraph] Warning: skipping mock-to-live embeddings upgrade of shared canonical cluster '${clusterRootDir}' from linked worktree '${repoRoot}'; reusing running server.\n`,
+                      )
+                    } else {
+                      return { _tag: "UpgradeEmbeddingsMode" as const }
+                    }
+                  }
+                }
                 const restored = yield* runLockedLiveRestore({
                   clusterRepoRoot,
                   clusterRootDir,
@@ -234,7 +273,7 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
 
       const preLockEarly = match(preLockDecision)
         .with({ _tag: "Done" }, ({ ok }) => ok)
-        .with({ _tag: "Continue" }, () => undefined)
+        .with({ _tag: "Continue" }, { _tag: "UpgradeEmbeddingsMode" }, () => undefined)
         .exhaustive()
       if (preLockEarly !== undefined) {
         return preLockEarly
@@ -357,19 +396,43 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
               }),
             )
             .with({ _tag: "NoOp" }, () =>
-              Effect.sync(() => {
-                if (serverJsonCorruptOrUnreadable) {
-                  const stopped = stopStaleOmnigraphClusterBeforeDelete(clusterRootDir, undefined)
-                  if (!stopped) {
-                    return { ok: false as const, applyCluster: false }
-                  }
-                }
-                return {
-                  ok: true as const,
-                  applyCluster: false,
-                  workflowBackup: pendingBackup,
-                }
-              }),
+              match(preLockDecision)
+                .with({ _tag: "UpgradeEmbeddingsMode" }, () =>
+                  Effect.gen(function* () {
+                    const killed = yield* killOmnigraphServerPidIfAlive(
+                      serverPid,
+                      clusterRootDir,
+                      "embeddings-mode-upgrade",
+                    )
+                    if (!killed) {
+                      return { ok: false as const, applyCluster: false }
+                    }
+                    return {
+                      ok: true as const,
+                      applyCluster: false,
+                      workflowBackup: pendingBackup,
+                    }
+                  }),
+                )
+                .with({ _tag: "Continue" }, { _tag: "Done" }, () =>
+                  Effect.sync(() => {
+                    if (serverJsonCorruptOrUnreadable) {
+                      const stopped = stopStaleOmnigraphClusterBeforeDelete(
+                        clusterRootDir,
+                        undefined,
+                      )
+                      if (!stopped) {
+                        return { ok: false as const, applyCluster: false }
+                      }
+                    }
+                    return {
+                      ok: true as const,
+                      applyCluster: false,
+                      workflowBackup: pendingBackup,
+                    }
+                  }),
+                )
+                .exhaustive(),
             )
             .exhaustive()
 
@@ -444,6 +507,7 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
             defaultPort,
             spawnedPid: setupRes.pid,
             appliedCluster: setupRes.appliedCluster,
+            embeddingsMode: setupRes.embeddingsMode,
             workflowBackup: driftHandled.workflowBackup,
             verifyEmptyBeforeRestore: canFallbackProbe,
             driftActionTag: nonRebuildDriftTag,
@@ -457,12 +521,19 @@ export function ensureLocalOmnigraphReady(repoRoot: string): Effect.Effect<boole
         return yield* body.pipe(Effect.onInterrupt(() => cleanupSpawned("fiber interrupt")))
       })
 
+      const requiresClusterLock =
+        pendingBackup !== undefined ||
+        match(preLockDecision)
+          .with({ _tag: "UpgradeEmbeddingsMode" }, () => true)
+          .with({ _tag: "Continue" }, { _tag: "Done" }, () => false)
+          .exhaustive()
+
       return yield* match(drift.action)
         .with({ _tag: "RequiresCleanRebuild" }, () =>
           withClusterDaemonLockIfGit(clusterRepoRoot, executeLifecycle),
         )
         .with({ _tag: "LiveClusterApply" }, { _tag: "NoOp" }, () =>
-          pendingBackup !== undefined
+          requiresClusterLock
             ? withClusterDaemonLockIfGit(clusterRepoRoot, executeLifecycle)
             : executeLifecycle,
         )

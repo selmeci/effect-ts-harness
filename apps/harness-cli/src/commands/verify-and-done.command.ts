@@ -177,6 +177,7 @@ export const handleVerify = (options: CliEnv | undefined): Effect.Effect<CliResu
           { _tag: "PatternDoc" },
           { _tag: "AdrDoc" },
           { _tag: "EarsSpec" },
+          { _tag: "EarsRequirement" },
           { _tag: "EffectSignature" },
           { _tag: "LayerFlow" },
           { _tag: "TraceabilityTuple" },
@@ -283,9 +284,10 @@ export const handleVerify = (options: CliEnv | undefined): Effect.Effect<CliResu
       const nxArgs = resolveNxAffectedArgs(repoRoot, ["verify"], scopedFiles)
       const subprocessErr = yield* Effect.try({
         try: () => {
+          const { HARNESS_STATE_DIR: _dropStateDir, ...cleanEnv } = process.env
           const res = nodeSyncHostIo.execFileSync("pnpm", nxArgs, {
             cwd: repoRoot,
-            env: { ...process.env, CI: "true" },
+            env: { ...cleanEnv, CI: "true" },
           })
           return match(res)
             .with({ _tag: "Exited" }, (exited) =>

@@ -5,6 +5,7 @@ import { match } from "ts-pattern"
 import {
   ErrorReasonMessage,
   InvalidReviewRouteInputError,
+  KnowledgeQueryText,
   type NxScopeTag,
   type NxTierTag,
   ReviewRawDiffInput,
@@ -15,19 +16,26 @@ import {
 } from "@harness/contract"
 import {
   decideStructuralSearch,
+  executeNamedGqQueryInMemory,
   findCallees,
   findCallers,
   findTestsReaching,
+  invokeOmnigraphNamedQuery,
+  makeOmnigraphSyncLayer,
   resolveNode,
+  scoreLexicalBm25Lite,
+  tokenizeRetrievalText,
 } from "@harness/graph"
 import {
   attachReviewSlicesIfThresholdReached,
   inferReviewDiffSignals,
   normalizeReviewFilePaths,
   routeReviewDiff,
-  routeStep,
+  routeStepWithStatus,
+  selectRouteWithHybridCandidates,
 } from "@harness/decision"
-import { LocalDecisionModel, nodeSyncHostIo } from "@harness/infra"
+import { EmbeddingClient } from "@harness/service"
+import { LocalDecisionModel, nodeSyncHostIo, OllamaEmbeddingClientLive } from "@harness/infra"
 import {
   graphStatusMeta,
   isPathInsideRoot,
@@ -48,6 +56,8 @@ import {
   type ReviewRouteExecutionContext,
   ReviewRouteInputSchema,
 } from "./review-route-helpers.js"
+import { graphHasNodesForKind } from "./retrieval-search-helpers.js"
+import { resolveContainedRepoRoot } from "./retrieval.tools.js"
 
 export { isPathInsideRoot, normalizeProjectPath, resolveDefaultRepoRoot }
 export type { ReviewRouteExecutionContext }
@@ -248,8 +258,16 @@ export const buildGraphNavigationToolDescriptors = (
       Effect.gen(function* () {
         const { symbolOrSpan } = yield* decodeResolveInput(args)
         const graphStatus = yield* resolveGraphWithStatus(options, args)
+        const node = resolveNode(graphStatus.graph, symbolOrSpan) ?? null
+        const suggestions =
+          node === null
+            ? executeNamedGqQueryInMemory(graphStatus.graph, "resolve_effect_fn_fuzzy", {
+                query: symbolOrSpan,
+              }).slice(0, 5)
+            : undefined
         return {
-          node: resolveNode(graphStatus.graph, symbolOrSpan) ?? null,
+          node,
+          ...(suggestions !== undefined ? { suggestions } : {}),
           ...graphStatusMeta(graphStatus),
         }
       }),
@@ -317,13 +335,15 @@ export const buildGraphNavigationToolDescriptors = (
   {
     name: McpToolName.make("harness_route"),
     description:
-      "Route an implementation plan step to an Effect idiom building block using local decision model",
+      "Route an implementation plan step to an Effect idiom building block using hybrid Omnigraph pattern retrieval and local decision model",
     inputSchema: RouteInputSchema,
     execute: (args) =>
       Effect.gen(function* () {
-        const { planStep } = yield* decodeRouteInput(args)
+        const { planStep, repoRoot } = yield* decodeRouteInput(args)
+        const root = yield* resolveContainedRepoRoot(repoRoot, options)
         const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
-        const routedOpt = yield* routeStep(planStep).pipe(
+        const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
+        const routedOpt = yield* routeStepWithStatus(planStep).pipe(
           Effect.provide(decisionLayer),
           Effect.timeoutOption("1500 millis"),
           Effect.catchCause((cause) => {
@@ -334,8 +354,138 @@ export const buildGraphNavigationToolDescriptors = (
             return Effect.succeedNone
           }),
         )
-        let block: string = Option.getOrElse(routedOpt, () => "review")
-        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+        const baseRoute = Option.getOrElse(routedOpt, () => ({
+          block: "review" as const,
+          source: "degraded-fallback" as const,
+        }))
+
+        const syncLayer = options?.omnigraphSyncLayer ?? makeOmnigraphSyncLayer(nodeSyncHostIo)
+        const embeddingLayer = options?.embeddingClientLayer ?? OllamaEmbeddingClientLive
+        const skipOmnigraph =
+          (options?.skipOmnigraphSpawn === true ||
+            (options?.graph !== undefined && options?.skipOmnigraphSpawn !== false)) &&
+          !process.env["OMNIGRAPH_URL"] &&
+          options?.omnigraphSyncLayer === undefined
+
+        const trimmedStep = planStep.trim()
+        const shouldProbeEmbeddings =
+          trimmedStep.length > 0 && (!skipOmnigraph || options?.embeddingClientLayer !== undefined)
+        const queryVectorOpt: Option.Option<ReadonlyArray<number>> = shouldProbeEmbeddings
+          ? yield* Effect.gen(function* () {
+              const client = yield* EmbeddingClient
+              const avail = yield* client.checkAvailability
+              return yield* match(avail)
+                .with({ _tag: "Available" }, () =>
+                  client.embedQuery(KnowledgeQueryText.make(trimmedStep)).pipe(
+                    Effect.map((vec): ReadonlyArray<number> => vec.components),
+                    Effect.asSome,
+                  ),
+                )
+                .with({ _tag: "Unavailable" }, () => Effect.succeedNone)
+                .exhaustive()
+            }).pipe(
+              Effect.provide(embeddingLayer),
+              Effect.orElseSucceed(() => Option.none<ReadonlyArray<number>>()),
+            )
+          : Option.none<ReadonlyArray<number>>()
+
+        const runRoutePatternQuery = (
+          queryName: "rank_patterns_vector_hybrid" | "rank_patterns_bm25",
+          queryParams: Readonly<Record<string, unknown>>,
+        ) =>
+          invokeOmnigraphNamedQuery({
+            repoRoot: root,
+            actor: "agent-mcp",
+            name: queryName,
+            params: queryParams,
+            fallbackGraph: graphStatus.graph,
+            ...(skipOmnigraph ? { baseUrl: "http://127.0.0.1:1" } : {}),
+          }).pipe(
+            Effect.provide(syncLayer),
+            Effect.catch((err) =>
+              Effect.succeed({
+                source: "memory-fallback" as const,
+                rows: executeNamedGqQueryInMemory(graphStatus.graph, queryName, queryParams),
+                degraded: true as const,
+                fallbackError: toErrorReasonMessage(err, "fallback"),
+              }),
+            ),
+          )
+
+        interface RouteCandidateQueryOutcome {
+          readonly rows: ReadonlyArray<Record<string, unknown>>
+          readonly usedLiveVectorHybrid: boolean
+        }
+
+        const runBm25FallbackRows = (): Effect.Effect<RouteCandidateQueryOutcome> =>
+          runRoutePatternQuery("rank_patterns_bm25", {
+            query: trimmedStep,
+            targetLayer: "*",
+          }).pipe(Effect.map((res) => ({ rows: res.rows, usedLiveVectorHybrid: false })))
+
+        const candidateQueryOutcome: RouteCandidateQueryOutcome = yield* match(queryVectorOpt)
+          .with({ _tag: "Some" }, ({ value: vectorQuery }) =>
+            runRoutePatternQuery("rank_patterns_vector_hybrid", {
+              vectorQuery: [...vectorQuery],
+              textQuery: trimmedStep,
+              targetLayer: "*",
+            }).pipe(
+              Effect.flatMap((res) =>
+                match(res)
+                  .with({ source: "omnigraph" }, ({ rows }) => {
+                    if (rows.length > 0) {
+                      return Effect.succeed<RouteCandidateQueryOutcome>({
+                        rows,
+                        usedLiveVectorHybrid: true,
+                      })
+                    }
+                    if (graphHasNodesForKind(graphStatus.graph, "PatternDoc", "*")) {
+                      return runBm25FallbackRows()
+                    }
+                    return Effect.succeed<RouteCandidateQueryOutcome>({
+                      rows: [],
+                      usedLiveVectorHybrid: false,
+                    })
+                  })
+                  .with({ source: "memory-fallback" }, () => runBm25FallbackRows())
+                  .exhaustive(),
+              ),
+            ),
+          )
+          .with({ _tag: "None" }, () => runBm25FallbackRows())
+          .exhaustive()
+
+        const hasMeaningfulTokens = tokenizeRetrievalText(trimmedStep).length > 0
+        const candidatePatterns = candidateQueryOutcome.rows
+          .filter((row) => typeof row["slug"] === "string")
+          .map((row, idx) => {
+            const slug = String(row["slug"])
+            const titleStr = typeof row["title"] === "string" ? row["title"] : ""
+            const summaryStr = typeof row["summary"] === "string" ? row["summary"] : ""
+            const rowScore =
+              typeof row["score"] === "number" && Number.isFinite(row["score"])
+                ? row["score"]
+                : undefined
+            const computedScore = candidateQueryOutcome.usedLiveVectorHybrid
+              ? (rowScore ?? (hasMeaningfulTokens ? 1 / (60 + idx) : 0))
+              : (rowScore ??
+                scoreLexicalBm25Lite(
+                  `${slug} ${titleStr} ${summaryStr}`,
+                  `${slug} ${titleStr}`,
+                  trimmedStep,
+                ))
+            return {
+              slug,
+              path: typeof row["path"] === "string" ? row["path"] : undefined,
+              score: computedScore,
+              scoreKind: candidateQueryOutcome.usedLiveVectorHybrid
+                ? ("rrf" as const)
+                : ("bm25" as const),
+            }
+          })
+
+        const combined = selectRouteWithHybridCandidates(baseRoute, candidatePatterns)
+        let block: string = combined.block
         if (block === "review") {
           const patternsDir = path.join(root, "agent-patterns")
           if (nodeSyncHostIo.existsSync(patternsDir)) {
@@ -356,7 +506,12 @@ export const buildGraphNavigationToolDescriptors = (
         }
         const patternFile =
           block === "review" || block === "effect" ? null : `agent-patterns/${block}.md`
-        return { block, patternFile }
+        return {
+          block,
+          patternFile,
+          source: combined.source,
+          candidatePatterns: candidatePatterns.slice(0, 5).map((c) => c.slug),
+        }
       }),
   },
   {

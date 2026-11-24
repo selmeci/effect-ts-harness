@@ -18,6 +18,9 @@ export interface WorkspaceFsShape {
     content: WorkspaceFileContent,
   ) => Effect.Effect<void, WorkspaceFsError>
   readonly exists: (filePath: WorkspaceFilePath) => Effect.Effect<boolean, WorkspaceFsError>
+  readonly realPath: (
+    filePath: WorkspaceFilePath,
+  ) => Effect.Effect<WorkspaceFilePath, WorkspaceFsError>
 }
 
 export class WorkspaceFs extends Context.Service<WorkspaceFs, WorkspaceFsShape>()(
@@ -78,5 +81,12 @@ export {
   WorkflowWorktreePort,
   type WorkflowWorktreePortShape,
 } from "./workflow-ports.js"
+
+export {
+  EmbeddingCachePort,
+  type EmbeddingCachePortShape,
+  EmbeddingClient,
+  type EmbeddingClientShape,
+} from "./retrieval-ports.js"
 
 export type { SyncHostExecutor, SyncHostWriter } from "./host-io.js"

@@ -20,10 +20,8 @@ import {
   type VitestCaseNode,
   getNodeKey,
 } from "../model.js"
-import {
-  decodePackageJson,
-  stripCommentsAndTestTitles,
-} from "./extractor-types-and-helpers.js"
+import { decodePackageJson, stripCommentsAndTestTitles } from "./extractor-types-and-helpers.js"
+import { linkGovernanceDocsToGraph } from "./governance-body-extractor.js"
 import type { SourceFileInput } from "./compiler-session.js"
 export {
   loadWorkspaceGovernanceDocs,
@@ -56,7 +54,10 @@ export const findPackageForRelFile = (
       const opt = decodePackageJson(content)
       const relDir = path.relative(rootResolved, curr).replace(/\\/g, "/")
       const entry: PackageJsonEntry = {
-        name: match(opt).with({ _tag: "Some" }, ({ value }) => value.name).with({ _tag: "None" }, () => undefined).exhaustive(),
+        name: match(opt)
+          .with({ _tag: "Some" }, ({ value }) => value.name)
+          .with({ _tag: "None" }, () => undefined)
+          .exhaustive(),
         dir: relDir,
       }
       packageJsonCache?.set(curr, entry)
@@ -78,23 +79,36 @@ export const testImportsFn = (
   packageJsonCache?: Map<string, PackageJsonEntry>,
 ): boolean => {
   const fnPkg = findPackageForRelFile(root, fnFile, hostIo, packageJsonCache)
-  if (fnPkg?.name && (testContent.includes(`"${fnPkg.name}"`) || testContent.includes(`'${fnPkg.name}'`) || testContent.includes(`"${fnPkg.name}/`) || testContent.includes(`'${fnPkg.name}/`))) {
+  if (
+    fnPkg?.name &&
+    (testContent.includes(`"${fnPkg.name}"`) ||
+      testContent.includes(`'${fnPkg.name}'`) ||
+      testContent.includes(`"${fnPkg.name}/`) ||
+      testContent.includes(`'${fnPkg.name}/`))
+  ) {
     return true
   }
 
-  const testFullDir = path.dirname(path.join(root, testRelPath)), fnFullFile = path.join(root, fnFile)
-  const fnFullDir = path.dirname(fnFullFile), fnPkgFullDir = fnPkg ? path.join(root, fnPkg.dir) : null
+  const testFullDir = path.dirname(path.join(root, testRelPath)),
+    fnFullFile = path.join(root, fnFile)
+  const fnFullDir = path.dirname(fnFullFile),
+    fnPkgFullDir = fnPkg ? path.join(root, fnPkg.dir) : null
 
-  for (const m of testContent.matchAll(/(?:import|export)\s+(?:[\s\S]*?from\s+)?["']([^"']+)["']/g)) {
+  for (const m of testContent.matchAll(
+    /(?:import|export)\s+(?:[\s\S]*?from\s+)?["']([^"']+)["']/g,
+  )) {
     const spec = m[1]
     if (!spec) continue
     if (spec.startsWith(".")) {
       const resolved = path.resolve(testFullDir, spec)
       if (
-        resolved === fnFullFile || resolved === fnFullFile.replace(/\.tsx?$/, ".js") ||
+        resolved === fnFullFile ||
+        resolved === fnFullFile.replace(/\.tsx?$/, ".js") ||
         resolved.replace(/\.js$/, "") === fnFullFile.replace(/\.tsx?$/, "") ||
-        resolved.startsWith(fnFullDir) || (fnPkgFullDir && resolved.startsWith(fnPkgFullDir))
-      ) return true
+        resolved.startsWith(fnFullDir) ||
+        (fnPkgFullDir && resolved.startsWith(fnPkgFullDir))
+      )
+        return true
       continue
     }
     if (fnPkg?.dir && spec.includes(fnPkg.dir)) return true
@@ -104,12 +118,25 @@ export const testImportsFn = (
 
 const splitTopLevelCommas = (input: string): Array<string> => {
   const items: Array<string> = []
-  let depth = 0, current = ""
+  let depth = 0,
+    current = ""
   for (let i = 0; i < input.length; i++) {
     const char = input[i]
-    if (char === "(" || char === "[" || char === "{") { depth++; current += char; continue }
-    if (char === ")" || char === "]" || char === "}") { if (depth > 0) depth--; current += char; continue }
-    if (char === "," && depth === 0) { items.push(current); current = ""; continue }
+    if (char === "(" || char === "[" || char === "{") {
+      depth++
+      current += char
+      continue
+    }
+    if (char === ")" || char === "]" || char === "}") {
+      if (depth > 0) depth--
+      current += char
+      continue
+    }
+    if (char === "," && depth === 0) {
+      items.push(current)
+      current = ""
+      continue
+    }
     current += char
   }
   if (current.length > 0) items.push(current)
@@ -122,11 +149,15 @@ const PRIMITIVE_SCALAR_REGEX =
 export const isAllPrimitiveArbitraryBlock = (rawBlock: string): boolean => {
   const block = rawBlock.trim()
   if (block.startsWith("[") && block.endsWith("]")) {
-    const items = splitTopLevelCommas(block.slice(1, -1)).map((s) => s.trim()).filter((s) => s.length > 0)
+    const items = splitTopLevelCommas(block.slice(1, -1))
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
     return items.length === 0 ? true : items.every((item) => PRIMITIVE_SCALAR_REGEX.test(item))
   }
   if (block.startsWith("{") && block.endsWith("}")) {
-    const items = splitTopLevelCommas(block.slice(1, -1)).map((s) => s.trim()).filter((s) => s.length > 0)
+    const items = splitTopLevelCommas(block.slice(1, -1))
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
     if (items.length === 0) return true
     return items.every((entry) => {
       const parts = entry.split(":")
@@ -162,10 +193,18 @@ export const checkUnassertedStateFieldsForInputs = (
     const sf = ts.createSourceFile(input.filePath, input.content, ts.ScriptTarget.Latest, true)
     const evolveFns: Array<ts.Node> = []
     for (const stmt of sf.statements) {
-      if (ts.isFunctionDeclaration(stmt) && stmt.name && /^evolve/i.test(stmt.name.text)) { evolveFns.push(stmt); continue }
+      if (ts.isFunctionDeclaration(stmt) && stmt.name && /^evolve/i.test(stmt.name.text)) {
+        evolveFns.push(stmt)
+        continue
+      }
       if (ts.isVariableStatement(stmt)) {
         for (const decl of stmt.declarationList.declarations) {
-          if (ts.isIdentifier(decl.name) && /^evolve/i.test(decl.name.text) && decl.initializer && (ts.isArrowFunction(decl.initializer) || ts.isFunctionExpression(decl.initializer))) {
+          if (
+            ts.isIdentifier(decl.name) &&
+            /^evolve/i.test(decl.name.text) &&
+            decl.initializer &&
+            (ts.isArrowFunction(decl.initializer) || ts.isFunctionExpression(decl.initializer))
+          ) {
             evolveFns.push(decl.initializer)
           }
         }
@@ -176,8 +215,14 @@ export const checkUnassertedStateFieldsForInputs = (
     const collectProps = (node: ts.Node): void => {
       if (ts.isObjectLiteralExpression(node)) {
         for (const p of node.properties) {
-          const pName = ts.isPropertyAssignment(p) && p.name ? p.name.getText(sf).replace(/^["'`]|["'`]$/g, "") : ts.isShorthandPropertyAssignment(p) ? p.name.text : null
-          if (pName && pName !== "_tag" && !pName.endsWith("Id") && pName !== "id") assignedFields.add(pName)
+          const pName =
+            ts.isPropertyAssignment(p) && p.name
+              ? p.name.getText(sf).replace(/^["'`]|["'`]$/g, "")
+              : ts.isShorthandPropertyAssignment(p)
+                ? p.name.text
+                : null
+          if (pName && pName !== "_tag" && !pName.endsWith("Id") && pName !== "id")
+            assignedFields.add(pName)
         }
       }
       ts.forEachChild(node, collectProps)
@@ -186,16 +231,21 @@ export const checkUnassertedStateFieldsForInputs = (
 
     if (assignedFields.size > 0) {
       let combinedTestContent = ""
-      for (const t of scopeTestFiles) combinedTestContent += " " + stripCommentsAndTestTitles(t.getContent())
+      for (const t of scopeTestFiles)
+        combinedTestContent += " " + stripCommentsAndTestTitles(t.getContent())
 
       for (const field of assignedFields) {
         const dotRead = new RegExp("\\.\\s*" + field + "\\b")
-        const assertBlock = new RegExp(`(?:expect|Equal\\.equals)\\s*\\([\\s\\S]{0,240}?\\b${field}\\b`)
+        const assertBlock = new RegExp(
+          `(?:expect|Equal\\.equals)\\s*\\([\\s\\S]{0,240}?\\b${field}\\b`,
+        )
         if (!dotRead.test(combinedTestContent) && !assertBlock.test(combinedTestContent)) {
           violations.push({
             rule: "unasserted-state-field",
             message: `State property '${field}' computed in reducer '${input.filePath}' is never read or asserted in any test file in scope '${scope}' — add fold assertions verifying '${field}' on folded states.`,
-            file: input.filePath, line: 1, enclosingSymbol: `${input.filePath}#evolve`,
+            file: input.filePath,
+            line: 1,
+            enclosingSymbol: `${input.filePath}#evolve`,
           })
         }
       }
@@ -210,17 +260,26 @@ export const checkNodeSqliteTestViolations = (
 ): ReadonlyArray<BranchingViolation> => {
   const violations: Array<BranchingViolation> = []
   for (const relTestFile of testFiles) {
-    if (relTestFile.startsWith("libs/harness/") || relTestFile.startsWith("apps/harness-") || !/(?:^libs\/[^/]+\/infra\/|^apps\/)/.test(relTestFile)) continue
+    if (
+      relTestFile.startsWith("libs/harness/") ||
+      relTestFile.startsWith("apps/harness-") ||
+      !/(?:^libs\/[^/]+\/infra\/|^apps\/)/.test(relTestFile)
+    )
+      continue
     const content = testContentMap.get(relTestFile)
     if (content === undefined) continue
     const lines = content.split(/\r?\n/)
     for (let i = 0; i < lines.length; i++) {
-      const m = lines[i]?.match(/\b(?:import\s*\(\s*|require\s*\(\s*|(?:import|from)\s+)["'](node:sqlite|sqlite|better-sqlite3)["']/)
+      const m = lines[i]?.match(
+        /\b(?:import\s*\(\s*|require\s*\(\s*|(?:import|from)\s+)["'](node:sqlite|sqlite|better-sqlite3)["']/,
+      )
       if (m && m[1]) {
         violations.push({
           rule: "node-sqlite-in-infra",
           message: `Do not import '${m[1]}' in '${relTestFile}' — Cloudflare Durable Object SQLite and D1 tests in type:infra/type:app must execute against the real workerd runtime via @alchemy.run/cloudflare-runtime instead of hand-rolled node:sqlite mocks (harness:ADR-0008, harness:SPEC-0006).`,
-          file: relTestFile, line: i + 1, enclosingSymbol: relTestFile,
+          file: relTestFile,
+          line: i + 1,
+          enclosingSymbol: relTestFile,
         })
       }
     }
@@ -245,15 +304,25 @@ export const assembleTestAndGovernanceGraph = (
   const packageJsonCache = new Map<string, PackageJsonEntry>()
   const deciderAliasesByFnName = new Map<string, Set<string>>()
   for (const input of inputs) {
-    for (const m of input.content.matchAll(/(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*(?:Decider\.)?make\s*(?:<[\s\S]*?>)?\s*\(\s*\{([\s\S]*?)\}\s*\)/g)) {
-      const varName = m[1], body = m[2]
+    for (const m of input.content.matchAll(
+      /(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*(?:Decider\.)?make\s*(?:<[\s\S]*?>)?\s*\(\s*\{([\s\S]*?)\}\s*\)/g,
+    )) {
+      const varName = m[1],
+        body = m[2]
       if (!varName || !body) continue
-      const dFn = body.match(/decide\s*:\s*([A-Za-z0-9_$]+)/)?.[1] ?? (/\bdecide\b/.test(body) ? "decide" : null)
-      const eFn = body.match(/evolve\s*:\s*([A-Za-z0-9_$]+)/)?.[1] ?? (/\bevolve\b/.test(body) ? "evolve" : null)
+      const dFn =
+        body.match(/decide\s*:\s*([A-Za-z0-9_$]+)/)?.[1] ??
+        (/\bdecide\b/.test(body) ? "decide" : null)
+      const eFn =
+        body.match(/evolve\s*:\s*([A-Za-z0-9_$]+)/)?.[1] ??
+        (/\bevolve\b/.test(body) ? "evolve" : null)
       for (const fn of [dFn, eFn]) {
         if (!fn) continue
         let s = deciderAliasesByFnName.get(fn)
-        if (!s) { s = new Set<string>(); deciderAliasesByFnName.set(fn, s) }
+        if (!s) {
+          s = new Set<string>()
+          deciderAliasesByFnName.set(fn, s)
+        }
         s.add(varName)
       }
     }
@@ -263,24 +332,34 @@ export const assembleTestAndGovernanceGraph = (
     const content = testContentMap.get(relTestFile)
     if (content === undefined) continue
     if (
-      !content.includes("describe(") && !content.includes("it(") &&
-      !content.includes("it.effect(") && !content.includes("it.prop(") && !content.includes("it.effect.prop(")
+      !content.includes("describe(") &&
+      !content.includes("it(") &&
+      !content.includes("it.effect(") &&
+      !content.includes("it.prop(") &&
+      !content.includes("it.effect.prop(")
     ) {
       continue
     }
 
-    const hasPropTest = /\b(?:it|test)(?:\.effect)?\.prop\s*\(/.test(content) || /\bfc\.assert\s*\(/.test(content)
+    const hasPropTest =
+      /\b(?:it|test)(?:\.effect)?\.prop\s*\(/.test(content) || /\bfc\.assert\s*\(/.test(content)
     const strippedContent = stripCommentsAndTestTitles(content)
     let hasNonPrimitiveArbitrary: boolean | undefined = undefined
     if (hasPropTest) {
-      const propCallRegex = /\b(?:it|test)(?:\.effect)?\.prop\s*\(\s*(?:""|''|``)\s*,\s*(\[[\s\S]*?\]|\{[\s\S]*?\})\s*,/g
+      const propCallRegex =
+        /\b(?:it|test)(?:\.effect)?\.prop\s*\(\s*(?:""|''|``)\s*,\s*(\[[\s\S]*?\]|\{[\s\S]*?\})\s*,/g
       const matches = [...strippedContent.matchAll(propCallRegex)]
-      hasNonPrimitiveArbitrary = matches.length > 0 && matches.every((m) => !isAllPrimitiveArbitraryBlock(m[1]!))
+      hasNonPrimitiveArbitrary =
+        matches.length > 0 && matches.every((m) => !isAllPrimitiveArbitraryBlock(m[1]!))
     }
 
     const testNode: VitestCaseNode = {
-      _tag: "VitestCase", testId: `${relTestFile}::suite`, testFile: relTestFile,
-      testName: relTestFile, lastTreeHash: "workspace", isPropertyTest: hasPropTest,
+      _tag: "VitestCase",
+      testId: `${relTestFile}::suite`,
+      testFile: relTestFile,
+      testName: relTestFile,
+      lastTreeHash: "workspace",
+      isPropertyTest: hasPropTest,
       ...(hasNonPrimitiveArbitrary !== undefined ? { hasNonPrimitiveArbitrary } : {}),
     }
     const testKey = getNodeKey(testNode)
@@ -289,11 +368,16 @@ export const assembleTestAndGovernanceGraph = (
 
     const usesTestTracer = strippedContent.includes("runWithTestTracer")
     const identTokens = new Set<string>()
-    for (const m of strippedContent.matchAll(/\b([A-Za-z_$][A-Za-z0-9_$]*)\b/g)) if (m[1]) identTokens.add(m[1])
+    for (const m of strippedContent.matchAll(/\b([A-Za-z_$][A-Za-z0-9_$]*)\b/g))
+      if (m[1]) identTokens.add(m[1])
     const callOrArgTokens = new Set<string>()
-    for (const m of strippedContent.matchAll(/(?:\b|\$)([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:\(|\)|,)/g)) if (m[1]) callOrArgTokens.add(m[1])
+    for (const m of strippedContent.matchAll(/(?:\b|\$)([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:\(|\)|,)/g))
+      if (m[1]) callOrArgTokens.add(m[1])
     const dottedCallTokens = new Set<string>()
-    for (const m of strippedContent.matchAll(/\b([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+)\s*\(/g)) if (m[1]) dottedCallTokens.add(m[1])
+    for (const m of strippedContent.matchAll(
+      /\b([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+)\s*\(/g,
+    ))
+      if (m[1]) dottedCallTokens.add(m[1])
 
     const testScope = getScopeDir(relTestFile)
     const importCheckedByFnFile = new Map<string, boolean>()
@@ -303,20 +387,35 @@ export const assembleTestAndGovernanceGraph = (
       if (testScope && fnScope && testScope !== fnScope && fnNode.file) {
         let importsFn = importCheckedByFnFile.get(fnNode.file)
         if (importsFn === undefined) {
-          importsFn = testImportsFn(repoRoot, relTestFile, content, fnNode.file, hostIo, packageJsonCache)
+          importsFn = testImportsFn(
+            repoRoot,
+            relTestFile,
+            content,
+            fnNode.file,
+            hostIo,
+            packageJsonCache,
+          )
           importCheckedByFnFile.set(fnNode.file, importsFn)
         }
         if (!importsFn) continue
       }
       const fnName = fnNode.qualname.split("#")[1] ?? ""
       const fnCallMatches = fnName.length > 0 && callOrArgTokens.has(fnName)
-      const spanCallMatches = fnNode.spanName.length > 0 && (dottedCallTokens.has(fnNode.spanName) || callOrArgTokens.has(fnNode.spanName))
-      const testTracerMatches = usesTestTracer && ((fnName.length > 0 && strippedContent.includes(fnName)) || (fnNode.spanName.length > 0 && strippedContent.includes(fnNode.spanName)))
+      const spanCallMatches =
+        fnNode.spanName.length > 0 &&
+        (dottedCallTokens.has(fnNode.spanName) || callOrArgTokens.has(fnNode.spanName))
+      const testTracerMatches =
+        usesTestTracer &&
+        ((fnName.length > 0 && strippedContent.includes(fnName)) ||
+          (fnNode.spanName.length > 0 && strippedContent.includes(fnNode.spanName)))
       const deciderAliases = deciderAliasesByFnName.get(fnName)
       let deciderAliasMatches = false
       if (deciderAliases) {
         for (const alias of deciderAliases) {
-          if (identTokens.has(alias)) { deciderAliasMatches = true; break }
+          if (identTokens.has(alias)) {
+            deciderAliasMatches = true
+            break
+          }
         }
       }
 
@@ -324,21 +423,31 @@ export const assembleTestAndGovernanceGraph = (
         const fnKey = getNodeKey(fnNode)
         const calleeIdx = updatedNodeIndexByKey.get(fnKey)
         if (calleeIdx !== undefined) {
-          const relId = RelationId.make(`TraceabilityTuple:exercise:${testNode.testId}->${fnNode.qualname}`)
+          const relId = RelationId.make(
+            `TraceabilityTuple:exercise:${testNode.testId}->${fnNode.qualname}`,
+          )
           if (!updatedNodeIndexByKey.has(relId)) {
             const relNode: TraceabilityTupleRelation = {
-              _tag: "TraceabilityTuple", relationId: relId,
-              targetSymbolQualname: fnNode.qualname, verifyingTestQualnames: [testNode.testId],
+              _tag: "TraceabilityTuple",
+              relationId: relId,
+              targetSymbolQualname: fnNode.qualname,
+              verifyingTestQualnames: [testNode.testId],
             }
             const relIdx = Graph.addNode(mutable, relNode)
             updatedNodeIndexByKey.set(relId, relIdx)
             Graph.addEdge(mutable, relIdx, testIdx, {
-              _tag: "PlaysRole", relationId: relId, entityKey: NodeKey.make(testKey),
-              role: RoleName.make("exercising-test"), archimateRelation: "Triggering",
+              _tag: "PlaysRole",
+              relationId: relId,
+              entityKey: NodeKey.make(testKey),
+              role: RoleName.make("exercising-test"),
+              archimateRelation: "Triggering",
             })
             Graph.addEdge(mutable, relIdx, calleeIdx, {
-              _tag: "PlaysRole", relationId: relId, entityKey: NodeKey.make(fnKey),
-              role: RoleName.make("exercised-span"), archimateRelation: "Realization",
+              _tag: "PlaysRole",
+              relationId: relId,
+              entityKey: NodeKey.make(fnKey),
+              role: RoleName.make("exercised-span"),
+              archimateRelation: "Realization",
             })
           }
         }
@@ -346,55 +455,13 @@ export const assembleTestAndGovernanceGraph = (
     }
   }
 
-  for (const docNode of governanceDocs) {
-    const docKey = getNodeKey(docNode), docIdx = Graph.addNode(mutable, docNode)
-    updatedNodeIndexByKey.set(docKey, docIdx)
-    const { kindPrefix, docRole, docArchimate, docIdField } = match(docNode)
-      .with({ _tag: "AdrDoc" }, (d) => ({ kindPrefix: "governs", docRole: "governing-adr", docArchimate: "Influence" as const, docIdField: { adrId: d.id } }))
-      .with({ _tag: "EarsSpec" }, (d) => ({ kindPrefix: "specifies", docRole: "specifying-ears", docArchimate: "Realization" as const, docIdField: { earsSpecId: d.id } }))
-      .exhaustive()
-
-    const addGovernanceTraceability = (targetKey: string, targetIdx: Graph.NodeIndex) => {
-      const relId = RelationId.make(`TraceabilityTuple:${kindPrefix}:${docNode.id}->${targetKey}`)
-      if (!updatedNodeIndexByKey.has(relId)) {
-        const relNode: TraceabilityTupleRelation = {
-          _tag: "TraceabilityTuple", relationId: relId, ...docIdField,
-          targetSymbolQualname: targetKey, verifyingTestQualnames: [],
-        }
-        const relIdx = Graph.addNode(mutable, relNode)
-        updatedNodeIndexByKey.set(relId, relIdx)
-        Graph.addEdge(mutable, relIdx, docIdx, {
-          _tag: "PlaysRole", relationId: relId, entityKey: NodeKey.make(docKey),
-          role: RoleName.make(docRole), archimateRelation: docArchimate,
-        })
-        Graph.addEdge(mutable, relIdx, targetIdx, {
-          _tag: "PlaysRole", relationId: relId, entityKey: NodeKey.make(targetKey),
-          role: RoleName.make("realizing-symbol"), archimateRelation: "Realization",
-        })
-      }
-    }
-
-    const linkGovRefs = <T extends HarnessNode>(items: ReadonlyArray<string> | undefined, nodes: ReadonlyArray<T>, matchFn: (item: string, node: T) => boolean) => {
-      const added = new Set<string>()
-      for (const item of items ?? []) {
-        let found = false
-        for (const n of nodes) {
-          if (matchFn(item, n)) {
-            found = true
-            const k = getNodeKey(n)
-            if (!added.has(k)) {
-              added.add(k)
-              const idx = updatedNodeIndexByKey.get(k)
-              if (idx !== undefined) addGovernanceTraceability(k, idx)
-            }
-          }
-        }
-        if (!found) unresolvedReferences.push({ relationId: `TraceabilityTuple:${kindPrefix}:${docNode.id}->${item}`, role: "realizing-symbol", targetKey: item, file: docNode.path })
-      }
-    }
-
-    linkGovRefs(docNode.referencedSpans, effectFns, (s, n) => n.spanName === s || n.qualname === s || n.qualname.endsWith(`#${s}`))
-    linkGovRefs(docNode.referencedServices, serviceTags, (s, n) => n.tagId === s || n.name === s || n.tagId.endsWith(`#${s}`))
-    linkGovRefs(docNode.referencedErrors, taggedErrors, (s, n) => n.errorTag === s)
-  }
+  linkGovernanceDocsToGraph(
+    mutable,
+    governanceDocs,
+    effectFns,
+    serviceTags,
+    taggedErrors,
+    updatedNodeIndexByKey,
+    unresolvedReferences,
+  )
 }

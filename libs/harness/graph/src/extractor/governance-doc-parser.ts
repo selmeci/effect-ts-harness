@@ -10,6 +10,11 @@ import {
   ViolationRule,
 } from "../model.js"
 import { resolveRepoRoot } from "./extractor-types-and-helpers.js"
+import {
+  extractAdrSearchText,
+  extractEarsRequirements,
+  extractGovernanceSummary,
+} from "./governance-body-extractor.js"
 
 export type ParseGovernanceDocFileResult =
   | { readonly _tag: "Ok"; readonly node: AdrDocNode | EarsSpecNode }
@@ -104,6 +109,8 @@ export const parseGovernanceDocFileChecked = (
   }
 
   const rawStatus = scalars.get("status")
+  const date = scalars.get("date")
+  const informedByAdrs = lists.get("informed_by") ?? []
   const enforcedByFiles = lists.get("enforced_by") ?? []
   const referencedSpans = lists.get("spans") ?? []
   const referencedServices = lists.get("services") ?? []
@@ -126,11 +133,14 @@ export const parseGovernanceDocFileChecked = (
         id,
         title,
         status: rawStatus,
+        ...(date ? { date } : {}),
         path: relDocPath,
         enforcedByFiles,
         referencedSpans,
         referencedServices,
         referencedErrors,
+        searchText: extractAdrSearchText(title, normalized),
+        summary: extractGovernanceSummary("AdrDoc", normalized),
       },
     }
   }
@@ -144,6 +154,10 @@ export const parseGovernanceDocFileChecked = (
       reason: `EARS Spec '${id}' (${relDocPath}) declares unrecognized or missing status '${rawStatus ?? "<missing>"}' (allowed: draft, proposed, accepted, superseded, deprecated).`,
     }
   }
+  const requirements = extractEarsRequirements(id, relDocPath, rawStatus, normalized).map((r) => ({
+    _tag: "EarsRequirement" as const,
+    ...r,
+  }))
   return {
     _tag: "Ok",
     node: {
@@ -151,11 +165,15 @@ export const parseGovernanceDocFileChecked = (
       id,
       title,
       status: rawStatus,
+      ...(date ? { date } : {}),
       path: relDocPath,
       enforcedByFiles,
+      informedByAdrs,
       referencedSpans,
       referencedServices,
       referencedErrors,
+      goalSummary: extractGovernanceSummary("EarsSpec", normalized),
+      requirements,
     },
   }
 }

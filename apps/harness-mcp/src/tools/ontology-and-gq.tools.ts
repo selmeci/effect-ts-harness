@@ -1,5 +1,5 @@
-import { Cause, Effect, Schema } from "effect"
-import { isPureInterruptCause } from "@harness/contract"
+import { Cause, Effect, Layer, Schema } from "effect"
+import { isPureInterruptCause, WorkspaceFilePath } from "@harness/contract"
 import {
   HARNESS_GQ_QUERY_NAMES,
   invokeOmnigraphNamedQuery,
@@ -9,13 +9,19 @@ import {
   queryOntologyWhy,
 } from "@harness/graph"
 import {
+  collectSemanticConflictCandidates,
   decideOntologyInvariants,
   evaluateOntologyConflictsWithStatus,
   extractOntologyConflictPairs,
   type OntologyConflictEvaluationReport,
 } from "@harness/decision"
 import { loadGovernanceDocsChecked } from "@harness/gates"
-import { LocalDecisionModel, nodeSyncHostIo } from "@harness/infra"
+import {
+  FileEmbeddingCacheLive,
+  LocalDecisionModel,
+  nodeSyncHostIo,
+  OllamaEmbeddingClientLive,
+} from "@harness/infra"
 import {
   graphStatusMeta,
   McpToolName,
@@ -26,22 +32,17 @@ import {
 } from "./mcp-helpers.js"
 
 const BoundedNonEmptyString = (max: number) =>
-  Schema.String.pipe(
-    Schema.check(Schema.isTrimmed()),
-    Schema.check(Schema.isBetweenLength(1, max)),
-  )
+  Schema.String.pipe(Schema.check(Schema.isTrimmed()), Schema.check(Schema.isBetweenLength(1, max)))
 
-const BoundedParamsRecord = Schema.Record(
-  Schema.String,
-  Schema.Unknown,
-).pipe(
+const BoundedParamsRecord = Schema.Record(Schema.String, Schema.Unknown).pipe(
   Schema.check(Schema.isPropertyNames(BoundedNonEmptyString(128))),
   Schema.check(Schema.isMaxProperties(64)),
 )
 
 export const OntologyWhyInputSchema = Schema.Struct({
   symbolOrSpan: BoundedNonEmptyString(512).annotate({
-    description: "Symbol, service, layer, error, or span name to trace upward to Motivation (EARS & ADR)",
+    description:
+      "Symbol, service, layer, error, or span name to trace upward to Motivation (EARS & ADR)",
   }),
   repoRoot: Schema.optional(
     BoundedNonEmptyString(1024).annotate({
@@ -122,7 +123,8 @@ export const buildOntologyAndGqToolDescriptors = (
   },
   {
     name: McpToolName.make("harness_ontology_impact"),
-    description: "Analyze cross-layer ArchiMate impact for a symbol, service, layer, error, or span",
+    description:
+      "Analyze cross-layer ArchiMate impact for a symbol, service, layer, error, or span",
     inputSchema: OntologyImpactInputSchema,
     execute: (args) =>
       Effect.gen(function* () {
@@ -175,7 +177,16 @@ export const buildOntologyAndGqToolDescriptors = (
           graph,
           governanceDocs: docs,
         })
-        const pairs = yield* extractOntologyConflictPairs(docs, scope)
+        const deterministicPairs = yield* extractOntologyConflictPairs(docs, scope)
+        const embeddingLayer = options?.embeddingClientLayer ?? OllamaEmbeddingClientLive
+        const embeddingCacheLayer = options?.embeddingCacheLayer ?? FileEmbeddingCacheLive
+        const semanticCandidateRes = yield* collectSemanticConflictCandidates({
+          repoRoot: WorkspaceFilePath.make(root),
+          graph,
+          docs,
+          existingPairs: deterministicPairs,
+        }).pipe(Effect.provide(Layer.mergeAll(embeddingLayer, embeddingCacheLayer)))
+        const pairs = [...deterministicPairs, ...semanticCandidateRes.pairs]
         const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
         const semanticReport = yield* evaluateOntologyConflictsWithStatus(pairs).pipe(
           Effect.provide(decisionLayer),
@@ -192,18 +203,27 @@ export const buildOntologyAndGqToolDescriptors = (
             })
           }),
         )
-        const degraded = graphStatus.degraded || semanticReport.degraded
+        const degraded =
+          graphStatus.degraded || semanticCandidateRes.degraded || semanticReport.degraded
+        const degradedReason =
+          [graphStatus.degradedReason, semanticCandidateRes.degradedReason ?? undefined]
+            .filter((v): v is string => v !== undefined && v.length > 0)
+            .join("; ") || undefined
         const evaluationError =
-          [graphStatus.evaluationError, semanticReport.evaluationError]
-            .filter((e): e is string => e !== undefined)
+          [
+            graphStatus.evaluationError,
+            semanticCandidateRes.degradedReason !== null
+              ? `Semantic conflict embedding check degraded: ${semanticCandidateRes.degradedReason}`
+              : undefined,
+            semanticReport.evaluationError,
+          ]
+            .filter((e): e is string => e !== undefined && e.length > 0)
             .join("; ") || undefined
         const projection = projectOntologyLayers(graph)
         return {
           clean: invariants.clean && semanticReport.conflicts.length === 0 && !degraded,
           degraded,
-          ...(graphStatus.degradedReason !== undefined
-            ? { degradedReason: graphStatus.degradedReason }
-            : {}),
+          ...(degradedReason !== undefined ? { degradedReason } : {}),
           ...(evaluationError !== undefined ? { evaluationError } : {}),
           findings: invariants.findings,
           semanticConflicts: semanticReport.conflicts,

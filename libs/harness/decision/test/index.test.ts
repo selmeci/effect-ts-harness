@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 import {
+  IDIOM_BLOCKS,
   validateDecisionLimits,
   deterministicLearnFallback,
   LearnProposalV1,
@@ -124,8 +125,7 @@ describe("LearnProposalV1 and proposeLearningAction", () => {
           target: "agent-pattern",
           actionable: true,
           confidence: 0.85,
-          recommendation:
-            'Create or expand an agent-patterns/*.md recipe for "D1 Repository Cache" and register it in IdiomRouterV1 (8 of 26 slots available).',
+          recommendation: `Create or expand an agent-patterns/*.md recipe for "D1 Repository Cache" and register it in IdiomRouterV1 (${26 - IDIOM_BLOCKS.length} of 26 slots available).`,
           source: "deterministic-fallback",
         })
       }),

@@ -185,7 +185,7 @@ describe("StructuralSearch.decide", () => {
 
         // 1. Symlink escaping repoRoot is rejected
         const symlinkResults = yield* StructuralSearch.decide({
-        hostIo: testHostIo,
+          hostIo: testHostIo,
           pattern: "TOP_SECRET_123",
           repoRoot: tmpRepo,
           filePath: "libs/ui/src/linked-secret.json",
@@ -194,7 +194,7 @@ describe("StructuralSearch.decide", () => {
 
         // 2. Dollar-prefixed pattern in comment falls back to deterministic line-locator
         const dollarResults = yield* StructuralSearch.decide({
-        hostIo: testHostIo,
+          hostIo: testHostIo,
           pattern: "$PORT",
           repoRoot: tmpRepo,
           filePath: "libs/ui/src/Button.tsx",
@@ -204,7 +204,7 @@ describe("StructuralSearch.decide", () => {
 
         // 3. Multiple occurrences on the same line are all emitted with distinct columns
         const multiLineResults = yield* StructuralSearch.decide({
-        hostIo: testHostIo,
+          hostIo: testHostIo,
           pattern: "ADR-0010",
           repoRoot: tmpRepo,
           filePath: "libs/ui/src/Button.tsx",
@@ -216,7 +216,7 @@ describe("StructuralSearch.decide", () => {
 
         // 4. .tsx JSX AST pattern matches via Lang.Tsx
         const tsxAstResults = yield* StructuralSearch.decide({
-        hostIo: testHostIo,
+          hostIo: testHostIo,
           pattern: "<button>{$EXPR}</button>",
           repoRoot: tmpRepo,
           filePath: "libs/ui/src/Button.tsx",
@@ -237,13 +237,13 @@ describe("StructuralSearch.decide", () => {
         const repoRoot = path.resolve(process.cwd())
         const effectiveSubDirs = input.subDirs.length > 0 ? input.subDirs : ["libs/sample"]
         const run1 = yield* StructuralSearch.decide({
-        hostIo: testHostIo,
+          hostIo: testHostIo,
           ...input,
           subDirs: effectiveSubDirs,
           repoRoot,
         })
         const run2 = yield* StructuralSearch.decide({
-        hostIo: testHostIo,
+          hostIo: testHostIo,
           ...input,
           subDirs: effectiveSubDirs,
           repoRoot,

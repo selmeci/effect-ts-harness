@@ -1,12 +1,12 @@
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
-import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js"
-import { Cause, Effect, type Exit, Layer, type ManagedRuntime, Result, Schema } from "effect"
+import { Effect, Layer, Result, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import {
   CANONICAL_MCP_TOOL_NAMES,
+  DocTreePathError,
+  EmbeddingProviderError,
   type DaemonProtocolMismatchError,
   GitDiffErrorReason,
   GitDiffExecutionError,
@@ -19,6 +19,7 @@ import {
   type WorkflowStoreUnavailableError,
   type WorkspaceFsError,
 } from "@harness/contract"
+import type { EmbeddingCachePort, EmbeddingClient, WorkspaceFs } from "@harness/service"
 import {
   appendTelemetryEvent,
   type TelemetryCategory,
@@ -32,8 +33,10 @@ import {
   type GraphProjectorError,
   type GraphRewriteError,
   type HarnessGraph,
+  isRelativeEscape,
   loadGraphSnapshotEffect,
   type OmnigraphLoadError,
+  type OmnigraphSync,
   readGraphHeadMeta,
   resolveCanonicalRepoRoot,
   resolveGitHeadState,
@@ -43,9 +46,12 @@ import {
 } from "@harness/graph"
 import type { GovernanceDocReference } from "@harness/decision"
 import { nodeSyncHostIo, resolveHarnessStateDir } from "@harness/infra"
+import { attachServerCloseRuntimeDisposal, formatMcpToolExit } from "./mcp-runtime-helpers.js"
 
 export {
+  attachServerCloseRuntimeDisposal,
   CANONICAL_MCP_TOOL_NAMES,
+  formatMcpToolExit,
   GitDiffErrorReason,
   GitDiffExecutionError,
   McpToolInputName,
@@ -74,6 +80,8 @@ export type McpToolExecutionError =
   | GraphRewriteError
   | GraphProjectorError
   | OmnigraphLoadError
+  | DocTreePathError
+  | EmbeddingProviderError
   | WorkflowStoreUnavailableError
   | WorkspaceFsError
   | DaemonProtocolMismatchError
@@ -106,6 +114,10 @@ export interface ServerOptions {
   readonly graph?: HarnessGraph
   readonly snapshotPath?: string
   readonly decisionLayer?: Layer.Layer<DecisionModel.DecisionModel>
+  readonly embeddingClientLayer?: Layer.Layer<EmbeddingClient>
+  readonly embeddingCacheLayer?: Layer.Layer<EmbeddingCachePort>
+  readonly workspaceFsLayer?: Layer.Layer<WorkspaceFs>
+  readonly omnigraphSyncLayer?: Layer.Layer<OmnigraphSync>
   readonly extraLayer?: Layer.Layer<never>
   readonly repoRoot?: string
   readonly reviewRouteTimeoutMs?: ReviewTimeoutMillis | undefined
@@ -376,12 +388,20 @@ export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolea
     ? path.resolve(candidatePath)
     : path.resolve(logicalRoot, candidatePath)
   const rel = path.relative(logicalRoot, logicalCandidate)
-  if (rel !== "" && (rel.startsWith("..") || path.isAbsolute(rel))) return false
+  if (rel !== "" && isRelativeEscape(rel)) {
+    return false
+  }
   if (nodeSyncHostIo.existsSync(logicalRoot)) {
     let checkPath = logicalCandidate
     while (!nodeSyncHostIo.existsSync(checkPath)) {
-      if (nodeSyncHostIo.isSymbolicLinkSync(checkPath) || checkPath === logicalRoot) {
-        if (nodeSyncHostIo.isSymbolicLinkSync(checkPath)) return false
+      const isSymlink = Result.getOrElse(
+        Result.try(() => nodeSyncHostIo.isSymbolicLinkSync(checkPath)),
+        () => false,
+      )
+      if (isSymlink) {
+        return false
+      }
+      if (checkPath === logicalRoot) {
         break
       }
       const parent = path.dirname(checkPath)
@@ -390,13 +410,13 @@ export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolea
     }
     if (nodeSyncHostIo.existsSync(checkPath)) {
       const checkRel = path.relative(logicalRoot, checkPath)
-      if (!checkRel.startsWith("..") && !path.isAbsolute(checkRel)) {
+      if (!isRelativeEscape(checkRel)) {
         const contained = Result.getOrElse(
           Result.try(() => {
             const realRoot = nodeSyncHostIo.realpathSync(logicalRoot)
             const realCheck = nodeSyncHostIo.realpathSync(checkPath)
             const realRel = path.relative(realRoot, realCheck)
-            return !(realRel !== "" && (realRel.startsWith("..") || path.isAbsolute(realRel)))
+            return !(realRel !== "" && isRelativeEscape(realRel))
           }),
           () => false,
         )
@@ -519,12 +539,20 @@ export const recordMcpToolTelemetry = (
 
   const engineSource: TelemetryEngineSource = match(toolName)
     .with("harness_gq_query", () =>
-      typeof result === "object" &&
-      result !== null &&
-      "source" in result &&
-      result.source === "omnigraph"
-        ? ("omnigraph" as const)
-        : ("memory-fallback" as const),
+      match(result)
+        .with({ source: "omnigraph" }, () => "omnigraph" as const)
+        .with({ source: "memory-fallback" }, () => "memory-fallback" as const)
+        .otherwise(() => "memory-fallback" as const),
+    )
+    .with("harness_search_knowledge", () =>
+      match(result)
+        .with(
+          { retrievalMode: "hybrid-rrf" },
+          { retrievalMode: "bm25-only" },
+          () => "omnigraph" as const,
+        )
+        .with({ retrievalMode: "lexical-fallback" }, () => "memory-fallback" as const)
+        .otherwise(() => "memory-fallback" as const),
     )
     .with(
       "harness_route",
@@ -535,7 +563,8 @@ export const recordMcpToolTelemetry = (
     .otherwise(() => "local" as const)
 
   const outcome: TelemetryOutcome =
-    toolName === "harness_gq_query" && engineSource === "memory-fallback"
+    (toolName === "harness_gq_query" || toolName === "harness_search_knowledge") &&
+    engineSource === "memory-fallback"
       ? "fallback"
       : toolName === "harness_lsp_diagnostics" &&
           typeof result === "object" &&
@@ -560,79 +589,4 @@ export const recordMcpToolTelemetry = (
     },
     nodeSyncHostIo,
   )
-}
-
-export const formatMcpToolExit = (
-  toolName: string,
-  exit: Exit.Exit<unknown, unknown>,
-):
-  | {
-      readonly content: ReadonlyArray<{ readonly type: "text"; readonly text: string }>
-      readonly isError?: boolean
-    }
-  | Promise<never> =>
-  match(exit)
-    .with({ _tag: "Success" }, ({ value }) => ({
-      content: [{ type: "text" as const, text: JSON.stringify(value ?? null, null, 2) }],
-    }))
-    .with({ _tag: "Failure" }, ({ cause }) => {
-      if (Cause.hasInterrupts(cause) && !Cause.hasFails(cause) && !Cause.hasDies(cause)) {
-        return Promise.reject(
-          new McpError(ErrorCode.InternalError, `Tool '${toolName}' execution was interrupted`),
-        )
-      }
-      const squashed = Cause.squash(cause)
-      if (Schema.isSchemaError(squashed)) {
-        return Promise.reject(
-          new McpError(
-            ErrorCode.InvalidParams,
-            `Invalid arguments for tool '${toolName}': ${squashed.message}`,
-          ),
-        )
-      }
-      if (squashed instanceof InvalidReviewRouteInputError) {
-        return {
-          content: [{ type: "text" as const, text: squashed.reason }],
-          isError: true,
-        }
-      }
-      if (squashed instanceof GitDiffExecutionError) {
-        return {
-          content: [{ type: "text" as const, text: squashed.reason }],
-          isError: true,
-        }
-      }
-      const message = squashed instanceof Error ? squashed.message : String(squashed)
-      return {
-        content: [{ type: "text" as const, text: message }],
-        isError: true,
-      }
-    })
-    .exhaustive()
-
-export const attachServerCloseRuntimeDisposal = <A, E>(
-  server: McpServer,
-  runtime: ManagedRuntime.ManagedRuntime<A, E>,
-): void => {
-  const originalClose = server.close.bind(server)
-  let disposePromise: Promise<void> | undefined
-  const disposeRuntime = (): Promise<void> => {
-    if (disposePromise === undefined) {
-      disposePromise = runtime.dispose().catch((err: unknown) => {
-        disposePromise = undefined
-        return Promise.reject(err)
-      })
-    }
-    return disposePromise
-  }
-  server.close = (): Promise<void> => originalClose().finally(() => disposeRuntime())
-  const previousOnClose = server.server.onclose
-  server.server.onclose = () => {
-    previousOnClose?.()
-    void disposeRuntime().catch((err: unknown) => {
-      process.stderr.write(
-        `[harness-mcp] Runtime dispose error: ${err instanceof Error ? err.message : String(err)}\n`,
-      )
-    })
-  }
 }

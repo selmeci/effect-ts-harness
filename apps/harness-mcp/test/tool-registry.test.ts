@@ -45,8 +45,10 @@ describe("HarnessMcp.dispatchTool (SPEC-0011 §4)", () => {
         const registry = yield* McpToolRegistry.pipe(Effect.provide(liveLayer))
         const tools = yield* registry.listTools
         const registeredNames = tools.map((t) => t.name)
-        expect(registeredNames).toHaveLength(18)
+        expect(registeredNames).toHaveLength(20)
         expect(registeredNames).toContain("harness_workflow_plan")
+        expect(registeredNames).toContain("harness_search_knowledge")
+        expect(registeredNames).toContain("harness_doc_tree")
         expect(registeredNames).toEqual([...CANONICAL_MCP_TOOL_NAMES])
       }),
   )

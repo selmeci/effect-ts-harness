@@ -46,6 +46,7 @@ export const GcFindingKind = Schema.Literals([
   "chained-equality-ternary",
   "hook-fastpath-forbidden-import",
   "untested-union-variant",
+  "test-domain-sprawl",
   "doc-mcp-tool-count-truth",
   "doc-cli-command-truth",
   "adapter-skill-parity",

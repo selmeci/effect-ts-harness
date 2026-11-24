@@ -21,6 +21,7 @@ import {
   queryUnixSocketLineDetailed,
   resolveHarnessDaemonSocketPath,
 } from "@harness/infra/hook-fastpath"
+import type { EmbeddingCachePort, EmbeddingClient } from "@harness/service"
 import type {
   abortWorkflowViaDaemon,
   compileWorkflowPlanFromRepo,
@@ -139,6 +140,8 @@ export interface CliEnv {
   readonly governanceDocs?: ReadonlyArray<GovernanceDocReference> | undefined
   readonly hookStdinTracker?: HookStdinTracker | undefined
   readonly skipInitialSessionCacheRead?: boolean | undefined
+  readonly embeddingClientLayer?: Layer.Layer<EmbeddingClient> | undefined
+  readonly embeddingCacheLayer?: Layer.Layer<EmbeddingCachePort> | undefined
   readonly env?: Readonly<Record<string, string | undefined>> | undefined
   readonly workflowDeps?: WorkflowCliDeps | undefined
 }

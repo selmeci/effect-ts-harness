@@ -178,6 +178,116 @@ query rank_patterns_hybrid($query: String, $targetLayer: String) {
   limit 8
 }
 
+query rank_patterns_vector_hybrid($vectorQuery: Vector(4096), $textQuery: String, $targetLayer: String) {
+  match {
+    $p: PatternDoc
+    $p.summaryEmbedding is not null
+    $p.archimateLayer = $targetLayer or $targetLayer = "*"
+  }
+  return {
+    $p.slug as slug,
+    $p.path as path,
+    $p.title as title,
+    $p.summary as summary
+  }
+  order { rrf(nearest($p.summaryEmbedding, $vectorQuery), bm25($p.summary, $textQuery)) }
+  limit 8
+}
+
+query rank_patterns_bm25($query: String, $targetLayer: String) {
+  match {
+    $p: PatternDoc
+    $p.archimateLayer = $targetLayer or $targetLayer = "*"
+  }
+  return {
+    $p.slug as slug,
+    $p.path as path,
+    $p.title as title,
+    $p.summary as summary,
+    bm25($p.summary, $query) as score
+  }
+  order { bm25($p.summary, $query) }
+  limit 8
+}
+
+query search_adrs_vector_hybrid($vectorQuery: Vector(4096), $textQuery: String, $status: String) {
+  match {
+    $a: AdrDoc
+    $a.searchEmbedding is not null
+    $a.status = $status or $status = "*"
+  }
+  return {
+    $a.id as id,
+    $a.title as title,
+    $a.status as status,
+    $a.path as path,
+    $a.searchText as searchText
+  }
+  order { rrf(nearest($a.searchEmbedding, $vectorQuery), bm25($a.searchText, $textQuery)) }
+  limit 10
+}
+
+query search_adrs_bm25($query: String, $status: String) {
+  match {
+    $a: AdrDoc
+    $a.status = $status or $status = "*"
+  }
+  return {
+    $a.id as id,
+    $a.title as title,
+    $a.status as status,
+    $a.path as path,
+    $a.searchText as searchText,
+    bm25($a.searchText, $query) as score
+  }
+  order { bm25($a.searchText, $query) }
+  limit 10
+}
+
+query search_requirements_vector_hybrid($vectorQuery: Vector(4096), $textQuery: String, $status: String) {
+  match {
+    $r: EarsRequirement
+    $r.clauseEmbedding is not null
+    $r.status = $status or $status = "*"
+  }
+  return {
+    $r.id as id,
+    $r.specId as specId,
+    $r.requirementId as requirementId,
+    $r.area as area,
+    $r.pattern as pattern,
+    $r.clauseText as clauseText,
+    $r.effectSymbol as effectSymbol,
+    $r.path as path,
+    $r.line as line,
+    $r.status as status
+  }
+  order { rrf(nearest($r.clauseEmbedding, $vectorQuery), bm25($r.clauseText, $textQuery)) }
+  limit 10
+}
+
+query search_requirements_bm25($query: String, $status: String) {
+  match {
+    $r: EarsRequirement
+    $r.status = $status or $status = "*"
+  }
+  return {
+    $r.id as id,
+    $r.specId as specId,
+    $r.requirementId as requirementId,
+    $r.area as area,
+    $r.pattern as pattern,
+    $r.clauseText as clauseText,
+    $r.effectSymbol as effectSymbol,
+    $r.path as path,
+    $r.line as line,
+    $r.status as status,
+    bm25($r.clauseText, $query) as score
+  }
+  order { bm25($r.clauseText, $query) }
+  limit 10
+}
+
 query rank_candidate_services_for_stub($layer: String, $intent: String) {
   match {
     $svc: ServiceTag
@@ -186,9 +296,10 @@ query rank_candidate_services_for_stub($layer: String, $intent: String) {
   return {
     $svc.tagId as tagId,
     $svc.qualname as qualname,
-    $svc.file as file
+    $svc.file as file,
+    bm25($svc.name, $intent) as score
   }
-  order { rrf(nearest($svc.capabilityEmbedding, $intent), bm25($svc.name, $intent)) }
+  order { bm25($svc.name, $intent) }
   limit 10
 }
 

@@ -44,6 +44,8 @@ import {
 import {
   collectContractShapeViolations,
   collectMaxTestCaseLineViolations,
+  collectMaxTestFileLineViolations,
+  collectMaxTestsPerFileViolations,
   collectWorkflowNameAccessViolations,
 } from "./ast-contract-and-test-hygiene.js"
 
@@ -196,7 +198,7 @@ export const visitSourceFileSinglePass = (
   const norm = fp.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "")
   const pkg = packageTagParam ?? inferAstGatePackageTagFromPath(norm)
   const violations: Array<GateViolation> = []
-  const isTest = /\.(?:test|spec)\.tsx?$/.test(norm)
+  const isTest = /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(norm)
   const isTestOrHelper = isTest || /(?:^|\/)test\/(?!fixtures\/)/.test(norm)
   const isGatesSrc = !isTest && isSilentFsFallbackCheckedPath(norm)
   const isContractSrc = !isTest && /(?:^|\/)libs\/[^/]+\/contract\/src\//.test(norm)
@@ -584,6 +586,12 @@ export const visitSourceFileSinglePass = (
   if (isTest) {
     for (const v of collectMaxTestCaseLineViolations(sourceFile, norm)) {
       pushViolation(catTest, "max-test-case-lines", v.message, v.node)
+    }
+    for (const v of collectMaxTestFileLineViolations(sourceFile, norm)) {
+      pushViolation(catTest, "max-test-file-lines", v.message, v.node)
+    }
+    for (const v of collectMaxTestsPerFileViolations(sourceFile, norm)) {
+      pushViolation(catTest, "max-tests-per-file", v.message, v.node)
     }
   }
   if (!isTestOrHelper && /(?:^|\/)(?:libs|apps)\/.*\/src\//.test(norm)) {

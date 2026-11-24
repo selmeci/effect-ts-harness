@@ -59,8 +59,9 @@ plan -> skeleton with stub<A, E, R>(...args) -> harness plan-check -> implement 
 Always prefer in-process MCP tools over spawning shell subcommands to eliminate process overhead and guard prompt friction:
 
 - **LSP & Type Diagnostics:** `harness_lsp_diagnostics` (replaces slow shell lint/typecheck runs during development only — final task verification always requires `pnpm harness verify`).
-- **Ontology & Architecture:** `harness_ontology_check`, `harness_ontology_why`, `harness_ontology_impact` (trace and audit EARS specs and ADR invariants).
-- **Test Impact Analysis:** `harness_tests_reaching` (determines affected test files for touched symbols).
+- **Ontology & Architecture:** `harness_ontology_check` (`scope?`, `repoRoot?`), `harness_ontology_why` (`symbolOrSpan`, `repoRoot?`), `harness_ontology_impact` (`symbolOrSpan`, `repoRoot?`) — trace `ADR <-informed_by- EarsSpec -> EarsRequirement -> EffectFn` and audit invariants + `SemanticConflictPairer.decide` semantic conflicts.
+- **Three-Tier Knowledge & Doc Retrieval:** `harness_search_knowledge` (Tier 2 hybrid `qwen3-embedding:8b` RRF search across `PatternDoc`, `AdrDoc`, and `EarsRequirement` with `linkedSymbols` hydration and explicit `bm25-only`/`lexical-fallback` degradation), `harness_route` (upgraded hybrid Omnigraph pattern retrieval + `"planning"` block + `clef-flash`), and `harness_doc_tree` (Tier 3 PageIndex-lite governance catalog + bounded markdown heading/section reads).
+- **Test Impact Analysis:** `harness_tests_reaching` (`symbolOrSpan`, `repoRoot?`) — determines affected test files for touched symbols.
 - **Session Telemetry:** `harness_telemetry_report` (reviews session metrics and friction logs).
 - **Graph Queries & Diffs:** `harness_gq_query`, `harness_structural_search`, `harness_git_diff`.
 - **Task Lifecycle Gates & Workflow Control Plane (CLI only):** Use `pnpm harness <cmd>` (`plan-check`, `gc --strict`, `mutate --strict`, `verify`, `done`, `workflow <compile|start|status|complete|resume|doctor|abort>`) strictly for task state transitions, durable `HarnessTaskWorkflow` orchestration, and cryptographic verify-stamp generation. When `HARNESS_UNIT_WORKER=1` is set on unit worker invocations (automatic runner spawning lands in WF-5), isolation guards block recursive `harness workflow start|resume|abort|doctor|complete --phase llm`, `harness done`, and direct access to `daemon.sock`/`auth-tokens.json`.
@@ -70,32 +71,45 @@ Always prefer in-process MCP tools over spawning shell subcommands to eliminate 
 
 ---
 
-## 3. MCP Tool Catalog
+## 3. MCP Tool Catalog (19 `harness-mcp` Tools Across 3 Retrieval Tiers)
 
 The plugin provides three complementary MCP servers in `mcp_config.json` (`harness-mcp`, `omnigraph-mcp`, and `nx-mcp`):
 
-### `harness-mcp` (High-Level Effect Shortcuts)
+### `harness-mcp` — Tier 1 (Deterministic Code & Governance Graph)
 
-- **`harness_resolve`** (`symbolOrSpan: string`, `repoRoot?: string`): Resolves a symbol or `Effect.fn` span name to its node in the Effect functional graph (`EffectFn`, `ServiceTag`, or `ServiceLayer`) with full signature details.
+- **`harness_resolve`** (`symbolOrSpan: string`, `repoRoot?: string`): Resolves any graph entity or relation node across all 15 node kinds (`EffectFn`, `ServiceTag`, `ServiceLayer`, `TaggedError`, `SchemaDef`, `VitestCase`, `PatternDoc`, `AdrDoc`, `EarsSpec`, `EarsRequirement`, `EffectSignature`, `LayerFlow`, `TraceabilityTuple`, `HttpEndpointTuple`, `MigrationTuple`). On miss, automatically runs `resolve_effect_fn_fuzzy` and returns ranked `suggestions` for misspelled names.
 - **`harness_callers`** (`symbolOrSpan: string`, `repoRoot?: string`): Inspects incoming calls and dependencies across `RequiresService`, `ProvidesService`, `FailsWith`, and runtime `TracedCall` edges.
 - **`harness_callees`** (`symbolOrSpan: string`, `repoRoot?: string`): Traverses outgoing calls and service requirements.
 - **`harness_tests_reaching`** (`symbolOrSpan: string`, `repoRoot?: string`): Discovers all `@effect/vitest` test cases (`VitestCase`) that exercise the target symbol or span via `ExercisesSpan` and transitive `TracedCall` edges.
+- **`harness_ontology_why`** (`symbolOrSpan: string`, `repoRoot?: string`): Traces upward ArchiMate traceability (`EffectFn` $\rightarrow$ `EarsRequirement` / `EarsSpec` $\rightarrow$ `informed_by` `AdrDoc`).
+- **`harness_ontology_impact`** (`symbolOrSpan: string`, `repoRoot?: string`): Computes downstream ArchiMate blast radius from any ADR, EARS spec, or code symbol across `informed_by` and traceability edges.
+- **`harness_ontology_check`** (`scope?: string`, `repoRoot?: string`): Verifies deterministic cross-layer ArchiMate invariants (`OntologyInvariants.decide`) and semantic conflicts (`SemanticConflictPairer.decide` + `OntologyConflictV1`).
+- **`harness_gq_query`** (`queryName: HarnessGqQueryName`, `params?: Record<string, unknown>`, `branch?: string`, `repoRoot?: string`): Executes canonical Omnigraph `.gq` queries from `libs/harness/graph/queries/harness.gq` (including `resolve_effect_fn_fuzzy`, `search_adrs_*`, `search_requirements_*`, `rank_patterns_*`).
 - **`harness_structural_search`** (`pattern: string`, `filePath?: string`, `paths?: string[]`, `subDirs?: string[]`, `repoRoot?: string`): Performs fast AST pattern matching using `@ast-grep/napi`.
-- **`harness_route`** (`planStep: string`, `repoRoot?: string`): Consults the advisory `clef-flash` idiom router to determine the optimal pattern doc in `agent-patterns/*.md`.
-- **`harness_review_route`** (`changedFiles: string[]`, `diffSummary?: string`, `changedLineCount?: number`, `repoRoot?: string`): Computes a monotonic hybrid `ReviewRoutingPlan` (`skip` | `lite` | `focused` | `full`) across all 7 specialist reviewers plus a precomputed `ReviewGraphContextBundle`.
 - **`harness_lsp_diagnostics`** (`file?: string`, `filePath?: string`, `project?: string`, `tsconfigPath?: string`, `overlays?: Record<string, string>`, `repoRoot?: string`): Runs `@effect/tsgo` (`@effect/language-service`) strict JSON diagnostics on a target file, in-memory overlay map, or tsconfig project.
-- **`harness_ontology_why`** / **`harness_ontology_impact`** / **`harness_ontology_check`**: Queries ArchiMate 3.2 cross-layer traceability (Motivation $\leftrightarrow$ Implementation) and checks cross-layer invariants and semantic conflicts.
-- **`harness_gq_query`** (`queryName?: string`, `querySource?: string`, `params?: Record<string, unknown>`, `branch?: string`): Executes canonical Omnigraph `.gq` queries from `libs/harness/graph/queries/harness.gq`.
-- **`harness_graph_infer`** / **`harness_graph_complete`** / **`harness_graph_rewrite`**: Runs incremental Datalog (`@electric-sql/d2ts`) inference, computes missing traceability edges, and evaluates double-pushout (DPO) graph rewrite rules.
+- **`harness_graph_infer`** (`symbolOrSpan?: string`, `repoRoot?: string`) / **`harness_graph_complete`** (`minConfidenceMillis?: number`, `priors?: ...`, `repoRoot?: string`) / **`harness_graph_rewrite`** (`target?: string`, `repoRoot?: string`): Runs incremental Datalog inference, computes missing traceability edges, and evaluates double-pushout (DPO) graph rewrite rules.
+- **`harness_review_route`** (`changedFiles: string[]`, `diffSummary?: string`, `changedLineCount?: number`, `repoRoot?: string`): Computes a monotonic hybrid `ReviewRoutingPlan` (`skip` | `lite` | `focused` | `full`) across all 7 specialist reviewers plus a precomputed `ReviewGraphContextBundle`.
 - **`harness_telemetry_report`** (`format?: "json" | "markdown"`, `cumulative?: boolean`, `repoRoot?: string`): Generates the session observability scorecard and tool-usage health report.
 - **`harness_git_diff`** (`repoRoot?: string`, `baseRef?: string`, `paths?: string[]`, `statOnly?: boolean`, `maxPatchChars?: number`): Returns bounded read-only unified diff, stats, and untracked-file previews via `git --no-optional-locks` without acquiring repository lock files.
 - **`harness_workflow_plan`** (`repoRoot?: string`, `runId?: string`): Read-only status inspection of the active or latest `HarnessTaskWorkflow` run, work units, attempts, pending `DurableDeferred`s, and worktree/`commonGitDir` binding.
+
+### `harness-mcp` — Tier 2 (Selective Hybrid RRF Knowledge Retrieval)
+
+- **`harness_search_knowledge`** (`query: string`, `kinds?: ("PatternDoc" | "AdrDoc" | "EarsRequirement")[]`, `status?: "accepted" | "proposed" | "superseded" | "deprecated"`, `limit?: number`, `repoRoot?: string`): Searches documentation and requirement knowledge via local `qwen3-embedding:8b` RRF (`hybrid-rrf`) with explicit `bm25-only` / `lexical-fallback` degradation (`degradedReason` always surfaced, never mock vectors) and hydrates `linkedSymbols` directly from the code graph.
+- **`harness_route`** (`planStep: string`, `repoRoot?: string`): Combines hybrid Omnigraph `PatternDoc` retrieval (`candidatePatterns`), `"planning"` block detection, and the advisory `clef-flash` idiom router (`source`: `"deterministic"` | `"model"` | `"hybrid-retrieval"` | `"degraded-fallback"`) to match `agent-patterns/*.md`.
+
+### `harness-mcp` — Tier 3 (Deterministic PageIndex-lite Doc Navigation)
+
+- **`harness_doc_tree`** (`mode?: "catalog" | "tree" | "section"`, `path?: string`, `sectionId?: string`, `scope?: string`, `repoRoot?: string`): Navigates ADRs (`libs/*/docs/adr/`), EARS specs (`libs/*/docs/specs/`), and patterns without loading whole files:
+  - `mode: "catalog"`: Lists all `AdrDoc` and `EarsSpec` metadata, statuses, summaries, `informed_by` links, and paths.
+  - `mode: "tree"`: Extracts the Markdown heading outline (`sectionId`, `level`, `title`, 1-based `startLine`/`endLine`, `preview`) while ignoring code fences.
+  - `mode: "section"`: Reads a single bounded section slice (capped cleanly at 250 lines) with strict repo-root containment (`DocTreePathError`).
 
 ### `@modernrelay/omnigraph-mcp` (Property Graph & Branching)
 
 Exposes parameterized `.gq` graph queries over local Lance storage (`http://127.0.0.1:8080`) under subject `agent-mcp`:
 
-- **Node types:** `EffectFn`, `ServiceTag`, `ServiceLayer`, `TaggedError`, `VitestCase`, `PatternDoc`.
+- **Node types:** `EffectFn`, `ServiceTag`, `ServiceLayer`, `TaggedError`, `VitestCase`, `PatternDoc`, `AdrDoc`, `EarsSpec`, `EarsRequirement`.
 - **Edge types:** `RequiresService`, `FailsWith`, `ProvidesService`, `LayerRequires`, `TracedCall`, `ExercisesSpan`.
 - **Access control:** Access is constrained by `libs/harness/graph/policies.cedar` to read-only actions on `main` and `plan/*` branches for `agent-mcp`.
 

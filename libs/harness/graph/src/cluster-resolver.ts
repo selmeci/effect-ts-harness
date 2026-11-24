@@ -606,6 +606,20 @@ export const deriveRepoOmnigraphPort = (repoRoot: string, hostIo: SyncHostIo): n
   return 18080 + (hash.readUInt16BE(0) % 10000)
 }
 
+export const deriveClusterOmnigraphPort = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  env: Readonly<Record<string, string | undefined>> = hostIo.getEnv(),
+): number => {
+  const rawCustomDir = env.HARNESS_STATE_DIR
+  if (rawCustomDir !== undefined && rawCustomDir.length > 0) {
+    const clusterDir = resolveOmnigraphClusterDir(repoRoot, hostIo, env)
+    const hash = createHash("sha256").update(clusterDir).digest()
+    return 18080 + (hash.readUInt16BE(0) % 10000)
+  }
+  return deriveRepoOmnigraphPort(repoRoot, hostIo)
+}
+
 export const resolveOmnigraphTaskBranches = (
   repoRoot: string,
   hostIo: SyncHostIo,

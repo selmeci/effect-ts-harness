@@ -1,4 +1,4 @@
-// PERA Bipartite Levi Incidence Hypergraph PG-Schema (v2 — RFC-0009)
+// PERA Bipartite Levi Incidence Hypergraph PG-Schema (v3 — Three-Tier Retrieval)
 // Bipartite Levi Incidence Graph: V = V_E u V_R, E = E_role (RelationNode -> EntityNode only).
 
 node EffectFn
@@ -14,7 +14,6 @@ node EffectFn
   payloadSchemas: [String]?
   inputSchema: String?
   outputSchema: String?
-  signatureEmbedding: Vector(768)? @embed("spanName") @index
   archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index
   archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index
   archimateElementType: String? @index
@@ -30,7 +29,6 @@ node ServiceTag
   packageTag: enum(contract, domain, service, infra, app, unknown)? @index
   file: String @index
   line: I32?
-  capabilityEmbedding: Vector(768)? @embed("name") @index
   archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index
   archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index
   archimateElementType: String? @index
@@ -57,7 +55,6 @@ node TaggedError
   tag: String? @index
   file: String @index
   line: I32?
-  errorEmbedding: Vector(768)? @embed("errorTag") @index
   archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index
   archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index
   archimateElementType: String? @index
@@ -73,7 +70,6 @@ node SchemaDef
   file: String @index
   line: I32?
   isBranded: Bool? @index
-  schemaEmbedding: Vector(768)? @embed("schemaName") @index
   archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index
   archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index
   archimateElementType: String? @index
@@ -104,11 +100,11 @@ node PatternDoc
   slug: String @key @description("Pattern document slug derived from filename")
   qualname: String @index
   path: String @index
-  summary: String @index @description("Concise architectural pattern summary used for BM25 and @embed")
+  summary: String @index @description("Architectural pattern summary used for BM25 and @embed")
   title: String? @index
   coveredSpans: [String]?
   coveredTags: [String]?
-  summaryEmbedding: Vector(768)? @embed("summary") @index
+  summaryEmbedding: Vector(4096)? @embed("summary") @index
   contentBlob: Blob?
   archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index
   archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index
@@ -128,7 +124,8 @@ node AdrDoc
   referencedSpans: [String]?
   referencedServices: [String]?
   referencedErrors: [String]?
-  titleEmbedding: Vector(768)? @embed("title") @index
+  searchText: String? @index @description("Combined context, outcome, and rejected alternatives text for BM25 and @embed")
+  searchEmbedding: Vector(4096)? @embed("searchText") @index
   markdownBlob: Blob?
   archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index
   archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index
@@ -149,8 +146,28 @@ node EarsSpec
   referencedSpans: [String]?
   referencedServices: [String]?
   referencedErrors: [String]?
-  titleEmbedding: Vector(768)? @embed("title") @index
   markdownBlob: Blob?
+  archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index
+  archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index
+  archimateElementType: String? @index
+}
+
+node EarsRequirement
+  @instruction("Individual EARS requirement clause (REQ-X.Y) extracted from an EarsSpec table.")
+{
+  id: String @key @description("Canonical requirement identifier <specId>::<REQ-X.Y>")
+  qualname: String @index
+  specId: String @index
+  requirementId: String @index
+  area: String @index
+  pattern: String @index
+  clauseText: String @index
+  effectSymbol: String @index
+  verification: String @index
+  path: String @index
+  line: I32
+  status: enum(draft, accepted, proposed, superseded, deprecated) @index
+  clauseEmbedding: Vector(4096)? @embed("clauseText") @index
   archimateLayer: enum(Motivation, Business, Application, Technology, Implementation)? @index
   archimateAspect: enum(Motivation, Behavior, ActiveStructure, PassiveStructure)? @index
   archimateElementType: String? @index
@@ -177,7 +194,7 @@ node LayerFlow
 }
 
 node TraceabilityTuple
-  @instruction("Reified Levi RelationNode linking AdrDoc/EarsSpec/PatternDoc/VitestCase to realized/specified symbols.")
+  @instruction("Reified Levi RelationNode linking AdrDoc/EarsSpec/EarsRequirement/PatternDoc/VitestCase to realized/specified symbols.")
 {
   relationId: String @key @description("Deterministic Levi relation identifier")
   qualname: String @index
@@ -329,6 +346,14 @@ edge PlaysSpecifyingEarsRole: TraceabilityTuple -> EarsSpec @card(0..)
 {
   @key(@src, @dst, role)
   role: String @index @description("Role tag: specifying-ears")
+  archimateRelation: String @index
+}
+
+edge PlaysSpecifiedRequirementRole: TraceabilityTuple -> EarsRequirement @card(0..)
+  @instruction("Incidence edge from TraceabilityTuple to an extracted EarsRequirement clause.")
+{
+  @key(@src, @dst, role)
+  role: String @index @description("Role tag: specified-requirement")
   archimateRelation: String @index
 }
 

@@ -4,9 +4,12 @@ import type { SyncHostIo, SyncHostReader } from "@harness/service/host-io"
 import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
+  type AdrDocNode,
   type BranchingViolation,
+  type EarsSpecNode,
   EffectFnNode,
   PackageTag,
+  type PatternDocNode,
   SchemaDefNode,
   ServiceLayerNode,
   ServiceTagNode,
@@ -25,9 +28,15 @@ export interface FileGraphFragment {
   readonly layers: ReadonlyArray<ServiceLayerNode>
   readonly errors?: ReadonlyArray<TaggedErrorNode> | undefined
   readonly schemas?: ReadonlyArray<SchemaDefNode> | undefined
-  readonly requiresService: ReadonlyArray<{ readonly callerQualname: string; readonly tagId: string }>
+  readonly requiresService: ReadonlyArray<{
+    readonly callerQualname: string
+    readonly tagId: string
+  }>
   readonly failsWith: ReadonlyArray<{ readonly callerQualname: string; readonly errorTag: string }>
-  readonly providesService: ReadonlyArray<{ readonly layerQualname: string; readonly tagId: string }>
+  readonly providesService: ReadonlyArray<{
+    readonly layerQualname: string
+    readonly tagId: string
+  }>
   readonly layerRequires: ReadonlyArray<{ readonly layerQualname: string; readonly tagId: string }>
   readonly branchingViolations: ReadonlyArray<BranchingViolation>
 }
@@ -69,10 +78,18 @@ const FileGraphFragmentSchema = Schema.Struct({
   layers: Schema.Array(ServiceLayerNode),
   errors: Schema.optional(Schema.Array(TaggedErrorNode)),
   schemas: Schema.optional(Schema.Array(SchemaDefNode)),
-  requiresService: Schema.Array(Schema.Struct({ callerQualname: Schema.String, tagId: Schema.String })),
-  failsWith: Schema.Array(Schema.Struct({ callerQualname: Schema.String, errorTag: Schema.String })),
-  providesService: Schema.Array(Schema.Struct({ layerQualname: Schema.String, tagId: Schema.String })),
-  layerRequires: Schema.Array(Schema.Struct({ layerQualname: Schema.String, tagId: Schema.String })),
+  requiresService: Schema.Array(
+    Schema.Struct({ callerQualname: Schema.String, tagId: Schema.String }),
+  ),
+  failsWith: Schema.Array(
+    Schema.Struct({ callerQualname: Schema.String, errorTag: Schema.String }),
+  ),
+  providesService: Schema.Array(
+    Schema.Struct({ layerQualname: Schema.String, tagId: Schema.String }),
+  ),
+  layerRequires: Schema.Array(
+    Schema.Struct({ layerQualname: Schema.String, tagId: Schema.String }),
+  ),
   branchingViolations: Schema.Array(BranchingViolationSchema),
 })
 
@@ -151,4 +168,40 @@ export const saveFileGraphFragmentsToDisk = (
       Result.try(() => effectiveHostIo.unlinkSync(tmpPath))
     }
   })
+}
+
+export const buildGovAndPatternShaMaps = (
+  governanceDocs: ReadonlyArray<AdrDocNode | EarsSpecNode>,
+  patternDocs: ReadonlyArray<PatternDocNode>,
+): {
+  readonly govShaMap: Map<string, string>
+  readonly patternShaMap: Map<string, string>
+} => {
+  const govShaMap = new Map<string, string>()
+  for (const d of governanceDocs) {
+    const extraHash = match(d)
+      .with({ _tag: "AdrDoc" }, (adr) => `${adr.date ?? ""}:${adr.searchText ?? ""}`)
+      .with(
+        { _tag: "EarsSpec" },
+        (spec) =>
+          `${spec.date ?? ""}:${(spec.informedByAdrs ?? []).join(",")}:${spec.goalSummary ?? ""}:${(spec.requirements ?? []).map((r) => `${r.requirementId}:${r.clauseText}:${r.effectSymbol}`).join("|")}`,
+      )
+      .exhaustive()
+    govShaMap.set(
+      d.path,
+      computeContentSha256(
+        `${d.id}:${d.title}:${d.status}:${(d.enforcedByFiles ?? []).join(",")}:${(d.referencedSpans ?? []).join(",")}:${(d.referencedServices ?? []).join(",")}:${(d.referencedErrors ?? []).join(",")}:${extraHash}`,
+      ),
+    )
+  }
+  const patternShaMap = new Map<string, string>()
+  for (const p of patternDocs) {
+    patternShaMap.set(
+      p.path,
+      computeContentSha256(
+        `${p.slug}:${p.title ?? ""}:${(p.headings ?? []).join("|")}:${p.summary}:${(p.coveredSpans ?? []).join(",")}:${(p.coveredTags ?? []).join(",")}`,
+      ),
+    )
+  }
+  return { govShaMap, patternShaMap }
 }

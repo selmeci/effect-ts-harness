@@ -217,7 +217,7 @@ export const resolveFileForEntityKey = (ctx: ProjectorContext, entityKey: string
     .with({ _tag: "ServiceLayer" }, (n) => n.file).with({ _tag: "TaggedError" }, (n) => n.file)
     .with({ _tag: "SchemaDef" }, (n) => n.file).with({ _tag: "VitestCase" }, (n) => n.testFile)
     .with({ _tag: "PatternDoc" }, (n) => n.path).with({ _tag: "AdrDoc" }, (n) => n.path)
-    .with({ _tag: "EarsSpec" }, (n) => n.path).exhaustive()
+    .with({ _tag: "EarsSpec" }, { _tag: "EarsRequirement" }, (n) => n.path).exhaustive()
 }
 
 export const resolveExportNameForEntityKey = (ctx: ProjectorContext, entityKey: string): string | undefined => {
@@ -229,7 +229,7 @@ export const resolveExportNameForEntityKey = (ctx: ProjectorContext, entityKey: 
       .with({ _tag: "ServiceLayer" }, (n) => sanitizeIdentifier(n.qualname.split("#").pop() ?? "SynthesizedLive"))
       .with({ _tag: "TaggedError" }, (n) => sanitizeIdentifier(n.errorTag))
       .with({ _tag: "SchemaDef" }, (n) => sanitizeIdentifier(n.schemaName))
-      .with({ _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, () => undefined)
+      .with({ _tag: "VitestCase" }, { _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, { _tag: "EarsRequirement" }, () => undefined)
       .exhaustive()
   }
   const rawTail = entityKey.split(":").slice(1).join(":").split("#").pop()

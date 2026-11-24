@@ -34,6 +34,10 @@ import {
 } from "./daemon-and-omnigraph.service.js"
 import { runOmnigraphMaintenance, runVerifyOmnigraphLintCheck } from "./omnigraph-lint-gate.js"
 import {
+  computeSyncEmbeddingsForGraph,
+  toSyncEmbeddingOptions,
+} from "./omnigraph-embedding-sync-helper.js"
+import {
   cleanupStalePlanSnapshotAfterDone,
   countImplEffectFns,
   formatDiffErrorMessage,
@@ -360,11 +364,13 @@ export const syncVerifyImplToOmnigraph = (
     }
     const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
     const syncLayer = makeOmnigraphSyncLayer(nodeSyncHostIo)
+    const embeddingResult = yield* computeSyncEmbeddingsForGraph(repoRoot, graph, options)
     const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
       repoRoot: clusterRepoRoot,
       branch: taskBranches.implBranch,
       from: taskBranches.mainBranch,
       snapshotPath,
+      ...toSyncEmbeddingOptions(embeddingResult),
     }).pipe(
       Effect.provide(syncLayer),
       Effect.catchCause((cause) => {
@@ -513,12 +519,14 @@ export const syncOmnigraphOnDone = (
         implGraph,
         syncLayer,
       )
+      const doneEmbeddingRes = yield* computeSyncEmbeddingsForGraph(repoRoot, implGraph, options)
       const reloadRes = yield* syncToOmnigraphAndSnapshot(implGraph, {
         repoRoot: clusterRepoRoot,
         branch: taskBranches.implBranch,
         from: taskBranches.mainBranch,
         mode: "overwrite",
         snapshotPath,
+        ...toSyncEmbeddingOptions(doneEmbeddingRes),
       }).pipe(
         Effect.provide(syncLayer),
         Effect.catchCause((cause) => {

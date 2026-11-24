@@ -62,6 +62,7 @@ export const buildDstTargetsFromGraph = (
         { _tag: "PatternDoc" },
         { _tag: "AdrDoc" },
         { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
         { _tag: "EffectSignature" },
         { _tag: "LayerFlow" },
         { _tag: "TraceabilityTuple" },

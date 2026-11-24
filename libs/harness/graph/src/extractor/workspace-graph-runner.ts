@@ -31,6 +31,7 @@ import {
   sha256Hex,
 } from "./extractor-types-and-helpers.js"
 import { loadWorkspaceGovernanceDocsWithViolations } from "./governance-doc-parser.js"
+import { buildGovAndPatternShaMaps } from "./file-graph-cache.js"
 import {
   assembleTestAndGovernanceGraph,
   checkNodeSqliteTestViolations,
@@ -102,27 +103,10 @@ export const runExtractWorkspaceTypeAwareGraph = (
   }
   const { docs: governanceDocs, violations: governanceStatusViolations } =
     loadWorkspaceGovernanceDocsWithViolations(root, hostIo)
-  const govShaMap = new Map<string, string>()
-  for (const d of governanceDocs) {
-    govShaMap.set(
-      d.path,
-      sha256Hex(
-        `${d.id}:${d.title}:${d.status}:${(d.enforcedByFiles ?? []).join(",")}:${(d.referencedSpans ?? []).join(",")}:${(d.referencedServices ?? []).join(",")}:${(d.referencedErrors ?? []).join(",")}`,
-      ),
-    )
-  }
+  const patternDocs = loadPatternDocs(root, hostIo)
+  const { govShaMap, patternShaMap } = buildGovAndPatternShaMaps(governanceDocs, patternDocs)
   for (const v of governanceStatusViolations) {
     govShaMap.set(v.file, sha256Hex(`invalid-gov-status:${v.enclosingSymbol}:${v.message}`))
-  }
-  const patternDocs = loadPatternDocs(root, hostIo)
-  const patternShaMap = new Map<string, string>()
-  for (const p of patternDocs) {
-    patternShaMap.set(
-      p.path,
-      sha256Hex(
-        `${p.slug}:${p.summary}:${(p.coveredSpans ?? []).join(",")}:${(p.coveredTags ?? []).join(",")}`,
-      ),
-    )
   }
   const fastSnap = checkWorkspaceSnapshotMatch(
     session,
@@ -171,6 +155,7 @@ export const runExtractWorkspaceTypeAwareGraph = (
         { _tag: "PatternDoc" },
         { _tag: "AdrDoc" },
         { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
         { _tag: "EffectSignature" },
         { _tag: "LayerFlow" },
         { _tag: "TraceabilityTuple" },

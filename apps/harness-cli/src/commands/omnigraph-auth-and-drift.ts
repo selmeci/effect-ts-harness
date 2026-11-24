@@ -48,7 +48,7 @@ export {
   withOmnigraphClusterStartupLock,
 }
 
-export const CLUSTER_SCHEMA_EPOCH = "rfc-0009-v2"
+export const CLUSTER_SCHEMA_EPOCH = "three-tier-retrieval-v3"
 
 const CONFIG_DIGEST_FILES = [
   "cluster.yaml",
@@ -86,10 +86,12 @@ export const resolveOmnigraphConfigDir = (
   repoRoot: string,
   canonicalRepoRoot: string,
   allowWorktreeOverride = process.env.HARNESS_ALLOW_WORKTREE_CLUSTER_REBUILD === "1",
+  isIsolatedStateCluster = false,
 ): string => {
   const canonicalConfigDir = join(canonicalRepoRoot, "libs", "harness", "graph")
   if (
     !allowWorktreeOverride &&
+    !isIsolatedStateCluster &&
     resolve(repoRoot) !== resolve(canonicalRepoRoot) &&
     nodeSyncHostIo.existsSync(join(canonicalConfigDir, "cluster.yaml"))
   ) {
@@ -154,6 +156,7 @@ export interface ClusterConfigDriftEvaluation {
   readonly action: OmnigraphSchemaEvolutionAction
   readonly expectedStamp: string
   readonly digests: ConfigDigests
+  readonly epochMismatch: boolean
 }
 
 export const evaluateClusterConfigDrift = (
@@ -240,7 +243,12 @@ export const evaluateClusterConfigDrift = (
           },
     )
 
-    return { action, expectedStamp, digests }
+    return {
+      action,
+      expectedStamp,
+      digests,
+      epochMismatch: clusterExists && !epochMatches,
+    }
   })
 
 export const writeClusterDriftReceipts = (

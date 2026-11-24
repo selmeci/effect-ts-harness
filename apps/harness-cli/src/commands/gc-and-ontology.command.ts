@@ -16,6 +16,7 @@ import {
 } from "@harness/gates"
 import {
   extractWorkspaceTypeAwareGraph,
+  matchesGovernanceScope,
   projectOntologyLayers,
   queryOntologyImpact,
   queryOntologyWhy,
@@ -30,6 +31,7 @@ import {
   resolveDecisionModelLayer,
 } from "./daemon-and-omnigraph.service.js"
 import { runOmnigraphMaintenance } from "./done-omnigraph-helpers.js"
+import { extractSemanticCandidateConflictPairs } from "./omnigraph-embedding-sync-helper.js"
 
 export const handleGc = (
   argv: ReadonlyArray<string>,
@@ -146,20 +148,28 @@ export const handleOntology = (
             }
           }
           const docs = scope
-            ? allDocs.filter(
-                (doc) =>
-                  doc.id.startsWith(`${scope}:`) ||
-                  doc.docPath.includes(`libs/${scope}/`) ||
-                  doc.docPath.includes(`apps/${scope}/`) ||
-                  doc.docPath.includes(`packages/${scope}/`),
-              )
+            ? allDocs.filter((doc) => matchesGovernanceScope(doc.id, doc.docPath, scope))
             : allDocs
 
           const invariants = yield* decideOntologyInvariants({
             graph,
             governanceDocs: docs,
           })
-          const pairs = yield* extractOntologyConflictPairs(docs, scope)
+          const deterministicPairs = yield* extractOntologyConflictPairs(docs, scope)
+          const semanticCandidateRes = deterministic
+            ? {
+                pairs: [] as ReadonlyArray<(typeof deterministicPairs)[number]>,
+                degraded: false,
+                degradedReason: null,
+              }
+            : yield* extractSemanticCandidateConflictPairs(
+                repoRoot,
+                graph,
+                docs,
+                deterministicPairs,
+                options,
+              )
+          const pairs = [...deterministicPairs, ...semanticCandidateRes.pairs]
           const semanticReport: OntologyConflictEvaluationReport = deterministic
             ? { conflicts: [], degraded: false }
             : yield* evaluateOntologyConflictsWithStatus(pairs).pipe(
@@ -179,7 +189,12 @@ export const handleOntology = (
                   })
                 }),
               )
-          const degraded = semanticReport.degraded
+          const combinedEvaluationError =
+            semanticReport.evaluationError ??
+            (semanticCandidateRes.degradedReason !== null
+              ? `Semantic conflict embedding check degraded: ${semanticCandidateRes.degradedReason}`
+              : undefined)
+          const degraded = semanticReport.degraded || semanticCandidateRes.degraded
           const clean = invariants.clean && semanticReport.conflicts.length === 0 && !degraded
 
           return {
@@ -188,8 +203,8 @@ export const handleOntology = (
               clean,
               degraded,
               semanticSkipped: deterministic,
-              ...(semanticReport.evaluationError !== undefined
-                ? { evaluationError: semanticReport.evaluationError }
+              ...(combinedEvaluationError !== undefined
+                ? { evaluationError: combinedEvaluationError }
                 : {}),
               findings: invariants.findings,
               semanticConflicts: semanticReport.conflicts,

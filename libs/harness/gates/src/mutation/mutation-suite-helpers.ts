@@ -40,6 +40,7 @@ import {
   findUnclassifiedModifiedLibFilesChecked,
   partitionReachingTestFilesChecked,
 } from "./mutation-target-discovery.js"
+import type { PackageReachabilityIndex } from "./mutation-test-reachability.js"
 
 type PartitionCheckedResult = ReturnType<typeof partitionReachingTestFilesChecked>
 
@@ -315,6 +316,7 @@ export const preparePackageBaselines = (input: {
   readonly bypassDiffFilter: boolean
 }): PreparePackageBaselinesResult => {
   const partitionCache = new Map<string, PartitionCheckedResult>()
+  const reachabilityCache = new Map<string, PackageReachabilityIndex>()
   const pkgPrimaryTests = new Map<string, Set<string>>()
   const pkgFileCounts = new Map<string, number>()
 
@@ -346,11 +348,17 @@ export const preparePackageBaselines = (input: {
     )
     if (mutants.length === 0) continue
 
-    const partRes = partitionReachingTestFilesChecked(input.repoRoot, file, content, input.hostIo)
+    const partRes = partitionReachingTestFilesChecked(
+      input.repoRoot,
+      file,
+      content,
+      input.hostIo,
+      reachabilityCache,
+    )
     partitionCache.set(file.relFile, partRes)
     match(partRes)
       .with({ _tag: "Ok" }, ({ partition }) => {
-        if (partition.primaryTests.length > 0) {
+        if (partition.primaryTests.length > 0 || partition.fallbackTests.length > 0) {
           const pkgKey = `${file.scope}/${file.pkgDir}`
           pkgFileCounts.set(pkgKey, (pkgFileCounts.get(pkgKey) ?? 0) + 1)
           let set = pkgPrimaryTests.get(pkgKey)

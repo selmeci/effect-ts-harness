@@ -1,4 +1,7 @@
 export {
+  HYBRID_ROUTE_BM25_THRESHOLD,
+  HYBRID_ROUTE_RRF_THRESHOLD,
+  type HybridCandidateScoreKind,
   IDIOM_BLOCKS,
   type IdiomBlock,
   type BuildingBlock,
@@ -8,6 +11,8 @@ export {
   validateDecisionLimits,
   type RouteStepSource,
   type RouteStepStatusResult,
+  type PatternCandidateSlug,
+  selectRouteWithHybridCandidates,
   routeStepWithStatus,
   routeStep,
 } from "./idiom-router.js"
@@ -176,4 +181,10 @@ export {
   decideDeterministicReviewRoute,
   routeReviewDiff,
 } from "./review-router-decision.js"
+export {
+  collectSemanticConflictCandidates,
+  decideSemanticConflictPairs,
+  type CollectSemanticConflictCandidatesInput,
+  type CollectSemanticConflictCandidatesResult,
+} from "./semantic-conflict-pairer.js"
 export { partitionDiffReviewSlices, resolveReviewSliceUnitKey } from "./review-slice-partitioner.js"

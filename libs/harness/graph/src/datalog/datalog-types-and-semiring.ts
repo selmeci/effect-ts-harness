@@ -484,7 +484,7 @@ export const extractEdbTuplesFromGraph = (
         specsByKey.set(key, n)
         allEntityKeys.add(key)
       })
-      .with({ _tag: "PatternDoc" }, () => {
+      .with({ _tag: "EarsRequirement" }, { _tag: "PatternDoc" }, () => {
         allEntityKeys.add(key)
       })
       .with({ _tag: "EffectSignature" }, (n) => {

@@ -65,10 +65,31 @@ describe("TsCompilerOverlayService (harness:SPEC-0011 §3)", () => {
           )
 
           const resolvedPing = resolveNode(graph, "Sample.ping")
-          expect(resolvedPing?._tag).toBe("EffectFn")
-          if (resolvedPing?._tag === "EffectFn") {
-            expect(resolvedPing.qualname).toContain("ping")
-          }
+          match(resolvedPing)
+            .with({ _tag: "EffectFn" }, (fnNode) => {
+              expect(fnNode.qualname).toContain("ping")
+            })
+            .with(
+              { _tag: "ServiceTag" },
+              { _tag: "ServiceLayer" },
+              { _tag: "TaggedError" },
+              { _tag: "SchemaDef" },
+              { _tag: "VitestCase" },
+              { _tag: "PatternDoc" },
+              { _tag: "AdrDoc" },
+              { _tag: "EarsSpec" },
+              { _tag: "EarsRequirement" },
+              { _tag: "EffectSignature" },
+              { _tag: "LayerFlow" },
+              { _tag: "TraceabilityTuple" },
+              { _tag: "HttpEndpointTuple" },
+              { _tag: "MigrationTuple" },
+              undefined,
+              () => {
+                expect.unreachable("Expected EffectFn node for Sample.ping")
+              },
+            )
+            .exhaustive()
 
           const overlaySpans = spans.filter((s) => s.name === "TsCompilerOverlay.extractGraph")
           expect(overlaySpans.length).toBeGreaterThanOrEqual(1)

@@ -49,10 +49,7 @@ const withTempDir = <A, E, R>(
       }),
   )
 
-const runWorkspaceFsConformance = (
-  name: string,
-  layer: Layer.Layer<WorkspaceFs>,
-) => {
+const runWorkspaceFsConformance = (name: string, layer: Layer.Layer<WorkspaceFs>) => {
   it.effect(`WorkspaceFs conformance (${name}): write, exists, read, and missing-file error`, () =>
     withTempDir((dir) =>
       Effect.gen(function* () {
@@ -90,35 +87,37 @@ const runWorkspaceFsConformance = (
   )
 }
 
-const runSubprocessConformance = (
-  name: string,
-  layer: Layer.Layer<HarnessSubprocessRunner>,
-) => {
-  it.live(`HarnessSubprocessRunner conformance (${name}): zero exit, non-zero exit, and invalid-input`, () =>
-    Effect.gen(function* () {
-      const runner = yield* HarnessSubprocessRunner
+const runSubprocessConformance = (name: string, layer: Layer.Layer<HarnessSubprocessRunner>) => {
+  it.live(
+    `HarnessSubprocessRunner conformance (${name}): zero exit, non-zero exit, and invalid-input`,
+    () =>
+      Effect.gen(function* () {
+        const runner = yield* HarnessSubprocessRunner
 
-      const ok = yield* runner.exec({
-        command: SubprocessCommand.make(process.execPath),
-        args: [SubprocessArg.make("-e"), SubprocessArg.make("process.stdout.write('ok')")],
-      })
-      expect(ok.exitCode).toBe(0)
-      expect(ok.stdout).toBe("ok")
+        const ok = yield* runner.exec({
+          command: SubprocessCommand.make(process.execPath),
+          args: [SubprocessArg.make("-e"), SubprocessArg.make("process.stdout.write('ok')")],
+        })
+        expect(ok.exitCode).toBe(0)
+        expect(ok.stdout).toBe("ok")
 
-      const nonZero = yield* runner.exec({
-        command: SubprocessCommand.make(process.execPath),
-        args: [SubprocessArg.make("-e"), SubprocessArg.make("process.exit(3)")],
-      })
-      expect(nonZero.exitCode).toBe(3)
+        const nonZero = yield* runner.exec({
+          command: SubprocessCommand.make(process.execPath),
+          args: [SubprocessArg.make("-e"), SubprocessArg.make("process.exit(3)")],
+        })
+        expect(nonZero.exitCode).toBe(3)
 
-      expect(() => Schema.decodeSync(SubprocessArg)("bad\0arg")).toThrow()
-    }).pipe(Effect.provide(layer)),
+        expect(() => Schema.decodeSync(SubprocessArg)("bad\0arg")).toThrow()
+      }).pipe(Effect.provide(layer)),
   )
 }
 
 describe("@harness/infra port conformance suite", () => {
   runWorkspaceFsConformance("WorkspaceFsLive", WorkspaceFsLive)
-  runWorkspaceFsConformance("makeWorkspaceFsHostIoLayer", makeWorkspaceFsHostIoLayer(nodeSyncHostIo))
+  runWorkspaceFsConformance(
+    "makeWorkspaceFsHostIoLayer",
+    makeWorkspaceFsHostIoLayer(nodeSyncHostIo),
+  )
 
   runSubprocessConformance("HarnessSubprocessRunnerLive", HarnessSubprocessRunnerLive)
   runSubprocessConformance(
@@ -185,83 +184,93 @@ describe("@harness/infra port conformance suite", () => {
     }).pipe(Effect.provide(ActiveMutantContextLive)),
   )
 
-  it.live("AstGateCacheLive deduplicates concurrent evaluateBatch calls and preserves read errors", () =>
-    withTempDir((dir) =>
-      Effect.gen(function* () {
-        const memLayer = makeAstGateCacheLayer().pipe(Layer.provide(NodeServices.layer))
-        let evalCalls = 0
-        const batch = [
-          {
-            filePath: AstSourceFilePath.make("libs/sample/domain/src/concurrent.ts"),
-            content: AstSourceContent.make("export const c = 1\n"),
-          },
-        ]
-        yield* Effect.all(
-          Array.from({ length: 4 }, () =>
-            Effect.gen(function* () {
-              const cache = yield* AstGateCachePort
-              return yield* cache.evaluateBatch(batch, () => {
-                evalCalls += 1
-                return []
-              })
-            }),
-          ),
-          { concurrency: "unbounded" },
-        ).pipe(Effect.provide(memLayer))
-        expect(evalCalls).toBe(1)
+  it.live(
+    "AstGateCacheLive deduplicates concurrent evaluateBatch calls and preserves read errors",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const memLayer = makeAstGateCacheLayer().pipe(Layer.provide(NodeServices.layer))
+          let evalCalls = 0
+          const batch = [
+            {
+              filePath: AstSourceFilePath.make("libs/sample/domain/src/concurrent.ts"),
+              content: AstSourceContent.make("export const c = 1\n"),
+            },
+          ]
+          yield* Effect.all(
+            Array.from({ length: 4 }, () =>
+              Effect.gen(function* () {
+                const cache = yield* AstGateCachePort
+                return yield* cache.evaluateBatch(batch, () => {
+                  evalCalls += 1
+                  return []
+                })
+              }),
+            ),
+            { concurrency: "unbounded" },
+          ).pipe(Effect.provide(memLayer))
+          expect(evalCalls).toBe(1)
 
-        const dirAsCache = WorkspaceFilePath.make(join(dir, "dir-cache"))
-        mkdirSync(dirAsCache, { recursive: true })
-        const badLayer = makeAstGateCacheLayer({ cacheFilePath: dirAsCache }).pipe(
-          Layer.provide(NodeServices.layer),
-        )
-        const [evalErr, sizeErr] = yield* Effect.gen(function* () {
-          const cache = yield* AstGateCachePort
-          const e1 = yield* cache.evaluateBatch(batch, () => []).pipe(Effect.flip)
-          const e2 = yield* cache.cacheSize.pipe(Effect.flip)
-          return [e1, e2] as const
-        }).pipe(Effect.provide(badLayer))
-        match(evalErr)
-          .with({ _tag: "WorkspaceFsError" }, (err) => {
-            expect(err.operation).toBe("read")
-          })
-          .with({ _tag: "AstGateEvaluationError" }, () => {
-            expect.unreachable("Expected WorkspaceFsError")
-          })
-          .exhaustive()
-        expect(sizeErr.operation).toBe("read")
-      }),
-    ),
+          const dirAsCache = WorkspaceFilePath.make(join(dir, "dir-cache"))
+          mkdirSync(dirAsCache, { recursive: true })
+          const badLayer = makeAstGateCacheLayer({ cacheFilePath: dirAsCache }).pipe(
+            Layer.provide(NodeServices.layer),
+          )
+          const [evalErr, sizeErr] = yield* Effect.gen(function* () {
+            const cache = yield* AstGateCachePort
+            const e1 = yield* cache.evaluateBatch(batch, () => []).pipe(Effect.flip)
+            const e2 = yield* cache.cacheSize.pipe(Effect.flip)
+            return [e1, e2] as const
+          }).pipe(Effect.provide(badLayer))
+          match(evalErr)
+            .with({ _tag: "WorkspaceFsError" }, (err) => {
+              expect(err.operation).toBe("read")
+            })
+            .with({ _tag: "AstGateEvaluationError" }, () => {
+              expect.unreachable("Expected WorkspaceFsError")
+            })
+            .exhaustive()
+          expect(sizeErr.operation).toBe("read")
+        }),
+      ),
   )
 
-  it.live("makeHarnessSubprocessRunnerHostIoLayer classifies signal, max-buffer, and spawn-error", () =>
-    Effect.gen(function* () {
-      const runner = yield* HarnessSubprocessRunner
+  it.live(
+    "makeHarnessSubprocessRunnerHostIoLayer classifies signal, max-buffer, and spawn-error",
+    () =>
+      Effect.gen(function* () {
+        const runner = yield* HarnessSubprocessRunner
 
-      const sigErr = yield* runner
-        .exec({
-          command: SubprocessCommand.make(process.execPath),
-          args: [SubprocessArg.make("-e"), SubprocessArg.make("process.kill(process.pid, 'SIGTERM')")],
-        })
-        .pipe(Effect.flip)
-      expect(sigErr.failureKind).toBe("signal")
+        const sigErr = yield* runner
+          .exec({
+            command: SubprocessCommand.make(process.execPath),
+            args: [
+              SubprocessArg.make("-e"),
+              SubprocessArg.make("process.kill(process.pid, 'SIGTERM')"),
+            ],
+          })
+          .pipe(Effect.flip)
+        expect(sigErr.failureKind).toBe("signal")
 
-      const bufErr = yield* runner
-        .exec({
-          command: SubprocessCommand.make(process.execPath),
-          args: [SubprocessArg.make("-e"), SubprocessArg.make("process.stdout.write('x'.repeat(4096))")],
-          maxBufferBytes: SubprocessMaxBufferBytes.make(1024),
-        })
-        .pipe(Effect.flip)
-      expect(bufErr.failureKind).toBe("max-buffer")
+        const bufErr = yield* runner
+          .exec({
+            command: SubprocessCommand.make(process.execPath),
+            args: [
+              SubprocessArg.make("-e"),
+              SubprocessArg.make("process.stdout.write('x'.repeat(4096))"),
+            ],
+            maxBufferBytes: SubprocessMaxBufferBytes.make(1024),
+          })
+          .pipe(Effect.flip)
+        expect(bufErr.failureKind).toBe("max-buffer")
 
-      const spawnErr = yield* runner
-        .exec({
-          command: SubprocessCommand.make("definitely-nonexistent-binary-xyz-42"),
-          args: [],
-        })
-        .pipe(Effect.flip)
-      expect(spawnErr.failureKind).toBe("spawn-error")
-    }).pipe(Effect.provide(makeHarnessSubprocessRunnerHostIoLayer(nodeSyncHostIo))),
+        const spawnErr = yield* runner
+          .exec({
+            command: SubprocessCommand.make("definitely-nonexistent-binary-xyz-42"),
+            args: [],
+          })
+          .pipe(Effect.flip)
+        expect(spawnErr.failureKind).toBe("spawn-error")
+      }).pipe(Effect.provide(makeHarnessSubprocessRunnerHostIoLayer(nodeSyncHostIo))),
   )
 })

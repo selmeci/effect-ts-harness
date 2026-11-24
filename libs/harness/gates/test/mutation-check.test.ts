@@ -517,6 +517,10 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
       const seenEnvs: Array<Readonly<Record<string, string | undefined>> | undefined> = []
       const ansiHostIo: SyncHostIo = {
         ...testHostIo,
+        getEnv: () => ({
+          ...testHostIo.getEnv(),
+          HARNESS_STATE_DIR: "/tmp/leaked-parent-worktree-state",
+        }),
         execFileSync: (cmd, _args, options) => {
           if (cmd === "git") return notGitExecResult
           seenEnvs.push(options?.env)
@@ -539,9 +543,11 @@ describe("Trustworthy mutation-check & fail-closed migration-check (F-2.1, F-4.1
       expect(seenEnvs[0]?.["NO_COLOR"]).toBe("1")
       expect(seenEnvs[0]?.["FORCE_COLOR"]).toBe("0")
       expect(seenEnvs[0]?.["HARNESS_ACTIVE_MUTANT_ID"]).toBeUndefined()
+      expect(seenEnvs[0]?.["HARNESS_STATE_DIR"]).toBeUndefined()
       expect(seenEnvs[1]?.["NO_COLOR"]).toBe("1")
       expect(seenEnvs[1]?.["FORCE_COLOR"]).toBe("0")
       expect(seenEnvs[1]?.["HARNESS_ACTIVE_MUTANT_ID"]).toBeDefined()
+      expect(seenEnvs[1]?.["HARNESS_STATE_DIR"]).toBeUndefined()
     } finally {
       rmSync(repoRoot, { recursive: true, force: true })
     }

@@ -143,6 +143,7 @@ export const buildGraphReachabilityContext = (
       .with(
         { _tag: "AdrDoc" },
         { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
         { _tag: "PatternDoc" },
         { _tag: "SchemaDef" },
         { _tag: "ServiceLayer" },
@@ -302,6 +303,7 @@ export const buildGraphReachabilityContext = (
         { _tag: "MigrationTuple" },
         { _tag: "AdrDoc" },
         { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
         { _tag: "EffectFn" },
         { _tag: "PatternDoc" },
         { _tag: "SchemaDef" },

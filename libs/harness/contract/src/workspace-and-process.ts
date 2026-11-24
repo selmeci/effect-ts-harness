@@ -345,6 +345,8 @@ export const CanonicalMcpToolName = Schema.Literals([
   "harness_graph_rewrite",
   "harness_git_diff",
   "harness_workflow_plan",
+  "harness_search_knowledge",
+  "harness_doc_tree",
 ]).pipe(Schema.brand("CanonicalMcpToolName"))
 export type CanonicalMcpToolName = typeof CanonicalMcpToolName.Type
 

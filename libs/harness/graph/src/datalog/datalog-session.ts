@@ -10,7 +10,10 @@ import {
 import { Context, Effect, Layer, Semaphore } from "effect"
 import * as Graph from "effect/Graph"
 import { match } from "ts-pattern"
-import { runGraphInferencePipeline, runGraphInferenceSync } from "./stratum-3-completion-and-holes.js"
+import {
+  runGraphInferencePipeline,
+  runGraphInferenceSync,
+} from "./stratum-3-completion-and-holes.js"
 export { runGraphInferenceSync }
 import {
   type DatalogFileDeltaResult,
@@ -60,7 +63,13 @@ const getEntityNodeFilePath = (node: HarnessNode): string | undefined =>
       (n) => n.file,
     )
     .with({ _tag: "VitestCase" }, (n) => n.testFile)
-    .with({ _tag: "PatternDoc" }, { _tag: "AdrDoc" }, { _tag: "EarsSpec" }, (n) => n.path)
+    .with(
+      { _tag: "PatternDoc" },
+      { _tag: "AdrDoc" },
+      { _tag: "EarsSpec" },
+      { _tag: "EarsRequirement" },
+      (n) => n.path,
+    )
     .with({ _tag: "MigrationTuple" }, (n) => n.moduleFile)
     .with({ _tag: "EffectSignature" }, (n) => n.file)
     .with({ _tag: "LayerFlow" }, (n) => n.file)
@@ -195,6 +204,7 @@ const mergeFileSubgraphIntoWorkspace = (
           { _tag: "PatternDoc" },
           { _tag: "AdrDoc" },
           { _tag: "EarsSpec" },
+          { _tag: "EarsRequirement" },
           () => {
             removedEntityKeys.add(key)
           },

@@ -2,9 +2,12 @@ import { Cause, Effect, Exit } from "effect"
 import { describe, expect, it } from "vitest"
 import { match } from "ts-pattern"
 import {
+  HYBRID_ROUTE_BM25_THRESHOLD,
+  HYBRID_ROUTE_RRF_THRESHOLD,
   IDIOM_BLOCKS,
   IdiomRouterV1,
   routeStep,
+  selectRouteWithHybridCandidates,
   validateDecisionLimits,
 } from "../src/idiom-router.js"
 import { makeMockDecisionModelLayer } from "../src/mock-layer.js"
@@ -33,6 +36,7 @@ describe("IdiomRouterV1 data constraints", () => {
       "rpc",
       "atom",
       "decision-model",
+      "planning",
       "effect",
     ])
   })
@@ -60,6 +64,16 @@ describe("IdiomRouterV1 data constraints", () => {
       })
       .with({ _tag: "Success" }, () => {
         expect.unreachable("Expected invalidExit to fail with die")
+      })
+      .exhaustive()
+
+    const emptyExit = await Effect.runPromiseExit(validateDecisionLimits({ decisions: {} }))
+    match(emptyExit)
+      .with({ _tag: "Failure" }, ({ cause }) => {
+        expect(Cause.hasDies(cause)).toBe(true)
+      })
+      .with({ _tag: "Success" }, () => {
+        expect.unreachable("Expected empty decisions to fail with die")
       })
       .exhaustive()
   })
@@ -144,5 +158,80 @@ describe("Deterministic routing for Phase 4 event schema evolution", () => {
       routeStep("Configure clef-flash System One DecisionModel").pipe(Effect.provide(mockModel)),
     )
     expect(result).toBe("decision-model")
+  })
+
+  it("routes planning/skeleton prompts deterministically to planning and upgrades review routes from hybrid candidates", async () => {
+    const planningResult = await Effect.runPromise(
+      routeStep("Author EARS spec and stub<A, E, R> skeleton before plan-check").pipe(
+        Effect.provide(mockModel),
+      ),
+    )
+    expect(planningResult).toBe("planning")
+
+    expect(
+      selectRouteWithHybridCandidates({ block: "review", source: "degraded-fallback" }, [
+        { slug: "review", score: 0.99 },
+        { slug: "resources-scope", score: 0.85 },
+      ]),
+    ).toEqual({
+      block: "resources-scope",
+      source: "hybrid-retrieval",
+    })
+
+    expect(
+      selectRouteWithHybridCandidates({ block: "review", source: "degraded-fallback" }, [
+        { slug: "testing", score: 0.75 },
+      ]),
+    ).toEqual({
+      block: "testing",
+      source: "hybrid-retrieval",
+    })
+
+    expect(
+      selectRouteWithHybridCandidates({ block: "review", source: "degraded-fallback" }, [
+        { slug: "resources-scope" },
+      ]),
+    ).toEqual({
+      block: "review",
+      source: "degraded-fallback",
+    })
+
+    expect(
+      selectRouteWithHybridCandidates({ block: "review", source: "degraded-fallback" }, [
+        { slug: "resources-scope", score: 0.5 },
+      ]),
+    ).toEqual({
+      block: "review",
+      source: "degraded-fallback",
+    })
+
+    expect(
+      selectRouteWithHybridCandidates({ block: "schema", source: "deterministic" }, [
+        { slug: "resources-scope", score: 0.99 },
+      ]),
+    ).toEqual({
+      block: "schema",
+      source: "deterministic",
+    })
+
+    // RRF threshold (~0.01613) promotes top-3 rank_patterns_vector_hybrid candidates and rejects rank >= 3
+    expect(HYBRID_ROUTE_BM25_THRESHOLD).toBe(0.75)
+    expect(HYBRID_ROUTE_RRF_THRESHOLD).toBeCloseTo(1 / 62, 6)
+    expect(
+      selectRouteWithHybridCandidates({ block: "review", source: "degraded-fallback" }, [
+        { slug: "resources-scope", score: 1 / 60, scoreKind: "rrf" },
+      ]),
+    ).toEqual({
+      block: "resources-scope",
+      source: "hybrid-retrieval",
+    })
+    expect(
+      selectRouteWithHybridCandidates({ block: "review", source: "degraded-fallback" }, [
+        { slug: "resources-scope", score: 1 / 63, scoreKind: "rrf" },
+      ]),
+    ).toEqual({
+      block: "review",
+      source: "degraded-fallback",
+    })
   })
 })

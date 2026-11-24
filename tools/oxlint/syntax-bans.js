@@ -371,18 +371,361 @@ const QUANTITY_OR_VERSION_PROP_REGEX =
 
 const DISCRIMINANT_CALLBACK_METHODS = new Set(["filter", "find", "some", "every"])
 
-const DISCRIMINANT_PROP_NAMES = new Set(["_tag", "kind", "status", "verdict", "role", "state"])
+const DISCRIMINANT_PROP_NAMES = new Set([
+  "_tag",
+  "kind",
+  "status",
+  "verdict",
+  "role",
+  "state",
+  "embeddingsMode",
+  "retrievalMode",
+])
+
+const RETRIEVAL_DISCRIMINANT_PROP_NAMES = new Set(["embeddingsMode", "retrievalMode"])
 
 export function isEnforcedWorkspaceFile(filename) {
   return /(^|\/)(libs\/[^/]+\/[^/]+|apps\/[^/]+)\//.test(filename)
 }
 
-function isDiscriminantMemberAccess(node) {
-  if (node == null || node.type !== "MemberExpression" || node.computed === true) {
+function createDiscriminantAliasTracker() {
+  const scopes = [new Set()]
+  return {
+    get size() {
+      let total = 0
+      for (const s of scopes) total += s.size
+      return total
+    },
+    clear() {
+      scopes.length = 0
+      scopes.push(new Set())
+    },
+    pushScope() {
+      scopes.push(new Set())
+    },
+    popScope() {
+      if (scopes.length > 1) scopes.pop()
+    },
+    add(name) {
+      if (typeof name === "string" && name.length > 0) {
+        scopes[scopes.length - 1].add(name)
+      }
+    },
+    has(name) {
+      for (let i = scopes.length - 1; i >= 0; i--) {
+        if (scopes[i].has(name)) return true
+      }
+      return false
+    },
+  }
+}
+
+function getDiscriminantMemberPropName(node) {
+  const unwrapped = unwrapEstreeExpr(node)
+  if (unwrapped == null || unwrapped.type !== "MemberExpression") {
+    return null
+  }
+  if (unwrapped.computed !== true) {
+    return unwrapped.property != null && unwrapped.property.type === "Identifier"
+      ? unwrapped.property.name
+      : null
+  }
+  return getStaticModuleString(unwrapEstreeExpr(unwrapped.property))
+}
+
+function isDiscriminantMemberAccess(node, propNames = DISCRIMINANT_PROP_NAMES) {
+  const propName = getDiscriminantMemberPropName(node)
+  return propName != null && propNames.has(propName)
+}
+
+function isDiscriminantSourceExpr(node, aliasTracker, propNames = DISCRIMINANT_PROP_NAMES) {
+  const u = unwrapEstreeExpr(node)
+  if (u == null) return false
+  if (isDiscriminantMemberAccess(u, propNames)) return true
+  if (u.type === "Identifier" && aliasTracker != null && aliasTracker.has(u.name)) {
+    return true
+  }
+  if (u.type === "LogicalExpression" && (u.operator === "??" || u.operator === "||")) {
+    return (
+      isDiscriminantSourceExpr(u.left, aliasTracker, propNames) ||
+      isDiscriminantSourceExpr(u.right, aliasTracker, propNames)
+    )
+  }
+  if (u.type === "ConditionalExpression") {
+    return (
+      isDiscriminantSourceExpr(u.consequent, aliasTracker, propNames) ||
+      isDiscriminantSourceExpr(u.alternate, aliasTracker, propNames)
+    )
+  }
+  return false
+}
+
+function recordDiscriminantAliasesFromPattern(
+  patternNode,
+  tracker,
+  propNames = DISCRIMINANT_PROP_NAMES,
+) {
+  if (patternNode == null || tracker == null) return
+  if (patternNode.type === "AssignmentPattern") {
+    recordDiscriminantAliasesFromPattern(patternNode.left, tracker, propNames)
+    return
+  }
+  if (patternNode.type === "ArrayPattern" && Array.isArray(patternNode.elements)) {
+    for (const elem of patternNode.elements) {
+      if (elem != null) recordDiscriminantAliasesFromPattern(elem, tracker, propNames)
+    }
+    return
+  }
+  if (patternNode.type === "ObjectPattern" && Array.isArray(patternNode.properties)) {
+    for (const prop of patternNode.properties) {
+      if (prop == null || prop.type !== "Property") continue
+      const keyName =
+        prop.computed !== true && prop.key != null && prop.key.type === "Identifier"
+          ? prop.key.name
+          : getStaticModuleString(unwrapEstreeExpr(prop.key))
+      if (keyName != null && propNames.has(keyName)) {
+        const target =
+          prop.value != null && prop.value.type === "AssignmentPattern"
+            ? prop.value.left
+            : prop.value
+        if (target != null && target.type === "Identifier") {
+          tracker.add(target.name)
+        }
+      }
+      recordDiscriminantAliasesFromPattern(prop.value, tracker, propNames)
+    }
+  }
+}
+
+function recordDiscriminantAliasesFromBinding(
+  lhsNode,
+  rhsNode,
+  tracker,
+  propNames = DISCRIMINANT_PROP_NAMES,
+) {
+  if (lhsNode == null || tracker == null) return
+  if (lhsNode.type === "Identifier") {
+    if (isDiscriminantSourceExpr(rhsNode, tracker, propNames)) {
+      tracker.add(lhsNode.name)
+    }
+    return
+  }
+  recordDiscriminantAliasesFromPattern(lhsNode, tracker, propNames)
+}
+
+function recordFunctionParamDiscriminantAliases(
+  fnNode,
+  tracker,
+  propNames = DISCRIMINANT_PROP_NAMES,
+) {
+  if (fnNode == null || !Array.isArray(fnNode.params) || tracker == null) return
+  for (const param of fnNode.params) {
+    recordDiscriminantAliasesFromPattern(param, tracker, propNames)
+  }
+}
+
+function isLiteralValue(node) {
+  const u = unwrapEstreeExpr(node)
+  if (u == null) return false
+  if (u.type === "Literal") return true
+  if (
+    u.type === "UnaryExpression" &&
+    (u.operator === "-" || u.operator === "+") &&
+    unwrapEstreeExpr(u.argument)?.type === "Literal"
+  ) {
+    return true
+  }
+  if (u.type === "TemplateLiteral" && Array.isArray(u.expressions) && u.expressions.length === 0) {
+    return true
+  }
+  return false
+}
+
+function isDiscriminantTestExpression(node, propNames = DISCRIMINANT_PROP_NAMES) {
+  const unwrapped = unwrapEstreeExpr(node)
+  if (unwrapped == null || typeof unwrapped !== "object") return false
+  if (propNames === DISCRIMINANT_PROP_NAMES && isTagGuardCall(unwrapped)) return true
+  if (
+    unwrapped.type === "UnaryExpression" &&
+    unwrapped.operator === "!" &&
+    isDiscriminantTestExpression(unwrapped.argument, propNames)
+  ) {
+    return true
+  }
+  if (unwrapped.type === "LogicalExpression") {
+    return (
+      isDiscriminantTestExpression(unwrapped.left, propNames) ||
+      isDiscriminantTestExpression(unwrapped.right, propNames)
+    )
+  }
+  if (
+    unwrapped.type === "BinaryExpression" &&
+    (unwrapped.operator === "===" ||
+      unwrapped.operator === "!==" ||
+      unwrapped.operator === "==" ||
+      unwrapped.operator === "!=")
+  ) {
+    if (
+      isDiscriminantSourceExpr(unwrapped.left, null, propNames) &&
+      isLiteralValue(unwrapped.right)
+    ) {
+      return true
+    }
+    if (
+      isDiscriminantSourceExpr(unwrapped.right, null, propNames) &&
+      isLiteralValue(unwrapped.left)
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+function isAliasedDiscriminantTest(node, aliasNames) {
+  const unwrapped = unwrapEstreeExpr(node)
+  if (
+    unwrapped == null ||
+    typeof unwrapped !== "object" ||
+    aliasNames == null ||
+    aliasNames.size === 0
+  ) {
     return false
   }
-  const prop = node.property
-  return prop != null && prop.type === "Identifier" && DISCRIMINANT_PROP_NAMES.has(prop.name)
+  if (
+    unwrapped.type === "UnaryExpression" &&
+    unwrapped.operator === "!" &&
+    isAliasedDiscriminantTest(unwrapped.argument, aliasNames)
+  ) {
+    return true
+  }
+  if (unwrapped.type === "LogicalExpression") {
+    return (
+      isAliasedDiscriminantTest(unwrapped.left, aliasNames) ||
+      isAliasedDiscriminantTest(unwrapped.right, aliasNames)
+    )
+  }
+  if (
+    unwrapped.type === "BinaryExpression" &&
+    (unwrapped.operator === "===" ||
+      unwrapped.operator === "!==" ||
+      unwrapped.operator === "==" ||
+      unwrapped.operator === "!=")
+  ) {
+    const left = unwrapEstreeExpr(unwrapped.left)
+    const right = unwrapEstreeExpr(unwrapped.right)
+    if (left != null && left.type === "Identifier" && aliasNames.has(left.name)) {
+      return true
+    }
+    if (right != null && right.type === "Identifier" && aliasNames.has(right.name)) {
+      return true
+    }
+  }
+  return false
+}
+
+function isNestedFunctionEstree(node) {
+  return (
+    node != null &&
+    (node.type === "ArrowFunctionExpression" ||
+      node.type === "FunctionExpression" ||
+      node.type === "FunctionDeclaration")
+  )
+}
+
+function collectCallbackAliasesAndReturns(
+  node,
+  localTracker,
+  returnsOut,
+  propNames = DISCRIMINANT_PROP_NAMES,
+) {
+  if (node == null || typeof node !== "object") return
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      collectCallbackAliasesAndReturns(item, localTracker, returnsOut, propNames)
+    }
+    return
+  }
+  if (typeof node.type !== "string" || isNestedFunctionEstree(node)) return
+  if (node.type === "VariableDeclarator") {
+    recordDiscriminantAliasesFromBinding(node.id, node.init, localTracker, propNames)
+  } else if (node.type === "AssignmentExpression") {
+    recordDiscriminantAliasesFromBinding(node.left, node.right, localTracker, propNames)
+  } else if (node.type === "ReturnStatement" && node.argument != null) {
+    returnsOut.push(node.argument)
+  }
+  for (const [k, v] of Object.entries(node)) {
+    if (k === "parent") continue
+    if (v != null && typeof v === "object") {
+      collectCallbackAliasesAndReturns(v, localTracker, returnsOut, propNames)
+    }
+  }
+}
+
+function checkDiscriminantCollectionCallback(
+  node,
+  filename,
+  outerTracker,
+  context,
+  propNames = DISCRIMINANT_PROP_NAMES,
+) {
+  if (!isEnforcedWorkspaceFile(filename) || node == null) return
+  const callee = unwrapEstreeExpr(node.callee)
+  if (callee == null || callee.type !== "MemberExpression") return
+  const methodName =
+    callee.computed !== true
+      ? callee.property != null && callee.property.type === "Identifier"
+        ? callee.property.name
+        : null
+      : getStaticModuleString(unwrapEstreeExpr(callee.property))
+  if (methodName == null || !DISCRIMINANT_CALLBACK_METHODS.has(methodName)) return
+  if (!Array.isArray(node.arguments)) return
+  let fnNode = null
+  for (let i = 0; i < Math.min(2, node.arguments.length); i++) {
+    const candidate = unwrapEstreeExpr(node.arguments[i])
+    if (
+      candidate != null &&
+      (candidate.type === "ArrowFunctionExpression" || candidate.type === "FunctionExpression")
+    ) {
+      fnNode = candidate
+      break
+    }
+  }
+  if (fnNode == null) return
+
+  const localSet = new Set()
+  const localTracker = {
+    get size() {
+      return (
+        (outerTracker != null && propNames === DISCRIMINANT_PROP_NAMES ? outerTracker.size : 0) +
+        localSet.size
+      )
+    },
+    add(name) {
+      if (typeof name === "string" && name.length > 0) localSet.add(name)
+    },
+    has(name) {
+      if (localSet.has(name)) return true
+      return outerTracker != null && propNames === DISCRIMINANT_PROP_NAMES && outerTracker.has(name)
+    },
+  }
+  recordFunctionParamDiscriminantAliases(fnNode, localTracker, propNames)
+
+  const predExprs = []
+  if (fnNode.type === "ArrowFunctionExpression" && fnNode.body?.type !== "BlockStatement") {
+    if (fnNode.body != null) predExprs.push(fnNode.body)
+  } else if (fnNode.body != null) {
+    collectCallbackAliasesAndReturns(fnNode.body, localTracker, predExprs, propNames)
+  }
+
+  for (const predExpr of predExprs) {
+    if (
+      isDiscriminantTestExpression(predExpr, propNames) ||
+      isAliasedDiscriminantTest(predExpr, localTracker)
+    ) {
+      context.report({ node, message: discriminantIfBanMessage })
+      return
+    }
+  }
 }
 
 function isTagGuardCall(node) {
@@ -403,104 +746,6 @@ function isTagGuardCall(node) {
     }
   }
   return false
-}
-
-function isLiteralValue(node) {
-  if (node == null) return false
-  if (node.type === "Literal") return true
-  if (
-    node.type === "TemplateLiteral" &&
-    Array.isArray(node.expressions) &&
-    node.expressions.length === 0
-  ) {
-    return true
-  }
-  return false
-}
-
-function isDiscriminantTestExpression(node) {
-  if (node == null || typeof node !== "object") return false
-  if (isTagGuardCall(node)) return true
-  if (
-    node.type === "UnaryExpression" &&
-    node.operator === "!" &&
-    isDiscriminantTestExpression(node.argument)
-  ) {
-    return true
-  }
-  if (node.type === "LogicalExpression") {
-    return isDiscriminantTestExpression(node.left) || isDiscriminantTestExpression(node.right)
-  }
-  if (
-    node.type === "BinaryExpression" &&
-    (node.operator === "===" ||
-      node.operator === "!==" ||
-      node.operator === "==" ||
-      node.operator === "!=")
-  ) {
-    if (isDiscriminantMemberAccess(node.left) && isLiteralValue(node.right)) {
-      return true
-    }
-    if (isDiscriminantMemberAccess(node.right) && isLiteralValue(node.left)) {
-      return true
-    }
-  }
-  return false
-}
-
-function isAliasedDiscriminantTest(node, aliasNames) {
-  if (node == null || typeof node !== "object" || aliasNames == null || aliasNames.size === 0) {
-    return false
-  }
-  if (
-    node.type === "UnaryExpression" &&
-    node.operator === "!" &&
-    isAliasedDiscriminantTest(node.argument, aliasNames)
-  ) {
-    return true
-  }
-  if (node.type === "LogicalExpression") {
-    return (
-      isAliasedDiscriminantTest(node.left, aliasNames) ||
-      isAliasedDiscriminantTest(node.right, aliasNames)
-    )
-  }
-  if (
-    node.type === "BinaryExpression" &&
-    (node.operator === "===" ||
-      node.operator === "!==" ||
-      node.operator === "==" ||
-      node.operator === "!=")
-  ) {
-    if (node.left != null && node.left.type === "Identifier" && aliasNames.has(node.left.name)) {
-      return true
-    }
-    if (node.right != null && node.right.type === "Identifier" && aliasNames.has(node.right.name)) {
-      return true
-    }
-  }
-  return false
-}
-
-function getCallbackPredicateExpression(fnNode) {
-  if (fnNode == null) return null
-  if (fnNode.type === "ArrowFunctionExpression") {
-    if (fnNode.body != null && fnNode.body.type !== "BlockStatement") {
-      return fnNode.body
-    }
-  }
-  if (
-    (fnNode.type === "ArrowFunctionExpression" || fnNode.type === "FunctionExpression") &&
-    fnNode.body != null &&
-    fnNode.body.type === "BlockStatement" &&
-    Array.isArray(fnNode.body.body)
-  ) {
-    const returnStmt = fnNode.body.body.find(
-      (stmt) => stmt != null && stmt.type === "ReturnStatement",
-    )
-    return returnStmt ? returnStmt.argument : null
-  }
-  return null
 }
 
 const SCALAR_PRIMITIVE_SCHEMA_NAMES = new Set([
@@ -2283,6 +2528,9 @@ const CONTRACT_SCHEMA_CHAIN_METHODS = new Set(["pipe", "check", "annotate"])
 const CONTRACT_STRING_BOUND_CALLS = new Set(["isTrimmed", "isPattern", "isMaxLength"])
 const VITEST_HYGIENE_BASE_NAMES = new Set(["it", "test"])
 const VITEST_HYGIENE_CURRIED_NAMES = new Set(["each", "for", "skipIf", "runIf"])
+const VITEST_HYGIENE_NON_REGISTRATION_METHODS = new Set([...VITEST_HYGIENE_CURRIED_NAMES, "extend"])
+const MAX_TEST_FILE_LINES = 1500
+const MAX_TESTS_PER_FILE = 30
 
 function walkEstreeChildren(node, fn) {
   if (node == null || typeof node !== "object") return
@@ -2676,9 +2924,67 @@ function checkMaxTestCaseLinesEstree(programNode, filename, report) {
   visit(programNode)
 }
 
+function isEstreeVitestTestRegistrationCall(node) {
+  if (
+    node == null ||
+    node.type !== "CallExpression" ||
+    !isEstreeVitestChain(node.callee) ||
+    !Array.isArray(node.arguments) ||
+    node.arguments.length < 2
+  ) {
+    return false
+  }
+  const u = unwrapEstreeTop(node.callee)
+  if (
+    u != null &&
+    u.type === "MemberExpression" &&
+    u.computed !== true &&
+    u.property?.type === "Identifier" &&
+    VITEST_HYGIENE_NON_REGISTRATION_METHODS.has(u.property.name)
+  ) {
+    return false
+  }
+  return true
+}
+
+function checkMaxTestFileLinesEstree(programNode, text, filename, report) {
+  if (typeof filename !== "string" || !/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(filename)) return
+  if (typeof text !== "string" || text.length === 0) return
+  const lineCount = text.split(/\r?\n/).length
+  if (lineCount > MAX_TEST_FILE_LINES) {
+    report(
+      programNode,
+      `[max-test-file-lines] Test file '${filename}' has ${lineCount} lines (max ${MAX_TEST_FILE_LINES}) — split tests by domain into focused *.test.ts files.`,
+    )
+  }
+}
+
+function checkMaxTestsPerFileEstree(programNode, filename, report) {
+  if (typeof filename !== "string" || !/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(filename)) return
+  let count = 0
+  let overflowNode = null
+  const visit = (node) => {
+    if (node == null || typeof node !== "object") return
+    if (isEstreeVitestTestRegistrationCall(node)) {
+      count += 1
+      if (count === MAX_TESTS_PER_FILE + 1) {
+        overflowNode = node
+      }
+    }
+    walkEstreeChildren(node, visit)
+  }
+  visit(programNode)
+  if (count > MAX_TESTS_PER_FILE) {
+    report(
+      overflowNode ?? programNode,
+      `[max-tests-per-file] Test file '${filename}' declares ${count} test cases (max ${MAX_TESTS_PER_FILE}) — split suites by domain into focused *.test.ts files for Vitest parallelism and targeted mutation reachability.`,
+    )
+  }
+}
+
 const syntaxBans = {
   create(context) {
-    const discriminantAliasNames = new Set()
+    const discriminantAliasNames = createDiscriminantAliasTracker()
     const schemaVarNames = new Set()
     const brandedTypeNames = new Set()
     const unbrandedSchemaVarNames = new Map()
@@ -3561,6 +3867,7 @@ const syntaxBans = {
             }
           }
         }
+        recordDiscriminantAliasesFromBinding(node.id, node.init, discriminantAliasNames)
         if (node.id != null && node.id.type === "Identifier") {
           if (node.init != null && node.init.type === "ObjectExpression") {
             migrationRecordVars.set(node.id.name, node.init)
@@ -3573,9 +3880,6 @@ const syntaxBans = {
               markAllowedDdlTemplates(node.init)
               validateMigrationRecordObject(node.init)
             }
-          }
-          if (isDiscriminantMemberAccess(node.init)) {
-            discriminantAliasNames.add(node.id.name)
           }
           recordSchemaDeclarator(node)
           const filename = getNormalizedFilename()
@@ -3614,17 +3918,41 @@ const syntaxBans = {
           )
         }
       },
+      AssignmentExpression(node) {
+        recordDiscriminantAliasesFromBinding(node.left, node.right, discriminantAliasNames)
+      },
+      BlockStatement() {
+        discriminantAliasNames.pushScope()
+      },
+      "BlockStatement:exit"() {
+        discriminantAliasNames.popScope()
+      },
       FunctionDeclaration(node) {
+        discriminantAliasNames.pushScope()
+        recordFunctionParamDiscriminantAliases(node, discriminantAliasNames)
         reportAsync(node)
         checkNeverParams(context, node)
+      },
+      "FunctionDeclaration:exit"() {
+        discriminantAliasNames.popScope()
       },
       FunctionExpression(node) {
+        discriminantAliasNames.pushScope()
+        recordFunctionParamDiscriminantAliases(node, discriminantAliasNames)
         reportAsync(node)
         checkNeverParams(context, node)
       },
+      "FunctionExpression:exit"() {
+        discriminantAliasNames.popScope()
+      },
       ArrowFunctionExpression(node) {
+        discriminantAliasNames.pushScope()
+        recordFunctionParamDiscriminantAliases(node, discriminantAliasNames)
         reportAsync(node)
         checkNeverParams(context, node)
+      },
+      "ArrowFunctionExpression:exit"() {
+        discriminantAliasNames.popScope()
       },
       AwaitExpression(node) {
         context.report({ node, message: asyncMessage })
@@ -3796,26 +4124,7 @@ const syntaxBans = {
           }
         }
 
-        if (isEnforcedWorkspaceFile(filename)) {
-          if (
-            node.callee != null &&
-            node.callee.type === "MemberExpression" &&
-            node.callee.computed !== true &&
-            node.callee.property != null &&
-            node.callee.property.type === "Identifier" &&
-            DISCRIMINANT_CALLBACK_METHODS.has(node.callee.property.name)
-          ) {
-            const callbackArg = node.arguments[0]
-            const predExpr = getCallbackPredicateExpression(callbackArg)
-            if (
-              predExpr != null &&
-              (isDiscriminantTestExpression(predExpr) ||
-                isAliasedDiscriminantTest(predExpr, discriminantAliasNames))
-            ) {
-              context.report({ node, message: discriminantIfBanMessage })
-            }
-          }
-        }
+        checkDiscriminantCollectionCallback(node, filename, discriminantAliasNames, context)
 
         if (
           /libs\/[^/]+\/(contract|domain|core|service|infra)\/src\//.test(filename) &&
@@ -4409,7 +4718,7 @@ const syntaxBans = {
 
 const testIntegrity = {
   create(context) {
-    const discriminantAliasNames = new Set()
+    const discriminantAliasNames = createDiscriminantAliasTracker()
 
     function getNormalizedFilename() {
       return (
@@ -4446,6 +4755,12 @@ const testIntegrity = {
           context.report({ node: target, message })
         })
         checkMaxTestCaseLinesEstree(node, normalized, (target, message) => {
+          context.report({ node: target, message })
+        })
+        checkMaxTestFileLinesEstree(node, text, normalized, (target, message) => {
+          context.report({ node: target, message })
+        })
+        checkMaxTestsPerFileEstree(node, normalized, (target, message) => {
           context.report({ node: target, message })
         })
       },
@@ -4557,22 +4872,40 @@ const testIntegrity = {
       },
       VariableDeclarator(node) {
         checkNeverVariableDeclarator(context, node)
-        if (
-          node.id != null &&
-          node.id.type === "Identifier" &&
-          isDiscriminantMemberAccess(node.init)
-        ) {
-          discriminantAliasNames.add(node.id.name)
-        }
+        recordDiscriminantAliasesFromBinding(node.id, node.init, discriminantAliasNames)
+      },
+      AssignmentExpression(node) {
+        recordDiscriminantAliasesFromBinding(node.left, node.right, discriminantAliasNames)
+      },
+      BlockStatement() {
+        discriminantAliasNames.pushScope()
+      },
+      "BlockStatement:exit"() {
+        discriminantAliasNames.popScope()
       },
       FunctionDeclaration(node) {
+        discriminantAliasNames.pushScope()
+        recordFunctionParamDiscriminantAliases(node, discriminantAliasNames)
         checkNeverParams(context, node)
+      },
+      "FunctionDeclaration:exit"() {
+        discriminantAliasNames.popScope()
       },
       FunctionExpression(node) {
+        discriminantAliasNames.pushScope()
+        recordFunctionParamDiscriminantAliases(node, discriminantAliasNames)
         checkNeverParams(context, node)
       },
+      "FunctionExpression:exit"() {
+        discriminantAliasNames.popScope()
+      },
       ArrowFunctionExpression(node) {
+        discriminantAliasNames.pushScope()
+        recordFunctionParamDiscriminantAliases(node, discriminantAliasNames)
         checkNeverParams(context, node)
+      },
+      "ArrowFunctionExpression:exit"() {
+        discriminantAliasNames.popScope()
       },
       IfStatement(node) {
         const filename = getNormalizedFilename()
@@ -4642,6 +4975,13 @@ const testIntegrity = {
           }
         }
         if (isEnforcedWorkspaceFile(filename)) {
+          checkDiscriminantCollectionCallback(
+            node,
+            filename,
+            discriminantAliasNames,
+            context,
+            RETRIEVAL_DISCRIMINANT_PROP_NAMES,
+          )
           if (isImpreciseFailureAssert(node)) {
             context.report({ node, message: impreciseFailureAssertMessage })
           }

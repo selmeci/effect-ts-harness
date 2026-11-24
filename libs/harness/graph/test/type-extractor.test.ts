@@ -277,6 +277,9 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
       /* calls Decider.run in block comment */
       describe("Decider.run suite", () => {
         it('tests Decider.run behavior', () => {
+          writeFileSync(p, "packages:\\n  - 'libs/*'\\n")
+          resolveCliInfraLayer("done")
+          /* trailing real comment */
           expect(1).toBe(1)
         })
         test(\`Decider.run template\`, () => {
@@ -289,6 +292,8 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
     expect(stripped).not.toContain("tests Decider.run behavior")
     expect(stripped).not.toContain("Decider.run template")
     expect(stripped).not.toContain("calls Decider.run")
+    expect(stripped).not.toContain("trailing real comment")
+    expect(stripped).toContain('resolveCliInfraLayer("done")')
     expect(stripped).toContain('describe("",')
     expect(stripped).toContain('it("",')
     expect(stripped).toContain('test("",')
@@ -328,6 +333,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
         { _tag: "PatternDoc" },
         { _tag: "AdrDoc" },
         { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
         { _tag: "EffectSignature" },
         { _tag: "LayerFlow" },
         { _tag: "TraceabilityTuple" },
@@ -1330,11 +1336,40 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
       const g1 = await Effect.runPromise(
         extractWorkspaceTypeAwareGraph(tmpRoot, testHostIo, { session }),
       )
+      const expectEarsSpecEnforcedBy = (
+        node: ReturnType<typeof resolveNode>,
+        expected: ReadonlyArray<string>,
+      ): void => {
+        match(node)
+          .with({ _tag: "EarsSpec" }, (specNode) => {
+            expect(specNode.enforcedByFiles).toEqual(expected)
+          })
+          .with(
+            undefined,
+            { _tag: "EffectFn" },
+            { _tag: "ServiceTag" },
+            { _tag: "ServiceLayer" },
+            { _tag: "TaggedError" },
+            { _tag: "SchemaDef" },
+            { _tag: "VitestCase" },
+            { _tag: "PatternDoc" },
+            { _tag: "AdrDoc" },
+            { _tag: "EarsRequirement" },
+            { _tag: "EffectSignature" },
+            { _tag: "LayerFlow" },
+            { _tag: "TraceabilityTuple" },
+            { _tag: "HttpEndpointTuple" },
+            { _tag: "MigrationTuple" },
+            () => {
+              expect.unreachable("Expected EarsSpec node")
+            },
+          )
+          .exhaustive()
+      }
+
       const spec1 = resolveNode(g1, "sample:SPEC-0001")
       expect(spec1?._tag).toBe("EarsSpec")
-      if (spec1?._tag === "EarsSpec") {
-        expect(spec1.enforcedByFiles).toEqual(["libs/sample/domain/src/index.ts"])
-      }
+      expectEarsSpecEnforcedBy(spec1, ["libs/sample/domain/src/index.ts"])
 
       // Identical files & frontmatter hit the warm snapshot cache
       const g2 = await Effect.runPromise(
@@ -1354,12 +1389,10 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
       expect(g3.graph).not.toBe(g1.graph)
       const spec3 = resolveNode(g3, "sample:SPEC-0001")
       expect(spec3?._tag).toBe("EarsSpec")
-      if (spec3?._tag === "EarsSpec") {
-        expect(spec3.enforcedByFiles).toEqual([
-          "libs/sample/domain/src/index.ts",
-          "libs/sample/domain/src/extra.ts",
-        ])
-      }
+      expectEarsSpecEnforcedBy(spec3, [
+        "libs/sample/domain/src/index.ts",
+        "libs/sample/domain/src/extra.ts",
+      ])
 
       // Removing enforced_by entries also invalidates the snapshot cleanly
       fs.writeFileSync(specPath, renderSpec([]), "utf-8")
@@ -1369,9 +1402,7 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
       expect(g4.graph).not.toBe(g3.graph)
       const spec4 = resolveNode(g4, "sample:SPEC-0001")
       expect(spec4?._tag).toBe("EarsSpec")
-      if (spec4?._tag === "EarsSpec") {
-        expect(spec4.enforcedByFiles).toEqual([])
-      }
+      expectEarsSpecEnforcedBy(spec4, [])
     } finally {
       fs.rmSync(tmpRoot, { recursive: true, force: true })
     }

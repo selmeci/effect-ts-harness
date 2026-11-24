@@ -6,7 +6,7 @@ import { match, P } from "ts-pattern"
 import {
   toErrorReasonMessage,
   WorkspaceFileContent,
-  type WorkspaceFilePath,
+  WorkspaceFilePath,
   WorkspaceFsError,
   WorkspaceFsOperation,
 } from "@harness/contract"
@@ -61,6 +61,11 @@ const makeWorkspaceFsLayer = (
                 .exhaustive(),
             ),
           ),
+        realPath: (filePath) =>
+          fs.realPath(filePath).pipe(
+            Effect.map((resolved) => WorkspaceFilePath.make(resolved)),
+            Effect.mapError((err) => toWorkspaceFsError(filePath, "stat", err)),
+          ),
       }
 
       return impl
@@ -110,6 +115,11 @@ const makeWorkspaceFsHostIoLayer = (hostIo: SyncHostIo): Layer.Layer<WorkspaceFs
           hostIo.isDirectorySync(filePath) ||
           hostIo.isSymbolicLinkSync(filePath) ||
           hostIo.existsSync(filePath),
+        catch: (err) => toWorkspaceFsError(filePath, "stat", err),
+      }),
+    realPath: (filePath) =>
+      Effect.try({
+        try: () => WorkspaceFilePath.make(hostIo.realpathSync(filePath)),
         catch: (err) => toWorkspaceFsError(filePath, "stat", err),
       }),
   })

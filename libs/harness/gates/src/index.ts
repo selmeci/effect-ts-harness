@@ -125,12 +125,16 @@ export {
   collectWorkspaceSqlFiles,
   collectWorkspaceTsFiles,
   decideGraphEntropy,
+  MAX_TEST_SOURCE_DOMAINS,
+  MIN_LINES_FOR_DOMAIN_SPRAWL,
+  checkTestDomainSprawl,
   evaluateBranchingSqliteViolations,
   evaluateDocTruthPlugin,
   evaluateGovernanceDocsPlugin,
   evaluatePackageAndMigrationPlugin,
   evaluateTestAndDeciderPlugin,
   evaluateTopologyEntropyPlugin,
+  resolveSourceDomainBucket,
   ADAPTER_SKILL_PARITY_CLAUSES,
   auditAdapterSkillParityPair,
   auditCatalogDocTruthInContent,
@@ -459,9 +463,13 @@ export {
 } from "./bench-check.js"
 export {
   MAX_TEST_CASE_LINES,
+  MAX_TEST_FILE_LINES,
+  MAX_TESTS_PER_FILE,
   collectContractShapeViolations,
   collectWorkflowNameAccessViolations,
   collectMaxTestCaseLineViolations,
+  collectMaxTestFileLineViolations,
+  collectMaxTestsPerFileViolations,
   type AstHygieneFinding,
   type AstHygieneRuleId,
 } from "./plugins/ast-contract-and-test-hygiene.js"
@@ -570,3 +578,20 @@ export {
   scanWorkspaceTsFilesChecked,
   type ScanWorkspaceTsFilesResult,
 } from "./workspace-ts-scan.js"
+export { decideEmbeddingSyncPlan } from "./embedding-sync-plan.js"
+export {
+  type PackageBatchFileInput,
+  type PackageBatchFileResult,
+  type RunPackageBatchResult,
+  runPackageMutantBatchChecked,
+} from "./mutation/mutation-package-batch.js"
+export {
+  buildPackageReachabilityIndexChecked,
+  getOrBuildPackageReachabilityIndexChecked,
+  partitionEligibleTestsChecked,
+  queryReverseImportReachability,
+  selectReachabilityPartition,
+  type BuildReachabilityIndexResult,
+  type PackageReachabilityIndex,
+  type ReverseImportReachability,
+} from "./mutation/mutation-test-reachability.js"

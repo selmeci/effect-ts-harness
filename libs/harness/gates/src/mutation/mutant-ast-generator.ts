@@ -107,7 +107,7 @@ export const MUTATION_PATTERNS: ReadonlyArray<{
 ]
 
 const HOISTED_MUTANT_HELPER =
-  'function __hMut(id: string): boolean { const g: object = globalThis; const p: unknown = Reflect.get(g, "process"); const env: unknown = typeof p === "object" && p !== null ? Reflect.get(p, "env") : undefined; const activeG: unknown = Reflect.get(g, "__HARNESS_ACTIVE_MUTANT_ID"); const activeE: unknown = typeof env === "object" && env !== null ? Reflect.get(env, "HARNESS_ACTIVE_MUTANT_ID") : undefined; return activeG === id || activeE === id; /* globalThis.__HARNESS_ACTIVE_MUTANT_ID */ }'
+  'function __hMut(id: string): boolean { const g: object = globalThis; const hit: unknown = Reflect.get(g, "__HARNESS_MUTANT_HITS"); if (hit instanceof Set) hit.add(id); const p: unknown = Reflect.get(g, "process"); const env: unknown = typeof p === "object" && p !== null ? Reflect.get(p, "env") : undefined; const activeG: unknown = Reflect.get(g, "__HARNESS_ACTIVE_MUTANT_ID"); const activeE: unknown = typeof env === "object" && env !== null ? Reflect.get(env, "HARNESS_ACTIVE_MUTANT_ID") : undefined; return activeG === id || activeE === id; /* globalThis.__HARNESS_ACTIVE_MUTANT_ID */ }'
 
 const shouldSkipLine = (trimmed: string): boolean =>
   trimmed.length === 0 ||

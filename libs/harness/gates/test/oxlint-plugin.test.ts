@@ -68,7 +68,11 @@ describe("oxlint syntax-bans & test-integrity Drizzle sealing", () => {
     const interpolatedImportSource = {
       type: "TemplateLiteral",
       quasis: [
-        { type: "TemplateElement", value: { cooked: "drizzle-orm/", raw: "drizzle-orm/" }, tail: false },
+        {
+          type: "TemplateElement",
+          value: { cooked: "drizzle-orm/", raw: "drizzle-orm/" },
+          tail: false,
+        },
         { type: "TemplateElement", value: { cooked: "", raw: "" }, tail: true },
       ],
       expressions: [{ type: "Identifier", name: "driver" }],
@@ -76,7 +80,11 @@ describe("oxlint syntax-bans & test-integrity Drizzle sealing", () => {
     const interpolatedRequireSource = {
       type: "TemplateLiteral",
       quasis: [
-        { type: "TemplateElement", value: { cooked: "drizzle-kit/", raw: "drizzle-kit/" }, tail: false },
+        {
+          type: "TemplateElement",
+          value: { cooked: "drizzle-kit/", raw: "drizzle-kit/" },
+          tail: false,
+        },
         { type: "TemplateElement", value: { cooked: "", raw: "" }, tail: true },
       ],
       expressions: [{ type: "Identifier", name: "sub" }],
@@ -333,10 +341,16 @@ describe("oxlint syntax-bans & test-integrity Drizzle sealing", () => {
       computed: false,
       object: { type: "Identifier", name: "Cause" },
       property: { type: "Identifier", name: "hasInterrupts" },
-      parent: { type: "CallExpression", callee: { type: "Identifier", name: "catchCauseIf" }, arguments: [] },
+      parent: {
+        type: "CallExpression",
+        callee: { type: "Identifier", name: "catchCauseIf" },
+        arguments: [],
+      },
     })
 
-    expect(reports.filter((r) => r.message.includes("process-env-outside-infra-or-app")).length).toBe(2)
+    expect(
+      reports.filter((r) => r.message.includes("process-env-outside-infra-or-app")).length,
+    ).toBe(2)
     expect(reports.filter((r) => r.message.includes("bare-cause-has-interrupts")).length).toBe(1)
   })
 })

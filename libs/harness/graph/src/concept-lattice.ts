@@ -38,6 +38,7 @@ export const HARNESS_PERA_CONCEPT_LATTICE_CONFIG: ConceptLatticeConfig = {
     { id: ConceptId.make("PatternDoc"), kind: "entity", supertypes: [ConceptId.make("GovernanceArtifact")], playsRoles: [RoleName.make("enforcing-pattern")] },
     { id: ConceptId.make("AdrDoc"), kind: "entity", supertypes: [ConceptId.make("GovernanceArtifact")], playsRoles: [RoleName.make("governing-adr")] },
     { id: ConceptId.make("EarsSpec"), kind: "entity", supertypes: [ConceptId.make("GovernanceArtifact")], playsRoles: [RoleName.make("specifying-ears"), RoleName.make("specified-target")] },
+    { id: ConceptId.make("EarsRequirement"), kind: "entity", supertypes: [ConceptId.make("GovernanceArtifact")], playsRoles: [RoleName.make("specified-requirement"), RoleName.make("specified-target")] },
 
     // Abstract & Concrete Relation Concepts (V_R)
     { id: ConceptId.make("SemanticRelation"), kind: "relation", supertypes: [], playsRoles: [], relatesRoles: [] },
@@ -77,6 +78,7 @@ export const HARNESS_PERA_CONCEPT_LATTICE_CONFIG: ConceptLatticeConfig = {
         { role: RoleName.make("governing-adr"), minCard: 0, maxCard: 1, allowedPlayers: [ConceptId.make("AdrDoc")], archimateRelation: "Influence" },
         { role: RoleName.make("governed-symbol"), minCard: 0, maxCard: 1, allowedPlayers: [ConceptId.make("Artifact")], archimateRelation: "Influence" },
         { role: RoleName.make("specifying-ears"), minCard: 0, maxCard: 1, allowedPlayers: [ConceptId.make("EarsSpec")], archimateRelation: "Realization" },
+        { role: RoleName.make("specified-requirement"), minCard: 0, maxCard: 1, allowedPlayers: [ConceptId.make("EarsRequirement")], archimateRelation: "Realization" },
         { role: RoleName.make("realizing-symbol"), minCard: 0, maxCard: 1, allowedPlayers: [ConceptId.make("Artifact")], archimateRelation: "Realization" },
         { role: RoleName.make("specified-target"), minCard: 0, maxCard: null, allowedPlayers: [ConceptId.make("Artifact")], archimateRelation: ARCHIMATE_BY_ROLE["specified-target"] },
         { role: RoleName.make("verifying-test"), minCard: 0, maxCard: null, allowedPlayers: [ConceptId.make("VerificationArtifact")], archimateRelation: "Realization" },

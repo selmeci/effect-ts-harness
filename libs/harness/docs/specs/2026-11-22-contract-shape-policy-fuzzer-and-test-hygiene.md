@@ -11,6 +11,7 @@ informed_by:
   - harness:ADR-0022
 enforced_by:
   - tools/oxlint/syntax-bans.js
+  - libs/harness/gates/src/gc-check.ts
   - libs/harness/gates/src/plugins/ast-contract-and-test-hygiene.ts
   - libs/harness/gates/src/plugins/ast-gate-visitors.ts
   - libs/harness/gates/src/plugins/gc/gc-test-and-decider.plugin.ts
@@ -23,13 +24,19 @@ enforced_by:
   - libs/harness/gates/test/ast-contract-and-test-hygiene.test.ts
   - libs/harness/gates/test/gc-test-and-decider.test.ts
   - libs/harness/gates/test/policy-adversarial-property.test.ts
+  - libs/harness/gates/test/self-dogfooding-plugin-harness.test.ts
+  - libs/harness/gates/test/session-handoff-and-budget.test.ts
   - libs/harness/decision/test/guard-decision-property.test.ts
+  - libs/harness/graph/src/extractor/extractor-path-and-text-helpers.ts
+  - libs/harness/graph/src/extractor/extractor-types-and-helpers.ts
+  - libs/harness/graph/test/type-extractor.test.ts
 spans:
   - AstGateCache.decide
   - SyntaxBans.decide
   - TestIntegrity.decide
   - GraphGc.decide
   - Harness.decideGuardCommand
+  - TypeExtractor.extractWorkspace
 services: []
 errors: []
 ---
@@ -38,15 +45,15 @@ errors: []
 
 Post-mortem review of PR #44 identified three structural quality gaps across contract schemas, security policy testing, and test hygiene. First, branded identifiers in `type:contract` can still omit trimming/pattern/length bounds or embed raw unvalidated `Schema.Record(Schema.String, Schema.Unknown)` escape hatches outside designated wire-envelope codecs, and callers can mistakenly read `.name` (JavaScript `Function.prototype.name === "Workflow"`) on a `Workflow.make(...)` definition instead of `._tag`.
 
-Second, shell and path policy guards across `policy.ts`, `policy-shell-parser.ts`, `policy-harness-state.ts`, and `policy-worker-isolation.ts` rely predominantly on curated example regression tests, leaving nested quotes, backslash escapes, env-var expansions, command wrappers (`env`, `timeout`, `xargs`, `sh -c`), brace/glob obfuscations, and `..` path traversals under-fuzzed. Third, individual Vitest test callbacks can grow beyond 200 lines and closed `Schema.TaggedUnion` variants exported from `type:contract` can sit unexercised across `test/` suites.
+Second, shell and path policy guards across `policy.ts`, `policy-shell-parser.ts`, `policy-harness-state.ts`, and `policy-worker-isolation.ts` rely predominantly on curated example regression tests, leaving nested quotes, backslash escapes, env-var expansions, command wrappers (`env`, `timeout`, `xargs`, `sh -c`), brace/glob obfuscations, and `..` path traversals under-fuzzed. Third, individual Vitest test callbacks can grow beyond 200 lines, monolithic test files can exceed 1,500 lines or 30 test cases or span more than 6 resolved production source domains, and closed `Schema.TaggedUnion` variants exported from `type:contract` can sit unexercised across `test/` suites.
 
 - **Reused Contracts / Errors:** `GateViolation`, `GateRuleId`, `GcFinding`, `GcFindingKind`, `AstSourceFilePath` from `@harness/contract` and `@harness/gates`
 - **Reused Services:** `SyncHostIo` from `@harness/service/host-io`
-- **New Capabilities Needed:** `contract-shape-hardening`, `workflow-name-instead-of-tag`, and `max-test-case-lines` detectors in `ast-contract-and-test-hygiene.ts` + `tools/oxlint/syntax-bans.js`, `untested-union-variant` GC check in `GraphGc.decide`, and generative property-based security fuzzer in `policy-adversarial-property.test.ts`
+- **New Capabilities Needed:** `contract-shape-hardening`, `workflow-name-instead-of-tag`, `max-test-case-lines`, `max-test-file-lines`, and `max-tests-per-file` detectors in `ast-contract-and-test-hygiene.ts` + `tools/oxlint/syntax-bans.js`, `untested-union-variant` and `test-domain-sprawl` GC checks in `GraphGc.decide`, and generative property-based security fuzzer in `policy-adversarial-property.test.ts`
 
 ## Goal
 
-Every `type:contract` schema enforces bounded branded invariants and safe `Workflow._tag` usage, the security guard policy survives randomized combinatorial shell/path obfuscation fuzzing under both coordinator and worker modes, and every test suite respects compact per-test size limits and full closed-union variant coverage.
+Every `type:contract` schema enforces bounded branded invariants and safe `Workflow._tag` usage, the security guard policy survives randomized combinatorial shell/path obfuscation fuzzing under both coordinator and worker modes, and every test suite respects compact file and per-test size limits, domain-focused test imports, and full closed-union variant coverage.
 
 ## How to read the requirements
 
@@ -72,19 +79,24 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | REQ-2.1 | Event-driven | **When** evaluating generated shell commands combining nested quotes, backslash escapes, variable expansions, subshells, command wrappers (`env`, `timeout`, `xargs`, `sh -c`), and protected `.harness`/`daemon.sock`/`auth-tokens.json`/`.env` paths, `Harness.decideGuardCommand` and `classifyCommand` **shall** deny or escalate every obfuscated access without allowing bypasses. | `Harness.decideGuardCommand` | `UnitTest`   |
 | REQ-2.2 | Event-driven | **When** evaluating generated file paths combining `..` traversal, brace/glob obfuscation, and valid worktree prefixes across standard and `unitWorkerMode: true` policies, the policy path guard **shall** allow benign workspace sources while denying every protected stamp, state, and secret target.                                                                                | `Harness.decideGuardCommand` | `UnitTest`   |
 
-### 3 · Test Hygiene and Closed-Union Variant Coverage
+### 3 · Test Hygiene, Domain Split, and Closed-Union Variant Coverage
 
-**Source (`libs/harness/gates/src/plugins/ast-gate-visitors.ts`, `libs/harness/gates/src/plugins/gc/gc-test-and-decider.plugin.ts`, `tools/oxlint/syntax-bans.js`):** Keeps Vitest test cases focused and catches unexercised `Schema.TaggedUnion` variants in `@harness/contract`.
+**Source (`libs/harness/gates/src/plugins/ast-gate-visitors.ts`, `libs/harness/gates/src/plugins/gc/gc-test-and-decider.plugin.ts`, `tools/oxlint/syntax-bans.js`):** Keeps Vitest test cases and suites domain-focused and compact while catching unexercised `Schema.TaggedUnion` variants in `@harness/contract`.
 
-| ID      | Pattern            | Requirement                                                                                                                                                                                                                                       | Effect Symbol          | Verification |
-| ------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- | ------------ |
-| REQ-3.1 | Unwanted behaviour | **If** a Vitest `it(...)`, `it.effect(...)`, `it.live(...)`, or `it.prop(...)` callback body spans more than `200` source lines, **then** `TestIntegrity.decide` and `harness/test-integrity` **shall** report a `max-test-case-lines` violation. | `TestIntegrity.decide` | `AstGate`    |
-| REQ-3.2 | Unwanted behaviour | **If** an exported closed `Schema.TaggedUnion` variant from `type:contract` has zero references across workspace `test/` files, **then** `GraphGc.decide` **shall** report an `untested-union-variant` finding.                                   | `GraphGc.decide`       | `UnitTest`   |
+| ID      | Pattern            | Requirement                                                                                                                                                                                                                                                                                                                                                  | Effect Symbol                    | Verification |
+| ------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------- | ------------ |
+| REQ-3.1 | Unwanted behaviour | **If** a Vitest `it(...)`, `it.effect(...)`, `it.live(...)`, or `it.prop(...)` callback body spans more than `200` source lines, **then** `TestIntegrity.decide` and `harness/test-integrity` **shall** report a `max-test-case-lines` violation.                                                                                                            | `TestIntegrity.decide`           | `AstGate`    |
+| REQ-3.2 | Unwanted behaviour | **If** an exported closed `Schema.TaggedUnion` variant from `type:contract` has zero references across workspace `test/` files, **then** `GraphGc.decide` **shall** report an `untested-union-variant` finding.                                                                                                                                              | `GraphGc.decide`                 | `UnitTest`   |
+| REQ-3.3 | Unwanted behaviour | **If** a workspace Vitest test file spans more than `1500` source lines or registers more than `30` Vitest `it` or `test` cases, **then** `TestIntegrity.decide` and `harness/test-integrity` **shall** report a `max-test-file-lines` or `max-tests-per-file` violation.                                                                                    | `TestIntegrity.decide`           | `AstGate`    |
+| REQ-3.4 | Unwanted behaviour | **If** a non-fixture workspace Vitest test file spans at least `300` source lines and imports runtime symbols resolving across more than `6` distinct production source domains, **then** `GraphGc.decide` **shall** report a `test-domain-sprawl` finding.                                                                                                  | `GraphGc.decide`                 | `UnitTest`   |
+| REQ-3.5 | Event-driven       | **When** `stripCommentsAndTestTitles` strips comments, template literals, and Vitest `describe`, `it`, or `test` titles during `TypeExtractor.extractWorkspace` reachability extraction, the extractor **shall** parse syntax spans with the TypeScript AST parser so glob tokens such as `/*` inside string literals never erase downstream function calls. | `TypeExtractor.extractWorkspace` | `UnitTest`   |
 
 ## Assumptions
 
 - **REQ-1.1:** Pre-existing raw JSON-row boundary schemas in `workflow-storage.ts` / `workflow-rpc.ts` are inspected carefully and either tightened or documented in an explicit narrow wire-codec exemption set so internal domain contracts never accept arbitrary `Unknown` property maps.
 - **REQ-3.2:** Variant usage scanning inspects exported `Schema.TaggedUnion` member keys in `libs/*/contract/src/*.ts` against non-fixture workspace `test/**/*.test.ts` files via AST/symbol matching.
+- **REQ-3.4:** Domain sprawl analysis inspects runtime imports in non-fixture workspace `test/**/*.test.ts(x)` files at or above `300` lines, transitively resolving barrel re-exports under `libs|apps/**/src/**` while ignoring type-only imports and pure helper modules, against `MAX_TEST_SOURCE_DOMAINS = 6`, while monolithic splits isolate dedicated per-decider property suites such as `SessionHandoff.decide` in `libs/harness/gates/test/session-handoff-and-budget.test.ts`.
+- **REQ-3.5:** `extractor-path-and-text-helpers.ts` hosts `stripCommentsAndTestTitles` and path helpers re-exported by `extractor-types-and-helpers.ts` so every extractor module stays under the 499-line `SelfDogfooding.decide` budget.
 
 ## Out of scope
 
@@ -93,7 +105,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ## Known residual risks
 
-- Enforcing `max-test-case-lines` (`<= 200` lines per test callback) and `contract-shape-hardening` across the workspace will flag any existing oversized tests or legacy unbounded contract brands, which must be split/tightened during implementation.
+- Enforcing `max-test-case-lines` (`<= 200` lines per callback), `max-test-file-lines` (`<= 1500` lines per test file), `max-tests-per-file` (`<= 30` cases per test file), `test-domain-sprawl` (`<= 6` resolved production source domains at `>= 300` lines), and `contract-shape-hardening` across the workspace will flag any existing oversized tests, multi-domain test monoliths, or legacy unbounded contract brands, which must be split or tightened during implementation.
 
 ## Acceptance criteria
 

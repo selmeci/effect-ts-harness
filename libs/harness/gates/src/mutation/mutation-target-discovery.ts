@@ -1,7 +1,7 @@
 /**
  * @fileoverview Tag-based package classification, domain target discovery, and reaching test partitioning.
  */
-import { basename, join, relative } from "node:path"
+import { join, relative } from "node:path"
 import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import { compareCodeUnits } from "@harness/contract"
@@ -11,6 +11,10 @@ import {
   collectExcludedLibPureFilesChecked,
   discoverAppPureFilesChecked,
 } from "./mutation-pure-module-classifier.js"
+import {
+  type PackageReachabilityIndex,
+  partitionEligibleTestsChecked,
+} from "./mutation-test-reachability.js"
 
 export interface DomainFile {
   readonly scope: string
@@ -671,110 +675,32 @@ export const findReachingTestFiles = (
     (reason) => new Error(reason),
   )
 
-const extractExportedRuntimeSymbols = (sourceContent: string): ReadonlyArray<string> => {
-  const symbols = new Set<string>()
-  const declRe =
-    /\bexport\s+(?:async\s+)?(?:const|let|var|function|class|enum)\s+([A-Za-z_$][\w$]*)/g
-  for (const m of sourceContent.matchAll(declRe)) {
-    const sym = m[1]
-    if (sym && sym.length >= 2) symbols.add(sym)
-  }
-  const listRe = /\bexport\s*\{([^}]+)\}/g
-  for (const lm of sourceContent.matchAll(listRe)) {
-    for (const part of (lm[1] ?? "").split(",")) {
-      const cleaned = part.trim()
-      if (cleaned.length === 0 || cleaned.startsWith("type ")) continue
-      const aliasParts = cleaned.split(/\s+as\s+/)
-      const sym = (aliasParts[1] ?? aliasParts[0] ?? "").trim()
-      if (/^[A-Za-z_$][\w$]*$/.test(sym) && sym.length >= 2) symbols.add(sym)
-    }
-  }
-  return Array.from(symbols)
-}
-
-const escapeRegex = (raw: string): string => raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-
 export const partitionReachingTestFilesChecked = (
   repoRoot: string,
   file: DomainFile,
   sourceContent: string,
   hostIo: SyncHostIo,
+  reachabilityCache?: Map<string, PackageReachabilityIndex>,
 ):
   | { readonly _tag: "Ok"; readonly partition: TestPartition }
   | { readonly _tag: "Error"; readonly reason: string } =>
   match(findReachingTestFilesChecked(repoRoot, file, hostIo))
     .with({ _tag: "Error" }, (err) => err)
     .with({ _tag: "Ok" }, ({ files: allTests }) => {
-      const stem = basename(file.relFile).replace(/\.(tsx?)$/, "")
-      const eligibleTests = allTests.filter(
-        (t) =>
-          basename(t) !== "self-dogfooding-plugin-harness.test.ts" ||
-          stem === "self-dogfooding-plugin",
-      )
-      if (eligibleTests.length <= 2) {
-        return {
-          _tag: "Ok" as const,
-          partition: { primaryTests: eligibleTests, fallbackTests: [] },
-        }
-      }
-
-      const symbolRegexes = extractExportedRuntimeSymbols(sourceContent).map(
-        (sym) => new RegExp(`\\b${escapeRegex(sym)}\\b`),
-      )
-      const directStemTests: Array<string> = []
-      const symbolMatchedTests: Array<string> = []
-      const remainingOther: Array<string> = []
-
-      for (const testPath of eligibleTests) {
-        const testBase = basename(testPath)
-        if (testBase.startsWith(`${stem}.`)) {
-          directStemTests.push(testPath)
-          continue
-        }
-        const readRes = readTextGuarded(testPath, hostIo)
-        const content = match(readRes)
-          .with({ _tag: "Success" }, ({ success }) => success)
-          .with({ _tag: "Failure" }, () => undefined)
-          .exhaustive()
-        if (content === undefined) {
-          return {
-            _tag: "Error" as const,
-            reason: match(readRes)
-              .with({ _tag: "Failure" }, ({ failure }) => failure)
-              .with({ _tag: "Success" }, () => "")
-              .exhaustive(),
-          }
-        }
-        if (content.includes(stem)) {
-          directStemTests.push(testPath)
-          continue
-        }
-        if (symbolRegexes.some((re) => re.test(content))) {
-          symbolMatchedTests.push(testPath)
-          continue
-        }
-        remainingOther.push(testPath)
-      }
-
-      if (directStemTests.length > 0) {
-        return {
-          _tag: "Ok" as const,
-          partition: {
-            primaryTests: directStemTests,
-            fallbackTests: [...symbolMatchedTests, ...remainingOther],
-          },
-        }
-      }
-      if (symbolMatchedTests.length > 0) {
-        return {
-          _tag: "Ok" as const,
-          partition: { primaryTests: symbolMatchedTests, fallbackTests: remainingOther },
-        }
-      }
-      return {
-        _tag: "Ok" as const,
-        partition: { primaryTests: eligibleTests, fallbackTests: [] },
-      }
+      const pkgDirRel =
+        file.tier === "app-pure" && file.scope === "apps"
+          ? `apps/${file.pkgDir}`
+          : `libs/${file.scope}/${file.pkgDir}`
+      return partitionEligibleTestsChecked({
+        repoRoot,
+        pkgDirRel,
+        pkgName: file.pkgName,
+        relFile: file.relFile,
+        sourceContent,
+        allTests,
+        hostIo,
+        reachabilityCache,
+      })
     })
     .exhaustive()
 
@@ -783,9 +709,12 @@ export const partitionReachingTestFiles = (
   file: DomainFile,
   sourceContent: string,
   hostIo: SyncHostIo,
+  reachabilityCache?: Map<string, PackageReachabilityIndex>,
 ): TestPartition =>
   Result.getOrThrowWith(
-    match(partitionReachingTestFilesChecked(repoRoot, file, sourceContent, hostIo))
+    match(
+      partitionReachingTestFilesChecked(repoRoot, file, sourceContent, hostIo, reachabilityCache),
+    )
       .with({ _tag: "Ok" }, ({ partition }) => Result.succeed(partition))
       .with({ _tag: "Error" }, ({ reason }) => Result.fail(reason))
       .exhaustive(),

@@ -108,7 +108,7 @@ describe("Claude Code adapter & Omnigraph Cedar policy", () => {
       })
 
       const agyDoneCmd = (agyHooks["effect-harness"].Stop[0].command as string).replace(
-        "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/index.ts",
+        "node --import ../../../../tools/node-ts-resolver.mjs ../../../../apps/harness-cli/src/hook-entry.ts",
         `node ${JSON.stringify(brokenEntry)}`,
       )
       const agyDoneRes = spawnSync("/bin/sh", ["-c", agyDoneCmd], { encoding: "utf8" })
@@ -580,6 +580,12 @@ describe("Antigravity adapter & plugin configuration", () => {
       "no-double-wrapped-effect-fn",
       "dynamic-harness-import",
     ] as const
+    for (const ruleId of [...canonicalTopologyRules, ...canonicalDogfoodRules]) {
+      expect(registeredRules.has(ruleId), `Rule ${ruleId} must exist in @harness/contract`).toBe(
+        true,
+      )
+    }
+    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(20)
 
     const skillExpectations: ReadonlyArray<{
       readonly relPath: string
@@ -806,8 +812,10 @@ describe("Antigravity adapter & plugin configuration", () => {
         true,
       )
     }
-    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(18)
+    expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(20)
     expect(CANONICAL_MCP_TOOL_NAMES).toContain("harness_workflow_plan")
+    expect(CANONICAL_MCP_TOOL_NAMES).toContain("harness_search_knowledge")
+    expect(CANONICAL_MCP_TOOL_NAMES).toContain("harness_doc_tree")
 
     const skillDirs = [
       resolve(pluginDir, "skills"),
@@ -971,7 +979,7 @@ describe("Antigravity adapter & plugin configuration", () => {
     expect(rootReadme).not.toContain("{ writeReport? }")
 
     for (const readme of [agyReadme, claudeReadme]) {
-      expect(readme).toContain("exposing 18 tools")
+      expect(readme).toContain("exposing 20 tools")
       expect(readme).toContain("harness workflow")
       expect(readme).toContain("HARNESS_UNIT_WORKER=1")
       expect(readme).toContain("nondeterministic-workflow-body")
@@ -982,7 +990,7 @@ describe("Antigravity adapter & plugin configuration", () => {
     expect(rootReadme).toContain(
       "HARNESS_INFRA --> GATES & DECISION & GRAPH & HARNESS_SVC & HARNESS_CON",
     )
-    expect(rootReadme).toContain("Exposes 18")
+    expect(rootReadme).toContain("Exposes 20")
     expect(rootReadme).toContain(
       "workflow <compile\\|start\\|status\\|complete\\|resume\\|doctor\\|abort>",
     )
@@ -1414,6 +1422,37 @@ describe("Antigravity adapter & plugin configuration", () => {
       },
     )
     expect(hookLoadOut).toContain("INFRA_HOOK_OK")
+  })
+
+  it("bans Antigravity-only tool names including read_file across all adapters/claude-code/skills markdown files", () => {
+    const claudeSkillsRoot = resolve(repoRoot, "adapters/claude-code/skills")
+    const collectMarkdownFiles = (dir: string): Array<string> => {
+      const files: Array<string> = []
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const fullPath = join(dir, entry.name)
+        if (entry.isDirectory()) {
+          files.push(...collectMarkdownFiles(fullPath))
+        } else if (entry.name.endsWith(".md")) {
+          files.push(fullPath)
+        }
+      }
+      return files
+    }
+    const markdownFiles = collectMarkdownFiles(claudeSkillsRoot)
+    expect(markdownFiles.length).toBeGreaterThan(0)
+    for (const filePath of markdownFiles) {
+      const content = readFileSync(filePath, "utf8")
+      for (const bannedTool of [
+        "read_file",
+        "write_to_file",
+        "replace_file_content",
+        "multi_replace_file_content",
+        "grep_search",
+        "invoke_subagent",
+      ]) {
+        expect(content, `${filePath} contains ${bannedTool}`).not.toContain(bannedTool)
+      }
+    }
   })
 
   it("SPEC-0030 REQ-2.1 / REQ-2.2: keeps Swarm Seam Checklist and Second-Pass Remediation Re-Audit synchronized across Antigravity and Claude Code", () => {

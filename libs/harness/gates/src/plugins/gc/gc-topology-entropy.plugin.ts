@@ -358,6 +358,7 @@ export const evaluateTopologyEntropyPlugin = (
       .with(
         { _tag: "AdrDoc" },
         { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
         { _tag: "EffectFn" },
         { _tag: "PatternDoc" },
         { _tag: "SchemaDef" },
@@ -398,6 +399,7 @@ export const evaluateTopologyEntropyPlugin = (
       .with(
         { _tag: "AdrDoc" },
         { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
         { _tag: "EffectFn" },
         { _tag: "PatternDoc" },
         { _tag: "SchemaDef" },
@@ -438,6 +440,7 @@ export const evaluateTopologyEntropyPlugin = (
       .with(
         { _tag: "AdrDoc" },
         { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
         { _tag: "EffectFn" },
         { _tag: "PatternDoc" },
         { _tag: "SchemaDef" },
@@ -470,6 +473,7 @@ export const evaluateTopologyEntropyPlugin = (
         .with(
           { _tag: "AdrDoc" },
           { _tag: "EarsSpec" },
+          { _tag: "EarsRequirement" },
           { _tag: "EffectFn" },
           { _tag: "SchemaDef" },
           { _tag: "ServiceLayer" },
