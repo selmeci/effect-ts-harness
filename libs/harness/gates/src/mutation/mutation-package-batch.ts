@@ -60,6 +60,12 @@ export type RunPackageBatchResult =
       readonly diagnostic: string
     }
 
+const makeBatchAbort = (
+  diagnostic: string,
+  partialResults: ReadonlyArray<PackageBatchFileResult> = [],
+  observedDurationsMs: ReadonlyMap<string, number> = new Map(),
+): RunPackageBatchResult => ({ _tag: "Abort", partialResults, observedDurationsMs, diagnostic })
+
 const applyBatchPassOutcomes = (input: {
   readonly repoRoot: string
   readonly backupPath: string
@@ -322,12 +328,9 @@ export const runPackageMutantBatchChecked = (input: {
   const vitestCliPath = join(input.repoRoot, "node_modules", "vitest", "vitest.mjs")
   const runnerPath = join(input.repoRoot, "tools", "package-vitest-batch.mjs")
   if (!input.hostIo.existsSync(vitestCliPath) || !input.hostIo.existsSync(runnerPath)) {
-    return {
-      _tag: "Abort",
-      partialResults: [],
-      observedDurationsMs: new Map(),
-      diagnostic: `[mutation-check] Package batch runner or vitest CLI missing for '${input.pkgKey}'.`,
-    }
+    return makeBatchAbort(
+      `[mutation-check] Package batch runner or vitest CLI missing for '${input.pkgKey}'.`,
+    )
   }
 
   const planRes = writePackageBatchPlan({
@@ -346,12 +349,7 @@ export const runPackageMutantBatchChecked = (input: {
     .with({ _tag: "Err" }, ({ diagnostic }) => diagnostic)
     .exhaustive()
   if (typeof planOrErr === "string") {
-    return {
-      _tag: "Abort",
-      partialResults: [],
-      observedDurationsMs: new Map(),
-      diagnostic: planOrErr,
-    }
+    return makeBatchAbort(planOrErr)
   }
   const { planPath, streamReportPath, totalMutants } = planOrErr
 
@@ -384,12 +382,7 @@ export const runPackageMutantBatchChecked = (input: {
   if (startupRecoverErr !== undefined) {
     const diagnostic =
       typeof reportsOrErr === "string" ? `${reportsOrErr}; ${startupRecoverErr}` : startupRecoverErr
-    return {
-      _tag: "Abort",
-      partialResults: [],
-      observedDurationsMs: new Map(),
-      diagnostic,
-    }
+    return makeBatchAbort(diagnostic)
   }
   if (typeof reportsOrErr === "string") {
     const partialResults: Array<PackageBatchFileResult> = []
@@ -397,10 +390,10 @@ export const runPackageMutantBatchChecked = (input: {
     const streamedByRel = new Map<string, PackageBatchFileOutput>(
       streamedReports.map((r) => [r.relFile, r]),
     )
+    let recoveryAbortDiag: string | undefined
     for (const fileEntry of input.files) {
       const report = streamedByRel.get(fileEntry.file.relFile)
       if (report === undefined) break
-      mergeObservedDurationsIntoMap(observedDurationsMs, report.observedTestDurationsMs)
       const processed = processBatchFileReport({
         repoRoot: input.repoRoot,
         backupPath: input.backupPath,
@@ -409,16 +402,26 @@ export const runPackageMutantBatchChecked = (input: {
         fileEntry,
         report,
       })
-      const recovered = match(processed)
+      const abortDiag = match(processed)
         .with({ _tag: "Ok" }, ({ fileResult }) => {
+          mergeObservedDurationsIntoMap(observedDurationsMs, report.observedTestDurationsMs)
           partialResults.push(fileResult)
-          return true
+          return undefined
         })
-        .with({ _tag: "Abort" }, () => false)
+        .with({ _tag: "Abort" }, ({ diagnostic }) => `${fileEntry.file.relFile}: ${diagnostic}`)
         .exhaustive()
-      if (!recovered) break
+      if (abortDiag !== undefined) {
+        recoveryAbortDiag = abortDiag
+        break
+      }
     }
-    return { _tag: "Abort", partialResults, observedDurationsMs, diagnostic: reportsOrErr }
+    return makeBatchAbort(
+      recoveryAbortDiag !== undefined
+        ? `${reportsOrErr}; NDJSON recovery aborted (${recoveryAbortDiag})`
+        : reportsOrErr,
+      partialResults,
+      observedDurationsMs,
+    )
   }
 
   const reportByRel = new Map<string, PackageBatchFileOutput>(
@@ -434,12 +437,11 @@ export const runPackageMutantBatchChecked = (input: {
       if (input.maxSurvivors !== undefined && confirmedSurvivorsInBatch >= input.maxSurvivors) {
         break
       }
-      return {
-        _tag: "Abort",
-        partialResults: fileResults,
+      return makeBatchAbort(
+        `[mutation-check] Package batch runner missing report for '${fileEntry.file.relFile}'`,
+        fileResults,
         observedDurationsMs,
-        diagnostic: `[mutation-check] Package batch runner missing report for '${fileEntry.file.relFile}'`,
-      }
+      )
     }
     mergeObservedDurationsIntoMap(observedDurationsMs, report.observedTestDurationsMs)
     const processed = processBatchFileReport({
@@ -466,12 +468,7 @@ export const runPackageMutantBatchChecked = (input: {
       })
       .exhaustive()
     if (abortDiag !== undefined) {
-      return {
-        _tag: "Abort",
-        partialResults: fileResults,
-        observedDurationsMs,
-        diagnostic: abortDiag,
-      }
+      return makeBatchAbort(abortDiag, fileResults, observedDurationsMs)
     }
   }
 
@@ -663,7 +660,7 @@ export function executeQueuedPackageBatches(input: {
     opts?: { readonly skipSurvivorLimit?: boolean },
   ) => string | undefined
   readonly recordPartialOnAbort: (entry: QueuedPackageEntry, result: PackageBatchFileResult) => void
-  readonly onChunkFlushed?: (() => void) | undefined
+  readonly onBatchFlushed?: (() => void) | undefined
   readonly isEarlyStopped?: (() => boolean) | undefined
   readonly getMeasuredDurationsRecord?:
     | ((
@@ -684,6 +681,7 @@ export function executeQueuedPackageBatches(input: {
 }): string | undefined {
   for (const [pkgKey, queuedEntries] of input.queuedByPkg.entries()) {
     if (input.isEarlyStopped?.() === true) return undefined
+    if (queuedEntries.length === 0) continue
     if (queuedEntries.length < 2) {
       const only = queuedEntries[0]!
       const passRes = runSingleFileVitestPass({
@@ -714,7 +712,7 @@ export function executeQueuedPackageBatches(input: {
           return input.finalizeEntry(only, result)
         })
         .exhaustive()
-      input.onChunkFlushed?.()
+      input.onBatchFlushed?.()
       if (abortErr !== undefined) return abortErr
       if (input.isEarlyStopped?.() === true) return undefined
       continue
@@ -770,10 +768,13 @@ export function executeQueuedPackageBatches(input: {
           if (finErr !== undefined) return finErr
           if (input.isEarlyStopped?.() === true) break
         }
+        if (processedCount < queuedEntries.length && input.isEarlyStopped?.() !== true) {
+          return `[mutation-check] Package batch for '${pkgKey}' completed only ${processedCount}/${queuedEntries.length} queued file(s) without hitting survivor limit`
+        }
         return undefined
       })
       .exhaustive()
-    input.onChunkFlushed?.()
+    input.onBatchFlushed?.()
     const elapsedSec = ((Date.now() - batchStartedMs) / 1000).toFixed(1)
     process.stderr.write(
       `[mutation-check] ${pkgKey} (${processedCount}/${queuedEntries.length} files, ${pkgMutants} mutants) done in ${elapsedSec}s\n`,

@@ -1,6 +1,6 @@
 ---
 id: harness:SPEC-0034
-title: Witness-Scoped Mutation Caching, Incremental Chunk Flush, Strict Fail-Fast & Stage-A Probing, Adaptive Test Timings, Persistent Package Pool, and Verified Stacked-PR Base Stamping
+title: Witness-Scoped Mutation Caching, Incremental Package-Batch Flush, Strict Fail-Fast & Stage-A Probing, Adaptive Test Timings, Persistent Package Pool, and Verified Stacked-PR Base Stamping
 status: accepted
 archetype: framework
 date: 2026-11-25
@@ -36,7 +36,6 @@ enforced_by:
   - libs/harness/gates/src/verify-stamp.ts
   - apps/harness-cli/src/commands/mutate-flags.ts
   - apps/harness-cli/src/commands/mutate-and-bench.command.ts
-  - apps/harness-cli/src/commands/mutate-stamp-gate.ts
   - apps/harness-cli/src/commands/declarative-cli.ts
   - tools/package-vitest-batch.mjs
   - tools/vitest-pool-helpers.mjs
@@ -63,7 +62,7 @@ Profiling `pnpm harness mutate --strict` across stacked PR development in `SPEC-
 
 - **Reused Contracts / Errors:** `AstSourceFilePath`, `ContentSha256`, `MutationCacheEntry`, `MutationCacheLookupDecision`, `MutationCacheMac`, `MutationCacheStore`, `MutantId`, `PackageRelKey`, `WorkspaceFilePath`, `MutateStamp` from `@harness/contract` (`WorkspaceFsError`, `HarnessSubprocessError`)
 - **Reused Services:** `SyncHostIo` (`@harness/service/host-io`), `nodeSyncHostIo` (`@harness/infra`)
-- **New Capabilities Needed:** Witness-scoped cache entry fields (`witnessTestFile`, `witnessClosureSha256`) and HMAC payload bindings in `MutationCache.decide`, AST repo-root `libs/` traversal scoping (`hasLibsFsTraversal`, `hasDirectRepoLibsIo`, `hasRealRepoRootAnchor`, `hasTestLibsLiteralAndFsIo`), per-chunk/partial cache flushing, `--fail-fast` / `--max-survivors <N>` / `--stage-a-only` options, `.harness/cache/mutation-test-timings-v1.json` EMA timing recorder & sorter, continuous per-package warm worker pools with in-worker Stage 0 probes and schema-switch-only `invalidateFile`, and stacked `--base <parentRef>` ancestor HMAC proof verification in `MutationCheck.decide`.
+- **New Capabilities Needed:** Witness-scoped cache entry fields (`witnessTestFile`, `witnessClosureSha256`) and HMAC payload bindings in `MutationCache.decide`, AST repo-root `libs/` traversal scoping (`hasLibsFsTraversal`, `hasDirectRepoLibsIo`, `hasRealRepoRootAnchor`, `hasTestLibsLiteralAndFsIo`), per-package-batch/partial cache flushing, `--fail-fast` / `--max-survivors <N>` / `--stage-a-only` options, `.harness/cache/mutation-test-timings-v1.json` EMA timing recorder & sorter, continuous per-package warm worker pools with in-worker Stage 0 probes and schema-switch-only `invalidateFile`, and stacked `--base <parentRef>` ancestor HMAC proof verification in `MutationCheck.decide`.
 
 ## Goal
 
@@ -85,7 +84,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | REQ-1.2 | Event-driven       | **When** looking up cached kill entries for `(relFile, reachingTests)` after unrelated workspace or non-witness fallback test edits, `MutationCache.decide` **shall** return valid cache hits whenever `witnessTestFile` belongs to `reachingTests` and its witness closure digest and HMAC signature verify intact.      | MutationCache.decide | UnitTest     |
 | REQ-1.3 | Unwanted behaviour | **If** a candidate cache entry fails HMAC verification, exceeds TTL, references a symlinked path, or misses any digest in the transitive closure of `(relFile, witnessTestFile)`, **then** `MutationCache.decide` **shall** reject the entry for re-evaluation without mutating read-only common-repo caches.             | MutationCache.decide | UnitTest     |
 | REQ-1.4 | Event-driven       | **When** `computeFileMutationClosureDigest` scans AST literals along the transitive closure of a target module and its non-workspace-scanning witness test, `MutationCache.decide` **shall** limit `allLibsSrcDigest` coupling to genuine repository-root `libs/` filesystem traversal instead of synthetic test strings. | MutationCache.decide | UnitTest     |
-| REQ-1.5 | Event-driven       | **When** `executeQueuedPackageBatches` finishes any package chunk or aborts cleanly after completed files, `MutationCache.decide` **shall** atomically flush newly recorded HMAC-verified kill entries to `.harness/cache/` immediately instead of waiting for full suite completion.                                     | MutationCache.decide | UnitTest     |
+| REQ-1.5 | Event-driven       | **When** `executeQueuedPackageBatches` finishes any package batch or handles a clean/partial abort (`onBatchFlushed`), `MutationCache.decide` **shall** atomically flush newly recorded HMAC-verified kill entries to `.harness/cache/` immediately instead of waiting for full suite completion.                         | MutationCache.decide | UnitTest     |
 
 ### 2 · Strict Fail-Fast Execution & First-Class Stage-A Survivor Probe
 
@@ -96,17 +95,17 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | REQ-2.1 | Event-driven       | **When** `harness mutate` is invoked with `--fail-fast` or `--max-survivors <N>`, `MutationCheck.decide` **shall** halt further file/batch evaluation once total confirmed survivors reach `<N>`, print each `file:line:original->replacement`, and flush prior kills. | MutationCheck.decide | UnitTest     |
 | REQ-2.2 | Unwanted behaviour | **If** `--fail-fast` or `--max-survivors <N>` terminates execution early with non-zero survivors, **then** `MutationCheck.decide` **shall** return `passed: false` with non-zero exit code and remove any stale `.harness/mutate-stamp.json`.                          | MutationCheck.decide | UnitTest     |
 | REQ-2.3 | Event-driven       | **When** `harness mutate` is invoked with `--stage-a-only`, `MutationCheck.decide` **shall** execute only `primaryTests` (plus Stage 0 per-`it` targeting) while bypassing `scopedFallbackTests` and `packageFallbackTests` sweeps.                                    | MutationCheck.decide | UnitTest     |
-| REQ-2.4 | Ubiquitous         | The `MutationCheck.decide` gate **shall not** write `.harness/mutate-stamp.json` when executed with `--stage-a-only`, `--fail-fast` early termination, or `--scope`.                                                                                                   | MutationCheck.decide | UnitTest     |
+| REQ-2.4 | Ubiquitous         | The `MutationCheck.decide` gate **shall not** write `.harness/mutate-stamp.json` when executed with `--stage-a-only`, `--fail-fast` or `--max-survivors` early termination, `--scope`, `--file`, `--diff`, or unverified `--base`.                                     | MutationCheck.decide | UnitTest     |
 
 ### 3 · Adaptive Measured Test-Duration Ordering
 
 **Source (`libs/harness/gates/src/mutation/mutation-test-reachability.ts`, `libs/harness/gates/src/mutation/mutation-outcomes.ts`):** Adaptive test-duration statistics replace manual `HEAVY_META_TEST_BASENAMES` maintenance so fast unit tests always execute before heavy integration suites.
 
-| ID      | Pattern            | Requirement                                                                                                                                                                                                                                                            | Effect Symbol        | Verification |
-| ------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- | ------------ |
-| REQ-3.1 | Event-driven       | **When** unmutated baselines or Stage-0/Stage-1 test runs complete for a package, `MutationCheck.decide` **shall** persist non-authoritative EMA wall-clock timings keyed by `(pkgKey, relTestFile, contentSha256)` in `.harness/cache/mutation-test-timings-v1.json`. | MutationCheck.decide | UnitTest     |
-| REQ-3.2 | Event-driven       | **When** partitioning and sorting `primaryTests` and `fallbackTests`, `MutationCheck.decide` **shall** order tests strictly from lowest to highest measured duration and classify suites exceeding the heavy threshold automatically for two-phase gating.             | MutationCheck.decide | UnitTest     |
-| REQ-3.3 | Unwanted behaviour | **If** `.harness/cache/mutation-test-timings-v1.json` is missing, symlinked, schema-invalid, or stale for a modified test hash, **then** `MutationCheck.decide` **shall** fall back cleanly to line-count and static `HEAVY_META_TEST_BASENAMES` ordering.             | MutationCheck.decide | UnitTest     |
+| ID      | Pattern            | Requirement                                                                                                                                                                                                                                                                                                                                                                                             | Effect Symbol        | Verification |
+| ------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- | ------------ |
+| REQ-3.1 | Event-driven       | **When** unmutated baselines or Stage-0/Stage-1 test runs complete for a package, `MutationCheck.decide` **shall** persist non-authoritative EMA wall-clock timings keyed by `${pkgKey}::${relTestFile}` with `contentSha256` validated on lookup in `.harness/cache/mutation-test-timings-v1.json`.                                                                                                    | MutationCheck.decide | UnitTest     |
+| REQ-3.2 | Event-driven       | **When** partitioning and sorting `primaryTests` and `fallbackTests`, `MutationCheck.decide` **shall** classify heavy suites (`>= 2000` ms) for two-phase gating, ordering by fast/heavy tier then ascending measured duration in `partitionEligibleTestsChecked` and by ascending measured duration when both are measured (with heavy-tier fallback otherwise) in `sortTestsByMeasuredOrStaticSpeed`. | MutationCheck.decide | UnitTest     |
+| REQ-3.3 | Unwanted behaviour | **If** `.harness/cache/mutation-test-timings-v1.json` is missing, symlinked, schema-invalid, or stale for a modified test hash, **then** `MutationCheck.decide` **shall** fall back cleanly to line-count and static `HEAVY_META_TEST_BASENAMES` ordering.                                                                                                                                              | MutationCheck.decide | UnitTest     |
 
 ### 4 · Persistent Per-Package Warm Pool, In-Worker Coverage Probes & Redundant-Invalidation Removal
 
@@ -117,11 +116,11 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | REQ-4.1 | Event-driven       | **When** a package has multiple uncached target files, `MutationCheck.decide` **shall** reuse a single persistent warm Vitest worker pool across all files in `(scope, pkgDir)` while streaming per-file completion and atomic backup/restore transitions.              | MutationCheck.decide | UnitTest     |
 | REQ-4.2 | Event-driven       | **When** Stage 0 coverage probing is required for heavy target test files, `MutationCheck.decide` **shall** execute the hit probe in an already-initialized warm worker or keyed probe cache instead of spawning cold per-file Vitest subprocesses.                     | MutationCheck.decide | UnitTest     |
 | REQ-4.3 | State-driven       | **While** executing mutants inside an `isolate: true` warm worker across a fixed on-disk `schemaSource` module, `MutationCheck.decide` **shall** issue `vitest.invalidateFile` strictly on schema-file transitions rather than between `HARNESS_ACTIVE_MUTANT_ID` runs. | MutationCheck.decide | UnitTest     |
-| REQ-4.4 | Unwanted behaviour | **If** a warm worker exceeds `MAX_WORKER_RSS_BYTES` or emits an unconfirmed `TimedOut` or `Exited(1)` result, **then** `MutationCheck.decide` **shall** recycle the worker cleanly and confirm solo (`concurrency=1`) or `Abort` fail-closed on `Signaled`.             | MutationCheck.decide | UnitTest     |
+| REQ-4.4 | Unwanted behaviour | **If** a warm worker exceeds `MAX_WORKER_RSS_BYTES` or emits an unconfirmed `TimedOut` or `Exited(1)` result, **then** `MutationCheck.decide` **shall** recycle the worker cleanly and confirm via solo cold recheck or `Abort` fail-closed on `Signaled`.              | MutationCheck.decide | UnitTest     |
 
 ### 5 · Cryptographically Verified Stacked-PR Base Stamping
 
-**Source (`apps/harness-cli/src/commands/mutate-and-bench.command.ts`, `apps/harness-cli/src/commands/mutate-stamp-gate.ts`, `libs/harness/gates/src/verify-stamp.ts`):** Verifying stacked parent diffs against valid HMAC kill receipts lets stacked PRs write `.harness/mutate-stamp.json` without re-running ancestor PR mutants from `main`.
+**Source (`libs/harness/gates/src/mutation/mutation-stacked-base.ts`, `libs/harness/gates/src/verify-stamp.ts`, `apps/harness-cli/src/commands/mutate-and-bench.command.ts`):** Verifying stacked parent diffs against valid HMAC kill receipts lets stacked PRs write `.harness/mutate-stamp.json` without re-running ancestor PR mutants from `main`.
 
 | ID      | Pattern            | Requirement                                                                                                                                                                                                                                                            | Effect Symbol        | Verification |
 | ------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- | ------------ |
@@ -131,15 +130,15 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ## Implementation Waves (Recommended PR Split)
 
-1. **Wave 1 (Highest ROI, zero `tools/*.mjs` pool changes):** Areas 1–2 — witness-scoped cache keys (`REQ-1.1`..`REQ-1.4`), incremental chunk flush (`REQ-1.5`), strict `--fail-fast` / `--max-survivors` (`REQ-2.1`..`REQ-2.2`), and `--stage-a-only` (`REQ-2.3`..`REQ-2.4`).
+1. **Wave 1 (Highest ROI, zero `tools/*.mjs` pool changes):** Areas 1–2 — witness-scoped cache keys (`REQ-1.1`..`REQ-1.4`), incremental package-batch flush (`REQ-1.5`), strict `--fail-fast` / `--max-survivors` (`REQ-2.1`..`REQ-2.2`), and `--stage-a-only` (`REQ-2.3`..`REQ-2.4`).
 2. **Wave 2 (Pool & scheduler throughput):** Areas 3–4 — adaptive EMA timing cache (`REQ-3.1`..`REQ-3.3`), continuous per-package warm worker pool (`REQ-4.1`, `REQ-4.4`), in-worker/cached Stage 0 hit probes (`REQ-4.2`), and eliminating redundant per-mutant `invalidateFile` under `isolate: true` (`REQ-4.3`).
 3. **Wave 3 (Stacked-PR stamp ergonomics):** Area 5 — ancestor HMAC proof verification and authorized stacked-PR stamping under `--strict --base <parentRef>` (`REQ-5.1`..`REQ-5.3`).
 
 ## Assumptions
 
-- **REQ-1.1:** Introducing `witnessTestFile` and `witnessClosureSha256` bumps `MUTATION_CACHE_SCHEMA_VERSION` cleanly (or adds non-legacy fields verified by `verifyMutationEntryMac`), leaving read-only legacy cache files untouched.
+- **REQ-1.1:** Introducing `witnessTestFile` and `witnessClosureSha256` bumps `MUTATION_CACHE_SCHEMA_VERSION` from `"mutation-cache-v2"` to `"mutation-cache-v3"` (`mutation-cache-v3.json`), causing a one-time cold start on first run because legacy `mutation-cache-v2.json` files are ignored read-only and never loaded.
 - **REQ-2.1:** Passing `--fail-fast` without `--max-survivors` defaults `--max-survivors` to `1`.
-- **REQ-3.1:** EMA timing updates use decay factor `alpha = 0.3` and classify a suite as heavy when its measured duration meets or exceeds `2000` ms, storing timings outside HMAC kill caches as non-authoritative scheduling hints only.
+- **REQ-3.1:** EMA timing updates use decay factor `alpha = 0.3` and classify a suite as heavy when its measured duration meets or exceeds `2000` ms, storing timings in a JSON map keyed by `${pkgKey}::${relTestFile}` (with `contentSha256` validated on lookup) outside HMAC kill caches as non-authoritative scheduling hints only.
 - **REQ-5.1:** Stacked ancestor verification against `main...<parentRef>` requires `<parentRef>` to resolve cleanly via local git ancestry (`git merge-base --is-ancestor`); missing refs fail closed to `main`.
 
 ## Out of scope

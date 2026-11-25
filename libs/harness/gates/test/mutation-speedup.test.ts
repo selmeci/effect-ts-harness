@@ -1211,7 +1211,7 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
     }
   })
 
-  it("parallel-vitest-batch with HARNESS_BATCH_TARGET_FILE enforces isolate:true even when HARNESS_MUTATE_WARM_ISOLATE=0 and kills top-level and function mutants", () => {
+  it("parallel-vitest-batch enforces isolate:true even when HARNESS_MUTATE_WARM_ISOLATE=0 and kills top-level and function mutants", () => {
     const dir = mkdtempSync(join(tmpdir(), "iso-false-batch-"))
     try {
       const modPath = join(dir, "calc.ts")
@@ -1254,7 +1254,6 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
               HARNESS_BATCH_TIMEOUT_MS: "20000",
               HARNESS_BATCH_TESTS_JSON: JSON.stringify(["calc.test.ts"]),
               HARNESS_BATCH_MUTANTS_JSON: JSON.stringify(["m-fn", "m-top", "m-surv"]),
-              HARNESS_BATCH_TARGET_FILE: modPath,
             },
           },
         )

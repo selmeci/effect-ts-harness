@@ -22,6 +22,7 @@ export {
   SelfDogfoodingViolation,
   SelfDogfoodingViolationError,
   SourceLineNumber,
+  TestTimingDurationMs,
   WorkspaceFilePath,
   compareCodeUnits,
   computeContentSha256,
@@ -462,7 +463,6 @@ export {
   PackageRelKey,
   RedactedMutationCacheHmacSecret,
   RuntimeVersionTag,
-  TestTimingDurationMs,
 } from "./mutation-cache.js"
 export {
   MUTATION_HEAVY_TEST_THRESHOLD_MS,

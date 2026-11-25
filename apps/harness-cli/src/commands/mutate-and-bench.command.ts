@@ -178,6 +178,7 @@ export const handleMutate = (
           failFast: parsed.failFast,
           maxSurvivors: parsed.maxSurvivors,
           stageAOnly: parsed.stageAOnly,
+          suppressSurvivorStderr: true,
           cacheAuth,
           nowMs: MutationEpochMillis.make(Date.now()),
         })
@@ -186,16 +187,17 @@ export const handleMutate = (
           !report.passed || report.earlyTerminated === true ? cleanupStamp() : undefined
         let stampWriteErr: string | undefined = undefined
         const baseAuthorized = parsed.baseRef === undefined || report.stackedBaseVerified === true
-        if (
-          report.passed &&
-          parsed.isStrict &&
-          !parsed.stageAOnly &&
-          report.earlyTerminated !== true &&
-          parsed.scope === undefined &&
-          parsed.targetFiles === undefined &&
-          baseAuthorized &&
-          !parsed.isDiff
-        ) {
+        const stampSkipReasons: Array<string> = []
+        if (parsed.stageAOnly) stampSkipReasons.push("--stage-a-only")
+        if (report.earlyTerminated === true) stampSkipReasons.push("early termination")
+        if (parsed.scope !== undefined) stampSkipReasons.push("--scope")
+        if (parsed.targetFiles !== undefined) stampSkipReasons.push("--file")
+        if (!baseAuthorized && parsed.baseRef !== undefined) {
+          stampSkipReasons.push(`unverified --base '${parsed.baseRef}'`)
+        }
+        if (parsed.isDiff) stampSkipReasons.push("--diff")
+
+        if (report.passed && parsed.isStrict && stampSkipReasons.length === 0) {
           const writeRes = Result.try(() =>
             writeMutateStamp(repoRoot, nodeSyncHostIo, {
               enforcementMode: "strict",
@@ -223,6 +225,10 @@ export const handleMutate = (
             })
             .exhaustive()
         }
+        const stampSkipNotice =
+          report.passed && parsed.isStrict && stampSkipReasons.length > 0
+            ? `[mutation-check] Notice: .harness/mutate-stamp.json was not written (${stampSkipReasons.join(", ")}).`
+            : undefined
 
         const survivorLines =
           report.earlyTerminated === true ||
@@ -236,6 +242,7 @@ export const handleMutate = (
             : []),
           ...(cleanupErr !== undefined ? [cleanupErr] : []),
           ...(stampWriteErr !== undefined ? [stampWriteErr] : []),
+          ...(stampSkipNotice !== undefined ? [stampSkipNotice] : []),
         ]
 
         return {

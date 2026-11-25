@@ -35,6 +35,7 @@ import {
   parseVitestBaselineTestDurations,
   recordObservedTestTimings,
   saveMutationTestTimingsAtomic,
+  tryBuildTimingEntryKey,
 } from "../src/mutation/mutation-test-timings.js"
 import { resolveHarnessStateDir } from "../src/worktree.js"
 import { isolatedTestHostIo } from "./helpers/test-host-io.js"
@@ -579,6 +580,64 @@ describe("mutation-test-timings safety & fallback (REQ-3.3)", () => {
         lookup,
       )
       expect(part.primaryTests).toEqual([tShort, tLong, tMeta])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects newline, CR, and colon pkgKey in buildTimingEntryKey while recordObservedTestTimings and lookupForPackage skip malformed paths", () => {
+    const validRel = AstSourceFilePath.make("libs/demo/core/test/a.test.ts")
+    const nlRel = "libs/demo/core/test/bad\ntest.ts"
+    const crRel = "libs/demo/core/test/bad\rtest.ts"
+    const colonPkg = "demo:core"
+    const nlPkg = "demo\ncore"
+    const crPkg = "demo\rcore"
+
+    expect(() => buildTimingEntryKey(PKG_KEY, nlRel)).toThrow()
+    expect(() => buildTimingEntryKey(PKG_KEY, crRel)).toThrow()
+    expect(() => buildTimingEntryKey(colonPkg, validRel)).toThrow()
+    expect(() => buildTimingEntryKey(nlPkg, validRel)).toThrow()
+    expect(() => buildTimingEntryKey(crPkg, validRel)).toThrow()
+
+    expect(tryBuildTimingEntryKey(PKG_KEY, nlRel)).toBeUndefined()
+    expect(tryBuildTimingEntryKey(PKG_KEY, crRel)).toBeUndefined()
+    expect(tryBuildTimingEntryKey(colonPkg, validRel)).toBeUndefined()
+    expect(tryBuildTimingEntryKey(PKG_KEY, validRel)).toBe(buildTimingEntryKey(PKG_KEY, validRel))
+
+    const { dir, pkg } = setupDemoPkg("timings-malformed-")
+    try {
+      const tValid = join(pkg, "test", "a.test.ts")
+      writeFileSync(tValid, "export const a = 1\n", "utf8")
+      const nlPath = join(pkg, "test", "bad\ntest.ts")
+      const crPath = join(pkg, "test", "bad\rtest.ts")
+
+      const colonRec = recordObservedTestTimings({
+        repoRoot: dir,
+        pkgKey: "demo:core",
+        observedByRelOrAbs: new Map([[tValid, 75]]),
+        store: emptyMutationTestTimingsStore(),
+        nowMs: 1_764_000_000_000,
+        hostIo: isolatedTestHostIo,
+      })
+      expect(colonRec.dirty).toBe(false)
+
+      const tracker = createSuiteTimingsTracker(dir, isolatedTestHostIo)
+      expect(() =>
+        tracker.recordObserved(
+          PKG_KEY,
+          new Map([
+            [nlPath, 100],
+            [crPath, 120],
+            [tValid, 85],
+          ]),
+          1_764_000_000_000,
+        ),
+      ).not.toThrow()
+      const looked = tracker.lookupForPackage(PKG_KEY, [nlPath, crPath, tValid])
+      expect(looked.get(tValid)).toBe(85)
+      expect(looked.has(nlPath)).toBe(false)
+      expect(looked.has(crPath)).toBe(false)
+      expect(tracker.lookupForPackage("demo:core", [tValid]).size).toBe(0)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

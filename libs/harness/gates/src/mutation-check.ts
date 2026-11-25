@@ -142,6 +142,7 @@ export interface RunMutationOptions {
   readonly minScore?: number | undefined
   readonly failFast?: boolean | undefined
   readonly maxSurvivors?: number | undefined
+  readonly suppressSurvivorStderr?: boolean | undefined
   readonly stageAOnly?: boolean | undefined
   readonly disableMutantCache?: boolean | undefined
   readonly enableMutantCache?: boolean | undefined
@@ -297,6 +298,7 @@ export const runDomainMutationSuite = (
   let cacheDirty = false
   flushCacheIfDirty = () => {
     if (!cacheEnabled || !cacheDirty || enabledCacheAuth === undefined) return
+    // flushMutationCache already emits a stderr warning when persistence returns false.
     if (flushMutationCache(repoRoot, hostIo, enabledCacheAuth, cacheEntries)) cacheDirty = false
   }
   const witnessClosureMemo = new Map<string, ContentSha256 | null>()
@@ -326,14 +328,23 @@ export const runDomainMutationSuite = (
   diffMode = diffPrep.diffMode
   const diffLinesMap = diffPrep.evalDiffLines
   const allMainDiffLines = diffPrep.allMainDiffLines
-  const appliedStacked = applyStackedBaseOutcomes(
-    stackedPrep,
-    outcomes,
-    evaluatedFiles,
-    evaluatedFilesSet,
-  )
-  if (appliedStacked.dirtiedCache) cacheDirty = true
-  cachedKilledCount += appliedStacked.cachedKilledDelta
+  if (stackedPrep !== undefined) {
+    const prepAbort = match(stackedPrep)
+      .with({ _tag: "Abort" }, ({ abortDiagnostic }) => abortDiagnostic)
+      .with({ _tag: "Ok" }, () => {
+        const appliedStacked = applyStackedBaseOutcomes(
+          stackedPrep,
+          outcomes,
+          evaluatedFiles,
+          evaluatedFilesSet,
+        )
+        if (appliedStacked.dirtiedCache) cacheDirty = true
+        cachedKilledCount += appliedStacked.cachedKilledDelta
+        return undefined
+      })
+      .exhaustive()
+    if (prepAbort !== undefined) return abortWith(outcomes, prepAbort)
+  }
   if (diffPrep.abortDiagnostic !== undefined) return abortWith(outcomes, diffPrep.abortDiagnostic)
 
   const baseSubprocessEnv: Record<string, string | undefined> = {
@@ -372,8 +383,10 @@ export const runDomainMutationSuite = (
     if (confirmed.length < survivorLimit) return undefined
     if (!earlyTerminated) {
       earlyTerminated = true
-      for (const o of confirmed) {
-        process.stderr.write(`${formatSurvivorLine(o.mutant)}\n`)
+      if (options?.suppressSurvivorStderr !== true) {
+        for (const o of confirmed) {
+          process.stderr.write(`${formatSurvivorLine(o.mutant)}\n`)
+        }
       }
       flushCacheIfDirty()
       timingsTracker.flushIfDirty()
@@ -731,7 +744,7 @@ export const runDomainMutationSuite = (
         false,
       )
     },
-    onChunkFlushed: () => {
+    onBatchFlushed: () => {
       flushCacheIfDirty()
     },
     isEarlyStopped: () => earlyTerminated,

@@ -109,23 +109,76 @@ export const resolveGitCommitSha = (
     .exhaustive()
 }
 
+export type GitAncestorCheckResult =
+  | { readonly _tag: "Ancestor" }
+  | { readonly _tag: "NotAncestor" }
+  | { readonly _tag: "Error"; readonly reason: string }
+
+/**
+ * Checks whether `ancestorRef` is an ancestor of `descendantRef` using `git merge-base --is-ancestor`,
+ * distinguishing a clean non-ancestor exit (`1`) from spawn/timeout/unexpected git failures.
+ */
+export const checkGitAncestorCommit = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  ancestorRef: string,
+  descendantRef: string,
+): GitAncestorCheckResult => {
+  const args = [
+    "merge-base",
+    "--is-ancestor",
+    "--end-of-options",
+    ancestorRef,
+    descendantRef,
+  ] as const
+  const res = Result.try(() =>
+    hostIo.execFileSync("git", ["-c", "core.quotePath=false", ...args], {
+      cwd: repoRoot,
+      timeoutMs: GIT_TIMEOUT_MS,
+    }),
+  )
+  return match(res)
+    .with({ _tag: "Failure" }, ({ failure }) => ({
+      _tag: "Error" as const,
+      reason: `git ${args.join(" ")} threw: ${failure instanceof Error ? failure.message : String(failure)}`,
+    }))
+    .with({ _tag: "Success" }, ({ success }) =>
+      match(success)
+        .with({ _tag: "Exited" }, (r) => {
+          if (r.exitCode === 0) return { _tag: "Ancestor" as const }
+          if (r.exitCode === 1) return { _tag: "NotAncestor" as const }
+          const stderrPart = r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""
+          return {
+            _tag: "Error" as const,
+            reason: `git merge-base --is-ancestor failed (exitCode=${r.exitCode}${stderrPart})`,
+          }
+        })
+        .with({ _tag: "TimedOut" }, (r) => ({
+          _tag: "Error" as const,
+          reason: `git merge-base --is-ancestor timed out${r.stderr.trim().length > 0 ? ` (stderr=${r.stderr.trim()})` : ""}`,
+        }))
+        .with({ _tag: "Signaled" }, (r) => ({
+          _tag: "Error" as const,
+          reason: `git merge-base --is-ancestor signaled (${r.signal}${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
+        }))
+        .with({ _tag: "SpawnFailed" }, (r) => ({
+          _tag: "Error" as const,
+          reason: `git merge-base --is-ancestor spawn failed (${r.spawnError}${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
+        }))
+        .exhaustive(),
+    )
+    .exhaustive()
+}
+
 export const isGitAncestorCommit = (
   repoRoot: string,
   hostIo: SyncHostIo,
   ancestorRef: string,
   descendantRef: string,
 ): boolean =>
-  match(
-    runGitChecked(repoRoot, hostIo, [
-      "merge-base",
-      "--is-ancestor",
-      "--end-of-options",
-      ancestorRef,
-      descendantRef,
-    ]),
-  )
-    .with({ _tag: "Success" }, () => true)
-    .with({ _tag: "Failure" }, () => false)
+  match(checkGitAncestorCommit(repoRoot, hostIo, ancestorRef, descendantRef))
+    .with({ _tag: "Ancestor" }, () => true)
+    .with({ _tag: "NotAncestor" }, { _tag: "Error" }, () => false)
     .exhaustive()
 
 export const resolveEffectiveGitBaseRef = (

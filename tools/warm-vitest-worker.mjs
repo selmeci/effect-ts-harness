@@ -197,7 +197,7 @@ const synthesizeRunOutcome = (specs, runRes) => {
       summary: {
         _tag: "Exited",
         exitCode: 1,
-        stdout: ` FAIL  ${firstModuleErrLabel || "module error"}\n`,
+        stdout: "",
         stderr: truncateOutput(modAndUnhandledCombined),
         ...(killingTestFile.length > 0 ? { killingTestFile } : {}),
       },
@@ -477,6 +477,7 @@ const executeProbeMessage = async (msg) => {
         type: "probeResult",
         reqId: msg.reqId,
         ok: false,
+        error: `missing matching Vitest test specs (${specs.length}/${subsetFiles.length})`,
         durationsByTest: {},
         invalidateCallCount,
         rssBytes: process.memoryUsage().rss,
@@ -500,6 +501,11 @@ const executeProbeMessage = async (msg) => {
       specs.length === subsetFiles.length &&
       summary.exitCode === 0 &&
       !/\bTests\s+0\s+passed\b/i.test(summary.stdout)
+    const error = ok
+      ? undefined
+      : (summary.stderr.trim() || summary.stdout.trim() || `exitCode=${summary.exitCode}`)
+          .slice(0, 300)
+          .trim()
     const ranModuleIds = new Set(specs.map((s) => resolve(s.moduleId)))
     const durationsByTest = {}
     for (const mod of runRes.testModules ?? []) {
@@ -522,16 +528,19 @@ const executeProbeMessage = async (msg) => {
       type: "probeResult",
       reqId: msg.reqId,
       ok,
+      ...(error !== undefined ? { error } : {}),
       durationsByTest,
       invalidateCallCount,
       rssBytes: process.memoryUsage().rss,
     })
-  } catch {
+  } catch (err) {
     process.exitCode = 0
+    const rawErr = (err instanceof Error ? err.message : String(err)).trim()
     sendMsg({
       type: "probeResult",
       reqId: msg.reqId,
       ok: false,
+      error: rawErr.slice(0, 300).trim() || "probe execution failed",
       durationsByTest: {},
       invalidateCallCount,
       rssBytes: process.memoryUsage().rss,

@@ -6,7 +6,7 @@ import { isAbsolute, join, resolve } from "node:path"
 import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
-  type AstSourceFilePath,
+  AstSourceFilePath,
   type ContentSha256,
   MUTATION_HEAVY_TEST_THRESHOLD_MS,
   MUTATION_TEST_TIMING_EMA_ALPHA,
@@ -58,9 +58,11 @@ const HEAVY_META_TEST_BASENAMES: ReadonlySet<string> = new Set(
   ).split(","),
 )
 
+/** Returns true when `testAbsPath` matches the static heavy meta-test basename list. */
 export const isHeavyMetaTestAbsPath = (testAbsPath: string): boolean =>
   HEAVY_META_TEST_BASENAMES.has(testAbsPath.split(/[/\\]/).pop() ?? testAbsPath)
 
+/** Looks up a verified measured duration (ms) for `testAbsPath` by raw or resolved path. */
 export const lookupMeasuredTestDurationMs = (
   testAbsPath: string,
   measuredDurationMsByAbsPath?: ReadonlyMap<string, number>,
@@ -70,6 +72,10 @@ export const lookupMeasuredTestDurationMs = (
     : (measuredDurationMsByAbsPath.get(testAbsPath) ??
       measuredDurationMsByAbsPath.get(resolve(testAbsPath)))
 
+/**
+ * Classifies a test file as heavy using measured EMA duration when present, otherwise falling
+ * back to `isHeavyMetaTestAbsPath`.
+ */
 export const isHeavyTestByTimingOrStatic = (
   testAbsPath: string,
   measuredDurationMsByAbsPath?: ReadonlyMap<string, number>,
@@ -80,16 +86,44 @@ export const isHeavyTestByTimingOrStatic = (
     : isHeavyMetaTestAbsPath(testAbsPath)
 }
 
+/** Creates an empty `MutationTestTimingsStore` at the current schema version. */
 export const emptyMutationTestTimingsStore = (): MutationTestTimingsStore => ({
   version: TIMINGS_VERSION,
   entries: {},
 })
 
-export const buildTimingEntryKey = (
-  pkgKey: PackageRelKey,
-  relTestFile: AstSourceFilePath,
-): MutationTestTimingKey => MutationTestTimingKey.make(`${pkgKey}::${relTestFile}`)
+/**
+ * Builds a validated `MutationTestTimingKey` (`${pkgKey}::${relTestFile}`), rejecting control
+ * characters (`\0`, `\r`, `\n`), untrimmed/invalid paths, or malformed package keys.
+ */
+export const buildTimingEntryKey = (pkgKey: string, relTestFile: string): MutationTestTimingKey => {
+  const validPkg = Schema.decodeSync(PackageRelKey)(pkgKey)
+  const validRel = Schema.decodeSync(AstSourceFilePath)(relTestFile)
+  return Schema.decodeSync(MutationTestTimingKey)(`${validPkg}::${validRel}`)
+}
 
+/**
+ * Attempts to build a validated `MutationTestTimingKey` (`${pkgKey}::${relTestFile}`), returning
+ * `undefined` instead of throwing when `pkgKey` or `relTestFile` fails schema validation.
+ */
+export const tryBuildTimingEntryKey = (
+  pkgKey: string,
+  relTestFile: string,
+): MutationTestTimingKey | undefined => {
+  const validPkg = decodePkgKey(pkgKey)
+  if (validPkg === undefined) return undefined
+  return match(Schema.decodeOption(AstSourceFilePath)(relTestFile))
+    .with({ _tag: "None" }, () => undefined)
+    .with({ _tag: "Some" }, ({ value: validRel }) =>
+      match(Schema.decodeOption(MutationTestTimingKey)(`${validPkg}::${validRel}`))
+        .with({ _tag: "None" }, () => undefined)
+        .with({ _tag: "Some" }, ({ value }) => value)
+        .exhaustive(),
+    )
+    .exhaustive()
+}
+
+/** Computes the next clamped exponential moving average duration (ms) for a test file. */
 export const computeNextEmaDurationMs = (
   prevMs: number | undefined,
   observedMs: number,
@@ -148,19 +182,34 @@ const readLocalTimingsStore = (repoRoot: string, hostIo: SyncHostIo): ReadTiming
     .exhaustive()
 }
 
+/**
+ * Loads the mutation test timings store from the local state dir (or linked-worktree common repo
+ * read-only), logging a warning and falling back to an empty store when invalid or unsafe.
+ */
 export const loadMutationTestTimings = (
   repoRoot: string,
   hostIo: SyncHostIo,
 ): MutationTestTimingsStore =>
   match(readLocalTimingsStore(repoRoot, hostIo))
     .with({ _tag: "Loaded" }, ({ store }) => store)
-    .with({ _tag: "Rejected" }, () => emptyMutationTestTimingsStore())
+    .with({ _tag: "Rejected" }, () => {
+      process.stderr.write(
+        "[mutation-check] Warning: Ignoring invalid or unsafe mutation test timings file; falling back to static ordering.\n",
+      )
+      return emptyMutationTestTimingsStore()
+    })
     .with({ _tag: "MissingSafe" }, () => {
       const commonRoot = resolveLinkedWorktreeCommonRepoRoot(repoRoot, hostIo)
       if (commonRoot === undefined) return emptyMutationTestTimingsStore()
       return match(readLocalTimingsStore(commonRoot, { ...hostIo, getEnv: () => ({}) }))
         .with({ _tag: "Loaded" }, ({ store }) => store)
-        .with({ _tag: "MissingSafe" }, { _tag: "Rejected" }, () => emptyMutationTestTimingsStore())
+        .with({ _tag: "MissingSafe" }, () => emptyMutationTestTimingsStore())
+        .with({ _tag: "Rejected" }, () => {
+          process.stderr.write(
+            "[mutation-check] Warning: Ignoring invalid or unsafe mutation test timings file; falling back to static ordering.\n",
+          )
+          return emptyMutationTestTimingsStore()
+        })
         .exhaustive()
     })
     .exhaustive()
@@ -193,6 +242,10 @@ const mergeAndCapTimingsStore = (
   return { version: TIMINGS_VERSION, entries }
 }
 
+/**
+ * Merges `store` with any valid on-disk entries (preferring newer timestamps), caps at
+ * `MAX_TIMINGS_ENTRIES`, and atomically writes the timings cache file.
+ */
 export const saveMutationTestTimingsAtomic = (
   repoRoot: string,
   store: MutationTestTimingsStore,
@@ -263,6 +316,9 @@ const hashVerifiedTestFile = (
   return sha
 }
 
+/**
+ * Resolves `contentSha256`-verified EMA durations (ms) keyed by resolved test path for `pkgKey`.
+ */
 export const buildVerifiedTestTimingLookup = (
   input: {
     readonly repoRoot: string
@@ -281,7 +337,8 @@ export const buildVerifiedTestTimingLookup = (
     const absPath = isAbsolute(rawAbs) ? resolve(rawAbs) : resolve(resolvedRoot, rawAbs)
     const relTestFile = unwrapOption(normalizeRepoRelTestPath(resolvedRoot, absPath))
     if (relTestFile === undefined) continue
-    const key = buildTimingEntryKey(validPkgKey, relTestFile)
+    const key = tryBuildTimingEntryKey(validPkgKey, relTestFile)
+    if (key === undefined) continue
     const entry = Object.hasOwn(input.store.entries, key) ? input.store.entries[key] : undefined
     if (entry === undefined || entry.pkgKey !== validPkgKey || entry.relTestFile !== relTestFile)
       continue
@@ -291,6 +348,10 @@ export const buildVerifiedTestTimingLookup = (
   return out
 }
 
+/**
+ * Records observed test durations into `store`, updating EMA/sample counts when `contentSha256`
+ * matches and resetting when test contents change.
+ */
 export const recordObservedTestTimings = (
   input: {
     readonly repoRoot: string
@@ -323,7 +384,8 @@ export const recordObservedTestTimings = (
     if (relTestFile === undefined) continue
     const sha = hashVerifiedTestFile(resolve(input.repoRoot, relTestFile), input.hostIo, shaCache)
     if (sha === undefined) continue
-    const key = buildTimingEntryKey(validPkgKey, relTestFile)
+    const key = tryBuildTimingEntryKey(validPkgKey, relTestFile)
+    if (key === undefined) continue
     const prev = Object.hasOwn(nextEntries, key) ? nextEntries[key] : undefined
     const keepEma =
       prev !== undefined &&
@@ -343,6 +405,7 @@ export const recordObservedTestTimings = (
   return { store: dirty ? { version: TIMINGS_VERSION, entries: nextEntries } : input.store, dirty }
 }
 
+/** Creates a lazy per-suite test timings tracker that loads once, records observations, and flushes on exit. */
 export const createSuiteTimingsTracker = (repoRoot: string, hostIo: SyncHostIo) => {
   let store: MutationTestTimingsStore | undefined = undefined
   let dirty = false
@@ -373,8 +436,15 @@ export const createSuiteTimingsTracker = (repoRoot: string, hostIo: SyncHostIo) 
       }
     },
     flushIfDirty: (): void => {
-      if (dirty && store !== undefined && saveMutationTestTimingsAtomic(repoRoot, store, hostIo))
-        dirty = false
+      if (dirty && store !== undefined) {
+        if (saveMutationTestTimingsAtomic(repoRoot, store, hostIo)) {
+          dirty = false
+        } else {
+          process.stderr.write(
+            "[mutation-check] Warning: Failed to persist mutation test timings cache.\n",
+          )
+        }
+      }
     },
   }
 }
@@ -382,6 +452,10 @@ export const createSuiteTimingsTracker = (repoRoot: string, hostIo: SyncHostIo) 
 const VITEST_DURATION_LINE_RE =
   /^\s*[✓✔]\s+(?:\|[^|]+\|\s+)?(.+?)(?:\s+\([^)]*\))?\s+(\d+(?:\.\d+)?)(ms|s)(?:\s+\d+\s+MB heap used)?\s*$/
 
+/**
+ * Parses per-file Vitest baseline stdout durations (`ms`/`s`) into normalized repo-relative paths,
+ * falling back to `fallbackElapsedMs` only for single-file baseline runs.
+ */
 export const parseVitestBaselineTestDurations = (
   stdout: string,
   repoRoot: string,

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -22,8 +22,15 @@ import {
   runDomainMutationSuite,
   writeMutateStamp,
 } from "../src/index.js"
+import {
+  compileMutantSchemaModule,
+  discoverDomainMutants,
+} from "../src/mutation/mutant-ast-generator.js"
+import { checkGitAncestorCommit } from "../src/mutation/mutation-backup.js"
 import { loadMutationCache, saveMutationCacheAtomic } from "../src/mutation/mutation-cache.js"
-import { isolatedTestHostIo } from "./helpers/test-host-io.js"
+import { runPackageMutantBatchChecked } from "../src/mutation/mutation-package-batch.js"
+import { resolveStackedBaseContext } from "../src/mutation/mutation-stacked-base.js"
+import { isolatedTestHostIo, testHostIo } from "./helpers/test-host-io.js"
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../../..", import.meta.url)))
 
@@ -462,30 +469,105 @@ describe("mutation-stacked-base: SPEC-0034 Area 5", () => {
     }
   })
 
-  it("REQ-5.3: warm runner scripts enforce isolate: true unbypassably and --base main (DirectMain) verifies cleanly", () => {
-    const warmWorkerSrc = readFileSync(join(REPO_ROOT, "tools", "warm-vitest-worker.mjs"), "utf8")
-    const poolHelpersSrc = readFileSync(join(REPO_ROOT, "tools", "vitest-pool-helpers.mjs"), "utf8")
-    const pkgBatchSrc = readFileSync(join(REPO_ROOT, "tools", "package-vitest-batch.mjs"), "utf8")
-    const parBatchSrc = readFileSync(join(REPO_ROOT, "tools", "parallel-vitest-batch.mjs"), "utf8")
-    const mutCheckSrc = readFileSync(
-      join(REPO_ROOT, "libs", "harness", "gates", "src", "mutation-check.ts"),
-      "utf8",
-    )
+  it("REQ-5.3: warm batch enforces isolate:true despite HARNESS_MUTATE_WARM_ISOLATE=0/HARNESS_WARM_ISOLATE=0 and --base main (DirectMain) verifies cleanly", () => {
+    const isoDir = mkdtempSync(join(tmpdir(), "stacked-isolate-"))
+    try {
+      mkdirSync(join(isoDir, "libs", "demo", "core", "src"), { recursive: true })
+      mkdirSync(join(isoDir, "libs", "demo", "core", "test"), { recursive: true })
+      writeFileSync(join(isoDir, "package.json"), JSON.stringify({ type: "module" }), "utf8")
+      writeFileSync(
+        join(isoDir, "libs", "demo", "core", "package.json"),
+        JSON.stringify({ name: "@demo/core", nx: { tags: ["type:core"] } }),
+        "utf8",
+      )
+      symlinkSync(join(REPO_ROOT, "node_modules"), join(isoDir, "node_modules"), "dir")
+      symlinkSync(join(REPO_ROOT, "tools"), join(isoDir, "tools"), "dir")
 
-    expect(warmWorkerSrc).toContain("const warmIsolate = true")
-    expect(warmWorkerSrc).toContain("isolate: true")
-    expect(warmWorkerSrc).toContain("isolate: warmIsolate")
-    expect(warmWorkerSrc).toContain('delete process.env["HARNESS_MUTATE_WARM_ISOLATE"]')
-    expect(warmWorkerSrc).toContain('delete process.env["HARNESS_WARM_ISOLATE"]')
-    expect(poolHelpersSrc).toContain('HARNESS_WARM_ISOLATE: "1"')
-    expect(poolHelpersSrc).toContain('delete probeEnv["HARNESS_MUTATE_WARM_ISOLATE"]')
-    expect(poolHelpersSrc).toContain('delete workerEnv["HARNESS_MUTATE_WARM_ISOLATE"]')
-    expect(pkgBatchSrc).toContain('delete childBaseEnv["HARNESS_MUTATE_WARM_ISOLATE"]')
-    expect(pkgBatchSrc).toContain('delete childBaseEnv["HARNESS_WARM_ISOLATE"]')
-    expect(parBatchSrc).toContain('delete childBaseEnv["HARNESS_MUTATE_WARM_ISOLATE"]')
-    expect(parBatchSrc).toContain('delete childBaseEnv["HARNESS_WARM_ISOLATE"]')
-    expect(mutCheckSrc).toContain('delete baseSubprocessEnv["HARNESS_MUTATE_WARM_ISOLATE"]')
-    expect(mutCheckSrc).toContain('delete baseSubprocessEnv["HARNESS_WARM_ISOLATE"]')
+      const cacheModRel = "libs/demo/core/src/mod-cache.ts"
+      const targetRel = "libs/demo/core/src/target.ts"
+      const testRel = "libs/demo/core/test/target.test.ts"
+      writeFileSync(
+        join(isoDir, cacheModRel),
+        [
+          "const seen = new Set<string>()",
+          "export const checkOnce = (k: string): boolean => {",
+          "  const existed = seen.has(k)",
+          "  seen.add(k)",
+          "  return existed",
+          "}",
+        ].join("\n"),
+        "utf8",
+      )
+      const targetSrc = [
+        "export const evalA = (n: number): number => n + 1",
+        "export const evalSurv = (n: number): number => n - 1",
+      ].join("\n")
+      writeFileSync(join(isoDir, targetRel), targetSrc, "utf8")
+      writeFileSync(
+        join(isoDir, testRel),
+        [
+          'import { expect, it } from "vitest"',
+          'import { checkOnce } from "../src/mod-cache.js"',
+          'import { evalA, evalSurv } from "../src/target.js"',
+          'it("fresh module state per mutant", () => {',
+          '  expect(checkOnce("a")).toBe(false)',
+          "  expect(evalA(2)).toBe(3)",
+          '  expect(typeof evalSurv).toBe("function")',
+          "})",
+        ].join("\n"),
+        "utf8",
+      )
+
+      const mutants = discoverDomainMutants(targetRel, targetSrc)
+      const mod = compileMutantSchemaModule(targetRel, targetSrc, mutants)
+      const batchRes = runPackageMutantBatchChecked({
+        repoRoot: isoDir,
+        pkgKey: "demo/core",
+        backupPath: join(isoDir, ".harness", "mutation-backup.json"),
+        hostIo: testHostIo,
+        baseSubprocessEnv: {
+          ...process.env,
+          HARNESS_MUTATE_WARM_ISOLATE: "0",
+          HARNESS_WARM_ISOLATE: "0",
+          HARNESS_MUTATE_CONCURRENCY: "1",
+        },
+        allPackageTests: [testRel],
+        files: [
+          {
+            file: {
+              scope: "demo",
+              pkgDir: "core",
+              pkgName: "@demo/core",
+              tier: "core",
+              fullPath: join(isoDir, targetRel),
+              relFile: targetRel,
+            },
+            originalContent: targetSrc,
+            schemaSource: mod.schemaSource,
+            mutants,
+            uncachedMutants: mutants,
+            primaryTests: [testRel],
+            scopedFallbackTests: [],
+            packageFallbackTests: [],
+            fallbackTests: [],
+            cachedHitIds: new Set<string>(),
+          },
+        ],
+      })
+      match(batchRes)
+        .with({ _tag: "Abort" }, ({ diagnostic }) => expect.unreachable(diagnostic))
+        .with({ _tag: "Ok" }, ({ fileResults }) => {
+          expect(fileResults).toHaveLength(1)
+          const outcomes = Array.from(fileResults[0]!.fileOutcomes.values())
+          const killed = outcomes.filter((o) => o.status === "killed")
+          const survived = outcomes.filter((o) => o.status === "survived")
+          expect(killed.length).toBeGreaterThanOrEqual(1)
+          expect(survived.length).toBeGreaterThanOrEqual(1)
+        })
+        .exhaustive()
+    } finally {
+      rmSync(isoDir, { recursive: true, force: true })
+    }
 
     const fixture = createStackedGitFixture()
     try {
@@ -507,7 +589,7 @@ describe("mutation-stacked-base: SPEC-0034 Area 5", () => {
     } finally {
       rmSync(fixture.repoRoot, { recursive: true, force: true })
     }
-  })
+  }, 60_000)
 
   it("REQ-5.1 & REQ-5.2: child edits to ancestor file expand all ancestor lines without duplicate outcomes, and comment-only child passes with zero Vitest runs", () => {
     const fixture = createStackedGitFixture()
@@ -568,6 +650,97 @@ describe("mutation-stacked-base: SPEC-0034 Area 5", () => {
       expect(childEditReport.ancestorExpandedMutantCount ?? 0).toBeGreaterThan(0)
       expect(childEditReport.evaluatedFiles).toEqual([fixture.relA])
     } finally {
+      rmSync(fixture.repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("REQ-5.1 Security: rejects option-injection and control-char base refs and propagates git merge-base errors into FallbackToMain", () => {
+    const fixture = createStackedGitFixture()
+    const origWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = (() => true) as typeof process.stderr.write
+    try {
+      for (const badRef of ["--exec=echo", "--output=/tmp/x", "parent\0bad", "parent\nbad"]) {
+        const res = resolveStackedBaseContext({
+          repoRoot: fixture.repoRoot,
+          parentRef: badRef,
+          hostIo: isolatedTestHostIo,
+        })
+        match(res)
+          .with({ _tag: "FallbackToMain" }, ({ reason }) => {
+            expect(reason).toBe("invalid base ref")
+          })
+          .with({ _tag: "DirectMain" }, { _tag: "Stacked" }, { _tag: "Failed" }, (other) =>
+            expect.unreachable(`Expected FallbackToMain for ${badRef}, got ${other._tag}`),
+          )
+          .exhaustive()
+      }
+
+      const exitedErrorIo: SyncHostIo = {
+        ...isolatedTestHostIo,
+        execFileSync: () => ({
+          _tag: "Exited",
+          exitCode: 128,
+          stdout: "",
+          stderr: "fatal: bad object",
+        }),
+      }
+      const timedOutIo: SyncHostIo = {
+        ...isolatedTestHostIo,
+        execFileSync: () => ({ _tag: "TimedOut", stdout: "", stderr: "" }),
+      }
+      const signaledIo: SyncHostIo = {
+        ...isolatedTestHostIo,
+        execFileSync: () => ({ _tag: "Signaled", signal: "SIGKILL", stdout: "", stderr: "" }),
+      }
+      const spawnFailedIo: SyncHostIo = {
+        ...isolatedTestHostIo,
+        execFileSync: () => ({
+          _tag: "SpawnFailed",
+          spawnError: "ENOENT",
+          stdout: "",
+          stderr: "",
+        }),
+      }
+      const throwingIo: SyncHostIo = {
+        ...isolatedTestHostIo,
+        execFileSync: () => {
+          throw new Error("boom")
+        },
+      }
+      for (const io of [exitedErrorIo, timedOutIo, signaledIo, spawnFailedIo, throwingIo]) {
+        const anc = checkGitAncestorCommit(fixture.repoRoot, io, "parent", "HEAD")
+        expect(anc._tag).toBe("Error")
+      }
+
+      const mergeBaseFailIo: SyncHostIo = {
+        ...isolatedTestHostIo,
+        execFileSync: (cmd, args, opts) => {
+          if (cmd === "git" && args.includes("merge-base") && args.includes("--is-ancestor")) {
+            return {
+              _tag: "Exited",
+              exitCode: 128,
+              stdout: "",
+              stderr: "fatal: corrupt commit graph",
+            }
+          }
+          return isolatedTestHostIo.execFileSync(cmd, args, opts)
+        },
+      }
+      const mergeBaseRes = resolveStackedBaseContext({
+        repoRoot: fixture.repoRoot,
+        parentRef: "parent",
+        hostIo: mergeBaseFailIo,
+      })
+      match(mergeBaseRes)
+        .with({ _tag: "FallbackToMain" }, ({ reason }) => {
+          expect(reason).toContain("git merge-base error:")
+        })
+        .with({ _tag: "DirectMain" }, { _tag: "Stacked" }, { _tag: "Failed" }, (other) =>
+          expect.unreachable(`Expected FallbackToMain, got ${other._tag}`),
+        )
+        .exhaustive()
+    } finally {
+      process.stderr.write = origWrite
       rmSync(fixture.repoRoot, { recursive: true, force: true })
     }
   })

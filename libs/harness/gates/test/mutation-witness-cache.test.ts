@@ -970,4 +970,79 @@ describe("SPEC-0034 Area 1: Witness-Scoped Mutation Cache & Incremental Flush", 
       rmSync(repoRoot, { recursive: true, force: true })
     }
   })
+
+  it("REQ-1.4 Security Hardening: test file combining mkdtempSync + REPO_ROOT / REAL_REPO_ROOT + 'libs' triggers usedFallbackAllLibs === true", () => {
+    const repoRoot = setupWitnessTempRepo()
+    try {
+      const srcDir = join(repoRoot, "libs", "sample", "domain", "src")
+      const testDir = join(repoRoot, "libs", "sample", "domain", "test")
+      writeFileMkdir(join(srcDir, "helper.ts"), "export const helper = (x: number): number => x\n")
+      writeFileMkdir(
+        join(testDir, "tmp-real-root.test.ts"),
+        [
+          'import { mkdtempSync, readFileSync } from "node:fs"',
+          'import { tmpdir } from "node:os"',
+          'import { join, resolve } from "node:path"',
+          'import { helper } from "../src/helper.js"',
+          'const REAL_REPO_ROOT = resolve(import.meta.dirname, "../../../..")',
+          "export const runWithTmp = () => {",
+          '  const dir = mkdtempSync(join(tmpdir(), "x-"))',
+          '  const content = readFileSync(join(REAL_REPO_ROOT, "libs", "es", "infra", "src", "memory.ts"), "utf8")',
+          "  return { dir, content, val: helper(1) }",
+          "}",
+        ].join("\n"),
+      )
+      writeFileMkdir(
+        join(testDir, "tmp-repo-root.test.ts"),
+        [
+          'import { mkdtempSync, symlinkSync } from "node:fs"',
+          'import { tmpdir } from "node:os"',
+          'import { join, resolve } from "node:path"',
+          'import { helper } from "../src/helper.js"',
+          'const REPO_ROOT = resolve(import.meta.dirname, "../../../..")',
+          "export const runWithSym = () => {",
+          '  const dir = mkdtempSync(join(tmpdir(), "y-"))',
+          '  symlinkSync(join(REPO_ROOT, "libs"), join(dir, "libs"), "dir")',
+          "  return helper(2)",
+          "}",
+        ].join("\n"),
+      )
+
+      const getClosure = (witness: string) => {
+        const digests = unwrapOpt(computeMutationContextDigests(repoRoot, isolatedTestHostIo))
+        return match(
+          computeFileMutationClosureDigest({
+            repoRoot,
+            relFile: "libs/sample/domain/src/helper.ts",
+            allReachingTests: [witness],
+            digests,
+            hostIo: isolatedTestHostIo,
+          }),
+        )
+          .with({ _tag: "Ok" }, (ok) => ok)
+          .with({ _tag: "Disabled" }, ({ reason }) => {
+            throw new Error(`Expected Ok closure: ${reason}`)
+          })
+          .exhaustive()
+      }
+
+      const realRootBefore = getClosure("libs/sample/domain/test/tmp-real-root.test.ts")
+      const repoRootBefore = getClosure("libs/sample/domain/test/tmp-repo-root.test.ts")
+      expect(realRootBefore.usedFallbackAllLibs).toBe(true)
+      expect(repoRootBefore.usedFallbackAllLibs).toBe(true)
+
+      writeFileMkdir(
+        join(repoRoot, "libs", "es", "infra", "src", "memory.ts"),
+        "export const mem = () => 12345\n",
+      )
+      expect(getClosure("libs/sample/domain/test/tmp-real-root.test.ts").closureDigest).not.toBe(
+        realRootBefore.closureDigest,
+      )
+      expect(getClosure("libs/sample/domain/test/tmp-repo-root.test.ts").closureDigest).not.toBe(
+        repoRootBefore.closureDigest,
+      )
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true })
+    }
+  })
 })

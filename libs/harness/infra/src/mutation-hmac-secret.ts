@@ -233,7 +233,7 @@ const readExistingValidatedKey = (
 }
 
 /**
- * Resolves or atomically initializes the out-of-workspace HMAC secret used to sign `mutation-cache-v2.json`.
+ * Resolves or atomically initializes the out-of-workspace HMAC secret used to sign `mutation-cache-v3.json`.
  *
  * Key directory precedence: `options.keyDirOverride` → `env.XDG_CACHE_HOME/effect-harness` →
  * `~/.cache/effect-harness`, enforced outside `repoRoot` with `0o700` directory and `0o600` key permissions

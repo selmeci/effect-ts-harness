@@ -491,7 +491,11 @@ export const preparePackageBaselines = (input: {
           input.onObservedDurations?.(pkgKey, observedDurationsMs)
         }
       })
-      .with({ _tag: "Failed" }, () => {})
+      .with({ _tag: "Failed" }, ({ diagnostic }) => {
+        process.stderr.write(
+          `[mutation-check] Warning: Batched package baseline for '${pkgKey}' failed (${diagnostic}); falling back to per-file baselines.\n`,
+        )
+      })
       .exhaustive()
   }
 

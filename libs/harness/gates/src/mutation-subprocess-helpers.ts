@@ -567,7 +567,6 @@ export const runVitestTargetList = (
               HARNESS_BATCH_TIMEOUT_MS: String(scaledTimeoutMs),
               HARNESS_BATCH_TESTS_JSON: JSON.stringify(reachingTestFiles),
               HARNESS_BATCH_MUTANTS_JSON: JSON.stringify(mutantsToRun.map((m) => m.id)),
-              HARNESS_BATCH_TARGET_FILE: file.fullPath,
             },
           }),
         )

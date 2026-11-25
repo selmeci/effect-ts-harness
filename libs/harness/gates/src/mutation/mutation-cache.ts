@@ -7,15 +7,12 @@ import {
   ContentSha256,
   MUTATION_CACHE_FILENAME,
   MUTATION_CACHE_SCHEMA_VERSION,
-  MutantCacheId,
   type MutationCacheAuth,
   MutationCacheEntry,
   MutationCacheLookupDecision,
   type MutationCacheLookupInput,
   MutationCacheMac,
-  type MutationCacheStatus,
   MutationCacheStore,
-  MutationCacheTimestamp,
   MutationMaxAgeMillis,
   type PackageRelKey,
   type RedactedMutationCacheHmacSecret,
@@ -52,15 +49,7 @@ export {
 export const MAX_MUTATION_CACHE_ENTRIES = 5000
 export const MAX_MUTATION_CACHE_AGE_MS = 12 * 60 * 60 * 1000
 
-export interface ComputeMutationEntryMacInput {
-  readonly key: ContentSha256
-  readonly file: AstSourceFilePath
-  readonly mutantId: MutantCacheId
-  readonly status: MutationCacheStatus
-  readonly recordedAt: MutationCacheTimestamp
-  readonly witnessTestFile: AstSourceFilePath
-  readonly witnessClosureSha256: ContentSha256
-}
+export type ComputeMutationEntryMacInput = Omit<MutationCacheEntry, "mac">
 
 export interface ComputeMutantCacheKeyInput {
   readonly pkgKey: PackageRelKey

@@ -249,7 +249,19 @@ const containsDirOrMetaAnchor = (root: ts.Node): boolean => {
 const isDirectRepoLibsLiteral = (text: string): boolean =>
   text === "libs" || text === "./libs" || text.startsWith("libs/") || text.startsWith("./libs/")
 
-const scanSourceAst = (source: string, isTestFile = false): AstClosureScan => {
+const REPO_ROOT_ANCHOR_IDENTIFIERS: ReadonlySet<string> = new Set([
+  "CLI_REPO_ROOT",
+  "REPO_ROOT",
+  "REAL_REPO_ROOT",
+  "WORKSPACE_ROOT",
+])
+
+const scanSourceAst = (
+  source: string,
+  isTestFile = false,
+  relPath?: string,
+  debugEnabled = false,
+): AstClosureScan => {
   const pre = ts.preProcessFile(source, true, true)
   const specifiers: Array<string> = pre.importedFiles.map((f) => f.fileName)
   let hasNonLiteralDynamicImport = false
@@ -279,7 +291,8 @@ const scanSourceAst = (source: string, isTestFile = false): AstClosureScan => {
     if (
       text === "pnpm-workspace.yaml" ||
       text.endsWith("/pnpm-workspace.yaml") ||
-      text.endsWith("\\pnpm-workspace.yaml")
+      text.endsWith("\\pnpm-workspace.yaml") ||
+      /(?:^|\s)--show-toplevel(?=$|\s)/.test(text)
     ) {
       hasRealRepoRootAnchor = true
     }
@@ -301,7 +314,7 @@ const scanSourceAst = (source: string, isTestFile = false): AstClosureScan => {
 
   const sf = ts.createSourceFile("closure.ts", source, ts.ScriptTarget.Latest, true)
   const visit = (node: ts.Node) => {
-    if (ts.isIdentifier(node) && node.text === "CLI_REPO_ROOT") {
+    if (ts.isIdentifier(node) && REPO_ROOT_ANCHOR_IDENTIFIERS.has(node.text)) {
       hasRealRepoRootAnchor = true
     }
     if (ts.isNewExpression(node)) {
@@ -378,6 +391,16 @@ const scanSourceAst = (source: string, isTestFile = false): AstClosureScan => {
   visit(sf)
 
   const excludedAsTempFixture = hasTempDirFixture && !hasRealRepoRootAnchor
+  if (
+    excludedAsTempFixture &&
+    hasDirectLibsLiteral &&
+    (hasPathOrFsCall || hasDirectFsIoCall) &&
+    debugEnabled
+  ) {
+    process.stderr.write(
+      `[mutation-closure] Debug: Excluded temp-dir fixture${relPath !== undefined ? ` '${relPath}'` : ""} from allLibsSrcDigest fallback (direct libs/ literal with path/fs call without repo-root anchor).\n`,
+    )
+  }
   if (!excludedAsTempFixture && hasDirectLibsLiteral && hasPathOrFsCall) {
     hasLibsFsTraversal = true
   }
@@ -651,6 +674,10 @@ export const computeFileMutationClosureDigest = (
   let closureHasLibsFsTraversal = false
   let closureHasTestLibsLiteralAndFsIo = false
 
+  const debugEnabled =
+    unwrapOption(unwrapResult(Result.try(() => input.hostIo.getEnv()["HARNESS_MUTATE_DEBUG"]))) ===
+    "1"
+
   while (queue.length > 0) {
     const relPath = queue.shift()!
     const pkgKey = extractPackageKey(relPath)
@@ -669,7 +696,7 @@ export const computeFileMutationClosureDigest = (
     filePairs.push([relPath, fileSha])
 
     const isTestFile = /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(relPath)
-    const scan = scanSourceAst(content, isTestFile)
+    const scan = scanSourceAst(content, isTestFile, relPath, debugEnabled)
     if (scan.needsDocs) needsDocs = true
     if (scan.needsAgentPatterns) needsAgentPatterns = true
     if (scan.needsAdapters) needsAdapters = true

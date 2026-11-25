@@ -1,5 +1,9 @@
 import { Schema } from "effect"
-import { AstSourceFilePath, ContentSha256 } from "./ast-and-gate-primitives.js"
+import {
+  AstSourceFilePath,
+  ContentSha256,
+  TestTimingDurationMs,
+} from "./ast-and-gate-primitives.js"
 import {
   BatchExitCode,
   ErrorReasonMessage,
@@ -95,7 +99,7 @@ export type MutationMaxAgeMillis = typeof MutationMaxAgeMillis.Type
 
 export const PackageRelKey = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),
-  Schema.check(Schema.isPattern(/^[^\0]+$/)),
+  Schema.check(Schema.isPattern(/^[^\0\r\n:]+$/)),
   Schema.brand("PackageRelKey"),
 )
 export type PackageRelKey = typeof PackageRelKey.Type
@@ -187,13 +191,8 @@ export type BatchMutantResultEntry = typeof BatchMutantResultEntry.Type
 
 export const BatchMutantResultsSchema = Schema.fromJsonString(Schema.Array(BatchMutantResultEntry))
 
-export const TestTimingDurationMs = Schema.Finite.pipe(
-  Schema.check(Schema.isGreaterThanOrEqualTo(0)),
-  Schema.brand("TestTimingDurationMs"),
-)
-export type TestTimingDurationMs = typeof TestTimingDurationMs.Type
-
 export const PackageBatchFileOutputSchema = Schema.Struct({
+  schemaVersion: Schema.optional(Schema.Literal(1)),
   relFile: AstSourceFilePath,
   primaryResults: Schema.Array(BatchMutantResultEntry),
   scopedFallbackResults: Schema.Array(BatchMutantResultEntry),

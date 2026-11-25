@@ -274,6 +274,8 @@ describe("MutationCache contract schemas", () => {
     expectRejected(Schema.decodeExit(MutationEpochMillis)(-1))
     expectRejected(Schema.decodeExit(MutationMaxAgeMillis)(0))
     expectRejected(Schema.decodeExit(PackageRelKey)(""))
+    expectRejected(Schema.decodeExit(PackageRelKey)("pkg:colon"))
+    expectRejected(Schema.decodeExit(PackageRelKey)("pkg\nnewline"))
     expectRejected(Schema.decodeExit(RuntimeVersionTag)(""))
 
     // Invalid MutationCacheLookupInput & MutationCacheLookupDecision
@@ -348,11 +350,31 @@ describe("MutationCache contract schemas", () => {
       observedTestDurationsMs: { [sampleWitnessTest]: 12.5 },
       restoreError: "restore failed",
     })
+    expect(validBatchOutput.schemaVersion).toBeUndefined()
     expect(validBatchOutput.relFile).toBe(AstSourceFilePath.make("libs/sample/domain/src/logic.ts"))
     expect(validBatchOutput.observedTestDurationsMs?.[sampleWitnessTest]).toBe(
       TestTimingDurationMs.make(12.5),
     )
     expect(validBatchOutput.restoreError).toBe(ErrorReasonMessage.make("restore failed"))
+
+    const validVersionedBatchOutput = Schema.decodeSync(PackageBatchFileOutputSchema)({
+      schemaVersion: 1,
+      relFile: "libs/sample/domain/src/logic.ts",
+      primaryResults: [],
+      scopedFallbackResults: [],
+      packageFallbackResults: [],
+    })
+    expect(validVersionedBatchOutput.schemaVersion).toBe(1)
+
+    expectRejected(
+      Schema.decodeUnknownExit(PackageBatchFileOutputSchema)({
+        schemaVersion: 2,
+        relFile: "libs/sample/domain/src/logic.ts",
+        primaryResults: [],
+        scopedFallbackResults: [],
+        packageFallbackResults: [],
+      }),
+    )
 
     expectRejected(
       Schema.decodeExit(PackageBatchFileOutputSchema)({

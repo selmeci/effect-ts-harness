@@ -81,6 +81,11 @@ let activeMutation = null
 
 const sha256Hex = (text) => createHash("sha256").update(text, "utf8").digest("hex")
 
+const normalizeErrorReason = (msg, fallback = "[mutation-check] Runner error") => {
+  const t = String(msg ?? "").trim()
+  return t.length > 0 ? t : fallback
+}
+
 const assertNotSymlinkSync = (targetPath, { allowMissing = false } = {}) => {
   let st
   try {
@@ -126,13 +131,17 @@ const restoreActiveMutationSync = () => {
         const currentDisk = readFileSync(cur.fullPath, "utf8")
         const diskSha = sha256Hex(currentDisk)
         if (diskSha !== cur.mutatedSha256) {
-          return `[mutation-check] CRITICAL: Target '${cur.relFile}' was modified externally mid-run (sha256=${diskSha}); refusing to overwrite user edits. Preserving '${backupPath}'.`
+          return normalizeErrorReason(
+            `[mutation-check] CRITICAL: Target '${cur.relFile}' was modified externally mid-run (sha256=${diskSha}); refusing to overwrite user edits. Preserving '${backupPath}'.`,
+          )
         }
       }
       writeFileAtomicSync(cur.fullPath, cur.originalSource)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      return `[mutation-check] CRITICAL: Failed to restore '${cur.fullPath}' (${msg}). Preserving '${backupPath}'.`
+      return normalizeErrorReason(
+        `[mutation-check] CRITICAL: Failed to restore '${cur.fullPath}' (${msg}). Preserving '${backupPath}'.`,
+      )
     }
   }
   try {
@@ -141,7 +150,9 @@ const restoreActiveMutationSync = () => {
     if (existsSync(backupPath)) unlinkSync(backupPath)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    return `[mutation-check] CRITICAL: Restored '${cur.fullPath}' but failed to unlink '${backupPath}': ${msg}`
+    return normalizeErrorReason(
+      `[mutation-check] CRITICAL: Restored '${cur.fullPath}' but failed to unlink '${backupPath}': ${msg}`,
+    )
   }
   return undefined
 }
@@ -206,8 +217,15 @@ const isCleanSurvivorResult = (result) =>
 
 const appendStreamReport = (report) => {
   if (streamReportPath === undefined) return
-  mkdirSync(dirname(streamReportPath), { recursive: true })
-  appendFileSync(streamReportPath, `${JSON.stringify(report)}\n`, "utf8")
+  try {
+    mkdirSync(dirname(streamReportPath), { recursive: true })
+    appendFileSync(streamReportPath, `${JSON.stringify(report)}\n`, "utf8")
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    process.stderr.write(
+      `[package-vitest-batch] Warning: Failed to append stream report '${streamReportPath}': ${msg}\n`,
+    )
+  }
 }
 
 const createObservedDurationRecorder = (targetRecord) => {
@@ -245,7 +263,11 @@ const ensureStageBaselined = async ({
     if (ref.current) {
       usedWarm = true
       res = await ref.current.runSubset("", unbaselined, timeoutMs, "", onObservedDurations)
-      if (ref.current && !ref.current.isAlive()) {
+      if (res?._tag === "SpawnFailed") {
+        await ref.current.shutdown()
+        ref.current = null
+        res = null
+      } else if (ref.current && !ref.current.isAlive()) {
         await ref.current.shutdown()
         ref.current = null
       }
@@ -256,8 +278,15 @@ const ensureStageBaselined = async ({
     res = (await coldFallback("", unbaselined, timeoutMs)).result
   }
   if (!isCleanSurvivorResult(res)) {
-    const detail = ((res?.stderr ?? "") || (res?.stdout ?? "")).trim().slice(0, 300)
-    return `[mutation-check] Baseline test suite failed on fallback tests for '${relFile}' (${unbaselined.length} file(s)): ${detail}`
+    const detail = ((res?.spawnError ?? "") || (res?.stderr ?? "") || (res?.stdout ?? ""))
+      .trim()
+      .slice(0, 300)
+      .trim()
+    const msg =
+      detail.length > 0
+        ? `[mutation-check] Baseline test suite failed on fallback tests for '${relFile}' (${unbaselined.length} file(s)): ${detail}`
+        : `[mutation-check] Baseline test suite failed on fallback tests for '${relFile}' (${unbaselined.length} file(s))`
+    return normalizeErrorReason(msg)
   }
   if (!usedWarm && unbaselined.length === 1 && typeof onObservedDurations === "function") {
     onObservedDurations({
@@ -269,7 +298,6 @@ const ensureStageBaselined = async ({
 }
 
 const probeCache = new Map()
-const probeStats = { inWorkerProbes: 0, cachedProbes: 0, coldProbes: 0 }
 
 const runMutantPassWithPool = async ({
   workerRefs,
@@ -299,7 +327,9 @@ const runMutantPassWithPool = async ({
         relFile,
         onObservedDurations,
       })
-      if (baseErr !== undefined) return { results: [], baselineError: baseErr }
+      if (baseErr !== undefined) {
+        return { results: [], baselineError: normalizeErrorReason(baseErr) }
+      }
     }
     let nextIdx = 0
     await Promise.all(
@@ -332,7 +362,6 @@ const runMutantPassWithPool = async ({
     spawnWorker,
     probeCache,
     probeCacheKey,
-    probeStats,
     onObservedDurations,
     heavyThresholdMs,
     testDurationsMs,
@@ -347,7 +376,9 @@ const runMutantPassWithPool = async ({
       relFile,
       onObservedDurations,
     })
-    if (baseErr !== undefined) return { results: [], baselineError: baseErr }
+    if (baseErr !== undefined) {
+      return { results: [], baselineError: normalizeErrorReason(baseErr) }
+    }
   }
 
   let nextIdx = 0
@@ -442,7 +473,7 @@ const runTwoPhasePass = async ({
       onObservedDurations,
     })
     if (passA.baselineError !== undefined) {
-      return { results: [], baselineError: passA.baselineError }
+      return { results: [], baselineError: normalizeErrorReason(passA.baselineError) }
     }
     stageAResults = passA.results
   }
@@ -470,7 +501,7 @@ const runTwoPhasePass = async ({
       onObservedDurations,
     })
     if (passB.baselineError !== undefined) {
-      return { results: [], baselineError: passB.baselineError }
+      return { results: [], baselineError: normalizeErrorReason(passB.baselineError) }
     }
     stageBResults = passB.results
   }
@@ -533,7 +564,7 @@ const runFallbackStagePass = async ({
     onObservedDurations,
   })
   return pass.baselineError !== undefined
-    ? { results: [], baselineError: pass.baselineError }
+    ? { results: [], baselineError: normalizeErrorReason(pass.baselineError) }
     : { results: pass.results, baselineError: undefined }
 }
 
@@ -611,12 +642,15 @@ try {
       if (diskSha !== file.originalSha256) {
         activeMutation = null
         const errReport = {
+          schemaVersion: 1,
           relFile: file.relFile,
           primaryResults: [],
           scopedFallbackResults: [],
           packageFallbackResults: [],
           observedTestDurationsMs,
-          restoreError: `[mutation-check] Refusing to mutate '${file.relFile}': disk sha256 (${diskSha}) does not match planned originalSha256 (${file.originalSha256}).`,
+          restoreError: normalizeErrorReason(
+            `[mutation-check] Refusing to mutate '${file.relFile}': disk sha256 (${diskSha}) does not match planned originalSha256 (${file.originalSha256}).`,
+          ),
         }
         fileReports.push(errReport)
         appendStreamReport(errReport)
@@ -635,18 +669,20 @@ try {
           }),
           { allowMissing: true },
         )
-        activeMutation.wroteSchema = true
         writeFileAtomicSync(file.fullPath, file.schemaSource)
+        activeMutation.wroteSchema = true
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      activeMutation.writeFailed = true
+      if (activeMutation !== null) activeMutation.writeFailed = true
       const cleanupErr = restoreActiveMutationSync()
-      const restoreError =
+      const restoreError = normalizeErrorReason(
         cleanupErr !== undefined
           ? `[mutation-check] Failed to write mutated schema for '${file.relFile}': ${msg}; ${cleanupErr}`
-          : `[mutation-check] Failed to write mutated schema for '${file.relFile}': ${msg}`
+          : `[mutation-check] Failed to write mutated schema for '${file.relFile}': ${msg}`,
+      )
       const errReport = {
+        schemaVersion: 1,
         relFile: file.relFile,
         primaryResults: [],
         scopedFallbackResults: [],
@@ -718,12 +754,13 @@ try {
     prevFullPath = file.fullPath
     const reportErr = restoreErr ?? scopedBaselineError ?? packageBaselineError
     const fileReport = {
+      schemaVersion: 1,
       relFile: file.relFile,
       primaryResults,
       scopedFallbackResults,
       packageFallbackResults,
       observedTestDurationsMs,
-      ...(reportErr !== undefined ? { restoreError: reportErr } : {}),
+      ...(reportErr !== undefined ? { restoreError: normalizeErrorReason(reportErr) } : {}),
     }
     fileReports.push(fileReport)
     appendStreamReport(fileReport)

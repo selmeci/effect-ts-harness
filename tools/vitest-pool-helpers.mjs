@@ -36,16 +36,6 @@ const VERY_HEAVY_TESTS = new Set([
 
 export const DEFAULT_HEAVY_TEST_THRESHOLD_MS = 2_000
 
-export const sortTestsByStaticSpeed = (tests) =>
-  [...tests].sort((a, b) => {
-    const baseA = a.split(/[/\\]/).pop() ?? a
-    const baseB = b.split(/[/\\]/).pop() ?? b
-    const rankA = VERY_HEAVY_TESTS.has(baseA) ? 2 : isHeavyMetaTest(a) ? 1 : 0
-    const rankB = VERY_HEAVY_TESTS.has(baseB) ? 2 : isHeavyMetaTest(b) ? 1 : 0
-    if (rankA !== rankB) return rankA - rankB
-    return a < b ? -1 : a > b ? 1 : 0
-  })
-
 export const lookupTestDurationMs = (testDurationsMs, cwd, testPath) => {
   if (typeof testDurationsMs !== "object" || testDurationsMs === null) return undefined
   const direct = testDurationsMs[testPath]
@@ -357,20 +347,29 @@ const runExternalProbeProcess = async ({
         env: probeEnv,
         stdio: ["ignore", "pipe", "pipe", "ipc"],
       })
-    } catch {
-      resolvePromise({ ok: false, durationsByTest: {} })
+    } catch (err) {
+      const rawMsg = (err instanceof Error ? err.message : String(err)).trim()
+      resolvePromise({
+        ok: false,
+        reason: rawMsg || "fork failed",
+        durationsByTest: {},
+      })
       return
     }
     tracker.activeChildren.add(child)
     let doneOk = false
     let durationsByTest = {}
     let settled = false
-    const finish = (ok) => {
+    const finish = (ok, reason = undefined) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       tracker.activeChildren.delete(child)
-      resolvePromise({ ok, durationsByTest })
+      resolvePromise({
+        ok,
+        ...(reason !== undefined ? { reason } : {}),
+        durationsByTest,
+      })
     }
     const timer = setTimeout(
       () => {
@@ -379,7 +378,7 @@ const runExternalProbeProcess = async ({
         } catch {
           // Best-effort kill on probe timeout
         }
-        finish(false)
+        finish(false, "timed out")
       },
       Math.max(timeoutMs, 45_000),
     )
@@ -393,8 +392,14 @@ const runExternalProbeProcess = async ({
         }
       }
     })
-    child.on("error", () => finish(false))
-    child.on("close", (code) => finish(doneOk && code === 0))
+    child.on("error", (err) => {
+      const rawMsg = (err instanceof Error ? err.message : String(err)).trim()
+      finish(false, rawMsg || "probe child error")
+    })
+    child.on("close", (code) => {
+      const ok = doneOk && code === 0
+      finish(ok, ok ? undefined : `exitCode=${code}, doneOk=${doneOk}`)
+    })
   })
 }
 
@@ -450,6 +455,9 @@ export const runCoverageProbe = async ({
         if (workerRef) workerRef.current = worker
       }
       if (!worker || typeof worker.runProbe !== "function") {
+        process.stderr.write(
+          "[mutation-check] Warning: Coverage probe failed (warm worker unavailable); falling back without Stage 0 probe.\n",
+        )
         return null
       }
       if (probeStats) probeStats.inWorkerProbes = (probeStats.inWorkerProbes ?? 0) + 1
@@ -458,7 +466,16 @@ export const runCoverageProbe = async ({
         await workerRef.current.shutdown()
         workerRef.current = null
       }
-      if (probeResult === null || !probeResult.ok) return null
+      if (probeResult === null || !probeResult.ok) {
+        const reason =
+          probeResult === null
+            ? "worker probe returned null"
+            : probeResult.error || "worker probe failed"
+        process.stderr.write(
+          `[mutation-check] Warning: Coverage probe failed (${reason}); falling back without Stage 0 probe.\n`,
+        )
+        return null
+      }
     } else {
       if (probeStats) probeStats.coldProbes = (probeStats.coldProbes ?? 0) + 1
       probeStateDir = tracker.makeTempDir("harness-probe-state-")
@@ -472,7 +489,13 @@ export const runCoverageProbe = async ({
         timeoutMs,
         tracker,
       })
-      if (!probeResult.ok) return null
+      if (!probeResult.ok) {
+        const reason = probeResult.reason || "external probe failed"
+        process.stderr.write(
+          `[mutation-check] Warning: Coverage probe failed (${reason}); falling back without Stage 0 probe.\n`,
+        )
+        return null
+      }
     }
 
     const coveredCanonical = new Set()
@@ -545,7 +568,12 @@ export const runCoverageProbe = async ({
       }
       totalTestsByFile.set(mappedTest, distinctTestNames.size)
     }
-    if (coveredCanonical.size !== testFiles.length) return null
+    if (coveredCanonical.size !== testFiles.length) {
+      process.stderr.write(
+        `[mutation-check] Warning: Coverage probe failed (covered ${coveredCanonical.size}/${testFiles.length} test files); falling back without Stage 0 probe.\n`,
+      )
+      return null
+    }
 
     if (onObservedDurations && Object.keys(observedDurationsByTest).length > 0) {
       onObservedDurations(observedDurationsByTest)
@@ -602,7 +630,11 @@ export const runCoverageProbe = async ({
       probeCache.set(probeCacheKey, result)
     }
     return result
-  } catch {
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    process.stderr.write(
+      `[mutation-check] Warning: Coverage probe failed (${msg}); falling back without Stage 0 probe.\n`,
+    )
     return null
   } finally {
     tracker.cleanupTempDir(covOutDir)
@@ -706,6 +738,7 @@ export const createWarmVitestWorker = async ({
         }
         return pendingProbe.resolve({
           ok: msg.ok === true,
+          ...(typeof msg.error === "string" && msg.error.length > 0 ? { error: msg.error } : {}),
           durationsByTest:
             typeof msg.durationsByTest === "object" && msg.durationsByTest !== null
               ? msg.durationsByTest
@@ -731,7 +764,7 @@ export const createWarmVitestWorker = async ({
       if (pendingInvalidate) pendingInvalidate.resolve(false)
       if (pendingProbe) pendingProbe.resolve(null)
       if (pendingRun !== null) {
-        const msg = err instanceof Error ? err.message : String(err)
+        const msg = (err instanceof Error ? err.message : String(err)).trim()
         pendingRun.resolve({
           _tag: "SpawnFailed",
           spawnError: msg.length > 0 ? msg : "Warm worker IPC error",
@@ -910,10 +943,10 @@ export const createWarmVitestWorker = async ({
           })
         } catch (err) {
           closed = true
-          const rawErr = err instanceof Error ? err.message : String(err)
+          const rawErr = (err instanceof Error ? err.message : String(err)).trim()
           settle({
             _tag: "SpawnFailed",
-            spawnError: rawErr,
+            spawnError: rawErr.length > 0 ? rawErr : "Warm worker IPC error",
             stdout: tailStdout,
             stderr: tailStderr,
           })

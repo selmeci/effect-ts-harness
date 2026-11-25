@@ -19,8 +19,8 @@ import {
   verifyMutantSchemaSyntax,
 } from "./mutant-ast-generator.js"
 import {
+  checkGitAncestorCommit,
   extractGitDiffModifiedLinesChecked,
-  isGitAncestorCommit,
   mergeLineMaps,
   resolveEffectiveGitBaseRef,
   resolveGitCommitSha,
@@ -77,19 +77,26 @@ export type VerifyAncestorLinesResult =
     }
   | { readonly _tag: "Abort"; readonly diagnostic: string }
 
-export interface StackedBaseSuitePreparation {
-  readonly abortDiagnostic?: string | undefined
-  readonly diffMode: MutationSuiteReport["diffMode"]
-  readonly evalDiffLines: ReadonlyMap<string, ReadonlySet<number>> | undefined
-  readonly allMainDiffLines: ReadonlyMap<string, ReadonlySet<number>> | undefined
-  readonly verifiedAncestorOutcomes: ReadonlyArray<MutantOutcome>
-  readonly verifiedAncestorEvaluatedFiles: ReadonlyArray<string>
-  readonly ancestorVerifiedMutantCount: number
-  readonly ancestorExpandedMutantCount: number
-  readonly stackedBaseRef: string | undefined
-  readonly stackedBaseEligible: boolean
-  readonly dirtiedCache: boolean
-}
+export type StackedBaseSuitePreparation =
+  | {
+      readonly _tag: "Abort"
+      readonly diffMode: MutationSuiteReport["diffMode"]
+      readonly abortDiagnostic: string
+      readonly stackedBaseRef?: string | undefined
+    }
+  | {
+      readonly _tag: "Ok"
+      readonly diffMode: MutationSuiteReport["diffMode"]
+      readonly evalDiffLines: ReadonlyMap<string, ReadonlySet<number>> | undefined
+      readonly allMainDiffLines: ReadonlyMap<string, ReadonlySet<number>> | undefined
+      readonly verifiedAncestorOutcomes: ReadonlyArray<MutantOutcome>
+      readonly verifiedAncestorEvaluatedFiles: ReadonlyArray<string>
+      readonly ancestorVerifiedMutantCount: number
+      readonly ancestorExpandedMutantCount: number
+      readonly stackedBaseRef: string | undefined
+      readonly stackedBaseEligible: boolean
+      readonly dirtiedCache: boolean
+    }
 
 const cloneLineMap = (
   source: ReadonlyMap<string, ReadonlySet<number>>,
@@ -166,8 +173,15 @@ export const resolveStackedBaseContext = (input: {
   if (parentCommitSha === undefined) {
     return fallback(`ref '${input.parentRef}' does not resolve to a commit`)
   }
-  if (!isGitAncestorCommit(input.repoRoot, input.hostIo, parentCommitSha, "HEAD")) {
-    return fallback(`ref '${input.parentRef}' is not an ancestor of HEAD`)
+  const ancestorErr = match(
+    checkGitAncestorCommit(input.repoRoot, input.hostIo, parentCommitSha, "HEAD"),
+  )
+    .with({ _tag: "Ancestor" }, () => undefined)
+    .with({ _tag: "NotAncestor" }, () => `ref '${input.parentRef}' is not an ancestor of HEAD`)
+    .with({ _tag: "Error" }, ({ reason }) => `git merge-base error: ${reason}`)
+    .exhaustive()
+  if (ancestorErr !== undefined) {
+    return fallback(ancestorErr)
   }
 
   const effectiveMainRef = resolveEffectiveGitBaseRef(input.repoRoot, input.hostIo, "main", false)
@@ -367,21 +381,42 @@ export const verifyAncestorLinesAgainstHmacCache = (input: {
   }
 }
 
-const emptyStackedPrep = (
+const abortStackedPrep = (
   diffMode: MutationSuiteReport["diffMode"],
-  extra: Partial<StackedBaseSuitePreparation>,
+  abortDiagnostic: string,
+  stackedBaseRef?: string,
 ): StackedBaseSuitePreparation => ({
+  _tag: "Abort",
   diffMode,
-  evalDiffLines: undefined,
-  allMainDiffLines: undefined,
-  verifiedAncestorOutcomes: [],
-  verifiedAncestorEvaluatedFiles: [],
-  ancestorVerifiedMutantCount: 0,
-  ancestorExpandedMutantCount: 0,
-  stackedBaseRef: undefined,
-  stackedBaseEligible: false,
-  dirtiedCache: false,
-  ...extra,
+  abortDiagnostic,
+  ...(stackedBaseRef !== undefined ? { stackedBaseRef } : {}),
+})
+
+const okStackedPrep = (
+  diffMode: MutationSuiteReport["diffMode"],
+  fields?: {
+    readonly evalDiffLines?: ReadonlyMap<string, ReadonlySet<number>> | undefined
+    readonly allMainDiffLines?: ReadonlyMap<string, ReadonlySet<number>> | undefined
+    readonly verifiedAncestorOutcomes?: ReadonlyArray<MutantOutcome>
+    readonly verifiedAncestorEvaluatedFiles?: ReadonlyArray<string>
+    readonly ancestorVerifiedMutantCount?: number
+    readonly ancestorExpandedMutantCount?: number
+    readonly stackedBaseRef?: string | undefined
+    readonly stackedBaseEligible?: boolean
+    readonly dirtiedCache?: boolean
+  },
+): StackedBaseSuitePreparation => ({
+  _tag: "Ok",
+  diffMode,
+  evalDiffLines: fields?.evalDiffLines,
+  allMainDiffLines: fields?.allMainDiffLines,
+  verifiedAncestorOutcomes: fields?.verifiedAncestorOutcomes ?? [],
+  verifiedAncestorEvaluatedFiles: fields?.verifiedAncestorEvaluatedFiles ?? [],
+  ancestorVerifiedMutantCount: fields?.ancestorVerifiedMutantCount ?? 0,
+  ancestorExpandedMutantCount: fields?.ancestorExpandedMutantCount ?? 0,
+  stackedBaseRef: fields?.stackedBaseRef,
+  stackedBaseEligible: fields?.stackedBaseEligible ?? false,
+  dirtiedCache: fields?.dirtiedCache ?? false,
 })
 
 /**
@@ -416,12 +451,13 @@ export const prepareStackedBaseForSuite = (input: {
     }),
   )
     .with({ _tag: "Failed" }, ({ reason }) =>
-      emptyStackedPrep("working-tree", {
-        abortDiagnostic: `[mutation-check] Failed to extract git diff modified lines: ${reason}`,
-      }),
+      abortStackedPrep(
+        "working-tree",
+        `[mutation-check] Failed to extract git diff modified lines: ${reason}`,
+      ),
     )
     .with({ _tag: "DirectMain" }, { _tag: "FallbackToMain" }, (res) => {
-      if (res.diffMode === "not-git") return emptyStackedPrep("not-git", {})
+      if (res.diffMode === "not-git") return okStackedPrep("not-git")
       const unclassifiedErr = checkUnclassifiedStrictFiles(
         input.repoRoot,
         res.mainDiffLines,
@@ -429,9 +465,9 @@ export const prepareStackedBaseForSuite = (input: {
         input.hostIo,
       )
       if (unclassifiedErr !== undefined) {
-        return emptyStackedPrep(res.diffMode, { abortDiagnostic: unclassifiedErr })
+        return abortStackedPrep(res.diffMode, unclassifiedErr)
       }
-      return emptyStackedPrep(res.diffMode, {
+      return okStackedPrep(res.diffMode, {
         evalDiffLines: res.mainDiffLines,
         allMainDiffLines: res.mainDiffLines,
         ...match(res)
@@ -453,7 +489,7 @@ export const prepareStackedBaseForSuite = (input: {
           input.hostIo,
         )
         if (unclassifiedErr !== undefined) {
-          return emptyStackedPrep(diffMode, { abortDiagnostic: unclassifiedErr })
+          return abortStackedPrep(diffMode, unclassifiedErr)
         }
         return match(
           verifyAncestorLinesAgainstHmacCache({
@@ -476,10 +512,7 @@ export const prepareStackedBaseForSuite = (input: {
           }),
         )
           .with({ _tag: "Abort" }, ({ diagnostic }) =>
-            emptyStackedPrep(diffMode, {
-              abortDiagnostic: diagnostic,
-              stackedBaseRef: parentRef,
-            }),
+            abortStackedPrep(diffMode, diagnostic, parentRef),
           )
           .with(
             { _tag: "Ok" },
@@ -491,7 +524,7 @@ export const prepareStackedBaseForSuite = (input: {
               ancestorExpandedMutantCount,
               dirtiedCache,
             }) =>
-              emptyStackedPrep(diffMode, {
+              okStackedPrep(diffMode, {
                 evalDiffLines,
                 allMainDiffLines: combinedMainDiffLines,
                 verifiedAncestorOutcomes,
@@ -580,13 +613,21 @@ export const resolveSuiteDiffOrStackedBase = (input: {
       witnessClosureMemo: input.witnessClosureMemo,
       precomputedPartitions: input.precomputedPartitions,
     })
-    return {
-      stackedPrep,
-      diffMode: stackedPrep.diffMode,
-      evalDiffLines: stackedPrep.evalDiffLines,
-      allMainDiffLines: stackedPrep.allMainDiffLines,
-      abortDiagnostic: stackedPrep.abortDiagnostic,
-    }
+    return match(stackedPrep)
+      .with({ _tag: "Abort" }, ({ diffMode, abortDiagnostic }) => ({
+        stackedPrep,
+        diffMode,
+        evalDiffLines: undefined,
+        allMainDiffLines: undefined,
+        abortDiagnostic,
+      }))
+      .with({ _tag: "Ok" }, ({ diffMode, evalDiffLines, allMainDiffLines }) => ({
+        stackedPrep,
+        diffMode,
+        evalDiffLines,
+        allMainDiffLines,
+      }))
+      .exhaustive()
   }
 
   const resolvedDiff = match(
@@ -659,15 +700,21 @@ export const formatStackedBaseReportFields = (
   | "ancestorExpandedMutantCount"
 > => {
   if (stackedPrep === undefined) return {}
-  return {
-    ...(stackedPrep.stackedBaseRef !== undefined
-      ? { stackedBaseRef: stackedPrep.stackedBaseRef }
-      : {}),
-    stackedBaseVerified:
-      stackedPrep.stackedBaseEligible && passed && earlyTerminated !== true && stageAOnly !== true,
-    ancestorVerifiedMutantCount: stackedPrep.ancestorVerifiedMutantCount,
-    ancestorExpandedMutantCount: stackedPrep.ancestorExpandedMutantCount,
-  }
+  return match(stackedPrep)
+    .with({ _tag: "Abort" }, ({ stackedBaseRef }) => ({
+      ...(stackedBaseRef !== undefined ? { stackedBaseRef } : {}),
+      stackedBaseVerified: false,
+      ancestorVerifiedMutantCount: 0,
+      ancestorExpandedMutantCount: 0,
+    }))
+    .with({ _tag: "Ok" }, (ok) => ({
+      ...(ok.stackedBaseRef !== undefined ? { stackedBaseRef: ok.stackedBaseRef } : {}),
+      stackedBaseVerified:
+        ok.stackedBaseEligible && passed && earlyTerminated !== true && stageAOnly !== true,
+      ancestorVerifiedMutantCount: ok.ancestorVerifiedMutantCount,
+      ancestorExpandedMutantCount: ok.ancestorExpandedMutantCount,
+    }))
+    .exhaustive()
 }
 
 /** Applies verified ancestor outcomes and file tracking from `StackedBaseSuitePreparation`. */
@@ -678,15 +725,20 @@ export const applyStackedBaseOutcomes = (
   evaluatedFilesSet: Set<string>,
 ): { readonly cachedKilledDelta: number; readonly dirtiedCache: boolean } => {
   if (stackedPrep === undefined) return { cachedKilledDelta: 0, dirtiedCache: false }
-  outcomes.push(...stackedPrep.verifiedAncestorOutcomes)
-  for (const rel of stackedPrep.verifiedAncestorEvaluatedFiles) {
-    if (!evaluatedFilesSet.has(rel)) {
-      evaluatedFilesSet.add(rel)
-      evaluatedFiles.push(rel)
-    }
-  }
-  return {
-    cachedKilledDelta: stackedPrep.ancestorVerifiedMutantCount,
-    dirtiedCache: stackedPrep.dirtiedCache,
-  }
+  return match(stackedPrep)
+    .with({ _tag: "Abort" }, () => ({ cachedKilledDelta: 0, dirtiedCache: false }))
+    .with({ _tag: "Ok" }, (ok) => {
+      outcomes.push(...ok.verifiedAncestorOutcomes)
+      for (const rel of ok.verifiedAncestorEvaluatedFiles) {
+        if (!evaluatedFilesSet.has(rel)) {
+          evaluatedFilesSet.add(rel)
+          evaluatedFiles.push(rel)
+        }
+      }
+      return {
+        cachedKilledDelta: ok.ancestorVerifiedMutantCount,
+        dirtiedCache: ok.dirtiedCache,
+      }
+    })
+    .exhaustive()
 }

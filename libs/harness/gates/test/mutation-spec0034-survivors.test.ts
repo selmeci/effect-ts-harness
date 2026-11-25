@@ -1,5 +1,7 @@
+import { spawn, spawnSync } from "node:child_process"
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -56,14 +58,20 @@ import {
 } from "../src/mutation/mutation-test-reachability.js"
 import {
   buildTimingEntryKey,
+  createSuiteTimingsTracker,
   emptyMutationTestTimingsStore,
   loadMutationTestTimings,
   parseVitestBaselineTestDurations,
   recordObservedTestTimings,
   saveMutationTestTimingsAtomic,
 } from "../src/mutation/mutation-test-timings.js"
-import { extractWitnessTestFileFromOutput } from "../src/mutation/mutation-witness.js"
+import {
+  PackageBatchFileOutputSchema,
+  extractWitnessTestFileFromOutput,
+} from "../src/mutation/mutation-witness.js"
 import { isolatedTestHostIo } from "./helpers/test-host-io.js"
+
+const REAL_REPO_ROOT = resolve(import.meta.dirname, "../../../..")
 
 const BatchPlanOutputSchema = Schema.fromJsonString(
   Schema.Struct({
@@ -179,7 +187,7 @@ const unwrapBatchAbort = (res: ReturnType<typeof runPackageMutantBatchChecked>):
     .exhaustive()
 
 describe("mutation-spec0034-survivors: backup, path safety, batch stream, and cache", () => {
-  it("mutation-backup:644 skips active backup when HARNESS_ACTIVE_BACKUP_PATH matches and recovers on mismatch", () => {
+  it("recoverBackupIfPresent skips active backup when HARNESS_ACTIVE_BACKUP_PATH matches and recovers on mismatch", () => {
     withTempDir("spec0034-backup-", (dir) => {
       const targetPath = join(dir, "libs/demo/core/src/v.ts")
       mkdirSync(dirname(targetPath), { recursive: true })
@@ -210,7 +218,7 @@ describe("mutation-spec0034-survivors: backup, path safety, batch stream, and ca
     })
   })
 
-  it("mutation-batch-stream:56,58,60 validates existing files with undefined repoRoot and rejects realpath escapes", () => {
+  it("validateBatchArtifactPath validates existing files with undefined repoRoot and rejects realpath escapes", () => {
     withTempDir("spec0034-batch-path-undef-", (dir) => {
       withTempDir("spec0034-batch-outside-", (outsideDir) => {
         const validFile = join(dir, "valid.json")
@@ -234,7 +242,7 @@ describe("mutation-spec0034-survivors: backup, path safety, batch stream, and ca
     })
   })
 
-  it("mutation-batch-stream:78,79,84 walks deepestExisting to resolvedRoot without escaping symlinked parent", () => {
+  it("validateBatchArtifactPath walks deepest existing ancestor to resolvedRoot without escaping symlinked parent", () => {
     withTempDir("spec0034-batch-ancestors-", (base) => {
       withTempDir("spec0034-batch-anc-out-", (outside) => {
         const realParent = join(base, "real-parent")
@@ -263,7 +271,7 @@ describe("mutation-spec0034-survivors: backup, path safety, batch stream, and ca
     })
   })
 
-  it("mutation-batch-stream:165,202,292,296 records 0ms durations, stage witnesses, and optional plan fields", () => {
+  it("mergeObservedDurationsIntoMap, recordStageOutcomes, and writePackageBatchPlan handle 0ms durations, stage witnesses, and optional plan fields", () => {
     const durations = new Map<string, number>()
     mergeObservedDurationsIntoMap(durations, { "a.test.ts": 0, "b.test.ts": -1 })
     expect(durations.get("a.test.ts")).toBe(0)
@@ -322,7 +330,7 @@ describe("mutation-spec0034-survivors: backup, path safety, batch stream, and ca
     })
   })
 
-  it("mutation-cache:399 rejects a directory inside cacheDir when checkFileExists is true", () => {
+  it("validateHarnessCacheFileSafety rejects a directory inside cacheDir when checkFileExists is true", () => {
     withTempDir("spec0034-cache-dir-", (dir) => {
       const subDir = join(dir, ".harness/cache/some-subdir")
       mkdirSync(subDir, { recursive: true })
@@ -334,7 +342,7 @@ describe("mutation-spec0034-survivors: backup, path safety, batch stream, and ca
 })
 
 describe("mutation-spec0034-survivors: package batch, stacked base, and baselines", () => {
-  it("mutation-package-batch:113 records solo cold recheck witness for TimedOut batch mutant when witness exists", () => {
+  it("runPackageMutantBatchChecked records solo cold recheck witness for TimedOut batch mutant when witness exists", () => {
     withTempDir("spec0034-solo-witness-", (dir) => {
       setupBatchPkgRepo(dir)
       const relFile = "libs/demo/core/src/cmp.ts"
@@ -391,7 +399,7 @@ describe("mutation-spec0034-survivors: package batch, stacked base, and baseline
     })
   })
 
-  it("mutation-package-batch:386 distinguishes string reportsOrErr vs array when startup backup recovery fails", () => {
+  it("runPackageMutantBatchChecked preserves runner diagnostic alongside CRITICAL backup recovery error", () => {
     withTempDir("spec0034-startup-rec-", (dir) => {
       setupBatchPkgRepo(dir)
       const fileInput = makeBatchFileInput(
@@ -428,7 +436,7 @@ describe("mutation-spec0034-survivors: package batch, stacked base, and baseline
     })
   })
 
-  it("mutation-package-batch:719 stops immediately after single-file package when isEarlyStopped flips true", () => {
+  it("executeQueuedPackageBatches stops immediately after single-file package when isEarlyStopped flips true", () => {
     withTempDir("spec0034-early-stop-", (dir) => {
       setupBatchPkgRepo(dir)
       const makeEntry = (pkgDir: string): QueuedPackageEntry => {
@@ -487,7 +495,7 @@ describe("mutation-spec0034-survivors: package batch, stacked base, and baseline
     })
   })
 
-  it("mutation-stacked-base:571 forwards opts.stageAOnly === true to exclude/include fallback witness hits", () => {
+  it("runDomainMutationSuite forwards stageAOnly to exclude or include fallback witness hits in stacked-base cache verification", () => {
     withTempDir("spec0034-stacked-stagea-", (repoRoot) => {
       runGit(repoRoot, ["init"])
       runGit(repoRoot, ["checkout", "-B", "main"])
@@ -586,7 +594,7 @@ describe("mutation-spec0034-survivors: package batch, stacked base, and baseline
     })
   })
 
-  it("mutation-suite-helpers:442 forwards modifiedLines when size > 0 and skips baseline when no mutants are on modified lines", () => {
+  it("preparePackageBaselines forwards non-empty modifiedLines and skips baseline when no mutants fall on modified lines", () => {
     withTempDir("spec0034-baseline-lines-", (dir) => {
       setupBatchPkgRepo(dir)
       const f1Rel = "libs/demo/core/src/f1.ts"
@@ -654,10 +662,58 @@ describe("mutation-spec0034-survivors: package batch, stacked base, and baseline
       expect(execCalls).toBe(1)
     })
   })
+
+  it("preparePackageBaselines logs a stderr warning and excludes pkgKey when batched baseline fails across >= 2 files", () => {
+    withTempDir("spec0034-baseline-fail-", (dir) => {
+      setupBatchPkgRepo(dir)
+      const f1Rel = "libs/demo/core/src/f1.ts"
+      const f2Rel = "libs/demo/core/src/f2.ts"
+      writeFileSync(join(dir, f1Rel), "export const f1 = (a: number, b: number) => a === b\n")
+      writeFileSync(join(dir, f2Rel), "export const f2 = (a: number, b: number) => a !== b\n")
+      writeFileSync(
+        join(dir, "libs/demo/core/test/f1.test.ts"),
+        'import { expect, it } from "vitest"\nimport { f1 } from "../src/f1.js"\nit("t", () => { expect(f1(1, 1)).toBe(true) })\n',
+      )
+      writeFileSync(
+        join(dir, "libs/demo/core/test/f2.test.ts"),
+        'import { expect, it } from "vitest"\nimport { f2 } from "../src/f2.js"\nit("t", () => { expect(f2(1, 2)).toBe(true) })\n',
+      )
+
+      const failingIo: SyncHostIo = {
+        ...isolatedTestHostIo,
+        execFileSync: () => exited(1, "FAIL libs/demo/core/test/f1.test.ts\n", "baseline boom"),
+      }
+      const chunks: Array<string> = []
+      const origWrite = process.stderr.write.bind(process.stderr)
+      process.stderr.write = ((chunk: string | Uint8Array) => {
+        chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+        return true
+      }) as typeof process.stderr.write
+      try {
+        const res = match(
+          preparePackageBaselines({
+            repoRoot: dir,
+            targets: [makeDomainFile(dir, "core", f1Rel), makeDomainFile(dir, "core", f2Rel)],
+            hostIo: failingIo,
+            baseSubprocessEnv: {},
+            diffLinesMap: undefined,
+            bypassDiffFilter: true,
+          }),
+        )
+          .with({ _tag: "Ok" }, (ok) => ok)
+          .with({ _tag: "ReadError" }, ({ reason }) => expect.unreachable(reason))
+          .exhaustive()
+        expect(res.passedPackageBaselines.has("demo/core")).toBe(false)
+      } finally {
+        process.stderr.write = origWrite
+      }
+      expect(chunks.join("")).toContain("[mutation-check] Warning: Batched package baseline")
+    })
+  })
 })
 
 describe("mutation-spec0034-survivors: reachability sorting, timings store, and witness extraction", () => {
-  it("mutation-test-reachability:475 sorts symbolMatchedTests by measured duration when map is provided", () => {
+  it("selectReachabilityPartition sorts symbolMatchedTests by measured duration when duration map is provided", () => {
     withTempDir("spec0034-reach-sym-", (dir) => {
       mkdirSync(join(dir, "libs/demo/core/src"), { recursive: true })
       mkdirSync(join(dir, "libs/demo/core/test"), { recursive: true })
@@ -705,7 +761,7 @@ describe("mutation-spec0034-survivors: reachability sorting, timings store, and 
     })
   })
 
-  it("mutation-test-reachability:561,566,569 sorts 2-test packages by heavyDiff, measured duration, and tie-break", () => {
+  it("partitionEligibleTestsChecked sorts 2-test packages by heavyDiff, measured duration, and tie-break", () => {
     withTempDir("spec0034-reach-2tests-", (dir) => {
       const aTest = join(dir, "libs/demo/core/test/a.test.ts")
       const zTest = join(dir, "libs/demo/core/test/z.test.ts")
@@ -748,7 +804,7 @@ describe("mutation-spec0034-survivors: reachability sorting, timings store, and 
     })
   })
 
-  it("mutation-test-timings:181,188 merges equal timestamp+sampleCount and evicts deterministically above 4096", () => {
+  it("saveMutationTestTimingsAtomic merges equal timestamp+sampleCount and evicts deterministically above 4096 entries", () => {
     withTempDir("spec0034-timings-merge-", (dir) => {
       const pkgKey = PackageRelKey.make("demo/core")
       const rel = AstSourceFilePath.make("libs/demo/core/test/a.test.ts")
@@ -790,7 +846,7 @@ describe("mutation-spec0034-survivors: reachability sorting, timings store, and 
     })
   })
 
-  it("mutation-test-timings:217,227,241 rejects non-file targets, encode failures, and cleans tmp on renameSync throw", () => {
+  it("saveMutationTestTimingsAtomic rejects non-file targets and encode failures, and cleans tmp on renameSync throw", () => {
     withTempDir("spec0034-timings-fail-", (dir) => {
       withTempDir("spec0034-timings-out-", (outside) => {
         const cacheDir = join(dir, ".harness/cache")
@@ -838,7 +894,38 @@ describe("mutation-spec0034-survivors: reachability sorting, timings store, and 
     })
   })
 
-  it("mutation-test-timings:307,409,416 accepts epoch 0ms timestamps and 0ms baseline/fallback durations", () => {
+  it("createSuiteTimingsTracker().flushIfDirty logs stderr warning when saving timings cache fails", () => {
+    withTempDir("spec0034-timings-warn-", (dir) => {
+      withTempDir("spec0034-timings-warn-out-", (outside) => {
+        const testRel = "libs/demo/core/test/a.test.ts"
+        mkdirSync(join(dir, "libs/demo/core/test"), { recursive: true })
+        writeFileSync(join(dir, testRel), "export const a = 1\n", "utf8")
+        const cacheDir = join(dir, ".harness", "cache")
+        mkdirSync(cacheDir, { recursive: true })
+        const outsideFile = join(outside, "ext.json")
+        writeFileSync(outsideFile, "{}", "utf8")
+        symlinkSync(outsideFile, join(cacheDir, MUTATION_TEST_TIMINGS_FILENAME))
+        const tracker = createSuiteTimingsTracker(dir, isolatedTestHostIo)
+        tracker.recordObserved("demo/core", { [testRel]: 42 }, 1000)
+        const chunks: Array<string> = []
+        const origWrite = process.stderr.write.bind(process.stderr)
+        process.stderr.write = ((chunk: string | Uint8Array) => {
+          chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+          return true
+        }) as typeof process.stderr.write
+        try {
+          tracker.flushIfDirty()
+        } finally {
+          process.stderr.write = origWrite
+        }
+        expect(chunks.join("")).toContain(
+          "[mutation-check] Warning: Failed to persist mutation test timings cache.",
+        )
+      })
+    })
+  })
+
+  it("recordObservedTestTimings and parseVitestBaselineTestDurations accept epoch 0ms timestamps and 0ms durations", () => {
     withTempDir("spec0034-timings-zero-", (dir) => {
       const pkgKey = PackageRelKey.make("demo/core")
       const rel = "libs/demo/core/test/foo.test.ts"
@@ -868,7 +955,7 @@ describe("mutation-spec0034-survivors: reachability sorting, timings store, and 
     })
   })
 
-  it("mutation-witness:154 prefers explicitKillingTestFile over stdout FAIL lines when in passTests", () => {
+  it("extractWitnessTestFileFromOutput prefers explicitKillingTestFile over stdout FAIL lines when present in passTests", () => {
     withTempDir("spec0034-witness-explicit-", (dir) => {
       const pass = ["test/a.test.ts", "test/b.test.ts"]
       expect(
@@ -889,6 +976,453 @@ describe("mutation-spec0034-survivors: reachability sorting, timings store, and 
           AstSourceFilePath.make("test/c.test.ts"),
         ),
       ).toBe(AstSourceFilePath.make("test/b.test.ts"))
+    })
+  })
+})
+
+const BatchFileReportsArraySchema = Schema.fromJsonString(
+  Schema.Array(PackageBatchFileOutputSchema),
+)
+
+const buildBatchPlanFile = (
+  dir: string,
+  opts: {
+    readonly files: ReadonlyArray<{
+      readonly fileInput: PackageBatchFileInput
+      readonly primaryTests?: ReadonlyArray<string>
+      readonly scopedFallbackTests?: ReadonlyArray<string>
+      readonly packageFallbackTests?: ReadonlyArray<string>
+    }>
+    readonly allPackageTests: ReadonlyArray<string>
+    readonly streamReportPath: string
+    readonly backupPath: string
+    readonly maxSurvivors?: number
+  },
+): string => {
+  const planPath = join(dir, "pkg-plan.json")
+  writeFileSync(
+    planPath,
+    JSON.stringify({
+      cwd: dir,
+      backupPath: opts.backupPath,
+      vitestCli: join(dir, "node_modules/vitest/vitest.mjs"),
+      allPackageTests: opts.allPackageTests,
+      baselinedTests: opts.allPackageTests.filter((t) => t.endsWith("primary.test.ts")),
+      streamReportPath: opts.streamReportPath,
+      ...(opts.maxSurvivors !== undefined ? { maxSurvivors: opts.maxSurvivors } : {}),
+      files: opts.files.map((entry) => ({
+        relFile: entry.fileInput.file.relFile,
+        fullPath: entry.fileInput.file.fullPath,
+        originalSha256: computeContentSha256(entry.fileInput.originalContent),
+        mutatedSha256: computeContentSha256(entry.fileInput.schemaSource),
+        originalSource: entry.fileInput.originalContent,
+        schemaSource: entry.fileInput.schemaSource,
+        primaryTests: entry.primaryTests ?? entry.fileInput.primaryTests,
+        scopedFallbackTests: entry.scopedFallbackTests ?? entry.fileInput.scopedFallbackTests,
+        packageFallbackTests: entry.packageFallbackTests ?? entry.fileInput.packageFallbackTests,
+        mutantIds: entry.fileInput.uncachedMutants.map((m) => m.id),
+        primaryTimeoutMs: 30_000,
+        scopedFallbackTimeoutMs: 30_000,
+        packageFallbackTimeoutMs: 30_000,
+      })),
+    }),
+    "utf8",
+  )
+  return planPath
+}
+
+describe("mutation-spec0034-survivors: package-vitest-batch runner safety and schema contracts", () => {
+  it("#1: fallback baseline failure with empty output and 300-char trailing-space output decodes cleanly through PackageBatchFileOutputSchema", () => {
+    for (const mode of ["empty", "trailing-space"] as const) {
+      withTempDir(`spec0034-fb-base-${mode}-`, (dir) => {
+        setupBatchPkgRepo(dir)
+        rmSync(join(dir, "tools"), { recursive: true, force: true })
+        symlinkSync(join(REAL_REPO_ROOT, "tools"), join(dir, "tools"), "dir")
+        const tPrimary = "libs/demo/core/test/primary.test.ts"
+        const tFb =
+          mode === "empty"
+            ? "libs/demo/core/test/fb-empty.test.ts"
+            : "libs/demo/core/test/fb-300space.test.ts"
+        writeFileSync(join(dir, tPrimary), "// primary\n", "utf8")
+        writeFileSync(join(dir, tFb), "// fallback\n", "utf8")
+        writeFileSync(
+          join(dir, "node_modules/vitest/vitest.mjs"),
+          [
+            "const args = process.argv.slice(2)",
+            'if (args.some((a) => a.endsWith("primary.test.ts"))) {',
+            '  console.log("Tests  1 passed (1)")',
+            "  process.exit(0)",
+            "}",
+            'if (args.some((a) => a.endsWith("fb-empty.test.ts"))) {',
+            "  process.exit(1)",
+            "}",
+            'if (args.some((a) => a.endsWith("fb-300space.test.ts"))) {',
+            '  process.stderr.write("E".repeat(290) + "          extra-after-300")',
+            "  process.exit(1)",
+            "}",
+            "process.exit(0)",
+          ].join("\n"),
+          "utf8",
+        )
+        const fileInput = makeBatchFileInput(
+          dir,
+          "core",
+          "libs/demo/core/src/f1.ts",
+          "export const f1 = (a: number, b: number): boolean => a === b\n",
+          [tPrimary],
+        )
+        const planPath = buildBatchPlanFile(dir, {
+          files: [{ fileInput, scopedFallbackTests: [tFb] }],
+          allPackageTests: [tPrimary, tFb],
+          streamReportPath: join(dir, "stream.ndjson"),
+          backupPath: join(dir, "backup.json"),
+        })
+        const res = spawnSync(process.execPath, [join(dir, "tools/package-vitest-batch.mjs")], {
+          cwd: dir,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            HARNESS_PACKAGE_PLAN_FILE: planPath,
+            HARNESS_MUTATE_USE_WARM_VITEST: "0",
+          },
+          timeout: 20_000,
+        })
+        expect(res.status, res.stderr).toBe(0)
+        const reports = Schema.decodeSync(BatchFileReportsArraySchema)(res.stdout.trim())
+        expect(reports).toHaveLength(1)
+        const restoreErr = reports[0]!.restoreError
+        expect(restoreErr).toBeDefined()
+        if (mode === "empty") {
+          expect(restoreErr).toBe(
+            "[mutation-check] Baseline test suite failed on fallback tests for 'libs/demo/core/src/f1.ts' (1 file(s))",
+          )
+        } else {
+          expect(restoreErr).toContain("E".repeat(290))
+          expect(restoreErr).not.toContain("extra-after-300")
+          expect(restoreErr).toBe(restoreErr!.trim())
+        }
+      })
+    }
+  })
+
+  it("#7 & #9: pre-mutation disk SHA mismatch and symlinked target refuse mutation cleanly, and appendStreamReport failure after activeMutation=null does not crash", () => {
+    withTempDir("spec0034-sha-sym-", (dir) => {
+      setupBatchPkgRepo(dir)
+      rmSync(join(dir, "tools"), { recursive: true, force: true })
+      symlinkSync(join(REAL_REPO_ROOT, "tools"), join(dir, "tools"), "dir")
+      const tPrimary = "libs/demo/core/test/primary.test.ts"
+      writeFileSync(join(dir, tPrimary), "// primary\n", "utf8")
+      writeFileSync(
+        join(dir, "node_modules/vitest/vitest.mjs"),
+        'console.log("Tests  1 passed (1)")\nprocess.exit(0)\n',
+        "utf8",
+      )
+
+      const origSrc = "export const f1 = (a: number, b: number): boolean => a === b\n"
+      const fileInput = makeBatchFileInput(dir, "core", "libs/demo/core/src/f1.ts", origSrc, [
+        tPrimary,
+      ])
+      const streamBlocker = join(dir, "stream-blocker")
+      writeFileSync(streamBlocker, "not-a-directory\n", "utf8")
+      const shaPlanPath = buildBatchPlanFile(dir, {
+        files: [{ fileInput }],
+        allPackageTests: [tPrimary],
+        streamReportPath: join(streamBlocker, "pkg-stream.ndjson"),
+        backupPath: join(dir, "backup.json"),
+      })
+      const externalEdit = "// user edited before mutation\n"
+      writeFileSync(fileInput.file.fullPath, externalEdit, "utf8")
+      const shaRes = spawnSync(process.execPath, [join(dir, "tools/package-vitest-batch.mjs")], {
+        cwd: dir,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HARNESS_PACKAGE_PLAN_FILE: shaPlanPath,
+          HARNESS_MUTATE_USE_WARM_VITEST: "0",
+        },
+        timeout: 20_000,
+      })
+      expect(shaRes.status, shaRes.stderr).toBe(0)
+      expect(shaRes.stderr).toContain(
+        "[package-vitest-batch] Warning: Failed to append stream report",
+      )
+      const shaReports = Schema.decodeSync(BatchFileReportsArraySchema)(shaRes.stdout.trim())
+      expect(shaReports).toHaveLength(1)
+      expect(shaReports[0]!.restoreError).toContain("Refusing to mutate")
+      expect(shaReports[0]!.restoreError).toContain("does not match planned originalSha256")
+      expect(readFileSync(fileInput.file.fullPath, "utf8")).toBe(externalEdit)
+
+      const outsideTarget = join(dir, "outside-target.ts")
+      writeFileSync(outsideTarget, origSrc, "utf8")
+      rmSync(fileInput.file.fullPath, { force: true })
+      symlinkSync(outsideTarget, fileInput.file.fullPath)
+      const symPlanPath = buildBatchPlanFile(dir, {
+        files: [{ fileInput }],
+        allPackageTests: [tPrimary],
+        streamReportPath: join(dir, "sym-stream.ndjson"),
+        backupPath: join(dir, "sym-backup.json"),
+      })
+      const symRes = spawnSync(process.execPath, [join(dir, "tools/package-vitest-batch.mjs")], {
+        cwd: dir,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HARNESS_PACKAGE_PLAN_FILE: symPlanPath,
+          HARNESS_MUTATE_USE_WARM_VITEST: "0",
+        },
+        timeout: 20_000,
+      })
+      expect(symRes.status, symRes.stderr).toBe(0)
+      const symReports = Schema.decodeSync(BatchFileReportsArraySchema)(symRes.stdout.trim())
+      expect(symReports).toHaveLength(1)
+      expect(symReports[0]!.restoreError).toContain("Refusing to operate on symbolic link")
+      expect(lstatSync(fileInput.file.fullPath).isSymbolicLink()).toBe(true)
+      expect(readFileSync(outsideTarget, "utf8")).toBe(origSrc)
+    })
+  })
+
+  it("#9: SIGTERM mid-run restores original source on disk and countFileConfirmedSurvivors respects maxSurvivors across fallback stages", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "spec0034-sigterm-maxsurv-"))
+    try {
+      setupBatchPkgRepo(dir)
+      rmSync(join(dir, "tools"), { recursive: true, force: true })
+      symlinkSync(join(REAL_REPO_ROOT, "tools"), join(dir, "tools"), "dir")
+
+      const tPrimary = "libs/demo/core/test/primary.test.ts"
+      const tScoped = "libs/demo/core/test/scoped.test.ts"
+      const tPkgFb = "libs/demo/core/test/pkgfb.test.ts"
+      writeFileSync(join(dir, tPrimary), "// primary\n", "utf8")
+      writeFileSync(join(dir, tScoped), "// scoped\n", "utf8")
+      writeFileSync(join(dir, tPkgFb), "// pkgfb\n", "utf8")
+
+      const readyFlag = join(dir, "mutant-active.flag")
+      writeFileSync(
+        join(dir, "node_modules/vitest/vitest.mjs"),
+        [
+          'import { writeFileSync } from "node:fs"',
+          "const args = process.argv.slice(2)",
+          'const readyFile = process.env["TEST_MUTANT_READY_FILE"] ?? ""',
+          'const activeId = process.env["HARNESS_ACTIVE_MUTANT_ID"] ?? ""',
+          "if (readyFile.length > 0 && activeId.length > 0) {",
+          '  writeFileSync(readyFile, activeId, "utf8")',
+          "  setInterval(() => {}, 1000)",
+          '} else if (args.some((a) => a.endsWith("pkgfb.test.ts"))) {',
+          '  if (process.env["TEST_KILL_IN_PKGFB"] === "1" && activeId.length > 0) {',
+          '    console.log("Tests  1 failed (1)")',
+          "    process.exit(1)",
+          "  }",
+          '  console.log("Tests  1 passed (1)")',
+          "  process.exit(0)",
+          "} else {",
+          '  if (activeId.includes("f2.ts:")) {',
+          '    console.log("Tests  1 failed (1)")',
+          "    process.exit(1)",
+          "  }",
+          '  console.log("Tests  1 passed (1)")',
+          "  process.exit(0)",
+          "}",
+        ].join("\n"),
+        "utf8",
+      )
+
+      const origF1 = "export const f1 = (a: number, b: number): boolean => a === b\n"
+      const origF2 = "export const f2 = (a: number, b: number): boolean => a !== b\n"
+      const input1 = makeBatchFileInput(dir, "core", "libs/demo/core/src/f1.ts", origF1, [tPrimary])
+      const input2 = makeBatchFileInput(dir, "core", "libs/demo/core/src/f2.ts", origF2, [tPrimary])
+
+      // 1) SIGTERM mid-run restores original source and cleans backupPath
+      const sigBackup = join(dir, "sig-backup.json")
+      const sigPlanPath = buildBatchPlanFile(dir, {
+        files: [{ fileInput: input1 }],
+        allPackageTests: [tPrimary],
+        streamReportPath: join(dir, "sig-stream.ndjson"),
+        backupPath: sigBackup,
+      })
+      const child = spawn(process.execPath, [join(dir, "tools/package-vitest-batch.mjs")], {
+        cwd: dir,
+        env: {
+          ...process.env,
+          HARNESS_PACKAGE_PLAN_FILE: sigPlanPath,
+          HARNESS_MUTATE_USE_WARM_VITEST: "0",
+          TEST_MUTANT_READY_FILE: readyFlag,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+      const deadline = Date.now() + 10_000
+      while (!existsSync(readyFlag)) {
+        if (Date.now() > deadline) {
+          child.kill("SIGKILL")
+          throw new Error("Timed out waiting for package-vitest-batch mutant start")
+        }
+        await new Promise((r) => setTimeout(r, 20))
+      }
+      expect(readFileSync(input1.file.fullPath, "utf8")).toBe(input1.schemaSource)
+      expect(existsSync(sigBackup)).toBe(true)
+      child.kill("SIGTERM")
+      const exitInfo = await new Promise<{ code: number | null; sig: NodeJS.Signals | null }>(
+        (resolveExit) => {
+          child.on("close", (code, sig) => resolveExit({ code, sig }))
+        },
+      )
+      expect(exitInfo.code === 143 || exitInfo.sig === "SIGTERM").toBe(true)
+      expect(readFileSync(input1.file.fullPath, "utf8")).toBe(origF1)
+      expect(existsSync(sigBackup)).toBe(false)
+
+      // 2) countFileConfirmedSurvivors stops after f1 when mutant survives scoped + package fallback (maxSurvivors: 1)
+      const fbPlanPath = buildBatchPlanFile(dir, {
+        files: [
+          {
+            fileInput: input1,
+            scopedFallbackTests: [tScoped],
+            packageFallbackTests: [tPkgFb],
+          },
+          {
+            fileInput: input2,
+            scopedFallbackTests: [tScoped],
+            packageFallbackTests: [tPkgFb],
+          },
+        ],
+        allPackageTests: [tPrimary, tScoped, tPkgFb],
+        streamReportPath: join(dir, "fb-stream.ndjson"),
+        backupPath: join(dir, "fb-backup.json"),
+        maxSurvivors: 1,
+      })
+      const stopRes = spawnSync(process.execPath, [join(dir, "tools/package-vitest-batch.mjs")], {
+        cwd: dir,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HARNESS_PACKAGE_PLAN_FILE: fbPlanPath,
+          HARNESS_MUTATE_USE_WARM_VITEST: "0",
+        },
+        timeout: 20_000,
+      })
+      expect(stopRes.status, stopRes.stderr).toBe(0)
+      const stopReports = Schema.decodeSync(BatchFileReportsArraySchema)(stopRes.stdout.trim())
+      expect(stopReports.map((r) => r.relFile)).toEqual(["libs/demo/core/src/f1.ts"])
+
+      // 3) When packageFallbackTests kills f1's survivor, confirmedSurvivors stays 0 so f2 is evaluated
+      const contRes = spawnSync(process.execPath, [join(dir, "tools/package-vitest-batch.mjs")], {
+        cwd: dir,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HARNESS_PACKAGE_PLAN_FILE: fbPlanPath,
+          HARNESS_MUTATE_USE_WARM_VITEST: "0",
+          TEST_KILL_IN_PKGFB: "1",
+        },
+        timeout: 20_000,
+      })
+      expect(contRes.status, contRes.stderr).toBe(0)
+      const contReports = Schema.decodeSync(BatchFileReportsArraySchema)(contRes.stdout.trim())
+      expect(contReports.map((r) => r.relFile)).toEqual([
+        "libs/demo/core/src/f1.ts",
+        "libs/demo/core/src/f2.ts",
+      ])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("mutant-coverage-setup omits overlapped it.concurrent tests from perTestHits while keeping moduleHits and sequential perTestHits", () => {
+    withTempDir("spec0034-cov-overlap-", (dir) => {
+      const covOutDir = join(dir, "cov-out")
+      mkdirSync(covOutDir, { recursive: true })
+      symlinkSync(join(REAL_REPO_ROOT, "node_modules"), join(dir, "node_modules"), "dir")
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ type: "module" }), "utf8")
+      writeFileSync(
+        join(dir, "mod.ts"),
+        [
+          "export const recordHit = (id: string): string => {",
+          '  const hits: unknown = Reflect.get(globalThis, "__HARNESS_MUTANT_HITS")',
+          "  if (hits instanceof Set) hits.add(id)",
+          "  return id",
+          "}",
+        ].join("\n"),
+        "utf8",
+      )
+      const testFile = join(dir, "overlap.test.ts")
+      writeFileSync(
+        testFile,
+        [
+          'import { describe, expect, it } from "vitest"',
+          'import { recordHit } from "./mod.js"',
+          'describe("concurrent overlap", () => {',
+          '  it.concurrent("conc-a", async () => {',
+          '    recordHit("m-conc-a")',
+          "    await new Promise((r) => setTimeout(r, 40))",
+          '    expect(recordHit("m-conc-a-after")).toBe("m-conc-a-after")',
+          "  })",
+          '  it.concurrent("conc-b", async () => {',
+          '    recordHit("m-conc-b")',
+          "    await new Promise((r) => setTimeout(r, 40))",
+          '    expect(recordHit("m-conc-b-after")).toBe("m-conc-b-after")',
+          "  })",
+          "})",
+          'describe("sequential isolated", () => {',
+          '  it("seq-only", () => {',
+          '    expect(recordHit("m-seq")).toBe("m-seq")',
+          "  })",
+          "})",
+        ].join("\n"),
+        "utf8",
+      )
+      const configPath = join(dir, "vitest.config.mjs")
+      const setupFile = join(REAL_REPO_ROOT, "tools/mutant-coverage-setup.mjs")
+      writeFileSync(
+        configPath,
+        `export default { test: { setupFiles: [${JSON.stringify(setupFile)}] } }\n`,
+        "utf8",
+      )
+      const res = spawnSync(
+        process.execPath,
+        [
+          join(REAL_REPO_ROOT, "node_modules/vitest/vitest.mjs"),
+          "run",
+          "--root",
+          dir,
+          "--config",
+          configPath,
+          testFile,
+        ],
+        {
+          cwd: dir,
+          encoding: "utf8",
+          env: { ...process.env, HARNESS_COVERAGE_OUT_DIR: covOutDir },
+          timeout: 30_000,
+        },
+      )
+      expect(res.status, res.stderr).toBe(0)
+      const files = readdirSync(covOutDir).filter((f) => f.endsWith(".json"))
+      expect(files).toHaveLength(1)
+      const CoverageReportSchema = Schema.fromJsonString(
+        Schema.Struct({
+          testFile: Schema.String,
+          hits: Schema.Array(Schema.String),
+          perTestHits: Schema.Array(
+            Schema.Struct({
+              testName: Schema.String,
+              durationMs: Schema.Finite,
+              hits: Schema.Array(Schema.String),
+            }),
+          ),
+        }),
+      )
+      const report = Schema.decodeSync(CoverageReportSchema)(
+        readFileSync(join(covOutDir, files[0]!), "utf8"),
+      )
+      expect(report.hits).toContain("m-conc-a")
+      expect(report.hits).toContain("m-conc-b")
+      expect(report.hits).toContain("m-seq")
+      expect(
+        report.perTestHits.some(
+          (entry) => entry.testName.includes("conc-a") || entry.testName.includes("conc-b"),
+        ),
+      ).toBe(false)
+      const seqEntry = report.perTestHits.find((entry) => entry.testName.includes("seq-only"))
+      expect(seqEntry).toBeDefined()
+      expect(seqEntry!.hits).toContain("m-seq")
+      expect(Number.isFinite(seqEntry!.durationMs) && seqEntry!.durationMs > 0).toBe(true)
     })
   })
 })

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { Effect } from "effect"
 import { match } from "ts-pattern"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   checkMutateStamp,
   MutantCount,
@@ -17,7 +17,7 @@ import { nodeSyncHostIo } from "@harness/infra"
 import { handleMutate } from "../src/commands/mutate-and-bench.command.js"
 import { parseMutateCliFlags } from "../src/commands/mutate-flags.js"
 import { evaluateVerifyMutateStampGate } from "../src/commands/mutate-stamp-gate.js"
-import { runDeclarativeCli } from "../src/index.js"
+import { type CliResult, runDeclarativeCli } from "../src/index.js"
 
 const REAL_REPO_ROOT = resolve(import.meta.dirname, "../../..")
 
@@ -254,9 +254,19 @@ describe("SPEC-0034 Area 2 CLI flags, fail-fast, stage-a-only, and stamp prevent
     const stampPath = writeValidStamp(dir)
     expect(existsSync(stampPath)).toBe(true)
 
-    const ffRes = await Effect.runPromise(
-      handleMutate(["mutate", "--strict", "--fail-fast"], { repoRoot: dir }),
-    )
+    const ffDirectStderr: Array<string> = []
+    const ffSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      ffDirectStderr.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+      return true
+    })
+    let ffRes: CliResult
+    try {
+      ffRes = await Effect.runPromise(
+        handleMutate(["mutate", "--strict", "--fail-fast"], { repoRoot: dir }),
+      )
+    } finally {
+      ffSpy.mockRestore()
+    }
     expect(ffRes.exitCode).toBe(1)
     expect(existsSync(stampPath)).toBe(false)
     const ffReport = JSON.parse(ffRes.stdout) as ParsedMutateReport
@@ -266,17 +276,31 @@ describe("SPEC-0034 Area 2 CLI flags, fail-fast, stage-a-only, and stamp prevent
     expect(ffReport.killedCount).toBe(1)
     expect(ffReport.survivedCount).toBe(2)
     expect(ffReport.survivedMutants.every((m) => m.file !== "libs/demo/gates/src/c.ts")).toBe(true)
+    const ffDirectText = ffDirectStderr.join("")
+    const ffStderrLines = ffRes.stderr.split("\n")
     for (const m of ffReport.survivedMutants) {
-      expect(ffRes.stderr).toContain(`${m.file}:${m.line}:${m.original}->${m.replacement}`)
+      const line = `${m.file}:${m.line}:${m.original}->${m.replacement}`
+      expect(ffDirectText).not.toContain(line)
+      expect(ffStderrLines.filter((l) => l === line)).toHaveLength(1)
     }
 
     writeValidStamp(dir)
-    const maxRes = await Effect.runPromise(
-      runDeclarativeCli(["mutate", "--strict", "--max-survivors=2"], {
-        repoRoot: dir,
-        skipBackgroundDaemons: true,
-      }),
-    )
+    const maxDirectStderr: Array<string> = []
+    const maxSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      maxDirectStderr.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+      return true
+    })
+    let maxRes: CliResult
+    try {
+      maxRes = await Effect.runPromise(
+        runDeclarativeCli(["mutate", "--strict", "--max-survivors=2"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        }),
+      )
+    } finally {
+      maxSpy.mockRestore()
+    }
     expect(maxRes.exitCode).toBe(1)
     expect(existsSync(stampPath)).toBe(false)
     const maxReport = JSON.parse(maxRes.stdout) as ParsedMutateReport
@@ -285,8 +309,12 @@ describe("SPEC-0034 Area 2 CLI flags, fail-fast, stage-a-only, and stamp prevent
     expect(maxReport.totalMutants).toBe(3)
     expect(maxReport.survivedCount).toBe(2)
     expect(maxReport.survivedMutants.every((m) => m.file !== "libs/demo/gates/src/c.ts")).toBe(true)
+    const maxDirectText = maxDirectStderr.join("")
+    const maxStderrLines = maxRes.stderr.split("\n")
     for (const m of maxReport.survivedMutants) {
-      expect(maxRes.stderr).toContain(`${m.file}:${m.line}:${m.original}->${m.replacement}`)
+      const line = `${m.file}:${m.line}:${m.original}->${m.replacement}`
+      expect(maxDirectText).not.toContain(line)
+      expect(maxStderrLines.filter((l) => l === line)).toHaveLength(1)
     }
   }, 90_000)
 
@@ -405,9 +433,12 @@ describe("SPEC-0034 Area 2 CLI flags, fail-fast, stage-a-only, and stamp prevent
     expect(report.stageAOnly).toBe(true)
     expect(report.killedCount).toBe(1)
     expect(existsSync(stampPath)).toBe(false)
+    expect(stageARes.stderr).toContain(
+      "[mutation-check] Notice: .harness/mutate-stamp.json was not written (--stage-a-only).",
+    )
   }, 60_000)
 
-  it("REQ-2.4: clean strict --fail-fast writes stamp, while --scope and --stage-a-only never write stamp", async () => {
+  it("REQ-2.4: clean strict --fail-fast writes stamp, while --scope, --stage-a-only, --file, --diff, and unverified --base never write stamp and emit notice", async () => {
     const dir = initTempGitRepo("cli-spec0034-stamp-policy-")
     tempDirs.push(dir)
     git(dir, ["checkout", "-b", "feat/stamp-policy"])
@@ -435,12 +466,47 @@ describe("SPEC-0034 Area 2 CLI flags, fail-fast, stage-a-only, and stamp prevent
     )
     expect(scopeRes.exitCode).toBe(0)
     expect(existsSync(stampPath)).toBe(false)
+    expect(scopeRes.stderr).toContain(
+      "[mutation-check] Notice: .harness/mutate-stamp.json was not written (--scope).",
+    )
 
     const stageARes = await Effect.runPromise(
       handleMutate(["mutate", "--strict", "--stage-a-only"], { repoRoot: dir }),
     )
     expect(stageARes.exitCode).toBe(0)
     expect(existsSync(stampPath)).toBe(false)
+    expect(stageARes.stderr).toContain(
+      "[mutation-check] Notice: .harness/mutate-stamp.json was not written (--stage-a-only).",
+    )
+
+    const fileRes = await Effect.runPromise(
+      handleMutate(["mutate", "--strict", "--file=libs/demo/gates/src/engine.ts"], {
+        repoRoot: dir,
+      }),
+    )
+    expect(fileRes.exitCode).toBe(0)
+    expect(existsSync(stampPath)).toBe(false)
+    expect(fileRes.stderr).toContain(
+      "[mutation-check] Notice: .harness/mutate-stamp.json was not written (--file).",
+    )
+
+    const diffRes = await Effect.runPromise(
+      handleMutate(["mutate", "--strict", "--diff"], { repoRoot: dir }),
+    )
+    expect(diffRes.exitCode).toBe(0)
+    expect(existsSync(stampPath)).toBe(false)
+    expect(diffRes.stderr).toContain(
+      "[mutation-check] Notice: .harness/mutate-stamp.json was not written (--diff).",
+    )
+
+    const unverifiedBaseRes = await Effect.runPromise(
+      handleMutate(["mutate", "--strict", "--base=nonexistent-parent"], { repoRoot: dir }),
+    )
+    expect(unverifiedBaseRes.exitCode).toBe(0)
+    expect(existsSync(stampPath)).toBe(false)
+    expect(unverifiedBaseRes.stderr).toContain(
+      "[mutation-check] Notice: .harness/mutate-stamp.json was not written (unverified --base 'nonexistent-parent').",
+    )
 
     const ffPassRes = await Effect.runPromise(
       runDeclarativeCli(["mutate", "--strict", "--fail-fast"], {
@@ -452,8 +518,9 @@ describe("SPEC-0034 Area 2 CLI flags, fail-fast, stage-a-only, and stamp prevent
     const ffReport = JSON.parse(ffPassRes.stdout) as ParsedMutateReport
     expect(ffReport.passed).toBe(true)
     expect(ffReport.earlyTerminated).not.toBe(true)
+    expect(ffPassRes.stderr).not.toContain("was not written")
     expect(existsSync(stampPath)).toBe(true)
-  }, 60_000)
+  }, 90_000)
 
   it("REQ-5.1: stacked --strict --base parent verifies ancestor witness cache, mints stackedBaseRef stamp, and passes verify stamp gate against main", async () => {
     const { dir, stampPath } = setupStackedMainParentFeatRepo("cli-spec0034-stacked-pass-", true)

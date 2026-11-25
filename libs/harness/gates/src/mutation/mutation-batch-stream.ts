@@ -124,15 +124,20 @@ export const readStreamedPackageBatchReports = (
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
   const reports: Array<PackageBatchFileOutput> = []
-  for (const line of nonEmptyLines) {
-    const ok = match(Schema.decodeExit(StreamedBatchReportLineSchema)(line))
+  for (let i = 0; i < nonEmptyLines.length; i++) {
+    const line = nonEmptyLines[i]!
+    match(Schema.decodeExit(StreamedBatchReportLineSchema)(line))
       .with({ _tag: "Success" }, ({ value }) => {
         reports.push(value)
-        return true
       })
-      .with({ _tag: "Failure" }, () => false)
+      .with({ _tag: "Failure" }, () => {
+        if (i < nonEmptyLines.length - 1) {
+          process.stderr.write(
+            `[mutation-check] Warning: Skipping malformed NDJSON batch line ${i + 1}/${nonEmptyLines.length} in '${streamReportPath}'.\n`,
+          )
+        }
+      })
       .exhaustive()
-    if (!ok) break
   }
   return reports
 }

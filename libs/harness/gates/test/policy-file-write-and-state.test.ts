@@ -129,6 +129,17 @@ describe("guard policy file writes, shell normalization & harness state protecti
     expect(
       classifyFileWrite(".harness/worktrees/wt-1/cache/mutation-cache-v2.corrupt").verdict,
     ).toBe("deny")
+    expect(classifyFileWrite(".harness/cache/mutation-test-timings-v1.json").verdict).toBe("deny")
+    expect(classifyFileWrite(".harness/cache/mutation-test-timings-v*.json").verdict).toBe("deny")
+    expect(classifyFileWrite(".harness/cache/mutation-cache-v*.json").verdict).toBe("deny")
+    expect(classifyCommand("rm .harness/cache/mutation-test-timings-v*.json")).toBe("deny")
+    expect(classifyCommand("rm .harness/cache/mutation-cache-v*.json")).toBe("deny")
+    expect(classifyFileWrite(".harness/cache/mutation-test-timings-v1.json.corrupt").verdict).toBe(
+      "deny",
+    )
+    expect(
+      classifyFileWrite(".harness/worktrees/wt-1/cache/mutation-test-timings-v1.json").verdict,
+    ).toBe("deny")
     expect(classifyFileWrite(".harness/session-preinvocation-cache.json").verdict).toBe("deny")
   })
 

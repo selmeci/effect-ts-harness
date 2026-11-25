@@ -245,6 +245,7 @@ export {
   resolveStackedBaseContext,
   verifyAncestorLinesAgainstHmacCache,
   type StackedBaseResolution,
+  type StackedBaseSuitePreparation,
 } from "./mutation/mutation-stacked-base.js"
 export {
   classifyMutationModulePurity,
@@ -523,8 +524,10 @@ export {
   verifyMutantSchemaSyntax,
 } from "./mutation/mutant-ast-generator.js"
 export {
+  checkGitAncestorCommit,
   extractGitDiffModifiedLinesChecked,
   recoverStartupBackup,
+  type GitAncestorCheckResult,
   type GitDiffExtractionResult,
 } from "./mutation/mutation-backup.js"
 export { readAndVerifyWorkspaceFile, statAndReadWorkspaceFiles } from "./services/workspace-fs.js"
@@ -631,6 +634,7 @@ export {
   parseVitestBaselineTestDurations,
   recordObservedTestTimings,
   saveMutationTestTimingsAtomic,
+  tryBuildTimingEntryKey,
 } from "./mutation/mutation-test-timings.js"
 export {
   PackageBatchFileOutputSchema,
