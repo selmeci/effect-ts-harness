@@ -457,10 +457,24 @@ export {
   MutationCacheVersion,
   MutationEpochMillis,
   MutationMaxAgeMillis,
+  PackageBatchFileOutputSchema,
+  type PackageBatchFileOutput,
   PackageRelKey,
   RedactedMutationCacheHmacSecret,
   RuntimeVersionTag,
+  TestTimingDurationMs,
 } from "./mutation-cache.js"
+export {
+  MUTATION_HEAVY_TEST_THRESHOLD_MS,
+  MUTATION_TEST_TIMING_EMA_ALPHA,
+  MUTATION_TEST_TIMINGS_FILENAME,
+  MUTATION_TEST_TIMINGS_SCHEMA_VERSION,
+  MutationTestTimingEntry,
+  MutationTestTimingKey,
+  MutationTestTimingsStore,
+  MutationTestTimingsVersion,
+  TestTimingSampleCount,
+} from "./mutation-test-timings.js"
 export {
   ConflictPairLimit,
   DEFAULT_QWEN_EMBEDDING_DIMENSIONS,

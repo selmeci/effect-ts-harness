@@ -1,7 +1,7 @@
 ---
 id: harness:SPEC-0034
 title: Witness-Scoped Mutation Caching, Incremental Chunk Flush, Strict Fail-Fast & Stage-A Probing, Adaptive Test Timings, Persistent Package Pool, and Verified Stacked-PR Base Stamping
-status: draft
+status: accepted
 archetype: framework
 date: 2026-11-25
 owners:
@@ -13,18 +13,28 @@ informed_by:
   - harness:ADR-0011
   - harness:ADR-0019
   - harness:ADR-0026
+  - harness:ADR-0027
 enforced_by:
   - libs/harness/contract/src/workspace-and-process.ts
   - libs/harness/contract/src/ast-and-gate-primitives.ts
+  - libs/harness/contract/src/mutation-cache.ts
+  - libs/harness/contract/src/mutation-test-timings.ts
+  - libs/harness/gates/src/mutation/mutation-witness.ts
   - libs/harness/gates/src/mutation/mutation-cache.ts
+  - libs/harness/gates/src/mutation/mutation-test-timings.ts
+  - libs/harness/gates/src/mutation/mutation-batch-stream.ts
   - libs/harness/gates/src/mutation/mutation-closure.ts
   - libs/harness/gates/src/mutation/mutation-context-digest.ts
   - libs/harness/gates/src/mutation/mutation-package-batch.ts
+  - libs/harness/gates/src/mutation/mutation-suite-helpers.ts
   - libs/harness/gates/src/mutation/mutation-test-reachability.ts
   - libs/harness/gates/src/mutation/mutation-target-discovery.ts
+  - libs/harness/gates/src/mutation/mutation-stacked-base.ts
   - libs/harness/gates/src/mutation/mutation-outcomes.ts
+  - libs/harness/gates/src/mutation-subprocess-helpers.ts
   - libs/harness/gates/src/mutation-check.ts
   - libs/harness/gates/src/verify-stamp.ts
+  - apps/harness-cli/src/commands/mutate-flags.ts
   - apps/harness-cli/src/commands/mutate-and-bench.command.ts
   - apps/harness-cli/src/commands/mutate-stamp-gate.ts
   - apps/harness-cli/src/commands/declarative-cli.ts
@@ -32,6 +42,14 @@ enforced_by:
   - tools/vitest-pool-helpers.mjs
   - tools/warm-vitest-worker.mjs
   - tools/mutant-coverage-setup.mjs
+  - tools/parallel-vitest-batch.mjs
+  - libs/harness/gates/test/mutation-witness-cache.test.ts
+  - libs/harness/gates/test/mutation-fail-fast-and-stage-a.test.ts
+  - libs/harness/gates/test/mutation-test-timings.test.ts
+  - libs/harness/gates/test/mutation-continuous-pool.test.ts
+  - libs/harness/gates/test/mutation-stacked-base.test.ts
+  - libs/harness/gates/test/mutation-spec0034-survivors.test.ts
+  - apps/harness-cli/test/mutate-spec0034-cli.test.ts
 spans:
   - MutationCache.decide
   - MutationCheck.decide
@@ -45,7 +63,7 @@ Profiling `pnpm harness mutate --strict` across stacked PR development in `SPEC-
 
 - **Reused Contracts / Errors:** `AstSourceFilePath`, `ContentSha256`, `MutationCacheEntry`, `MutationCacheLookupDecision`, `MutationCacheMac`, `MutationCacheStore`, `MutantId`, `PackageRelKey`, `WorkspaceFilePath`, `MutateStamp` from `@harness/contract` (`WorkspaceFsError`, `HarnessSubprocessError`)
 - **Reused Services:** `SyncHostIo` (`@harness/service/host-io`), `nodeSyncHostIo` (`@harness/infra`)
-- **New Capabilities Needed:** Witness-scoped cache entry fields (`witnessTestFile`, `witnessClosureSha256`) and HMAC payload bindings in `MutationCache.decide`, AST `referencesLibs` precision scoping, per-chunk/partial cache flushing, `--fail-fast` / `--max-survivors <N>` / `--stage-a-only` options, `.harness/cache/mutation-test-timings-v1.json` EMA timing recorder & sorter, continuous per-package warm worker pools with in-worker Stage 0 probes and schema-switch-only `invalidateFile`, and stacked `--base <parentRef>` ancestor HMAC proof verification in `MutationCheck.decide`.
+- **New Capabilities Needed:** Witness-scoped cache entry fields (`witnessTestFile`, `witnessClosureSha256`) and HMAC payload bindings in `MutationCache.decide`, AST repo-root `libs/` traversal scoping (`hasLibsFsTraversal`, `hasDirectRepoLibsIo`, `hasRealRepoRootAnchor`, `hasTestLibsLiteralAndFsIo`), per-chunk/partial cache flushing, `--fail-fast` / `--max-survivors <N>` / `--stage-a-only` options, `.harness/cache/mutation-test-timings-v1.json` EMA timing recorder & sorter, continuous per-package warm worker pools with in-worker Stage 0 probes and schema-switch-only `invalidateFile`, and stacked `--base <parentRef>` ancestor HMAC proof verification in `MutationCheck.decide`.
 
 ## Goal
 
@@ -109,7 +127,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | ------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- | ------------ |
 | REQ-5.1 | Event-driven       | **When** `harness mutate --strict --base <parentRef>` evaluates only `<parentRef>...HEAD` mutants, `MutationCheck.decide` **shall** verify that every modified mutable line in `main...<parentRef>` holds a valid witness-verified HMAC kill before writing the stamp. | MutationCheck.decide | UnitTest     |
 | REQ-5.2 | Unwanted behaviour | **If** `--strict --base <parentRef>` detects any modified mutable line in `main...<parentRef>` lacking a verified non-expired HMAC kill entry, **then** `MutationCheck.decide` **shall** expand evaluation to cover unverified ancestor mutants before stamping.       | MutationCheck.decide | UnitTest     |
-| REQ-5.3 | Ubiquitous         | The `MutationCheck.decide` warm runner **shall** keep `isolate: true` as its unbypassable default and uphold equivalent `main`-diff cryptographic kill coverage for every `.harness/mutate-stamp.json` produced under `--strict`.                                      | MutationCheck.decide | GraphCheck   |
+| REQ-5.3 | Ubiquitous         | The `MutationCheck.decide` warm runner **shall** keep `isolate: true` as its unbypassable default and uphold equivalent `main`-diff cryptographic kill coverage for every `.harness/mutate-stamp.json` produced under `--strict`.                                      | MutationCheck.decide | UnitTest     |
 
 ## Implementation Waves (Recommended PR Split)
 

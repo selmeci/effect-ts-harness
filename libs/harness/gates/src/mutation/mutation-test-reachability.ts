@@ -14,28 +14,13 @@ import {
   extractBarrelExportIndex,
   extractBarrelImportUsage,
 } from "./mutation-barrel-reachability.js"
+import {
+  isHeavyMetaTestAbsPath,
+  isHeavyTestByTimingOrStatic,
+  lookupMeasuredTestDurationMs,
+} from "./mutation-test-timings.js"
 
-const HEAVY_META_TEST_BASENAMES: ReadonlySet<string> = new Set([
-  "mutation-check.test.ts",
-  "mutation-speedup.test.ts",
-  "mutation-cache.test.ts",
-  "mutation-cache-hardening.test.ts",
-  "mutation-scoped-fallback.test.ts",
-  "self-dogfooding-capability-plugins.test.ts",
-  "self-dogfooding-governance-plugins.test.ts",
-  "self-dogfooding-plugin-harness.test.ts",
-  "milestone5-dst-ears-mutation-dpo.test.ts",
-  "policy-check.test.ts",
-  "policy-check-architecture-and-layers.test.ts",
-  "policy-check-patterns-and-types.test.ts",
-  "type-extractor.test.ts",
-  "governance-nodes.test.ts",
-  "graph-projector.test.ts",
-  "structural-search.test.ts",
-  "workflow-graph-assets.test.ts",
-  "workflow-graph-assets-sync.test.ts",
-  "ts-compiler-overlay-service.test.ts",
-])
+export { isHeavyMetaTestAbsPath }
 
 export interface PackageReachabilityIndex {
   readonly pkgDirRel: string
@@ -320,19 +305,22 @@ export const getOrBuildPackageReachabilityIndexChecked = (
     .exhaustive()
 }
 
-export const isHeavyMetaTestAbsPath = (testAbsPath: string): boolean => {
-  const base = testAbsPath.split(/[/\\]/).pop() ?? testAbsPath
-  return HEAVY_META_TEST_BASENAMES.has(base)
-}
-
 export const sortTestAbsPathsBySpeed = (
   paths: ReadonlyArray<string>,
   index: PackageReachabilityIndex,
   prioritySet?: ReadonlySet<string>,
+  measuredDurationMsByAbsPath?: ReadonlyMap<string, number>,
 ): Array<string> =>
   [...paths].sort((a, b) => {
-    const heavyDiff = Number(isHeavyMetaTestAbsPath(a)) - Number(isHeavyMetaTestAbsPath(b))
+    const heavyDiff =
+      Number(isHeavyTestByTimingOrStatic(a, measuredDurationMsByAbsPath)) -
+      Number(isHeavyTestByTimingOrStatic(b, measuredDurationMsByAbsPath))
     if (heavyDiff !== 0) return heavyDiff
+    const durA = lookupMeasuredTestDurationMs(a, measuredDurationMsByAbsPath)
+    const durB = lookupMeasuredTestDurationMs(b, measuredDurationMsByAbsPath)
+    if (durA !== undefined && durB !== undefined && durA !== durB) {
+      return durA - durB
+    }
     if (prioritySet !== undefined) {
       const priDiff = Number(!prioritySet.has(a)) - Number(!prioritySet.has(b))
       if (priDiff !== 0) return priDiff
@@ -374,6 +362,7 @@ export const queryReverseImportReachability = (
   index: PackageReachabilityIndex,
   targetRelFile: string,
   eligibleTests: ReadonlyArray<string>,
+  measuredDurationMsByAbsPath?: ReadonlyMap<string, number>,
 ): ReverseImportReachability => {
   const eligibleByRel = new Map<string, string>()
   for (const [rel, abs] of index.absByRelPath.entries()) {
@@ -390,9 +379,24 @@ export const queryReverseImportReachability = (
     nonBarrelTests: nonBarrel,
   })
   return {
-    nonBarrelTests: sortTestAbsPathsBySpeed(nonBarrel, index),
-    scopedClosureTests: sortTestAbsPathsBySpeed(Array.from(scopedClosureSet), index),
-    allStaticImporterTests: sortTestAbsPathsBySpeed(full, index),
+    nonBarrelTests: sortTestAbsPathsBySpeed(
+      nonBarrel,
+      index,
+      undefined,
+      measuredDurationMsByAbsPath,
+    ),
+    scopedClosureTests: sortTestAbsPathsBySpeed(
+      Array.from(scopedClosureSet),
+      index,
+      undefined,
+      measuredDurationMsByAbsPath,
+    ),
+    allStaticImporterTests: sortTestAbsPathsBySpeed(
+      full,
+      index,
+      undefined,
+      measuredDurationMsByAbsPath,
+    ),
   }
 }
 
@@ -402,6 +406,7 @@ export const selectReachabilityPartition = (input: {
   readonly eligibleTests: ReadonlyArray<string>
   readonly directStemTests: ReadonlyArray<string>
   readonly symbolMatchedTests: ReadonlyArray<string>
+  readonly measuredDurationMsByAbsPath?: ReadonlyMap<string, number> | undefined
 }): {
   readonly primaryTests: ReadonlyArray<string>
   readonly scopedFallbackTests: ReadonlyArray<string>
@@ -409,7 +414,12 @@ export const selectReachabilityPartition = (input: {
   readonly fallbackTests: ReadonlyArray<string>
 } => {
   const { nonBarrelTests, scopedClosureTests, allStaticImporterTests } =
-    queryReverseImportReachability(input.index, input.targetRelFile, input.eligibleTests)
+    queryReverseImportReachability(
+      input.index,
+      input.targetRelFile,
+      input.eligibleTests,
+      input.measuredDurationMsByAbsPath,
+    )
   const staticSet = new Set(allStaticImporterTests)
   const scopedClosureSet = new Set(scopedClosureTests)
   const buildPartition = (primaryTests: ReadonlyArray<string>) => {
@@ -417,12 +427,15 @@ export const selectReachabilityPartition = (input: {
     const scopedFallbackTests = sortTestAbsPathsBySpeed(
       input.eligibleTests.filter((t) => !primarySet.has(t) && scopedClosureSet.has(t)),
       input.index,
+      undefined,
+      input.measuredDurationMsByAbsPath,
     )
     const scopedSet = new Set(scopedFallbackTests)
     const packageFallbackTests = sortTestAbsPathsBySpeed(
       input.eligibleTests.filter((t) => !primarySet.has(t) && !scopedSet.has(t)),
       input.index,
       staticSet,
+      input.measuredDurationMsByAbsPath,
     )
     return {
       primaryTests,
@@ -444,10 +457,30 @@ export const selectReachabilityPartition = (input: {
   }
 
   if (input.directStemTests.length > 0) {
-    return buildPartition(dedupPreserve([...input.directStemTests, ...nonBarrelTests]))
+    const primary = dedupPreserve([...input.directStemTests, ...nonBarrelTests])
+    return buildPartition(
+      input.measuredDurationMsByAbsPath !== undefined
+        ? sortTestAbsPathsBySpeed(
+            primary,
+            input.index,
+            new Set(input.directStemTests),
+            input.measuredDurationMsByAbsPath,
+          )
+        : primary,
+    )
   }
   if (input.symbolMatchedTests.length > 0) {
-    return buildPartition(dedupPreserve([...input.symbolMatchedTests, ...nonBarrelTests]))
+    const primary = dedupPreserve([...input.symbolMatchedTests, ...nonBarrelTests])
+    return buildPartition(
+      input.measuredDurationMsByAbsPath !== undefined
+        ? sortTestAbsPathsBySpeed(
+            primary,
+            input.index,
+            new Set(input.symbolMatchedTests),
+            input.measuredDurationMsByAbsPath,
+          )
+        : primary,
+    )
   }
   if (nonBarrelTests.length > 0) {
     return buildPartition(nonBarrelTests)
@@ -459,7 +492,12 @@ export const selectReachabilityPartition = (input: {
     return buildPartition(allStaticImporterTests)
   }
   return {
-    primaryTests: sortTestAbsPathsBySpeed(input.eligibleTests, input.index, staticSet),
+    primaryTests: sortTestAbsPathsBySpeed(
+      input.eligibleTests,
+      input.index,
+      staticSet,
+      input.measuredDurationMsByAbsPath,
+    ),
     scopedFallbackTests: [],
     packageFallbackTests: [],
     fallbackTests: [],
@@ -501,6 +539,7 @@ export const partitionEligibleTestsChecked = (input: {
   readonly allTests: ReadonlyArray<string>
   readonly hostIo: SyncHostIo
   readonly reachabilityCache?: Map<string, PackageReachabilityIndex> | undefined
+  readonly measuredDurationMsByAbsPath?: ReadonlyMap<string, number> | undefined
 }):
   | {
       readonly _tag: "Ok"
@@ -518,10 +557,23 @@ export const partitionEligibleTestsChecked = (input: {
       basename(t) !== "self-dogfooding-plugin-harness.test.ts" || stem === "self-dogfooding-plugin",
   )
   if (eligibleTests.length <= 2) {
+    const primaryTests =
+      input.measuredDurationMsByAbsPath !== undefined
+        ? [...eligibleTests].sort((a, b) => {
+            const heavyDiff =
+              Number(isHeavyTestByTimingOrStatic(a, input.measuredDurationMsByAbsPath)) -
+              Number(isHeavyTestByTimingOrStatic(b, input.measuredDurationMsByAbsPath))
+            if (heavyDiff !== 0) return heavyDiff
+            const durA = lookupMeasuredTestDurationMs(a, input.measuredDurationMsByAbsPath)
+            const durB = lookupMeasuredTestDurationMs(b, input.measuredDurationMsByAbsPath)
+            if (durA !== undefined && durB !== undefined && durA !== durB) return durA - durB
+            return compareCodeUnits(a, b)
+          })
+        : eligibleTests
     return {
       _tag: "Ok",
       partition: {
-        primaryTests: eligibleTests,
+        primaryTests,
         scopedFallbackTests: [],
         packageFallbackTests: [],
         fallbackTests: [],
@@ -591,6 +643,7 @@ export const partitionEligibleTestsChecked = (input: {
       eligibleTests,
       directStemTests,
       symbolMatchedTests,
+      measuredDurationMsByAbsPath: input.measuredDurationMsByAbsPath,
     }),
   }
 }

@@ -592,6 +592,14 @@ export const findUnclassifiedModifiedLibFiles = (
     (reason) => new Error(reason),
   )
 
+export const resolveDomainPackageRelDir = (file: DomainFile): string =>
+  match(file.tier)
+    .with("app-pure", () =>
+      file.scope === "apps" ? `apps/${file.pkgDir}` : `libs/${file.scope}/${file.pkgDir}`,
+    )
+    .with("domain", "core", "contract", "infra-pure", () => `libs/${file.scope}/${file.pkgDir}`)
+    .exhaustive()
+
 export const findReachingTestFilesChecked = (
   repoRoot: string,
   file: DomainFile,
@@ -599,13 +607,7 @@ export const findReachingTestFilesChecked = (
 ):
   | { readonly _tag: "Ok"; readonly files: ReadonlyArray<string> }
   | { readonly _tag: "Error"; readonly reason: string } => {
-  const testDir = match(file.tier)
-    .with("app-pure", () =>
-      file.scope === "apps"
-        ? join(repoRoot, "apps", file.pkgDir, "test")
-        : join(repoRoot, "libs", file.scope, file.pkgDir, "test"),
-    )
-    .otherwise(() => join(repoRoot, "libs", file.scope, file.pkgDir, "test"))
+  const testDir = join(repoRoot, resolveDomainPackageRelDir(file), "test")
   const existsRes = existsGuarded(testDir, hostIo)
   const testDirExists = match(existsRes)
     .with({ _tag: "Success" }, ({ success }) => success)
@@ -686,17 +688,14 @@ export const partitionReachingTestFilesChecked = (
   sourceContent: string,
   hostIo: SyncHostIo,
   reachabilityCache?: Map<string, PackageReachabilityIndex>,
+  measuredDurationMsByAbsPath?: ReadonlyMap<string, number>,
 ):
   | { readonly _tag: "Ok"; readonly partition: TestPartition }
   | { readonly _tag: "Error"; readonly reason: string } =>
   match(findReachingTestFilesChecked(repoRoot, file, hostIo))
     .with({ _tag: "Error" }, (err) => err)
     .with({ _tag: "Ok" }, ({ files: allTests }) => {
-      const pkgDirRel = match(file.tier)
-        .with("app-pure", () =>
-          file.scope === "apps" ? `apps/${file.pkgDir}` : `libs/${file.scope}/${file.pkgDir}`,
-        )
-        .otherwise(() => `libs/${file.scope}/${file.pkgDir}`)
+      const pkgDirRel = resolveDomainPackageRelDir(file)
       return partitionEligibleTestsChecked({
         repoRoot,
         pkgDirRel,
@@ -706,6 +705,7 @@ export const partitionReachingTestFilesChecked = (
         allTests,
         hostIo,
         reachabilityCache,
+        measuredDurationMsByAbsPath,
       })
     })
     .exhaustive()
@@ -716,10 +716,18 @@ export const partitionReachingTestFiles = (
   sourceContent: string,
   hostIo: SyncHostIo,
   reachabilityCache?: Map<string, PackageReachabilityIndex>,
+  measuredDurationMsByAbsPath?: ReadonlyMap<string, number>,
 ): TestPartition =>
   Result.getOrThrowWith(
     match(
-      partitionReachingTestFilesChecked(repoRoot, file, sourceContent, hostIo, reachabilityCache),
+      partitionReachingTestFilesChecked(
+        repoRoot,
+        file,
+        sourceContent,
+        hostIo,
+        reachabilityCache,
+        measuredDurationMsByAbsPath,
+      ),
     )
       .with({ _tag: "Ok" }, ({ partition }) => Result.succeed(partition))
       .with({ _tag: "Error" }, ({ reason }) => Result.fail(reason))

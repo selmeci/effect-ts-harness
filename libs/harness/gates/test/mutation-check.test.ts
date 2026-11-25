@@ -207,6 +207,12 @@ describe("mutation-check infrastructure failure and backup recovery (F-4.3, F-5.
           }
           testHostIo.writeTextSync(filePath, content)
         },
+        renameSync: (oldPath, newPath) => {
+          if (newPath === domainFile) {
+            throw new Error("EACCES: simulated rename restore failure")
+          }
+          testHostIo.renameSync(oldPath, newPath)
+        },
       }
 
       const stderrChunks: Array<string> = []

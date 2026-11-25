@@ -589,6 +589,8 @@ describe("mutation-speedup: read-only worktree shared cache & runtime digests", 
       const keyShared2 = ContentSha256.make("2".repeat(64))
       const recordedAt = MutationCacheTimestamp.make("2026-11-23T12:00:00.000Z")
       const file = AstSourceFilePath.make("libs/demo/domain/src/a.ts")
+      const witnessTestFile = AstSourceFilePath.make("libs/demo/domain/test/a.test.ts")
+      const witnessClosureSha256 = computeContentSha256("demo-witness-closure")
       const mutantId = MutantCacheId.make("libs/demo/domain/src/a.ts:1:===->!==")
       const hmac = match(auth)
         .with({ _tag: "Enabled" }, ({ hmacSecret }) => hmacSecret)
@@ -605,12 +607,16 @@ describe("mutation-speedup: read-only worktree shared cache & runtime digests", 
               mutantId,
               status: "killed",
               recordedAt,
+              witnessTestFile,
+              witnessClosureSha256,
               mac: computeMutationEntryMac(hmac, {
                 key: keyShared,
                 file,
                 mutantId,
                 status: "killed",
                 recordedAt,
+                witnessTestFile,
+                witnessClosureSha256,
               }),
             },
             [keyShared2]: {
@@ -619,12 +625,16 @@ describe("mutation-speedup: read-only worktree shared cache & runtime digests", 
               mutantId,
               status: "killed",
               recordedAt,
+              witnessTestFile,
+              witnessClosureSha256,
               mac: computeMutationEntryMac(hmac, {
                 key: keyShared2,
                 file,
                 mutantId,
                 status: "killed",
                 recordedAt,
+                witnessTestFile,
+                witnessClosureSha256,
               }),
             },
           },
@@ -645,12 +655,16 @@ describe("mutation-speedup: read-only worktree shared cache & runtime digests", 
               mutantId,
               status: "killed",
               recordedAt: localOverrideTs,
+              witnessTestFile,
+              witnessClosureSha256,
               mac: computeMutationEntryMac(hmac, {
                 key: keyShared,
                 file,
                 mutantId,
                 status: "killed",
                 recordedAt: localOverrideTs,
+                witnessTestFile,
+                witnessClosureSha256,
               }),
             },
           },
@@ -957,7 +971,9 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
       opts?: { readonly exists?: boolean; readonly writeThrows?: boolean },
     ): SyncHostIo => ({
       ...testHostIo,
-      existsSync: () => opts?.exists ?? true,
+      existsSync: (p) =>
+        opts?.exists === false ? false : !p.endsWith("backup.json") && !p.includes("pkg-stream-"),
+      realpathSync: (p) => p,
       mkdirRecursiveSync: () => {},
       writeTextSync: () => {
         if (opts?.writeThrows) throw new Error("disk full")
@@ -1195,7 +1211,7 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
     }
   })
 
-  it("parallel-vitest-batch with HARNESS_BATCH_TARGET_FILE kills top-level and function mutants in both default isolate and opt-in isolate:false modes", () => {
+  it("parallel-vitest-batch with HARNESS_BATCH_TARGET_FILE enforces isolate:true even when HARNESS_MUTATE_WARM_ISOLATE=0 and kills top-level and function mutants", () => {
     const dir = mkdtempSync(join(tmpdir(), "iso-false-batch-"))
     try {
       const modPath = join(dir, "calc.ts")

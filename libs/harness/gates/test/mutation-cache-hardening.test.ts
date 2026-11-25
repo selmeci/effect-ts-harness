@@ -12,7 +12,7 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "@effect/vitest"
-import { Option, Redacted } from "effect"
+import { Redacted } from "effect"
 import { match } from "ts-pattern"
 import {
   AstSourceFilePath,
@@ -50,7 +50,6 @@ import {
   computeMutantCacheKey,
   computeMutationContextDigestsChecked,
   computeMutationEntryMac,
-  hashReachingTestFiles,
   loadMutationCache,
   loadMutationCacheWithStatus,
   partitionMutationCacheLookup,
@@ -104,12 +103,17 @@ const setupTempRepo = (
   return { repoRoot, domainFile, testFile }
 }
 
+const DEFAULT_WITNESS_TEST = AstSourceFilePath.make("libs/sample/domain/test/logic.test.ts")
+const DEFAULT_WITNESS_CLOSURE = computeContentSha256("sample-witness-closure")
+
 const makeSignedEntry = (
   key: ContentSha256,
   mutantId: string,
   recordedAtStr: string,
   secret = TEST_HMAC_SECRET,
   lastAccessedAtStr?: string,
+  witnessTestFile: AstSourceFilePath = DEFAULT_WITNESS_TEST,
+  witnessClosureSha256: ContentSha256 = DEFAULT_WITNESS_CLOSURE,
 ): MutationCacheEntry => {
   const file = AstSourceFilePath.make("libs/sample/domain/src/logic.ts")
   const mId = MutantCacheId.make(mutantId)
@@ -123,23 +127,19 @@ const makeSignedEntry = (
     ...(lastAccessedAtStr !== undefined
       ? { lastAccessedAt: MutationCacheTimestamp.make(lastAccessedAtStr) }
       : {}),
+    witnessTestFile,
+    witnessClosureSha256,
     mac: computeMutationEntryMac(secret, {
       key,
       file,
       mutantId: mId,
       status: "killed",
       recordedAt,
+      witnessTestFile,
+      witnessClosureSha256,
     }),
   }
 }
-
-const unwrapOpt = <A>(opt: Option.Option<A>): A =>
-  match(opt)
-    .with({ _tag: "Some" }, ({ value }) => value)
-    .with({ _tag: "None" }, () => {
-      throw new Error("Expected Option.Some")
-    })
-    .exhaustive()
 
 const makeSampleMutant = (id = "logic.ts:1:0"): CodeMutant => ({
   id: MutantId.make(id),
@@ -178,6 +178,8 @@ describe("MutationCache hardening & regressions", () => {
       mutantId: MutantCacheId.make("1:c"),
       status: "killed",
       recordedAt: MutationCacheTimestamp.make(recordedAt),
+      witnessTestFile: DEFAULT_WITNESS_TEST,
+      witnessClosureSha256: DEFAULT_WITNESS_CLOSURE,
     })
     const macB = computeMutationEntryMac(TEST_HMAC_SECRET, {
       key: computeContentSha256("collision"),
@@ -185,12 +187,18 @@ describe("MutationCache hardening & regressions", () => {
       mutantId: MutantCacheId.make("c"),
       status: "killed",
       recordedAt: MutationCacheTimestamp.make(recordedAt),
+      witnessTestFile: DEFAULT_WITNESS_TEST,
+      witnessClosureSha256: DEFAULT_WITNESS_CLOSURE,
     })
     expect(macA).not.toBe(macB)
 
     const store: MutationCacheStore = {
       version: MUTATION_CACHE_SCHEMA_VERSION,
       entries: { [k1]: entry1WithAccess, [k2]: makeSignedEntry(k2, "m2", recordedAt) },
+    }
+    const defaultWitnessArgs = {
+      reachingTests: [DEFAULT_WITNESS_TEST],
+      witnessClosureDigests: { [DEFAULT_WITNESS_TEST]: DEFAULT_WITNESS_CLOSURE },
     }
 
     // Disabled auth fails closed
@@ -199,6 +207,7 @@ describe("MutationCache hardening & regressions", () => {
       store,
       auth: { _tag: "Disabled", reason: ErrorReasonMessage.make("no secret") },
       nowMs: MutationEpochMillis.make(Date.parse(recordedAt)),
+      ...defaultWitnessArgs,
     })
     expect(noSecret.hitKeys).toEqual([])
     expect(noSecret.missKeys).toEqual([k1, k2])
@@ -210,6 +219,7 @@ describe("MutationCache hardening & regressions", () => {
       auth: TEST_CACHE_AUTH,
       nowMs: MutationEpochMillis.make(Date.parse(recordedAt)),
       maxAgeMs: MutationMaxAgeMillis.make(MAX_MUTATION_CACHE_AGE_MS),
+      ...defaultWitnessArgs,
     })
     expect(exactZeroAge.hitKeys).toEqual([k1, k2])
 
@@ -219,6 +229,7 @@ describe("MutationCache hardening & regressions", () => {
       auth: TEST_CACHE_AUTH,
       nowMs: MutationEpochMillis.make(Date.parse(recordedAt) + MAX_MUTATION_CACHE_AGE_MS),
       maxAgeMs: MutationMaxAgeMillis.make(MAX_MUTATION_CACHE_AGE_MS),
+      ...defaultWitnessArgs,
     })
     expect(exactTtlBoundary.hitKeys).toEqual([k1, k2])
 
@@ -228,6 +239,7 @@ describe("MutationCache hardening & regressions", () => {
       store,
       auth: TEST_CACHE_AUTH,
       nowMs: MutationEpochMillis.make(Date.parse(recordedAt) + MAX_MUTATION_CACHE_AGE_MS + 1),
+      ...defaultWitnessArgs,
     })
     expect(expired.hitKeys).toEqual([])
     expect(expired.missKeys).toEqual([k1, k2])
@@ -237,6 +249,7 @@ describe("MutationCache hardening & regressions", () => {
       store,
       auth: TEST_CACHE_AUTH,
       nowMs: MutationEpochMillis.make(Date.parse("2026-11-18T09:00:00.000Z")),
+      ...defaultWitnessArgs,
     })
     expect(futureRecorded.hitKeys).toEqual([])
 
@@ -534,7 +547,7 @@ describe("MutationCache hardening & regressions", () => {
           return {
             _tag: "Exited",
             exitCode: 1,
-            stdout: "FAIL  test\nTests  1 failed (1)\n",
+            stdout: `FAIL  libs/sample/domain/test/${isFallback ? "extra.test.ts" : "logic.test.ts"}\nTests  1 failed (1)\n`,
             stderr: "",
           }
         },
@@ -593,7 +606,7 @@ describe("MutationCache hardening & regressions", () => {
       "export const isSame = (a: number, b: number) => a === b && otherFn() > 0 && refs.length > 0",
       "",
     ].join("\n")
-    const { repoRoot, testFile } = setupTempRepo(src)
+    const { repoRoot } = setupTempRepo(src)
     try {
       mkdirSync(join(repoRoot, "agent-patterns"), { recursive: true })
       mkdirSync(join(repoRoot, "docs", "adr"), { recursive: true })
@@ -651,8 +664,7 @@ describe("MutationCache hardening & regressions", () => {
       const mutant = makeSampleMutant()
       const origSha = computeContentSha256(src)
       const schemaSha = computeContentSha256("schema")
-      const reachingTestHashes = unwrapOpt(hashReachingTestFiles(repoRoot, [testFile], testHostIo))
-      const keyFor = (digests: typeof d0) => {
+      const keyFor = (digests: typeof d0): string => {
         const closure = match(
           computeFileMutationClosureDigest({
             repoRoot,
@@ -667,16 +679,15 @@ describe("MutationCache hardening & regressions", () => {
             throw new Error(`Expected Ok closure: ${reason}`)
           })
           .exhaustive()
-        return computeMutantCacheKey({
+        const key = computeMutantCacheKey({
           pkgKey: PackageRelKey.make("sample/domain"),
           relFile: AstSourceFilePath.make("libs/sample/domain/src/logic.ts"),
           originalContentSha256: origSha,
           compiledSchemaSha256: schemaSha,
           mutant,
-          reachingTestHashes,
           digests,
-          closureDigest: closure.closureDigest,
         })
+        return `${key}:${closure.closureDigest}`
       }
 
       const k0 = keyFor(d0)
@@ -818,7 +829,7 @@ describe("MutationCache hardening & regressions", () => {
           return {
             _tag: "Exited",
             exitCode: 1,
-            stdout: "FAIL  test\nTests  1 failed (1)\n",
+            stdout: "FAIL  libs/zzz/domain/test/logic2.test.ts\nTests  1 failed (1)\n",
             stderr: "",
           }
         },
@@ -1238,32 +1249,34 @@ it("second should not run", () => {
       const key = computeContentSha256("k1")
       const mutantKeys = new Map([[mutant.id, key]])
       const fileOutcomes = new Map([[mutant.id, { mutant, status: "killed" as const }]])
+      const witnessByMutantId = new Map([
+        [mutant.id, AstSourceFilePath.make("libs/demo/domain/test/a.test.ts")],
+      ])
+      const cacheDigests = match(computeMutationContextDigestsChecked(repoRoot, testHostIo))
+        .with({ _tag: "Ok" }, ({ digests }) => digests)
+        .with({ _tag: "Disabled" }, ({ reason }) => {
+          throw new Error(`Expected Ok digests: ${reason}`)
+        })
+        .exhaustive()
       const cacheEntries: Record<ContentSha256, MutationCacheEntry> = {}
       const nowMs = MutationEpochMillis.make(Date.parse("2026-11-18T16:00:00.000Z"))
-      expect(
-        recordKilledMutantsToCache({
-          relFile: fileA.relFile,
-          uncachedMutants: [mutant],
-          fileOutcomes,
-          mutantKeys,
-          fileNonCacheableIds: new Set(),
-          cacheAuth: undefined,
-          nowMs,
-          cacheEntries,
-        }),
-      ).toBe(false)
-      expect(
-        recordKilledMutantsToCache({
-          relFile: fileA.relFile,
-          uncachedMutants: [mutant],
-          fileOutcomes,
-          mutantKeys,
-          fileNonCacheableIds: new Set(),
-          cacheAuth: TEST_CACHE_AUTH,
-          nowMs,
-          cacheEntries,
-        }),
-      ).toBe(true)
+      const baseRecordArgs = {
+        relFile: fileA.relFile,
+        uncachedMutants: [mutant],
+        fileOutcomes,
+        mutantKeys,
+        fileNonCacheableIds: new Set<string>(),
+        witnessByMutantId,
+        repoRoot,
+        digests: cacheDigests,
+        hostIo: testHostIo,
+        nowMs,
+        cacheEntries,
+      }
+      expect(recordKilledMutantsToCache({ ...baseRecordArgs, cacheAuth: undefined })).toBe(false)
+      expect(recordKilledMutantsToCache({ ...baseRecordArgs, cacheAuth: TEST_CACHE_AUTH })).toBe(
+        true,
+      )
       expect(cacheEntries[key]?.status).toBe("killed")
 
       // flushMutationCache: Saved -> true, Failed -> false, Skipped (symlink) -> false

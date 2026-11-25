@@ -484,16 +484,16 @@ describe("CLI handleMutate, handleVerify (mutate-stamp), handleBench, and handle
     return dir
   }
 
-  it("handleMutate CLI integration: failing strict deletes stamp; --scope/--file/--base never write stamp; --file= and 0-mutant strict fail closed", async () => {
+  it("handleMutate CLI integration: failing strict deletes stamp; --scope/--file/--stage-a-only never write stamp; --file= and 0-mutant strict fail closed", async () => {
     const dir = setupMutateCliRepo()
     try {
       const stampPath = join(dir, ".harness", "mutate-stamp.json")
 
-      // 1. --scope, --file, and --base NEVER write a stamp even on passing --strict
+      // 1. --scope, --file, and --stage-a-only NEVER write a stamp even on passing --strict
       for (const extraFlag of [
         "--scope=@demo/gates",
         "--file=libs/demo/gates/src/engine.ts",
-        "--base=main",
+        "--stage-a-only",
       ]) {
         if (existsSync(stampPath)) rmSync(stampPath)
         const res = await Effect.runPromise(

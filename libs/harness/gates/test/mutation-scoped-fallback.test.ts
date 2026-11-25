@@ -1025,7 +1025,7 @@ describe("mutation-scoped-fallback: two-stage fallback execution", () => {
     }
   })
 
-  it("chunks executeQueuedPackageBatches at 4 files with incremental finalize and classifies heavy split tests", () => {
+  it("runs executeQueuedPackageBatches as one continuous per-package batch with incremental finalize and classifies heavy split tests", () => {
     for (const heavyBase of [
       "policy-check-architecture-and-layers.test.ts",
       "policy-check-patterns-and-types.test.ts",
@@ -1145,13 +1145,10 @@ describe("mutation-scoped-fallback: two-stage fallback execution", () => {
         recordPartialOnAbort: () => {},
       })
       expect(errFive).toBeUndefined()
-      expect(sizesFive).toEqual([4, 1])
+      expect(sizesFive).toEqual([5])
       expect(finalizedFive).toHaveLength(5)
       expect(stderrLines.join("")).toContain(
-        "[mutation-check] demo/core (4/5 files, 4 mutants) done in ",
-      )
-      expect(stderrLines.join("")).toContain(
-        "[mutation-check] demo/core (5/5 files, 1 mutants) done in ",
+        "[mutation-check] demo/core (5/5 files, 5 mutants) done in ",
       )
     } finally {
       process.stderr.write = origWrite

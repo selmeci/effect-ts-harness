@@ -23,12 +23,14 @@ import {
   compileWorkflowWaves,
   decideHarnessBench,
   DEFAULT_STAGE_LATENCY_BUDGETS,
+  formatSurvivorLine,
   LatencyMillis,
   LatencySloViolationError,
   MutantCount,
   MutateStampPassed,
   removeMutateStamp,
   runDomainMutationSuite,
+  StampBranchName,
   StampRelFilePath,
   writeMutateStamp,
 } from "@harness/gates"
@@ -63,7 +65,8 @@ import {
   isVerifyMutateStampGateEnforced,
   resolveVerifyStampMutateMeta,
 } from "./mutate-stamp-gate.js"
-import { extractRequiredFlagValue, shouldSuppressLiveRepoTestSideEffects } from "./repo-path.js"
+import { parseMutateCliFlags } from "./mutate-flags.js"
+import { shouldSuppressLiveRepoTestSideEffects } from "./repo-path.js"
 import {
   isAlreadyDoneForVerifiedTree,
   readLastDoneMarker,
@@ -113,22 +116,19 @@ export const finalizeDoneSuccess = (
   }
 }
 
+export const cleanupMutateStamp = (repoRoot?: string): string | undefined =>
+  match(removeMutateStamp(repoRoot ?? findWorkspaceRoot(), nodeSyncHostIo))
+    .with({ _tag: "Success" }, () => undefined)
+    .with({ _tag: "Failure" }, ({ failure }) => failure)
+    .exhaustive()
+
 export const handleMutate = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
 ): Effect.Effect<CliResult> =>
   Effect.sync(() => {
     const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-    const isStrict = argv.includes("--strict")
-    const isAll = argv.includes("--all")
-    const isDiff = argv.includes("--diff")
-    const disableMutantCache = argv.includes("--no-cache")
-
-    const cleanupStamp = (): string | undefined =>
-      match(removeMutateStamp(repoRoot, nodeSyncHostIo))
-        .with({ _tag: "Success" }, () => undefined)
-        .with({ _tag: "Failure" }, ({ failure }) => failure)
-        .exhaustive()
+    const cleanupStamp = (): string | undefined => cleanupMutateStamp(repoRoot)
 
     const failClosed = (msg: string): CliResult => {
       const cleanupErr = cleanupStamp()
@@ -148,127 +148,103 @@ export const handleMutate = (
       }
     }
 
-    const scopeFlag = extractRequiredFlagValue(argv, "--scope")
-    const fileFlag = extractRequiredFlagValue(argv, "--file")
-    const baseFlag = extractRequiredFlagValue(argv, "--base")
+    return match(parseMutateCliFlags(argv))
+      .with({ _tag: "Invalid" }, ({ reason }) => failClosed(reason))
+      .with({ _tag: "Ok" }, ({ parsed }) => {
+        const cacheAuth: MutationCacheAuth = match(
+          resolveOrCreateMutationCacheHmacSecret(WorkspaceFilePath.make(repoRoot), {
+            hostIo: nodeSyncHostIo,
+          }),
+        )
+          .with({ _tag: "Resolved" }, ({ secret }) => ({
+            _tag: "Enabled" as const,
+            hmacSecret: secret,
+          }))
+          .with({ _tag: "Unavailable" }, ({ reason }) => ({
+            _tag: "Disabled" as const,
+            reason,
+          }))
+          .exhaustive()
 
-    const flagError = match({ scopeFlag, fileFlag, baseFlag })
-      .with(
-        { scopeFlag: { _tag: "MissingValue" } },
-        () => "Flag --scope requires a non-empty value.",
-      )
-      .with({ fileFlag: { _tag: "MissingValue" } }, () => "Flag --file requires a non-empty value.")
-      .with({ baseFlag: { _tag: "MissingValue" } }, () => "Flag --base requires a non-empty value.")
-      .otherwise(() => undefined)
-    if (flagError !== undefined) {
-      return failClosed(flagError)
-    }
-
-    const scope = match(scopeFlag)
-      .with({ _tag: "Value" }, ({ value }) => value)
-      .with({ _tag: "Absent" }, { _tag: "MissingValue" }, () => undefined)
-      .exhaustive()
-    const fileCsv = match(fileFlag)
-      .with({ _tag: "Value" }, ({ value }) => value)
-      .with({ _tag: "Absent" }, { _tag: "MissingValue" }, () => undefined)
-      .exhaustive()
-    const baseRef = match(baseFlag)
-      .with({ _tag: "Value" }, ({ value }) => value)
-      .with({ _tag: "Absent" }, { _tag: "MissingValue" }, () => undefined)
-      .exhaustive()
-
-    if (baseRef !== undefined && baseRef.startsWith("-")) {
-      return failClosed(`Invalid --base ref '${baseRef}': must not start with '-'.`)
-    }
-
-    const targetFiles =
-      fileCsv !== undefined
-        ? fileCsv
-            .split(",")
-            .map((s) => s.trim())
-            .filter((s) => s.length > 0)
-        : undefined
-
-    if (targetFiles !== undefined && targetFiles.length === 0) {
-      return failClosed("Empty --file target list; refusing to run mutation suite.")
-    }
-
-    const cacheAuth: MutationCacheAuth = match(
-      resolveOrCreateMutationCacheHmacSecret(WorkspaceFilePath.make(repoRoot), {
-        hostIo: nodeSyncHostIo,
-      }),
-    )
-      .with({ _tag: "Resolved" }, ({ secret }) => ({
-        _tag: "Enabled" as const,
-        hmacSecret: secret,
-      }))
-      .with({ _tag: "Unavailable" }, ({ reason }) => ({
-        _tag: "Disabled" as const,
-        reason,
-      }))
-      .exhaustive()
-
-    const report = runDomainMutationSuite(repoRoot, nodeSyncHostIo, {
-      scope,
-      includeAllLines: isAll,
-      enforcementMode: isStrict ? "strict" : "advisory",
-      targetFiles,
-      baseRef,
-      explicitBaseRef: baseRef !== undefined,
-      diffOnly: isDiff,
-      disableMutantCache,
-      cacheAuth,
-      nowMs: MutationEpochMillis.make(Date.now()),
-    })
-
-    const cleanupErr = !report.passed ? cleanupStamp() : undefined
-    let stampWriteErr: string | undefined = undefined
-    if (
-      report.passed &&
-      isStrict &&
-      scope === undefined &&
-      targetFiles === undefined &&
-      baseRef === undefined &&
-      !isDiff
-    ) {
-      const writeRes = Result.try(() =>
-        writeMutateStamp(repoRoot, nodeSyncHostIo, {
-          enforcementMode: "strict",
-          diffMode: report.diffMode,
-          scannedCandidateFiles: MutantCount.make(report.scannedCandidateFiles),
-          scannedFiles: report.scannedFiles.map((f) => StampRelFilePath.make(f)),
-          diffMatchedFiles: report.diffMatchedFiles.map((f) => StampRelFilePath.make(f)),
-          evaluatedFiles: report.evaluatedFiles.map((f) => StampRelFilePath.make(f)),
-          totalMutants: MutantCount.make(report.totalMutants),
-          killedCount: MutantCount.make(report.killedCount),
-          survivedCount: MutantCount.make(report.survivedCount),
-          equivalentCount: MutantCount.make(report.equivalentCount),
-          passed: MutateStampPassed.make(true),
-        }),
-      )
-      stampWriteErr = match(writeRes)
-        .with({ _tag: "Success" }, () => undefined)
-        .with({ _tag: "Failure" }, ({ failure }) => {
-          const rollbackErr = cleanupStamp()
-          const msg = `Failed to write mutate-stamp.json: ${failure instanceof Error ? failure.message : String(failure)}`
-          return rollbackErr !== undefined ? `${msg}\n${rollbackErr}` : msg
+        const report = runDomainMutationSuite(repoRoot, nodeSyncHostIo, {
+          scope: parsed.scope,
+          includeAllLines: parsed.isAll,
+          enforcementMode: parsed.isStrict ? "strict" : "advisory",
+          targetFiles: parsed.targetFiles,
+          baseRef: parsed.baseRef,
+          explicitBaseRef: parsed.baseRef !== undefined,
+          diffOnly: parsed.isDiff,
+          disableMutantCache: parsed.disableMutantCache,
+          failFast: parsed.failFast,
+          maxSurvivors: parsed.maxSurvivors,
+          stageAOnly: parsed.stageAOnly,
+          cacheAuth,
+          nowMs: MutationEpochMillis.make(Date.now()),
         })
-        .exhaustive()
-    }
 
-    const stderrParts = [
-      ...(report.diagnostic !== undefined && report.diagnostic.length > 0
-        ? [report.diagnostic]
-        : []),
-      ...(cleanupErr !== undefined ? [cleanupErr] : []),
-      ...(stampWriteErr !== undefined ? [stampWriteErr] : []),
-    ]
+        const cleanupErr =
+          !report.passed || report.earlyTerminated === true ? cleanupStamp() : undefined
+        let stampWriteErr: string | undefined = undefined
+        const baseAuthorized = parsed.baseRef === undefined || report.stackedBaseVerified === true
+        if (
+          report.passed &&
+          parsed.isStrict &&
+          !parsed.stageAOnly &&
+          report.earlyTerminated !== true &&
+          parsed.scope === undefined &&
+          parsed.targetFiles === undefined &&
+          baseAuthorized &&
+          !parsed.isDiff
+        ) {
+          const writeRes = Result.try(() =>
+            writeMutateStamp(repoRoot, nodeSyncHostIo, {
+              enforcementMode: "strict",
+              diffMode: report.diffMode,
+              scannedCandidateFiles: MutantCount.make(report.scannedCandidateFiles),
+              scannedFiles: report.scannedFiles.map((f) => StampRelFilePath.make(f)),
+              diffMatchedFiles: report.diffMatchedFiles.map((f) => StampRelFilePath.make(f)),
+              evaluatedFiles: report.evaluatedFiles.map((f) => StampRelFilePath.make(f)),
+              totalMutants: MutantCount.make(report.totalMutants),
+              killedCount: MutantCount.make(report.killedCount),
+              survivedCount: MutantCount.make(report.survivedCount),
+              equivalentCount: MutantCount.make(report.equivalentCount),
+              passed: MutateStampPassed.make(true),
+              ...(report.stackedBaseRef !== undefined
+                ? { stackedBaseRef: StampBranchName.make(report.stackedBaseRef) }
+                : {}),
+            }),
+          )
+          stampWriteErr = match(writeRes)
+            .with({ _tag: "Success" }, () => undefined)
+            .with({ _tag: "Failure" }, ({ failure }) => {
+              const rollbackErr = cleanupStamp()
+              const msg = `Failed to write mutate-stamp.json: ${failure instanceof Error ? failure.message : String(failure)}`
+              return rollbackErr !== undefined ? `${msg}\n${rollbackErr}` : msg
+            })
+            .exhaustive()
+        }
 
-    return {
-      exitCode: !report.passed || stampWriteErr !== undefined ? 1 : 0,
-      stdout: JSON.stringify(report),
-      stderr: stderrParts.join("\n"),
-    }
+        const survivorLines =
+          report.earlyTerminated === true ||
+          (!report.passed && (parsed.failFast || parsed.maxSurvivors !== undefined))
+            ? report.survivedMutants.map((m) => formatSurvivorLine(m))
+            : []
+        const stderrParts = [
+          ...survivorLines,
+          ...(report.diagnostic !== undefined && report.diagnostic.length > 0
+            ? [report.diagnostic]
+            : []),
+          ...(cleanupErr !== undefined ? [cleanupErr] : []),
+          ...(stampWriteErr !== undefined ? [stampWriteErr] : []),
+        ]
+
+        return {
+          exitCode: !report.passed || stampWriteErr !== undefined ? 1 : 0,
+          stdout: JSON.stringify(report),
+          stderr: stderrParts.join("\n"),
+        }
+      })
+      .exhaustive()
   })
 
 export const loadSnapshotPair = (

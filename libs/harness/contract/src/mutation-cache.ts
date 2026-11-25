@@ -8,10 +8,10 @@ import {
 } from "./workspace-and-process.js"
 
 /** Canonical persistence format version for HMAC-authenticated incremental mutant outcomes. */
-export const MUTATION_CACHE_SCHEMA_VERSION = "mutation-cache-v2" as const
+export const MUTATION_CACHE_SCHEMA_VERSION = "mutation-cache-v3" as const
 
 /** Relative filename under the active harness cache directory. */
-export const MUTATION_CACHE_FILENAME = "mutation-cache-v2.json" as const
+export const MUTATION_CACHE_FILENAME = "mutation-cache-v3.json" as const
 
 export const MutationCacheVersion = Schema.Literal(MUTATION_CACHE_SCHEMA_VERSION)
 export type MutationCacheVersion = typeof MutationCacheVersion.Type
@@ -116,6 +116,8 @@ export const MutationCacheEntry = Schema.Struct({
   recordedAt: MutationCacheTimestamp,
   /** Mutable access timestamp updated on cache hit so LRU eviction preserves hot entries without extending TTL. */
   lastAccessedAt: Schema.optional(MutationCacheTimestamp),
+  witnessTestFile: AstSourceFilePath,
+  witnessClosureSha256: ContentSha256,
   mac: MutationCacheMac,
 })
 export type MutationCacheEntry = typeof MutationCacheEntry.Type
@@ -142,6 +144,8 @@ export const MutationCacheLookupInput = Schema.Struct({
   auth: MutationCacheAuth,
   nowMs: MutationEpochMillis,
   maxAgeMs: Schema.optional(MutationMaxAgeMillis),
+  reachingTests: Schema.Array(AstSourceFilePath),
+  witnessClosureDigests: Schema.Record(AstSourceFilePath, ContentSha256),
 })
 export type MutationCacheLookupInput = typeof MutationCacheLookupInput.Type
 
@@ -156,6 +160,7 @@ export const BatchMutantOutcomeResult = Schema.TaggedUnion({
     exitCode: BatchExitCode,
     stdout: SubprocessOutput,
     stderr: SubprocessOutput,
+    killingTestFile: Schema.optional(AstSourceFilePath),
   },
   TimedOut: {
     stdout: SubprocessOutput,
@@ -181,3 +186,19 @@ export const BatchMutantResultEntry = Schema.Struct({
 export type BatchMutantResultEntry = typeof BatchMutantResultEntry.Type
 
 export const BatchMutantResultsSchema = Schema.fromJsonString(Schema.Array(BatchMutantResultEntry))
+
+export const TestTimingDurationMs = Schema.Finite.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+  Schema.brand("TestTimingDurationMs"),
+)
+export type TestTimingDurationMs = typeof TestTimingDurationMs.Type
+
+export const PackageBatchFileOutputSchema = Schema.Struct({
+  relFile: AstSourceFilePath,
+  primaryResults: Schema.Array(BatchMutantResultEntry),
+  scopedFallbackResults: Schema.Array(BatchMutantResultEntry),
+  packageFallbackResults: Schema.Array(BatchMutantResultEntry),
+  observedTestDurationsMs: Schema.optional(Schema.Record(AstSourceFilePath, TestTimingDurationMs)),
+  restoreError: Schema.optional(ErrorReasonMessage),
+})
+export type PackageBatchFileOutput = typeof PackageBatchFileOutputSchema.Type

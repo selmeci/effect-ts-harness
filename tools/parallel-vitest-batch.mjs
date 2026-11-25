@@ -17,7 +17,6 @@ const parsedTimeout = Number(process.env["HARNESS_BATCH_TIMEOUT_MS"] ?? "30000")
 const timeoutMs = Number.isFinite(parsedTimeout) && parsedTimeout > 0 ? parsedTimeout : 30_000
 const rawTestFiles = JSON.parse(process.env["HARNESS_BATCH_TESTS_JSON"] ?? "[]")
 const mutantIds = JSON.parse(process.env["HARNESS_BATCH_MUTANTS_JSON"] ?? "[]")
-const targetFile = process.env["HARNESS_BATCH_TARGET_FILE"] ?? ""
 
 const { testFiles, absToRaw } = dedupCanonicalTests(cwd, rawTestFiles)
 
@@ -29,6 +28,9 @@ delete childBaseEnv["HARNESS_BATCH_TESTS_JSON"]
 delete childBaseEnv["HARNESS_BATCH_MUTANTS_JSON"]
 delete childBaseEnv["HARNESS_BATCH_TARGET_FILE"]
 delete childBaseEnv["HARNESS_ACTIVE_MUTANT_ID"]
+delete childBaseEnv["HARNESS_MUTATE_WARM_ISOLATE"]
+delete childBaseEnv["HARNESS_WARM_ISOLATE"]
+delete childBaseEnv["HARNESS_COVERAGE_OUT_DIR"]
 
 const tracker = createBatchTempTracker()
 
@@ -73,7 +75,6 @@ if (mutantIds.length > 0) {
         childBaseEnv,
         allTests: testFiles,
         tracker,
-        isolate: process.env["HARNESS_MUTATE_WARM_ISOLATE"] !== "0",
       })
     const coldFallback = (mutantId, targetTests, stepTimeoutMs) =>
       runOneColdMutant({
@@ -100,7 +101,6 @@ if (mutantIds.length > 0) {
             coverageInfo,
             timeoutMs,
             cwd,
-            targetFilePath: targetFile,
           })
         }
       } finally {

@@ -241,6 +241,12 @@ export {
   type UntestedMutationFile,
 } from "./mutation-check.js"
 export {
+  prepareStackedBaseForSuite,
+  resolveStackedBaseContext,
+  verifyAncestorLinesAgainstHmacCache,
+  type StackedBaseResolution,
+} from "./mutation/mutation-stacked-base.js"
+export {
   classifyMutationModulePurity,
   isPureMutationCandidate,
   type PureModuleClassification,
@@ -579,12 +585,17 @@ export {
   computeMutationEntryMac,
   decideMutationCacheLookup,
   emptyMutationCacheStore,
-  hashReachingTestFiles,
   loadMutationCache,
   loadMutationCacheWithStatus,
   saveMutationCacheAtomic,
+  validateHarnessCacheFileSafety,
   verifyMutationEntryMac,
 } from "./mutation/mutation-cache.js"
+export {
+  extractWitnessTestFileFromOutput,
+  formatSurvivorLine,
+  normalizeRepoRelTestPath,
+} from "./mutation/mutation-witness.js"
 export {
   isWorkspaceTsSourceFileName,
   scanWorkspaceTsFilesChecked,
@@ -607,3 +618,24 @@ export {
   type PackageReachabilityIndex,
   type ReverseImportReachability,
 } from "./mutation/mutation-test-reachability.js"
+export {
+  buildTimingEntryKey,
+  buildVerifiedTestTimingLookup,
+  computeNextEmaDurationMs,
+  createSuiteTimingsTracker,
+  emptyMutationTestTimingsStore,
+  isHeavyMetaTestAbsPath,
+  isHeavyTestByTimingOrStatic,
+  loadMutationTestTimings,
+  lookupMeasuredTestDurationMs,
+  parseVitestBaselineTestDurations,
+  recordObservedTestTimings,
+  saveMutationTestTimingsAtomic,
+} from "./mutation/mutation-test-timings.js"
+export {
+  PackageBatchFileOutputSchema,
+  type PackageBatchFileOutput,
+  cleanupStreamReportFile,
+  mergeObservedDurationsIntoMap,
+  readStreamedPackageBatchReports,
+} from "./mutation/mutation-batch-stream.js"

@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto"
 import { dirname, isAbsolute, join, relative, resolve } from "node:path"
-import { Cause, Effect, Option, Redacted, Result, Schema } from "effect"
+import { Cause, Effect, Redacted, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   AstSourceFilePath,
@@ -58,6 +58,8 @@ export interface ComputeMutationEntryMacInput {
   readonly mutantId: MutantCacheId
   readonly status: MutationCacheStatus
   readonly recordedAt: MutationCacheTimestamp
+  readonly witnessTestFile: AstSourceFilePath
+  readonly witnessClosureSha256: ContentSha256
 }
 
 export interface ComputeMutantCacheKeyInput {
@@ -66,9 +68,7 @@ export interface ComputeMutantCacheKeyInput {
   readonly originalContentSha256: ContentSha256
   readonly compiledSchemaSha256: ContentSha256
   readonly mutant: CodeMutant
-  readonly reachingTestHashes: ReadonlyMap<AstSourceFilePath, ContentSha256>
   readonly digests: MutationContextDigests
-  readonly closureDigest: ContentSha256
 }
 
 export type SaveMutationCacheResult =
@@ -99,7 +99,15 @@ export const computeMutationEntryMac = (
   hmacSecret: RedactedMutationCacheHmacSecret,
   p: ComputeMutationEntryMacInput,
 ): MutationCacheMac => {
-  const fields = [p.key, p.file, p.mutantId, p.status, p.recordedAt]
+  const fields = [
+    p.key,
+    p.file,
+    p.mutantId,
+    p.status,
+    p.recordedAt,
+    p.witnessTestFile,
+    p.witnessClosureSha256,
+  ]
   const payload = fields.map((f) => `${Buffer.byteLength(f, "utf8")}:${f}`).join("\0")
   return MutationCacheMac.make(
     createHmac("sha256", Redacted.value(hmacSecret)).update(payload).digest("hex"),
@@ -123,6 +131,7 @@ export const partitionMutationCacheLookup = (
     .with({ _tag: "Enabled" }, ({ hmacSecret }) => {
       const nowMs = input.nowMs
       const maxAgeMs = input.maxAgeMs ?? MutationMaxAgeMillis.make(MAX_MUTATION_CACHE_AGE_MS)
+      const reachingSet = new Set<AstSourceFilePath>(input.reachingTests)
       const hitKeys: Array<ContentSha256> = []
       const missKeys: Array<ContentSha256> = []
       for (const candidateKey of input.candidateKeys) {
@@ -138,7 +147,10 @@ export const partitionMutationCacheLookup = (
           verifyMutationEntryMac(hmacSecret, entry) &&
           Number.isFinite(ageMs) &&
           ageMs >= 0 &&
-          ageMs <= maxAgeMs
+          ageMs <= maxAgeMs &&
+          reachingSet.has(entry.witnessTestFile) &&
+          Object.hasOwn(input.witnessClosureDigests, entry.witnessTestFile) &&
+          input.witnessClosureDigests[entry.witnessTestFile] === entry.witnessClosureSha256
         if (isHit) hitKeys.push(candidateKey)
         else missKeys.push(candidateKey)
       }
@@ -154,32 +166,12 @@ export const decideMutationCacheLookup = Effect.fn("MutationCache.decide")(funct
 
 export const MutationCache = { decide: decideMutationCacheLookup } as const
 
-export const hashReachingTestFiles = (
-  repoRoot: string,
-  reachingTestFiles: ReadonlyArray<string>,
-  hostIo: SyncHostIo,
-): Option.Option<ReadonlyMap<AstSourceFilePath, ContentSha256>> => {
-  const hashed = new Map<AstSourceFilePath, ContentSha256>()
-  for (const testPath of [...reachingTestFiles].sort(compareCodeUnits)) {
-    const fullPath = isAbsolute(testPath) ? testPath : join(repoRoot, testPath)
-    const content = unwrapOption(readSafeText(fullPath, hostIo))
-    if (content === undefined) return Option.none()
-    hashed.set(
-      AstSourceFilePath.make(relative(repoRoot, fullPath).replace(/\\/g, "/")),
-      computeContentSha256(content),
-    )
-  }
-  return Option.some(hashed)
-}
-
-const formatDigestPresence = (digest: ContentSha256 | undefined): string =>
-  digest !== undefined ? `present:${digest}` : "absent"
-
 export const computeMutantCacheKey = (input: ComputeMutantCacheKeyInput): ContentSha256 =>
   computeContentSha256(
     JSON.stringify({
       v: MUTATION_CACHE_SCHEMA_VERSION,
       runtimeVersion: input.digests.runtimeVersion,
+      pkgKey: input.pkgKey,
       relFile: input.relFile,
       originalContentSha256: input.originalContentSha256,
       compiledSchemaSha256: input.compiledSchemaSha256,
@@ -188,10 +180,6 @@ export const computeMutantCacheKey = (input: ComputeMutantCacheKeyInput): Conten
       category: input.mutant.category,
       original: input.mutant.original,
       replacement: input.mutant.replacement,
-      ws: input.closureDigest,
-      ps: formatDigestPresence(input.digests.packageSupportDigests.get(input.pkgKey)),
-      ts: formatDigestPresence(input.digests.testSupportDigests.get(input.pkgKey)),
-      tests: [...input.reachingTestHashes.entries()].sort((a, b) => compareCodeUnits(a[0], b[0])),
     }),
   )
 
@@ -209,9 +197,9 @@ const tryOrErr = <A>(
     .exhaustive()
 const isFileSafe = (p: string, hostIo: SyncHostIo): boolean =>
   unwrapOption(unwrapResult(Result.try(() => hostIo.isFileSync(p)))) ?? false
-const realpathOrUndefined = (p: string, hostIo: SyncHostIo): string | undefined =>
+export const realpathOrUndefined = (p: string, hostIo: SyncHostIo): string | undefined =>
   unwrapOption(unwrapResult(Result.try(() => hostIo.realpathSync(p))))
-const isPathContained = (parentReal: string, childReal: string): boolean => {
+export const isPathContained = (parentReal: string, childReal: string): boolean => {
   const rel = relative(parentReal, childReal)
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
 }
@@ -235,9 +223,12 @@ const resolveCachePaths = (repoRoot: string, hostIo: SyncHostIo) =>
 
 type AncestorPathState = "safe-exists" | "absent" | "unsafe"
 
-const inspectAncestorPath = (targetPath: string, hostIo: SyncHostIo): AncestorPathState => {
+const inspectPathSymlinkState = (
+  targetPath: string,
+  hostIo: SyncHostIo,
+): "not-symlink" | "unsafe" => {
   const symRes = Result.try(() => hostIo.isSymbolicLinkSync(targetPath))
-  const symState = match(symRes)
+  return match(symRes)
     .with({ _tag: "Success" }, ({ success: isSymlink }) =>
       isSymlink ? ("unsafe" as const) : ("not-symlink" as const),
     )
@@ -254,11 +245,16 @@ const inspectAncestorPath = (targetPath: string, hostIo: SyncHostIo): AncestorPa
         : ("unsafe" as const)
     })
     .exhaustive()
-  const canInspectExists = match(symState)
-    .with("unsafe", () => false)
-    .with("not-symlink", () => true)
+}
+
+export const isUnsafeSymlinkPath = (targetPath: string, hostIo: SyncHostIo): boolean =>
+  match(inspectPathSymlinkState(targetPath, hostIo))
+    .with("unsafe", () => true)
+    .with("not-symlink", () => false)
     .exhaustive()
-  if (!canInspectExists) return "unsafe"
+
+const inspectAncestorPath = (targetPath: string, hostIo: SyncHostIo): AncestorPathState => {
+  if (isUnsafeSymlinkPath(targetPath, hostIo)) return "unsafe"
   const exists = checkExists(targetPath, hostIo)
   if (exists === undefined) return "unsafe"
   return exists ? "safe-exists" : "absent"
@@ -347,6 +343,9 @@ const validateCachePathSafety = (
 ): string | undefined => {
   if (checkCacheAncestors(repoRoot, stateDir, cacheDir, hostIo) === undefined)
     return `unsafe cache ancestor path for '${cacheDir}'`
+  if (isUnsafeSymlinkPath(cacheFile, hostIo)) {
+    return `symlink or unsafe path detected at '${cacheFile}'`
+  }
   if (
     !isNonSymlink(stateDir, hostIo) ||
     !isNonSymlink(cacheDir, hostIo) ||
@@ -365,6 +364,54 @@ const validateCachePathSafety = (
   }
   return undefined
 }
+
+/**
+ * Validates that a cache file path under the active harness state cache directory is free of
+ * symlinks, non-files, and realpath escapes outside `stateDir` / `repoRoot`.
+ */
+export const validateHarnessCacheFileSafety = (
+  repoRoot: string,
+  filePath: string,
+  checkFileExists: boolean,
+  hostIo: SyncHostIo,
+): string | undefined =>
+  match(resolveCachePaths(repoRoot, hostIo))
+    .with({ _tag: "Unsafe" }, ({ reason }) => reason)
+    .with({ _tag: "Ok" }, ({ stateDir, cacheDir }) => {
+      if (!isPathContained(resolve(cacheDir), resolve(filePath))) {
+        return `cache file '${filePath}' escapes '${cacheDir}'`
+      }
+      if (isUnsafeSymlinkPath(filePath, hostIo)) {
+        return `symlink or unsafe path detected at '${filePath}'`
+      }
+      if (checkCacheAncestors(repoRoot, stateDir, cacheDir, hostIo) === undefined) {
+        return `unsafe cache ancestor path for '${cacheDir}'`
+      }
+      if (checkFileExists || checkExists(cacheDir, hostIo) === true) {
+        const unsafeReason = validateCachePathSafety(
+          repoRoot,
+          stateDir,
+          cacheDir,
+          filePath,
+          checkFileExists,
+          hostIo,
+        )
+        if (unsafeReason !== undefined) return unsafeReason
+        if (isPathContained(resolve(repoRoot), resolve(stateDir))) {
+          const repoReal = realpathOrUndefined(repoRoot, hostIo)
+          const dirReal = realpathOrUndefined(cacheDir, hostIo)
+          if (
+            repoReal === undefined ||
+            dirReal === undefined ||
+            !isPathContained(repoReal, dirReal)
+          ) {
+            return `cache dir escapes repoRoot '${repoRoot}'`
+          }
+        }
+      }
+      return undefined
+    })
+    .exhaustive()
 
 const resolveCacheAuth = (
   cacheAuth: MutationCacheAuth | undefined,
@@ -391,6 +438,12 @@ export const loadMutationCacheWithStatus = (
       match(resolveCachePaths(repoRoot, hostIo))
         .with({ _tag: "Unsafe" }, (u) => u)
         .with({ _tag: "Ok" }, ({ stateDir, cacheDir, cacheFile }) => {
+          if (isUnsafeSymlinkPath(cacheFile, hostIo)) {
+            return {
+              _tag: "Unsafe" as const,
+              reason: `symlink or unsafe path detected at '${cacheFile}'`,
+            }
+          }
           const exists = checkExists(cacheFile, hostIo)
           if (exists === undefined)
             return { _tag: "Unsafe" as const, reason: `failed to stat cache file '${cacheFile}'` }
@@ -655,7 +708,7 @@ export const saveMutationCacheAtomic = (
           if (!encRes.ok) return { _tag: "Failed" as const, reason: encRes.err }
           const tmpPath = join(
             cacheDir,
-            `.mutation-cache-v2.${process.pid}.${randomBytes(6).toString("hex")}.tmp`,
+            `.mutation-cache-v3.${process.pid}.${randomBytes(6).toString("hex")}.tmp`,
           )
           const writeRes = tryOrErr(() => {
             hostIo.writeTextSync(tmpPath, encRes.v)
