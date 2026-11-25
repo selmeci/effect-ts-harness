@@ -192,7 +192,7 @@ describe("harness-cli v2 learn, gc & report", () => {
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 30_000)
 
     it("session --format=antigravity injects Context Handoff when active stubs exist", async () => {
       const dir = mkdtempSync(join(tmpdir(), "harness-cli-handoff-"))

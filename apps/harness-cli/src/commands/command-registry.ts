@@ -106,6 +106,16 @@ export const makeLiveCliCommandDescriptors = (
     execute: (args) => handleRoute(args, options),
   },
   {
+    name: CliCommandName.make("review-route"),
+    summary: "Route changed files to deterministic and System One specialist code reviewers.",
+    execute: (args) =>
+      lazyImportCliHandler(
+        "review-route",
+        () => import("./review-route.command.js"),
+        (m) => m.handleReviewRoute(args, options),
+      ),
+  },
+  {
     name: CliCommandName.make("plan-check"),
     summary: "Validate compilable stub<A,E,R>() skeletons and snapshot plan/current.",
     execute: (args) =>

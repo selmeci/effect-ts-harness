@@ -26,6 +26,7 @@ import {
   mergeObservedDurationsIntoMap,
   needsSoloColdRecheck,
   readStreamedPackageBatchReports,
+  recordBatchFileProgress,
   recordStageOutcomes,
   shouldRecordOutcome,
   writePackageBatchPlan,
@@ -429,12 +430,13 @@ export const runPackageMutantBatchChecked = (input: {
   )
   const fileResults: Array<PackageBatchFileResult> = []
   const observedDurationsMs = new Map<string, number>()
-  let confirmedSurvivorsInBatch = 0
+  const batchStartedMs = Date.now()
+  const progress = { killed: 0, survived: 0, lastProgressMs: batchStartedMs }
 
   for (const fileEntry of input.files) {
     const report = reportByRel.get(fileEntry.file.relFile)
     if (report === undefined) {
-      if (input.maxSurvivors !== undefined && confirmedSurvivorsInBatch >= input.maxSurvivors) {
+      if (input.maxSurvivors !== undefined && progress.survived >= input.maxSurvivors) {
         break
       }
       return makeBatchAbort(
@@ -456,14 +458,14 @@ export const runPackageMutantBatchChecked = (input: {
       .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
       .with({ _tag: "Ok" }, ({ fileResult }) => {
         fileResults.push(fileResult)
-        for (const outcome of fileResult.fileOutcomes.values()) {
-          match(outcome.status)
-            .with("survived", () => {
-              confirmedSurvivorsInBatch += 1
-            })
-            .with("killed", "equivalent", () => {})
-            .exhaustive()
-        }
+        recordBatchFileProgress({
+          pkgKey: input.pkgKey,
+          fileOutcomes: fileResult.fileOutcomes,
+          completed: fileResults.length,
+          totalFiles: input.files.length,
+          batchStartedMs,
+          counts: progress,
+        })
         return undefined
       })
       .exhaustive()
@@ -775,7 +777,7 @@ export function executeQueuedPackageBatches(input: {
       })
       .exhaustive()
     input.onBatchFlushed?.()
-    const elapsedSec = ((Date.now() - batchStartedMs) / 1000).toFixed(1)
+    const elapsedSec = (Math.max(0, Date.now() - batchStartedMs) / 1000).toFixed(1)
     process.stderr.write(
       `[mutation-check] ${pkgKey} (${processedCount}/${queuedEntries.length} files, ${pkgMutants} mutants) done in ${elapsedSec}s\n`,
     )

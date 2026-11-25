@@ -1,11 +1,14 @@
 import { execFileSync } from "node:child_process"
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
@@ -22,6 +25,7 @@ import { match } from "ts-pattern"
 import { LocalDecisionModel, makeLocalDecisionModelLayer } from "../src/hook-fastpath.js"
 import {
   appendHookTelemetryLite,
+  computePreInvocationFingerprintFromIo,
   findWorkspaceRootLite,
   type HookStdinReadResult,
   isIngestSnapshotUpToDateLite,
@@ -139,6 +143,10 @@ describe("hook-io lite helpers and lazy LocalDecisionModel", () => {
         }),
       ),
   )
+
+  it("REQ-5.1: vitest config isolates HARNESS_WORKTREE_ID to empty string", () => {
+    expect(process.env["HARNESS_WORKTREE_ID"]).toBe("")
+  })
 
   it.effect(
     "resolveHarnessStateDirLite handles default, HARNESS_STATE_DIR, and HARNESS_WORKTREE_ID",
@@ -1111,6 +1119,161 @@ describe("hook-io lite helpers and lazy LocalDecisionModel", () => {
               HARNESS_STATE_DIR: "/tmp/custom-state",
             }),
           ).toBe(false)
+        }),
+      ),
+  )
+
+  it.effect(
+    "computePreInvocationFingerprintFromIo hashes snapshot existence stably across mtime/content rewrites while invalidating missing<->present and failing closed on symlinks/directories",
+    () =>
+      withTempDir("hook-io-snap-fp-", (dir) =>
+        Effect.sync(() => {
+          initGitRepo(dir)
+          const harnessDir = join(dir, ".harness")
+          mkdirSync(harnessDir, { recursive: true })
+          const head = resolveGitHeadStateLite(dir, {})
+          writeFile(join(harnessDir, "graph-head.json"), JSON.stringify(head))
+
+          let mtimeTick = 1_700_000_000_000
+          const computeFp = () =>
+            computePreInvocationFingerprintFromIo({
+              repoRoot: dir,
+              harnessDir,
+              existsSync,
+              isFileSync: (filePath) => {
+                const st = lstatSync(filePath, { throwIfNoEntry: false })
+                return st !== undefined && !st.isSymbolicLink() && st.isFile()
+              },
+              isSymbolicLinkSync: (filePath) => {
+                const st = lstatSync(filePath, { throwIfNoEntry: false })
+                return st !== undefined && st.isSymbolicLink()
+              },
+              readBytesSync: (filePath) => readFileSync(filePath),
+              statMtimeMsSync: (filePath) => {
+                if (
+                  filePath.endsWith("graph-snapshot.json") ||
+                  filePath.endsWith("plan-graph-snapshot.json")
+                ) {
+                  mtimeTick += 1000
+                  return mtimeTick
+                }
+                return statSync(filePath).mtimeMs
+              },
+              getEnv: () => ({}),
+              resolveHead: () => head,
+              resolveTsconfigPath: () => join(repoRoot, "tsconfig.base.json"),
+              resolveTsgoPkgJsonPath: () =>
+                join(repoRoot, "node_modules", "@effect", "tsgo", "package.json"),
+            })
+
+          const expectSome = (opt: Option.Option<string>): string => {
+            expect(Option.isSome(opt)).toBe(true)
+            return Option.getOrThrow(opt)
+          }
+
+          // 1. Both snapshots missing
+          const fpMissing = expectSome(computeFp())
+
+          // 2. graph-snapshot.json missing -> present invalidates
+          const graphSnapPath = join(harnessDir, "graph-snapshot.json")
+          writeFile(graphSnapPath, JSON.stringify({ nodes: [], edges: [] }))
+          const fpGraphPresent = expectSome(computeFp())
+          expect(fpGraphPresent).not.toBe(fpMissing)
+
+          // 3. Rewriting graph-snapshot.json with different content & bumped mtime preserves fingerprint
+          writeFile(graphSnapPath, JSON.stringify({ nodes: [{ id: "n1" }], edges: [] }))
+          utimesSync(graphSnapPath, new Date(1_800_000_000_000), new Date(1_800_000_000_000))
+          const fpGraphRewritten = expectSome(computeFp())
+          expect(fpGraphRewritten).toBe(fpGraphPresent)
+
+          // 4. plan-graph-snapshot.json missing -> present invalidates
+          const planSnapPath = join(harnessDir, "plan-graph-snapshot.json")
+          writeFile(planSnapPath, JSON.stringify({ nodes: [], edges: [] }))
+          const fpBothPresent = expectSome(computeFp())
+          expect(fpBothPresent).not.toBe(fpGraphRewritten)
+
+          // 5. Rewriting plan-graph-snapshot.json with different content & bumped mtime preserves fingerprint
+          writeFile(planSnapPath, JSON.stringify({ nodes: [{ id: "p1" }], edges: [] }))
+          utimesSync(planSnapPath, new Date(1_900_000_000_000), new Date(1_900_000_000_000))
+          const fpPlanRewritten = expectSome(computeFp())
+          expect(fpPlanRewritten).toBe(fpBothPresent)
+
+          // 6. Warm session cache stays Hit across in-place snapshot rewrites (simulating PostToolUse ingest)
+          const cachePath = join(harnessDir, "session-preinvocation-cache.json")
+          writeFile(
+            cachePath,
+            JSON.stringify({
+              version: "session-preinvocation-v1",
+              fingerprint: "0".repeat(64),
+              recordedAtMs: Date.now(),
+              ollamaReady: true,
+              ollamaProbed: true,
+              injectSteps: ["step1"],
+              stderr: "",
+            }),
+          )
+          const seedMiss = tryReadPreInvocationCacheLite({
+            repoRoot: dir,
+            cliRepoRoot: repoRoot,
+            env: {},
+          })
+          const liteFp = Option.getOrThrow(
+            match(seedMiss)
+              .with({ _tag: "Miss" }, ({ fingerprint }) => fingerprint)
+              .with({ _tag: "Hit" }, () => Option.none<string>())
+              .exhaustive(),
+          )
+          writeFile(
+            cachePath,
+            JSON.stringify({
+              version: "session-preinvocation-v1",
+              fingerprint: liteFp,
+              recordedAtMs: Date.now(),
+              ollamaReady: true,
+              ollamaProbed: true,
+              injectSteps: ["step1"],
+              stderr: "",
+            }),
+          )
+          writeFile(graphSnapPath, JSON.stringify({ nodes: [{ id: "n2" }], edges: [] }))
+          utimesSync(graphSnapPath, new Date(1_950_000_000_000), new Date(1_950_000_000_000))
+          writeFile(planSnapPath, JSON.stringify({ nodes: [{ id: "p2" }], edges: [] }))
+          utimesSync(planSnapPath, new Date(1_950_000_000_000), new Date(1_950_000_000_000))
+          expect(
+            tryReadPreInvocationCacheLite({
+              repoRoot: dir,
+              cliRepoRoot: repoRoot,
+              env: {},
+            })._tag,
+          ).toBe("Hit")
+
+          // 7. present -> missing transitions invalidate
+          rmSync(planSnapPath)
+          const fpPlanRemoved = expectSome(computeFp())
+          expect(fpPlanRemoved).not.toBe(fpBothPresent)
+          expect(fpPlanRemoved).toBe(fpGraphPresent)
+
+          rmSync(graphSnapPath)
+          const fpGraphRemoved = expectSome(computeFp())
+          expect(fpGraphRemoved).toBe(fpMissing)
+
+          // 8. Symlinked or non-regular snapshot files fail closed to Option.none()
+          const outsideTarget = join(dir, "outside-snap.json")
+          writeFile(outsideTarget, "{}")
+          symlinkSync(outsideTarget, graphSnapPath)
+          expect(computeFp()).toEqual(Option.none())
+
+          rmSync(graphSnapPath)
+          mkdirSync(graphSnapPath)
+          expect(computeFp()).toEqual(Option.none())
+          rmSync(graphSnapPath, { recursive: true })
+
+          symlinkSync(join(dir, "dangling-target.json"), planSnapPath)
+          expect(computeFp()).toEqual(Option.none())
+          rmSync(planSnapPath)
+
+          mkdirSync(planSnapPath)
+          expect(computeFp()).toEqual(Option.none())
         }),
       ),
   )

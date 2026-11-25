@@ -82,14 +82,32 @@ describe("plan-check verified snapshot reuse (SPEC-0033 REQ-2.4)", () => {
 
     const graphOnlyRes = await runCli(["plan-check", "--graph-only"], { repoRoot: dir })
     expect(graphOnlyRes.exitCode).toBe(0)
-    expect(graphOnlyRes.stdout).toContain("flowchart TD")
-    expect(graphOnlyRes.stdout).toContain("Sample.fnA")
+    expect(graphOnlyRes.stdout).not.toContain("flowchart TD")
+    expect(JSON.parse(graphOnlyRes.stdout)).toMatchObject({
+      valid: true,
+      snapshotReused: true,
+      mermaidOmitted: true,
+    })
+    const graphOnlyMermaidRes = await runCli(["plan-check", "--graph-only", "--mermaid"], {
+      repoRoot: dir,
+    })
+    expect(graphOnlyMermaidRes.exitCode).toBe(0)
+    expect(graphOnlyMermaidRes.stdout).toContain("flowchart TD")
+    expect(graphOnlyMermaidRes.stdout).toContain("Sample.fnA")
     expect(existsSync(join(dir, ".harness", "plan-graph-snapshot.json"))).toBe(false)
 
     const res = await runCli(["plan-check"], { repoRoot: dir })
     expect(res.exitCode).toBe(0)
-    expect(res.stdout).toContain("flowchart TD")
-    expect(res.stdout).toContain("Sample.fnA")
+    expect(res.stdout).not.toContain("flowchart TD")
+    expect(JSON.parse(res.stdout)).toMatchObject({
+      valid: true,
+      snapshotReused: true,
+      mermaidOmitted: true,
+    })
+    const mermaidRes = await runCli(["plan-check", "--mermaid"], { repoRoot: dir })
+    expect(mermaidRes.exitCode).toBe(0)
+    expect(mermaidRes.stdout).toContain("flowchart TD")
+    expect(mermaidRes.stdout).toContain("Sample.fnA")
     expect(existsSync(join(dir, ".harness", "plan-graph-snapshot.json"))).toBe(true)
 
     const events = readTelemetryEvents(dir, nodeSyncHostIo)
@@ -284,8 +302,18 @@ describe("plan-check verified snapshot reuse (SPEC-0033 REQ-2.4)", () => {
       process.env.OMNIGRAPH_URL = "http://127.0.0.1:1"
       const res = await runCli(["plan-check"], { repoRoot: dir, skipBackgroundDaemons: true })
       expect(res.exitCode).toBe(0)
-      expect(res.stdout).toContain("flowchart TD")
-      expect(res.stdout).toContain("Sample.fnA")
+      expect(JSON.parse(res.stdout)).toMatchObject({
+        valid: true,
+        snapshotReused: true,
+        mermaidOmitted: true,
+      })
+      const mermaidRes = await runCli(["plan-check", "--mermaid"], {
+        repoRoot: dir,
+        skipBackgroundDaemons: true,
+      })
+      expect(mermaidRes.exitCode).toBe(0)
+      expect(mermaidRes.stdout).toContain("flowchart TD")
+      expect(mermaidRes.stdout).toContain("Sample.fnA")
     } finally {
       if (prevOmnigraphUrl === undefined) Reflect.deleteProperty(process.env, "OMNIGRAPH_URL")
       else process.env.OMNIGRAPH_URL = prevOmnigraphUrl

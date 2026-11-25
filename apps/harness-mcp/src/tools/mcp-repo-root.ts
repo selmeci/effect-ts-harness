@@ -36,7 +36,25 @@ export const findRepoRoot = (startDir: string): string => {
 export const hasWorkspaceMarker = (dir: string): boolean =>
   nodeSyncHostIo.existsSync(path.join(dir, "pnpm-workspace.yaml"))
 
+export const hasValidWorkspaceRootMarker = (dir: string): boolean => {
+  if (dir.trim().length === 0) return false
+  return Result.getOrElse(
+    Result.try(
+      () =>
+        nodeSyncHostIo.existsSync(dir) &&
+        nodeSyncHostIo.isDirectorySync(dir) &&
+        hasWorkspaceMarker(dir) &&
+        nodeSyncHostIo.existsSync(path.join(dir, ".git")),
+    ),
+    () => false,
+  )
+}
+
 export const SERVER_REPO_ROOT = findRepoRoot(path.dirname(fileURLToPath(import.meta.url)))
+
+const CANONICAL_SERVER_REPO_ROOT = nodeSyncHostIo.existsSync(SERVER_REPO_ROOT)
+  ? resolveCanonicalRepoRoot(SERVER_REPO_ROOT, nodeSyncHostIo)
+  : SERVER_REPO_ROOT
 
 export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolean => {
   const logicalRoot = path.resolve(rootDir)
@@ -178,8 +196,15 @@ export const resolveDefaultRepoRoot = (
   >,
 ): string => {
   const rawRepoRoot = args?.["repoRoot"]
-  if (typeof rawRepoRoot === "string" && rawRepoRoot.length > 0) {
-    return findRepoRoot(rawRepoRoot)
+  if (typeof rawRepoRoot === "string" && rawRepoRoot.trim().length > 0) {
+    const candidateRoot = findRepoRoot(rawRepoRoot)
+    if (
+      nodeSyncHostIo.existsSync(candidateRoot) &&
+      nodeSyncHostIo.isDirectorySync(candidateRoot) &&
+      hasWorkspaceMarker(candidateRoot)
+    ) {
+      return candidateRoot
+    }
   }
   const rawFile = args?.["file"]
   const rawFilePath = args?.["filePath"]
@@ -204,7 +229,14 @@ export const resolveDefaultRepoRoot = (
     if (hasWorkspaceMarker(candidateRoot)) return candidateRoot
   }
   const cwdRoot = findRepoRoot(options?.cwd ?? process.cwd())
-  if (cwdRoot !== SERVER_REPO_ROOT && hasWorkspaceMarker(cwdRoot)) return cwdRoot
+  if (
+    cwdRoot !== SERVER_REPO_ROOT &&
+    nodeSyncHostIo.existsSync(cwdRoot) &&
+    nodeSyncHostIo.isDirectorySync(cwdRoot) &&
+    hasWorkspaceMarker(cwdRoot)
+  ) {
+    return cwdRoot
+  }
   if (options?.skipActiveWorkspaceLookup !== true && options?.skipOmnigraphSpawn !== true) {
     const candidatePaths = [path.join(SERVER_REPO_ROOT, ".harness", "active-workspace.json")]
     if (nodeSyncHostIo.existsSync(SERVER_REPO_ROOT)) {
@@ -222,7 +254,46 @@ export const resolveDefaultRepoRoot = (
     }
     if (best !== undefined) return best.repoRoot
   }
+  if (hasValidWorkspaceRootMarker(SERVER_REPO_ROOT) || hasWorkspaceMarker(SERVER_REPO_ROOT)) {
+    return SERVER_REPO_ROOT
+  }
+  const canonicalRoot = nodeSyncHostIo.existsSync(SERVER_REPO_ROOT)
+    ? resolveCanonicalRepoRoot(SERVER_REPO_ROOT, nodeSyncHostIo)
+    : CANONICAL_SERVER_REPO_ROOT
+  if (hasValidWorkspaceRootMarker(canonicalRoot) || hasWorkspaceMarker(canonicalRoot)) {
+    return canonicalRoot
+  }
+  if (
+    hasValidWorkspaceRootMarker(CANONICAL_SERVER_REPO_ROOT) ||
+    hasWorkspaceMarker(CANONICAL_SERVER_REPO_ROOT)
+  ) {
+    return CANONICAL_SERVER_REPO_ROOT
+  }
   return SERVER_REPO_ROOT
+}
+
+export const resolveDaemonStartupRepoRoot = (cwd: string = process.cwd()): string => {
+  const cwdRoot = findRepoRoot(cwd)
+  if (hasValidWorkspaceRootMarker(cwdRoot)) {
+    return cwdRoot
+  }
+  const defaultRoot = resolveDefaultRepoRoot(undefined, { cwd })
+  if (hasValidWorkspaceRootMarker(defaultRoot)) {
+    return defaultRoot
+  }
+  if (hasValidWorkspaceRootMarker(SERVER_REPO_ROOT)) {
+    return SERVER_REPO_ROOT
+  }
+  const canonicalRoot = nodeSyncHostIo.existsSync(SERVER_REPO_ROOT)
+    ? resolveCanonicalRepoRoot(SERVER_REPO_ROOT, nodeSyncHostIo)
+    : CANONICAL_SERVER_REPO_ROOT
+  if (hasValidWorkspaceRootMarker(canonicalRoot)) {
+    return canonicalRoot
+  }
+  if (hasValidWorkspaceRootMarker(CANONICAL_SERVER_REPO_ROOT)) {
+    return CANONICAL_SERVER_REPO_ROOT
+  }
+  return hasWorkspaceMarker(SERVER_REPO_ROOT) ? SERVER_REPO_ROOT : defaultRoot
 }
 
 const decodeAbsoluteRepoRoot = Schema.decodeUnknownEffect(AbsoluteRepoRoot)
@@ -244,16 +315,43 @@ const mapWorktreeValidationError =
       ? makeRepoRootEscapeError(rawRepoRoot, boundaryRoot)
       : err
 
+const hasGitEntry = (dir: string): boolean =>
+  Result.getOrElse(
+    Result.try(
+      () =>
+        nodeSyncHostIo.existsSync(dir) &&
+        nodeSyncHostIo.isDirectorySync(dir) &&
+        nodeSyncHostIo.existsSync(path.join(dir, ".git")),
+    ),
+    () => false,
+  )
+
+const resolveIfExistingCanonical = (dir: string): string =>
+  nodeSyncHostIo.existsSync(dir) ? resolveCanonicalRepoRoot(dir, nodeSyncHostIo) : dir
+
 const pickAnchorRoot = (boundaryRoot: string, options?: RepoRootResolutionOptions): string => {
   if (options?.repoRoot !== undefined) {
     return options.repoRoot
   }
-  const candidates = [boundaryRoot, options?.cwd ?? process.cwd(), SERVER_REPO_ROOT]
+  const canonicalServerRoot = resolveIfExistingCanonical(SERVER_REPO_ROOT)
+  const effectiveCwd = options?.cwd ?? process.cwd()
+  const boundaryWorkspace = findRepoRoot(boundaryRoot)
+  const cwdWorkspace = findRepoRoot(effectiveCwd)
+  const candidates = [
+    resolveIfExistingCanonical(boundaryRoot),
+    boundaryRoot,
+    resolveIfExistingCanonical(boundaryWorkspace),
+    boundaryWorkspace,
+    resolveIfExistingCanonical(effectiveCwd),
+    effectiveCwd,
+    resolveIfExistingCanonical(cwdWorkspace),
+    cwdWorkspace,
+    canonicalServerRoot,
+    SERVER_REPO_ROOT,
+    CANONICAL_SERVER_REPO_ROOT,
+  ]
   for (const candidate of candidates) {
-    if (
-      nodeSyncHostIo.existsSync(candidate) &&
-      nodeSyncHostIo.existsSync(path.join(candidate, ".git"))
-    ) {
+    if (hasValidWorkspaceRootMarker(candidate) || hasGitEntry(candidate)) {
       return candidate
     }
   }

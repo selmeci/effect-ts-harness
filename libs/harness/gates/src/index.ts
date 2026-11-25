@@ -643,3 +643,9 @@ export {
   mergeObservedDurationsIntoMap,
   readStreamedPackageBatchReports,
 } from "./mutation/mutation-batch-stream.js"
+export {
+  type BarrelClosureStepResult,
+  isBarrelFilePath,
+  isPureReExportBarrel,
+  resolveBarrelClosureStep,
+} from "./mutation/mutation-barrel-closure.js"

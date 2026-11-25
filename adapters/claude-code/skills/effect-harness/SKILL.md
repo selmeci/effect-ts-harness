@@ -44,7 +44,7 @@ plan -> skeleton with stub<A, E, R>(...args) -> harness plan-check -> implement 
    - `WHILE <state>, THE SYSTEM SHALL <response>` $\rightarrow$ closed `Schema.TaggedUnion` state/decision types + pure decider `Effect.fn("*.decide")` (`R = never`) using exhaustive `match(state)...exhaustive()` from `ts-pattern` + stateful `Context.Service` in `R`
    - `WHERE <feature>, THE SYSTEM SHALL <response>` $\rightarrow$ `Context.Service` + `Layer` / `Config` in `R`
 2. **Skeleton (`planning-effect-skeletons`):** Implement the skeleton first (schemas, errors, service interfaces, function signatures). For function bodies, use `stub<A, E, R>(...args)` from `@harness/contract` to preserve accurate types. The skeleton must pass typecheck before implementation begins.
-3. **`harness plan-check` (`planning-effect-skeletons`):** Run plan-check (`node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts plan-check`). This verifies typecheck and linting under `HARNESS_PLAN_CHECK=1`, verifies unique span names, indexes workspace functions, writes `.harness/plan-graph-snapshot.json`, and records the plan graph to Omnigraph branch `plan/current`.
+3. **`harness plan-check` (`planning-effect-skeletons`):** Run plan-check (`node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts plan-check [--mermaid]`). This verifies typecheck and linting under `HARNESS_PLAN_CHECK=1`, verifies unique span names, indexes workspace functions, writes `.harness/plan-graph-snapshot.json`, records the plan graph to Omnigraph branch `plan/current`, and emits a compact JSON summary by default (pass `--mermaid` for full Mermaid topology).
 4. **Implement (`executing-effect-stubs`):** Replace `stub<A, E, R>(...args)` placeholders with production Effect implementations and comprehensive tests (`it.effect` + `checkSpanBudgets` via `SpanBudget.decide` for N+1 / latency bounds), delegating package-isolated units to `haiku` subagents (`HARNESS_WORKTREE_ID`). At session start, `harness session` (`SessionHandoff.decide`) automatically outputs active stubs, missing planned functions, and recent friction.
 5. **LLM Phase (`compounding-effect-learnings`):** Inspect `.harness/friction-log.jsonl` clusters (`Friction.decide` + `LearnProposalV1`) via `node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts learn` and promote recurring friction (`route_miss`, `verify_failure`, `guard_escalation`) into `agent-patterns/*.md`, `DETERMINISTIC_TRIAGE_RULES`, `ALLOWLIST`, or AST/graph gates. Then set EARS specs `status: accepted`, run `pnpm format` (or scoped `pnpm oxfmt --write <touched paths>`), clear processed logs (`pnpm harness learn --clear`), and run `pnpm harness workflow complete --phase llm` when inside `HarnessTaskWorkflow`.
 6. **Durable `ShipWorkflow` Pipeline (`pnpm harness workflow ship [--run <id>]` — `executing-effect-stubs`):** With no further file edits, run `pnpm harness workflow ship --run <id>` (or `pnpm harness workflow ship` in ephemeral mode for standalone non-plan tasks). Under `ShipWorkflow`, this executes `format-check` -> `gc-strict` (`GraphGc.decide`) -> `ontology-check-strict` (`ontology check --strict`) -> `mutate-strict` -> `verify` (`nx affected -t verify`, zero active `stub()` calls, `SpanBudget.decide`, `MigrationSafety.decide`, writes `.harness/verify-stamp.json`, records `impl/<task>`, triages via `TriageV1`) -> `done --cli` under monotonic `WfShipAttempt` OCC. This is the **ONLY** sanctioned verification and shipping gate sequence.
@@ -62,8 +62,26 @@ Always prefer in-process MCP tools over spawning shell subcommands to eliminate 
 - **Test Impact Analysis:** `harness_tests_reaching` (`symbolOrSpan`, `repoRoot?`) — determines affected test files for touched symbols.
 - **Session Telemetry:** `harness_telemetry_report` (reviews session metrics and friction logs).
 - **Graph Queries & Diffs:** `harness_gq_query`, `harness_structural_search`, `harness_git_diff`.
-- **Task Lifecycle Gates & Workflow Control Plane (CLI only):** Use `pnpm harness <cmd>` (`plan-check`, `gc --strict`, `mutate --strict`, `verify`, `done`, `workflow <compile|start|status|complete|resume|ship|doctor|abort>`) strictly for task state transitions, durable `HarnessTaskWorkflow` / `ShipWorkflow` orchestration, and cryptographic verify-stamp generation. When `HARNESS_UNIT_WORKER=1` is set on unit worker invocations (automatic runner spawning lands in WF-5), isolation guards block recursive `harness workflow start|resume|ship|abort|doctor|complete --phase llm`, `harness done`, and direct access to `daemon.sock`/`auth-tokens.json`.
+- **Task Lifecycle Gates & Workflow Control Plane (CLI only):** Use `pnpm harness <cmd>` (canonical CLI subcommands including `plan-check [--mermaid]`, `review-route`, `report [--json]`, `gc --strict`, `mutate --strict`, `verify`, `done`, `workflow <compile|start|status|complete|resume|ship|doctor|abort>`) strictly for task state transitions, durable `HarnessTaskWorkflow` / `ShipWorkflow` orchestration, and cryptographic verify-stamp generation. When `HARNESS_UNIT_WORKER=1` is set on unit worker invocations (automatic runner spawning lands in WF-5), isolation guards block recursive `harness workflow start|resume|ship|abort|doctor|complete --phase llm`, `harness done`, and direct access to `daemon.sock`/`auth-tokens.json`.
 - **Advisory `clef-flash` (TypeSafe System One API):** `clef-flash` is a structured System One model (`POST http://localhost:11434/v1/systemone` via `DecisionModel.decide` + `@effect/ai-typesafe`), never a generative/chat LLM. Use `pnpm harness doctor` for warm-up/health checks; `/api/generate`, `/api/chat`, `/v1/chat/completions`, `/v1/completions`, and `ollama run clef-flash` are unsupported and blocked.
+
+### 2.2 MCP Parameter Cheat-Sheet & Swarm Brief Header Standard
+
+Use exact MCP parameter names to avoid schema validation retries:
+
+- **MCP Parameter Cheat-Sheet:**
+  - `harness_lsp_diagnostics({ file | project, repoRoot?, overlays? })`
+  - `harness_ontology_check({ scope?, repoRoot? })` (CLI strict flag: `pnpm harness ontology check --strict`)
+  - `harness_ontology_why({ symbolOrSpan, repoRoot? })`
+  - `harness_git_diff({ baseRef?, paths?, statOnly?, repoRoot? })`
+  - `harness_tests_reaching({ symbolOrSpan, repoRoot? })`
+  - `harness_structural_search({ pattern, paths?, repoRoot? })`
+  - `harness_review_route({ changedFiles, baseRef?, repoRoot? })`
+- **Swarm Brief Header Standard:** Every parallel subagent brief MUST start with:
+  ```text
+  REPO_ROOT=<abs path>
+  IMPORTANT: Pass absolute paths starting with <abs path>/ to Read, Edit, and Write, and pass repoRoot: "<abs path>" to MCP tools. Run MCP-first diagnostics (harness_lsp_diagnostics, harness_ontology_check) before CLI fallbacks.
+  ```
 
 ---
 

@@ -1,5 +1,5 @@
-import { dirname, isAbsolute, join, posix, relative, resolve } from "node:path"
-import { Option, Result, Schema } from "effect"
+import { isAbsolute, join, posix, relative } from "node:path"
+import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   type ContentSha256,
@@ -10,6 +10,20 @@ import {
 } from "@harness/contract"
 import { ts } from "@harness/graph"
 import type { SyncHostIo } from "@harness/service/host-io"
+import {
+  type BarrelTraversalState,
+  type CachedBarrelMeta,
+  applyBarrelImportEdge,
+  checkExists,
+  isBarrelFilePath,
+  isNonSymlink,
+  readSafeText,
+  realpathOrUndefined,
+  unwrapOption,
+  unwrapResult,
+  verifyClosurePathSafe,
+} from "./mutation-barrel-closure.js"
+import type { PackageImportResolver } from "./mutation-barrel-reachability.js"
 
 export interface MutationContextDigests {
   readonly workspaceSrcDigest: ContentSha256
@@ -47,62 +61,6 @@ export type FileMutationClosureDigestResult =
       readonly usedFallbackAllLibs: boolean
     }
   | { readonly _tag: "Disabled"; readonly reason: string }
-
-const unwrapResult = <A>(res: Result.Result<A, unknown>): Option.Option<A> =>
-  match(res)
-    .with({ _tag: "Success" }, ({ success }) => Option.some(success))
-    .with({ _tag: "Failure" }, () => Option.none())
-    .exhaustive()
-
-const unwrapOption = <A>(opt: Option.Option<A>): A | undefined =>
-  match(opt)
-    .with({ _tag: "Some" }, ({ value }) => value)
-    .with({ _tag: "None" }, () => undefined)
-    .exhaustive()
-
-const isNonSymlink = (targetPath: string, hostIo: SyncHostIo): boolean =>
-  match(unwrapResult(Result.try(() => hostIo.isSymbolicLinkSync(targetPath))))
-    .with({ _tag: "Some" }, ({ value }) => !value)
-    .with({ _tag: "None" }, () => false)
-    .exhaustive()
-
-const readSafeText = (filePath: string, hostIo: SyncHostIo): Option.Option<string> =>
-  isNonSymlink(filePath, hostIo)
-    ? unwrapResult(Result.try(() => hostIo.readTextSync(filePath)))
-    : Option.none()
-
-const checkExists = (targetPath: string, hostIo: SyncHostIo): boolean | undefined =>
-  unwrapOption(unwrapResult(Result.try(() => hostIo.existsSync(targetPath))))
-
-const realpathOrUndefined = (targetPath: string, hostIo: SyncHostIo): string | undefined =>
-  unwrapOption(unwrapResult(Result.try(() => hostIo.realpathSync(targetPath))))
-
-const isPathContained = (parentReal: string, childReal: string): boolean => {
-  const rel = relative(parentReal, childReal)
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
-}
-
-const verifyClosurePathSafe = (
-  repoRoot: string,
-  repoReal: string,
-  fullPath: string,
-  hostIo: SyncHostIo,
-): string | undefined => {
-  const resolvedRoot = resolve(repoRoot)
-  let cur = resolve(fullPath)
-  while (true) {
-    if (!isNonSymlink(cur, hostIo)) {
-      return `symlink or unreadable path '${cur}'`
-    }
-    if (cur === resolvedRoot || cur === dirname(cur)) break
-    cur = dirname(cur)
-  }
-  const targetReal = realpathOrUndefined(fullPath, hostIo)
-  if (targetReal === undefined || !isPathContained(repoReal, targetReal)) {
-    return `realpath escape detected for '${fullPath}'`
-  }
-  return undefined
-}
 
 const TS_JS_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"] as const
 
@@ -580,44 +538,28 @@ const resolveWorkspacePackageImport = (
     pkgExportsCache.set(pkgRelDir, exportsMap)
   }
 
+  const mapCandidateResult = (candidates: ReadonlyArray<string>) =>
+    match(resolveExistingCandidate(repoRoot, candidates, digests.fileDigests, hostIo))
+      .with({ _tag: "Found" }, { _tag: "Disabled" }, (r) => r)
+      .with({ _tag: "Missing" }, () =>
+        isWorkspaceSpec
+          ? ({ _tag: "UnresolvedWorkspace", specifier: spec } as const)
+          : ({ _tag: "External" } as const),
+      )
+      .exhaustive()
+
   if (exportsMap !== null) {
     const exportKey = subpath === undefined ? "." : `./${subpath}`
     const targetStr =
       extractExportTargetString(exportsMap[exportKey]) ?? matchWildcardExport(exportsMap, exportKey)
     if (targetStr !== undefined) {
-      const res = resolveExistingCandidate(
-        repoRoot,
-        expandExportTargetCandidates(pkgRelDir, targetStr),
-        digests.fileDigests,
-        hostIo,
-      )
-      return match(res)
-        .with({ _tag: "Found" }, { _tag: "Disabled" }, (r) => r)
-        .with({ _tag: "Missing" }, () =>
-          isWorkspaceSpec
-            ? ({ _tag: "UnresolvedWorkspace", specifier: spec } as const)
-            : ({ _tag: "External" } as const),
-        )
-        .exhaustive()
+      return mapCandidateResult(expandExportTargetCandidates(pkgRelDir, targetStr))
     }
   }
 
   const fallbackBase =
     subpath === undefined ? `${pkgRelDir}/src/index` : `${pkgRelDir}/src/${subpath}`
-  const fallbackRes = resolveExistingCandidate(
-    repoRoot,
-    candidateFilesForBase(posix.normalize(fallbackBase)),
-    digests.fileDigests,
-    hostIo,
-  )
-  return match(fallbackRes)
-    .with({ _tag: "Found" }, { _tag: "Disabled" }, (r) => r)
-    .with({ _tag: "Missing" }, () =>
-      isWorkspaceSpec
-        ? ({ _tag: "UnresolvedWorkspace", specifier: spec } as const)
-        : ({ _tag: "External" } as const),
-    )
-    .exhaustive()
+  return mapCandidateResult(candidateFilesForBase(posix.normalize(fallbackBase)))
 }
 
 const extractPackageKey = (relPath: string): string | undefined => {
@@ -646,6 +588,13 @@ export const computeFileMutationClosureDigest = (
 
   const queue: Array<string> = []
   const visited = new Set<string>()
+  const barrelState: BarrelTraversalState = {
+    fullBarrels: new Set<string>(),
+    verifiedBarrels: new Set<string>(),
+    prunedBarrelBindings: new Map<string, Set<string>>(),
+    visited,
+    barrelMetaCache: new Map<string, CachedBarrelMeta>(),
+  }
   const touchedPackages = new Set<string>()
   const filePairs: Array<readonly [string, ContentSha256]> = []
   const unresolvedRelativeImports: Array<string> = []
@@ -657,10 +606,14 @@ export const computeFileMutationClosureDigest = (
     visited.add(relPath)
     queue.push(relPath)
   }
+  const enqueueSeed = (relPath: string) => {
+    if (isBarrelFilePath(relPath)) barrelState.fullBarrels.add(relPath)
+    enqueue(relPath)
+  }
 
-  enqueue(normalizeRepoRelPath(input.repoRoot, input.relFile))
+  enqueueSeed(normalizeRepoRelPath(input.repoRoot, input.relFile))
   for (const testFile of input.allReachingTests) {
-    enqueue(normalizeRepoRelPath(input.repoRoot, testFile))
+    enqueueSeed(normalizeRepoRelPath(input.repoRoot, testFile))
   }
 
   let needsDocs = false
@@ -677,6 +630,49 @@ export const computeFileMutationClosureDigest = (
   const debugEnabled =
     unwrapOption(unwrapResult(Result.try(() => input.hostIo.getEnv()["HARNESS_MUTATE_DEBUG"]))) ===
     "1"
+
+  const resolveImportSpec = (fromRel: string, spec: string) => {
+    if (spec.startsWith("./") || spec.startsWith("../") || spec === "." || spec === "..") {
+      const baseRel = posix.normalize(posix.join(posix.dirname(fromRel), spec))
+      const resolved = resolveExistingCandidate(
+        input.repoRoot,
+        candidateFilesForBase(baseRel),
+        input.digests.fileDigests,
+        input.hostIo,
+      )
+      return match(resolved)
+        .with({ _tag: "Found" }, (r) => r)
+        .with({ _tag: "Missing" }, () => ({ _tag: "UnresolvedRelative" as const, specifier: spec }))
+        .with({ _tag: "Disabled" }, (d) => d)
+        .exhaustive()
+    }
+    if (spec.startsWith("@")) {
+      return resolveWorkspacePackageImport(
+        input.repoRoot,
+        spec,
+        input.digests,
+        pkgExportsCache,
+        input.hostIo,
+      )
+    }
+    return { _tag: "External" as const }
+  }
+
+  let barrelResolverDisabledReason: string | undefined
+  const resolveBarrelImport: PackageImportResolver = (fromRel, spec) =>
+    match(resolveImportSpec(fromRel, spec))
+      .with({ _tag: "Found" }, ({ relPath }) => relPath)
+      .with({ _tag: "Disabled" }, ({ reason }) => {
+        barrelResolverDisabledReason ??= reason
+        return undefined
+      })
+      .with(
+        { _tag: "UnresolvedRelative" },
+        { _tag: "UnresolvedWorkspace" },
+        { _tag: "External" },
+        () => undefined,
+      )
+      .exhaustive()
 
   while (queue.length > 0) {
     const relPath = queue.shift()!
@@ -708,53 +704,47 @@ export const computeFileMutationClosureDigest = (
     if (scan.hasLibsFsTraversal) closureHasLibsFsTraversal = true
     if (scan.hasTestLibsLiteralAndFsIo) closureHasTestLibsLiteralAndFsIo = true
 
+    const seenBarrelsInFile = new Set<string>()
     for (const spec of scan.specifiers) {
-      if (spec.startsWith("./") || spec.startsWith("../") || spec === "." || spec === "..") {
-        const baseRel = posix.normalize(posix.join(posix.dirname(relPath), spec))
-        const resolved = resolveExistingCandidate(
-          input.repoRoot,
-          candidateFilesForBase(baseRel),
-          input.digests.fileDigests,
-          input.hostIo,
-        )
-        const disabledReason = match(resolved)
-          .with({ _tag: "Found" }, ({ relPath: r }) => {
-            enqueue(r)
+      const disabledReason = match(resolveImportSpec(relPath, spec))
+        .with({ _tag: "Found" }, ({ relPath: depRel }) => {
+          if (!isBarrelFilePath(depRel)) {
+            enqueue(depRel)
             return undefined
+          }
+          if (seenBarrelsInFile.has(depRel)) return undefined
+          seenBarrelsInFile.add(depRel)
+          const barrelPkg = extractPackageKey(depRel)
+          if (barrelPkg !== undefined) touchedPackages.add(barrelPkg)
+          return applyBarrelImportEdge({
+            repoRoot: input.repoRoot,
+            repoReal,
+            importerRel: relPath,
+            importerContent: content,
+            importerHasNonLiteralDynamicImport: scan.hasNonLiteralDynamicImport,
+            barrelRel: depRel,
+            knownFileDigest: input.digests.fileDigests.get(depRel),
+            hostIo: input.hostIo,
+            resolveImport: resolveBarrelImport,
+            getDisabledReason: () => barrelResolverDisabledReason,
+            state: barrelState,
+            enqueue,
           })
-          .with({ _tag: "Missing" }, () => {
-            unresolvedRelativeImports.push(`${relPath} -> ${spec}`)
-            hasDynamicOrUnresolved = true
-            return undefined
-          })
-          .with({ _tag: "Disabled" }, ({ reason }) => reason)
-          .exhaustive()
-        if (disabledReason !== undefined) return { _tag: "Disabled", reason: disabledReason }
-        continue
-      }
-      if (spec.startsWith("@")) {
-        const resolved = resolveWorkspacePackageImport(
-          input.repoRoot,
-          spec,
-          input.digests,
-          pkgExportsCache,
-          input.hostIo,
-        )
-        const disabledReason = match(resolved)
-          .with({ _tag: "Found" }, ({ relPath: r }) => {
-            enqueue(r)
-            return undefined
-          })
-          .with({ _tag: "UnresolvedWorkspace" }, ({ specifier }) => {
-            unresolvedWorkspaceImports.push(`${relPath} -> ${specifier}`)
-            hasDynamicOrUnresolved = true
-            return undefined
-          })
-          .with({ _tag: "External" }, () => undefined)
-          .with({ _tag: "Disabled" }, ({ reason }) => reason)
-          .exhaustive()
-        if (disabledReason !== undefined) return { _tag: "Disabled", reason: disabledReason }
-      }
+        })
+        .with({ _tag: "UnresolvedRelative" }, ({ specifier }) => {
+          unresolvedRelativeImports.push(`${relPath} -> ${specifier}`)
+          hasDynamicOrUnresolved = true
+          return undefined
+        })
+        .with({ _tag: "UnresolvedWorkspace" }, ({ specifier }) => {
+          unresolvedWorkspaceImports.push(`${relPath} -> ${specifier}`)
+          hasDynamicOrUnresolved = true
+          return undefined
+        })
+        .with({ _tag: "External" }, () => undefined)
+        .with({ _tag: "Disabled" }, ({ reason }) => reason)
+        .exhaustive()
+      if (disabledReason !== undefined) return { _tag: "Disabled", reason: disabledReason }
     }
   }
 
@@ -765,6 +755,9 @@ export const computeFileMutationClosureDigest = (
       (closureHasLibsFsTraversal || closureHasTestLibsLiteralAndFsIo))
 
   filePairs.sort((a, b) => compareCodeUnits(a[0], b[0]))
+  const prunedBarrels = [...barrelState.prunedBarrelBindings.entries()]
+    .sort((a, b) => compareCodeUnits(a[0], b[0]))
+    .map(([barrelRel, bindings]) => [barrelRel, [...bindings].sort(compareCodeUnits)])
   const packageDigests = [...touchedPackages].sort(compareCodeUnits).map((pkgKey) => {
     const k = PackageRelKey.make(pkgKey)
     return [
@@ -778,6 +771,7 @@ export const computeFileMutationClosureDigest = (
     JSON.stringify({
       rootRuntimeDigest: input.digests.rootRuntimeDigest,
       files: filePairs,
+      prunedBarrels,
       packages: packageDigests,
       docs: needsDocs ? input.digests.docsDigest : "",
       agentPatterns: needsAgentPatterns ? input.digests.agentPatternsDigest : "",

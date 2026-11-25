@@ -23,12 +23,20 @@ import {
   containsToken,
   hasUnquotedAdjacentBracketGlob,
   isCommandAllowed,
+  isSafeReadOnlyXargsSegment,
   matchesAny,
   splitByUnquotedOperator,
   stripSafeLeadingEnvVars,
   type GuardPatternRule,
   type GuardVerdict,
 } from "./policy-command-rules.js"
+import {
+  isAllowableStrippedHeredocCommand,
+  isGuardSelfInvocationCommand,
+  normalizeHeredocAwareContinuations,
+  stripSafeDataHeredocBodies,
+  stripSafeDataHeredocBodiesWithMeta,
+} from "./policy-heredoc.js"
 import {
   PROTECTED_HARNESS_FILE_WRITE_PATTERN,
   expandCommandVariables,
@@ -52,7 +60,6 @@ import {
   extractCommandSegments,
   extractDetailedCommandSegments,
   hasUnquotedBackgroundOperator,
-  normalizeShellLineContinuations,
   toCommandView,
   type CommandView,
   type UnwrappedSegment,
@@ -346,6 +353,7 @@ const explainDirectCommandDenyRule = (
         "Git remote/transfer command with custom upload-pack/receive-pack/exec or ext:: helper is banned by harness policy.",
     }
   }
+  const heredocStripped = stripSafeDataHeredocBodies(trimmed)
   if (options?.unitWorkerMode === true) {
     if (isWorkerRecursiveWorkflowCommand(trimmed)) {
       return {
@@ -353,7 +361,7 @@ const explainDirectCommandDenyRule = (
         reason: `Worker isolation mode (HARNESS_UNIT_WORKER=1) bans recursive 'harness workflow ${WORKER_ISOLATED_WORKFLOW_SUBCOMMANDS.join("|")}' and 'harness done' invocations.`,
       }
     }
-    if (isWorkerDaemonCredentialShellAccess(trimmed)) {
+    if (isWorkerDaemonCredentialShellAccess(heredocStripped)) {
       return {
         ruleId: "worker-daemon-credential-access",
         reason:
@@ -361,22 +369,33 @@ const explainDirectCommandDenyRule = (
       }
     }
   }
-  if (isHarnessStateMutationCommand(trimmed)) {
+  if (isHarnessStateMutationCommand(heredocStripped)) {
     return {
       ruleId: "harness-state-mutation",
       reason:
         "Mutating or directly probing protected harness runtime state (<git-common-dir>/harness/**, auth-tokens.json, daemon.sock, daemon.lock, workflow-backups/, pending-workflow-restore.json, stamps, caches, repos/**, oxlint policy) is banned by harness policy.",
     }
   }
-  const expandedView = toCommandView(expandedText)
-  const expandedArgv = expandedView.argv
+  const heredocExp =
+    heredocStripped === trimmed
+      ? { text: expandedText, overflowed: false }
+      : expandCommandVariables(heredocStripped)
+  if (heredocExp.overflowed) {
+    return {
+      ruleId: "harness-state-mutation",
+      reason: "Command variable expansion exceeded maximum inspection size.",
+    }
+  }
+  const hView = heredocStripped === trimmed ? view : toCommandView(heredocStripped)
+  const hExpText = heredocExp.text
+  const hExpView = hExpText === heredocStripped ? hView : toCommandView(hExpText)
   if (
-    SECRET_FILE_PATTERN.test(view.argv) ||
-    SECRET_FILE_PATTERN.test(view.argv.replace(/\\(.)/g, "$1")) ||
-    SECRET_FILE_PATTERN.test(expandedArgv) ||
-    SECRET_FILE_PATTERN.test(expandedArgv.replace(/\\(.)/g, "$1")) ||
-    argvMatchesSecretGlobToken(view.argv, trimmed, view.unquoted) ||
-    argvMatchesSecretGlobToken(expandedArgv, expandedText, expandedView.unquoted)
+    SECRET_FILE_PATTERN.test(hView.argv) ||
+    SECRET_FILE_PATTERN.test(hView.argv.replace(/\\(.)/g, "$1")) ||
+    SECRET_FILE_PATTERN.test(hExpView.argv) ||
+    SECRET_FILE_PATTERN.test(hExpView.argv.replace(/\\(.)/g, "$1")) ||
+    argvMatchesSecretGlobToken(hView.argv, heredocStripped, hView.unquoted) ||
+    argvMatchesSecretGlobToken(hExpView.argv, hExpText, hExpView.unquoted)
   ) {
     return {
       ruleId: "secret-file-access",
@@ -385,9 +404,9 @@ const explainDirectCommandDenyRule = (
     }
   }
   if (
-    isHarnessStateAccessCommand(trimmed) ||
-    argvMatchesProtectedStateGlobToken(view.argv, trimmed, view.unquoted) ||
-    argvMatchesProtectedStateGlobToken(expandedArgv, expandedText, expandedView.unquoted)
+    isHarnessStateAccessCommand(heredocStripped) ||
+    argvMatchesProtectedStateGlobToken(hView.argv, heredocStripped, hView.unquoted) ||
+    argvMatchesProtectedStateGlobToken(hExpView.argv, hExpText, hExpView.unquoted)
   ) {
     return {
       ruleId: "harness-state-mutation",
@@ -395,7 +414,7 @@ const explainDirectCommandDenyRule = (
         "Reading or inspecting protected harness runtime state (<git-common-dir>/harness/**, auth-tokens.json, daemon.sock, daemon.lock, workflow-backups/, pending-workflow-restore.json) is banned by harness policy.",
     }
   }
-  if (GUARD_SELF_INVOCATION_PATTERN.test(view.argv)) {
+  if (isGuardSelfInvocationCommand(trimmed)) {
     return {
       ruleId: "guard-self-invocation",
       reason: "Invoking 'harness guard' from an agent shell command is banned by harness policy.",
@@ -415,7 +434,7 @@ const explainCommandDenyRuleAtDepth = (
       reason: "Command exceeded maximum subshell/wrapper nesting inspection depth.",
     }
   }
-  const trimmed = normalizeShellLineContinuations(command).trim()
+  const trimmed = normalizeHeredocAwareContinuations(command).trim()
   if (trimmed === "") {
     return undefined
   }
@@ -431,7 +450,13 @@ const explainCommandDenyRuleAtDepth = (
     return direct
   }
 
-  const candidateTexts = expanded.text === trimmed ? [trimmed] : [trimmed, expanded.text]
+  const heredocStripped = stripSafeDataHeredocBodies(trimmed)
+  const candidateTexts = new Set<string>([trimmed, expanded.text])
+  if (heredocStripped !== trimmed) {
+    candidateTexts.add(heredocStripped)
+    const strippedExp = expandCommandVariables(heredocStripped)
+    if (!strippedExp.overflowed) candidateTexts.add(strippedExp.text)
+  }
   for (const candidate of candidateTexts) {
     for (const seg of extractDetailedCommandSegments(candidate)) {
       for (const payload of extractEmbeddedCommandPayloads(seg.commandWords)) {
@@ -462,13 +487,44 @@ export const explainCommandDenyReason = (
   options?: PolicyGuardOptions,
 ): string | undefined => explainCommandDenyRule(command, options)?.reason
 
+const SIMPLE_PIPE_FILTER_BINS: ReadonlySet<string> = new Set([
+  "grep",
+  "head",
+  "tail",
+  "wc",
+  "cat",
+  "cut",
+])
+
+const isAllowedPipeFilter = (p: string): boolean => {
+  if (isSafeReadOnlyXargsSegment(p)) return true
+  const argv = toCommandView(p).argv
+  const head = argv.split(" ", 1)[0] ?? ""
+  if (SIMPLE_PIPE_FILTER_BINS.has(head)) return true
+  if (head === "rg") return !/(?:^|\s)--(?:pre|pre-glob|hostname-bin)(?:=|\s|$)/.test(argv)
+  if (head === "sort") return !/(?:^|\s)(?:-[^\s-]*o|--output(?:=|\s|$))/.test(argv)
+  return false
+}
+
+const isAllowedPipedSegment = (segCmd: string, segUnquoted: string): boolean => {
+  if (!segUnquoted.includes("|") || segUnquoted.includes("||")) {
+    return false
+  }
+  const parts = splitByUnquotedOperator(segCmd, segUnquoted, "|")
+  return (
+    parts.length >= 2 &&
+    isCommandAllowed(parts[0]!.cmd) &&
+    parts.slice(1).every((p) => isAllowedPipeFilter(p.cmd))
+  )
+}
+
 /** Rule order is load-bearing (harness:ADR-0003): deny → ask → escalate → allow.
  * Every rule that removes the automatic `allow` must run before the prefix allowlist. */
 export const classifyCommand = (command: string, options?: PolicyGuardOptions): GuardVerdict => {
   if (command.length > MAX_CLASSIFY_COMMAND_LENGTH) {
     return "ask"
   }
-  const norm = normalizeShellLineContinuations(command)
+  const norm = normalizeHeredocAwareContinuations(command)
   const trimmed = norm.trim()
   if (trimmed === "") {
     return "escalate"
@@ -488,11 +544,19 @@ export const classifyCommand = (command: string, options?: PolicyGuardOptions): 
   ) {
     return "ask"
   }
+  if (matchesAny(view.argv, DESTRUCTIVE_ARGUMENT_PATTERNS)) {
+    return "escalate"
+  }
+  const heredocMeta = stripSafeDataHeredocBodiesWithMeta(norm)
+  if (heredocMeta.strippedCount > 0) {
+    return isAllowableStrippedHeredocCommand(heredocMeta, isAllowedPipedSegment)
+      ? "allow"
+      : "escalate"
+  }
   if (
     view.unclosedQuote ||
     view.hasDoubleQuotedSubstitution ||
     view.hasAnsiCQuote ||
-    matchesAny(view.argv, DESTRUCTIVE_ARGUMENT_PATTERNS) ||
     FILE_REDIRECTION_PATTERN.test(view.unquoted) ||
     matchesAny(norm, OBFUSCATION_PATTERNS) ||
     hasUnquotedAdjacentBracketGlob(norm, view.unquoted) ||
@@ -502,40 +566,6 @@ export const classifyCommand = (command: string, options?: PolicyGuardOptions): 
     return "escalate"
   }
   if (hasBgOp || SHELL_OPERATORS.some((op) => view.unquoted.includes(op))) {
-    const isAllowedFilter = (p: string): boolean => {
-      const argv = toCommandView(p).argv
-      return (
-        argv === "grep" ||
-        argv.startsWith("grep ") ||
-        ((argv === "rg" || argv.startsWith("rg ")) &&
-          !/(?:^|\s)--(?:pre|pre-glob|hostname-bin)(?:=|\s|$)/.test(argv)) ||
-        argv === "head" ||
-        argv.startsWith("head ") ||
-        argv === "tail" ||
-        argv.startsWith("tail ") ||
-        argv === "wc" ||
-        argv.startsWith("wc ") ||
-        argv === "cat" ||
-        argv.startsWith("cat ") ||
-        argv === "cut" ||
-        argv.startsWith("cut ") ||
-        ((argv === "sort" || argv.startsWith("sort ")) &&
-          !/(?:^|\s)(?:-[^\s-]*o|--output(?:=|\s|$))/.test(argv))
-      )
-    }
-
-    const isAllowedPipedSegment = (segCmd: string, segUnquoted: string): boolean => {
-      if (!segUnquoted.includes("|") || segUnquoted.includes("||")) {
-        return false
-      }
-      const parts = splitByUnquotedOperator(segCmd, segUnquoted, "|")
-      return (
-        parts.length >= 2 &&
-        isCommandAllowed(parts[0]!.cmd) &&
-        parts.slice(1).every((p) => isAllowedFilter(p.cmd))
-      )
-    }
-
     if (
       !hasBgOp &&
       view.unquoted.includes("|") &&

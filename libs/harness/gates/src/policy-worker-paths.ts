@@ -229,10 +229,15 @@ const sliceDotPrefixOutsideBrackets = (seg: string, keepInternalDots: number): s
   return seg
 }
 
-const SECRET_FILE_GLOB_PROBES: ReadonlyArray<SensitiveGlobProbe> = [
+const MUTATION_HMAC_GLOB_PROBE: SensitiveGlobProbe = {
+  segments: ["mutation-hmac.key"],
+  minSegLiterals: [["mutationhmac", 5]],
+  prefixOk: false,
+}
+
+const NON_HMAC_SECRET_FILE_GLOB_PROBES: ReadonlyArray<SensitiveGlobProbe> = [
   { segments: [".env"], minSegLiterals: [["env", 2]], prefixOk: false },
   { segments: [".dev.vars"], minSegLiterals: [["devvars", 4]], prefixOk: false },
-  { segments: ["mutation-hmac.key"], minSegLiterals: [["mutationhmac", 5]], prefixOk: false },
   { segments: ["auth-tokens.json"], minSegLiterals: [["authtokens", 4]], prefixOk: false },
   { segments: ["auth_tokens.json"], minSegLiterals: [["authtokens", 4]], prefixOk: false },
   {
@@ -245,36 +250,61 @@ const SECRET_FILE_GLOB_PROBES: ReadonlyArray<SensitiveGlobProbe> = [
   },
 ]
 
+const isSafeNonSecretWorkspaceDirPrefix = (dirSegs: ReadonlyArray<string>): boolean =>
+  dirSegs.length >= 1 &&
+  dirSegs.every(
+    (seg) =>
+      !seg.startsWith(".") &&
+      seg !== "~" &&
+      !/[*?[\]{}]/.test(seg) &&
+      !/^(?:secrets?|credentials?|auth|tokens?|common-dir|workflow-backups)$/i.test(seg),
+  )
+
+const hasMutationHmacOrKeyIndicator = (lastSeg: string): boolean =>
+  /(?:hmac|h[a-z*?[\]]*ac|mutation[-_]?h|key|pem)/i.test(lastSeg)
+
 export const matchesSecretFileGlob = (p: string): boolean => {
   if (!/[*?[\]]/.test(p) || /\.(example|template|sample)$/i.test(p)) return false
-  if (matchesSensitiveGlobProbes(p, SECRET_FILE_GLOB_PROBES)) return true
+  if (matchesSensitiveGlobProbes(p, NON_HMAC_SECRET_FILE_GLOB_PROBES)) return true
+  const segs = p.split("/").filter((s) => s.length > 0 && s !== ".")
+  const dirSegs = segs.slice(0, -1)
+  const segTail = segs[segs.length - 1] ?? ""
   const slashIdx = p.lastIndexOf("/")
   const dirPart = slashIdx === -1 ? "" : p.slice(0, slashIdx + 1)
   const lastSeg = slashIdx === -1 ? p : p.slice(slashIdx + 1)
+  const lastDot = lastSeg.lastIndexOf(".")
+  const extPat = lastDot > 0 ? lastSeg.slice(lastDot + 1) : undefined
+  const hasWildcardKeyOrPemExt =
+    extPat !== undefined &&
+    /[*?[\]]/.test(extPat) &&
+    (matchesGlobSegment(extPat, "key") || matchesGlobSegment(extPat, "pem"))
+  const allowNonHmacSubdir =
+    isSafeNonSecretWorkspaceDirPrefix(dirSegs) &&
+    !hasMutationHmacOrKeyIndicator(segTail) &&
+    !hasWildcardKeyOrPemExt
+  if (!allowNonHmacSubdir && matchesSensitiveGlobProbes(p, [MUTATION_HMAC_GLOB_PROBE])) {
+    return true
+  }
   const envStem = sliceDotPrefixOutsideBrackets(lastSeg, 1)
   if (
     envStem !== lastSeg &&
-    matchesSensitiveGlobProbes(`${dirPart}${envStem}`, [SECRET_FILE_GLOB_PROBES[0]!])
+    matchesSensitiveGlobProbes(`${dirPart}${envStem}`, [NON_HMAC_SECRET_FILE_GLOB_PROBES[0]!])
   ) {
     return true
   }
   const devStem = sliceDotPrefixOutsideBrackets(lastSeg, 2)
   if (
     devStem !== lastSeg &&
-    matchesSensitiveGlobProbes(`${dirPart}${devStem}`, [SECRET_FILE_GLOB_PROBES[1]!])
+    matchesSensitiveGlobProbes(`${dirPart}${devStem}`, [NON_HMAC_SECRET_FILE_GLOB_PROBES[1]!])
   ) {
     return true
   }
-  const lastDot = lastSeg.lastIndexOf(".")
-  if (lastDot > 0) {
-    const extPat = lastSeg.slice(lastDot + 1)
-    if (/[*?[\]]/.test(extPat)) {
-      if (
-        (matchesGlobSegment(extPat, "key") && countLiteralStemChars(extPat, "key") >= 2) ||
-        (matchesGlobSegment(extPat, "pem") && countLiteralStemChars(extPat, "pem") >= 2)
-      ) {
-        return true
-      }
+  if (extPat !== undefined && /[*?[\]]/.test(extPat)) {
+    if (
+      (matchesGlobSegment(extPat, "key") && countLiteralStemChars(extPat, "key") >= 2) ||
+      (matchesGlobSegment(extPat, "pem") && countLiteralStemChars(extPat, "pem") >= 2)
+    ) {
+      return true
     }
   }
   return false

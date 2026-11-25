@@ -357,6 +357,7 @@ describe("@harness/contract schemas", () => {
       expect(Schema.decodeUnknownSync(CanonicalCliCommandName)(cmd)).toBe(cmd)
       expect(Schema.decodeSync(CliCommandName)(cmd)).toBe(cmd)
     }
+    expect(CANONICAL_CLI_COMMAND_NAMES).toContain(CliCommandName.make("review-route"))
     expect(() => Schema.decodeUnknownSync(CanonicalCliCommandName)("not-a-cli-cmd")).toThrow()
 
     expect(CANONICAL_MCP_TOOL_NAMES).toHaveLength(20)

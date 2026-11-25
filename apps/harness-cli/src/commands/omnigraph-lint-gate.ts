@@ -60,6 +60,7 @@ const runOmnigraphMaintenanceCommands = (
     )
     return
   }
+  const lockedSubcommands: Array<string> = []
   for (const args of commands) {
     const subcommand = args[0] ?? "optimize"
     const execAttempt = Result.try(() =>
@@ -74,12 +75,17 @@ const runOmnigraphMaintenanceCommands = (
       .with({ _tag: "Success" }, ({ success: res }) => {
         match(res)
           .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {
-            const combined = stderr || stdout
+            const combined = [stderr, stdout].filter((s) => s.length > 0).join("\n")
             if (exitCode !== 0) {
-              const msg = combined.includes("[state_lock_held]")
-                ? `[harness:omnigraph] Info: skipped offline omnigraph ${subcommand} because cluster state lock is held by running omnigraph-server\n`
-                : `[harness:omnigraph] Warning: omnigraph ${subcommand} exited ${exitCode}: ${combined}\n`
-              process.stderr.write(msg)
+              if (combined.includes("[state_lock_held]")) {
+                if (!lockedSubcommands.includes(subcommand)) {
+                  lockedSubcommands.push(subcommand)
+                }
+              } else {
+                process.stderr.write(
+                  `[harness:omnigraph] Warning: omnigraph ${subcommand} exited ${exitCode}: ${combined}\n`,
+                )
+              }
             }
           })
           .with({ _tag: "TimedOut" }, ({ stderr }) => {
@@ -101,13 +107,19 @@ const runOmnigraphMaintenanceCommands = (
       })
       .exhaustive()
   }
+  if (lockedSubcommands.length > 0) {
+    const label =
+      lockedSubcommands.length === 1 ? lockedSubcommands[0]! : `(${lockedSubcommands.join(", ")})`
+    process.stderr.write(
+      `[harness:omnigraph] Info: skipped offline omnigraph ${label} because cluster state lock is held by running omnigraph-server\n`,
+    )
+  }
 }
 
-export const runOmnigraphRebuildFullTextIndexes = (
+const buildRebuildFullTextIndexCommands = (
   clusterRootDir: string,
-  omnigraphBin: string = resolveDefaultOmnigraphBin(),
-  branches: ReadonlyArray<string> = ["main"],
-): void => {
+  branches: ReadonlyArray<string>,
+): ReadonlyArray<ReadonlyArray<string>> => {
   const targetUri = `file://${clusterRootDir}`
   const seen = new Set<string>()
   const commands: Array<ReadonlyArray<string>> = []
@@ -136,7 +148,32 @@ export const runOmnigraphRebuildFullTextIndexes = (
       "main",
     ])
   }
-  runOmnigraphMaintenanceCommands(clusterRootDir, omnigraphBin, commands)
+  return commands
+}
+
+const buildOptimizeAndCleanupCommands = (
+  clusterRootDir: string,
+  includeCleanup: boolean,
+): ReadonlyArray<ReadonlyArray<string>> => {
+  const targetUri = `file://${clusterRootDir}`
+  return includeCleanup
+    ? [
+        ["optimize", "--target", targetUri, "--graph", "harness"],
+        ["cleanup", "--target", targetUri, "--graph", "harness", "--keep", "5", "--confirm"],
+      ]
+    : [["optimize", "--target", targetUri, "--graph", "harness"]]
+}
+
+export const runOmnigraphRebuildFullTextIndexes = (
+  clusterRootDir: string,
+  omnigraphBin: string = resolveDefaultOmnigraphBin(),
+  branches: ReadonlyArray<string> = ["main"],
+): void => {
+  runOmnigraphMaintenanceCommands(
+    clusterRootDir,
+    omnigraphBin,
+    buildRebuildFullTextIndexCommands(clusterRootDir, branches),
+  )
 }
 
 export const runOmnigraphOptimizeAndCleanup = (
@@ -144,14 +181,11 @@ export const runOmnigraphOptimizeAndCleanup = (
   omnigraphBin: string = resolveDefaultOmnigraphBin(),
   includeCleanup = true,
 ): void => {
-  const targetUri = `file://${clusterRootDir}`
-  const commands: ReadonlyArray<ReadonlyArray<string>> = includeCleanup
-    ? [
-        ["optimize", "--target", targetUri, "--graph", "harness"],
-        ["cleanup", "--target", targetUri, "--graph", "harness", "--keep", "5", "--confirm"],
-      ]
-    : [["optimize", "--target", targetUri, "--graph", "harness"]]
-  runOmnigraphMaintenanceCommands(clusterRootDir, omnigraphBin, commands)
+  runOmnigraphMaintenanceCommands(
+    clusterRootDir,
+    omnigraphBin,
+    buildOptimizeAndCleanupCommands(clusterRootDir, includeCleanup),
+  )
 }
 
 export const findFirstVitestCaseId = (graph: HarnessGraph): string | undefined => {
@@ -483,18 +517,25 @@ export const runVerifyOmnigraphLintCheck = (
  */
 export const runOmnigraphMaintenance = (
   repoRoot: string,
-  options?: { readonly includeCleanup?: boolean },
+  options?: { readonly includeCleanup?: boolean; readonly omnigraphBin?: string },
 ): void => {
   if (isIsolatedExternalWorkspace(repoRoot)) return
   const clusterRepoRoot = resolveClusterRepoRoot(repoRoot)
   const clusterDir = resolveOmnigraphClusterDir(clusterRepoRoot, nodeSyncHostIo)
   if (nodeSyncHostIo.existsSync(clusterDir)) {
     const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
-    runOmnigraphRebuildFullTextIndexes(clusterDir, undefined, [
-      taskBranches.mainBranch,
-      taskBranches.implBranch,
-      taskBranches.planBranch,
-    ])
-    runOmnigraphOptimizeAndCleanup(clusterDir, undefined, options?.includeCleanup ?? true)
+    const commands = [
+      ...buildRebuildFullTextIndexCommands(clusterDir, [
+        taskBranches.mainBranch,
+        taskBranches.implBranch,
+        taskBranches.planBranch,
+      ]),
+      ...buildOptimizeAndCleanupCommands(clusterDir, options?.includeCleanup ?? true),
+    ]
+    runOmnigraphMaintenanceCommands(
+      clusterDir,
+      options?.omnigraphBin ?? resolveDefaultOmnigraphBin(),
+      commands,
+    )
   }
 }

@@ -447,37 +447,49 @@ const isFileLite = (filePath: string): boolean => {
   return st !== undefined && !st.isSymbolicLink() && st.isFile()
 }
 
+type DigestFileMode = "content" | "mtime" | "existence"
+
 const digestFileFromIo = (
   filePath: string,
   io: Pick<
     PreInvocationFingerprintIo,
     "existsSync" | "isFileSync" | "isSymbolicLinkSync" | "readBytesSync" | "statMtimeMsSync"
   >,
-  contentHash: boolean,
+  mode: DigestFileMode,
 ): Option.Option<string> => {
   const isSym = tryOr(() => io.isSymbolicLinkSync(filePath), true)
   if (isSym) return Option.none()
   const exists = tryOr(() => io.existsSync(filePath), undefined)
   if (exists === undefined) return Option.none()
-  if (!exists) return Option.some("absent")
+  if (!exists) {
+    return match(mode)
+      .with("existence", () => Option.some("missing"))
+      .with("content", "mtime", () => Option.some("absent"))
+      .exhaustive()
+  }
   const isFile = tryOr(() => io.isFileSync(filePath), false)
   if (!isFile) return Option.none()
-  if (contentHash) {
-    const hex = tryOr(
-      () => createHash("sha256").update(io.readBytesSync(filePath)).digest("hex"),
-      undefined,
-    )
-    return Option.fromUndefinedOr(hex)
-  }
-  const statFn = io.statMtimeMsSync
-  const meta =
-    statFn !== undefined
-      ? tryOr(() => {
-          const mtime = statFn(filePath)
-          return mtime !== undefined ? `mtime:${String(mtime)}` : undefined
-        }, undefined)
-      : tryOr(() => `len:${String(io.readBytesSync(filePath).length)}`, undefined)
-  return Option.fromUndefinedOr(meta)
+  return match(mode)
+    .with("existence", () => Option.some("present"))
+    .with("content", () => {
+      const hex = tryOr(
+        () => createHash("sha256").update(io.readBytesSync(filePath)).digest("hex"),
+        undefined,
+      )
+      return Option.fromUndefinedOr(hex)
+    })
+    .with("mtime", () => {
+      const statFn = io.statMtimeMsSync
+      const meta =
+        statFn !== undefined
+          ? tryOr(() => {
+              const mtime = statFn(filePath)
+              return mtime !== undefined ? `mtime:${String(mtime)}` : undefined
+            }, undefined)
+          : tryOr(() => `len:${String(io.readBytesSync(filePath).length)}`, undefined)
+      return Option.fromUndefinedOr(meta)
+    })
+    .exhaustive()
 }
 
 const computePreInvocationFingerprintFromIo = (
@@ -488,29 +500,29 @@ const computePreInvocationFingerprintFromIo = (
   if (head.gitBranch === null && head.headSha === null) return Option.none()
   const hash = createHash("sha256")
   hash.update(`branch:${head.gitBranch ?? ""}\nsha:${head.headSha ?? ""}\n`)
-  const stateInputs: ReadonlyArray<readonly [string, boolean]> = [
-    ["friction-log.jsonl", true],
-    ["verify-stamp.json", true],
-    ["mutate-stamp.json", true],
-    ["plan-graph-snapshot.json", false],
-    ["graph-head.json", true],
-    ["graph-snapshot.json", false],
-    ["last-done.json", true],
+  const stateInputs: ReadonlyArray<readonly [string, DigestFileMode]> = [
+    ["friction-log.jsonl", "content"],
+    ["verify-stamp.json", "content"],
+    ["mutate-stamp.json", "content"],
+    ["plan-graph-snapshot.json", "existence"],
+    ["graph-head.json", "content"],
+    ["graph-snapshot.json", "existence"],
+    ["last-done.json", "content"],
   ]
-  for (const [f, contentHash] of stateInputs) {
-    const d = unwrapOpt(digestFileFromIo(join(io.harnessDir, f), io, contentHash))
+  for (const [f, mode] of stateInputs) {
+    const d = unwrapOpt(digestFileFromIo(join(io.harnessDir, f), io, mode))
     if (d === undefined) return Option.none()
     hash.update(`state:${f}:${d}\n`)
   }
-  const fixedInputs: ReadonlyArray<readonly [string, string, boolean]> = [
-    ["tsgo", io.resolveTsgoPkgJsonPath(), false],
-    ["tsconfig", io.resolveTsconfigPath(), true],
-    ["cluster", join(io.repoRoot, "libs/harness/graph/cluster.yaml"), true],
-    ["devvars", join(io.repoRoot, ".dev.vars"), false],
-    ["envfile", join(io.repoRoot, ".env"), false],
+  const fixedInputs: ReadonlyArray<readonly [string, string, DigestFileMode]> = [
+    ["tsgo", io.resolveTsgoPkgJsonPath(), "mtime"],
+    ["tsconfig", io.resolveTsconfigPath(), "content"],
+    ["cluster", join(io.repoRoot, "libs/harness/graph/cluster.yaml"), "content"],
+    ["devvars", join(io.repoRoot, ".dev.vars"), "mtime"],
+    ["envfile", join(io.repoRoot, ".env"), "mtime"],
   ]
-  for (const [label, path, contentHash] of fixedInputs) {
-    const d = unwrapOpt(digestFileFromIo(path, io, contentHash))
+  for (const [label, path, mode] of fixedInputs) {
+    const d = unwrapOpt(digestFileFromIo(path, io, mode))
     if (d === undefined) return Option.none()
     hash.update(`${label}:${d}\n`)
   }

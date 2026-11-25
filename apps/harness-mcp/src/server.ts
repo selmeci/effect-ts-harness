@@ -23,6 +23,7 @@ import {
   type ServerOptions,
   toMcpToolInputJsonSchema,
 } from "./tools/mcp-helpers.js"
+import { resolveDaemonStartupRepoRoot } from "./tools/mcp-repo-root.js"
 import {
   buildLiveMcpToolDescriptors,
   dispatchMcpTool,
@@ -58,6 +59,7 @@ export {
   type LspDiagnosticsReport,
   runDefaultLspDiagnostics,
 } from "./tools/lsp-and-telemetry.tools.js"
+export { hasValidWorkspaceRootMarker, resolveDaemonStartupRepoRoot } from "./tools/mcp-repo-root.js"
 export {
   isPathInsideRoot,
   normalizeProjectPath,
@@ -150,7 +152,9 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   let shuttingDown = false
   const daemonStartupPromise: Promise<HarnessDaemonServerHandle | undefined> =
     process.env.HARNESS_DAEMON_SOCK !== "0"
-      ? startHarnessDaemonServer(process.cwd(), { workflowEngine: { mode: "auto" } })
+      ? startHarnessDaemonServer(resolveDaemonStartupRepoRoot(process.cwd()), {
+          workflowEngine: { mode: "auto" },
+        })
           .then((handle) => {
             daemonHandle = handle
             return handle

@@ -125,7 +125,7 @@ export const SECRET_FILE_PATTERN: RegExp =
  * Hooks invoke the guard directly from the IDE, never through an agent shell command.
  * Flags (and flag values such as `--cwd /tmp`) or `--` before `guard` are tolerated. */
 export const GUARD_SELF_INVOCATION_PATTERN: RegExp =
-  /(?:(?:^|\s)harness|harness-cli\/src\/(?:index|hook-entry)\.ts)(?:\s+(?:--(?=\s|$)|-\S+(?:\s+(?!guard\b)[^\s;|&)<>]+)?))*\s+guard\b/
+  /(?:(?:^|\s)(?:\S*\/)?harness|(?:apps\/)?harness-cli\/(?:src|dist)\/(?:index|hook-entry)\.(?:ts|js))(?:\s+(?:--(?=\s|$)|-\S+(?:\s+(?!guard\b)[^\s;|&)<>]+)?))*\s+guard\b/
 
 /** SPEC-0001 REQ-1.2: git commands that irreversibly discard work. Always a human decision —
  * clef rated `git checkout -- .` only destructive=0.26 (would auto-allow). */
@@ -252,6 +252,7 @@ export const SAFE_LEADING_ENV_VALUES: Readonly<Record<string, (value: string) =>
   CI: (v) => /^(?:true|false|0|1)$/.test(v),
   NX_INTERACTIVE: (v) => /^(?:true|false|0|1)$/.test(v),
   NX_DAEMON: (v) => /^(?:true|false|0|1)$/.test(v),
+  NX_TUI: (v) => /^(?:true|false|0|1)$/.test(v),
   FORCE_COLOR: (v) => /^[0-3]$/.test(v),
   NO_COLOR: (v) => /^[01]$/.test(v),
   HARNESS_PLAN_CHECK: (v) => /^(?:0|1|true|false)$/.test(v),
@@ -318,6 +319,7 @@ export const SAFE_PNPM_EXEC_PREFIXES: ReadonlyArray<string> = [
   "oxfmt",
   "effect-tsgo",
   "nx run ",
+  "nx run-many",
   "nx affected",
   "nx test",
   "nx typecheck",
@@ -359,3 +361,29 @@ export const SAFE_GIT_CONFIG_GET_FLAGS: ReadonlySet<string> = new Set([
   "--no-includes",
   "--fixed-value",
 ])
+
+export const XARGS_GUARD_VALUE_FLAGS: ReadonlySet<string> = new Set(
+  "-a --arg-file -d --delimiter -E --eof -I --replace -L --max-lines -n --max-args -P --max-procs -s --max-chars --process-slot-var".split(
+    " ",
+  ),
+)
+export const INTERPRETER_OR_EXEC_BINARIES: ReadonlySet<string> = new Set(
+  "sh bash zsh dash ksh ash python python2 python3 node nodejs bun deno tsx ts-node perl ruby awk gawk mawk nawk sed eval exec env xargs source . command timeout nice nohup stdbuf time".split(
+    " ",
+  ),
+)
+export const SHELL_ONLY_HEREDOC_BINARIES: ReadonlySet<string> = new Set(
+  "sh bash zsh dash ksh ash eval source . env xargs exec".split(" "),
+)
+export const FORBIDDEN_DEST_PATH_PATTERN =
+  /\.harness|\.env|\.git|auth[-_]?tokens|mutation-hmac|\.key\b|\.pem\b|\.dev\.vars|daemon\.(?:sock|lock)|workflow-backups|pending-workflow-restore|repos\/|tools\/|adapters\//i
+export const SAFE_LITERAL_TEMP_PATH_PATTERN =
+  /^(?:\/tmp|\/var\/tmp)\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/
+export const SAFE_TMPDIR_FALLBACK_PATH_PATTERN =
+  /^\$\{TMPDIR:-\/(?:var\/)?tmp\}\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/
+export const SAFE_TMPDIR_VAR_PATH_PATTERN = /^\$TMPDIR\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/
+export const SAFE_TMPDIR_DIR_PATTERN =
+  /^(?:\/tmp|\/var\/tmp|\$\{TMPDIR:-\/(?:var\/)?tmp\}|\$TMPDIR)(?:\/[A-Za-z0-9._-]+)*$/
+export const SAFE_TMPDIR_ENV_PATTERN = /^\/(?:var\/)?tmp(?:\/[A-Za-z0-9._-]+)*$/
+export const SHELL_VAR_REF_PATTERN = /^\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})$/
+export const SIMPLE_VAR_ASSIGN_PATTERN = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s
