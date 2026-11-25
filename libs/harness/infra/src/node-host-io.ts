@@ -588,3 +588,6 @@ export const execFileAsyncEffect = Effect.fn("NodeHostIo.execFileAsync")(functio
     })
   })
 })
+
+/** Returns host logical CPU parallelism from Node's `node:os` inside `type:infra`. */
+export { availableParallelism as getHostAvailableParallelism } from "node:os"

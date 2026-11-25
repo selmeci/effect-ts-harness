@@ -18,6 +18,8 @@ export const HOOK_FASTPATH_ENTRYPOINTS: ReadonlyArray<string> = [
   "apps/harness-cli/src/commands/guard-and-route.command.ts",
   "apps/harness-cli/src/commands/session-fastpath.ts",
   "apps/harness-cli/src/commands/ingest-fastpath.ts",
+  "apps/harness-cli/src/commands/session-learn-report.command.ts",
+  "apps/harness-cli/src/commands/learn-and-report.command.ts",
 ]
 
 const FALLBACK_WORKSPACE_SPECIFIER_MAP: Readonly<Record<string, string>> = {
@@ -162,7 +164,11 @@ const buildWorkspaceSpecifierMap = (
   return { workspaceMap: map, unresolvedWorkspaceExports }
 }
 
-type FastpathClosureProfile = "standard" | "policy-zero-dep" | "hook-entry-lightweight"
+type FastpathClosureProfile =
+  | "standard"
+  | "policy-zero-dep"
+  | "hook-entry-lightweight"
+  | "session-no-infra-barrel"
 
 const LIGHTWEIGHT_EFFECT_SUBPATHS: ReadonlySet<string> = new Set([
   "effect/Option",
@@ -178,6 +184,12 @@ const getClosureProfile = (entryRel: string): FastpathClosureProfile => {
     entryRel === "libs/harness/infra/src/hook-io.ts"
   ) {
     return "hook-entry-lightweight"
+  }
+  if (
+    entryRel === "apps/harness-cli/src/commands/session-learn-report.command.ts" ||
+    entryRel === "apps/harness-cli/src/commands/learn-and-report.command.ts"
+  ) {
+    return "session-no-infra-barrel"
   }
   return "standard"
 }
@@ -211,6 +223,7 @@ const isForbiddenRuntimeSpecifier = (spec: string, profile: FastpathClosureProfi
     .with(
       "hook-entry-lightweight",
       () =>
+        spec === "<non-literal-dynamic-import>" ||
         spec === "effect" ||
         (spec.startsWith("effect/") && !LIGHTWEIGHT_EFFECT_SUBPATHS.has(spec)) ||
         spec === "@effect/platform-node" ||
@@ -240,6 +253,10 @@ const isForbiddenRuntimeSpecifier = (spec: string, profile: FastpathClosureProfi
         spec === "ts-morph" ||
         spec.startsWith("ts-morph/"),
     )
+    .with(
+      "session-no-infra-barrel",
+      () => spec === "@harness/infra" || spec === "<non-literal-dynamic-import>",
+    )
     .exhaustive()
 
 const isForbiddenResolvedTarget = (resolved: string, profile: FastpathClosureProfile): boolean =>
@@ -261,6 +278,7 @@ const isForbiddenResolvedTarget = (resolved: string, profile: FastpathClosurePro
         resolved.startsWith("libs/harness/decision/") ||
         resolved.startsWith("libs/harness/ingest/"),
     )
+    .with("session-no-infra-barrel", () => resolved === "libs/harness/infra/src/index.ts")
     .exhaustive()
 
 const extractStringLiteralText = (expr: ts.Expression): string | undefined =>
@@ -333,15 +351,32 @@ const extractStaticRuntimeSpecifiers = (
         (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "require")
       if (isDynImport || isRequire) {
         const spec = extractStringLiteralText(node.arguments[0])
-        if (spec !== undefined) {
+        if (spec === undefined) {
+          if (profile === "session-no-infra-barrel" || profile === "hook-entry-lightweight") {
+            specifiers.push("<non-literal-dynamic-import>")
+          }
+        } else {
           const isAllowedLazyFallback =
             profile === "hook-entry-lightweight" &&
             filePath === "apps/harness-cli/src/commands/hook-fastpath-core.ts" &&
             spec === "./hook-fallback.js"
-          const shouldPush =
-            profile === "standard"
-              ? !insideFunctionLike || isForbiddenRuntimeSpecifier(spec, profile)
-              : !insideFunctionLike || !isAllowedLazyFallback
+          const shouldPush = match(profile)
+            .with(
+              "standard",
+              () => !insideFunctionLike || isForbiddenRuntimeSpecifier(spec, profile),
+            )
+            .with(
+              "session-no-infra-barrel",
+              () =>
+                !insideFunctionLike ||
+                isForbiddenRuntimeSpecifier(spec, profile) ||
+                spec.startsWith(".") ||
+                spec.startsWith("@harness/"),
+            )
+            .with("policy-zero-dep", "hook-entry-lightweight", () => {
+              return !insideFunctionLike || !isAllowedLazyFallback
+            })
+            .exhaustive()
           if (shouldPush) {
             specifiers.push(spec)
           }
@@ -486,6 +521,7 @@ export const evaluateHookFastpathImportClosure = (
         () =>
           "full 'effect' barrel, heavy 'effect/*' subpaths, '@effect/platform-node', '@effect/ai-typesafe', 'typescript', 'ts-morph', and heavy '@harness/*' packages",
       )
+      .with("session-no-infra-barrel", () => "'@harness/infra' barrel")
       .exhaustive()
     for (const trace of [...violationEdges].sort(compareCodeUnits)) {
       findings.push({

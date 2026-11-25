@@ -1,5 +1,4 @@
 import * as path from "node:path"
-import { fileURLToPath } from "node:url"
 import { Effect, Layer, Result, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
@@ -33,12 +32,10 @@ import {
   type GraphProjectorError,
   type GraphRewriteError,
   type HarnessGraph,
-  isRelativeEscape,
   loadGraphSnapshotEffect,
   type OmnigraphLoadError,
   type OmnigraphSync,
   readGraphHeadMeta,
-  resolveCanonicalRepoRoot,
   resolveGitHeadState,
   saveGraphSnapshot,
   extractWorkspaceTypeAwareGraph,
@@ -46,28 +43,37 @@ import {
 } from "@harness/graph"
 import type { GovernanceDocReference } from "@harness/decision"
 import { nodeSyncHostIo, resolveHarnessStateDir } from "@harness/infra"
+import {
+  findRepoRoot,
+  hasIntermediateRepoBoundary,
+  hasWorkspaceMarker,
+  isPathInsideRoot,
+  ProjectPathEscapeError,
+  resolveContainedRepoRoot,
+  resolveDefaultRepoRoot,
+  SERVER_REPO_ROOT,
+} from "./mcp-repo-root.js"
 import { attachServerCloseRuntimeDisposal, formatMcpToolExit } from "./mcp-runtime-helpers.js"
 
 export {
   attachServerCloseRuntimeDisposal,
   CANONICAL_MCP_TOOL_NAMES,
+  findRepoRoot,
   formatMcpToolExit,
   GitDiffErrorReason,
   GitDiffExecutionError,
+  hasIntermediateRepoBoundary,
+  hasWorkspaceMarker,
+  isPathInsideRoot,
   McpToolInputName,
   McpToolName,
+  ProjectPathEscapeError,
+  resolveContainedRepoRoot,
+  resolveDefaultRepoRoot,
+  SERVER_REPO_ROOT,
   toMcpToolInputName,
   UnknownToolError,
 }
-
-export class ProjectPathEscapeError extends Schema.TaggedError<ProjectPathEscapeError>()(
-  "ProjectPathEscapeError",
-  {
-    projectPath: Schema.String,
-    repoRoot: Schema.String,
-    message: Schema.String,
-  },
-) {}
 
 export type McpToolExecutionError =
   | UnknownToolError
@@ -131,19 +137,6 @@ export interface ServerOptions {
   }) => LspDiagnosticsReport
 }
 
-export const findRepoRoot = (startDir: string): string => {
-  let curr = path.resolve(startDir)
-  while (curr !== path.dirname(curr)) {
-    if (nodeSyncHostIo.existsSync(path.join(curr, "pnpm-workspace.yaml"))) {
-      return curr
-    }
-    curr = path.dirname(curr)
-  }
-  return startDir
-}
-
-const SERVER_REPO_ROOT = findRepoRoot(path.dirname(fileURLToPath(import.meta.url)))
-
 export const shouldSuppressLiveMcpTestSideEffects = (
   targetRepoRoot: string,
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -154,108 +147,6 @@ export const shouldSuppressLiveMcpTestSideEffects = (
     env["NODE_ENV"] === "test") &&
   (env["HARNESS_STATE_DIR"] === undefined || env["HARNESS_STATE_DIR"].trim() === "") &&
   isPathInsideRoot(SERVER_REPO_ROOT, targetRepoRoot)
-
-const decodeActiveWorkspace = Schema.decodeUnknownOption(
-  Schema.fromJsonString(
-    Schema.Struct({
-      repoRoot: Schema.String,
-      updatedAt: Schema.optional(Schema.String),
-    }),
-  ),
-)
-
-const warnActiveWorkspace = (msg: string): undefined => {
-  process.stderr.write(`[harness-mcp] Warning: ${msg}\n`)
-  return undefined
-}
-
-const readActiveWorkspaceCandidate = (
-  activeWorkspacePath: string,
-): { readonly repoRoot: string; readonly updatedAtMs: number } | undefined => {
-  if (!nodeSyncHostIo.existsSync(activeWorkspacePath)) return undefined
-  return match(Result.try(() => nodeSyncHostIo.readTextSync(activeWorkspacePath)))
-    .with({ _tag: "Failure" }, ({ failure }) =>
-      warnActiveWorkspace(
-        `failed to read ${activeWorkspacePath}: ${failure instanceof Error ? failure.message : String(failure)}`,
-      ),
-    )
-    .with({ _tag: "Success" }, ({ success: raw }) =>
-      match(decodeActiveWorkspace(raw))
-        .with({ _tag: "None" }, () =>
-          warnActiveWorkspace(`failed to decode ${activeWorkspacePath} as active-workspace.json`),
-        )
-        .with({ _tag: "Some" }, ({ value: parsed }) =>
-          match(Result.try(() => nodeSyncHostIo.existsSync(parsed.repoRoot)))
-            .with({ _tag: "Success" }, ({ success }) => {
-              if (!success) return undefined
-              const parsedTime = parsed.updatedAt !== undefined ? Date.parse(parsed.updatedAt) : 0
-              return {
-                repoRoot: parsed.repoRoot,
-                updatedAtMs: Number.isFinite(parsedTime) ? parsedTime : 0,
-              }
-            })
-            .with({ _tag: "Failure" }, ({ failure }) =>
-              warnActiveWorkspace(
-                `failed to verify active workspace '${parsed.repoRoot}': ${failure instanceof Error ? failure.message : String(failure)}`,
-              ),
-            )
-            .exhaustive(),
-        )
-        .exhaustive(),
-    )
-    .exhaustive()
-}
-
-export const resolveDefaultRepoRoot = (
-  args?: Readonly<Record<string, unknown>>,
-  options?: Pick<ServerOptions, "skipActiveWorkspaceLookup" | "skipOmnigraphSpawn">,
-): string => {
-  const rawRepoRoot = args?.["repoRoot"]
-  if (typeof rawRepoRoot === "string" && rawRepoRoot.length > 0) {
-    return findRepoRoot(rawRepoRoot)
-  }
-  const rawFile = args?.["file"]
-  const rawFilePath = args?.["filePath"]
-  const rawPaths = args?.["paths"]
-  const rawFileCandidate =
-    typeof rawFile === "string"
-      ? rawFile
-      : typeof rawFilePath === "string"
-        ? rawFilePath
-        : Array.isArray(rawPaths) && typeof rawPaths[0] === "string"
-          ? rawPaths[0]
-          : undefined
-  const rawProject = args?.["project"]
-  const candidate =
-    typeof rawFileCandidate === "string" && path.isAbsolute(rawFileCandidate)
-      ? rawFileCandidate
-      : typeof rawProject === "string" && path.isAbsolute(rawProject)
-        ? rawProject
-        : undefined
-  if (candidate !== undefined) {
-    const candidateRoot = findRepoRoot(path.dirname(candidate))
-    if (nodeSyncHostIo.existsSync(path.join(candidateRoot, "pnpm-workspace.yaml")))
-      return candidateRoot
-  }
-  const cwdRoot = findRepoRoot(process.cwd())
-  if (cwdRoot !== SERVER_REPO_ROOT) return cwdRoot
-  if (options?.skipActiveWorkspaceLookup !== true && options?.skipOmnigraphSpawn !== true) {
-    const candidatePaths = [path.join(SERVER_REPO_ROOT, ".harness", "active-workspace.json")]
-    const canonicalRoot = resolveCanonicalRepoRoot(SERVER_REPO_ROOT, nodeSyncHostIo)
-    if (canonicalRoot !== SERVER_REPO_ROOT) {
-      candidatePaths.push(path.join(canonicalRoot, ".harness", "active-workspace.json"))
-    }
-    let best: { readonly repoRoot: string; readonly updatedAtMs: number } | undefined
-    for (const activeWorkspacePath of candidatePaths) {
-      const entry = readActiveWorkspaceCandidate(activeWorkspacePath)
-      if (entry !== undefined && (best === undefined || entry.updatedAtMs > best.updatedAtMs)) {
-        best = entry
-      }
-    }
-    if (best !== undefined) return best.repoRoot
-  }
-  return SERVER_REPO_ROOT
-}
 
 const buildEmptyHarnessGraph = (): HarnessGraph =>
   buildHarnessGraph({ fns: [], services: [], layers: [], errors: [], tests: [], patternDocs: [] })
@@ -295,7 +186,26 @@ export const resolveGraphWithStatus = (
     let stalenessDegradedReason: string | undefined = undefined
     let stalenessEvaluationError: string | undefined = undefined
     if (!snapshotPath) {
-      const stateDir = resolveHarnessStateDir(root)
+      const stateDirOrError = match(Result.try(() => resolveHarnessStateDir(root)))
+        .with({ _tag: "Success" }, ({ success }) => ({ stateDir: success, error: undefined }))
+        .with({ _tag: "Failure" }, ({ failure }) => ({
+          stateDir: undefined,
+          error: `Failed to resolve harness state directory for '${root}': ${
+            failure instanceof Error ? failure.message : String(failure)
+          }`,
+        }))
+        .exhaustive()
+      if (stateDirOrError.error !== undefined || stateDirOrError.stateDir === undefined) {
+        const evaluationError = stateDirOrError.error ?? "Failed to resolve harness state directory"
+        process.stderr.write(`[harness-mcp] ${evaluationError}\n`)
+        return {
+          graph: buildEmptyHarnessGraph(),
+          degraded: true,
+          degradedReason: "graph-state-io-error",
+          evaluationError,
+        }
+      }
+      const stateDir = stateDirOrError.stateDir
       const verifySnap = path.join(stateDir, "graph-snapshot.json")
       const planSnap = path.join(stateDir, "plan-graph-snapshot.json")
       const verifyExists = nodeSyncHostIo.existsSync(verifySnap)
@@ -311,7 +221,27 @@ export const resolveGraphWithStatus = (
           }
           if (headState.headSha !== null && recordedMeta.headSha !== headState.headSha) {
             const freshGraph = yield* extractWorkspaceTypeAwareGraph(root, nodeSyncHostIo)
-            saveGraphSnapshot(freshGraph, verifySnap, nodeSyncHostIo)
+            const saveError = match(
+              Result.try(() => saveGraphSnapshot(freshGraph, verifySnap, nodeSyncHostIo)),
+            )
+              .with({ _tag: "Success" }, () => undefined)
+              .with(
+                { _tag: "Failure" },
+                ({ failure }) =>
+                  `Failed to persist graph snapshot in '${root}': ${
+                    failure instanceof Error ? failure.message : String(failure)
+                  }`,
+              )
+              .exhaustive()
+            if (saveError !== undefined) {
+              process.stderr.write(`[harness-mcp] ${saveError}\n`)
+              return {
+                graph: buildEmptyHarnessGraph(),
+                degraded: true,
+                degradedReason: "graph-state-io-error",
+                evaluationError: saveError,
+              }
+            }
             const savedMeta = writeGraphHeadMeta(root, nodeSyncHostIo, headState)
             if (
               savedMeta === null &&
@@ -382,51 +312,6 @@ export const graphStatusMeta = (
     : {}),
 })
 
-export const isPathInsideRoot = (rootDir: string, candidatePath: string): boolean => {
-  const logicalRoot = path.resolve(rootDir)
-  const logicalCandidate = path.isAbsolute(candidatePath)
-    ? path.resolve(candidatePath)
-    : path.resolve(logicalRoot, candidatePath)
-  const rel = path.relative(logicalRoot, logicalCandidate)
-  if (rel !== "" && isRelativeEscape(rel)) {
-    return false
-  }
-  if (nodeSyncHostIo.existsSync(logicalRoot)) {
-    let checkPath = logicalCandidate
-    while (!nodeSyncHostIo.existsSync(checkPath)) {
-      const isSymlink = Result.getOrElse(
-        Result.try(() => nodeSyncHostIo.isSymbolicLinkSync(checkPath)),
-        () => false,
-      )
-      if (isSymlink) {
-        return false
-      }
-      if (checkPath === logicalRoot) {
-        break
-      }
-      const parent = path.dirname(checkPath)
-      if (parent === checkPath) break
-      checkPath = parent
-    }
-    if (nodeSyncHostIo.existsSync(checkPath)) {
-      const checkRel = path.relative(logicalRoot, checkPath)
-      if (!isRelativeEscape(checkRel)) {
-        const contained = Result.getOrElse(
-          Result.try(() => {
-            const realRoot = nodeSyncHostIo.realpathSync(logicalRoot)
-            const realCheck = nodeSyncHostIo.realpathSync(checkPath)
-            const realRel = path.relative(realRoot, realCheck)
-            return !(realRel !== "" && isRelativeEscape(realRel))
-          }),
-          () => false,
-        )
-        if (!contained) return false
-      }
-    }
-  }
-  return true
-}
-
 export const normalizeProjectPathEffect = (
   repoRoot: string,
   rawProject: string,
@@ -489,6 +374,32 @@ export const toMcpToolInputJsonSchema = (inputSchema: McpToolInputSchema) => {
   }
 }
 
+const normalizeDegradedReason = (raw: string): string => raw.replace(/\s+/g, " ").trim()
+
+const extractNonEmptyReason = (obj: object): string | undefined => {
+  const rawReason = Reflect.get(obj, "degradedReason")
+  if (typeof rawReason === "string") {
+    const normalized = normalizeDegradedReason(rawReason)
+    if (normalized.length > 0) return normalized
+  }
+  return undefined
+}
+
+const extractDegradedReason = (result: unknown): string | undefined => {
+  if (typeof result !== "object" || result === null) return undefined
+  const topReason = extractNonEmptyReason(result)
+  if (topReason !== undefined) return topReason
+  const plan = Reflect.get(result, "plan")
+  if (typeof plan === "object" && plan !== null) {
+    const planReason = extractNonEmptyReason(plan)
+    if (planReason !== undefined) return planReason
+  }
+  if (Reflect.get(result, "degraded") === true) {
+    return "degraded"
+  }
+  return undefined
+}
+
 const formatLspFailDetail = (
   toolName: string,
   outcome: TelemetryOutcome,
@@ -522,7 +433,20 @@ export const recordMcpToolTelemetry = (
   ) {
     return
   }
-  const root = options?.repoRoot ?? resolveDefaultRepoRoot(args, options)
+  const boundaryRoot = options?.repoRoot ?? resolveDefaultRepoRoot(args, options)
+  const rawArgRepoRoot = args["repoRoot"]
+  let root = boundaryRoot
+  if (typeof rawArgRepoRoot === "string" && rawArgRepoRoot.trim().length > 0) {
+    const trimmed = rawArgRepoRoot.trim()
+    const resolvedArg = path.isAbsolute(trimmed)
+      ? path.resolve(trimmed)
+      : path.resolve(boundaryRoot, trimmed)
+    root =
+      isPathInsideRoot(boundaryRoot, resolvedArg) &&
+      !hasIntermediateRepoBoundary(boundaryRoot, resolvedArg)
+        ? path.resolve(boundaryRoot)
+        : resolvedArg
+  }
   if (shouldSuppressLiveMcpTestSideEffects(root)) {
     return
   }
@@ -562,19 +486,27 @@ export const recordMcpToolTelemetry = (
     )
     .otherwise(() => "local" as const)
 
+  const degradedReason = extractDegradedReason(result)
+  const isCleanFalseFail =
+    (toolName === "harness_lsp_diagnostics" || toolName === "harness_ontology_check") &&
+    typeof result === "object" &&
+    result !== null &&
+    "clean" in result &&
+    result.clean === false
   const outcome: TelemetryOutcome =
-    (toolName === "harness_gq_query" || toolName === "harness_search_knowledge") &&
-    engineSource === "memory-fallback"
+    degradedReason !== undefined
       ? "fallback"
-      : toolName === "harness_lsp_diagnostics" &&
-          typeof result === "object" &&
-          result !== null &&
-          "clean" in result &&
-          result.clean === false
-        ? "fail"
-        : "ok"
+      : (toolName === "harness_gq_query" || toolName === "harness_search_knowledge") &&
+          engineSource === "memory-fallback"
+        ? "fallback"
+        : isCleanFalseFail
+          ? "fail"
+          : "ok"
 
-  const detail = formatLspFailDetail(toolName, outcome, result)
+  const detail =
+    degradedReason !== undefined
+      ? `degraded=${degradedReason.slice(0, 151)}`
+      : formatLspFailDetail(toolName, outcome, result)
 
   appendTelemetryEvent(
     root,

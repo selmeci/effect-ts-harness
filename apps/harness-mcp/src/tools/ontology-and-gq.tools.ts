@@ -26,7 +26,7 @@ import {
   graphStatusMeta,
   McpToolName,
   type McpToolPluginDescriptor,
-  resolveDefaultRepoRoot,
+  resolveContainedRepoRoot,
   resolveGraphWithStatus,
   type ServerOptions,
 } from "./mcp-helpers.js"
@@ -113,8 +113,9 @@ export const buildOntologyAndGqToolDescriptors = (
     inputSchema: OntologyWhyInputSchema,
     execute: (args) =>
       Effect.gen(function* () {
-        const { symbolOrSpan } = yield* decodeOntologyWhyInput(args)
-        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        const { symbolOrSpan, repoRoot } = yield* decodeOntologyWhyInput(args)
+        const root = yield* resolveContainedRepoRoot(repoRoot, options)
+        const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
         return {
           ...queryOntologyWhy(graphStatus.graph, symbolOrSpan),
           ...graphStatusMeta(graphStatus),
@@ -128,8 +129,9 @@ export const buildOntologyAndGqToolDescriptors = (
     inputSchema: OntologyImpactInputSchema,
     execute: (args) =>
       Effect.gen(function* () {
-        const { symbolOrSpan } = yield* decodeOntologyImpactInput(args)
-        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        const { symbolOrSpan, repoRoot } = yield* decodeOntologyImpactInput(args)
+        const root = yield* resolveContainedRepoRoot(repoRoot, options)
+        const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
         return {
           ...queryOntologyImpact(graphStatus.graph, symbolOrSpan),
           ...graphStatusMeta(graphStatus),
@@ -143,10 +145,10 @@ export const buildOntologyAndGqToolDescriptors = (
     inputSchema: OntologyCheckInputSchema,
     execute: (args) =>
       Effect.gen(function* () {
-        const { scope } = yield* decodeOntologyCheckInput(args)
-        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        const { scope, repoRoot } = yield* decodeOntologyCheckInput(args)
+        const root = yield* resolveContainedRepoRoot(repoRoot, options)
+        const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
         const graph = graphStatus.graph
-        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
         const checkedDocs =
           options?.governanceDocs !== undefined
             ? { docs: options.governanceDocs, findings: [] }
@@ -245,9 +247,9 @@ export const buildOntologyAndGqToolDescriptors = (
     inputSchema: GqQueryInputSchema,
     execute: (args) =>
       Effect.gen(function* () {
-        const { queryName, params, branch } = yield* decodeGqQueryInput(args)
-        const graphStatus = yield* resolveGraphWithStatus(options, args)
-        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args, options)
+        const { queryName, params, branch, repoRoot } = yield* decodeGqQueryInput(args)
+        const root = yield* resolveContainedRepoRoot(repoRoot, options)
+        const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
         const skipSpawn =
           (options?.skipOmnigraphSpawn === true ||
             (options?.graph !== undefined && options?.skipOmnigraphSpawn !== false)) &&

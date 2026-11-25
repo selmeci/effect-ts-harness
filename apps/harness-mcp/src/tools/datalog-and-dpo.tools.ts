@@ -33,7 +33,7 @@ import {
   graphStatusMeta,
   McpToolName,
   type McpToolPluginDescriptor,
-  resolveDefaultRepoRoot,
+  resolveContainedRepoRoot,
   resolveGraphWithStatus,
   type ServerOptions,
 } from "./mcp-helpers.js"
@@ -350,8 +350,9 @@ export const buildDatalogAndDpoToolDescriptors = (
     inputSchema: GraphInferInputSchema,
     execute: (args) =>
       Effect.gen(function* () {
-        const { symbolOrSpan, ruleId } = yield* decodeGraphInferInput(args)
-        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        const { symbolOrSpan, ruleId, repoRoot } = yield* decodeGraphInferInput(args)
+        const root = yield* resolveContainedRepoRoot(repoRoot, options)
+        const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
         const graph = graphStatus.graph
         const resolvedNode =
           symbolOrSpan !== undefined && symbolOrSpan.length > 0
@@ -406,7 +407,8 @@ export const buildDatalogAndDpoToolDescriptors = (
         const ruleId = input.ruleId
         const useDecisionPriors = input.useDecisionPriors === true
         const rawPriors = input.priors
-        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        const root = yield* resolveContainedRepoRoot(input.repoRoot, options)
+        const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
         const graph = graphStatus.graph
         const resolvedNode =
           symbolOrSpan !== undefined && symbolOrSpan.length > 0
@@ -465,8 +467,8 @@ export const buildDatalogAndDpoToolDescriptors = (
         const candidateRank = typedArgs.candidateRank ?? 1
         const useDecisionPriors = typedArgs.useDecisionPriors === true
         const verifyRoundTrip = typedArgs.verifyRoundTrip === true
-        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
-        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        const root = yield* resolveContainedRepoRoot(typedArgs.repoRoot, options)
+        const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
         const graph = graphStatus.graph
 
         let candidatePriors: DpoCandidatePriors | undefined = undefined

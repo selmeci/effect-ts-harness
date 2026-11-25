@@ -15,7 +15,7 @@ import {
   type WorkflowStoreUnavailableError,
   type WorkspaceFsError,
 } from "@harness/contract"
-import { makeWorkflowGraphBackupLayer, nodeSyncHostIo } from "@harness/infra"
+import { makeWorkflowGraphBackupLayer, nodeSyncHostIo } from "@harness/infra/omnigraph-session"
 import { WorkflowGraphBackup } from "@harness/service"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { isValidLockId, probeOmnigraphServerReady } from "./omnigraph-safety-helpers.js"

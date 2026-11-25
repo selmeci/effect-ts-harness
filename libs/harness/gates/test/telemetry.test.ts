@@ -921,7 +921,7 @@ describe("telemetry & session observability", () => {
               category: "guard",
               toolName: "guard",
               outcome: "ask",
-              durationMs: 1449,
+              durationMs: 2449,
             },
             {
               timestamp: "2026-11-20T10:01:01.000Z",
@@ -947,7 +947,7 @@ describe("telemetry & session observability", () => {
               category: "guard",
               toolName: "guard",
               outcome: "ask",
-              durationMs: 1450,
+              durationMs: 2450,
             },
             {
               timestamp: "2026-11-20T10:01:01.000Z",
@@ -964,7 +964,7 @@ describe("telemetry & session observability", () => {
               category: "guard",
               toolName: "guard",
               outcome: "ask",
-              durationMs: 1500,
+              durationMs: 2500,
             },
             {
               timestamp: "2026-11-20T10:01:03.000Z",
@@ -972,7 +972,7 @@ describe("telemetry & session observability", () => {
               category: "guard",
               toolName: "guard",
               outcome: "ask",
-              durationMs: 1505,
+              durationMs: 2505,
             },
           ],
         })
@@ -989,7 +989,7 @@ describe("telemetry & session observability", () => {
               category: "guard",
               toolName: "guard",
               outcome: "ask",
-              durationMs: 1450,
+              durationMs: 2450,
             },
           ],
         })

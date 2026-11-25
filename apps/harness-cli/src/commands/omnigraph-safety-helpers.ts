@@ -3,7 +3,7 @@ import { Cause, Effect, Graph, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import { isPureInterruptCause, OmnigraphSpanName } from "@harness/contract"
 import { type HarnessGraph, loadGraphSnapshotEffect } from "@harness/graph"
-import { nodeSyncHostIo } from "@harness/infra"
+import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
 import type { SyncHostIo } from "@harness/service/host-io"
 
 export {

@@ -21,7 +21,7 @@ import {
   resolveOmnigraphClusterDir,
   resolveOmnigraphTaskBranches,
 } from "@harness/graph"
-import { nodeSyncHostIo } from "@harness/infra"
+import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
 import type { CliResult } from "./hook-format.js"
 import { isIsolatedExternalWorkspace, resolveClusterRepoRoot } from "./repo-path.js"
 

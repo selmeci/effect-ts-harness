@@ -16,13 +16,19 @@ export {
   routeStepWithStatus,
   routeStep,
 } from "./idiom-router.js"
-export { GuardV1, type GuardDecisionResult, decideGuardCommand } from "./guard-decision.js"
+export {
+  GUARD_DECISION_TIMEOUT_MS,
+  GuardV1,
+  type GuardDecisionResult,
+  decideGuardCommand,
+} from "./guard-decision.js"
 export {
   TriageV1,
   type TriageKind,
   type TriageResult,
   type DeterministicTriageRule,
   DETERMINISTIC_TRIAGE_RULES,
+  extractTriageFailureScope,
   triageFailure,
 } from "./triage-decision.js"
 export {

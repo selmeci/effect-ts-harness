@@ -17,7 +17,7 @@ import {
   type McpToolPluginDescriptor,
   normalizeProjectPathEffect,
   ProjectPathEscapeError,
-  resolveDefaultRepoRoot,
+  resolveContainedRepoRoot,
   type ServerOptions,
 } from "./mcp-helpers.js"
 
@@ -171,6 +171,9 @@ export const runDefaultLspDiagnostics = (
   },
 ): Effect.Effect<LspDiagnosticsReport, ProjectPathEscapeError> =>
   Effect.gen(function* () {
+    if (!nodeSyncHostIo.existsSync(repoRoot)) {
+      return makeLspExceptionReport(new Error(`Repository root '${repoRoot}' does not exist`))
+    }
     const cliArgs = ["diagnostics", "--strict", "--format", "json"]
     const effectiveFile = input.file ?? input.filePath
     const effectiveProject = input.project ?? input.tsconfigPath
@@ -504,7 +507,7 @@ export const buildLspAndTelemetryToolDescriptors = (
         const file = typedArgs.file ?? typedArgs.filePath
         const project = typedArgs.project ?? typedArgs.tsconfigPath
         const overlays = typedArgs.overlays
-        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+        const root = yield* resolveContainedRepoRoot(typedArgs.repoRoot, options)
         if (overlays !== undefined && Object.keys(overlays).length > 0) {
           return yield* runSyncLspBranch(() =>
             evaluateOverlaysDiagnostics(root, overlays, file, project),
@@ -524,8 +527,8 @@ export const buildLspAndTelemetryToolDescriptors = (
     inputSchema: TelemetryReportInputSchema,
     execute: (args) =>
       Effect.gen(function* () {
-        const { format, cumulative } = yield* decodeTelemetryReportInput(args)
-        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+        const { format, cumulative, repoRoot } = yield* decodeTelemetryReportInput(args)
+        const root = yield* resolveContainedRepoRoot(repoRoot, options)
         const events = readTelemetryEvents(root, nodeSyncHostIo)
         const frictionEvents = readFrictionEvents(root, nodeSyncHostIo)
         const report = buildSessionReport({

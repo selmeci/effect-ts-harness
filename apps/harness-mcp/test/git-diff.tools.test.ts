@@ -115,7 +115,7 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
           fs.writeFileSync(path.join(dir, "binary.bin"), Buffer.from([0x00, 0x01, 0x02]))
           fs.writeFileSync(path.join(dir, "invalid-utf8.bin"), Buffer.from([0xff, 0xfe, 0x80]))
 
-          const res = yield* executeGitDiffTool({ repoRoot: dir })
+          const res = yield* executeGitDiffTool({ repoRoot: dir }, { repoRoot: dir })
           expect(res._tag).toBe("PatchComplete")
           expect(res.resolvedBase).toBe("HEAD")
           expect(res.changedFiles).toEqual(["tracked.ts"])
@@ -149,7 +149,7 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
 
         fs.writeFileSync(path.join(dir, "base.ts"), "export const v = 2\n", "utf8")
 
-        const res = yield* executeGitDiffTool({ repoRoot: dir, baseRef: "main" })
+        const res = yield* executeGitDiffTool({ repoRoot: dir, baseRef: "main" }, { repoRoot: dir })
         expect(res.resolvedBase).toBe(baseSha)
         expect(res.changedFiles).toEqual(["base.ts", "feature.ts"])
         expect(res.patch).toContain("diff --git a/base.ts b/base.ts")
@@ -164,7 +164,7 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
         initGitRepo(dir)
         fs.writeFileSync(path.join(dir, "new.ts"), "export const n = 1\n", "utf8")
 
-        const res = yield* executeGitDiffTool({ repoRoot: dir })
+        const res = yield* executeGitDiffTool({ repoRoot: dir }, { repoRoot: dir })
         expect(res.resolvedBase).toBeNull()
         expect(res.untrackedFiles).toEqual(["new.ts"])
         expect(res.patch).toContain("diff --git a/new.ts b/new.ts")
@@ -189,7 +189,7 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
         fs.writeFileSync(path.join(dir, "a", "extra.ts"), "extra-a\n", "utf8")
         fs.writeFileSync(path.join(dir, "b", "extra.ts"), "extra-b\n", "utf8")
 
-        const res = yield* executeGitDiffTool({ repoRoot: dir, paths: ["a"] })
+        const res = yield* executeGitDiffTool({ repoRoot: dir, paths: ["a"] }, { repoRoot: dir })
         expect(res.changedFiles).toEqual(["a/one.ts"])
         expect(res.untrackedFiles).toEqual(["a/extra.ts"])
         expect(res.patch).toContain("a/one.ts")
@@ -210,7 +210,7 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
         fs.writeFileSync(path.join(dir, "file.ts"), "const x = 2\n", "utf8")
         fs.writeFileSync(path.join(dir, "extra.ts"), "const y = 3\n", "utf8")
 
-        const res = yield* executeGitDiffTool({ repoRoot: dir, statOnly: true })
+        const res = yield* executeGitDiffTool({ repoRoot: dir, statOnly: true }, { repoRoot: dir })
         expect(res._tag).toBe("StatOnly")
         expect(res.changedFiles).toEqual(["file.ts"])
         expect(res.untrackedFiles).toEqual(["extra.ts"])
@@ -231,20 +231,29 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
           fs.writeFileSync(path.join(dir, "01-big.ts"), "line\n".repeat(40), "utf8")
           fs.writeFileSync(path.join(dir, "02-skip.ts"), "second\n".repeat(20), "utf8")
 
-          const res = yield* executeGitDiffTool({ repoRoot: dir, maxPatchChars: 50 })
+          const res = yield* executeGitDiffTool(
+            { repoRoot: dir, maxPatchChars: 50 },
+            { repoRoot: dir },
+          )
           expect(res._tag).toBe("PatchTruncated")
           expect(res.truncated).toBe(true)
           expect(res.patch.length).toBeLessThanOrEqual(50)
           expect(res.totalPatchChars).toBeGreaterThan(50)
           expect(res.untrackedFiles).toEqual(["01-big.ts", "02-skip.ts"])
 
-          const zeroRes = yield* executeGitDiffTool({ repoRoot: dir, maxPatchChars: 0 })
+          const zeroRes = yield* executeGitDiffTool(
+            { repoRoot: dir, maxPatchChars: 0 },
+            { repoRoot: dir },
+          )
           expect(zeroRes._tag).toBe("PatchBudgetZero")
           expect(zeroRes.patch).toBe("")
           expect(zeroRes.truncated).toBe(true)
           expect(zeroRes.untrackedFiles).toEqual(["01-big.ts", "02-skip.ts"])
 
-          const clampedRes = yield* executeGitDiffTool({ repoRoot: dir, maxPatchChars: 999_999 })
+          const clampedRes = yield* executeGitDiffTool(
+            { repoRoot: dir, maxPatchChars: 999_999 },
+            { repoRoot: dir },
+          )
           expect(clampedRes._tag).toBe("PatchComplete")
           expect(clampedRes.truncated).toBe(false)
           expect(clampedRes.patch).toContain("02-skip.ts")
@@ -257,12 +266,15 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
-          yield* expectFailureError(executeGitDiffTool({ repoRoot: dir }), (err) => {
-            expect(err._tag).toBe("GitDiffExecutionError")
-            if (err instanceof GitDiffExecutionError) {
-              expect(err.reason.length).toBeGreaterThan(0)
-            }
-          })
+          yield* expectFailureError(
+            executeGitDiffTool({ repoRoot: dir }, { repoRoot: dir }),
+            (err) => {
+              expect(err._tag).toBe("GitDiffExecutionError")
+              if (err instanceof GitDiffExecutionError) {
+                expect(err.reason.length).toBeGreaterThan(0)
+              }
+            },
+          )
 
           initGitRepo(dir)
           fs.writeFileSync(path.join(dir, "a.ts"), "1\n", "utf8")
@@ -281,7 +293,7 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
           ]
           for (const badRef of badRefs) {
             yield* expectFailureError(
-              executeGitDiffTool({ repoRoot: dir, baseRef: badRef }),
+              executeGitDiffTool({ repoRoot: dir, baseRef: badRef }, { repoRoot: dir }),
               (err) => {
                 expect(err._tag).toBe("GitDiffExecutionError")
                 if (err instanceof GitDiffExecutionError) {
@@ -304,7 +316,7 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
           git(dir, ["commit", "-m", "init"])
 
           yield* expectFailureError(
-            executeGitDiffTool({ repoRoot: dir, paths: ["../outside"] }),
+            executeGitDiffTool({ repoRoot: dir, paths: ["../outside"] }, { repoRoot: dir }),
             (err) => {
               expect(err._tag).toBe("ProjectPathEscapeError")
               if (err instanceof ProjectPathEscapeError) {
@@ -330,7 +342,7 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
           )
 
           yield* expectFailureError(
-            executeGitDiffTool({ repoRoot: dir, paths: [":/.env"] }),
+            executeGitDiffTool({ repoRoot: dir, paths: [":/.env"] }, { repoRoot: dir }),
             (err) => {
               expect(err._tag).toBe("ProjectPathEscapeError")
               if (err instanceof ProjectPathEscapeError) {
@@ -343,7 +355,7 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
           const linkPath = path.join(dir, "escape-link.txt")
           fs.symlinkSync(otherRepoFile, linkPath)
           yield* expectFailureError(
-            executeGitDiffTool({ repoRoot: dir, paths: ["escape-link.txt"] }),
+            executeGitDiffTool({ repoRoot: dir, paths: ["escape-link.txt"] }, { repoRoot: dir }),
             (err) => {
               expect(err._tag).toBe("ProjectPathEscapeError")
               if (err instanceof ProjectPathEscapeError) {
@@ -415,7 +427,7 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
           const emptyFnIndex = new Map<string, IndexedEffectFn>()
           const { result, spans } = yield* runWithTestTracer(
             "HarnessMcp.gitDiff::span",
-            executeGitDiffTool({ repoRoot: dir }),
+            executeGitDiffTool({ repoRoot: dir }, { repoRoot: dir }),
             emptyFnIndex,
           )
 
@@ -446,7 +458,7 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
           })
           for (const badMax of [-1, Number.NaN, 1.5]) {
             yield* expectFailureError(
-              executeGitDiffTool({ repoRoot: dir, maxPatchChars: badMax }),
+              executeGitDiffTool({ repoRoot: dir, maxPatchChars: badMax }, { repoRoot: dir }),
               (err) => {
                 expect(err._tag).toBe("GitDiffExecutionError")
               },
@@ -467,7 +479,7 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
           git(dir, ["commit", "-m", "init"])
 
           fs.symlinkSync(path.join(dir, "tracked.ts"), path.join(dir, "sym-untracked.ts"))
-          const symRes = yield* executeGitDiffTool({ repoRoot: dir })
+          const symRes = yield* executeGitDiffTool({ repoRoot: dir }, { repoRoot: dir })
           expect(symRes._tag).toBe("PatchComplete")
           expect(symRes.patch).toContain("diff --git a/sym-untracked.ts b/sym-untracked.ts")
           expect(symRes.patch).toContain(
@@ -479,7 +491,10 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
           fs.writeFileSync(regularPath, "a".repeat(20_000), "utf8")
           const prefixSpy = vi.spyOn(nodeSyncHostIo, "readBytesPrefixSync")
           try {
-            const boundedRes = yield* executeGitDiffTool({ repoRoot: dir, maxPatchChars: 128 })
+            const boundedRes = yield* executeGitDiffTool(
+              { repoRoot: dir, maxPatchChars: 128 },
+              { repoRoot: dir },
+            )
             expect(boundedRes._tag).toBe("PatchTruncated")
             expect(prefixSpy).toHaveBeenCalled()
             const maxBytesPassed = prefixSpy.mock.calls[0]?.[1]
@@ -493,12 +508,15 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
             throw new Error("EACCES: permission denied")
           })
           try {
-            yield* expectFailureError(executeGitDiffTool({ repoRoot: dir }), (err) => {
-              expect(err._tag).toBe("GitDiffExecutionError")
-              if (err instanceof GitDiffExecutionError) {
-                expect(err.reason).toContain("Failed to read untracked file 'large.txt'")
-              }
-            })
+            yield* expectFailureError(
+              executeGitDiffTool({ repoRoot: dir }, { repoRoot: dir }),
+              (err) => {
+                expect(err._tag).toBe("GitDiffExecutionError")
+                if (err instanceof GitDiffExecutionError) {
+                  expect(err.reason).toContain("Failed to read untracked file 'large.txt'")
+                }
+              },
+            )
           } finally {
             errSpy.mockRestore()
           }
@@ -542,6 +560,8 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
     const gitCommonSpy = vi.spyOn(nodeSyncHostIo, "readTextSync")
     const tmpMain = fs.mkdtempSync(path.join(os.tmpdir(), "harness-active-main-"))
     const tmpWt = fs.mkdtempSync(path.join(os.tmpdir(), "harness-active-wt-"))
+    fs.writeFileSync(path.join(tmpMain, "pnpm-workspace.yaml"), "packages: []\n", "utf8")
+    fs.writeFileSync(path.join(tmpWt, "pnpm-workspace.yaml"), "packages: []\n", "utf8")
     const existsSpy = vi.spyOn(nodeSyncHostIo, "existsSync").mockImplementation((target) => {
       if (target === localActivePath || target.endsWith("active-workspace.json")) return true
       return fs.existsSync(target)
@@ -565,4 +585,45 @@ describe("HarnessMcp.gitDiff (harness:SPEC-0020 · 2)", () => {
       fs.rmSync(tmpWt, { recursive: true, force: true })
     }
   })
+
+  it.effect(
+    "SPEC-0033: accepts linked worktree repoRoot and rejects external git repo escape",
+    () =>
+      withTempDir((tmpBase) =>
+        Effect.gen(function* () {
+          const mainRepo = path.join(tmpBase, "main-repo")
+          const linkedWt = path.join(tmpBase, "linked-wt")
+          const externalRepo = path.join(tmpBase, "external-repo")
+          fs.mkdirSync(mainRepo, { recursive: true })
+          fs.mkdirSync(externalRepo, { recursive: true })
+
+          initGitRepo(mainRepo)
+          fs.writeFileSync(path.join(mainRepo, "a.ts"), "export const a = 1\n", "utf8")
+          git(mainRepo, ["add", "a.ts"])
+          git(mainRepo, ["commit", "-m", "init"])
+          git(mainRepo, ["worktree", "add", "-b", "wt-branch", linkedWt])
+
+          fs.writeFileSync(path.join(linkedWt, "a.ts"), "export const a = 2\n", "utf8")
+
+          initGitRepo(externalRepo)
+          fs.writeFileSync(path.join(externalRepo, "ext.ts"), "export const e = 1\n", "utf8")
+          git(externalRepo, ["add", "ext.ts"])
+          git(externalRepo, ["commit", "-m", "init"])
+
+          const wtRes = yield* executeGitDiffTool({ repoRoot: linkedWt }, { repoRoot: mainRepo })
+          expect(wtRes.changedFiles).toEqual(["a.ts"])
+          expect(wtRes.patch).toContain("+export const a = 2")
+
+          yield* expectFailureError(
+            executeGitDiffTool({ repoRoot: externalRepo }, { repoRoot: mainRepo }),
+            (err) => {
+              expect(err._tag).toBe("ProjectPathEscapeError")
+              if (err instanceof ProjectPathEscapeError) {
+                expect(err.projectPath).toBe(externalRepo)
+              }
+            },
+          )
+        }),
+      ),
+  )
 })

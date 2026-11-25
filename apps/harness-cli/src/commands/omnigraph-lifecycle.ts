@@ -6,7 +6,7 @@ import {
   resolveCanonicalRepoRoot,
   resolveOmnigraphClusterDir,
 } from "@harness/graph"
-import { nodeSyncHostIo } from "@harness/infra"
+import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
 import {
   evaluateClusterConfigDrift,
   killOmnigraphServerPidIfAlive,

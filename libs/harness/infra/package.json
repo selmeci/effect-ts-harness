@@ -6,7 +6,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./hook-fastpath": "./src/hook-fastpath.ts",
-    "./hook-io": "./src/hook-io.ts"
+    "./hook-io": "./src/hook-io.ts",
+    "./omnigraph-session": "./src/omnigraph-session.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit && effect-tsgo diagnostics --strict --project tsconfig.json",

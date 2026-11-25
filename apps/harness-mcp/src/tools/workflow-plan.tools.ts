@@ -1,4 +1,3 @@
-import * as path from "node:path"
 import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
@@ -21,9 +20,8 @@ import {
   type McpToolExecutionError,
   type McpToolPluginDescriptor,
   ProjectPathEscapeError,
+  resolveContainedRepoRoot,
   type ServerOptions,
-  isPathInsideRoot,
-  resolveDefaultRepoRoot,
 } from "./mcp-helpers.js"
 
 const BoundedRepoRoot = Schema.NonEmptyString.pipe(
@@ -66,99 +64,24 @@ const isSocketTransportUnavailableReason = (reason: string): boolean =>
   reason.startsWith("Daemon closed IPC connection") ||
   reason.startsWith("Daemon IPC socket error")
 
-const resolveCandidateRepoRoot = (
-  inputRepoRoot: string | undefined,
-  options?: ServerOptions,
-): Effect.Effect<AbsoluteRepoRoot, ProjectPathEscapeError> =>
-  Effect.gen(function* () {
-    if (inputRepoRoot === undefined) {
-      const fallbackRaw = options?.repoRoot ?? resolveDefaultRepoRoot(undefined, options)
-      const canonical = toCanonicalPathOrRaw(fallbackRaw)
-      return yield* decodeAbsoluteRepoRoot(canonical).pipe(
-        Effect.mapError(
-          () =>
-            new ProjectPathEscapeError({
-              projectPath: fallbackRaw,
-              repoRoot: fallbackRaw,
-              message: `Resolved repository root '${fallbackRaw}' is not a valid absolute path.`,
-            }),
-        ),
-      )
-    }
-
-    if (inputRepoRoot.includes("\0")) {
-      return yield* new ProjectPathEscapeError({
-        projectPath: inputRepoRoot,
-        repoRoot: options?.repoRoot ?? process.cwd(),
-        message: `Repository root '${inputRepoRoot}' contains invalid NUL bytes.`,
-      })
-    }
-
-    const baseForRelative = options?.repoRoot ?? process.cwd()
-    if (!path.isAbsolute(inputRepoRoot)) {
-      const resolvedRel = path.resolve(baseForRelative, inputRepoRoot)
-      if (!isPathInsideRoot(baseForRelative, resolvedRel)) {
-        return yield* new ProjectPathEscapeError({
-          projectPath: inputRepoRoot,
-          repoRoot: baseForRelative,
-          message: `Repository path '${inputRepoRoot}' escapes repository root '${baseForRelative}'.`,
-        })
-      }
-      const canonicalRel = toCanonicalPathOrRaw(resolvedRel)
-      return yield* decodeAbsoluteRepoRoot(canonicalRel).pipe(
-        Effect.mapError(
-          () =>
-            new ProjectPathEscapeError({
-              projectPath: inputRepoRoot,
-              repoRoot: baseForRelative,
-              message: `Repository path '${inputRepoRoot}' is not a valid absolute repository root.`,
-            }),
-        ),
-      )
-    }
-
-    const canonicalAbs = toCanonicalPathOrRaw(path.resolve(inputRepoRoot))
-    return yield* decodeAbsoluteRepoRoot(canonicalAbs).pipe(
-      Effect.mapError(
-        () =>
-          new ProjectPathEscapeError({
-            projectPath: inputRepoRoot,
-            repoRoot: options?.repoRoot ?? inputRepoRoot,
-            message: `Repository path '${inputRepoRoot}' is not a valid absolute repository root.`,
-          }),
-      ),
-    )
-  })
-
 /** Executes read-only `harness_workflow_plan` status lookup against daemon IPC without mutating state. */
 export const executeWorkflowPlanTool = Effect.fn("HarnessMcp.workflowPlan")(function* (
   input: WorkflowPlanToolInput,
   options?: ServerOptions,
 ): Effect.fn.Return<WorkflowPlanToolOutput, McpToolExecutionError> {
-  const candidateRoot = yield* resolveCandidateRepoRoot(input.repoRoot, options)
-  const validated = yield* validateWorktreeRepoRoot(candidateRoot)
-
-  if (options?.repoRoot !== undefined && input.repoRoot !== undefined) {
-    const baseCanonical = toCanonicalPathOrRaw(options.repoRoot)
-    const baseAbs = yield* decodeAbsoluteRepoRoot(baseCanonical).pipe(
-      Effect.mapError(
-        () =>
-          new ProjectPathEscapeError({
-            projectPath: input.repoRoot!,
-            repoRoot: options.repoRoot!,
-            message: `Configured base repoRoot '${options.repoRoot}' is invalid.`,
-          }),
-      ),
-    )
-    const baseValidated = yield* validateWorktreeRepoRoot(baseAbs)
-    if (validated.commonGitDir !== baseValidated.commonGitDir) {
-      return yield* new ProjectPathEscapeError({
-        projectPath: input.repoRoot,
-        repoRoot: options.repoRoot,
-        message: `Worktree '${validated.worktreeRoot}' escapes repository '${baseValidated.worktreeRoot}'.`,
-      })
-    }
-  }
+  const containedRoot = yield* resolveContainedRepoRoot(input.repoRoot, options)
+  const canonicalRoot = toCanonicalPathOrRaw(containedRoot)
+  const candidateAbs = yield* decodeAbsoluteRepoRoot(canonicalRoot).pipe(
+    Effect.mapError(
+      () =>
+        new ProjectPathEscapeError({
+          projectPath: input.repoRoot ?? containedRoot,
+          repoRoot: options?.repoRoot ?? containedRoot,
+          message: `Repository path '${input.repoRoot ?? containedRoot}' is not a valid absolute repository root.`,
+        }),
+    ),
+  )
+  const validated = yield* validateWorktreeRepoRoot(candidateAbs)
 
   const runtimePaths = resolveWorkflowRuntimePaths(validated.commonGitDir)
   const isAlive = yield* Effect.gen(function* () {

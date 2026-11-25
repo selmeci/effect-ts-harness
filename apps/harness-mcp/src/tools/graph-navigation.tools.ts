@@ -38,11 +38,12 @@ import { EmbeddingClient } from "@harness/service"
 import { LocalDecisionModel, nodeSyncHostIo, OllamaEmbeddingClientLive } from "@harness/infra"
 import {
   graphStatusMeta,
+  hasIntermediateRepoBoundary,
   isPathInsideRoot,
   McpToolName,
   type McpToolPluginDescriptor,
   normalizeProjectPath,
-  ProjectPathEscapeError,
+  resolveContainedRepoRoot,
   resolveDefaultRepoRoot,
   resolveGraphWithStatus,
   type ServerOptions,
@@ -57,7 +58,6 @@ import {
   ReviewRouteInputSchema,
 } from "./review-route-helpers.js"
 import { graphHasNodesForKind } from "./retrieval-search-helpers.js"
-import { resolveContainedRepoRoot } from "./retrieval.tools.js"
 
 export { isPathInsideRoot, normalizeProjectPath, resolveDefaultRepoRoot }
 export type { ReviewRouteExecutionContext }
@@ -231,15 +231,22 @@ export const executeReviewRouteTool = Effect.fn("HarnessMcp.routeReview")(functi
     signals.changedFiles,
   )
 
+  const planDegradedReason = plan.degradedReason
+  const isDegraded = (context?.graphStatus?.degraded ?? false) || planDegradedReason !== undefined
+  const combinedDegradedReason =
+    [context?.graphStatus?.degradedReason, planDegradedReason]
+      .filter((v): v is string => v !== undefined && v.length > 0)
+      .join("; ") || undefined
+
   return ReviewRouteToolOutput.make({
     plan,
     signals,
     graphContext,
     warnings: manifestResult.warnings,
-    degraded: context?.graphStatus?.degraded ?? false,
+    degraded: isDegraded,
     ...(reviewSlices !== undefined ? { reviewSlices } : {}),
-    ...(context?.graphStatus?.degradedReason !== undefined
-      ? { degradedReason: toErrorReasonMessage(context.graphStatus.degradedReason) }
+    ...(combinedDegradedReason !== undefined
+      ? { degradedReason: toErrorReasonMessage(combinedDegradedReason) }
       : {}),
     ...(context?.graphStatus?.evaluationError !== undefined
       ? { evaluationError: toErrorReasonMessage(context.graphStatus.evaluationError) }
@@ -256,8 +263,9 @@ export const buildGraphNavigationToolDescriptors = (
     inputSchema: ResolveInputSchema,
     execute: (args) =>
       Effect.gen(function* () {
-        const { symbolOrSpan } = yield* decodeResolveInput(args)
-        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        const { symbolOrSpan, repoRoot } = yield* decodeResolveInput(args)
+        const root = yield* resolveContainedRepoRoot(repoRoot, options)
+        const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
         const node = resolveNode(graphStatus.graph, symbolOrSpan) ?? null
         const suggestions =
           node === null
@@ -278,8 +286,9 @@ export const buildGraphNavigationToolDescriptors = (
     inputSchema: CallersInputSchema,
     execute: (args) =>
       Effect.gen(function* () {
-        const { symbolOrSpan } = yield* decodeResolveInput(args)
-        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        const { symbolOrSpan, repoRoot } = yield* decodeResolveInput(args)
+        const root = yield* resolveContainedRepoRoot(repoRoot, options)
+        const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
         return {
           callers: findCallers(graphStatus.graph, symbolOrSpan),
           ...graphStatusMeta(graphStatus),
@@ -292,8 +301,9 @@ export const buildGraphNavigationToolDescriptors = (
     inputSchema: CalleesInputSchema,
     execute: (args) =>
       Effect.gen(function* () {
-        const { symbolOrSpan } = yield* decodeResolveInput(args)
-        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        const { symbolOrSpan, repoRoot } = yield* decodeResolveInput(args)
+        const root = yield* resolveContainedRepoRoot(repoRoot, options)
+        const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
         return {
           callees: findCallees(graphStatus.graph, symbolOrSpan),
           ...graphStatusMeta(graphStatus),
@@ -306,8 +316,9 @@ export const buildGraphNavigationToolDescriptors = (
     inputSchema: TestsReachingInputSchema,
     execute: (args) =>
       Effect.gen(function* () {
-        const { symbolOrSpan } = yield* decodeResolveInput(args)
-        const graphStatus = yield* resolveGraphWithStatus(options, args)
+        const { symbolOrSpan, repoRoot } = yield* decodeResolveInput(args)
+        const root = yield* resolveContainedRepoRoot(repoRoot, options)
+        const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
         return {
           tests: findTestsReaching(graphStatus.graph, symbolOrSpan),
           ...graphStatusMeta(graphStatus),
@@ -321,7 +332,7 @@ export const buildGraphNavigationToolDescriptors = (
     execute: (args) =>
       Effect.gen(function* () {
         const input = yield* decodeStructuralSearchInput(args)
-        const root = options?.repoRoot ?? resolveDefaultRepoRoot(args)
+        const root = yield* resolveContainedRepoRoot(input.repoRoot, options)
         return yield* decideStructuralSearch({
           pattern: input.pattern,
           repoRoot: root,
@@ -506,11 +517,25 @@ export const buildGraphNavigationToolDescriptors = (
         }
         const patternFile =
           block === "review" || block === "effect" ? null : `agent-patterns/${block}.md`
+        const routeDegraded = graphStatus.degraded || baseRoute.source === "degraded-fallback"
+        const routeDegradedReason = [
+          graphStatus.degradedReason,
+          baseRoute.source === "degraded-fallback" ? "decision-model-fallback" : undefined,
+        ]
+          .filter((v): v is string => v !== undefined && v.length > 0)
+          .join("; ")
         return {
           block,
           patternFile,
           source: combined.source,
           candidatePatterns: candidatePatterns.slice(0, 5).map((c) => c.slug),
+          degraded: routeDegraded,
+          ...(routeDegraded && routeDegradedReason.length > 0
+            ? { degradedReason: routeDegradedReason }
+            : {}),
+          ...(graphStatus.evaluationError !== undefined
+            ? { evaluationError: graphStatus.evaluationError }
+            : {}),
         }
       }),
   },
@@ -523,26 +548,14 @@ export const buildGraphNavigationToolDescriptors = (
       Effect.gen(function* () {
         const parsed = yield* decodeReviewRouteInput(args)
         const boundaryRoot = options?.repoRoot ?? resolveDefaultRepoRoot(undefined, options)
-        if (parsed.repoRoot !== undefined && !isPathInsideRoot(boundaryRoot, parsed.repoRoot)) {
-          return yield* new ProjectPathEscapeError({
-            projectPath: parsed.repoRoot,
-            repoRoot: boundaryRoot,
-            message: "repoRoot escapes configured workspace root",
-          })
-        }
-        const candidateRoot =
-          parsed.repoRoot !== undefined
-            ? path.isAbsolute(parsed.repoRoot)
-              ? path.resolve(parsed.repoRoot)
-              : path.resolve(boundaryRoot, parsed.repoRoot)
-            : boundaryRoot
+        const candidateRoot = yield* resolveContainedRepoRoot(parsed.repoRoot, options)
         const resolvedBoundary = path.resolve(boundaryRoot)
         const isStrictSubdirWithoutWorkspaceMarker =
+          isPathInsideRoot(resolvedBoundary, candidateRoot) &&
           candidateRoot !== resolvedBoundary &&
           nodeSyncHostIo.existsSync(candidateRoot) &&
           nodeSyncHostIo.isDirectorySync(candidateRoot) &&
-          !nodeSyncHostIo.existsSync(path.join(candidateRoot, "pnpm-workspace.yaml")) &&
-          !nodeSyncHostIo.existsSync(path.join(candidateRoot, ".git"))
+          !hasIntermediateRepoBoundary(resolvedBoundary, candidateRoot)
         let effectiveRoot = candidateRoot
         let effectiveChangedFiles: ReadonlyArray<string> = parsed.changedFiles
         if (isStrictSubdirWithoutWorkspaceMarker) {

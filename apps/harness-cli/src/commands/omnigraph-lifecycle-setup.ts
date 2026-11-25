@@ -10,7 +10,7 @@ import {
   OmnigraphTcpPort,
   WorkspaceFilePath,
 } from "@harness/contract"
-import { nodeSyncHostIo, OllamaEmbeddingClientLive } from "@harness/infra"
+import { nodeSyncHostIo, OllamaEmbeddingClientLive } from "@harness/infra/omnigraph-session"
 import { EmbeddingClient } from "@harness/service"
 import {
   ensureOmnigraphEndpointTokens,
