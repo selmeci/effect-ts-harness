@@ -114,7 +114,10 @@ interface AstClosureScan {
   readonly needsAdapters: boolean
   readonly needsTools: boolean
   readonly needsApps: boolean
-  readonly referencesLibs: boolean
+  readonly hasLibsFsTraversal: boolean
+  readonly hasDirectRepoLibsIo: boolean
+  readonly hasRealRepoRootAnchor: boolean
+  readonly hasTestLibsLiteralAndFsIo: boolean
 }
 
 const matchesBucketText = (text: string, bucket: string): boolean =>
@@ -132,19 +135,133 @@ const isImportActualCall = (expr: ts.Expression): boolean =>
   ts.isPropertyAccessExpression(expr) &&
   (expr.name.text === "importActual" || expr.name.text === "importMock")
 
-const REPO_FS_IO_IDENTIFIERS: ReadonlySet<string> = new Set([
-  "readFileSync",
+const PATH_OR_FS_API_NAMES: ReadonlySet<string> = new Set([
+  "join",
+  "resolve",
   "readdirSync",
+  "readdir",
+  "readFileSync",
+  "readFile",
   "readTextSync",
+  "readBytesSync",
   "existsSync",
   "statSync",
   "lstatSync",
-  "hostIo",
-  "REPO_ROOT",
-  "REAL_REPO_ROOT",
+  "realpathSync",
+  "isDirectorySync",
+  "isFileSync",
+  "isSymbolicLinkSync",
 ])
 
-const scanSourceAst = (source: string): AstClosureScan => {
+const DIRECT_FS_IO_API_NAMES: ReadonlySet<string> = new Set([
+  "readdirSync",
+  "readdir",
+  "readFileSync",
+  "readFile",
+  "readTextSync",
+  "readBytesSync",
+  "statSync",
+  "lstatSync",
+  "existsSync",
+  "realpathSync",
+  "isFileSync",
+  "isDirectorySync",
+  "isSymbolicLinkSync",
+])
+
+const TEST_FS_IO_API_NAMES: ReadonlySet<string> = new Set([
+  "readFileSync",
+  "readdirSync",
+  "readTextSync",
+  "readBytesSync",
+  "isFileSync",
+  "isDirectorySync",
+  "isSymbolicLinkSync",
+])
+
+const isHostIoCallee = (expr: ts.Expression): boolean => {
+  if (!ts.isPropertyAccessExpression(expr)) return false
+  const recv = expr.expression
+  return (
+    (ts.isIdentifier(recv) && recv.text === "hostIo") ||
+    (ts.isPropertyAccessExpression(recv) && recv.name.text === "hostIo")
+  )
+}
+
+const PARENT_CLIMB_RE = /\.\.[/\\]\.\./
+const NON_LIBS_PATH_TARGET_RE = /(?:^|[/\\])(?:tools|node_modules)(?:[/\\]|$)/
+
+const getCalleeName = (expr: ts.Expression): string | undefined => {
+  if (ts.isIdentifier(expr)) return expr.text
+  if (ts.isPropertyAccessExpression(expr)) return expr.name.text
+  return undefined
+}
+
+const collectNodeStringTexts = (root: ts.Node): ReadonlyArray<string> => {
+  const texts: Array<string> = []
+  const walk = (n: ts.Node) => {
+    if (ts.isStringLiteralLike(n)) {
+      texts.push(n.text)
+    }
+    if (ts.isTemplateExpression(n)) {
+      texts.push(n.head.text)
+      for (const span of n.templateSpans) {
+        texts.push(span.literal.text)
+      }
+    }
+    ts.forEachChild(n, walk)
+  }
+  walk(root)
+  return texts
+}
+
+const containsDirOrMetaAnchor = (root: ts.Node): boolean => {
+  let found = false
+  const walk = (n: ts.Node) => {
+    if (found) return
+    if (ts.isIdentifier(n) && (n.text === "__dirname" || n.text === "__filename")) {
+      found = true
+      return
+    }
+    if (
+      ts.isPropertyAccessExpression(n) &&
+      ts.isMetaProperty(n.expression) &&
+      n.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
+      (n.name.text === "dirname" || n.name.text === "url")
+    ) {
+      found = true
+      return
+    }
+    if (ts.isCallExpression(n) && getCalleeName(n.expression) === "fileURLToPath") {
+      for (const arg of n.arguments) {
+        if (containsDirOrMetaAnchor(arg)) {
+          found = true
+          return
+        }
+      }
+    }
+    ts.forEachChild(n, walk)
+  }
+  walk(root)
+  return found
+}
+
+const isDirectRepoLibsLiteral = (text: string): boolean =>
+  text === "libs" || text === "./libs" || text.startsWith("libs/") || text.startsWith("./libs/")
+
+const REPO_ROOT_ANCHOR_IDENTIFIERS: ReadonlySet<string> = new Set([
+  "CLI_REPO_ROOT",
+  "REPO_ROOT",
+  "REAL_REPO_ROOT",
+  "WORKSPACE_ROOT",
+])
+
+const scanSourceAst = (
+  source: string,
+  isTestFile = false,
+  relPath?: string,
+  debugEnabled = false,
+): AstClosureScan => {
   const pre = ts.preProcessFile(source, true, true)
   const specifiers: Array<string> = pre.importedFiles.map((f) => f.fileName)
   let hasNonLiteralDynamicImport = false
@@ -153,8 +270,15 @@ const scanSourceAst = (source: string): AstClosureScan => {
   let needsAdapters = false
   let needsTools = false
   let needsApps = false
-  let referencesLibs = false
-  let hasRepoFsIo = false
+  let hasLibsFsTraversal = false
+  let hasDirectRepoLibsIo = false
+  let hasRealRepoRootAnchor = false
+  let hasNonSpecifierLibsLiteral = false
+  let hasDirectLibsLiteral = false
+  let hasPathOrFsCall = false
+  let hasDirectFsIoCall = false
+  let hasTempDirFixture = false
+  let hasTestFsIoCall = false
 
   const recordText = (text: string) => {
     if (matchesBucketText(text, "docs")) needsDocs = true
@@ -162,13 +286,41 @@ const scanSourceAst = (source: string): AstClosureScan => {
     if (matchesBucketText(text, "adapters")) needsAdapters = true
     if (matchesBucketText(text, "tools")) needsTools = true
     if (matchesBucketText(text, "apps")) needsApps = true
-    if (matchesBucketText(text, "libs")) referencesLibs = true
+    if (matchesBucketText(text, "libs")) hasNonSpecifierLibsLiteral = true
+    if (isDirectRepoLibsLiteral(text)) hasDirectLibsLiteral = true
+    if (
+      text === "pnpm-workspace.yaml" ||
+      text.endsWith("/pnpm-workspace.yaml") ||
+      text.endsWith("\\pnpm-workspace.yaml") ||
+      /(?:^|\s)--show-toplevel(?=$|\s)/.test(text)
+    ) {
+      hasRealRepoRootAnchor = true
+    }
+    if (text.startsWith("/tmp/") || text.startsWith("/var/tmp/")) {
+      hasTempDirFixture = true
+    }
+  }
+
+  const checkPathAnchorArgs = (args: ReadonlyArray<ts.Expression>) => {
+    const texts = args.flatMap((a) => collectNodeStringTexts(a))
+    const hasMetaAnchor = args.some((a) => containsDirOrMetaAnchor(a))
+    const hasParentClimb =
+      texts.some((t) => PARENT_CLIMB_RE.test(t)) || texts.filter((t) => t === "..").length >= 2
+    const targetsNonLibs = texts.some((t) => NON_LIBS_PATH_TARGET_RE.test(t))
+    if (hasMetaAnchor && hasParentClimb && !targetsNonLibs) {
+      hasRealRepoRootAnchor = true
+    }
   }
 
   const sf = ts.createSourceFile("closure.ts", source, ts.ScriptTarget.Latest, true)
   const visit = (node: ts.Node) => {
-    if (ts.isIdentifier(node) && REPO_FS_IO_IDENTIFIERS.has(node.text)) {
-      hasRepoFsIo = true
+    if (ts.isIdentifier(node) && REPO_ROOT_ANCHOR_IDENTIFIERS.has(node.text)) {
+      hasRealRepoRootAnchor = true
+    }
+    if (ts.isNewExpression(node)) {
+      if (getCalleeName(node.expression) === "URL" && node.arguments !== undefined) {
+        checkPathAnchorArgs(node.arguments)
+      }
     }
     if (ts.isCallExpression(node)) {
       const isDynImport = node.expression.kind === ts.SyntaxKind.ImportKeyword
@@ -181,6 +333,48 @@ const scanSourceAst = (source: string): AstClosureScan => {
         } else {
           hasNonLiteralDynamicImport = true
         }
+      }
+
+      const calleeName = getCalleeName(node.expression)
+      if (
+        ts.isPropertyAccessExpression(node.expression) &&
+        ts.isIdentifier(node.expression.expression) &&
+        node.expression.expression.text === "process" &&
+        node.expression.name.text === "cwd"
+      ) {
+        hasRealRepoRootAnchor = true
+      }
+      if (
+        calleeName === "findWorkspaceRoot" ||
+        calleeName === "findWorkspaceRootLite" ||
+        calleeName === "resolveRepoRoot" ||
+        calleeName === "resolveCanonicalRepoRoot"
+      ) {
+        hasRealRepoRootAnchor = true
+      }
+      if (calleeName === "mkdtempSync" || calleeName === "mkdtemp" || calleeName === "tmpdir") {
+        hasTempDirFixture = true
+      }
+      if (calleeName === "resolve" || calleeName === "join") {
+        checkPathAnchorArgs(node.arguments)
+      }
+      const hostIoCall = isHostIoCallee(node.expression)
+      if ((calleeName !== undefined && PATH_OR_FS_API_NAMES.has(calleeName)) || hostIoCall) {
+        hasPathOrFsCall = true
+        const argTexts = node.arguments.flatMap((a) => collectNodeStringTexts(a))
+        if (argTexts.some((t) => matchesBucketText(t, "libs"))) {
+          hasLibsFsTraversal = true
+        }
+      }
+      if ((calleeName !== undefined && DIRECT_FS_IO_API_NAMES.has(calleeName)) || hostIoCall) {
+        hasDirectFsIoCall = true
+        const argTexts = node.arguments.flatMap((a) => collectNodeStringTexts(a))
+        if (argTexts.some(isDirectRepoLibsLiteral)) {
+          hasDirectRepoLibsIo = true
+        }
+      }
+      if ((calleeName !== undefined && TEST_FS_IO_API_NAMES.has(calleeName)) || hostIoCall) {
+        hasTestFsIoCall = true
       }
     }
     if (ts.isStringLiteralLike(node) && !isModuleSpecifierNode(node)) {
@@ -196,6 +390,24 @@ const scanSourceAst = (source: string): AstClosureScan => {
   }
   visit(sf)
 
+  const excludedAsTempFixture = hasTempDirFixture && !hasRealRepoRootAnchor
+  if (
+    excludedAsTempFixture &&
+    hasDirectLibsLiteral &&
+    (hasPathOrFsCall || hasDirectFsIoCall) &&
+    debugEnabled
+  ) {
+    process.stderr.write(
+      `[mutation-closure] Debug: Excluded temp-dir fixture${relPath !== undefined ? ` '${relPath}'` : ""} from allLibsSrcDigest fallback (direct libs/ literal with path/fs call without repo-root anchor).\n`,
+    )
+  }
+  if (!excludedAsTempFixture && hasDirectLibsLiteral && hasPathOrFsCall) {
+    hasLibsFsTraversal = true
+  }
+  if (!excludedAsTempFixture && hasDirectLibsLiteral && hasDirectFsIoCall) {
+    hasDirectRepoLibsIo = true
+  }
+
   return {
     specifiers,
     hasNonLiteralDynamicImport,
@@ -204,7 +416,10 @@ const scanSourceAst = (source: string): AstClosureScan => {
     needsAdapters,
     needsTools,
     needsApps,
-    referencesLibs: referencesLibs && hasRepoFsIo,
+    hasLibsFsTraversal,
+    hasDirectRepoLibsIo,
+    hasRealRepoRootAnchor,
+    hasTestLibsLiteralAndFsIo: isTestFile && hasNonSpecifierLibsLiteral && hasTestFsIoCall,
   }
 }
 
@@ -453,7 +668,15 @@ export const computeFileMutationClosureDigest = (
   let needsAdapters = false
   let needsTools = false
   let needsApps = false
-  let usedFallbackAllLibs = false
+  let hasDynamicOrUnresolved = false
+  let closureHasDirectRepoLibsIo = false
+  let closureHasRealRepoRootAnchor = false
+  let closureHasLibsFsTraversal = false
+  let closureHasTestLibsLiteralAndFsIo = false
+
+  const debugEnabled =
+    unwrapOption(unwrapResult(Result.try(() => input.hostIo.getEnv()["HARNESS_MUTATE_DEBUG"]))) ===
+    "1"
 
   while (queue.length > 0) {
     const relPath = queue.shift()!
@@ -472,13 +695,18 @@ export const computeFileMutationClosureDigest = (
     const fileSha = input.digests.fileDigests.get(relPath) ?? computeContentSha256(content)
     filePairs.push([relPath, fileSha])
 
-    const scan = scanSourceAst(content)
+    const isTestFile = /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(relPath)
+    const scan = scanSourceAst(content, isTestFile, relPath, debugEnabled)
     if (scan.needsDocs) needsDocs = true
     if (scan.needsAgentPatterns) needsAgentPatterns = true
     if (scan.needsAdapters) needsAdapters = true
     if (scan.needsTools) needsTools = true
     if (scan.needsApps) needsApps = true
-    if (scan.referencesLibs || scan.hasNonLiteralDynamicImport) usedFallbackAllLibs = true
+    if (scan.hasNonLiteralDynamicImport) hasDynamicOrUnresolved = true
+    if (scan.hasDirectRepoLibsIo) closureHasDirectRepoLibsIo = true
+    if (scan.hasRealRepoRootAnchor) closureHasRealRepoRootAnchor = true
+    if (scan.hasLibsFsTraversal) closureHasLibsFsTraversal = true
+    if (scan.hasTestLibsLiteralAndFsIo) closureHasTestLibsLiteralAndFsIo = true
 
     for (const spec of scan.specifiers) {
       if (spec.startsWith("./") || spec.startsWith("../") || spec === "." || spec === "..") {
@@ -496,7 +724,7 @@ export const computeFileMutationClosureDigest = (
           })
           .with({ _tag: "Missing" }, () => {
             unresolvedRelativeImports.push(`${relPath} -> ${spec}`)
-            usedFallbackAllLibs = true
+            hasDynamicOrUnresolved = true
             return undefined
           })
           .with({ _tag: "Disabled" }, ({ reason }) => reason)
@@ -519,7 +747,7 @@ export const computeFileMutationClosureDigest = (
           })
           .with({ _tag: "UnresolvedWorkspace" }, ({ specifier }) => {
             unresolvedWorkspaceImports.push(`${relPath} -> ${specifier}`)
-            usedFallbackAllLibs = true
+            hasDynamicOrUnresolved = true
             return undefined
           })
           .with({ _tag: "External" }, () => undefined)
@@ -529,6 +757,12 @@ export const computeFileMutationClosureDigest = (
       }
     }
   }
+
+  const usedFallbackAllLibs =
+    hasDynamicOrUnresolved ||
+    closureHasDirectRepoLibsIo ||
+    (closureHasRealRepoRootAnchor &&
+      (closureHasLibsFsTraversal || closureHasTestLibsLiteralAndFsIo))
 
   filePairs.sort((a, b) => compareCodeUnits(a[0], b[0]))
   const packageDigests = [...touchedPackages].sort(compareCodeUnits).map((pkgKey) => {

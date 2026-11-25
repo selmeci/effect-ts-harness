@@ -41,6 +41,8 @@ export interface MutationEvaluationInput {
   readonly saturationSpecs?: ReadonlyArray<SpanSaturationSpec> | undefined
   readonly traceObservations?: ReadonlyArray<TraceSpanObservation> | undefined
   readonly spanObservations?: ReadonlyArray<SpanSaturationObservation> | undefined
+  readonly earlyTerminated?: boolean | undefined
+  readonly maxSurvivors?: number | undefined
 }
 
 export interface UntestedMutationFile {
@@ -63,6 +65,12 @@ export interface MutationOutcomesSummary {
 export interface MutationSuiteReport extends MutationOutcomesSummary {
   readonly diagnostic?: string | undefined
   readonly cachedKilledCount?: number | undefined
+  readonly earlyTerminated?: boolean | undefined
+  readonly stageAOnly?: boolean | undefined
+  readonly stackedBaseRef?: string | undefined
+  readonly stackedBaseVerified?: boolean | undefined
+  readonly ancestorVerifiedMutantCount?: number | undefined
+  readonly ancestorExpandedMutantCount?: number | undefined
   readonly diffMode: "all-lines" | "explicit-files" | "working-tree" | "branch-base" | "not-git"
   readonly scannedCandidateFiles: number
   readonly scannedFiles: ReadonlyArray<string>
@@ -188,6 +196,8 @@ export const evaluateMutationOutcomes = (
   equivalencePriors?: Readonly<Record<string, number>>,
   saturationSpecs?: ReadonlyArray<SpanSaturationSpec>,
   spanObservations?: ReadonlyArray<SpanSaturationObservation>,
+  earlyTerminated?: boolean,
+  maxSurvivors?: number,
 ): MutationOutcomesSummary => {
   const equivalentMutantIds = new Set(
     outcomes
@@ -224,6 +234,8 @@ export const evaluateMutationOutcomes = (
       ? evaluateSpanSaturationViolations(saturationSpecs, spanObservations)
       : undefined
   const passed =
+    earlyTerminated !== true &&
+    (maxSurvivors === undefined || survivedCount < maxSurvivors) &&
     survivedCount === 0 &&
     mutationScore >= (minScore ?? 1) &&
     (saturationViolations === undefined || saturationViolations.length === 0)
@@ -253,6 +265,8 @@ export const decideMutationReport = Effect.fn("MutationCheck.decide")(function* 
       input.equivalencePriors,
       input.saturationSpecs,
       input.spanObservations ?? input.traceObservations,
+      input.earlyTerminated,
+      input.maxSurvivors,
     ),
   )
 })

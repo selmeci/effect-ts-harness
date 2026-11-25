@@ -25,7 +25,7 @@ export interface GitDiffExtractionOptions {
   readonly explicitBaseRef?: boolean | undefined
 }
 
-const mergeLineMaps = (
+export const mergeLineMaps = (
   target: Map<string, Set<number>>,
   source: ReadonlyMap<string, ReadonlySet<number>>,
 ): void => {
@@ -40,13 +40,176 @@ const mergeLineMaps = (
 }
 
 const COMMIT_SHA_RE = /^[0-9a-f]{40,64}$/i
+const GIT_TIMEOUT_MS = 15_000
+
+export const runGitChecked = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  args: ReadonlyArray<string>,
+): Result.Result<string, string> => {
+  const res = Result.try(() =>
+    hostIo.execFileSync("git", ["-c", "core.quotePath=false", ...args], {
+      cwd: repoRoot,
+      timeoutMs: GIT_TIMEOUT_MS,
+    }),
+  )
+  return match(res)
+    .with({ _tag: "Failure" }, ({ failure }) =>
+      Result.fail(
+        `git ${args.join(" ")} threw: ${failure instanceof Error ? failure.message : String(failure)}`,
+      ),
+    )
+    .with({ _tag: "Success" }, ({ success }) =>
+      match(success)
+        .with({ _tag: "Exited" }, (r) => {
+          if (r.exitCode === 0) return Result.succeed(r.stdout)
+          const stderrPart = r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""
+          return Result.fail(`git ${args.join(" ")} failed (exitCode=${r.exitCode}${stderrPart})`)
+        })
+        .with({ _tag: "TimedOut" }, (r) =>
+          Result.fail(
+            `git ${args.join(" ")} failed (timedOut=true${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
+          ),
+        )
+        .with({ _tag: "Signaled" }, (r) =>
+          Result.fail(
+            `git ${args.join(" ")} failed (signal=${r.signal}${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
+          ),
+        )
+        .with({ _tag: "SpawnFailed" }, (r) =>
+          Result.fail(
+            `git ${args.join(" ")} failed (spawnError=${r.spawnError}${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
+          ),
+        )
+        .exhaustive(),
+    )
+    .exhaustive()
+}
+
+export const resolveGitCommitSha = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  ref: string,
+): string | undefined => {
+  if (ref.startsWith("-")) return undefined
+  return match(
+    runGitChecked(repoRoot, hostIo, [
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      "--end-of-options",
+      `${ref}^{commit}`,
+    ]),
+  )
+    .with({ _tag: "Success" }, ({ success }) => {
+      const trimmed = success.trim()
+      return COMMIT_SHA_RE.test(trimmed) ? trimmed : undefined
+    })
+    .with({ _tag: "Failure" }, () => undefined)
+    .exhaustive()
+}
+
+export type GitAncestorCheckResult =
+  | { readonly _tag: "Ancestor" }
+  | { readonly _tag: "NotAncestor" }
+  | { readonly _tag: "Error"; readonly reason: string }
+
+/**
+ * Checks whether `ancestorRef` is an ancestor of `descendantRef` using `git merge-base --is-ancestor`,
+ * distinguishing a clean non-ancestor exit (`1`) from spawn/timeout/unexpected git failures.
+ */
+export const checkGitAncestorCommit = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  ancestorRef: string,
+  descendantRef: string,
+): GitAncestorCheckResult => {
+  const args = [
+    "merge-base",
+    "--is-ancestor",
+    "--end-of-options",
+    ancestorRef,
+    descendantRef,
+  ] as const
+  const res = Result.try(() =>
+    hostIo.execFileSync("git", ["-c", "core.quotePath=false", ...args], {
+      cwd: repoRoot,
+      timeoutMs: GIT_TIMEOUT_MS,
+    }),
+  )
+  return match(res)
+    .with({ _tag: "Failure" }, ({ failure }) => ({
+      _tag: "Error" as const,
+      reason: `git ${args.join(" ")} threw: ${failure instanceof Error ? failure.message : String(failure)}`,
+    }))
+    .with({ _tag: "Success" }, ({ success }) =>
+      match(success)
+        .with({ _tag: "Exited" }, (r) => {
+          if (r.exitCode === 0) return { _tag: "Ancestor" as const }
+          if (r.exitCode === 1) return { _tag: "NotAncestor" as const }
+          const stderrPart = r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""
+          return {
+            _tag: "Error" as const,
+            reason: `git merge-base --is-ancestor failed (exitCode=${r.exitCode}${stderrPart})`,
+          }
+        })
+        .with({ _tag: "TimedOut" }, (r) => ({
+          _tag: "Error" as const,
+          reason: `git merge-base --is-ancestor timed out${r.stderr.trim().length > 0 ? ` (stderr=${r.stderr.trim()})` : ""}`,
+        }))
+        .with({ _tag: "Signaled" }, (r) => ({
+          _tag: "Error" as const,
+          reason: `git merge-base --is-ancestor signaled (${r.signal}${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
+        }))
+        .with({ _tag: "SpawnFailed" }, (r) => ({
+          _tag: "Error" as const,
+          reason: `git merge-base --is-ancestor spawn failed (${r.spawnError}${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
+        }))
+        .exhaustive(),
+    )
+    .exhaustive()
+}
+
+export const isGitAncestorCommit = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  ancestorRef: string,
+  descendantRef: string,
+): boolean =>
+  match(checkGitAncestorCommit(repoRoot, hostIo, ancestorRef, descendantRef))
+    .with({ _tag: "Ancestor" }, () => true)
+    .with({ _tag: "NotAncestor" }, { _tag: "Error" }, () => false)
+    .exhaustive()
+
+export const resolveEffectiveGitBaseRef = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  baseRef: string,
+  explicitBaseRef?: boolean,
+): string => {
+  if (explicitBaseRef === true || baseRef.includes("/")) return baseRef
+  const localBaseSha = resolveGitCommitSha(repoRoot, hostIo, baseRef)
+  const originBaseSha = resolveGitCommitSha(repoRoot, hostIo, `origin/${baseRef}`)
+  const headSha = resolveGitCommitSha(repoRoot, hostIo, "HEAD")
+  if (
+    localBaseSha !== undefined &&
+    originBaseSha !== undefined &&
+    headSha !== undefined &&
+    localBaseSha !== originBaseSha &&
+    isGitAncestorCommit(repoRoot, hostIo, localBaseSha, originBaseSha) &&
+    isGitAncestorCommit(repoRoot, hostIo, originBaseSha, headSha)
+  ) {
+    return originBaseSha
+  }
+  return baseRef
+}
 
 export const extractGitDiffModifiedLinesChecked = (
   repoRoot: string,
   hostIo: SyncHostIo,
   options?: GitDiffExtractionOptions,
 ): GitDiffExtractionResult => {
-  const gitOpts = { cwd: repoRoot, timeoutMs: 15_000 }
+  const gitOpts = { cwd: repoRoot, timeoutMs: GIT_TIMEOUT_MS }
   const revParseRes = Result.try(() =>
     hostIo.execFileSync(
       "git",
@@ -102,42 +265,8 @@ export const extractGitDiffModifiedLinesChecked = (
     .exhaustive()
   if (earlyExit !== undefined) return earlyExit
 
-  const runGit = (args: ReadonlyArray<string>): Result.Result<string, string> => {
-    const res = Result.try(() =>
-      hostIo.execFileSync("git", ["-c", "core.quotePath=false", ...args], gitOpts),
-    )
-    return match(res)
-      .with({ _tag: "Failure" }, ({ failure }) =>
-        Result.fail(
-          `git ${args.join(" ")} threw: ${failure instanceof Error ? failure.message : String(failure)}`,
-        ),
-      )
-      .with({ _tag: "Success" }, ({ success }) =>
-        match(success)
-          .with({ _tag: "Exited" }, (r) => {
-            if (r.exitCode === 0) return Result.succeed(r.stdout)
-            const stderrPart = r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""
-            return Result.fail(`git ${args.join(" ")} failed (exitCode=${r.exitCode}${stderrPart})`)
-          })
-          .with({ _tag: "TimedOut" }, (r) =>
-            Result.fail(
-              `git ${args.join(" ")} failed (timedOut=true${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
-            ),
-          )
-          .with({ _tag: "Signaled" }, (r) =>
-            Result.fail(
-              `git ${args.join(" ")} failed (signal=${r.signal}${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
-            ),
-          )
-          .with({ _tag: "SpawnFailed" }, (r) =>
-            Result.fail(
-              `git ${args.join(" ")} failed (spawnError=${r.spawnError}${r.stderr.trim().length > 0 ? `, stderr=${r.stderr.trim()}` : ""})`,
-            ),
-          )
-          .exhaustive(),
-      )
-      .exhaustive()
-  }
+  const runGit = (args: ReadonlyArray<string>): Result.Result<string, string> =>
+    runGitChecked(repoRoot, hostIo, args)
 
   const collectUntrackedLibsFiles = (
     targetMap: Map<string, Set<number>>,
@@ -202,42 +331,10 @@ export const extractGitDiffModifiedLinesChecked = (
       },
     )
 
-  const resolveCommitSha = (ref: string): string | undefined => {
-    if (ref.startsWith("-")) return undefined
-    return match(
-      runGit(["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`]),
-    )
-      .with({ _tag: "Success" }, ({ success }) => {
-        const trimmed = success.trim()
-        return COMMIT_SHA_RE.test(trimmed) ? trimmed : undefined
-      })
-      .with({ _tag: "Failure" }, () => undefined)
-      .exhaustive()
-  }
-
-  const isAncestorCommit = (ancestorRef: string, descendantRef: string): boolean =>
-    match(runGit(["merge-base", "--is-ancestor", "--end-of-options", ancestorRef, descendantRef]))
-      .with({ _tag: "Success" }, () => true)
-      .with({ _tag: "Failure" }, () => false)
-      .exhaustive()
-
-  const resolveEffectiveBaseRef = (baseRef: string): string => {
-    if (options?.explicitBaseRef === true || baseRef.includes("/")) return baseRef
-    const localBaseSha = resolveCommitSha(baseRef)
-    const originBaseSha = resolveCommitSha(`origin/${baseRef}`)
-    const headSha = resolveCommitSha("HEAD")
-    if (
-      localBaseSha !== undefined &&
-      originBaseSha !== undefined &&
-      headSha !== undefined &&
-      localBaseSha !== originBaseSha &&
-      isAncestorCommit(localBaseSha, originBaseSha) &&
-      isAncestorCommit(originBaseSha, headSha)
-    ) {
-      return originBaseSha
-    }
-    return baseRef
-  }
+  const resolveCommitSha = (ref: string): string | undefined =>
+    resolveGitCommitSha(repoRoot, hostIo, ref)
+  const resolveEffectiveBaseRef = (baseRef: string): string =>
+    resolveEffectiveGitBaseRef(repoRoot, hostIo, baseRef, options?.explicitBaseRef)
 
   const tryIncomingBaseMergeDiff = (baseRef: string): GitDiffExtractionResult | undefined => {
     if (baseRef.startsWith("-")) return undefined
@@ -588,6 +685,35 @@ export const recoverStartupBackup = (
     ? `[mutation-check] CRITICAL: Failed to restore startup backup '${backupPath}' (${restoreFailureReason}); aborting without deleting backup.`
     : undefined
 }
+
+export const recoverBackupIfPresent = (
+  repoRoot: string,
+  backupPath: string,
+  hasOverlays: boolean,
+  hostIo: SyncHostIo,
+): string | undefined => {
+  if (
+    hasOverlays ||
+    hostIo.getEnv()["HARNESS_ACTIVE_BACKUP_PATH"] === resolve(backupPath) ||
+    !Result.getOrElse(
+      Result.try(() => hostIo.existsSync(backupPath)),
+      () => false,
+    )
+  ) {
+    return undefined
+  }
+  return recoverStartupBackup(repoRoot, backupPath, hostIo)
+}
+
+export const extractGitDiffModifiedLines = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+): ReadonlyMap<string, ReadonlySet<number>> | undefined =>
+  match(extractGitDiffModifiedLinesChecked(repoRoot, hostIo))
+    .with({ _tag: "Ok" }, ({ lines }) => lines)
+    .with({ _tag: "NotGit" }, () => undefined)
+    .with({ _tag: "Failed" }, () => undefined)
+    .exhaustive()
 
 export const writeMutationBackup = (
   repoRoot: string,

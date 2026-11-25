@@ -129,7 +129,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ## Assumptions
 
-- **REQ-1.2:** Hashing each target file's transitive workspace import closure, conditional `docs/{adr,adrs,scenarios,specs}` / `agent-patterns` / `adapters` / `tools` buckets, touched-package test helpers, root/package configs, tool runners, Node/Vitest versions, and reaching test files minimizes false cache hits while preserving full invalidation via `allLibsSrcDigest` fallback on unresolved dynamic imports; remaining external host dependencies are documented in Known residual risks.
+- **REQ-1.2:** Hashing each target file's transitive workspace import closure, conditional `docs/{adr,adrs,scenarios,specs}` / `agent-patterns` / `adapters` / `tools` buckets, touched-package test helpers, root/package configs, tool runners, Node/Vitest versions, and reaching test files minimizes false cache hits while preserving full invalidation via `allLibsSrcDigest` fallback on unresolved dynamic imports; remaining external host dependencies are documented in Known residual risks. (Supersession note: `mutation-cache-v2.json` and the `REQ-1.4` opt-in `HARNESS_MUTATE_WARM_ISOLATE=0` mode were later superseded by `harness:SPEC-0034` / `harness:ADR-0027` with witness-scoped `mutation-cache-v3.json` and unbypassable `isolate: true`.)
 - **REQ-2.1:** Enabling V8 bytecode caching under `os.tmpdir()` (overridable via `NODE_COMPILE_CACHE`) avoids modifying the hashed workspace `treeHash` (`verify-stamp.json` / `mutate-stamp.json`).
 
 ## Out of scope
@@ -138,7 +138,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ## Known residual risks
 
-- Unmodeled OS-level shared library changes or arbitrary external binaries invoked outside tracked Node/Vitest versions are not hashed into `mutation-cache-v2.json`; pass `--no-cache` to bypass cached kill entries on demand.
+- Unmodeled OS-level shared library changes or arbitrary external binaries invoked outside tracked Node/Vitest versions are not hashed into `mutation-cache-v2.json` (superseded alongside `HARNESS_MUTATE_WARM_ISOLATE=0` by `harness:SPEC-0034` / `harness:ADR-0027`, which use `mutation-cache-v3.json` and unbypassable `isolate: true`); pass `--no-cache` to bypass cached kill entries on demand.
 
 ## Acceptance criteria
 

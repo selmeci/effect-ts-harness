@@ -69,6 +69,7 @@ export const MutateStampSchema = Schema.Struct({
   equivalentCount: MutantCount,
   survivedCount: MutantCount,
   passed: MutateStampPassed,
+  stackedBaseRef: Schema.optional(StampBranchName),
 })
 export type MutateStamp = typeof MutateStampSchema.Type
 

@@ -34,12 +34,51 @@ const VERY_HEAVY_TESTS = new Set([
   "governance-nodes.test.ts",
 ])
 
-export const sortTestsByStaticSpeed = (tests) =>
+export const DEFAULT_HEAVY_TEST_THRESHOLD_MS = 2_000
+
+export const lookupTestDurationMs = (testDurationsMs, cwd, testPath) => {
+  if (typeof testDurationsMs !== "object" || testDurationsMs === null) return undefined
+  const direct = testDurationsMs[testPath]
+  if (typeof direct === "number" && Number.isFinite(direct) && direct >= 0) return direct
+  const abs = resolve(cwd, testPath)
+  const byAbs = testDurationsMs[abs]
+  if (typeof byAbs === "number" && Number.isFinite(byAbs) && byAbs >= 0) return byAbs
+  const rel = relative(resolve(cwd), abs).replace(/\\/g, "/")
+  const byRel = testDurationsMs[rel]
+  if (typeof byRel === "number" && Number.isFinite(byRel) && byRel >= 0) return byRel
+  return undefined
+}
+
+export const isHeavyTest = (
+  testPath,
+  cwd,
+  testDurationsMs,
+  heavyThresholdMs = DEFAULT_HEAVY_TEST_THRESHOLD_MS,
+) => {
+  const measured = lookupTestDurationMs(testDurationsMs, cwd, testPath)
+  if (measured !== undefined) return measured >= heavyThresholdMs
+  return isHeavyMetaTest(testPath)
+}
+
+export const sortTestsByMeasuredOrStaticSpeed = (
+  tests,
+  cwd,
+  testDurationsMs,
+  heavyThresholdMs = DEFAULT_HEAVY_TEST_THRESHOLD_MS,
+) =>
   [...tests].sort((a, b) => {
+    const durA = lookupTestDurationMs(testDurationsMs, cwd, a)
+    const durB = lookupTestDurationMs(testDurationsMs, cwd, b)
+    if (durA !== undefined && durB !== undefined) {
+      if (durA !== durB) return durA - durB
+      return a < b ? -1 : a > b ? 1 : 0
+    }
     const baseA = a.split(/[/\\]/).pop() ?? a
     const baseB = b.split(/[/\\]/).pop() ?? b
-    const rankA = VERY_HEAVY_TESTS.has(baseA) ? 2 : isHeavyMetaTest(a) ? 1 : 0
-    const rankB = VERY_HEAVY_TESTS.has(baseB) ? 2 : isHeavyMetaTest(b) ? 1 : 0
+    const heavyA = isHeavyTest(a, cwd, testDurationsMs, heavyThresholdMs)
+    const heavyB = isHeavyTest(b, cwd, testDurationsMs, heavyThresholdMs)
+    const rankA = !heavyA ? 0 : durA === undefined && VERY_HEAVY_TESTS.has(baseA) ? 2 : 1
+    const rankB = !heavyB ? 0 : durB === undefined && VERY_HEAVY_TESTS.has(baseB) ? 2 : 1
     if (rankA !== rankB) return rankA - rankB
     return a < b ? -1 : a > b ? 1 : 0
   })
@@ -278,6 +317,92 @@ export const COVERAGE_SETUP_SCRIPT = join(scriptDir, "mutant-coverage-setup.mjs"
 
 const escapeRegexLiteral = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 
+const runExternalProbeProcess = async ({
+  vitestNodeEntry,
+  cwd,
+  childBaseEnv,
+  testFiles,
+  covOutDir,
+  probeStateDir,
+  timeoutMs,
+  tracker,
+}) => {
+  const probeEnv = {
+    ...childBaseEnv,
+    HARNESS_WARM_MODE: "probe",
+    HARNESS_WARM_VITEST_NODE_ENTRY: vitestNodeEntry,
+    HARNESS_WARM_CWD: cwd,
+    HARNESS_WARM_TESTS_JSON: JSON.stringify(testFiles),
+    HARNESS_WARM_COVERAGE_SETUP: COVERAGE_SETUP_SCRIPT,
+    HARNESS_WARM_COVERAGE_OUT_DIR: covOutDir,
+    HARNESS_WARM_STATE_DIR: probeStateDir,
+    HARNESS_WARM_ISOLATE: "1",
+  }
+  delete probeEnv["HARNESS_MUTATE_WARM_ISOLATE"]
+  return new Promise((resolvePromise) => {
+    let child
+    try {
+      child = fork(WARM_WORKER_SCRIPT, [], {
+        cwd,
+        env: probeEnv,
+        stdio: ["ignore", "pipe", "pipe", "ipc"],
+      })
+    } catch (err) {
+      const rawMsg = (err instanceof Error ? err.message : String(err)).trim()
+      resolvePromise({
+        ok: false,
+        reason: rawMsg || "fork failed",
+        durationsByTest: {},
+      })
+      return
+    }
+    tracker.activeChildren.add(child)
+    let doneOk = false
+    let durationsByTest = {}
+    let settled = false
+    const finish = (ok, reason = undefined) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      tracker.activeChildren.delete(child)
+      resolvePromise({
+        ok,
+        ...(reason !== undefined ? { reason } : {}),
+        durationsByTest,
+      })
+    }
+    const timer = setTimeout(
+      () => {
+        try {
+          child.kill("SIGKILL")
+        } catch {
+          // Best-effort kill on probe timeout
+        }
+        finish(false, "timed out")
+      },
+      Math.max(timeoutMs, 45_000),
+    )
+    child.stdout?.resume()
+    child.stderr?.resume()
+    child.on("message", (msg) => {
+      if (typeof msg === "object" && msg !== null && msg.type === "probeDone") {
+        doneOk = msg.ok === true
+        if (typeof msg.durationsByTest === "object" && msg.durationsByTest !== null) {
+          durationsByTest = msg.durationsByTest
+        }
+      }
+    })
+    child.on("error", (err) => {
+      const rawMsg = (err instanceof Error ? err.message : String(err)).trim()
+      finish(false, rawMsg || "probe child error")
+    })
+    child.on("close", (code) => {
+      const ok = doneOk && code === 0
+      finish(ok, ok ? undefined : `exitCode=${code}, doneOk=${doneOk}`)
+    })
+  })
+}
+
 export const runCoverageProbe = async ({
   vitestNodeEntry,
   cwd,
@@ -289,6 +414,14 @@ export const runCoverageProbe = async ({
   minMutants = 4,
   timeoutMs,
   tracker,
+  workerRef = undefined,
+  spawnWorker = undefined,
+  probeCache = undefined,
+  probeCacheKey = undefined,
+  probeStats = undefined,
+  onObservedDurations = undefined,
+  heavyThresholdMs = DEFAULT_HEAVY_TEST_THRESHOLD_MS,
+  testDurationsMs = undefined,
 }) => {
   if (
     testFiles.length < minTests ||
@@ -297,67 +430,73 @@ export const runCoverageProbe = async ({
   ) {
     return null
   }
-  const probeStateDir = tracker.makeTempDir("harness-probe-state-")
-  const covOutDir = tracker.makeTempDir("harness-probe-cov-")
-  try {
-    const probeEnv = {
-      ...childBaseEnv,
-      HARNESS_WARM_MODE: "probe",
-      HARNESS_WARM_VITEST_NODE_ENTRY: vitestNodeEntry,
-      HARNESS_WARM_CWD: cwd,
-      HARNESS_WARM_TESTS_JSON: JSON.stringify(testFiles),
-      HARNESS_WARM_COVERAGE_SETUP: COVERAGE_SETUP_SCRIPT,
-      HARNESS_WARM_COVERAGE_OUT_DIR: covOutDir,
-      HARNESS_WARM_STATE_DIR: probeStateDir,
+  if (
+    probeCache !== undefined &&
+    typeof probeCacheKey === "string" &&
+    probeCacheKey.length > 0 &&
+    probeCache.has(probeCacheKey)
+  ) {
+    if (probeStats) probeStats.cachedProbes = (probeStats.cachedProbes ?? 0) + 1
+    const cached = probeCache.get(probeCacheKey) ?? null
+    if (cached !== null && cached.observedDurationsByTest && onObservedDurations) {
+      onObservedDurations(cached.observedDurationsByTest)
     }
-    const probeResult = await new Promise((resolvePromise) => {
-      let child
-      try {
-        child = fork(WARM_WORKER_SCRIPT, [], {
-          cwd,
-          env: probeEnv,
-          stdio: ["ignore", "pipe", "pipe", "ipc"],
-        })
-      } catch {
-        resolvePromise({ ok: false, durationsByTest: {} })
-        return
+    return cached
+  }
+
+  const covOutDir = tracker.makeTempDir("harness-probe-cov-")
+  let probeStateDir = ""
+  try {
+    let probeResult = null
+    if (workerRef !== undefined || spawnWorker !== undefined) {
+      let worker = workerRef?.current
+      if ((!worker || !worker.isAlive()) && typeof spawnWorker === "function") {
+        worker = await spawnWorker()
+        if (workerRef) workerRef.current = worker
       }
-      tracker.activeChildren.add(child)
-      let doneOk = false
-      let durationsByTest = {}
-      let settled = false
-      const finish = (ok) => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        tracker.activeChildren.delete(child)
-        resolvePromise({ ok, durationsByTest })
+      if (!worker || typeof worker.runProbe !== "function") {
+        process.stderr.write(
+          "[mutation-check] Warning: Coverage probe failed (warm worker unavailable); falling back without Stage 0 probe.\n",
+        )
+        return null
       }
-      const timer = setTimeout(
-        () => {
-          try {
-            child.kill("SIGKILL")
-          } catch {
-            // Best-effort kill on probe timeout
-          }
-          finish(false)
-        },
-        Math.max(timeoutMs, 45_000),
-      )
-      child.stdout?.resume()
-      child.stderr?.resume()
-      child.on("message", (msg) => {
-        if (typeof msg === "object" && msg !== null && msg.type === "probeDone") {
-          doneOk = msg.ok === true
-          if (typeof msg.durationsByTest === "object" && msg.durationsByTest !== null) {
-            durationsByTest = msg.durationsByTest
-          }
-        }
+      if (probeStats) probeStats.inWorkerProbes = (probeStats.inWorkerProbes ?? 0) + 1
+      probeResult = await worker.runProbe(testFiles, covOutDir, timeoutMs)
+      if (workerRef && workerRef.current && !workerRef.current.isAlive()) {
+        await workerRef.current.shutdown()
+        workerRef.current = null
+      }
+      if (probeResult === null || !probeResult.ok) {
+        const reason =
+          probeResult === null
+            ? "worker probe returned null"
+            : probeResult.error || "worker probe failed"
+        process.stderr.write(
+          `[mutation-check] Warning: Coverage probe failed (${reason}); falling back without Stage 0 probe.\n`,
+        )
+        return null
+      }
+    } else {
+      if (probeStats) probeStats.coldProbes = (probeStats.coldProbes ?? 0) + 1
+      probeStateDir = tracker.makeTempDir("harness-probe-state-")
+      probeResult = await runExternalProbeProcess({
+        vitestNodeEntry,
+        cwd,
+        childBaseEnv,
+        testFiles,
+        covOutDir,
+        probeStateDir,
+        timeoutMs,
+        tracker,
       })
-      child.on("error", () => finish(false))
-      child.on("close", (code) => finish(doneOk && code === 0))
-    })
-    if (!probeResult.ok) return null
+      if (!probeResult.ok) {
+        const reason = probeResult.reason || "external probe failed"
+        process.stderr.write(
+          `[mutation-check] Warning: Coverage probe failed (${reason}); falling back without Stage 0 probe.\n`,
+        )
+        return null
+      }
+    }
 
     const coveredCanonical = new Set()
     const hitCountByTest = new Map()
@@ -365,6 +504,8 @@ export const runCoverageProbe = async ({
     const coveringSets = new Map()
     const perTestByMutantFile = new Map()
     const totalTestsByFile = new Map()
+    const observedDurationsByTest = {}
+    const resolvedCwd = resolve(cwd)
 
     for (const fileName of readdirSync(covOutDir)) {
       if (!fileName.endsWith(".json")) continue
@@ -373,12 +514,21 @@ export const runCoverageProbe = async ({
       const mappedTest = absToRaw.get(absTestPath)
       if (!mappedTest) continue
       coveredCanonical.add(mappedTest)
-      const measuredMs = probeResult.durationsByTest[absTestPath]
+      const relTest = relative(resolvedCwd, absTestPath).replace(/\\/g, "/")
+      const rawMeasured =
+        probeResult.durationsByTest[absTestPath] ??
+        probeResult.durationsByTest[relTest] ??
+        lookupTestDurationMs(testDurationsMs, cwd, mappedTest)
+      if (typeof rawMeasured === "number" && Number.isFinite(rawMeasured) && rawMeasured > 0) {
+        if (relTest.length > 0) {
+          observedDurationsByTest[relTest] = Math.max(1, Math.round(rawMeasured))
+        }
+      }
       fileDurationMs.set(
         mappedTest,
-        typeof measuredMs === "number" && Number.isFinite(measuredMs)
-          ? measuredMs
-          : isHeavyMetaTest(mappedTest)
+        typeof rawMeasured === "number" && Number.isFinite(rawMeasured)
+          ? rawMeasured
+          : isHeavyTest(mappedTest, cwd, testDurationsMs, heavyThresholdMs)
             ? 5_000
             : 500,
       )
@@ -418,7 +568,16 @@ export const runCoverageProbe = async ({
       }
       totalTestsByFile.set(mappedTest, distinctTestNames.size)
     }
-    if (coveredCanonical.size !== testFiles.length) return null
+    if (coveredCanonical.size !== testFiles.length) {
+      process.stderr.write(
+        `[mutation-check] Warning: Coverage probe failed (covered ${coveredCanonical.size}/${testFiles.length} test files); falling back without Stage 0 probe.\n`,
+      )
+      return null
+    }
+
+    if (onObservedDurations && Object.keys(observedDurationsByTest).length > 0) {
+      onObservedDurations(observedDurationsByTest)
+    }
 
     const coveringByMutant = new Map()
     const targetedByMutant = new Map()
@@ -437,7 +596,7 @@ export const runCoverageProbe = async ({
         const byTestName = perTestByMutantFile.get(mId)?.get(file)
         const distinctTotal = totalTestsByFile.get(file) ?? 0
         if (
-          (durMs >= 1_200 || isHeavyMetaTest(file)) &&
+          (durMs >= 1_200 || isHeavyTest(file, cwd, testDurationsMs, heavyThresholdMs)) &&
           byTestName !== undefined &&
           byTestName.size > 0 &&
           (distinctTotal === 0 || byTestName.size < distinctTotal || byTestName.size <= 6)
@@ -466,16 +625,24 @@ export const runCoverageProbe = async ({
         targetedByMutant.set(mId, targetedPlans.slice(0, 3))
       }
     }
-    return { coveringByMutant, targetedByMutant }
-  } catch {
+    const result = { coveringByMutant, targetedByMutant, observedDurationsByTest }
+    if (probeCache !== undefined && typeof probeCacheKey === "string" && probeCacheKey.length > 0) {
+      probeCache.set(probeCacheKey, result)
+    }
+    return result
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    process.stderr.write(
+      `[mutation-check] Warning: Coverage probe failed (${msg}); falling back without Stage 0 probe.\n`,
+    )
     return null
   } finally {
     tracker.cleanupTempDir(covOutDir)
-    tracker.cleanupTempDir(probeStateDir)
+    if (probeStateDir.length > 0) tracker.cleanupTempDir(probeStateDir)
   }
 }
 
-const MAX_WORKER_RSS_BYTES = 2048 * 1024 * 1024
+export const MAX_WORKER_RSS_BYTES = 2048 * 1024 * 1024
 
 export const createWarmVitestWorker = async ({
   vitestNodeEntry,
@@ -483,20 +650,32 @@ export const createWarmVitestWorker = async ({
   childBaseEnv,
   allTests,
   tracker,
-  isolate = true,
+  maxWorkerRssBytes = undefined,
+  onObservedDurations = undefined,
 }) => {
+  const effectiveMaxRssBytes =
+    typeof maxWorkerRssBytes === "number" &&
+    Number.isFinite(maxWorkerRssBytes) &&
+    maxWorkerRssBytes > 0
+      ? Math.min(MAX_WORKER_RSS_BYTES, maxWorkerRssBytes)
+      : MAX_WORKER_RSS_BYTES
+
+  const workerEnv = {
+    ...childBaseEnv,
+    HARNESS_WARM_MODE: "worker",
+    HARNESS_WARM_VITEST_NODE_ENTRY: vitestNodeEntry,
+    HARNESS_WARM_CWD: cwd,
+    HARNESS_WARM_TESTS_JSON: JSON.stringify(allTests),
+    HARNESS_WARM_COVERAGE_SETUP: existsSync(COVERAGE_SETUP_SCRIPT) ? COVERAGE_SETUP_SCRIPT : "",
+    HARNESS_WARM_ISOLATE: "1",
+  }
+  delete workerEnv["HARNESS_MUTATE_WARM_ISOLATE"]
+
   let child
   try {
     child = fork(WARM_WORKER_SCRIPT, [], {
       cwd,
-      env: {
-        ...childBaseEnv,
-        HARNESS_WARM_MODE: "worker",
-        HARNESS_WARM_VITEST_NODE_ENTRY: vitestNodeEntry,
-        HARNESS_WARM_CWD: cwd,
-        HARNESS_WARM_TESTS_JSON: JSON.stringify(allTests),
-        HARNESS_WARM_ISOLATE: isolate ? "1" : "0",
-      },
+      env: workerEnv,
       stdio: ["ignore", "pipe", "pipe", "ipc"],
     })
   } catch {
@@ -509,8 +688,11 @@ export const createWarmVitestWorker = async ({
   let closed = false
   let pendingRun = null
   let pendingInvalidate = null
+  let pendingProbe = null
   let reqSeq = 0
   let lastRssBytes = 0
+  let invalidateCalls = 0
+  let recycled = false
 
   child.stdout?.on("data", (c) => {
     tailStdout = appendCapped(tailStdout, c)
@@ -544,11 +726,35 @@ export const createWarmVitestWorker = async ({
         pendingInvalidate &&
         msg.reqId === pendingInvalidate.reqId
       ) {
-        return pendingInvalidate.resolve(true)
+        if (typeof msg.invalidateCallCount === "number") {
+          invalidateCalls = msg.invalidateCallCount
+        }
+        return pendingInvalidate.resolve(msg.ok !== false)
+      }
+      if (msg.type === "probeResult" && pendingProbe !== null && msg.reqId === pendingProbe.reqId) {
+        if (typeof msg.rssBytes === "number") lastRssBytes = msg.rssBytes
+        if (typeof msg.invalidateCallCount === "number") {
+          invalidateCalls = msg.invalidateCallCount
+        }
+        return pendingProbe.resolve({
+          ok: msg.ok === true,
+          ...(typeof msg.error === "string" && msg.error.length > 0 ? { error: msg.error } : {}),
+          durationsByTest:
+            typeof msg.durationsByTest === "object" && msg.durationsByTest !== null
+              ? msg.durationsByTest
+              : {},
+        })
       }
       if (msg.type === "result" && pendingRun !== null && msg.id === pendingRun.id) {
         if (typeof msg.rssBytes === "number") lastRssBytes = msg.rssBytes
-        return pendingRun.resolve({ _tag: "Result", result: msg.result })
+        if (typeof msg.invalidateCallCount === "number") {
+          invalidateCalls = msg.invalidateCallCount
+        }
+        return pendingRun.resolve({
+          _tag: "Result",
+          result: msg.result,
+          durationsByTest: msg.durationsByTest,
+        })
       }
     })
     child.on("error", (err) => {
@@ -556,8 +762,9 @@ export const createWarmVitestWorker = async ({
       tracker.activeChildren.delete(child)
       finishBoot(false)
       if (pendingInvalidate) pendingInvalidate.resolve(false)
+      if (pendingProbe) pendingProbe.resolve(null)
       if (pendingRun !== null) {
-        const msg = err instanceof Error ? err.message : String(err)
+        const msg = (err instanceof Error ? err.message : String(err)).trim()
         pendingRun.resolve({
           _tag: "SpawnFailed",
           spawnError: msg.length > 0 ? msg : "Warm worker IPC error",
@@ -571,6 +778,7 @@ export const createWarmVitestWorker = async ({
       tracker.activeChildren.delete(child)
       finishBoot(false)
       if (pendingInvalidate) pendingInvalidate.resolve(false)
+      if (pendingProbe) pendingProbe.resolve(null)
       if (pendingRun !== null) {
         pendingRun.resolve(
           signal !== null
@@ -624,12 +832,58 @@ export const createWarmVitestWorker = async ({
     })
   }
 
+  const runProbe = async (testFiles, coverageOutDir, timeoutMs) => {
+    if (closed || !child.connected) return null
+    const stateDir = tracker.makeTempDir("harness-probe-state-")
+    reqSeq += 1
+    const reqId = reqSeq
+    try {
+      return await new Promise((resolveProbe) => {
+        let settled = false
+        const settle = (res) => {
+          if (settled) return
+          settled = true
+          clearTimeout(probeTimer)
+          pendingProbe = null
+          resolveProbe(res)
+        }
+        const probeTimer = setTimeout(
+          () => {
+            closed = true
+            try {
+              child.kill("SIGKILL")
+            } catch {
+              // Best-effort kill on probe timeout
+            }
+            settle(null)
+          },
+          Math.max(timeoutMs, 45_000),
+        )
+        pendingProbe = { reqId, resolve: settle }
+        try {
+          child.send({
+            type: "probe",
+            reqId,
+            testFiles,
+            coverageOutDir,
+            stateDir,
+          })
+        } catch {
+          closed = true
+          settle(null)
+        }
+      })
+    } finally {
+      tracker.cleanupTempDir(stateDir)
+    }
+  }
+
   const runSubset = async (
     mutantId,
     subsetFiles,
     timeoutMs,
-    invalidateFile = "",
     testNamePattern = "",
+    runOnObservedDurations = onObservedDurations,
   ) => {
     if (closed || !child.connected) return null
     const stateDir = tracker.makeTempDir("harness-batch-state-")
@@ -663,6 +917,16 @@ export const createWarmVitestWorker = async ({
             if (timedOut) {
               settle({ _tag: "TimedOut", stdout: tailStdout, stderr: tailStderr })
             } else if (ev._tag === "Result") {
+              if (
+                testNamePattern.length === 0 &&
+                ev.result?._tag === "Exited" &&
+                ev.result?.exitCode === 0 &&
+                typeof ev.durationsByTest === "object" &&
+                ev.durationsByTest !== null &&
+                typeof runOnObservedDurations === "function"
+              ) {
+                runOnObservedDurations(ev.durationsByTest)
+              }
               settle(ev.result)
             } else {
               settle(ev)
@@ -675,15 +939,14 @@ export const createWarmVitestWorker = async ({
             id: mutantId,
             testFiles: subsetFiles,
             stateDir,
-            ...(invalidateFile ? { invalidateFile } : {}),
             ...(testNamePattern ? { testNamePattern } : {}),
           })
         } catch (err) {
           closed = true
-          const rawErr = err instanceof Error ? err.message : String(err)
+          const rawErr = (err instanceof Error ? err.message : String(err)).trim()
           settle({
             _tag: "SpawnFailed",
-            spawnError: rawErr,
+            spawnError: rawErr.length > 0 ? rawErr : "Warm worker IPC error",
             stdout: tailStdout,
             stderr: tailStderr,
           })
@@ -695,6 +958,7 @@ export const createWarmVitestWorker = async ({
   }
 
   const shutdown = async () => {
+    if (lastRssBytes > effectiveMaxRssBytes) recycled = true
     if (closed) return
     await new Promise((resolveStop) => {
       const killTimer = setTimeout(() => {
@@ -726,10 +990,16 @@ export const createWarmVitestWorker = async ({
 
   return {
     invalidateFiles,
+    runProbe,
     runSubset,
     shutdown,
     isAlive: () => !closed && child.connected,
-    shouldRecycle: () => lastRssBytes > MAX_WORKER_RSS_BYTES,
+    shouldRecycle: () => lastRssBytes > effectiveMaxRssBytes,
+    getStats: () => ({
+      rssBytes: lastRssBytes,
+      invalidateCalls,
+      recycled: recycled || lastRssBytes > effectiveMaxRssBytes,
+    }),
   }
 }
 
@@ -742,7 +1012,8 @@ export const runWarmMutantWithWorker = async ({
   coverageInfo,
   timeoutMs,
   cwd,
-  targetFilePath = "",
+  onObservedDurations = undefined,
+  onRecycle = undefined,
 }) => {
   const ensureWorker = async () => {
     if (!workerRef.current || !workerRef.current.isAlive()) {
@@ -750,10 +1021,17 @@ export const runWarmMutantWithWorker = async ({
     }
     return workerRef.current
   }
+  const shutdownWorkerRef = async () => {
+    if (!workerRef.current) return
+    const wasRssRecycle = workerRef.current.shouldRecycle?.() === true
+    await workerRef.current.shutdown()
+    workerRef.current = null
+    if (wasRssRecycle && typeof onRecycle === "function") onRecycle()
+  }
   const maybeRecycle = async () => {
-    if (workerRef.current?.shouldRecycle?.()) {
-      await workerRef.current.shutdown()
-      workerRef.current = null
+    if (!workerRef.current) return
+    if (workerRef.current.shouldRecycle?.() || !workerRef.current.isAlive()) {
+      await shutdownWorkerRef()
     }
   }
 
@@ -762,15 +1040,21 @@ export const runWarmMutantWithWorker = async ({
   for (const targeted of targetedList) {
     const w0 = await ensureWorker()
     if (!w0) break
-    const stage0 = await w0.runSubset(
-      mutantId,
-      [targeted.file],
-      timeoutMs,
-      targetFilePath,
-      targeted.pattern,
-    )
+    const stage0 = await w0.runSubset(mutantId, [targeted.file], timeoutMs, targeted.pattern)
+    if (stage0 === null) {
+      await shutdownWorkerRef()
+      break
+    }
+    if (stage0._tag === "Signaled" || stage0._tag === "TimedOut") {
+      await shutdownWorkerRef()
+      return { id: mutantId, result: stage0 }
+    }
+    if (stage0._tag === "SpawnFailed") {
+      await shutdownWorkerRef()
+      break
+    }
     await maybeRecycle()
-    if (stage0 !== null && (stage0._tag !== "Exited" || stage0.exitCode !== 0)) {
+    if (stage0._tag !== "Exited" || stage0.exitCode !== 0) {
       return { id: mutantId, result: stage0 }
     }
   }
@@ -779,42 +1063,60 @@ export const runWarmMutantWithWorker = async ({
   if (!w1) return coldFallback(mutantId, targetTests, timeoutMs)
 
   const covering = coverageInfo?.coveringByMutant?.get(mutantId)
-  if (!covering || covering.length === 0 || covering.length >= targetTests.length) {
-    const res = await w1.runSubset(mutantId, targetTests, timeoutMs, targetFilePath)
+  const coveringSet =
+    covering && covering.length > 0 ? new Set(covering.map((f) => resolve(cwd, f))) : null
+  const remaining =
+    coveringSet !== null ? targetTests.filter((f) => !coveringSet.has(resolve(cwd, f))) : []
+
+  if (
+    !covering ||
+    covering.length === 0 ||
+    covering.length >= targetTests.length ||
+    remaining.length === 0
+  ) {
+    const res = await w1.runSubset(mutantId, targetTests, timeoutMs, "", onObservedDurations)
+    if (res === null || res._tag === "SpawnFailed") {
+      await shutdownWorkerRef()
+      return coldFallback(mutantId, targetTests, timeoutMs)
+    }
+    if (res._tag === "Signaled" || res._tag === "TimedOut") {
+      await shutdownWorkerRef()
+      return { id: mutantId, result: res }
+    }
     await maybeRecycle()
-    if (res === null) return coldFallback(mutantId, targetTests, timeoutMs)
     return { id: mutantId, result: res }
   }
 
-  const coveringSet = new Set(covering.map((f) => resolve(cwd, f)))
-  const remaining = targetTests.filter((f) => !coveringSet.has(resolve(cwd, f)))
-  if (remaining.length === 0) {
-    const res = await w1.runSubset(mutantId, targetTests, timeoutMs, targetFilePath)
-    await maybeRecycle()
-    if (res === null) return coldFallback(mutantId, targetTests, timeoutMs)
-    return { id: mutantId, result: res }
-  }
-
-  const stage1 = await w1.runSubset(mutantId, covering, timeoutMs, targetFilePath)
-  if (stage1 === null) {
-    await maybeRecycle()
+  const stage1 = await w1.runSubset(mutantId, covering, timeoutMs, "", onObservedDurations)
+  if (stage1 === null || stage1._tag === "SpawnFailed") {
+    await shutdownWorkerRef()
     return coldFallback(mutantId, targetTests, timeoutMs)
   }
+  if (stage1._tag === "Signaled" || stage1._tag === "TimedOut") {
+    await shutdownWorkerRef()
+    return { id: mutantId, result: stage1 }
+  }
+  await maybeRecycle()
   if (stage1._tag !== "Exited" || stage1.exitCode !== 0) {
-    await maybeRecycle()
     return { id: mutantId, result: stage1 }
   }
   const count1 = parsePassedCount(stage1.stdout)
   if (count1 === null) {
-    await maybeRecycle()
     return { id: mutantId, result: stage1 }
   }
 
   const w2 = await ensureWorker()
   if (!w2) return coldFallback(mutantId, targetTests, timeoutMs)
-  const stage2 = await w2.runSubset(mutantId, remaining, timeoutMs, targetFilePath)
+  const stage2 = await w2.runSubset(mutantId, remaining, timeoutMs, "", onObservedDurations)
+  if (stage2 === null || stage2._tag === "SpawnFailed") {
+    await shutdownWorkerRef()
+    return coldFallback(mutantId, targetTests, timeoutMs)
+  }
+  if (stage2._tag === "Signaled" || stage2._tag === "TimedOut") {
+    await shutdownWorkerRef()
+    return { id: mutantId, result: stage2 }
+  }
   await maybeRecycle()
-  if (stage2 === null) return coldFallback(mutantId, targetTests, timeoutMs)
   if (stage2._tag !== "Exited" || stage2.exitCode !== 0) {
     return { id: mutantId, result: stage2 }
   }

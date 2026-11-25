@@ -28,8 +28,8 @@ import {
   type MutationContextDigests,
   computeFileMutationClosureDigest,
   computeMutantCacheKey,
+  computeMutationContextDigestsChecked,
   computeMutationEntryMac,
-  hashReachingTestFiles,
   loadMutationCache,
   partitionMutationCacheLookup,
   saveMutationCacheAtomic,
@@ -37,15 +37,90 @@ import {
 import {
   type DomainFile,
   findDomainFilesChecked,
+  findReachingTestFilesChecked,
   findUnclassifiedModifiedLibFilesChecked,
   partitionReachingTestFilesChecked,
+  resolveDomainPackageRelDir,
 } from "./mutation-target-discovery.js"
-import type { PackageReachabilityIndex } from "./mutation-test-reachability.js"
+import {
+  type PackageReachabilityIndex,
+  partitionEligibleTestsChecked,
+} from "./mutation-test-reachability.js"
+import type { createSuiteTimingsTracker } from "./mutation-test-timings.js"
+import { normalizeRepoRelTestPath } from "./mutation-witness.js"
 
 type PartitionCheckedResult = ReturnType<typeof partitionReachingTestFilesChecked>
+export type SuiteTimingsTracker = ReturnType<typeof createSuiteTimingsTracker>
 
 /**
- * Computes candidate cache keys for a file's mutants and partitions hits vs misses.
+ * Discovers reaching tests, looks up verified measured timings, and partitions tests into primary and fallback stages.
+ */
+export const partitionTargetTestsWithTimings = (input: {
+  readonly repoRoot: string
+  readonly file: DomainFile
+  readonly sourceContent: string
+  readonly hostIo: SyncHostIo
+  readonly reachabilityCache: Map<string, PackageReachabilityIndex>
+  readonly timingsTracker: SuiteTimingsTracker
+}): PartitionCheckedResult =>
+  match(findReachingTestFilesChecked(input.repoRoot, input.file, input.hostIo))
+    .with({ _tag: "Error" }, (err) => err)
+    .with({ _tag: "Ok" }, ({ files: allTests }) => {
+      const pkgKey = `${input.file.scope}/${input.file.pkgDir}`
+      const measuredDurationMsByAbsPath = input.timingsTracker.lookupForPackage(pkgKey, allTests)
+      const pkgDirRel = resolveDomainPackageRelDir(input.file)
+      return partitionEligibleTestsChecked({
+        repoRoot: input.repoRoot,
+        pkgDirRel,
+        pkgName: input.file.pkgName,
+        relFile: input.file.relFile,
+        sourceContent: input.sourceContent,
+        allTests,
+        hostIo: input.hostIo,
+        reachabilityCache: input.reachabilityCache,
+        measuredDurationMsByAbsPath,
+      })
+    })
+    .exhaustive()
+
+const resolveMemoizedWitnessClosureDigest = (input: {
+  readonly repoRoot: string
+  readonly relFile: string
+  readonly witnessTestFile: AstSourceFilePath
+  readonly digests: MutationContextDigests
+  readonly hostIo: SyncHostIo
+  readonly witnessClosureMemo?: Map<string, ContentSha256 | null> | undefined
+}): ContentSha256 | undefined => {
+  const memoKey = `${input.relFile}\0${input.witnessTestFile}`
+  if (input.witnessClosureMemo?.has(memoKey) === true) {
+    return input.witnessClosureMemo.get(memoKey) ?? undefined
+  }
+  return match(
+    computeFileMutationClosureDigest({
+      repoRoot: input.repoRoot,
+      relFile: input.relFile,
+      allReachingTests: [input.witnessTestFile],
+      digests: input.digests,
+      hostIo: input.hostIo,
+    }),
+  )
+    .with({ _tag: "Ok" }, ({ closureDigest }) => {
+      input.witnessClosureMemo?.set(memoKey, closureDigest)
+      return closureDigest
+    })
+    .with({ _tag: "Disabled" }, ({ reason }) => {
+      input.witnessClosureMemo?.set(memoKey, null)
+      process.stderr.write(
+        `[mutation-check] Warning: Witness closure disabled for '${input.relFile}' (${reason}).\n`,
+      )
+      return undefined
+    })
+    .exhaustive()
+}
+
+/**
+ * Computes candidate witness-independent cache keys for a file's mutants and partitions hits vs misses
+ * against witness-scoped closure digests.
  */
 export const hydrateFileMutantCacheHits = (input: {
   readonly repoRoot: string
@@ -61,6 +136,7 @@ export const hydrateFileMutantCacheHits = (input: {
   readonly contextDigests: MutationContextDigests | undefined
   readonly loadedCacheStore: MutationCacheStore | undefined
   readonly cacheEntries: Record<ContentSha256, MutationCacheEntry>
+  readonly witnessClosureMemo?: Map<string, ContentSha256 | null> | undefined
 }): {
   readonly mutantKeys: ReadonlyMap<string, ContentSha256>
   readonly cachedHitIds: ReadonlySet<string>
@@ -86,34 +162,18 @@ export const hydrateFileMutantCacheHits = (input: {
   }
   const compiledSchemaSha256 = computeContentSha256(input.schemaSource)
   const originalSha256 = computeContentSha256(input.originalContent)
-  const reachingTestHashes = match(
-    hashReachingTestFiles(input.repoRoot, input.allReachingTests, input.hostIo),
-  )
-    .with({ _tag: "Some" }, ({ value }) => value)
-    .with({ _tag: "None" }, () => undefined)
-    .exhaustive()
-  if (reachingTestHashes === undefined) {
-    return { mutantKeys, cachedHitIds, dirtiedCache }
-  }
-  const closureDigest = match(
-    computeFileMutationClosureDigest({
-      repoRoot: input.repoRoot,
-      relFile: input.file.relFile,
-      allReachingTests: input.allReachingTests,
-      digests: input.contextDigests,
-      hostIo: input.hostIo,
-    }),
-  )
-    .with({ _tag: "Ok" }, ({ closureDigest: digest }) => digest)
-    .with({ _tag: "Disabled" }, ({ reason }) => {
-      process.stderr.write(
-        `[mutation-check] Warning: Mutation cache disabled for '${input.file.relFile}' (${reason}).\n`,
-      )
-      return undefined
-    })
-    .exhaustive()
-  if (closureDigest === undefined) {
-    return { mutantKeys, cachedHitIds, dirtiedCache }
+  const reachingTests: Array<AstSourceFilePath> = []
+  const reachingSet = new Set<AstSourceFilePath>()
+  for (const rawTest of input.allReachingTests) {
+    match(normalizeRepoRelTestPath(input.repoRoot, rawTest))
+      .with({ _tag: "Some" }, ({ value }) => {
+        if (!reachingSet.has(value)) {
+          reachingSet.add(value)
+          reachingTests.push(value)
+        }
+      })
+      .with({ _tag: "None" }, () => {})
+      .exhaustive()
   }
   const pkgKey = PackageRelKey.make(`${input.file.scope}/${input.file.pkgDir}`)
   const relFile = AstSourceFilePath.make(input.file.relFile)
@@ -126,9 +186,7 @@ export const hydrateFileMutantCacheHits = (input: {
       originalContentSha256: originalSha256,
       compiledSchemaSha256,
       mutant,
-      reachingTestHashes,
       digests: input.contextDigests,
-      closureDigest,
     })
     mutantKeys.set(mutant.id, key)
     candidateKeys.push(key)
@@ -137,11 +195,36 @@ export const hydrateFileMutantCacheHits = (input: {
     else keyToMutantIds.set(key, [mutant.id])
   }
   if (candidateKeys.length > 0) {
+    const distinctWitnessFiles = new Set<AstSourceFilePath>()
+    for (const candidateKey of candidateKeys) {
+      const entry = Object.hasOwn(input.loadedCacheStore.entries, candidateKey)
+        ? input.loadedCacheStore.entries[candidateKey]
+        : undefined
+      if (entry !== undefined && reachingSet.has(entry.witnessTestFile)) {
+        distinctWitnessFiles.add(entry.witnessTestFile)
+      }
+    }
+    const witnessClosureDigests: Record<AstSourceFilePath, ContentSha256> = {}
+    for (const witnessTestFile of distinctWitnessFiles) {
+      const digest = resolveMemoizedWitnessClosureDigest({
+        repoRoot: input.repoRoot,
+        relFile: input.file.relFile,
+        witnessTestFile,
+        digests: input.contextDigests,
+        hostIo: input.hostIo,
+        witnessClosureMemo: input.witnessClosureMemo,
+      })
+      if (digest !== undefined) {
+        witnessClosureDigests[witnessTestFile] = digest
+      }
+    }
     const lookupDecision = partitionMutationCacheLookup({
       candidateKeys,
       store: input.loadedCacheStore,
       auth: input.cacheAuth,
       nowMs: input.nowMs,
+      reachingTests,
+      witnessClosureDigests,
     })
     const touchedAt = MutationCacheTimestamp.make(new Date(input.nowMs).toISOString())
     for (const hitKey of lookupDecision.hitKeys) {
@@ -314,6 +397,11 @@ export const preparePackageBaselines = (input: {
   readonly baseSubprocessEnv: Readonly<Record<string, string | undefined>>
   readonly diffLinesMap: ReadonlyMap<string, ReadonlySet<number>> | undefined
   readonly bypassDiffFilter: boolean
+  readonly uncachedFilesSet?: ReadonlySet<string> | undefined
+  readonly precomputedPartitions?: ReadonlyMap<string, PartitionCheckedResult> | undefined
+  readonly onObservedDurations?:
+    | ((pkgKey: string, observed: ReadonlyMap<string, number>) => void)
+    | undefined
 }): PreparePackageBaselinesResult => {
   const partitionCache = new Map<string, PartitionCheckedResult>()
   const reachabilityCache = new Map<string, PackageReachabilityIndex>()
@@ -328,34 +416,45 @@ export const preparePackageBaselines = (input: {
     ) {
       continue
     }
-    const content = match(
-      Result.try({
-        try: () => input.hostIo.readTextSync(file.fullPath),
-        catch: (err) => (err instanceof Error ? err.message : String(err)),
-      }),
-    )
-      .with({ _tag: "Success" }, ({ success }) => success)
-      .with({ _tag: "Failure" }, ({ failure }) => ({ readErr: failure }))
-      .exhaustive()
-    if (typeof content !== "string") {
-      return { _tag: "ReadError", relFile: file.relFile, reason: content.readErr }
-    }
-    const modifiedLines = input.bypassDiffFilter ? undefined : input.diffLinesMap?.get(file.relFile)
-    const mutants = discoverDomainMutants(
-      file.relFile,
-      content,
-      modifiedLines !== undefined && modifiedLines.size > 0 ? { modifiedLines } : undefined,
-    )
-    if (mutants.length === 0) continue
+    const prePart = input.precomputedPartitions?.get(file.relFile)
+    let partRes: PartitionCheckedResult
+    if (prePart !== undefined) {
+      partRes = prePart
+    } else {
+      const content = match(
+        Result.try({
+          try: () => input.hostIo.readTextSync(file.fullPath),
+          catch: (err) => (err instanceof Error ? err.message : String(err)),
+        }),
+      )
+        .with({ _tag: "Success" }, ({ success }) => success)
+        .with({ _tag: "Failure" }, ({ failure }) => ({ readErr: failure }))
+        .exhaustive()
+      if (typeof content !== "string") {
+        return { _tag: "ReadError", relFile: file.relFile, reason: content.readErr }
+      }
+      const modifiedLines = input.bypassDiffFilter
+        ? undefined
+        : input.diffLinesMap?.get(file.relFile)
+      const mutants = discoverDomainMutants(
+        file.relFile,
+        content,
+        modifiedLines !== undefined && modifiedLines.size > 0 ? { modifiedLines } : undefined,
+      )
+      if (mutants.length === 0) continue
 
-    const partRes = partitionReachingTestFilesChecked(
-      input.repoRoot,
-      file,
-      content,
-      input.hostIo,
-      reachabilityCache,
-    )
+      partRes = partitionReachingTestFilesChecked(
+        input.repoRoot,
+        file,
+        content,
+        input.hostIo,
+        reachabilityCache,
+      )
+    }
     partitionCache.set(file.relFile, partRes)
+    const shouldIncludeInBaseline =
+      input.uncachedFilesSet === undefined || input.uncachedFilesSet.has(file.relFile)
+    if (!shouldIncludeInBaseline) continue
     match(partRes)
       .with({ _tag: "Ok" }, ({ partition }) => {
         if (partition.primaryTests.length > 0 || partition.fallbackTests.length > 0) {
@@ -386,10 +485,17 @@ export const preparePackageBaselines = (input: {
       input.baseSubprocessEnv,
     )
     match(res)
-      .with({ _tag: "Ok" }, () => {
+      .with({ _tag: "Ok" }, ({ observedDurationsMs }) => {
         passedPackageBaselines.add(pkgKey)
+        if (observedDurationsMs.size > 0) {
+          input.onObservedDurations?.(pkgKey, observedDurationsMs)
+        }
       })
-      .with({ _tag: "Failed" }, () => {})
+      .with({ _tag: "Failed" }, ({ diagnostic }) => {
+        process.stderr.write(
+          `[mutation-check] Warning: Batched package baseline for '${pkgKey}' failed (${diagnostic}); falling back to per-file baselines.\n`,
+        )
+      })
       .exhaustive()
   }
 
@@ -477,11 +583,16 @@ export const recordKilledMutantsToCache = (input: {
   readonly fileOutcomes: ReadonlyMap<string, MutantOutcome>
   readonly mutantKeys: ReadonlyMap<string, ContentSha256>
   readonly fileNonCacheableIds: ReadonlySet<string>
+  readonly witnessByMutantId: ReadonlyMap<string, AstSourceFilePath>
+  readonly repoRoot: string
+  readonly digests: MutationContextDigests | undefined
+  readonly hostIo: SyncHostIo
   readonly cacheAuth: MutationCacheAuth | undefined
   readonly nowMs: MutationEpochMillis
   readonly cacheEntries: Record<ContentSha256, MutationCacheEntry>
+  readonly witnessClosureMemo?: Map<string, ContentSha256 | null> | undefined
 }): boolean => {
-  if (input.cacheAuth === undefined) return false
+  if (input.cacheAuth === undefined || input.digests === undefined) return false
   const hmacSecret = match(input.cacheAuth)
     .with({ _tag: "Enabled" }, ({ hmacSecret: secret }) => secret)
     .with({ _tag: "Disabled" }, () => undefined)
@@ -493,32 +604,99 @@ export const recordKilledMutantsToCache = (input: {
   for (const mutant of input.uncachedMutants) {
     const outcome = input.fileOutcomes.get(mutant.id)
     const key = input.mutantKeys.get(mutant.id)
+    const witnessTestFile = input.witnessByMutantId.get(mutant.id)
     match(outcome?.status)
       .with("killed", () => {
-        if (key !== undefined && !input.fileNonCacheableIds.has(mutant.id)) {
-          const mutantCacheId = MutantCacheId.make(mutant.id)
-          const mac = computeMutationEntryMac(hmacSecret, {
-            key,
-            file: fileAstPath,
-            mutantId: mutantCacheId,
-            status: "killed",
-            recordedAt,
+        if (
+          key !== undefined &&
+          witnessTestFile !== undefined &&
+          !input.fileNonCacheableIds.has(mutant.id)
+        ) {
+          const witnessClosureSha256 = resolveMemoizedWitnessClosureDigest({
+            repoRoot: input.repoRoot,
+            relFile: input.relFile,
+            witnessTestFile,
+            digests: input.digests!,
+            hostIo: input.hostIo,
+            witnessClosureMemo: input.witnessClosureMemo,
           })
-          input.cacheEntries[key] = {
-            key,
-            file: fileAstPath,
-            mutantId: mutantCacheId,
-            status: "killed",
-            recordedAt,
-            mac,
+          if (witnessClosureSha256 !== undefined) {
+            const mutantCacheId = MutantCacheId.make(mutant.id)
+            const mac = computeMutationEntryMac(hmacSecret, {
+              key,
+              file: fileAstPath,
+              mutantId: mutantCacheId,
+              status: "killed",
+              recordedAt,
+              witnessTestFile,
+              witnessClosureSha256,
+            })
+            input.cacheEntries[key] = {
+              key,
+              file: fileAstPath,
+              mutantId: mutantCacheId,
+              status: "killed",
+              recordedAt,
+              witnessTestFile,
+              witnessClosureSha256,
+              mac,
+            }
+            dirtied = true
           }
-          dirtied = true
         }
       })
       .with("survived", "equivalent", undefined, () => {})
       .exhaustive()
   }
   return dirtied
+}
+
+export interface SuiteCacheContext {
+  readonly enabledCacheAuth: MutationCacheAuth | undefined
+  readonly contextDigests: MutationContextDigests | undefined
+  readonly cacheEnabled: boolean
+  readonly loadedCacheStore: MutationCacheStore | undefined
+}
+
+/** Resolves cache auth, context digests, and initial cache store for a mutation suite run. */
+export const initSuiteCacheContext = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  cacheRequested: boolean,
+  cacheAuth: MutationCacheAuth | undefined,
+): SuiteCacheContext => {
+  const enabledCacheAuth: MutationCacheAuth | undefined = cacheRequested
+    ? cacheAuth === undefined
+      ? (() => {
+          process.stderr.write(
+            "[mutation-check] Warning: Mutation cache disabled (missing HMAC secret).\n",
+          )
+          return undefined
+        })()
+      : match(cacheAuth)
+          .with({ _tag: "Disabled" }, ({ reason }) => {
+            process.stderr.write(`[mutation-check] Warning: Mutation cache disabled (${reason}).\n`)
+            return undefined
+          })
+          .with({ _tag: "Enabled" }, (enabled) => enabled)
+          .exhaustive()
+    : undefined
+  const contextDigests =
+    enabledCacheAuth !== undefined
+      ? match(computeMutationContextDigestsChecked(repoRoot, hostIo))
+          .with({ _tag: "Ok" }, ({ digests }) => digests)
+          .with({ _tag: "Disabled" }, ({ reason }) => {
+            process.stderr.write(`[mutation-check] Warning: Mutation cache disabled (${reason}).\n`)
+            return undefined
+          })
+          .exhaustive()
+      : undefined
+  const cacheEnabled = enabledCacheAuth !== undefined && contextDigests !== undefined
+  const loadedCacheStore =
+    cacheEnabled && enabledCacheAuth !== undefined
+      ? loadMutationCache(repoRoot, hostIo, enabledCacheAuth)
+      : undefined
+  return { enabledCacheAuth, contextDigests, cacheEnabled, loadedCacheStore }
 }
 
 /**
@@ -549,4 +727,55 @@ export const flushMutationCache = (
       return false
     })
     .exhaustive()
+}
+
+/** Records killed mutants to cache, appends ordered outcomes, and invokes flush callback. */
+export const applyFileOutcomesAndRecordKills = (input: {
+  readonly relFile: string
+  readonly mutants: ReadonlyArray<CodeMutant>
+  readonly uncachedMutants: ReadonlyArray<CodeMutant>
+  readonly mutantKeys: ReadonlyMap<string, ContentSha256>
+  readonly fileOutcomes: ReadonlyMap<string, MutantOutcome>
+  readonly fileNonCacheableIds: ReadonlySet<string>
+  readonly witnessByMutantId: ReadonlyMap<string, AstSourceFilePath>
+  readonly repoRoot: string
+  readonly contextDigests: MutationContextDigests | undefined
+  readonly hostIo: SyncHostIo
+  readonly enabledCacheAuth: MutationCacheAuth | undefined
+  readonly nowMs: MutationEpochMillis
+  readonly cacheEntries: Record<ContentSha256, MutationCacheEntry>
+  readonly witnessClosureMemo: Map<string, ContentSha256 | null>
+  readonly outcomes: Array<MutantOutcome>
+  readonly markDirty: () => void
+  readonly flushCache: () => void
+  readonly requireAllOutcomes: boolean
+}): string | undefined => {
+  if (!input.requireAllOutcomes && input.fileOutcomes.size === 0) return undefined
+  const ordered = collectOrderedFileOutcomes(input.mutants, input.fileOutcomes)
+  if (input.requireAllOutcomes && ordered.missingIds.length > 0) {
+    input.outcomes.push(...ordered.present)
+    return `[mutation-check] Missing outcome(s) for mutant(s) in '${input.relFile}': ${ordered.missingIds.join(", ")}`
+  }
+  if (
+    recordKilledMutantsToCache({
+      relFile: input.relFile,
+      uncachedMutants: input.uncachedMutants,
+      fileOutcomes: input.fileOutcomes,
+      mutantKeys: input.mutantKeys,
+      fileNonCacheableIds: input.fileNonCacheableIds,
+      witnessByMutantId: input.witnessByMutantId,
+      repoRoot: input.repoRoot,
+      digests: input.contextDigests,
+      hostIo: input.hostIo,
+      cacheAuth: input.enabledCacheAuth,
+      nowMs: input.nowMs,
+      cacheEntries: input.cacheEntries,
+      witnessClosureMemo: input.witnessClosureMemo,
+    })
+  ) {
+    input.markDirty()
+  }
+  input.outcomes.push(...ordered.present)
+  input.flushCache()
+  return undefined
 }

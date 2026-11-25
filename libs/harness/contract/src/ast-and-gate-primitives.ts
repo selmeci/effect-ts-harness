@@ -6,6 +6,12 @@ export const NonNegativeCount = Schema.Int.pipe(
 )
 export type NonNegativeCount = typeof NonNegativeCount.Type
 
+export const TestTimingDurationMs = Schema.Finite.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+  Schema.brand("TestTimingDurationMs"),
+)
+export type TestTimingDurationMs = typeof TestTimingDurationMs.Type
+
 export const GateRuleVersion = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),
   Schema.check(Schema.isMaxLength(256)),

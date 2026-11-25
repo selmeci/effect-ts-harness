@@ -241,6 +241,13 @@ export {
   type UntestedMutationFile,
 } from "./mutation-check.js"
 export {
+  prepareStackedBaseForSuite,
+  resolveStackedBaseContext,
+  verifyAncestorLinesAgainstHmacCache,
+  type StackedBaseResolution,
+  type StackedBaseSuitePreparation,
+} from "./mutation/mutation-stacked-base.js"
+export {
   classifyMutationModulePurity,
   isPureMutationCandidate,
   type PureModuleClassification,
@@ -517,8 +524,10 @@ export {
   verifyMutantSchemaSyntax,
 } from "./mutation/mutant-ast-generator.js"
 export {
+  checkGitAncestorCommit,
   extractGitDiffModifiedLinesChecked,
   recoverStartupBackup,
+  type GitAncestorCheckResult,
   type GitDiffExtractionResult,
 } from "./mutation/mutation-backup.js"
 export { readAndVerifyWorkspaceFile, statAndReadWorkspaceFiles } from "./services/workspace-fs.js"
@@ -579,12 +588,17 @@ export {
   computeMutationEntryMac,
   decideMutationCacheLookup,
   emptyMutationCacheStore,
-  hashReachingTestFiles,
   loadMutationCache,
   loadMutationCacheWithStatus,
   saveMutationCacheAtomic,
+  validateHarnessCacheFileSafety,
   verifyMutationEntryMac,
 } from "./mutation/mutation-cache.js"
+export {
+  extractWitnessTestFileFromOutput,
+  formatSurvivorLine,
+  normalizeRepoRelTestPath,
+} from "./mutation/mutation-witness.js"
 export {
   isWorkspaceTsSourceFileName,
   scanWorkspaceTsFilesChecked,
@@ -607,3 +621,25 @@ export {
   type PackageReachabilityIndex,
   type ReverseImportReachability,
 } from "./mutation/mutation-test-reachability.js"
+export {
+  buildTimingEntryKey,
+  buildVerifiedTestTimingLookup,
+  computeNextEmaDurationMs,
+  createSuiteTimingsTracker,
+  emptyMutationTestTimingsStore,
+  isHeavyMetaTestAbsPath,
+  isHeavyTestByTimingOrStatic,
+  loadMutationTestTimings,
+  lookupMeasuredTestDurationMs,
+  parseVitestBaselineTestDurations,
+  recordObservedTestTimings,
+  saveMutationTestTimingsAtomic,
+  tryBuildTimingEntryKey,
+} from "./mutation/mutation-test-timings.js"
+export {
+  PackageBatchFileOutputSchema,
+  type PackageBatchFileOutput,
+  cleanupStreamReportFile,
+  mergeObservedDurationsIntoMap,
+  readStreamedPackageBatchReports,
+} from "./mutation/mutation-batch-stream.js"

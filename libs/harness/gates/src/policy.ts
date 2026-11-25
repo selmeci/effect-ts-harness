@@ -708,7 +708,7 @@ export const classifyFileWrite = (
 
   if (
     candidates.some((p) =>
-      /(^|\/)\.harness\/(worktrees\/[^/]+\/)?(cache\/mutation-cache-v\d+\.(?:json(?:\.corrupt)?|corrupt)|session-preinvocation-cache\.json|last-done\.json|graph-snapshot\.json|graph-head\.json)$/.test(
+      /(^|\/)\.harness\/(worktrees\/[^/]+\/)?(cache\/mutation-(?:cache|test-timings)-v(?:\d+|[^/*?[\]{}]*[*?[\]{}][^/]*)\.(?:json(?:\.corrupt)?|corrupt)|session-preinvocation-cache\.json|last-done\.json|graph-snapshot\.json|graph-head\.json)$/.test(
         p,
       ),
     )

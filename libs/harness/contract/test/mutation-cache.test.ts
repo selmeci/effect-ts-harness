@@ -9,6 +9,7 @@ import {
   ErrorReasonMessage,
   MUTATION_CACHE_FILENAME,
   MUTATION_CACHE_SCHEMA_VERSION,
+  MUTATION_TEST_TIMINGS_SCHEMA_VERSION,
   MutantCacheId,
   MutationCacheAuth,
   MutationCacheEntry,
@@ -21,21 +22,28 @@ import {
   MutationCacheTimestamp,
   MutationEpochMillis,
   MutationMaxAgeMillis,
+  MutationTestTimingKey,
+  MutationTestTimingsStore,
+  PackageBatchFileOutputSchema,
   PackageRelKey,
   RuntimeVersionTag,
+  TestTimingDurationMs,
+  TestTimingSampleCount,
   computeContentSha256,
 } from "../src/index.js"
 
 describe("MutationCache contract schemas", () => {
   const sampleSha = computeContentSha256("sample-mutant-key")
   const otherSha = computeContentSha256("other-mutant-key")
+  const sampleWitnessClosure = computeContentSha256("sample-witness-closure")
+  const sampleWitnessTest = AstSourceFilePath.make("libs/sample/domain/test/logic.test.ts")
   const sampleMac = MutationCacheMac.make(computeContentSha256("sample-hmac-tag"))
   const sampleSecret = MutationCacheHmacSecret.make("0123456789abcdef0123456789abcdef")
   const redactedSecret = Redacted.make(sampleSecret)
 
   it("decodes valid MutationCacheEntry, MutationCacheStore, MutationCacheLookupInput, and MutationCacheLookupDecision", () => {
-    expect(MUTATION_CACHE_SCHEMA_VERSION).toBe("mutation-cache-v2")
-    expect(MUTATION_CACHE_FILENAME).toBe("mutation-cache-v2.json")
+    expect(MUTATION_CACHE_SCHEMA_VERSION).toBe("mutation-cache-v3")
+    expect(MUTATION_CACHE_FILENAME).toBe("mutation-cache-v3.json")
 
     const entry = Schema.decodeSync(MutationCacheEntry)({
       key: sampleSha,
@@ -44,6 +52,8 @@ describe("MutationCache contract schemas", () => {
       status: "killed",
       recordedAt: "2026-11-18T16:00:00.000Z",
       lastAccessedAt: "2026-11-18T16:05:00Z",
+      witnessTestFile: sampleWitnessTest,
+      witnessClosureSha256: sampleWitnessClosure,
       mac: sampleMac,
     })
     expect(entry.key).toBe(sampleSha)
@@ -52,6 +62,8 @@ describe("MutationCache contract schemas", () => {
     expect(entry.status).toBe("killed")
     expect(entry.recordedAt).toBe(MutationCacheTimestamp.make("2026-11-18T16:00:00.000Z"))
     expect(entry.lastAccessedAt).toBe(MutationCacheTimestamp.make("2026-11-18T16:05:00Z"))
+    expect(entry.witnessTestFile).toBe(sampleWitnessTest)
+    expect(entry.witnessClosureSha256).toBe(sampleWitnessClosure)
     expect(entry.mac).toBe(sampleMac)
 
     const store = Schema.decodeSync(MutationCacheStore)({
@@ -69,6 +81,8 @@ describe("MutationCache contract schemas", () => {
       auth: { _tag: "Enabled", hmacSecret: redactedSecret },
       nowMs: 1_700_000_000_000,
       maxAgeMs: 43_200_000,
+      reachingTests: [sampleWitnessTest],
+      witnessClosureDigests: { [sampleWitnessTest]: sampleWitnessClosure },
     })
     expect(lookupInput.auth._tag).toBe("Enabled")
     match(lookupInput.auth)
@@ -100,7 +114,16 @@ describe("MutationCache contract schemas", () => {
 
     const batchDecoded = Schema.decodeSync(BatchMutantResultsSchema)(
       JSON.stringify([
-        { id: "m-1", result: { _tag: "Exited", exitCode: 1, stdout: "FAIL", stderr: "" } },
+        {
+          id: "m-1",
+          result: {
+            _tag: "Exited",
+            exitCode: 1,
+            stdout: "FAIL",
+            stderr: "",
+            killingTestFile: sampleWitnessTest,
+          },
+        },
         { id: "m-2", result: { _tag: "Signaled", signal: "SIGTERM", stdout: "", stderr: "" } },
         { id: "m-3", result: { _tag: "TimedOut", stdout: "", stderr: "timed out" } },
         {
@@ -116,7 +139,10 @@ describe("MutationCache contract schemas", () => {
       )
       expect(roundTripped._tag).toBe(outcome._tag)
       match(roundTripped)
-        .with({ _tag: "Exited" }, (v) => expect(v.exitCode).toBe(1))
+        .with({ _tag: "Exited" }, (v) => {
+          expect(v.exitCode).toBe(1)
+          expect(v.killingTestFile).toBe(sampleWitnessTest)
+        })
         .with({ _tag: "Signaled" }, (v) => expect(v.signal).toBe("SIGTERM"))
         .with({ _tag: "TimedOut" }, (v) => expect(v.stderr).toBe("timed out"))
         .with({ _tag: "SpawnFailed" }, (v) => expect(v.spawnError).toBe("ENOENT"))
@@ -144,6 +170,8 @@ describe("MutationCache contract schemas", () => {
       mutantId: "logic.ts:1:0",
       status: "killed",
       recordedAt: "2026-11-18T16:00:00.000Z",
+      witnessTestFile: sampleWitnessTest,
+      witnessClosureSha256: sampleWitnessClosure,
       mac: sampleMac,
     }
 
@@ -201,10 +229,16 @@ describe("MutationCache contract schemas", () => {
     expectRejected(Schema.decodeUnknownExit(MutationCacheStore)(null))
     expectRejected(Schema.decodeUnknownExit(MutationCacheStore)(123))
 
-    // Invalid store version (including stale v1) & recordKey !== entry.key spoofing
+    // Invalid store version (including stale v1/v2) & recordKey !== entry.key spoofing
     expectRejected(
       Schema.decodeUnknownExit(MutationCacheStore)({
         version: "mutation-cache-v1",
+        entries: {},
+      }),
+    )
+    expectRejected(
+      Schema.decodeUnknownExit(MutationCacheStore)({
+        version: "mutation-cache-v2",
         entries: {},
       }),
     )
@@ -240,6 +274,8 @@ describe("MutationCache contract schemas", () => {
     expectRejected(Schema.decodeExit(MutationEpochMillis)(-1))
     expectRejected(Schema.decodeExit(MutationMaxAgeMillis)(0))
     expectRejected(Schema.decodeExit(PackageRelKey)(""))
+    expectRejected(Schema.decodeExit(PackageRelKey)("pkg:colon"))
+    expectRejected(Schema.decodeExit(PackageRelKey)("pkg\nnewline"))
     expectRejected(Schema.decodeExit(RuntimeVersionTag)(""))
 
     // Invalid MutationCacheLookupInput & MutationCacheLookupDecision
@@ -249,6 +285,8 @@ describe("MutationCache contract schemas", () => {
         store: { version: MUTATION_CACHE_SCHEMA_VERSION, entries: {} },
         auth: { _tag: "Disabled", reason: "no secret" },
         nowMs: 1_700_000_000_000,
+        reachingTests: [sampleWitnessTest],
+        witnessClosureDigests: { [sampleWitnessTest]: sampleWitnessClosure },
       }),
     )
     expectRejected(
@@ -257,6 +295,8 @@ describe("MutationCache contract schemas", () => {
         store: { version: "wrong-version", entries: {} },
         auth: { _tag: "Disabled", reason: "no secret" },
         nowMs: 1_700_000_000_000,
+        reachingTests: [sampleWitnessTest],
+        witnessClosureDigests: { [sampleWitnessTest]: sampleWitnessClosure },
       }),
     )
     expectRejected(
@@ -284,5 +324,116 @@ describe("MutationCache contract schemas", () => {
         missKeys: [],
       }),
     )
+  })
+
+  it("decodes PackageBatchFileOutputSchema and rejects empty relFile, negative durations, and blank restoreError", () => {
+    const expectRejected = <A, E>(exit: Exit.Exit<A, E>): void => {
+      expect(Exit.isFailure(exit) && Cause.hasFails(exit.cause)).toBe(true)
+    }
+
+    const validBatchOutput = Schema.decodeSync(PackageBatchFileOutputSchema)({
+      relFile: "libs/sample/domain/src/logic.ts",
+      primaryResults: [
+        {
+          id: "m-1",
+          result: {
+            _tag: "Exited",
+            exitCode: 1,
+            stdout: "FAIL",
+            stderr: "",
+            killingTestFile: sampleWitnessTest,
+          },
+        },
+      ],
+      scopedFallbackResults: [],
+      packageFallbackResults: [],
+      observedTestDurationsMs: { [sampleWitnessTest]: 12.5 },
+      restoreError: "restore failed",
+    })
+    expect(validBatchOutput.schemaVersion).toBeUndefined()
+    expect(validBatchOutput.relFile).toBe(AstSourceFilePath.make("libs/sample/domain/src/logic.ts"))
+    expect(validBatchOutput.observedTestDurationsMs?.[sampleWitnessTest]).toBe(
+      TestTimingDurationMs.make(12.5),
+    )
+    expect(validBatchOutput.restoreError).toBe(ErrorReasonMessage.make("restore failed"))
+
+    const validVersionedBatchOutput = Schema.decodeSync(PackageBatchFileOutputSchema)({
+      schemaVersion: 1,
+      relFile: "libs/sample/domain/src/logic.ts",
+      primaryResults: [],
+      scopedFallbackResults: [],
+      packageFallbackResults: [],
+    })
+    expect(validVersionedBatchOutput.schemaVersion).toBe(1)
+
+    expectRejected(
+      Schema.decodeUnknownExit(PackageBatchFileOutputSchema)({
+        schemaVersion: 2,
+        relFile: "libs/sample/domain/src/logic.ts",
+        primaryResults: [],
+        scopedFallbackResults: [],
+        packageFallbackResults: [],
+      }),
+    )
+
+    expectRejected(
+      Schema.decodeExit(PackageBatchFileOutputSchema)({
+        relFile: "",
+        primaryResults: [],
+        scopedFallbackResults: [],
+        packageFallbackResults: [],
+      }),
+    )
+    expectRejected(
+      Schema.decodeExit(PackageBatchFileOutputSchema)({
+        relFile: "libs/sample/domain/src/logic.ts",
+        primaryResults: [],
+        scopedFallbackResults: [],
+        packageFallbackResults: [],
+        observedTestDurationsMs: { [sampleWitnessTest]: -1 },
+      }),
+    )
+    expectRejected(
+      Schema.decodeExit(PackageBatchFileOutputSchema)({
+        relFile: "libs/sample/domain/src/logic.ts",
+        primaryResults: [],
+        scopedFallbackResults: [],
+        packageFallbackResults: [],
+        restoreError: "  ",
+      }),
+    )
+  })
+
+  it("decodes valid populated MutationTestTimingsStore and rejects mismatched record keys", () => {
+    const pkgKey = PackageRelKey.make("sample/domain")
+    const relTestFile = AstSourceFilePath.make("libs/sample/domain/test/logic.test.ts")
+    const validKey = MutationTestTimingKey.make(`${pkgKey}::${relTestFile}`)
+    const entry = {
+      pkgKey,
+      relTestFile,
+      contentSha256: computeContentSha256("logic-test-source"),
+      emaDurationMs: TestTimingDurationMs.make(42),
+      sampleCount: TestTimingSampleCount.make(2),
+      updatedAt: MutationCacheTimestamp.make("2026-11-25T10:00:00.000Z"),
+    }
+
+    const decoded = Schema.decodeSync(MutationTestTimingsStore)({
+      version: MUTATION_TEST_TIMINGS_SCHEMA_VERSION,
+      entries: {
+        [validKey]: entry,
+      },
+    })
+    expect(decoded.entries[validKey]?.emaDurationMs).toBe(TestTimingDurationMs.make(42))
+
+    const mismatchedKey = MutationTestTimingKey.make(
+      `${pkgKey}::libs/sample/domain/test/other.test.ts`,
+    )
+    const mismatchedExit = Schema.decodeExit(MutationTestTimingsStore)({
+      version: MUTATION_TEST_TIMINGS_SCHEMA_VERSION,
+      entries: {
+        [mismatchedKey]: entry,
+      },
+    })
+    expect(Exit.isFailure(mismatchedExit) && Cause.hasFails(mismatchedExit.cause)).toBe(true)
   })
 })

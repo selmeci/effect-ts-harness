@@ -1,126 +1,70 @@
 /**
  * @fileoverview Package-level persistent warm Vitest runner bridge and outcome classifier.
  */
-import { randomBytes } from "node:crypto"
-import { dirname, join } from "node:path"
-import { Cause, Result, Schema } from "effect"
+import { join } from "node:path"
+import { Result } from "effect"
 import { match } from "ts-pattern"
-import {
-  type BatchExitCode,
-  type BatchMutantOutcomeResult,
+import type {
+  AstSourceFilePath,
+  BatchMutantOutcomeResult,
   BatchMutantResultEntry,
-  type ContentSha256,
-  computeContentSha256,
-  type SubprocessSignalName,
+  ContentSha256,
 } from "@harness/contract"
-import type { SyncHostExecResult, SyncHostIo } from "@harness/service/host-io"
+import type { SyncHostIo } from "@harness/service/host-io"
 import {
   classifyMutantSubprocessResult,
   hasClearFailureEvidence,
   runVitestTargetList,
-  stripAnsi,
 } from "../mutation-subprocess-helpers.js"
 import type { CodeMutant, MutantOutcome } from "./mutant-ast-generator.js"
+import { recoverStartupBackup } from "./mutation-backup.js"
+import {
+  type PackageBatchFileInput,
+  type PackageBatchFileOutput,
+  cleanupStreamReportFile,
+  collectSurvivingMutants,
+  mergeObservedDurationsIntoMap,
+  needsSoloColdRecheck,
+  readStreamedPackageBatchReports,
+  recordStageOutcomes,
+  shouldRecordOutcome,
+  writePackageBatchPlan,
+} from "./mutation-batch-stream.js"
 import type { DomainFile } from "./mutation-target-discovery.js"
+import {
+  attributeKillWitnessFromExecResult,
+  decodePackageBatchExecResult,
+  extractBatchKillingTestFile,
+  toBatchHostExecResult,
+} from "./mutation-witness.js"
 
-const PackageBatchFileOutputSchema = Schema.Struct({
-  relFile: Schema.String,
-  primaryResults: Schema.Array(BatchMutantResultEntry),
-  scopedFallbackResults: Schema.Array(BatchMutantResultEntry),
-  packageFallbackResults: Schema.Array(BatchMutantResultEntry),
-  restoreError: Schema.optional(Schema.String),
-})
-
-const PackageBatchRunnerOutputSchema = Schema.fromJsonString(
-  Schema.Array(PackageBatchFileOutputSchema),
-)
-
-export interface PackageBatchFileInput {
-  readonly file: DomainFile
-  readonly originalContent: string
-  readonly schemaSource: string
-  readonly mutants: ReadonlyArray<CodeMutant>
-  readonly uncachedMutants: ReadonlyArray<CodeMutant>
-  readonly primaryTests: ReadonlyArray<string>
-  readonly scopedFallbackTests: ReadonlyArray<string>
-  readonly packageFallbackTests: ReadonlyArray<string>
-  readonly fallbackTests: ReadonlyArray<string>
-  readonly cachedHitIds: ReadonlySet<string>
-}
+export type { PackageBatchFileInput }
 
 export interface PackageBatchFileResult {
   readonly file: DomainFile
   readonly fileOutcomes: ReadonlyMap<string, MutantOutcome>
   readonly fileNonCacheableIds: ReadonlySet<string>
+  readonly witnessByMutantId: ReadonlyMap<string, AstSourceFilePath>
 }
 
 export type RunPackageBatchResult =
-  | { readonly _tag: "Ok"; readonly fileResults: ReadonlyArray<PackageBatchFileResult> }
+  | {
+      readonly _tag: "Ok"
+      readonly fileResults: ReadonlyArray<PackageBatchFileResult>
+      readonly observedDurationsMs: ReadonlyMap<string, number>
+    }
   | {
       readonly _tag: "Abort"
       readonly partialResults: ReadonlyArray<PackageBatchFileResult>
+      readonly observedDurationsMs: ReadonlyMap<string, number>
       readonly diagnostic: string
     }
 
-const toExecResult = (entryRes: BatchMutantOutcomeResult): SyncHostExecResult =>
-  match(entryRes)
-    .with({ _tag: "Signaled" }, (s) => {
-      const signal: SubprocessSignalName = s.signal
-      return { _tag: "Signaled" as const, signal, stdout: s.stdout, stderr: s.stderr }
-    })
-    .with({ _tag: "Exited" }, (e) => {
-      const exitCode: BatchExitCode = e.exitCode
-      return { _tag: "Exited" as const, exitCode, stdout: e.stdout, stderr: e.stderr }
-    })
-    .with({ _tag: "TimedOut" }, (t) => t)
-    .with({ _tag: "SpawnFailed" }, (f) => f)
-    .exhaustive()
-
-const needsSoloColdRecheck = (mapped: SyncHostExecResult): boolean =>
-  match(mapped)
-    .with({ _tag: "TimedOut" }, () => true)
-    .with(
-      { _tag: "Exited" },
-      (e) => e.exitCode === 1 && !hasClearFailureEvidence(e.stdout, e.stderr),
-    )
-    .with({ _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => false)
-    .exhaustive()
-
-const shouldRecordOutcome = (
-  onlyUpdateOnKill: boolean,
-  status: "killed" | "survived" | "equivalent",
-): boolean =>
-  !onlyUpdateOnKill ||
-  match(status)
-    .with("killed", () => true)
-    .with("survived", "equivalent", () => false)
-    .exhaustive()
-
-const recordStageOutcomes = (
-  outcomes: ReadonlyArray<MutantOutcome>,
-  nonCacheableIds: ReadonlySet<string>,
-  fileOutcomes: Map<string, MutantOutcome>,
-  fileNonCacheableIds: Set<string>,
-  onlyUpdateOnKill: boolean,
-): void => {
-  for (const id of nonCacheableIds) fileNonCacheableIds.add(id)
-  for (const o of outcomes) {
-    if (shouldRecordOutcome(onlyUpdateOnKill, o.status)) {
-      fileOutcomes.set(o.mutant.id, o)
-    }
-  }
-}
-
-const collectSurvivingMutants = (
-  mutants: ReadonlyArray<CodeMutant>,
-  fileOutcomes: ReadonlyMap<string, MutantOutcome>,
-): ReadonlyArray<CodeMutant> =>
-  mutants.filter((m) =>
-    match(fileOutcomes.get(m.id)?.status)
-      .with("survived", () => true)
-      .with("killed", "equivalent", undefined, () => false)
-      .exhaustive(),
-  )
+const makeBatchAbort = (
+  diagnostic: string,
+  partialResults: ReadonlyArray<PackageBatchFileResult> = [],
+  observedDurationsMs: ReadonlyMap<string, number> = new Map(),
+): RunPackageBatchResult => ({ _tag: "Abort", partialResults, observedDurationsMs, diagnostic })
 
 const applyBatchPassOutcomes = (input: {
   readonly repoRoot: string
@@ -133,6 +77,7 @@ const applyBatchPassOutcomes = (input: {
   readonly rawEntries: ReadonlyArray<BatchMutantResultEntry>
   readonly fileOutcomes: Map<string, MutantOutcome>
   readonly fileNonCacheableIds: Set<string>
+  readonly witnessByMutantId: Map<string, AstSourceFilePath>
   readonly onlyUpdateOnKill: boolean
 }): string | undefined => {
   const byId = new Map<string, BatchMutantOutcomeResult>(
@@ -143,7 +88,7 @@ const applyBatchPassOutcomes = (input: {
     if (entryRes === undefined) {
       return `[mutation-check] Package batch runner missing result for mutant '${mutant.id}'`
     }
-    const mapped = toExecResult(entryRes)
+    const mapped = toBatchHostExecResult(entryRes)
     if (needsSoloColdRecheck(mapped)) {
       const soloRes = runVitestTargetList(
         input.repoRoot,
@@ -159,7 +104,7 @@ const applyBatchPassOutcomes = (input: {
       )
       const soloDiag = match(soloRes)
         .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
-        .with({ _tag: "Ok" }, ({ outcomes, nonCacheableIds }) => {
+        .with({ _tag: "Ok" }, ({ outcomes, nonCacheableIds, witnessByMutantId: soloWitness }) => {
           for (const id of nonCacheableIds) input.fileNonCacheableIds.add(id)
           const single = outcomes[0]
           if (single === undefined) {
@@ -167,6 +112,15 @@ const applyBatchPassOutcomes = (input: {
           }
           if (shouldRecordOutcome(input.onlyUpdateOnKill, single.status)) {
             input.fileOutcomes.set(mutant.id, single)
+            match(single.status)
+              .with("killed", () => {
+                if (!input.fileNonCacheableIds.has(mutant.id)) {
+                  const w = soloWitness.get(mutant.id)
+                  if (w !== undefined) input.witnessByMutantId.set(mutant.id, w)
+                }
+              })
+              .with("survived", "equivalent", () => {})
+              .exhaustive()
           }
           return undefined
         })
@@ -192,6 +146,20 @@ const applyBatchPassOutcomes = (input: {
           .exhaustive()
         if (shouldRecordOutcome(input.onlyUpdateOnKill, status)) {
           input.fileOutcomes.set(mutant.id, { mutant, status })
+          match(status)
+            .with("killed", () => {
+              attributeKillWitnessFromExecResult({
+                repoRoot: input.repoRoot,
+                passTests: input.passTests,
+                mutantId: mutant.id,
+                execResult: mapped,
+                nonCacheableIds: input.fileNonCacheableIds,
+                witnessByMutantId: input.witnessByMutantId,
+                explicitKillingTestFile: extractBatchKillingTestFile(entryRes),
+              })
+            })
+            .with("survived", () => {})
+            .exhaustive()
         }
         return undefined
       })
@@ -200,9 +168,6 @@ const applyBatchPassOutcomes = (input: {
   }
   return undefined
 }
-
-const stageTimeoutMs = (tests: ReadonlyArray<string>): number =>
-  Math.max(30_000, Math.min(180_000, Math.max(1, tests.length) * 10_000))
 
 const processBatchFallbackStage = (input: {
   readonly repoRoot: string
@@ -214,6 +179,7 @@ const processBatchFallbackStage = (input: {
   readonly stageResults: ReadonlyArray<BatchMutantResultEntry>
   readonly fileOutcomes: Map<string, MutantOutcome>
   readonly fileNonCacheableIds: Set<string>
+  readonly witnessByMutantId: Map<string, AstSourceFilePath>
 }): string | undefined => {
   const surviving = collectSurvivingMutants(input.fileEntry.uncachedMutants, input.fileOutcomes)
   if (surviving.length === 0 || input.stageTests.length === 0) return undefined
@@ -233,6 +199,7 @@ const processBatchFallbackStage = (input: {
       rawEntries: input.stageResults,
       fileOutcomes: input.fileOutcomes,
       fileNonCacheableIds: input.fileNonCacheableIds,
+      witnessByMutantId: input.witnessByMutantId,
       onlyUpdateOnKill: true,
     })
     if (fbAbort !== undefined) return fbAbort
@@ -253,12 +220,14 @@ const processBatchFallbackStage = (input: {
     )
     return match(soloFbRes)
       .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
-      .with({ _tag: "Ok" }, ({ outcomes: fbOutcomes, nonCacheableIds }) => {
+      .with({ _tag: "Ok" }, ({ outcomes: fbOutcomes, nonCacheableIds, witnessByMutantId }) => {
         recordStageOutcomes(
           fbOutcomes,
           nonCacheableIds,
+          witnessByMutantId,
           input.fileOutcomes,
           input.fileNonCacheableIds,
+          input.witnessByMutantId,
           true,
         )
         return undefined
@@ -266,6 +235,79 @@ const processBatchFallbackStage = (input: {
       .exhaustive()
   }
   return undefined
+}
+
+const processBatchFileReport = (input: {
+  readonly repoRoot: string
+  readonly backupPath: string
+  readonly hostIo: SyncHostIo
+  readonly baseSubprocessEnv: Readonly<Record<string, string | undefined>>
+  readonly fileEntry: PackageBatchFileInput
+  readonly report: PackageBatchFileOutput
+}):
+  | { readonly _tag: "Ok"; readonly fileResult: PackageBatchFileResult }
+  | { readonly _tag: "Abort"; readonly diagnostic: string } => {
+  if (input.report.restoreError !== undefined) {
+    return { _tag: "Abort", diagnostic: input.report.restoreError }
+  }
+  const fileOutcomes = new Map<string, MutantOutcome>()
+  const fileNonCacheableIds = new Set<string>()
+  const witnessByMutantId = new Map<string, AstSourceFilePath>()
+  for (const mutant of input.fileEntry.mutants) {
+    if (input.fileEntry.cachedHitIds.has(mutant.id)) {
+      fileOutcomes.set(mutant.id, { mutant, status: "killed" })
+    }
+  }
+  const primaryAbort = applyBatchPassOutcomes({
+    repoRoot: input.repoRoot,
+    backupPath: input.backupPath,
+    hostIo: input.hostIo,
+    baseSubprocessEnv: input.baseSubprocessEnv,
+    fileEntry: input.fileEntry,
+    passTests: input.fileEntry.primaryTests,
+    expectedMutants: input.fileEntry.uncachedMutants,
+    rawEntries: input.report.primaryResults,
+    fileOutcomes,
+    fileNonCacheableIds,
+    witnessByMutantId,
+    onlyUpdateOnKill: false,
+  })
+  if (primaryAbort !== undefined) return { _tag: "Abort", diagnostic: primaryAbort }
+  const scopedErr = processBatchFallbackStage({
+    repoRoot: input.repoRoot,
+    backupPath: input.backupPath,
+    hostIo: input.hostIo,
+    baseSubprocessEnv: input.baseSubprocessEnv,
+    fileEntry: input.fileEntry,
+    stageTests: input.fileEntry.scopedFallbackTests,
+    stageResults: input.report.scopedFallbackResults,
+    fileOutcomes,
+    fileNonCacheableIds,
+    witnessByMutantId,
+  })
+  if (scopedErr !== undefined) return { _tag: "Abort", diagnostic: scopedErr }
+  const pkgFbErr = processBatchFallbackStage({
+    repoRoot: input.repoRoot,
+    backupPath: input.backupPath,
+    hostIo: input.hostIo,
+    baseSubprocessEnv: input.baseSubprocessEnv,
+    fileEntry: input.fileEntry,
+    stageTests: input.fileEntry.packageFallbackTests,
+    stageResults: input.report.packageFallbackResults,
+    fileOutcomes,
+    fileNonCacheableIds,
+    witnessByMutantId,
+  })
+  if (pkgFbErr !== undefined) return { _tag: "Abort", diagnostic: pkgFbErr }
+  return {
+    _tag: "Ok",
+    fileResult: {
+      file: input.fileEntry.file,
+      fileOutcomes,
+      fileNonCacheableIds,
+      witnessByMutantId,
+    },
+  }
 }
 
 /**
@@ -279,69 +321,37 @@ export const runPackageMutantBatchChecked = (input: {
   readonly baseSubprocessEnv: Readonly<Record<string, string | undefined>>
   readonly allPackageTests: ReadonlyArray<string>
   readonly files: ReadonlyArray<PackageBatchFileInput>
+  readonly measuredDurationsMs?: Readonly<Record<string, number>> | undefined
+  readonly maxSurvivors?: number | undefined
+  readonly maxWorkerRssBytes?: number | undefined
 }): RunPackageBatchResult => {
   const vitestCliPath = join(input.repoRoot, "node_modules", "vitest", "vitest.mjs")
   const runnerPath = join(input.repoRoot, "tools", "package-vitest-batch.mjs")
   if (!input.hostIo.existsSync(vitestCliPath) || !input.hostIo.existsSync(runnerPath)) {
-    return {
-      _tag: "Abort",
-      partialResults: [],
-      diagnostic: `[mutation-check] Package batch runner or vitest CLI missing for '${input.pkgKey}'.`,
-    }
+    return makeBatchAbort(
+      `[mutation-check] Package batch runner or vitest CLI missing for '${input.pkgKey}'.`,
+    )
   }
 
-  let totalMutants = 0
-  const planFiles = input.files.map((f) => {
-    totalMutants += f.uncachedMutants.length
-    return {
-      relFile: f.file.relFile,
-      fullPath: f.file.fullPath,
-      originalSha256: computeContentSha256(f.originalContent),
-      mutatedSha256: computeContentSha256(f.schemaSource),
-      originalSource: f.originalContent,
-      schemaSource: f.schemaSource,
-      primaryTests: f.primaryTests,
-      scopedFallbackTests: f.scopedFallbackTests,
-      packageFallbackTests: f.packageFallbackTests,
-      mutantIds: f.uncachedMutants.map((m) => m.id),
-      primaryTimeoutMs: stageTimeoutMs(f.primaryTests),
-      scopedFallbackTimeoutMs: stageTimeoutMs(f.scopedFallbackTests),
-      packageFallbackTimeoutMs: stageTimeoutMs(f.packageFallbackTests),
-    }
+  const planRes = writePackageBatchPlan({
+    repoRoot: input.repoRoot,
+    backupPath: input.backupPath,
+    vitestCliPath,
+    hostIo: input.hostIo,
+    allPackageTests: input.allPackageTests,
+    files: input.files,
+    measuredDurationsMs: input.measuredDurationsMs,
+    maxSurvivors: input.maxSurvivors,
+    maxWorkerRssBytes: input.maxWorkerRssBytes,
   })
-
-  const planPath = join(
-    dirname(input.backupPath),
-    `pkg-plan-${process.pid}-${randomBytes(6).toString("hex")}.json`,
-  )
-  const writePlanRes = Result.try({
-    try: () => {
-      input.hostIo.mkdirRecursiveSync(dirname(planPath))
-      input.hostIo.writeTextSync(
-        planPath,
-        JSON.stringify({
-          cwd: input.repoRoot,
-          backupPath: input.backupPath,
-          vitestCli: vitestCliPath,
-          allPackageTests: input.allPackageTests,
-          baselinedTests: Array.from(new Set(input.files.flatMap((f) => f.primaryTests))),
-          files: planFiles,
-        }),
-      )
-    },
-    catch: (err) => (err instanceof Error ? err.message : String(err)),
-  })
-  const writePlanErr = match(writePlanRes)
-    .with({ _tag: "Success" }, () => undefined)
-    .with({ _tag: "Failure" }, ({ failure }) => failure)
+  const planOrErr = match(planRes)
+    .with({ _tag: "Ok" }, (ok) => ok)
+    .with({ _tag: "Err" }, ({ diagnostic }) => diagnostic)
     .exhaustive()
-  if (writePlanErr !== undefined) {
-    return {
-      _tag: "Abort",
-      partialResults: [],
-      diagnostic: `[mutation-check] Failed to write package batch plan '${planPath}': ${writePlanErr}`,
-    }
+  if (typeof planOrErr === "string") {
+    return makeBatchAbort(planOrErr)
   }
+  const { planPath, streamReportPath, totalMutants } = planOrErr
 
   const packageTimeoutMs = Math.max(
     180_000,
@@ -355,128 +365,122 @@ export const runPackageMutantBatchChecked = (input: {
       env: { ...input.baseSubprocessEnv, HARNESS_PACKAGE_PLAN_FILE: planPath },
     }),
   )
-  Result.try(() => {
-    if (input.hostIo.existsSync(planPath)) input.hostIo.unlinkSync(planPath)
-  })
+  cleanupStreamReportFile(planPath, input.hostIo, input.repoRoot)
+  const streamedReports = readStreamedPackageBatchReports(
+    streamReportPath,
+    input.hostIo,
+    input.repoRoot,
+  )
+  cleanupStreamReportFile(streamReportPath, input.hostIo, input.repoRoot)
 
-  const batchAbort = (msg: string) =>
-    Result.fail<string>(`[mutation-check] Package batch runner ${msg} for '${input.pkgKey}'`)
-  const decoded = match(execRes)
-    .with({ _tag: "Failure" }, ({ failure }) =>
-      batchAbort(`threw: ${failure instanceof Error ? failure.message : String(failure)}`),
-    )
-    .with({ _tag: "Success" }, ({ success }) =>
-      match(success)
-        .with({ _tag: "Exited" }, (r) =>
-          r.exitCode !== 0
-            ? batchAbort(`exited with code ${r.exitCode}: ${stripAnsi(r.stderr).trim()}`)
-            : match(Schema.decodeExit(PackageBatchRunnerOutputSchema)(r.stdout))
-                .with({ _tag: "Success" }, ({ value }) => Result.succeed(value))
-                .with({ _tag: "Failure" }, ({ cause }) =>
-                  batchAbort(
-                    `emitted invalid JSON schema (stdoutLen=${r.stdout.length}): ${Cause.pretty(cause).slice(0, 240)}`,
-                  ),
-                )
-                .exhaustive(),
-        )
-        .with({ _tag: "TimedOut" }, () => batchAbort("timed out"))
-        .with({ _tag: "Signaled" }, (r) => batchAbort(`signaled (${r.signal})`))
-        .with({ _tag: "SpawnFailed" }, (r) => batchAbort(`spawn failed (${r.spawnError})`))
-        .exhaustive(),
-    )
-    .exhaustive()
-
+  const decoded = decodePackageBatchExecResult(input.pkgKey, execRes)
   const reportsOrErr = match(decoded)
     .with({ _tag: "Failure" }, ({ failure }) => failure)
     .with({ _tag: "Success" }, ({ success }) => success)
     .exhaustive()
+  const startupRecoverErr = recoverStartupBackup(input.repoRoot, input.backupPath, input.hostIo)
+  if (startupRecoverErr !== undefined) {
+    const diagnostic =
+      typeof reportsOrErr === "string" ? `${reportsOrErr}; ${startupRecoverErr}` : startupRecoverErr
+    return makeBatchAbort(diagnostic)
+  }
   if (typeof reportsOrErr === "string") {
-    return { _tag: "Abort", partialResults: [], diagnostic: reportsOrErr }
+    const partialResults: Array<PackageBatchFileResult> = []
+    const observedDurationsMs = new Map<string, number>()
+    const streamedByRel = new Map<string, PackageBatchFileOutput>(
+      streamedReports.map((r) => [r.relFile, r]),
+    )
+    let recoveryAbortDiag: string | undefined
+    for (const fileEntry of input.files) {
+      const report = streamedByRel.get(fileEntry.file.relFile)
+      if (report === undefined) break
+      const processed = processBatchFileReport({
+        repoRoot: input.repoRoot,
+        backupPath: input.backupPath,
+        hostIo: input.hostIo,
+        baseSubprocessEnv: input.baseSubprocessEnv,
+        fileEntry,
+        report,
+      })
+      const abortDiag = match(processed)
+        .with({ _tag: "Ok" }, ({ fileResult }) => {
+          mergeObservedDurationsIntoMap(observedDurationsMs, report.observedTestDurationsMs)
+          partialResults.push(fileResult)
+          return undefined
+        })
+        .with({ _tag: "Abort" }, ({ diagnostic }) => `${fileEntry.file.relFile}: ${diagnostic}`)
+        .exhaustive()
+      if (abortDiag !== undefined) {
+        recoveryAbortDiag = abortDiag
+        break
+      }
+    }
+    return makeBatchAbort(
+      recoveryAbortDiag !== undefined
+        ? `${reportsOrErr}; NDJSON recovery aborted (${recoveryAbortDiag})`
+        : reportsOrErr,
+      partialResults,
+      observedDurationsMs,
+    )
   }
 
-  const reportByRel = new Map(reportsOrErr.map((r) => [r.relFile, r]))
+  const reportByRel = new Map<string, PackageBatchFileOutput>(
+    reportsOrErr.map((r) => [r.relFile, r]),
+  )
   const fileResults: Array<PackageBatchFileResult> = []
+  const observedDurationsMs = new Map<string, number>()
+  let confirmedSurvivorsInBatch = 0
 
   for (const fileEntry of input.files) {
     const report = reportByRel.get(fileEntry.file.relFile)
     if (report === undefined) {
-      return {
-        _tag: "Abort",
-        partialResults: fileResults,
-        diagnostic: `[mutation-check] Package batch runner missing report for '${fileEntry.file.relFile}'`,
+      if (input.maxSurvivors !== undefined && confirmedSurvivorsInBatch >= input.maxSurvivors) {
+        break
       }
+      return makeBatchAbort(
+        `[mutation-check] Package batch runner missing report for '${fileEntry.file.relFile}'`,
+        fileResults,
+        observedDurationsMs,
+      )
     }
-
-    if (report.restoreError !== undefined) {
-      return {
-        _tag: "Abort",
-        partialResults: fileResults,
-        diagnostic: report.restoreError,
-      }
-    }
-
-    const fileOutcomes = new Map<string, MutantOutcome>()
-    const fileNonCacheableIds = new Set<string>()
-    for (const mutant of fileEntry.mutants) {
-      if (fileEntry.cachedHitIds.has(mutant.id)) {
-        fileOutcomes.set(mutant.id, { mutant, status: "killed" })
-      }
-    }
-
-    const primaryAbort = applyBatchPassOutcomes({
+    mergeObservedDurationsIntoMap(observedDurationsMs, report.observedTestDurationsMs)
+    const processed = processBatchFileReport({
       repoRoot: input.repoRoot,
       backupPath: input.backupPath,
       hostIo: input.hostIo,
       baseSubprocessEnv: input.baseSubprocessEnv,
       fileEntry,
-      passTests: fileEntry.primaryTests,
-      expectedMutants: fileEntry.uncachedMutants,
-      rawEntries: report.primaryResults,
-      fileOutcomes,
-      fileNonCacheableIds,
-      onlyUpdateOnKill: false,
+      report,
     })
-    if (primaryAbort !== undefined) {
-      return { _tag: "Abort", partialResults: fileResults, diagnostic: primaryAbort }
+    const abortDiag = match(processed)
+      .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
+      .with({ _tag: "Ok" }, ({ fileResult }) => {
+        fileResults.push(fileResult)
+        for (const outcome of fileResult.fileOutcomes.values()) {
+          match(outcome.status)
+            .with("survived", () => {
+              confirmedSurvivorsInBatch += 1
+            })
+            .with("killed", "equivalent", () => {})
+            .exhaustive()
+        }
+        return undefined
+      })
+      .exhaustive()
+    if (abortDiag !== undefined) {
+      return makeBatchAbort(abortDiag, fileResults, observedDurationsMs)
     }
-
-    const scopedErr = processBatchFallbackStage({
-      repoRoot: input.repoRoot,
-      backupPath: input.backupPath,
-      hostIo: input.hostIo,
-      baseSubprocessEnv: input.baseSubprocessEnv,
-      fileEntry,
-      stageTests: fileEntry.scopedFallbackTests,
-      stageResults: report.scopedFallbackResults,
-      fileOutcomes,
-      fileNonCacheableIds,
-    })
-    if (scopedErr !== undefined) {
-      return { _tag: "Abort", partialResults: fileResults, diagnostic: scopedErr }
-    }
-
-    const pkgFbErr = processBatchFallbackStage({
-      repoRoot: input.repoRoot,
-      backupPath: input.backupPath,
-      hostIo: input.hostIo,
-      baseSubprocessEnv: input.baseSubprocessEnv,
-      fileEntry,
-      stageTests: fileEntry.packageFallbackTests,
-      stageResults: report.packageFallbackResults,
-      fileOutcomes,
-      fileNonCacheableIds,
-    })
-    if (pkgFbErr !== undefined) {
-      return { _tag: "Abort", partialResults: fileResults, diagnostic: pkgFbErr }
-    }
-    fileResults.push({ file: fileEntry.file, fileOutcomes, fileNonCacheableIds })
   }
 
-  return { _tag: "Ok", fileResults }
+  return { _tag: "Ok", fileResults, observedDurationsMs }
 }
 
 export type RunSingleFilePassResult =
-  | { readonly _tag: "Ok"; readonly result: PackageBatchFileResult }
+  | {
+      readonly _tag: "Ok"
+      readonly result: PackageBatchFileResult
+      readonly observedDurationsMs: ReadonlyMap<string, number>
+    }
   | {
       readonly _tag: "Abort"
       readonly partialResult: PackageBatchFileResult
@@ -494,6 +498,8 @@ const runSingleFileFallbackStage = (input: {
   readonly stageTests: ReadonlyArray<string>
   readonly fileOutcomes: Map<string, MutantOutcome>
   readonly fileNonCacheableIds: Set<string>
+  readonly witnessByMutantId: Map<string, AstSourceFilePath>
+  readonly observedDurationsMs: Map<string, number>
 }): string | undefined => {
   const surviving = collectSurvivingMutants(
     Array.from(input.fileOutcomes.values()).map((o) => o.mutant),
@@ -514,16 +520,22 @@ const runSingleFileFallbackStage = (input: {
   )
   return match(fallbackRes)
     .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
-    .with({ _tag: "Ok" }, ({ outcomes: fbOutcomes, nonCacheableIds }) => {
-      recordStageOutcomes(
-        fbOutcomes,
-        nonCacheableIds,
-        input.fileOutcomes,
-        input.fileNonCacheableIds,
-        true,
-      )
-      return undefined
-    })
+    .with(
+      { _tag: "Ok" },
+      ({ outcomes: fbOutcomes, nonCacheableIds, witnessByMutantId, observedDurationsMs }) => {
+        mergeObservedDurationsIntoMap(input.observedDurationsMs, observedDurationsMs)
+        recordStageOutcomes(
+          fbOutcomes,
+          nonCacheableIds,
+          witnessByMutantId,
+          input.fileOutcomes,
+          input.fileNonCacheableIds,
+          input.witnessByMutantId,
+          true,
+        )
+        return undefined
+      },
+    )
     .exhaustive()
 }
 
@@ -545,6 +557,8 @@ export function runSingleFileVitestPass(input: {
   readonly pkgBaselinePassed: boolean
 }): RunSingleFilePassResult {
   const fileNonCacheableIds = new Set<string>()
+  const witnessByMutantId = new Map<string, AstSourceFilePath>()
+  const observedDurationsMs = new Map<string, number>()
   const primaryRes = runVitestTargetList(
     input.repoRoot,
     input.file,
@@ -559,10 +573,22 @@ export function runSingleFileVitestPass(input: {
   )
   const primaryOutcomes = match(primaryRes)
     .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
-    .with({ _tag: "Ok" }, ({ outcomes: resOutcomes, nonCacheableIds }) => {
-      for (const id of nonCacheableIds) fileNonCacheableIds.add(id)
-      return resOutcomes
-    })
+    .with(
+      { _tag: "Ok" },
+      ({
+        outcomes: resOutcomes,
+        nonCacheableIds,
+        witnessByMutantId: primaryWitness,
+        observedDurationsMs: primaryObserved,
+      }) => {
+        mergeObservedDurationsIntoMap(observedDurationsMs, primaryObserved)
+        for (const id of nonCacheableIds) fileNonCacheableIds.add(id)
+        for (const [mId, witness] of primaryWitness) {
+          if (!fileNonCacheableIds.has(mId)) witnessByMutantId.set(mId, witness)
+        }
+        return resOutcomes
+      },
+    )
     .exhaustive()
   if (typeof primaryOutcomes === "string") {
     return {
@@ -571,6 +597,7 @@ export function runSingleFileVitestPass(input: {
         file: input.file,
         fileOutcomes: new Map(),
         fileNonCacheableIds,
+        witnessByMutantId,
       },
       diagnostic: primaryOutcomes,
     }
@@ -595,11 +622,13 @@ export function runSingleFileVitestPass(input: {
       stageTests,
       fileOutcomes,
       fileNonCacheableIds,
+      witnessByMutantId,
+      observedDurationsMs,
     })
     if (stageAbort !== undefined) {
       return {
         _tag: "Abort",
-        partialResult: { file: input.file, fileOutcomes, fileNonCacheableIds },
+        partialResult: { file: input.file, fileOutcomes, fileNonCacheableIds, witnessByMutantId },
         diagnostic: stageAbort,
       }
     }
@@ -607,7 +636,8 @@ export function runSingleFileVitestPass(input: {
 
   return {
     _tag: "Ok",
-    result: { file: input.file, fileOutcomes, fileNonCacheableIds },
+    result: { file: input.file, fileOutcomes, fileNonCacheableIds, witnessByMutantId },
+    observedDurationsMs,
   }
 }
 
@@ -617,20 +647,7 @@ export interface QueuedPackageEntry {
   readonly mutantKeys: ReadonlyMap<string, ContentSha256>
 }
 
-const PACKAGE_BATCH_CHUNK_MAX_FILES = 4
-
-const chunkQueuedPackageEntries = (
-  entries: ReadonlyArray<QueuedPackageEntry>,
-  maxFiles: number = PACKAGE_BATCH_CHUNK_MAX_FILES,
-): ReadonlyArray<ReadonlyArray<QueuedPackageEntry>> => {
-  const chunks: Array<ReadonlyArray<QueuedPackageEntry>> = []
-  for (let i = 0; i < entries.length; i += maxFiles) {
-    chunks.push(entries.slice(i, i + maxFiles))
-  }
-  return chunks
-}
-
-/** Executes queued package batches using one persistent warm Vitest pool per chunk (up to 4 files). */
+/** Executes queued package batches using one continuous persistent warm Vitest pool per package. */
 export function executeQueuedPackageBatches(input: {
   readonly repoRoot: string
   readonly backupPath: string
@@ -640,10 +657,31 @@ export function executeQueuedPackageBatches(input: {
   readonly finalizeEntry: (
     entry: QueuedPackageEntry,
     result: PackageBatchFileResult,
+    opts?: { readonly skipSurvivorLimit?: boolean },
   ) => string | undefined
   readonly recordPartialOnAbort: (entry: QueuedPackageEntry, result: PackageBatchFileResult) => void
+  readonly onBatchFlushed?: (() => void) | undefined
+  readonly isEarlyStopped?: (() => boolean) | undefined
+  readonly getMeasuredDurationsRecord?:
+    | ((
+        pkgKey: string,
+        entries: ReadonlyArray<QueuedPackageEntry>,
+      ) => Readonly<Record<string, number>>)
+    | undefined
+  readonly onObservedTestDurations?:
+    | ((
+        pkgKey: string,
+        observed: ReadonlyMap<string, number> | Readonly<Record<string, number>>,
+      ) => void)
+    | undefined
+  readonly getRemainingSurvivorBudget?:
+    | ((entries: ReadonlyArray<QueuedPackageEntry>) => number | undefined)
+    | undefined
+  readonly maxWorkerRssBytes?: number | undefined
 }): string | undefined {
   for (const [pkgKey, queuedEntries] of input.queuedByPkg.entries()) {
+    if (input.isEarlyStopped?.() === true) return undefined
+    if (queuedEntries.length === 0) continue
     if (queuedEntries.length < 2) {
       const only = queuedEntries[0]!
       const passRes = runSingleFileVitestPass({
@@ -667,61 +705,82 @@ export function executeQueuedPackageBatches(input: {
           input.recordPartialOnAbort(only, partialResult)
           return diagnostic
         })
-        .with({ _tag: "Ok" }, ({ result }) => input.finalizeEntry(only, result))
+        .with({ _tag: "Ok" }, ({ result, observedDurationsMs }) => {
+          if (observedDurationsMs.size > 0) {
+            input.onObservedTestDurations?.(pkgKey, observedDurationsMs)
+          }
+          return input.finalizeEntry(only, result)
+        })
         .exhaustive()
+      input.onBatchFlushed?.()
       if (abortErr !== undefined) return abortErr
+      if (input.isEarlyStopped?.() === true) return undefined
       continue
     }
 
-    const chunks = chunkQueuedPackageEntries(queuedEntries, PACKAGE_BATCH_CHUNK_MAX_FILES)
-    let doneFiles = 0
-    for (const chunk of chunks) {
-      const chunkTestSet = new Set<string>()
-      let chunkMutants = 0
-      for (const q of chunk) {
-        chunkMutants += q.input.uncachedMutants.length
-        for (const t of q.input.primaryTests) chunkTestSet.add(t)
-        for (const t of [...q.input.scopedFallbackTests, ...q.input.packageFallbackTests]) {
-          chunkTestSet.add(t)
-        }
+    const pkgTestSet = new Set<string>()
+    let pkgMutants = 0
+    for (const q of queuedEntries) {
+      pkgMutants += q.input.uncachedMutants.length
+      for (const t of q.input.primaryTests) pkgTestSet.add(t)
+      for (const t of [...q.input.scopedFallbackTests, ...q.input.packageFallbackTests]) {
+        pkgTestSet.add(t)
       }
-      const chunkStartedMs = Date.now()
-      const pkgBatchRes = runPackageMutantBatchChecked({
-        repoRoot: input.repoRoot,
-        pkgKey,
-        backupPath: input.backupPath,
-        hostIo: input.hostIo,
-        baseSubprocessEnv: input.baseSubprocessEnv,
-        allPackageTests: Array.from(chunkTestSet),
-        files: chunk.map((q) => q.input),
-      })
-      const entryByRel = new Map(chunk.map((q) => [q.input.file.relFile, q]))
-      const batchAbort = match(pkgBatchRes)
-        .with({ _tag: "Abort" }, ({ partialResults, diagnostic }) => {
-          for (const pr of partialResults) {
-            const matched = entryByRel.get(pr.file.relFile)
-            if (matched === undefined) continue
-            input.finalizeEntry(matched, pr)
-          }
-          return diagnostic
-        })
-        .with({ _tag: "Ok" }, ({ fileResults }) => {
-          for (const fr of fileResults) {
-            const matched = entryByRel.get(fr.file.relFile)
-            if (matched === undefined) continue
-            const finErr = input.finalizeEntry(matched, fr)
-            if (finErr !== undefined) return finErr
-          }
-          return undefined
-        })
-        .exhaustive()
-      doneFiles += chunk.length
-      const elapsedSec = ((Date.now() - chunkStartedMs) / 1000).toFixed(1)
-      process.stderr.write(
-        `[mutation-check] ${pkgKey} (${doneFiles}/${queuedEntries.length} files, ${chunkMutants} mutants) done in ${elapsedSec}s\n`,
-      )
-      if (batchAbort !== undefined) return batchAbort
     }
+    const batchStartedMs = Date.now()
+    const pkgBatchRes = runPackageMutantBatchChecked({
+      repoRoot: input.repoRoot,
+      pkgKey,
+      backupPath: input.backupPath,
+      hostIo: input.hostIo,
+      baseSubprocessEnv: input.baseSubprocessEnv,
+      allPackageTests: Array.from(pkgTestSet),
+      files: queuedEntries.map((q) => q.input),
+      measuredDurationsMs: input.getMeasuredDurationsRecord?.(pkgKey, queuedEntries),
+      maxSurvivors: input.getRemainingSurvivorBudget?.(queuedEntries),
+      maxWorkerRssBytes: input.maxWorkerRssBytes,
+    })
+    const entryByRel = new Map(queuedEntries.map((q) => [q.input.file.relFile, q]))
+    let processedCount = 0
+    const batchAbort = match(pkgBatchRes)
+      .with({ _tag: "Abort" }, ({ partialResults, observedDurationsMs, diagnostic }) => {
+        if (observedDurationsMs.size > 0) {
+          input.onObservedTestDurations?.(pkgKey, observedDurationsMs)
+        }
+        for (const pr of partialResults) {
+          const matched = entryByRel.get(pr.file.relFile)
+          if (matched === undefined) continue
+          processedCount += 1
+          const finErr = input.finalizeEntry(matched, pr, { skipSurvivorLimit: true })
+          if (finErr !== undefined) return `${diagnostic}; ${finErr}`
+        }
+        return diagnostic
+      })
+      .with({ _tag: "Ok" }, ({ fileResults, observedDurationsMs }) => {
+        if (observedDurationsMs.size > 0) {
+          input.onObservedTestDurations?.(pkgKey, observedDurationsMs)
+        }
+        for (const fr of fileResults) {
+          const matched = entryByRel.get(fr.file.relFile)
+          if (matched === undefined) continue
+          processedCount += 1
+          const finErr = input.finalizeEntry(matched, fr)
+          if (finErr !== undefined) return finErr
+          if (input.isEarlyStopped?.() === true) break
+        }
+        if (processedCount < queuedEntries.length && input.isEarlyStopped?.() !== true) {
+          return `[mutation-check] Package batch for '${pkgKey}' completed only ${processedCount}/${queuedEntries.length} queued file(s) without hitting survivor limit`
+        }
+        return undefined
+      })
+      .exhaustive()
+    input.onBatchFlushed?.()
+    const elapsedSec = ((Date.now() - batchStartedMs) / 1000).toFixed(1)
+    process.stderr.write(
+      `[mutation-check] ${pkgKey} (${processedCount}/${queuedEntries.length} files, ${pkgMutants} mutants) done in ${elapsedSec}s\n`,
+    )
+    if (batchAbort !== undefined) return batchAbort
+    if (input.isEarlyStopped?.() === true) return undefined
   }
   return undefined
 }

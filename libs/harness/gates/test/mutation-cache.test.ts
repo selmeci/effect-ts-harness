@@ -45,7 +45,6 @@ import {
   computeMutationContextDigests,
   computeMutationEntryMac,
   emptyMutationCacheStore,
-  hashReachingTestFiles,
   loadMutationCache,
   loadMutationCacheWithStatus,
   saveMutationCacheAtomic,
@@ -93,10 +92,15 @@ const TEST_CACHE_AUTH: MutationCacheAuth = {
   hmacSecret: TEST_HMAC_SECRET,
 }
 
+const DEFAULT_WITNESS_TEST = AstSourceFilePath.make("libs/sample/domain/test/logic.test.ts")
+const DEFAULT_WITNESS_CLOSURE = computeContentSha256("sample-witness-closure")
+
 const makeSignedEntry = (
   key: ContentSha256,
   mutantId: string,
   recordedAtStr = "2026-11-18T16:00:00.000Z",
+  witnessTestFile: AstSourceFilePath = DEFAULT_WITNESS_TEST,
+  witnessClosureSha256: ContentSha256 = DEFAULT_WITNESS_CLOSURE,
 ): MutationCacheEntry => {
   const file = AstSourceFilePath.make("libs/sample/domain/src/logic.ts")
   const mId = MutantCacheId.make(mutantId)
@@ -107,12 +111,16 @@ const makeSignedEntry = (
     mutantId: mId,
     status: "killed",
     recordedAt,
+    witnessTestFile,
+    witnessClosureSha256,
     mac: computeMutationEntryMac(TEST_HMAC_SECRET, {
       key,
       file,
       mutantId: mId,
       status: "killed",
       recordedAt,
+      witnessTestFile,
+      witnessClosureSha256,
     }),
   }
 }
@@ -148,6 +156,8 @@ describe("MutationCache", () => {
             store,
             auth: TEST_CACHE_AUTH,
             nowMs: MutationEpochMillis.make(Date.parse("2026-11-18T16:30:00.000Z")),
+            reachingTests: [DEFAULT_WITNESS_TEST],
+            witnessClosureDigests: { [DEFAULT_WITNESS_TEST]: DEFAULT_WITNESS_CLOSURE },
           }),
           new Map(),
         )
@@ -200,6 +210,8 @@ describe("MutationCache", () => {
           store: { version: MUTATION_CACHE_SCHEMA_VERSION, entries },
           auth: TEST_CACHE_AUTH,
           nowMs: MutationEpochMillis.make(Date.parse("2026-11-18T16:30:00.000Z")),
+          reachingTests: [DEFAULT_WITNESS_TEST],
+          witnessClosureDigests: { [DEFAULT_WITNESS_TEST]: DEFAULT_WITNESS_CLOSURE },
         })
         expect(decision.hitKeys).toEqual(expectedHits)
         expect(decision.missKeys).toEqual(expectedMisses)
@@ -396,7 +408,7 @@ describe("MutationCache", () => {
     }
   })
 
-  it("computeMutantCacheKey invalidates on source, schema, reachingTest, mutant, .tsx, cross-pkg helper, and tools/ changes", () => {
+  it("computeMutantCacheKey & closureDigest invalidate on source, schema, mutant, reachingTest, and tools/ changes while isolating unrelated .tsx, helpers, and docs", () => {
     const src = "export const isSame = (a: number, b: number) => a === b\n"
     const { repoRoot, testFile } = setupTempRepo(src)
     try {
@@ -417,17 +429,13 @@ describe("MutationCache", () => {
       const schemaSha1 = computeContentSha256("schema-v1")
       const pkgKey = PackageRelKey.make("sample/domain")
       const relFile = AstSourceFilePath.make("libs/sample/domain/src/logic.ts")
-      const reachingHashes1 = unwrapOpt(hashReachingTestFiles(repoRoot, [testFile], testHostIo))
-      const dummyClosure = computeContentSha256("dummy-closure")
       const keyBase = computeMutantCacheKey({
         pkgKey,
         relFile,
         originalContentSha256: origSha1,
         compiledSchemaSha256: schemaSha1,
         mutant,
-        reachingTestHashes: reachingHashes1,
         digests: digests1,
-        closureDigest: dummyClosure,
       })
 
       const keyDiffSrc = computeMutantCacheKey({
@@ -436,9 +444,7 @@ describe("MutationCache", () => {
         originalContentSha256: computeContentSha256(`${src}// changed`),
         compiledSchemaSha256: schemaSha1,
         mutant,
-        reachingTestHashes: reachingHashes1,
         digests: digests1,
-        closureDigest: dummyClosure,
       })
       expect(keyDiffSrc).not.toBe(keyBase)
 
@@ -448,9 +454,7 @@ describe("MutationCache", () => {
         originalContentSha256: origSha1,
         compiledSchemaSha256: computeContentSha256("schema-v2"),
         mutant,
-        reachingTestHashes: reachingHashes1,
         digests: digests1,
-        closureDigest: dummyClosure,
       })
       expect(keyDiffSchema).not.toBe(keyBase)
 
@@ -460,30 +464,10 @@ describe("MutationCache", () => {
         originalContentSha256: origSha1,
         compiledSchemaSha256: schemaSha1,
         mutant: { ...mutant, replacement: MutantSourceText.make("true") },
-        reachingTestHashes: reachingHashes1,
         digests: digests1,
-        closureDigest: dummyClosure,
       })
       expect(keyDiffMutant).not.toBe(keyBase)
 
-      writeFileSync(
-        testFile,
-        'import { expect, it } from "vitest"\nit("ok", () => { expect(2).toBe(2) })\n',
-      )
-      const reachingHashes2 = unwrapOpt(hashReachingTestFiles(repoRoot, [testFile], testHostIo))
-      const keyDiffTest = computeMutantCacheKey({
-        pkgKey,
-        relFile,
-        originalContentSha256: origSha1,
-        compiledSchemaSha256: schemaSha1,
-        mutant,
-        reachingTestHashes: reachingHashes2,
-        digests: digests1,
-        closureDigest: dummyClosure,
-      })
-      expect(keyDiffTest).not.toBe(keyBase)
-
-      const digests2 = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
       const getClosure = (d: typeof digests1) =>
         match(
           computeFileMutationClosureDigest({
@@ -500,7 +484,14 @@ describe("MutationCache", () => {
           })
           .exhaustive()
 
+      const closureBeforeTest = getClosure(digests1)
+      writeFileSync(
+        testFile,
+        'import { expect, it } from "vitest"\nit("ok", () => { expect(2).toBe(2) })\n',
+      )
+      const digests2 = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
       const closure1 = getClosure(digests2)
+      expect(closure1.closureDigest).not.toBe(closureBeforeTest.closureDigest)
       expect(closure1.usedFallbackAllLibs).toBe(false)
       const keyClosureBase = computeMutantCacheKey({
         pkgKey,
@@ -508,9 +499,7 @@ describe("MutationCache", () => {
         originalContentSha256: origSha1,
         compiledSchemaSha256: schemaSha1,
         mutant,
-        reachingTestHashes: reachingHashes2,
         digests: digests2,
-        closureDigest: closure1.closureDigest,
       })
 
       // Unrelated .tsx file change keeps closureDigest & computeMutantCacheKey IDENTICAL
@@ -528,9 +517,7 @@ describe("MutationCache", () => {
           originalContentSha256: origSha1,
           compiledSchemaSha256: schemaSha1,
           mutant,
-          reachingTestHashes: reachingHashes2,
           digests: digestsTsx,
-          closureDigest: closureTsx.closureDigest,
         }),
       ).toBe(keyClosureBase)
 
@@ -548,23 +535,11 @@ describe("MutationCache", () => {
       const digestsSpec2 = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
       expect(getClosure(digestsSpec2).closureDigest).toBe(closure1.closureDigest)
 
-      // tools/parallel-vitest-batch.mjs (rootRuntimeDigest) change DOES invalidate closureDigest & key
+      // tools/parallel-vitest-batch.mjs (rootRuntimeDigest) change DOES invalidate closureDigest & witness lookup
       writeFileSync(join(repoRoot, "tools", "parallel-vitest-batch.mjs"), "// v2\n")
       const digestsTools = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
       const closureTools = getClosure(digestsTools)
       expect(closureTools.closureDigest).not.toBe(closure1.closureDigest)
-      expect(
-        computeMutantCacheKey({
-          pkgKey,
-          relFile,
-          originalContentSha256: origSha1,
-          compiledSchemaSha256: schemaSha1,
-          mutant,
-          reachingTestHashes: reachingHashes2,
-          digests: digestsTools,
-          closureDigest: closureTools.closureDigest,
-        }),
-      ).not.toBe(keyClosureBase)
     } finally {
       rmSync(repoRoot, { recursive: true, force: true })
     }
@@ -943,7 +918,7 @@ process.exit(1);
           writeFileSync(join(otherDir, "other.ts"), 'export const o = "init"\n')
 
           const relFile = AstSourceFilePath.make("libs/sample/domain/src/logic.ts")
-          const testFile = "libs/sample/domain/test/logic.test.ts"
+          const testFile = AstSourceFilePath.make("libs/sample/domain/test/logic.test.ts")
           const pkgKey = PackageRelKey.make("sample/domain")
           const origSha = computeContentSha256(src)
           const schemaSha = computeContentSha256("schema")
@@ -959,9 +934,6 @@ process.exit(1);
 
           const computeKey = () => {
             const d = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
-            const reachingTestHashes = unwrapOpt(
-              hashReachingTestFiles(repoRoot, [testFile], testHostIo),
-            )
             const closure = match(
               computeFileMutationClosureDigest({
                 repoRoot,
@@ -984,9 +956,7 @@ process.exit(1);
                 originalContentSha256: origSha,
                 compiledSchemaSha256: schemaSha,
                 mutant,
-                reachingTestHashes,
                 digests: d,
-                closureDigest: closure.closureDigest,
               }),
             }
           }
@@ -1003,12 +973,16 @@ process.exit(1);
                 mutantId: mutantCacheId,
                 status: "killed" as const,
                 recordedAt,
+                witnessTestFile: testFile,
+                witnessClosureSha256: base.closure.closureDigest,
                 mac: computeMutationEntryMac(TEST_HMAC_SECRET, {
                   key: base.key,
                   file: relFile,
                   mutantId: mutantCacheId,
                   status: "killed",
                   recordedAt,
+                  witnessTestFile: testFile,
+                  witnessClosureSha256: base.closure.closureDigest,
                 }),
               },
             },
@@ -1022,6 +996,8 @@ process.exit(1);
             store,
             auth: TEST_CACHE_AUTH,
             nowMs,
+            reachingTests: [testFile],
+            witnessClosureDigests: { [testFile]: afterUnrelated.closure.closureDigest },
           })
           if (useDynamicFallback) {
             expect(afterUnrelated.closure.usedFallbackAllLibs).toBe(true)
@@ -1039,8 +1015,10 @@ process.exit(1);
             store,
             auth: TEST_CACHE_AUTH,
             nowMs,
+            reachingTests: [testFile],
+            witnessClosureDigests: { [testFile]: afterDep.closure.closureDigest },
           })
-          expect(afterDep.key).not.toBe(base.key)
+          expect(afterDep.closure.closureDigest).not.toBe(base.closure.closureDigest)
           expect(depDecision.missKeys).toEqual([afterDep.key])
         } finally {
           rmSync(repoRoot, { recursive: true, force: true })
@@ -1360,7 +1338,7 @@ process.exit(1);
         makeSpyIo(true),
         {},
       )
-      expect(directRes).toEqual({ _tag: "Ok" })
+      expect(directRes._tag).toBe("Ok")
       expect(captured[0]?.args).toContain("--bail=1")
       expect(captured[0]?.args).toContain("--maxWorkers=2")
 
@@ -1371,7 +1349,7 @@ process.exit(1);
         makeSpyIo(false),
         {},
       )
-      expect(pnpmRes).toEqual({ _tag: "Ok" })
+      expect(pnpmRes._tag).toBe("Ok")
       expect(captured[1]?.cmd).toBe("pnpm")
       expect(captured[1]?.args).toEqual(["vitest", "run", "--bail=1", "a.test.ts"])
     } finally {

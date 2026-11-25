@@ -158,27 +158,42 @@ export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.E
     },
   )
 
+  const scalarOnce = (name: string, desc: string) =>
+    Flag.String(name).pipe(
+      Flag.withDescription(desc),
+      Flag.atMost(1),
+      Flag.map((xs): Option.Option<string> =>
+        xs[0] !== undefined ? Option.some(xs[0]) : Option.none(),
+      ),
+    )
+  const mutateBool = (name: string, desc: string) => boolFlag(name).pipe(Flag.withDescription(desc))
+
   const mutateCommand = CliCommand.make(
     "mutate",
     {
-      scope: Flag.optional(Flag.String("scope")),
-      strict: boolFlag("strict"),
-      all: boolFlag("all"),
-      diff: boolFlag("diff"),
-      noCache: boolFlag("no-cache"),
-      file: Flag.optional(Flag.String("file")),
-      base: Flag.optional(Flag.String("base")),
-      args: variadicArgs,
+      scope: scalarOnce("scope", "Filter mutation targets by package scope"),
+      strict: mutateBool("strict", "Fail on any surviving mutant"),
+      all: mutateBool("all", "Mutate all lines rather than diff only"),
+      diff: mutateBool("diff", "Mutate only diff-changed lines"),
+      noCache: mutateBool("no-cache", "Bypass mutation witness cache"),
+      failFast: mutateBool("fail-fast", "Stop on first confirmed survivor"),
+      stageAOnly: mutateBool("stage-a-only", "Run Stage-A primary tests only"),
+      file: scalarOnce("file", "Comma-separated target files to mutate"),
+      base: scalarOnce("base", "Stacked parent git ref for diff and ancestor proof"),
+      maxSurvivors: scalarOnce("max-survivors", "Stop early after N confirmed survivors"),
     },
-    ({ scope, strict, all, diff, noCache, file, base, args }) => {
-      const raw: Array<string> = [...args]
-      appendStringFlag(raw, "scope", scope)
-      appendBoolFlag(raw, "strict", strict)
-      appendBoolFlag(raw, "all", all)
-      appendBoolFlag(raw, "diff", diff)
-      appendBoolFlag(raw, "no-cache", noCache)
-      appendStringFlag(raw, "file", file)
-      appendStringFlag(raw, "base", base)
+    (flags) => {
+      const raw: Array<string> = []
+      appendStringFlag(raw, "scope", flags.scope)
+      appendBoolFlag(raw, "strict", flags.strict)
+      appendBoolFlag(raw, "all", flags.all)
+      appendBoolFlag(raw, "diff", flags.diff)
+      appendBoolFlag(raw, "no-cache", flags.noCache)
+      appendBoolFlag(raw, "fail-fast", flags.failFast)
+      appendBoolFlag(raw, "stage-a-only", flags.stageAOnly)
+      appendStringFlag(raw, "file", flags.file)
+      appendStringFlag(raw, "base", flags.base)
+      appendStringFlag(raw, "max-survivors", flags.maxSurvivors)
       return runSubcommand("mutate", raw)
     },
   )
@@ -460,12 +475,17 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
   if (
     requested !== "guard" &&
     requested !== "done" &&
-    (argv.includes("--help") || argv.includes("-h")) &&
-    isCommand(requested)
+    isCommand(requested) &&
+    (requested === "mutate"
+      ? argv.length === 2 && (argv[1] === "--help" || argv[1] === "-h")
+      : argv.includes("--help") || argv.includes("-h"))
   ) {
     return {
       exitCode: 0,
-      stdout: `harness help\nusage: harness <${COMMANDS.join("|")}>`,
+      stdout:
+        requested === "mutate"
+          ? "harness help\nusage: harness mutate [--strict] [--all] [--diff] [--no-cache] [--fail-fast] [--max-survivors <n>] [--stage-a-only] [--scope <pkg>] [--file <csv>] [--base <ref>]"
+          : `harness help\nusage: harness <${COMMANDS.join("|")}>`,
       stderr: "",
     }
   }
@@ -574,6 +594,16 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
           }),
         )
 
+        const cleanupMutate =
+          requested === "mutate"
+            ? Effect.tryPromise(() => import("./mutate-and-bench.command.js")).pipe(
+                Effect.tap((m) =>
+                  Effect.sync(() => m.cleanupMutateStamp(effectiveOptions.repoRoot)),
+                ),
+                Effect.ignore,
+              )
+            : Effect.void
+
         if (cliErr !== undefined) {
           if (requested === "guard" || requested === "done") {
             return makeFailClosedHookResult(
@@ -585,33 +615,33 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
               hookStdinTracker,
             )
           }
-          return {
-            exitCode: 1,
-            stdout: "",
-            stderr: cliErr,
-          }
+          yield* cleanupMutate
+          return { exitCode: 1, stdout: "", stderr: cliErr }
         }
 
         const maybeResult = yield* Ref.get(resultRef)
-        return match(maybeResult)
-          .with({ _tag: "Some" }, ({ value }) => value)
-          .with({ _tag: "None" }, () => {
-            if (requested === "guard" || requested === "done") {
-              return makeFailClosedHookResult(
-                requested,
-                argv,
-                `${requested}: subcommand handler did not execute`,
-                stderrBuffer.join(""),
-                effectiveOptions.stdin,
-                hookStdinTracker,
-              )
-            }
-            return {
-              exitCode: 1,
-              stdout: "",
-              stderr: "CLI command did not execute (invalid arguments or options).",
-            }
-          })
+        return yield* match(maybeResult)
+          .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+          .with({ _tag: "None" }, () =>
+            Effect.gen(function* () {
+              if (requested === "guard" || requested === "done") {
+                return makeFailClosedHookResult(
+                  requested,
+                  argv,
+                  `${requested}: subcommand handler did not execute`,
+                  stderrBuffer.join(""),
+                  effectiveOptions.stdin,
+                  hookStdinTracker,
+                )
+              }
+              yield* cleanupMutate
+              return {
+                exitCode: 1,
+                stdout: "",
+                stderr: "CLI command did not execute (invalid arguments or options).",
+              }
+            }),
+          )
           .exhaustive()
       }),
     )

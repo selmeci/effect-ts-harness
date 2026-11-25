@@ -73,7 +73,7 @@ const makeQueuedEntry = (repoRoot: string, pkgKey: string, relFile: string): Que
 }
 
 describe("wave3 mutation batch & target discovery unit tests", () => {
-  it("executeQueuedPackageBatches handles multi-chunk Ok, finalize abort, and Abort with partial results", () => {
+  it("executeQueuedPackageBatches handles continuous batch Ok, finalize abort, and Abort with partial results", () => {
     const repoRoot = makeTempDir()
     const fakeVitest = join(repoRoot, "node_modules", "vitest", "vitest.mjs")
     const fakeRunner = join(repoRoot, "tools", "package-vitest-batch.mjs")
