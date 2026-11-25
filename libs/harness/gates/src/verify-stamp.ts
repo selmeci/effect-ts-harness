@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import { join, relative } from "node:path"
 import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
-import { WorkspaceTreeHash } from "@harness/contract"
+import { computeContentSha256, WorkspaceTreeHash } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { DstSeed } from "./dst-engine.js"
 import {
@@ -85,6 +85,7 @@ export const VerifyStampSchema = Schema.Struct({
   dstSeedsRun: Schema.optional(DstSeedsRunCount),
   mutateEnforcementMode: Schema.optional(MutateEnforcementMode),
   mutantsEvaluated: Schema.optional(MutantCount),
+  graphSnapshotSha256: Schema.optional(WorkspaceTreeHash),
 })
 
 export type VerifyStamp = Schema.Schema.Type<typeof VerifyStampSchema>
@@ -461,6 +462,23 @@ export const writeVerifyStamp = (
   const resolvedSeed = dstOptions?.dstSeed ?? envSeed ?? DstSeed.make(0)
   const resolvedBranch =
     taskBranch !== undefined && taskBranch.trim().length > 0 ? taskBranch : "unknown"
+  const harnessDir = Result.getOrThrowWith(
+    resolveHarnessDirChecked(repoRoot, hostIo),
+    (err) => new Error(err),
+  )
+  const graphSnapshotSha256 = match(
+    checkSafeStampFileForRead(
+      harnessDir,
+      join(harnessDir, "graph-snapshot.json"),
+      hostIo,
+      "Missing graph snapshot",
+    ),
+  )
+    .with({ _tag: "Success" }, ({ success: content }) =>
+      WorkspaceTreeHash.make(computeContentSha256(content)),
+    )
+    .with({ _tag: "Failure" }, () => undefined)
+    .exhaustive()
   const stamp: VerifyStamp = {
     treeHash,
     mutableTreeHash,
@@ -476,11 +494,8 @@ export const writeVerifyStamp = (
     ...(mutateMeta?.mutantsEvaluated !== undefined
       ? { mutantsEvaluated: mutateMeta.mutantsEvaluated }
       : {}),
+    ...(graphSnapshotSha256 !== undefined ? { graphSnapshotSha256 } : {}),
   }
-  const harnessDir = Result.getOrThrowWith(
-    resolveHarnessDirChecked(repoRoot, hostIo),
-    (err) => new Error(err),
-  )
   const stampPath = join(harnessDir, "verify-stamp.json")
   Result.getOrThrowWith(
     writeStampAtomic(harnessDir, stampPath, JSON.stringify(stamp, null, 2) + "\n", hostIo),

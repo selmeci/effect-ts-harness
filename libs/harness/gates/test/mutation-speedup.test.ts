@@ -74,6 +74,34 @@ const BatchResultJsonSchema = Schema.fromJsonString(
   ),
 )
 
+const fb = (tests: ReadonlyArray<string> = []) => ({
+  scopedFallbackTests: tests,
+  packageFallbackTests: [] as ReadonlyArray<string>,
+  fallbackTests: tests,
+})
+const makeBatchFile = (
+  dir: string,
+  relFile: string,
+  originalContent: string,
+  schemaSource: string,
+  mutants: ReadonlyArray<ReturnType<typeof discoverDomainMutants>[number]>,
+  primaryTests: ReadonlyArray<string>,
+  fallback: ReadonlyArray<string> = [],
+) => ({
+  file: makeMockFile(dir, relFile),
+  originalContent,
+  schemaSource,
+  mutants,
+  uncachedMutants: mutants,
+  primaryTests,
+  ...fb(fallback),
+  cachedHitIds: new Set<string>(),
+})
+const emptyBatchEntry = (relFile: string) =>
+  JSON.stringify([
+    { relFile, primaryResults: [], scopedFallbackResults: [], packageFallbackResults: [] },
+  ])
+
 describe("mutation-speedup: hit hook & warm coverage-guided Vitest batch", () => {
   it.effect(
     "HOISTED_MUTANT_HELPER records executed mutant IDs into globalThis.__HARNESS_MUTANT_HITS and stays dogfood-clean",
@@ -885,26 +913,8 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
         baseSubprocessEnv: process.env,
         allPackageTests: [tA, tB],
         files: [
-          {
-            file: makeMockFile(dir, relA),
-            originalContent: srcA,
-            schemaSource: modA.schemaSource,
-            mutants: mutsA,
-            uncachedMutants: mutsA,
-            primaryTests: [tA],
-            fallbackTests: [tB],
-            cachedHitIds: new Set(),
-          },
-          {
-            file: makeMockFile(dir, relB),
-            originalContent: srcB,
-            schemaSource: modB.schemaSource,
-            mutants: mutsB,
-            uncachedMutants: mutsB,
-            primaryTests: [tB],
-            fallbackTests: [],
-            cachedHitIds: new Set(),
-          },
+          makeBatchFile(dir, relA, srcA, modA.schemaSource, mutsA, [tA], [tB]),
+          makeBatchFile(dir, relB, srcB, modB.schemaSource, mutsB, [tB]),
         ],
       })
       match(res)
@@ -933,16 +943,15 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
     const relA = "libs/demo/domain/src/a.ts"
     const srcA = "export const inc = (n: number): number => n + 1"
     const mut = readSingleMutant(relA, srcA)
-    const entry = {
-      file: makeMockFile(repoRoot, relA),
-      originalContent: srcA,
-      schemaSource: srcA,
-      mutants: [mut],
-      uncachedMutants: [mut],
-      primaryTests: ["libs/demo/domain/test/a.test.ts"],
-      fallbackTests: ["libs/demo/domain/test/b.test.ts"],
-      cachedHitIds: new Set<string>(),
-    }
+    const entry = makeBatchFile(
+      repoRoot,
+      relA,
+      srcA,
+      srcA,
+      [mut],
+      ["libs/demo/domain/test/a.test.ts"],
+      ["libs/demo/domain/test/b.test.ts"],
+    )
     const baseIo = (
       execResult: ReturnType<SyncHostIo["execFileSync"]>,
       opts?: { readonly exists?: boolean; readonly writeThrows?: boolean },
@@ -991,12 +1000,7 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
       { _tag: "Signaled", signal: "SIGTERM", stdout: "", stderr: "" },
       { _tag: "SpawnFailed", spawnError: "ENOENT", stdout: "", stderr: "" },
       { _tag: "Exited", exitCode: 0, stdout: "[]", stderr: "" },
-      {
-        _tag: "Exited",
-        exitCode: 0,
-        stdout: JSON.stringify([{ relFile: relA, primaryResults: [], fallbackResults: [] }]),
-        stderr: "",
-      },
+      { _tag: "Exited", exitCode: 0, stdout: emptyBatchEntry(relA), stderr: "" },
     ] as const) {
       expect(
         runPackageMutantBatchChecked({
@@ -1025,7 +1029,8 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
           {
             relFile: relA,
             primaryResults: killedOut,
-            fallbackResults: [],
+            scopedFallbackResults: [],
+            packageFallbackResults: [],
             restoreError: "restore failed",
           },
         ]),
@@ -1038,7 +1043,7 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
     match(restoreErrRes)
       .with({ _tag: "Abort" }, ({ partialResults, diagnostic }) => {
         expect(diagnostic).toBe("restore failed")
-        expect(partialResults.length).toBe(1)
+        expect(partialResults.length).toBe(0)
       })
       .with({ _tag: "Ok" }, () => {
         expect.unreachable("Expected Abort on restoreError")
@@ -1066,7 +1071,7 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
           p.endsWith("package-vitest-batch.mjs") ||
           testHostIo.existsSync(p),
         unlinkSync: () => {},
-        execFileSync: (_cmd, _args, _opts) => {
+        execFileSync: (_cmd, _args, opts) => {
           callIdx += 1
           if (callIdx === 1) {
             return {
@@ -1081,13 +1086,14 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
                       result: { _tag: "Exited", exitCode: 1, stdout: "ambiguous", stderr: "" },
                     },
                   ],
-                  fallbackResults: [],
+                  scopedFallbackResults: [],
+                  packageFallbackResults: [],
                 },
               ]),
               stderr: "",
             }
           }
-          if (callIdx === 2) {
+          if (callIdx === 2 || opts?.env?.["HARNESS_ACTIVE_MUTANT_ID"] === undefined) {
             return { _tag: "Exited", exitCode: 0, stdout: "Tests 1 passed (1)\n", stderr: "" }
           }
           return { _tag: "Exited", exitCode: 1, stdout: "Tests 1 failed (1)\n", stderr: "" }
@@ -1101,16 +1107,15 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
         baseSubprocessEnv: {},
         allPackageTests: ["libs/demo/domain/test/a.test.ts", "libs/demo/domain/test/b.test.ts"],
         files: [
-          {
-            file: makeMockFile(dir, relA),
-            originalContent: srcA,
-            schemaSource: mod.schemaSource,
-            mutants: [mut],
-            uncachedMutants: [mut],
-            primaryTests: ["libs/demo/domain/test/a.test.ts"],
-            fallbackTests: ["libs/demo/domain/test/b.test.ts"],
-            cachedHitIds: new Set(),
-          },
+          makeBatchFile(
+            dir,
+            relA,
+            srcA,
+            mod.schemaSource,
+            [mut],
+            ["libs/demo/domain/test/a.test.ts"],
+            ["libs/demo/domain/test/b.test.ts"],
+          ),
         ],
       })
       match(res)
@@ -1140,16 +1145,14 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
             {
               pkgKey: "harness/domain",
               mutantKeys: new Map([[mut.id, computeContentSha256("k")]]),
-              input: {
-                file: makeMockFile(dir, relA),
-                originalContent: srcA,
-                schemaSource: mod.schemaSource,
-                mutants: [mut],
-                uncachedMutants: [mut],
-                primaryTests: ["libs/demo/domain/test/a.test.ts"],
-                fallbackTests: [],
-                cachedHitIds: new Set(),
-              },
+              input: makeBatchFile(
+                dir,
+                relA,
+                srcA,
+                mod.schemaSource,
+                [mut],
+                ["libs/demo/domain/test/a.test.ts"],
+              ),
             },
           ],
         ],
@@ -1181,7 +1184,8 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
         mutants: [mut],
         uncachedMutants: [mut],
         primaryTests: ["libs/demo/domain/test/a.test.ts"],
-        fallbackTests: [],
+        scopedFallbackTests: [],
+        packageFallbackTests: [],
         cachedHitIds: new Set(),
         pkgBaselinePassed: true,
       })
@@ -1301,26 +1305,8 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
         baseSubprocessEnv: process.env,
         allPackageTests: [tPrim, tFast, tHeavy],
         files: [
-          {
-            file: makeMockFile(dir, relB),
-            originalContent: srcB,
-            schemaSource: modB.schemaSource,
-            mutants: mutsB,
-            uncachedMutants: mutsB,
-            primaryTests: [tPrim, tHeavy],
-            fallbackTests: [],
-            cachedHitIds: new Set(),
-          },
-          {
-            file: makeMockFile(dir, relA),
-            originalContent: srcA2,
-            schemaSource: modA2.schemaSource,
-            mutants: mutsA2,
-            uncachedMutants: mutsA2,
-            primaryTests: [tPrim],
-            fallbackTests: [tFast, tHeavy],
-            cachedHitIds: new Set(),
-          },
+          makeBatchFile(dir, relB, srcB, modB.schemaSource, mutsB, [tPrim, tHeavy]),
+          makeBatchFile(dir, relA, srcA2, modA2.schemaSource, mutsA2, [tPrim], [tFast, tHeavy]),
         ],
       })
       expect(stage2aOnly._tag).toBe("Ok")
@@ -1337,16 +1323,7 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
         baseSubprocessEnv: process.env,
         allPackageTests: [tPrim, tFast, tHeavy],
         files: [
-          {
-            file: makeMockFile(dir, relA),
-            originalContent: srcA3,
-            schemaSource: modA3.schemaSource,
-            mutants: mutsA3,
-            uncachedMutants: mutsA3,
-            primaryTests: [tPrim],
-            fallbackTests: [tFast, tHeavy],
-            cachedHitIds: new Set(),
-          },
+          makeBatchFile(dir, relA, srcA3, modA3.schemaSource, mutsA3, [tPrim], [tFast, tHeavy]),
         ],
       })
       match(brokenHeavyRes)
@@ -1372,16 +1349,7 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
         baseSubprocessEnv: process.env,
         allPackageTests: [tPrim, tFast, tHeavy],
         files: [
-          {
-            file: makeMockFile(dir, relA),
-            originalContent: srcA3,
-            schemaSource: modA3.schemaSource,
-            mutants: mutsA3,
-            uncachedMutants: mutsA3,
-            primaryTests: [tPrim],
-            fallbackTests: [tFast, tHeavy],
-            cachedHitIds: new Set(),
-          },
+          makeBatchFile(dir, relA, srcA3, modA3.schemaSource, mutsA3, [tPrim], [tFast, tHeavy]),
         ],
       })
       match(fixedHeavyRes)
@@ -1452,18 +1420,7 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
         hostIo: testHostIo,
         baseSubprocessEnv: { ...process.env, HARNESS_MUTATE_CONCURRENCY: "1" },
         allPackageTests: [tHeavy],
-        files: [
-          {
-            file: makeMockFile(dir, relA),
-            originalContent: origA,
-            schemaSource: mod.schemaSource,
-            mutants: selected,
-            uncachedMutants: selected,
-            primaryTests: [tHeavy],
-            fallbackTests: [],
-            cachedHitIds: new Set(),
-          },
-        ],
+        files: [makeBatchFile(dir, relA, origA, mod.schemaSource, selected, [tHeavy])],
       })
       match(res)
         .with({ _tag: "Abort" }, ({ diagnostic }) => {

@@ -1,8 +1,10 @@
 import * as path from "node:path"
 import { Data, Effect, Option, Schema } from "effect"
 import { match } from "ts-pattern"
+import { computeContentSha256 } from "@harness/contract"
 import { createTypeScriptProgramSession, evaluateOverlayDiagnostics } from "@harness/graph"
-import { nodeSyncHostIo } from "@harness/infra"
+import { execFileAsyncEffect, nodeSyncHostIo } from "@harness/infra"
+import type { SyncHostExecResult } from "@harness/service/host-io"
 import {
   buildSessionReport,
   readFrictionEvents,
@@ -20,8 +22,22 @@ import {
   resolveContainedRepoRoot,
   type ServerOptions,
 } from "./mcp-helpers.js"
+import {
+  buildOverlayCacheKey,
+  canonicalizePath,
+  findNearestContainedTsconfig,
+  type LspSessionCache,
+  type LspTsgoExecutor,
+  safeStatMtimeMs,
+  tryCanonicalizeExistingRoot,
+} from "./lsp-session-cache.js"
 
 export type { LspDiagnosticsReport }
+
+export interface LspDiagnosticsExecutionOptions {
+  readonly cache?: LspSessionCache | undefined
+  readonly execTsgo?: LspTsgoExecutor | undefined
+}
 
 const LspDiagnosticsSummarySchema = Schema.Struct({
   filesChecked: Schema.Int,
@@ -41,30 +57,24 @@ const decodeLspDiagnosticsPayload = Schema.decodeOption(
   Schema.fromJsonString(LspDiagnosticsPayloadSchema),
 )
 
+const boundedNoNulPath = Schema.String.pipe(
+  Schema.check(Schema.isBetweenLength(0, 1024), Schema.isPattern(/^[^\0]*$/)),
+)
+const pathField = (description: string) =>
+  Schema.optional(boundedNoNulPath.annotate({ description }))
+
 const LspDiagnosticsInputSchema = Schema.Struct({
-  file: Schema.optional(
-    Schema.String.annotate({
-      description: "Optional file path to check for Effect Language Service diagnostics",
-    }),
+  file: pathField("Optional file path to check for Effect Language Service diagnostics"),
+  filePath: pathField(
+    "Optional alias for file path to check for Effect Language Service diagnostics",
   ),
-  filePath: Schema.optional(
-    Schema.String.annotate({
-      description: "Optional alias for file path to check for Effect Language Service diagnostics",
-    }),
-  ),
-  project: Schema.optional(
-    Schema.String.annotate({
-      description: "Optional tsconfig.json path to check (defaults to tsconfig.base.json)",
-    }),
-  ),
-  tsconfigPath: Schema.optional(
-    Schema.String.annotate({
-      description: "Optional alias for project tsconfig.json path to check",
-    }),
-  ),
+  project: pathField("Optional tsconfig.json path to check (defaults to tsconfig.base.json)"),
+  tsconfigPath: pathField("Optional alias for project tsconfig.json path to check"),
   overlays: Schema.optional(
     Schema.Record(
-      Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 512))),
+      Schema.String.pipe(
+        Schema.check(Schema.isBetweenLength(1, 512), Schema.isPattern(/^[^\0]+$/)),
+      ),
       Schema.String.pipe(Schema.check(Schema.isMaxLength(1_000_000))),
     )
       .pipe(Schema.check(Schema.isMaxProperties(200)))
@@ -73,11 +83,7 @@ const LspDiagnosticsInputSchema = Schema.Struct({
           "Optional map of relative/absolute file paths to in-memory TypeScript content for Shadow LSP verification",
       }),
   ),
-  repoRoot: Schema.optional(
-    Schema.String.annotate({
-      description: "Optional repository root path",
-    }),
-  ),
+  repoRoot: pathField("Optional repository root path"),
 })
 
 const TelemetryReportInputSchema = Schema.Struct({
@@ -92,11 +98,7 @@ const TelemetryReportInputSchema = Schema.Struct({
         "Whether to report cumulative metrics across sessions instead of just the active task",
     }),
   ),
-  repoRoot: Schema.optional(
-    Schema.String.annotate({
-      description: "Optional repository root path",
-    }),
-  ),
+  repoRoot: pathField("Optional repository root path"),
 })
 
 const decodeLspDiagnosticsInput = Schema.decodeUnknownEffect(LspDiagnosticsInputSchema)
@@ -169,15 +171,18 @@ export const runDefaultLspDiagnostics = (
     readonly project?: string | undefined
     readonly tsconfigPath?: string | undefined
   },
+  execOptions?: LspDiagnosticsExecutionOptions,
 ): Effect.Effect<LspDiagnosticsReport, ProjectPathEscapeError> =>
   Effect.gen(function* () {
-    if (!nodeSyncHostIo.existsSync(repoRoot)) {
-      return makeLspExceptionReport(new Error(`Repository root '${repoRoot}' does not exist`))
-    }
+    const canonicalRoot = yield* match(tryCanonicalizeExistingRoot(repoRoot, nodeSyncHostIo))
+      .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))
+      .with({ _tag: "Failure" }, ({ failure }) => Effect.fail(toLspExecutionError(failure)))
+      .exhaustive()
     const cliArgs = ["diagnostics", "--strict", "--format", "json"]
     const effectiveFile = input.file ?? input.filePath
     const effectiveProject = input.project ?? input.tsconfigPath
     let resolvedFile: string | undefined
+    let projectTsconfigPath: string | undefined
 
     if (effectiveFile !== undefined && effectiveFile.trim().length > 0) {
       resolvedFile = path.isAbsolute(effectiveFile)
@@ -191,42 +196,73 @@ export const runDefaultLspDiagnostics = (
         })
       }
       if (effectiveProject !== undefined && effectiveProject.trim().length > 0) {
-        cliArgs.push("--project", yield* normalizeProjectPathEffect(repoRoot, effectiveProject))
+        projectTsconfigPath = yield* normalizeProjectPathEffect(repoRoot, effectiveProject)
+        cliArgs.push("--project", projectTsconfigPath)
       } else {
-        const normalizedRepoRoot = path.resolve(repoRoot)
-        let curr = path.dirname(resolvedFile)
-        while (isPathInsideRoot(normalizedRepoRoot, curr) && curr !== normalizedRepoRoot) {
-          const candidate = path.join(curr, "tsconfig.json")
-          const candidateExists = yield* Effect.try({
-            try: () => nodeSyncHostIo.existsSync(candidate),
-            catch: toLspExecutionError,
-          })
-          if (candidateExists) {
-            cliArgs.push("--project", candidate)
-            break
-          }
-          const parent = path.dirname(curr)
-          if (parent === curr) {
-            break
-          }
-          curr = parent
-        }
+        const targetFile = resolvedFile
+        const discovered = yield* Effect.try({
+          try: () => findNearestContainedTsconfig(repoRoot, targetFile, nodeSyncHostIo),
+          catch: toLspExecutionError,
+        })
+        const maybeEscape = match(discovered)
+          .with({ _tag: "Escaped" }, ({ path: escapedPath }) =>
+            Effect.fail(
+              new ProjectPathEscapeError({
+                projectPath: escapedPath,
+                repoRoot,
+                message: `Project path '${escapedPath}' escapes repository root '${repoRoot}'.`,
+              }),
+            ),
+          )
+          .with({ _tag: "Found" }, ({ path: foundPath }) =>
+            Effect.sync(() => {
+              projectTsconfigPath = foundPath
+              cliArgs.push("--project", foundPath)
+            }),
+          )
+          .with({ _tag: "None" }, () => Effect.void)
+          .exhaustive()
+        yield* maybeEscape
       }
       cliArgs.push("--file", resolvedFile)
     } else {
       const rawProject = effectiveProject ?? "tsconfig.base.json"
-      cliArgs.push("--project", yield* normalizeProjectPathEffect(repoRoot, rawProject))
+      projectTsconfigPath = yield* normalizeProjectPathEffect(repoRoot, rawProject)
+      cliArgs.push("--project", projectTsconfigPath)
     }
 
-    const binPath = path.join(findRepoRoot(repoRoot), "node_modules", ".bin", "effect-tsgo")
-    const proc = yield* Effect.try({
-      try: () =>
-        nodeSyncHostIo.execFileSync(binPath, cliArgs, {
-          cwd: repoRoot,
-          timeoutMs: 30_000,
-        }),
-      catch: (err) => (err instanceof Error ? err.message : String(err)),
-    })
+    const canonicalFile =
+      resolvedFile !== undefined ? canonicalizePath(resolvedFile, nodeSyncHostIo) : undefined
+    const canonicalProject =
+      projectTsconfigPath !== undefined
+        ? canonicalizePath(projectTsconfigPath, nodeSyncHostIo)
+        : undefined
+    const initialFileMtimeMs =
+      canonicalFile !== undefined ? safeStatMtimeMs(canonicalFile, nodeSyncHostIo) : undefined
+    const binPath = path.join(findRepoRoot(canonicalRoot), "node_modules", ".bin", "effect-tsgo")
+    const execTsgo = execOptions?.execTsgo ?? execFileAsyncEffect
+    const runTsgoEffect = (): Effect.Effect<SyncHostExecResult, string> =>
+      execTsgo(binPath, cliArgs, { cwd: repoRoot, timeoutMs: 30_000 }).pipe(
+        Effect.catchDefect((defect) =>
+          Effect.fail(defect instanceof Error ? defect.message : String(defect)),
+        ),
+      )
+
+    const cache = execOptions?.cache
+    const proc =
+      cache !== undefined
+        ? yield* cache.runSingleFlightTsgo(
+            JSON.stringify([
+              canonicalRoot,
+              binPath,
+              canonicalFile ?? null,
+              canonicalProject ?? null,
+              initialFileMtimeMs ?? null,
+              cache.getTsconfigMtimeKey(canonicalRoot, canonicalProject),
+            ]),
+            runTsgoEffect,
+          )
+        : yield* runTsgoEffect()
 
     const stdout = (proc.stdout ?? "").trim()
     const decoded = decodeLspDiagnosticsPayload(stdout)
@@ -234,33 +270,80 @@ export const runDefaultLspDiagnostics = (
     const overlays: Record<string, string> = {}
     if (
       resolvedFile !== undefined &&
+      canonicalFile !== undefined &&
       (resolvedFile.endsWith(".ts") || resolvedFile.endsWith(".tsx")) &&
       !resolvedFile.endsWith(".test.ts") &&
       !resolvedFile.endsWith(".spec.ts") &&
       !resolvedFile.endsWith(".test.tsx") &&
       !resolvedFile.endsWith(".spec.tsx")
     ) {
-      const fileExists = yield* Effect.try({
-        try: () => nodeSyncHostIo.existsSync(resolvedFile),
+      const canReadOverlayFile = yield* Effect.try({
+        try: () =>
+          isPathInsideRoot(canonicalRoot, canonicalFile) &&
+          nodeSyncHostIo.existsSync(canonicalFile) &&
+          !nodeSyncHostIo.isSymbolicLinkSync(resolvedFile) &&
+          !nodeSyncHostIo.isSymbolicLinkSync(canonicalFile) &&
+          nodeSyncHostIo.isFileSync(canonicalFile),
         catch: toLspExecutionError,
       })
-      if (fileExists) {
-        overlays[resolvedFile] = yield* Effect.try({
-          try: () => nodeSyncHostIo.readTextSync(resolvedFile),
+      if (canReadOverlayFile) {
+        overlays[canonicalFile] = yield* Effect.try({
+          try: () => nodeSyncHostIo.readTextSync(canonicalFile),
           catch: toLspExecutionError,
         })
       }
     }
 
+    const resolvedFileMtimeMs =
+      canonicalFile !== undefined ? safeStatMtimeMs(canonicalFile, nodeSyncHostIo) : undefined
     const tsDiags =
-      Object.keys(overlays).length > 0
+      Object.keys(overlays).length > 0 && canonicalFile !== undefined
         ? yield* Effect.try({
-            try: () =>
-              evaluateOverlayDiagnostics(
-                repoRoot,
+            try: () => {
+              const fileContent = overlays[canonicalFile] ?? ""
+              const contentSha256 = computeContentSha256(fileContent)
+              const cacheKey = buildOverlayCacheKey(
+                canonicalRoot,
+                canonicalFile,
+                canonicalProject,
+                nodeSyncHostIo,
+              )
+              if (cache !== undefined) {
+                const cached = cache.getCachedOverlayDiagnostics({
+                  repoRoot: canonicalRoot,
+                  cacheKey,
+                  filePath: canonicalFile,
+                  fileMtimeMs: resolvedFileMtimeMs,
+                  contentSha256,
+                  projectTsconfigPath: canonicalProject,
+                })
+                if (cached !== undefined) {
+                  return cached
+                }
+              }
+              const session =
+                cache !== undefined
+                  ? cache.getSession(canonicalRoot, canonicalProject)
+                  : createTypeScriptProgramSession(canonicalRoot, nodeSyncHostIo)
+              const freshDiags = evaluateOverlayDiagnostics(
+                canonicalRoot,
                 overlays,
-                createTypeScriptProgramSession(repoRoot, nodeSyncHostIo),
-              ).filter((d) => d.code !== "TS2591" && d.code !== "TS2580"),
+                session,
+              ).filter((d) => d.code !== "TS2591" && d.code !== "TS2580")
+              if (cache !== undefined) {
+                cache.setCachedOverlayDiagnostics({
+                  repoRoot: canonicalRoot,
+                  cacheKey,
+                  filePath: canonicalFile,
+                  fileMtimeMs: resolvedFileMtimeMs,
+                  contentSha256,
+                  session,
+                  diagnostics: freshDiags,
+                  projectTsconfigPath: canonicalProject,
+                })
+              }
+              return freshDiags
+            },
             catch: toLspExecutionError,
           })
         : []
@@ -294,14 +377,7 @@ export const runDefaultLspDiagnostics = (
       })
       .with({ _tag: "Some" }, () => undefined)
       .exhaustive()
-    for (const d of effectGoDiags) {
-      const key = formatDiagKey(d)
-      if (!seen.has(key)) {
-        seen.add(key)
-        mergedDiags.push(d)
-      }
-    }
-    for (const d of tsDiags) {
+    for (const d of [...effectGoDiags, ...tsDiags]) {
       const key = formatDiagKey(d)
       if (!seen.has(key)) {
         seen.add(key)
@@ -404,46 +480,31 @@ const evaluateOverlaysDiagnostics = (
   overlays: Record<string, string>,
   file: string | undefined,
   project: string | undefined,
+  lspSessionCache?: LspSessionCache,
 ): LspDiagnosticsReport => {
-  const escapedBoundaryPaths: Array<{ readonly file: string; readonly message: string }> = []
-  for (const k of Object.keys(overlays)) {
-    const absKey = path.isAbsolute(k) ? path.resolve(k) : path.resolve(root, k)
-    if (!isPathInsideRoot(root, absKey)) {
-      escapedBoundaryPaths.push({
-        file: k,
-        message: `Overlay path '${k}' escapes repository root.`,
-      })
-    }
-  }
-  if (file !== undefined && file.length > 0) {
-    const absFile = path.isAbsolute(file) ? path.resolve(file) : path.resolve(root, file)
-    if (!isPathInsideRoot(root, absFile)) {
-      escapedBoundaryPaths.push({
-        file,
-        message: `File path '${file}' escapes repository root.`,
-      })
-    }
-  }
-  if (project !== undefined && project.length > 0) {
-    const absProject = path.isAbsolute(project)
-      ? path.resolve(project)
-      : path.resolve(root, project)
-    if (!isPathInsideRoot(root, absProject)) {
-      escapedBoundaryPaths.push({
-        file: project,
-        message: `Project path '${project}' escapes repository root.`,
-      })
-    }
-  }
-  if (escapedBoundaryPaths.length > 0) {
-    const escapeDiags = escapedBoundaryPaths.map((entry) => ({
-      file: entry.file,
-      line: 1,
-      column: 1,
-      code: "PATH_TRAVERSAL",
-      severity: "error" as const,
-      message: entry.message,
-    }))
+  const candidatesToCheck: Array<readonly [label: string, value: string]> = [
+    ...Object.keys(overlays).map((k) => ["Overlay", k] as const),
+    ...(file !== undefined && file.length > 0 ? ([["File", file]] as const) : []),
+    ...(project !== undefined && project.length > 0 ? ([["Project", project]] as const) : []),
+  ]
+  const escapeDiags = candidatesToCheck.flatMap(([label, candidate]) => {
+    const absPath = path.isAbsolute(candidate)
+      ? path.resolve(candidate)
+      : path.resolve(root, candidate)
+    return isPathInsideRoot(root, absPath)
+      ? []
+      : [
+          {
+            file: candidate,
+            line: 1,
+            column: 1,
+            code: "PATH_TRAVERSAL",
+            severity: "error" as const,
+            message: `${label} path '${candidate}' escapes repository root.`,
+          },
+        ]
+  })
+  if (escapeDiags.length > 0) {
     return {
       clean: false,
       diagnostics: escapeDiags,
@@ -473,7 +534,16 @@ const evaluateOverlaysDiagnostics = (
   )
   const matchedKeys =
     targetRelFile !== undefined ? compilableKeys.filter(matchesTargetFile) : compilableKeys
-  const session = createTypeScriptProgramSession(root, nodeSyncHostIo)
+  const projectTsconfigPath =
+    project !== undefined && project.trim().length > 0
+      ? path.isAbsolute(project)
+        ? path.resolve(project)
+        : path.resolve(root, project)
+      : undefined
+  const session =
+    lspSessionCache !== undefined
+      ? lspSessionCache.getSession(root, projectTsconfigPath)
+      : createTypeScriptProgramSession(root, nodeSyncHostIo)
   const diags = evaluateOverlayDiagnostics(root, overlays, session)
   const filteredDiags =
     targetRelFile !== undefined ? diags.filter((d) => matchesTargetFile(d.file)) : diags
@@ -495,6 +565,7 @@ const evaluateOverlaysDiagnostics = (
 
 export const buildLspAndTelemetryToolDescriptors = (
   options?: ServerOptions,
+  lspSessionCache?: LspSessionCache,
 ): ReadonlyArray<McpToolPluginDescriptor> => [
   {
     name: McpToolName.make("harness_lsp_diagnostics"),
@@ -510,14 +581,18 @@ export const buildLspAndTelemetryToolDescriptors = (
         const root = yield* resolveContainedRepoRoot(typedArgs.repoRoot, options)
         if (overlays !== undefined && Object.keys(overlays).length > 0) {
           return yield* runSyncLspBranch(() =>
-            evaluateOverlaysDiagnostics(root, overlays, file, project),
+            evaluateOverlaysDiagnostics(root, overlays, file, project, lspSessionCache),
           )
         }
         if (options?.lspDiagnosticsRunner !== undefined) {
           const runner = options.lspDiagnosticsRunner
           return yield* runSyncLspBranch(() => runner({ file, project }))
         }
-        return yield* runDefaultLspDiagnostics(root, { file, project })
+        return yield* runDefaultLspDiagnostics(
+          root,
+          { file, project },
+          { cache: lspSessionCache, execTsgo: options?.lspTsgoExecutor },
+        )
       }),
   },
   {

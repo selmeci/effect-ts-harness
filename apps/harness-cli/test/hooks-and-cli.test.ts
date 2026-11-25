@@ -521,6 +521,15 @@ describe("hooks, stdin, declarative flags, hooks.json parity & fastpath", () => 
           repoRoot: dir,
           skipBackgroundDaemons: true,
         })._tag,
+      ).toBe("Some")
+
+      execFileSync("git", ["add", "."], { cwd: dir })
+      execFileSync("git", ["commit", "-m", "second"], { cwd: dir })
+      expect(
+        tryReadPreInvocationSessionCache(["session", "--format=antigravity"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+        })._tag,
       ).toBe("None")
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -630,7 +639,7 @@ describe("hooks, stdin, declarative flags, hooks.json parity & fastpath", () => 
         "None",
       )
 
-      // 7. Non-root gitignored file (.env.local) invalidates PreInvocation cache
+      // 7. Non-root gitignored file (.env.local) keeps PreInvocation cache Hit; root .env invalidates
       rmSync(join(dir, ".harness", "verify-stamp.json"), { force: true })
       writeFileSync(join(dir, ".gitignore"), "*.local\n", "utf8")
       execFileSync("git", ["add", ".gitignore"], { cwd: dir })
@@ -643,6 +652,10 @@ describe("hooks, stdin, declarative flags, hooks.json parity & fastpath", () => 
         "Some",
       )
       writeFileSync(join(dir, "libs", "demo", ".env.local"), "SECRET=1\n", "utf8")
+      expect(tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag).toBe(
+        "Some",
+      )
+      writeFileSync(join(dir, ".env"), "SECRET=1\n", "utf8")
       expect(tryReadPreInvocationSessionCache(["session", "--format=antigravity"], opts)._tag).toBe(
         "None",
       )

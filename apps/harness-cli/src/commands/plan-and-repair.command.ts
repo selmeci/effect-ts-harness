@@ -3,7 +3,7 @@ import { Cause, Effect, Option } from "effect"
 import * as Graph from "effect/Graph"
 import { match, P } from "ts-pattern"
 import { isPureInterruptCause } from "@harness/contract"
-import { IGNORED_ERRORS, loadGovernanceDocsChecked } from "@harness/gates"
+import { type GovernanceDocRef, IGNORED_ERRORS, loadGovernanceDocsChecked } from "@harness/gates"
 import {
   BisectionProbeCount,
   checkEffectGraph,
@@ -11,6 +11,7 @@ import {
   decideGraphRewrite,
   extractWorkspaceTypeAwareGraph,
   getNodeKey,
+  type HarnessGraph,
   makeOmnigraphSyncLayer,
   resolveOmnigraphTaskBranches,
   saveGraphSnapshot,
@@ -42,6 +43,129 @@ import {
   formatProjectionError,
   matchesExactSpecToken,
 } from "./plan-ears-and-overlays.js"
+import {
+  persistReusedPlanSnapshotIfSafe,
+  tryLoadReusableVerifiedPlanSnapshot,
+} from "./plan-snapshot-fastpath.js"
+
+const checkDeadTaggedErrors = (
+  graph: HarnessGraph,
+  governanceDocs: ReadonlyArray<GovernanceDocRef>,
+): CliResult | undefined => {
+  let hasEffectFnNodes = false
+  for (const [, node] of Graph.nodes(graph.graph)) {
+    const isEffectFn = match(node)
+      .with({ _tag: "EffectFn" }, () => true)
+      .with(
+        { _tag: "ServiceTag" },
+        { _tag: "ServiceLayer" },
+        { _tag: "TaggedError" },
+        { _tag: "SchemaDef" },
+        { _tag: "VitestCase" },
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
+        { _tag: "EffectSignature" },
+        { _tag: "LayerFlow" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "HttpEndpointTuple" },
+        { _tag: "MigrationTuple" },
+        () => false,
+      )
+      .exhaustive()
+    if (isEffectFn) {
+      hasEffectFnNodes = true
+      break
+    }
+  }
+  if (!hasEffectFnNodes) return undefined
+
+  const failsWithErrorTags = new Set<string>()
+  for (const [, node] of Graph.nodes(graph.graph)) {
+    match(node)
+      .with({ _tag: "EffectSignature" }, { _tag: "LayerFlow" }, (n) => {
+        for (const errTag of n.emittedErrors ?? []) failsWithErrorTags.add(errTag)
+      })
+      .with({ _tag: "HttpEndpointTuple" }, (n) => {
+        for (const errTag of n.errorTags) failsWithErrorTags.add(errTag)
+      })
+      .with(
+        { _tag: "EffectFn" },
+        { _tag: "ServiceTag" },
+        { _tag: "ServiceLayer" },
+        { _tag: "TaggedError" },
+        { _tag: "SchemaDef" },
+        { _tag: "VitestCase" },
+        { _tag: "PatternDoc" },
+        { _tag: "AdrDoc" },
+        { _tag: "EarsSpec" },
+        { _tag: "EarsRequirement" },
+        { _tag: "TraceabilityTuple" },
+        { _tag: "MigrationTuple" },
+        () => undefined,
+      )
+      .exhaustive()
+  }
+  for (const [, edge] of Graph.edges(graph.graph)) {
+    match<string>(edge.data.role)
+      .with("fails-with", "endpoint-error", () => {
+        const targetOpt = Graph.getNode(graph.graph, edge.target)
+        match(targetOpt)
+          .with({ _tag: "Some" }, ({ value }) => {
+            match(value)
+              .with({ _tag: "TaggedError" }, (errNode) => {
+                failsWithErrorTags.add(errNode.errorTag)
+              })
+              .with(
+                { _tag: "EffectFn" },
+                { _tag: "ServiceTag" },
+                { _tag: "ServiceLayer" },
+                { _tag: "SchemaDef" },
+                { _tag: "VitestCase" },
+                { _tag: "PatternDoc" },
+                { _tag: "AdrDoc" },
+                { _tag: "EarsSpec" },
+                { _tag: "EarsRequirement" },
+                { _tag: "EffectSignature" },
+                { _tag: "LayerFlow" },
+                { _tag: "TraceabilityTuple" },
+                { _tag: "HttpEndpointTuple" },
+                { _tag: "MigrationTuple" },
+                () => undefined,
+              )
+              .exhaustive()
+          })
+          .with({ _tag: "None" }, () => undefined)
+          .exhaustive()
+      })
+      .otherwise(() => undefined)
+  }
+  const violations: Array<string> = []
+  for (const doc of governanceDocs) {
+    const isActive = match(doc.status)
+      .with("accepted", "proposed", () => true)
+      .with("draft", "deprecated", "superseded", () => false)
+      .exhaustive()
+    if (isActive) {
+      for (const errName of doc.referencedErrors ?? []) {
+        if (!failsWithErrorTags.has(errName) && !IGNORED_ERRORS.has(errName)) {
+          violations.push(
+            `[dead-tagged-error] Governance doc '${doc.id}' declares TaggedError '${errName}', which has 0 FailsWith edges in the plan graph`,
+          )
+        }
+      }
+    }
+  }
+  if (violations.length > 0) {
+    return {
+      exitCode: 1,
+      stdout: JSON.stringify({ step: "type-graph-policy", valid: false, violations }, null, 2),
+      stderr: "",
+    }
+  }
+  return undefined
+}
 
 export const handlePlanCheck = (
   argv: ReadonlyArray<string>,
@@ -81,37 +205,6 @@ export const handlePlanCheck = (
       }
     }
 
-    if (
-      !graphOnly &&
-      !options?.skipSubprocessVerify &&
-      nodeSyncHostIo.existsSync(join(repoRoot, "package.json"))
-    ) {
-      const nxArgs = resolveNxAffectedArgs(repoRoot, ["typecheck", "lint"])
-      const subprocessErr = yield* Effect.try({
-        try: () => {
-          const res = nodeSyncHostIo.execFileSync("pnpm", nxArgs, {
-            cwd: repoRoot,
-            env: { ...process.env, HARNESS_PLAN_CHECK: "1", CI: "true" },
-          })
-          return match(res)
-            .with({ _tag: "Exited" }, (r) => (r.exitCode === 0 ? null : formatSubprocessError(r)))
-            .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, (r) =>
-              formatSubprocessError(r),
-            )
-            .exhaustive()
-        },
-        catch: (cause) => formatSubprocessError(cause),
-      }).pipe(Effect.catch((msg) => Effect.succeed(msg || "Plan check subprocess failed")))
-
-      if (subprocessErr !== null) {
-        return {
-          exitCode: 1,
-          stdout: "",
-          stderr: `[GATE FAILURE] plan-check:subprocess\nHINT: Fix compilation or lint errors before plan graph generation.\n\nFAILED OUTPUT:\n${subprocessErr}`,
-        }
-      }
-    }
-
     const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)
     if (fnIndex.duplicates.length > 0) {
       return {
@@ -120,204 +213,225 @@ export const handlePlanCheck = (
         stderr: `Duplicate span names found: ${fnIndex.duplicates.join(", ")}`,
       }
     }
+    const hasActiveStubs = Array.from(fnIndex.bySpanName.values()).some((fn) => fn.isStub)
+    const reuseOutcome = yield* tryLoadReusableVerifiedPlanSnapshot(
+      repoRoot,
+      hasActiveStubs,
+      nodeSyncHostIo,
+    )
 
-    const graph = yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo)
-    const checkResult = checkEffectGraph(graph)
-    if (!checkResult.ok) {
-      return {
-        exitCode: 1,
-        stdout: "",
-        stderr: checkResult.violations
-          .map((v) => `[${v.rule}] ${v.message} (${v.path.join(" -> ")})`)
-          .join("\n"),
-      }
-    }
+    type PlanGraphResolution =
+      | { readonly _tag: "Resolved"; readonly graph: HarnessGraph; readonly reused: boolean }
+      | { readonly _tag: "Failed"; readonly result: CliResult }
 
-    let hasEffectFnNodes = false
-    for (const [, node] of Graph.nodes(graph.graph)) {
-      const isEffectFn = match(node)
-        .with({ _tag: "EffectFn" }, () => true)
-        .with(
-          { _tag: "ServiceTag" },
-          { _tag: "ServiceLayer" },
-          { _tag: "TaggedError" },
-          { _tag: "SchemaDef" },
-          { _tag: "VitestCase" },
-          { _tag: "PatternDoc" },
-          { _tag: "AdrDoc" },
-          { _tag: "EarsSpec" },
-          { _tag: "EarsRequirement" },
-          { _tag: "EffectSignature" },
-          { _tag: "LayerFlow" },
-          { _tag: "TraceabilityTuple" },
-          { _tag: "HttpEndpointTuple" },
-          { _tag: "MigrationTuple" },
-          () => false,
-        )
-        .exhaustive()
-      if (isEffectFn) {
-        hasEffectFnNodes = true
-        break
-      }
-    }
-    if (hasEffectFnNodes) {
-      const failsWithErrorTags = new Set<string>()
-      for (const [, node] of Graph.nodes(graph.graph)) {
-        match(node)
-          .with({ _tag: "EffectSignature" }, { _tag: "LayerFlow" }, (n) => {
-            for (const errTag of n.emittedErrors ?? []) failsWithErrorTags.add(errTag)
-          })
-          .with({ _tag: "HttpEndpointTuple" }, (n) => {
-            for (const errTag of n.errorTags) failsWithErrorTags.add(errTag)
-          })
-          .with(
-            { _tag: "EffectFn" },
-            { _tag: "ServiceTag" },
-            { _tag: "ServiceLayer" },
-            { _tag: "TaggedError" },
-            { _tag: "SchemaDef" },
-            { _tag: "VitestCase" },
-            { _tag: "PatternDoc" },
-            { _tag: "AdrDoc" },
-            { _tag: "EarsSpec" },
-            { _tag: "EarsRequirement" },
-            { _tag: "TraceabilityTuple" },
-            { _tag: "MigrationTuple" },
-            () => undefined,
-          )
-          .exhaustive()
-      }
-      for (const [, edge] of Graph.edges(graph.graph)) {
-        match<string>(edge.data.role)
-          .with("fails-with", "endpoint-error", () => {
-            const targetOpt = Graph.getNode(graph.graph, edge.target)
-            match(targetOpt)
-              .with({ _tag: "Some" }, ({ value }) => {
-                match(value)
-                  .with({ _tag: "TaggedError" }, (errNode) => {
-                    failsWithErrorTags.add(errNode.errorTag)
-                  })
-                  .with(
-                    { _tag: "EffectFn" },
-                    { _tag: "ServiceTag" },
-                    { _tag: "ServiceLayer" },
-                    { _tag: "SchemaDef" },
-                    { _tag: "VitestCase" },
-                    { _tag: "PatternDoc" },
-                    { _tag: "AdrDoc" },
-                    { _tag: "EarsSpec" },
-                    { _tag: "EarsRequirement" },
-                    { _tag: "EffectSignature" },
-                    { _tag: "LayerFlow" },
-                    { _tag: "TraceabilityTuple" },
-                    { _tag: "HttpEndpointTuple" },
-                    { _tag: "MigrationTuple" },
-                    () => undefined,
+    const resolvedOutcome: PlanGraphResolution = yield* match(reuseOutcome)
+      .with({ _tag: "Hit" }, ({ graph: reusedGraph }) =>
+        Effect.succeed<PlanGraphResolution>({
+          _tag: "Resolved",
+          graph: reusedGraph,
+          reused: true,
+        }),
+      )
+      .with({ _tag: "Miss" }, () =>
+        Effect.gen(function* () {
+          if (
+            !graphOnly &&
+            !options?.skipSubprocessVerify &&
+            nodeSyncHostIo.existsSync(join(repoRoot, "package.json"))
+          ) {
+            const nxArgs = resolveNxAffectedArgs(repoRoot, ["typecheck", "lint"])
+            const subprocessErr = yield* Effect.try({
+              try: () => {
+                const res = nodeSyncHostIo.execFileSync("pnpm", nxArgs, {
+                  cwd: repoRoot,
+                  env: { ...process.env, HARNESS_PLAN_CHECK: "1", CI: "true" },
+                })
+                return match(res)
+                  .with({ _tag: "Exited" }, (r) =>
+                    r.exitCode === 0 ? null : formatSubprocessError(r),
+                  )
+                  .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, (r) =>
+                    formatSubprocessError(r),
                   )
                   .exhaustive()
-              })
-              .with({ _tag: "None" }, () => undefined)
-              .exhaustive()
-          })
-          .otherwise(() => undefined)
-      }
-      const violations: Array<string> = []
-      for (const doc of governanceDocs) {
-        const isActive = match(doc.status)
-          .with("accepted", "proposed", () => true)
-          .with("draft", "deprecated", "superseded", () => false)
-          .exhaustive()
-        if (isActive) {
-          for (const errName of doc.referencedErrors ?? []) {
-            if (!failsWithErrorTags.has(errName) && !IGNORED_ERRORS.has(errName)) {
-              violations.push(
-                `[dead-tagged-error] Governance doc '${doc.id}' declares TaggedError '${errName}', which has 0 FailsWith edges in the plan graph`,
-              )
+              },
+              catch: (cause) => formatSubprocessError(cause),
+            }).pipe(Effect.catch((msg) => Effect.succeed(msg || "Plan check subprocess failed")))
+
+            if (subprocessErr !== null) {
+              return {
+                _tag: "Failed" as const,
+                result: {
+                  exitCode: 1,
+                  stdout: "",
+                  stderr: `[GATE FAILURE] plan-check:subprocess\nHINT: Fix compilation or lint errors before plan graph generation.\n\nFAILED OUTPUT:\n${subprocessErr}`,
+                },
+              }
             }
           }
-        }
-      }
-      if (violations.length > 0) {
-        return {
-          exitCode: 1,
-          stdout: JSON.stringify({ step: "type-graph-policy", valid: false, violations }, null, 2),
-          stderr: "",
-        }
-      }
-    }
+          const extracted = yield* extractWorkspaceTypeAwareGraph(repoRoot, nodeSyncHostIo)
+          return { _tag: "Resolved" as const, graph: extracted, reused: false }
+        }),
+      )
+      .exhaustive()
 
-    if (!graphOnly) {
-      const omnigraphStartedAtMs = Date.now()
-      const snapshotPath = join(repoRoot, ".harness", "plan-graph-snapshot.json")
-      if (isIsolatedExternalWorkspace(repoRoot)) {
-        saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
-        recordTelemetry(options, {
-          surface: "cli",
-          category: "graph_query",
-          toolName: "graph:snapshot-local",
-          outcome: "ok",
-          durationMs: Math.max(0, Date.now() - omnigraphStartedAtMs),
-          engineSource: "local",
-          detail: "skipped-isolated-workspace",
-        })
-      } else {
-        const lintRes = yield* runOfflineOmnigraphLintGate(resolveClusterRepoRoot(repoRoot))
-        if (!lintRes.ok) {
-          return {
-            exitCode: 1,
-            stdout: "",
-            stderr: `[GATE FAILURE] plan-check:omnigraph-lint\n${lintRes.message}`,
+    return yield* match(resolvedOutcome)
+      .with({ _tag: "Failed" }, ({ result }) => Effect.succeed(result))
+      .with({ _tag: "Resolved" }, ({ graph, reused }) =>
+        Effect.gen(function* () {
+          const checkResult = checkEffectGraph(graph)
+          if (!checkResult.ok) {
+            return {
+              exitCode: 1,
+              stdout: "",
+              stderr: checkResult.violations
+                .map((v) => `[${v.rule}] ${v.message} (${v.path.join(" -> ")})`)
+                .join("\n"),
+            }
           }
-        }
-        const omnigraphReady = yield* ensureLocalOmnigraphReady(repoRoot)
-        if (!omnigraphReady) {
-          return {
-            exitCode: 1,
-            stdout: "",
-            stderr: "[GATE FAILURE] plan-check:omnigraph-ready\nOmnigraph server is not ready",
-          }
-        }
-        const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
-        const embeddingResult = yield* computeSyncEmbeddingsForGraph(repoRoot, graph, options)
-        const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
-          repoRoot: resolveClusterRepoRoot(repoRoot),
-          branch: taskBranches.planBranch,
-          from: taskBranches.mainBranch,
-          snapshotPath,
-          ...toSyncEmbeddingOptions(embeddingResult),
-        }).pipe(
-          Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
-          Effect.catchCause((cause) => {
-            if (isPureInterruptCause(cause)) return Effect.interrupt
-            return Effect.succeed({
-              syncedToOmnigraph: false,
-              snapshotPath,
-              error: Cause.pretty(cause),
-            })
-          }),
-        )
-        recordTelemetry(options, {
-          surface: "cli",
-          category: "graph_query",
-          toolName: "omnigraph:sync-plan",
-          outcome: syncRes.syncedToOmnigraph ? "ok" : "fail",
-          durationMs: Math.max(0, Date.now() - omnigraphStartedAtMs),
-          engineSource: syncRes.syncedToOmnigraph ? "omnigraph" : "memory-fallback",
-        })
-        if (!syncRes.syncedToOmnigraph) {
-          return {
-            exitCode: 1,
-            stdout: "",
-            stderr: `Plan check failed: could not sync plan graph to Omnigraph${syncRes.error ? ` (${syncRes.error})` : ""}`,
-          }
-        }
-      }
-    }
 
-    const earsErr = yield* checkPlanEarsConsistency(governanceDocs)
-    return match(earsErr)
-      .with({ _tag: "Some" }, ({ value }) => value)
-      .with({ _tag: "None" }, () => ({ exitCode: 0, stdout: checkResult.mermaid, stderr: "" }))
+          const deadErrorResult = checkDeadTaggedErrors(graph, governanceDocs)
+          if (deadErrorResult !== undefined) {
+            return deadErrorResult
+          }
+
+          if (!graphOnly) {
+            const omnigraphStartedAtMs = Date.now()
+            const snapshotPath = join(repoRoot, ".harness", "plan-graph-snapshot.json")
+            const syncMode = reused
+              ? ("reused" as const)
+              : isIsolatedExternalWorkspace(repoRoot)
+                ? ("isolated" as const)
+                : ("omnigraph" as const)
+            const syncFailResult = yield* match(syncMode)
+              .with("reused", () =>
+                Effect.sync((): CliResult | undefined => {
+                  if (
+                    isIsolatedExternalWorkspace(repoRoot) ||
+                    nodeSyncHostIo.existsSync(snapshotPath)
+                  ) {
+                    const persistRes = persistReusedPlanSnapshotIfSafe(
+                      repoRoot,
+                      snapshotPath,
+                      graph,
+                      nodeSyncHostIo,
+                    )
+                    const persistErr = match(persistRes)
+                      .with({ _tag: "Saved" }, () => undefined)
+                      .with({ _tag: "Failed" }, ({ reason }) => ({
+                        exitCode: 1,
+                        stdout: "",
+                        stderr: `[GATE FAILURE] plan-check:snapshot-write\n${reason}`,
+                      }))
+                      .exhaustive()
+                    if (persistErr !== undefined) return persistErr
+                  }
+                  recordTelemetry(options, {
+                    surface: "cli",
+                    category: "graph_query",
+                    toolName: "omnigraph:sync-plan",
+                    outcome: "ok",
+                    durationMs: Math.max(0, Date.now() - omnigraphStartedAtMs),
+                    engineSource: "local",
+                    detail: "reused-verified-snapshot",
+                  })
+                  return undefined
+                }),
+              )
+              .with("isolated", () =>
+                Effect.sync((): CliResult | undefined => {
+                  saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
+                  recordTelemetry(options, {
+                    surface: "cli",
+                    category: "graph_query",
+                    toolName: "graph:snapshot-local",
+                    outcome: "ok",
+                    durationMs: Math.max(0, Date.now() - omnigraphStartedAtMs),
+                    engineSource: "local",
+                    detail: "skipped-isolated-workspace",
+                  })
+                  return undefined
+                }),
+              )
+              .with("omnigraph", () =>
+                Effect.gen(function* (): Effect.fn.Return<CliResult | undefined> {
+                  const lintRes = yield* runOfflineOmnigraphLintGate(
+                    resolveClusterRepoRoot(repoRoot),
+                  )
+                  if (!lintRes.ok) {
+                    return {
+                      exitCode: 1,
+                      stdout: "",
+                      stderr: `[GATE FAILURE] plan-check:omnigraph-lint\n${lintRes.message}`,
+                    }
+                  }
+                  const omnigraphReady = yield* ensureLocalOmnigraphReady(repoRoot)
+                  if (!omnigraphReady) {
+                    return {
+                      exitCode: 1,
+                      stdout: "",
+                      stderr:
+                        "[GATE FAILURE] plan-check:omnigraph-ready\nOmnigraph server is not ready",
+                    }
+                  }
+                  const taskBranches = resolveOmnigraphTaskBranches(repoRoot, nodeSyncHostIo)
+                  const embeddingResult = yield* computeSyncEmbeddingsForGraph(
+                    repoRoot,
+                    graph,
+                    options,
+                  )
+                  const syncRes = yield* syncToOmnigraphAndSnapshot(graph, {
+                    repoRoot: resolveClusterRepoRoot(repoRoot),
+                    branch: taskBranches.planBranch,
+                    from: taskBranches.mainBranch,
+                    snapshotPath,
+                    ...toSyncEmbeddingOptions(embeddingResult),
+                  }).pipe(
+                    Effect.provide(makeOmnigraphSyncLayer(nodeSyncHostIo)),
+                    Effect.catchCause((cause) => {
+                      if (isPureInterruptCause(cause)) return Effect.interrupt
+                      return Effect.succeed({
+                        syncedToOmnigraph: false,
+                        snapshotPath,
+                        error: Cause.pretty(cause),
+                      })
+                    }),
+                  )
+                  recordTelemetry(options, {
+                    surface: "cli",
+                    category: "graph_query",
+                    toolName: "omnigraph:sync-plan",
+                    outcome: syncRes.syncedToOmnigraph ? "ok" : "fail",
+                    durationMs: Math.max(0, Date.now() - omnigraphStartedAtMs),
+                    engineSource: syncRes.syncedToOmnigraph ? "omnigraph" : "memory-fallback",
+                  })
+                  if (!syncRes.syncedToOmnigraph) {
+                    return {
+                      exitCode: 1,
+                      stdout: "",
+                      stderr: `Plan check failed: could not sync plan graph to Omnigraph${syncRes.error ? ` (${syncRes.error})` : ""}`,
+                    }
+                  }
+                  return undefined
+                }),
+              )
+              .exhaustive()
+            if (syncFailResult !== undefined) {
+              return syncFailResult
+            }
+          }
+
+          const earsErr = yield* checkPlanEarsConsistency(governanceDocs)
+          return match(earsErr)
+            .with({ _tag: "Some" }, ({ value }) => value)
+            .with({ _tag: "None" }, () => ({
+              exitCode: 0,
+              stdout: checkResult.mermaid,
+              stderr: "",
+            }))
+            .exhaustive()
+        }),
+      )
       .exhaustive()
   })
 

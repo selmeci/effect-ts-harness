@@ -4,6 +4,7 @@ import { buildDatalogAndDpoToolDescriptors } from "./datalog-and-dpo.tools.js"
 import { buildGitDiffToolDescriptors } from "./git-diff.tools.js"
 import { buildGraphNavigationToolDescriptors } from "./graph-navigation.tools.js"
 import { buildLspAndTelemetryToolDescriptors } from "./lsp-and-telemetry.tools.js"
+import { createLspSessionCache, type LspSessionCache } from "./lsp-session-cache.js"
 import {
   CANONICAL_MCP_TOOL_NAMES,
   type McpToolExecutionError,
@@ -38,26 +39,27 @@ export class McpToolRegistry extends Context.Service<McpToolRegistry, McpToolReg
   "harness-mcp/McpToolRegistry",
 ) {}
 
+const buildRegistryService = (
+  tools: ReadonlyArray<McpToolPluginDescriptor>,
+): Effect.Effect<McpToolRegistryShape> =>
+  Effect.gen(function* () {
+    const byName = new Map<string, McpToolPluginDescriptor>()
+    for (const t of tools) {
+      if (byName.has(t.name)) {
+        return yield* Effect.die(new Error(`Duplicate MCP tool registered: ${t.name}`))
+      }
+      byName.set(t.name, t)
+    }
+    const readonlyByName: ReadonlyMap<string, McpToolPluginDescriptor> = byName
+    return McpToolRegistry.of({
+      listTools: Effect.succeed(tools),
+      resolveTool: (name) => Effect.succeed(Option.fromUndefinedOr(readonlyByName.get(name))),
+    })
+  })
+
 export const makeMcpToolRegistryLayer = (
   tools: ReadonlyArray<McpToolPluginDescriptor>,
-): Layer.Layer<McpToolRegistry> =>
-  Layer.effect(
-    McpToolRegistry,
-    Effect.gen(function* () {
-      const byName = new Map<string, McpToolPluginDescriptor>()
-      for (const t of tools) {
-        if (byName.has(t.name)) {
-          return yield* Effect.die(new Error(`Duplicate MCP tool registered: ${t.name}`))
-        }
-        byName.set(t.name, t)
-      }
-      const readonlyByName: ReadonlyMap<string, McpToolPluginDescriptor> = byName
-      return McpToolRegistry.of({
-        listTools: Effect.succeed(tools),
-        resolveTool: (name) => Effect.succeed(Option.fromUndefinedOr(readonlyByName.get(name))),
-      })
-    }),
-  )
+): Layer.Layer<McpToolRegistry> => Layer.effect(McpToolRegistry, buildRegistryService(tools))
 
 export type McpToolHandler = (
   args: Readonly<Record<string, unknown>>,
@@ -65,34 +67,39 @@ export type McpToolHandler = (
 
 export const buildLiveMcpToolDescriptors = (
   options?: ServerOptions,
+  lspSessionCache?: LspSessionCache,
 ): ReadonlyArray<McpToolPluginDescriptor> => [
   ...buildGraphNavigationToolDescriptors(options),
   ...buildOntologyAndGqToolDescriptors(options),
-  ...buildLspAndTelemetryToolDescriptors(options),
+  ...buildLspAndTelemetryToolDescriptors(options, lspSessionCache),
   ...buildDatalogAndDpoToolDescriptors(options),
   ...buildGitDiffToolDescriptors(options),
   ...buildWorkflowPlanToolDescriptors(options),
   ...buildRetrievalToolDescriptors(options),
 ]
 
-const STATIC_LIVE_TOOL_DESCRIPTORS: ReadonlyArray<McpToolPluginDescriptor> =
-  buildLiveMcpToolDescriptors()
-
-const STATIC_LIVE_TOOL_MAP: ReadonlyMap<string, McpToolPluginDescriptor> = new Map(
-  STATIC_LIVE_TOOL_DESCRIPTORS.map((descriptor) => [descriptor.name, descriptor]),
-)
-
-export const McpToolRegistryLive: Layer.Layer<McpToolRegistry> = Layer.succeed(McpToolRegistry, {
-  listTools: Effect.succeed(STATIC_LIVE_TOOL_DESCRIPTORS),
-  resolveTool: (name) => Effect.succeed(Option.fromUndefinedOr(STATIC_LIVE_TOOL_MAP.get(name))),
-})
-
 export const makeLiveMcpToolRegistryLayer = (
   options?: ServerOptions,
 ): Layer.Layer<McpToolRegistry> =>
-  options === undefined
-    ? McpToolRegistryLive
-    : makeMcpToolRegistryLayer(buildLiveMcpToolDescriptors(options))
+  Layer.effect(
+    McpToolRegistry,
+    Effect.gen(function* () {
+      const lspSessionCache = yield* Effect.acquireRelease(
+        Effect.sync(
+          () => options?.lspSessionCache ?? createLspSessionCache(options?.lspSessionCacheOptions),
+        ),
+        (cache) =>
+          Effect.sync(() => {
+            if (options?.lspSessionCache === undefined) {
+              cache.clear()
+            }
+          }),
+      )
+      return yield* buildRegistryService(buildLiveMcpToolDescriptors(options, lspSessionCache))
+    }),
+  )
+
+export const McpToolRegistryLive: Layer.Layer<McpToolRegistry> = makeLiveMcpToolRegistryLayer()
 
 export interface DispatchMcpToolInput {
   readonly toolName: string

@@ -7,6 +7,13 @@ import { match } from "ts-pattern"
 import { compareCodeUnits } from "@harness/contract"
 import { ts } from "@harness/graph"
 import type { SyncHostDirEntry, SyncHostIo } from "@harness/service/host-io"
+import {
+  type BarrelExportIndex,
+  type BarrelImportUsage,
+  computeScopedClosureTestAbsPaths,
+  extractBarrelExportIndex,
+  extractBarrelImportUsage,
+} from "./mutation-barrel-reachability.js"
 
 const HEAVY_META_TEST_BASENAMES: ReadonlySet<string> = new Set([
   "mutation-check.test.ts",
@@ -30,6 +37,8 @@ export interface PackageReachabilityIndex {
   readonly testSourceByAbsPath: ReadonlyMap<string, string>
   readonly testLineCountByAbsPath: ReadonlyMap<string, number>
   readonly absByRelPath: ReadonlyMap<string, string>
+  readonly barrelExports: BarrelExportIndex
+  readonly barrelImporters: ReadonlyMap<string, BarrelImportUsage>
 }
 
 export type BuildReachabilityIndexResult =
@@ -38,6 +47,7 @@ export type BuildReachabilityIndexResult =
 
 export interface ReverseImportReachability {
   readonly nonBarrelTests: ReadonlyArray<string>
+  readonly scopedClosureTests: ReadonlyArray<string>
   readonly allStaticImporterTests: ReadonlyArray<string>
 }
 
@@ -128,7 +138,7 @@ const candidateTargetsForBase = (baseRel: string): ReadonlyArray<string> => {
   return [`${clean}.ts`, `${clean}.tsx`, `${prefix}index.ts`, `${prefix}index.tsx`]
 }
 
-const resolvePackageImport = (
+export const resolvePackageImport = (
   fromRel: string,
   spec: string,
   pkgDirRel: string,
@@ -137,17 +147,12 @@ const resolvePackageImport = (
 ): string | undefined => {
   if (spec.startsWith("./") || spec.startsWith("../") || spec === "." || spec === "..") {
     const base = posix.normalize(posix.join(posix.dirname(fromRel), spec))
-    for (const cand of candidateTargetsForBase(base)) {
-      if (knownFiles.has(cand)) return cand
-    }
-    return undefined
+    return candidateTargetsForBase(base).find((c) => knownFiles.has(c))
   }
   if (pkgName !== undefined && (spec === pkgName || spec.startsWith(`${pkgName}/`))) {
     const sub = spec === pkgName ? "index" : spec.slice(pkgName.length + 1)
-    const base = `${pkgDirRel}/src/${sub}`
-    for (const cand of candidateTargetsForBase(posix.normalize(base))) {
-      if (knownFiles.has(cand)) return cand
-    }
+    const base = posix.normalize(`${pkgDirRel}/src/${sub}`)
+    return candidateTargetsForBase(base).find((c) => knownFiles.has(c))
   }
   return undefined
 }
@@ -200,6 +205,14 @@ export const buildPackageReachabilityIndexChecked = (
   const revFull = new Map<string, Set<string>>()
   const testSourceByAbsPath = new Map<string, string>()
   const testLineCountByAbsPath = new Map<string, number>()
+  let barrelExports: BarrelExportIndex = {
+    exportsByTarget: new Map(),
+    wildcardTargets: new Set(),
+  }
+  const barrelImporters = new Map<string, BarrelImportUsage>()
+
+  const resolveImport = (fromRel: string, spec: string) =>
+    resolvePackageImport(fromRel, spec, pkgDirRel, pkgName, relToAbs)
 
   for (const [relPath, absPath] of relToAbs.entries()) {
     const symErr = match(
@@ -236,14 +249,24 @@ export const buildPackageReachabilityIndexChecked = (
       testLineCountByAbsPath.set(absPath, content.split(/\r?\n/).length)
     }
 
+    if (relPath === barrelRel) {
+      barrelExports = extractBarrelExportIndex(barrelRel, content, resolveImport)
+    }
+
+    let importsBarrel = false
     const pre = ts.preProcessFile(content, true, true)
     for (const imp of pre.importedFiles) {
-      const targetRel = resolvePackageImport(relPath, imp.fileName, pkgDirRel, pkgName, relToAbs)
+      const targetRel = resolveImport(relPath, imp.fileName)
       if (targetRel === undefined) continue
       addReverseEdge(revFull, targetRel, relPath)
       if (relPath !== barrelRel) {
         addReverseEdge(revNoBarrel, targetRel, relPath)
+        if (targetRel === barrelRel) importsBarrel = true
       }
+    }
+    if (importsBarrel) {
+      const usage = extractBarrelImportUsage(relPath, content, barrelRel, resolveImport)
+      if (usage !== undefined) barrelImporters.set(relPath, usage)
     }
   }
 
@@ -257,6 +280,8 @@ export const buildPackageReachabilityIndexChecked = (
       testSourceByAbsPath,
       testLineCountByAbsPath,
       absByRelPath: relToAbs,
+      barrelExports,
+      barrelImporters,
     },
   }
 }
@@ -348,8 +373,17 @@ export const queryReverseImportReachability = (
   }
   const nonBarrel = collectReachingFromRevMap(targetRelFile, index.revNoBarrel, eligibleByRel)
   const full = collectReachingFromRevMap(targetRelFile, index.revFull, eligibleByRel)
+  const scopedClosureSet = computeScopedClosureTestAbsPaths({
+    targetRelFile,
+    revNoBarrel: index.revNoBarrel,
+    barrelExports: index.barrelExports,
+    barrelImporters: index.barrelImporters,
+    eligibleByRel,
+    nonBarrelTests: nonBarrel,
+  })
   return {
     nonBarrelTests: sortTestAbsPathsBySpeed(nonBarrel, index),
+    scopedClosureTests: sortTestAbsPathsBySpeed(Array.from(scopedClosureSet), index),
     allStaticImporterTests: sortTestAbsPathsBySpeed(full, index),
   }
 }
@@ -362,21 +396,32 @@ export const selectReachabilityPartition = (input: {
   readonly symbolMatchedTests: ReadonlyArray<string>
 }): {
   readonly primaryTests: ReadonlyArray<string>
+  readonly scopedFallbackTests: ReadonlyArray<string>
+  readonly packageFallbackTests: ReadonlyArray<string>
   readonly fallbackTests: ReadonlyArray<string>
 } => {
-  const { nonBarrelTests, allStaticImporterTests } = queryReverseImportReachability(
-    input.index,
-    input.targetRelFile,
-    input.eligibleTests,
-  )
+  const { nonBarrelTests, scopedClosureTests, allStaticImporterTests } =
+    queryReverseImportReachability(input.index, input.targetRelFile, input.eligibleTests)
   const staticSet = new Set(allStaticImporterTests)
-  const remainingFrom = (primary: ReadonlyArray<string>): ReadonlyArray<string> => {
-    const primarySet = new Set(primary)
-    return sortTestAbsPathsBySpeed(
-      input.eligibleTests.filter((t) => !primarySet.has(t)),
+  const scopedClosureSet = new Set(scopedClosureTests)
+  const buildPartition = (primaryTests: ReadonlyArray<string>) => {
+    const primarySet = new Set(primaryTests)
+    const scopedFallbackTests = sortTestAbsPathsBySpeed(
+      input.eligibleTests.filter((t) => !primarySet.has(t) && scopedClosureSet.has(t)),
+      input.index,
+    )
+    const scopedSet = new Set(scopedFallbackTests)
+    const packageFallbackTests = sortTestAbsPathsBySpeed(
+      input.eligibleTests.filter((t) => !primarySet.has(t) && !scopedSet.has(t)),
       input.index,
       staticSet,
     )
+    return {
+      primaryTests,
+      scopedFallbackTests,
+      packageFallbackTests,
+      fallbackTests: [...scopedFallbackTests, ...packageFallbackTests],
+    }
   }
   const dedupPreserve = (items: ReadonlyArray<string>): ReadonlyArray<string> => {
     const seen = new Set<string>()
@@ -391,27 +436,24 @@ export const selectReachabilityPartition = (input: {
   }
 
   if (input.directStemTests.length > 0) {
-    const primaryTests = dedupPreserve([...input.directStemTests, ...nonBarrelTests])
-    return { primaryTests, fallbackTests: remainingFrom(primaryTests) }
+    return buildPartition(dedupPreserve([...input.directStemTests, ...nonBarrelTests]))
   }
   if (input.symbolMatchedTests.length > 0) {
-    const primaryTests = dedupPreserve([...input.symbolMatchedTests, ...nonBarrelTests])
-    return { primaryTests, fallbackTests: remainingFrom(primaryTests) }
+    return buildPartition(dedupPreserve([...input.symbolMatchedTests, ...nonBarrelTests]))
   }
   if (nonBarrelTests.length > 0) {
-    return { primaryTests: nonBarrelTests, fallbackTests: remainingFrom(nonBarrelTests) }
+    return buildPartition(nonBarrelTests)
   }
   if (
     allStaticImporterTests.length > 0 &&
     allStaticImporterTests.length < input.eligibleTests.length
   ) {
-    return {
-      primaryTests: allStaticImporterTests,
-      fallbackTests: remainingFrom(allStaticImporterTests),
-    }
+    return buildPartition(allStaticImporterTests)
   }
   return {
     primaryTests: sortTestAbsPathsBySpeed(input.eligibleTests, input.index, staticSet),
+    scopedFallbackTests: [],
+    packageFallbackTests: [],
     fallbackTests: [],
   }
 }
@@ -456,6 +498,8 @@ export const partitionEligibleTestsChecked = (input: {
       readonly _tag: "Ok"
       readonly partition: {
         readonly primaryTests: ReadonlyArray<string>
+        readonly scopedFallbackTests: ReadonlyArray<string>
+        readonly packageFallbackTests: ReadonlyArray<string>
         readonly fallbackTests: ReadonlyArray<string>
       }
     }
@@ -468,7 +512,12 @@ export const partitionEligibleTestsChecked = (input: {
   if (eligibleTests.length <= 2) {
     return {
       _tag: "Ok",
-      partition: { primaryTests: eligibleTests, fallbackTests: [] },
+      partition: {
+        primaryTests: eligibleTests,
+        scopedFallbackTests: [],
+        packageFallbackTests: [],
+        fallbackTests: [],
+      },
     }
   }
 

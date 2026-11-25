@@ -26,7 +26,8 @@ import type { DomainFile } from "./mutation-target-discovery.js"
 const PackageBatchFileOutputSchema = Schema.Struct({
   relFile: Schema.String,
   primaryResults: Schema.Array(BatchMutantResultEntry),
-  fallbackResults: Schema.Array(BatchMutantResultEntry),
+  scopedFallbackResults: Schema.Array(BatchMutantResultEntry),
+  packageFallbackResults: Schema.Array(BatchMutantResultEntry),
   restoreError: Schema.optional(Schema.String),
 })
 
@@ -41,6 +42,8 @@ export interface PackageBatchFileInput {
   readonly mutants: ReadonlyArray<CodeMutant>
   readonly uncachedMutants: ReadonlyArray<CodeMutant>
   readonly primaryTests: ReadonlyArray<string>
+  readonly scopedFallbackTests: ReadonlyArray<string>
+  readonly packageFallbackTests: ReadonlyArray<string>
   readonly fallbackTests: ReadonlyArray<string>
   readonly cachedHitIds: ReadonlySet<string>
 }
@@ -93,6 +96,32 @@ const shouldRecordOutcome = (
     .with("survived", "equivalent", () => false)
     .exhaustive()
 
+const recordStageOutcomes = (
+  outcomes: ReadonlyArray<MutantOutcome>,
+  nonCacheableIds: ReadonlySet<string>,
+  fileOutcomes: Map<string, MutantOutcome>,
+  fileNonCacheableIds: Set<string>,
+  onlyUpdateOnKill: boolean,
+): void => {
+  for (const id of nonCacheableIds) fileNonCacheableIds.add(id)
+  for (const o of outcomes) {
+    if (shouldRecordOutcome(onlyUpdateOnKill, o.status)) {
+      fileOutcomes.set(o.mutant.id, o)
+    }
+  }
+}
+
+const collectSurvivingMutants = (
+  mutants: ReadonlyArray<CodeMutant>,
+  fileOutcomes: ReadonlyMap<string, MutantOutcome>,
+): ReadonlyArray<CodeMutant> =>
+  mutants.filter((m) =>
+    match(fileOutcomes.get(m.id)?.status)
+      .with("survived", () => true)
+      .with("killed", "equivalent", undefined, () => false)
+      .exhaustive(),
+  )
+
 const applyBatchPassOutcomes = (input: {
   readonly repoRoot: string
   readonly backupPath: string
@@ -126,7 +155,7 @@ const applyBatchPassOutcomes = (input: {
         input.fileEntry.schemaSource,
         input.backupPath,
         [mutant],
-        { skipBaselineCheck: true },
+        { skipBaselineCheck: !input.onlyUpdateOnKill },
       )
       const soloDiag = match(soloRes)
         .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
@@ -172,6 +201,73 @@ const applyBatchPassOutcomes = (input: {
   return undefined
 }
 
+const stageTimeoutMs = (tests: ReadonlyArray<string>): number =>
+  Math.max(30_000, Math.min(180_000, Math.max(1, tests.length) * 10_000))
+
+const processBatchFallbackStage = (input: {
+  readonly repoRoot: string
+  readonly backupPath: string
+  readonly hostIo: SyncHostIo
+  readonly baseSubprocessEnv: Readonly<Record<string, string | undefined>>
+  readonly fileEntry: PackageBatchFileInput
+  readonly stageTests: ReadonlyArray<string>
+  readonly stageResults: ReadonlyArray<BatchMutantResultEntry>
+  readonly fileOutcomes: Map<string, MutantOutcome>
+  readonly fileNonCacheableIds: Set<string>
+}): string | undefined => {
+  const surviving = collectSurvivingMutants(input.fileEntry.uncachedMutants, input.fileOutcomes)
+  if (surviving.length === 0 || input.stageTests.length === 0) return undefined
+  const reportedIds = new Set<string>(input.stageResults.map((r) => r.id))
+  const reported = surviving.filter((m) => reportedIds.has(m.id))
+  const unreported = surviving.filter((m) => !reportedIds.has(m.id))
+
+  if (reported.length > 0) {
+    const fbAbort = applyBatchPassOutcomes({
+      repoRoot: input.repoRoot,
+      backupPath: input.backupPath,
+      hostIo: input.hostIo,
+      baseSubprocessEnv: input.baseSubprocessEnv,
+      fileEntry: input.fileEntry,
+      passTests: input.stageTests,
+      expectedMutants: reported,
+      rawEntries: input.stageResults,
+      fileOutcomes: input.fileOutcomes,
+      fileNonCacheableIds: input.fileNonCacheableIds,
+      onlyUpdateOnKill: true,
+    })
+    if (fbAbort !== undefined) return fbAbort
+  }
+
+  if (unreported.length > 0) {
+    const soloFbRes = runVitestTargetList(
+      input.repoRoot,
+      input.fileEntry.file,
+      input.hostIo,
+      input.baseSubprocessEnv,
+      input.stageTests,
+      input.fileEntry.originalContent,
+      input.fileEntry.schemaSource,
+      input.backupPath,
+      unreported,
+      { skipBaselineCheck: false },
+    )
+    return match(soloFbRes)
+      .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
+      .with({ _tag: "Ok" }, ({ outcomes: fbOutcomes, nonCacheableIds }) => {
+        recordStageOutcomes(
+          fbOutcomes,
+          nonCacheableIds,
+          input.fileOutcomes,
+          input.fileNonCacheableIds,
+          true,
+        )
+        return undefined
+      })
+      .exhaustive()
+  }
+  return undefined
+}
+
 /**
  * Executes uncached mutants for all evaluated files of one package inside a shared persistent warm Vitest worker pool.
  */
@@ -205,13 +301,12 @@ export const runPackageMutantBatchChecked = (input: {
       originalSource: f.originalContent,
       schemaSource: f.schemaSource,
       primaryTests: f.primaryTests,
-      fallbackTests: f.fallbackTests,
+      scopedFallbackTests: f.scopedFallbackTests,
+      packageFallbackTests: f.packageFallbackTests,
       mutantIds: f.uncachedMutants.map((m) => m.id),
-      primaryTimeoutMs: Math.max(30_000, Math.min(180_000, f.primaryTests.length * 10_000)),
-      fallbackTimeoutMs: Math.max(
-        30_000,
-        Math.min(180_000, Math.max(1, f.fallbackTests.length) * 10_000),
-      ),
+      primaryTimeoutMs: stageTimeoutMs(f.primaryTests),
+      scopedFallbackTimeoutMs: stageTimeoutMs(f.scopedFallbackTests),
+      packageFallbackTimeoutMs: stageTimeoutMs(f.packageFallbackTests),
     }
   })
 
@@ -312,6 +407,14 @@ export const runPackageMutantBatchChecked = (input: {
       }
     }
 
+    if (report.restoreError !== undefined) {
+      return {
+        _tag: "Abort",
+        partialResults: fileResults,
+        diagnostic: report.restoreError,
+      }
+    }
+
     const fileOutcomes = new Map<string, MutantOutcome>()
     const fileNonCacheableIds = new Set<string>()
     for (const mutant of fileEntry.mutants) {
@@ -337,72 +440,34 @@ export const runPackageMutantBatchChecked = (input: {
       return { _tag: "Abort", partialResults: fileResults, diagnostic: primaryAbort }
     }
 
-    const surviving = fileEntry.uncachedMutants.filter((m) =>
-      match(fileOutcomes.get(m.id)?.status)
-        .with("survived", () => true)
-        .with("killed", "equivalent", undefined, () => false)
-        .exhaustive(),
-    )
-    const reportedFallbackIds = new Set<string>(report.fallbackResults.map((r) => r.id))
-    const reportedFallback = surviving.filter((m) => reportedFallbackIds.has(m.id))
-    const unreportedFallback = surviving.filter((m) => !reportedFallbackIds.has(m.id))
-
-    if (surviving.length > 0 && fileEntry.fallbackTests.length > 0 && reportedFallback.length > 0) {
-      const fbAbort = applyBatchPassOutcomes({
-        repoRoot: input.repoRoot,
-        backupPath: input.backupPath,
-        hostIo: input.hostIo,
-        baseSubprocessEnv: input.baseSubprocessEnv,
-        fileEntry,
-        passTests: fileEntry.fallbackTests,
-        expectedMutants: reportedFallback,
-        rawEntries: report.fallbackResults,
-        fileOutcomes,
-        fileNonCacheableIds,
-        onlyUpdateOnKill: true,
-      })
-      if (fbAbort !== undefined) {
-        return { _tag: "Abort", partialResults: fileResults, diagnostic: fbAbort }
-      }
+    const scopedErr = processBatchFallbackStage({
+      repoRoot: input.repoRoot,
+      backupPath: input.backupPath,
+      hostIo: input.hostIo,
+      baseSubprocessEnv: input.baseSubprocessEnv,
+      fileEntry,
+      stageTests: fileEntry.scopedFallbackTests,
+      stageResults: report.scopedFallbackResults,
+      fileOutcomes,
+      fileNonCacheableIds,
+    })
+    if (scopedErr !== undefined) {
+      return { _tag: "Abort", partialResults: fileResults, diagnostic: scopedErr }
     }
 
-    if (report.restoreError !== undefined) {
-      fileResults.push({ file: fileEntry.file, fileOutcomes, fileNonCacheableIds })
-      return {
-        _tag: "Abort",
-        partialResults: fileResults,
-        diagnostic: report.restoreError,
-      }
-    }
-
-    if (unreportedFallback.length > 0 && fileEntry.fallbackTests.length > 0) {
-      const soloFbRes = runVitestTargetList(
-        input.repoRoot,
-        fileEntry.file,
-        input.hostIo,
-        input.baseSubprocessEnv,
-        fileEntry.fallbackTests,
-        fileEntry.originalContent,
-        fileEntry.schemaSource,
-        input.backupPath,
-        unreportedFallback,
-        { skipBaselineCheck: true },
-      )
-      const soloFbDiag = match(soloFbRes)
-        .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
-        .with({ _tag: "Ok" }, ({ outcomes: fbOutcomes, nonCacheableIds }) => {
-          for (const id of nonCacheableIds) fileNonCacheableIds.add(id)
-          for (const o of fbOutcomes) {
-            if (shouldRecordOutcome(true, o.status)) {
-              fileOutcomes.set(o.mutant.id, o)
-            }
-          }
-          return undefined
-        })
-        .exhaustive()
-      if (soloFbDiag !== undefined) {
-        return { _tag: "Abort", partialResults: fileResults, diagnostic: soloFbDiag }
-      }
+    const pkgFbErr = processBatchFallbackStage({
+      repoRoot: input.repoRoot,
+      backupPath: input.backupPath,
+      hostIo: input.hostIo,
+      baseSubprocessEnv: input.baseSubprocessEnv,
+      fileEntry,
+      stageTests: fileEntry.packageFallbackTests,
+      stageResults: report.packageFallbackResults,
+      fileOutcomes,
+      fileNonCacheableIds,
+    })
+    if (pkgFbErr !== undefined) {
+      return { _tag: "Abort", partialResults: fileResults, diagnostic: pkgFbErr }
     }
     fileResults.push({ file: fileEntry.file, fileOutcomes, fileNonCacheableIds })
   }
@@ -418,7 +483,51 @@ export type RunSingleFilePassResult =
       readonly diagnostic: string
     }
 
-/** Runs primary and conditional fallback Vitest passes for a single domain file. */
+const runSingleFileFallbackStage = (input: {
+  readonly repoRoot: string
+  readonly backupPath: string
+  readonly hostIo: SyncHostIo
+  readonly baseSubprocessEnv: Readonly<Record<string, string | undefined>>
+  readonly file: DomainFile
+  readonly originalContent: string
+  readonly schemaSource: string
+  readonly stageTests: ReadonlyArray<string>
+  readonly fileOutcomes: Map<string, MutantOutcome>
+  readonly fileNonCacheableIds: Set<string>
+}): string | undefined => {
+  const surviving = collectSurvivingMutants(
+    Array.from(input.fileOutcomes.values()).map((o) => o.mutant),
+    input.fileOutcomes,
+  )
+  if (surviving.length === 0 || input.stageTests.length === 0) return undefined
+  const fallbackRes = runVitestTargetList(
+    input.repoRoot,
+    input.file,
+    input.hostIo,
+    input.baseSubprocessEnv,
+    input.stageTests,
+    input.originalContent,
+    input.schemaSource,
+    input.backupPath,
+    surviving,
+    { skipBaselineCheck: false },
+  )
+  return match(fallbackRes)
+    .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
+    .with({ _tag: "Ok" }, ({ outcomes: fbOutcomes, nonCacheableIds }) => {
+      recordStageOutcomes(
+        fbOutcomes,
+        nonCacheableIds,
+        input.fileOutcomes,
+        input.fileNonCacheableIds,
+        true,
+      )
+      return undefined
+    })
+    .exhaustive()
+}
+
+/** Runs primary and conditional two-stage fallback Vitest passes for a single domain file. */
 export function runSingleFileVitestPass(input: {
   readonly repoRoot: string
   readonly backupPath: string
@@ -430,7 +539,8 @@ export function runSingleFileVitestPass(input: {
   readonly mutants: ReadonlyArray<CodeMutant>
   readonly uncachedMutants: ReadonlyArray<CodeMutant>
   readonly primaryTests: ReadonlyArray<string>
-  readonly fallbackTests: ReadonlyArray<string>
+  readonly scopedFallbackTests: ReadonlyArray<string>
+  readonly packageFallbackTests: ReadonlyArray<string>
   readonly cachedHitIds: ReadonlySet<string>
   readonly pkgBaselinePassed: boolean
 }): RunSingleFilePassResult {
@@ -472,48 +582,25 @@ export function runSingleFileVitestPass(input: {
       fileOutcomes.set(mutant.id, { mutant, status: "killed" })
     }
   }
-  const survivingMutants = primaryOutcomes
-    .filter((o) =>
-      match(o.status)
-        .with("survived", () => true)
-        .with("killed", "equivalent", () => false)
-        .exhaustive(),
-    )
-    .map((o) => o.mutant)
 
-  if (survivingMutants.length > 0 && input.fallbackTests.length > 0) {
-    const fallbackRes = runVitestTargetList(
-      input.repoRoot,
-      input.file,
-      input.hostIo,
-      input.baseSubprocessEnv,
-      input.fallbackTests,
-      input.originalContent,
-      input.schemaSource,
-      input.backupPath,
-      survivingMutants,
-      { skipBaselineCheck: input.pkgBaselinePassed },
-    )
-    const fallbackAbort = match(fallbackRes)
-      .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
-      .with({ _tag: "Ok" }, ({ outcomes: fbOutcomes, nonCacheableIds }) => {
-        for (const id of nonCacheableIds) fileNonCacheableIds.add(id)
-        for (const fbOutcome of fbOutcomes) {
-          match(fbOutcome.status)
-            .with("killed", () => {
-              fileOutcomes.set(fbOutcome.mutant.id, fbOutcome)
-            })
-            .with("survived", "equivalent", () => {})
-            .exhaustive()
-        }
-        return undefined
-      })
-      .exhaustive()
-    if (fallbackAbort !== undefined) {
+  for (const stageTests of [input.scopedFallbackTests, input.packageFallbackTests]) {
+    const stageAbort = runSingleFileFallbackStage({
+      repoRoot: input.repoRoot,
+      backupPath: input.backupPath,
+      hostIo: input.hostIo,
+      baseSubprocessEnv: input.baseSubprocessEnv,
+      file: input.file,
+      originalContent: input.originalContent,
+      schemaSource: input.schemaSource,
+      stageTests,
+      fileOutcomes,
+      fileNonCacheableIds,
+    })
+    if (stageAbort !== undefined) {
       return {
         _tag: "Abort",
         partialResult: { file: input.file, fileOutcomes, fileNonCacheableIds },
-        diagnostic: fallbackAbort,
+        diagnostic: stageAbort,
       }
     }
   }
@@ -557,7 +644,8 @@ export function executeQueuedPackageBatches(input: {
         mutants: only.input.mutants,
         uncachedMutants: only.input.uncachedMutants,
         primaryTests: only.input.primaryTests,
-        fallbackTests: only.input.fallbackTests,
+        scopedFallbackTests: only.input.scopedFallbackTests,
+        packageFallbackTests: only.input.packageFallbackTests,
         cachedHitIds: only.input.cachedHitIds,
         pkgBaselinePassed: true,
       })
@@ -575,7 +663,9 @@ export function executeQueuedPackageBatches(input: {
     const allPkgTestSet = new Set<string>()
     for (const q of queuedEntries) {
       for (const t of q.input.primaryTests) allPkgTestSet.add(t)
-      for (const t of q.input.fallbackTests) allPkgTestSet.add(t)
+      for (const t of [...q.input.scopedFallbackTests, ...q.input.packageFallbackTests]) {
+        allPkgTestSet.add(t)
+      }
     }
     const pkgBatchRes = runPackageMutantBatchChecked({
       repoRoot: input.repoRoot,

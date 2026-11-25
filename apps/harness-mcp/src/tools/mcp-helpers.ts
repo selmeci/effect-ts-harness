@@ -43,6 +43,11 @@ import {
 } from "@harness/graph"
 import type { GovernanceDocReference } from "@harness/decision"
 import { nodeSyncHostIo, resolveHarnessStateDir } from "@harness/infra"
+import type {
+  LspSessionCache,
+  LspSessionCacheOptions,
+  LspTsgoExecutor,
+} from "./lsp-session-cache.js"
 import {
   findRepoRoot,
   hasIntermediateRepoBoundary,
@@ -135,6 +140,9 @@ export interface ServerOptions {
     readonly file?: string | undefined
     readonly project?: string | undefined
   }) => LspDiagnosticsReport
+  readonly lspSessionCache?: LspSessionCache | undefined
+  readonly lspSessionCacheOptions?: LspSessionCacheOptions | undefined
+  readonly lspTsgoExecutor?: LspTsgoExecutor | undefined
 }
 
 export const shouldSuppressLiveMcpTestSideEffects = (

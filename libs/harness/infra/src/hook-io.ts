@@ -1,11 +1,9 @@
-import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import {
   appendFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
-  readdirSync,
   readFileSync,
   realpathSync,
   statSync,
@@ -19,17 +17,6 @@ import {
   type RealPathWithAncestorWalkResult,
   resolveRealPathWithAncestorWalkLite,
 } from "./hook-io-realpath.js"
-
-const GIT_FINGERPRINT_MAX_BUFFER_BYTES = 16 * 1024 * 1024
-
-const GIT_FINGERPRINT_STATUS_ARGS: ReadonlyArray<string> = [
-  "--no-optional-locks",
-  "status",
-  "--porcelain=v1",
-  "-z",
-  "--untracked-files=all",
-  "--ignored=matching",
-]
 
 const GraphHeadMetaLiteSchema = Schema.Struct({
   headSha: Schema.NullOr(Schema.String),
@@ -168,7 +155,9 @@ const resolveHarnessStateDirLite = (
       return Option.none()
     }
     const resolved = resolve(validRoot, customTrim)
-    return resolved === validRoot ? Option.none() : Option.some(resolved)
+    return resolved === validRoot || resolved === dirname(resolved)
+      ? Option.none()
+      : Option.some(resolved)
   }
   const rawWorktreeId = env["HARNESS_WORKTREE_ID"]
   if (rawWorktreeId !== undefined && rawWorktreeId.length > 0) {
@@ -423,175 +412,82 @@ const appendHookTelemetryLite = (input: HookTelemetryLiteInput): void => {
     .exhaustive()
 }
 
-const ROOT_IGNORED = new Set([
-  ".git",
-  ".superpowers",
-  "repos",
-  ".idea",
-  ".vscode",
-  ".alchemy",
-  ".remember",
-  ".worktrees",
-])
-const ARTIFACT_IGNORED = new Set([
-  ".harness",
-  ".nx",
-  "node_modules",
-  "dist",
-  "coverage",
-  ".DS_Store",
-  ".vite",
-])
-
-const isStampIncludedLite = (relPath: string): boolean => {
-  const norm = relPath.replace(/\\/g, "/").replace(/^\.\//, "")
-  if (norm.length === 0) return false
-  const parts = norm.split("/")
-  for (let i = 0; i < parts.length; i += 1) {
-    const seg = parts[i]!
-    const relDir = i === 0 ? "" : parts.slice(0, i).join("/")
-    if (i === 0 && (ROOT_IGNORED.has(seg) || /^(?:temp-|__temp_)/.test(seg))) return false
-    if (!/(?:^|\/)(?:src|test)(?:\/|$)/.test(relDir) && ARTIFACT_IGNORED.has(seg)) return false
-  }
-  return true
+export interface PreInvocationFingerprintIo {
+  readonly repoRoot: string
+  readonly harnessDir: string
+  readonly existsSync: (filePath: string) => boolean
+  readonly isFileSync: (filePath: string) => boolean
+  readonly isSymbolicLinkSync: (filePath: string) => boolean
+  readonly readBytesSync: (filePath: string) => Uint8Array
+  readonly statMtimeMsSync?: ((filePath: string) => number | undefined) | undefined
+  readonly getEnv: () => Readonly<Record<string, string | undefined>>
+  readonly resolveHead: () => GitHeadStateLite
+  readonly resolveTsconfigPath: () => string
+  readonly resolveTsgoPkgJsonPath: () => string
+  readonly skipBackgroundDaemons?: boolean | undefined
+  readonly hasDecisionLayer?: boolean | undefined
 }
 
-const lstatNoThrow = (filePath: string) =>
-  Result.try(() => lstatSync(filePath, { throwIfNoEntry: false }))
-
-const digestFileLite = (filePath: string, contentHash: boolean): Option.Option<string> =>
-  match(lstatNoThrow(filePath))
-    .with({ _tag: "Failure" }, () => Option.none())
-    .with({ _tag: "Success" }, ({ success: st }) => {
-      if (st === undefined) return Option.some("absent")
-      if (st.isSymbolicLink() || !st.isFile()) return Option.none()
-      if (contentHash) {
-        const hex = tryOr(
-          () => createHash("sha256").update(readFileSync(filePath)).digest("hex"),
-          undefined,
-        )
-        return Option.fromUndefinedOr(hex)
-      }
-      return Option.fromUndefinedOr(
-        tryOr(() => `mtime:${String(statSync(filePath).mtimeMs)}`, undefined),
-      )
-    })
-    .exhaustive()
-
-const digestWorkspaceRelPath = (repoRoot: string, relPath: string): string | undefined => {
-  const abs = join(repoRoot, relPath)
-  return match(lstatNoThrow(abs))
-    .with({ _tag: "Failure" }, () => undefined)
-    .with({ _tag: "Success" }, ({ success: st }) => {
-      if (st === undefined) return "deleted"
-      if (st.isSymbolicLink()) return undefined
-      if (tryOr(() => existsSync(join(abs, ".git")), true)) return undefined
-      return unwrapOpt(digestFileLite(abs, true))
-    })
-    .exhaustive()
+export interface SafeHarnessLeafPathIo {
+  readonly existsSync: (filePath: string) => boolean
+  readonly isFileSync: (filePath: string) => boolean
+  readonly isSymbolicLinkSync: (filePath: string) => boolean
+  readonly realpathSync: (filePath: string) => string
+  readonly getEnv: () => Readonly<Record<string, string | undefined>>
+  readonly onUnsafe?: ((reason: string) => void) | undefined
 }
 
-const computeFingerprintLite = (
-  repoRoot: string,
-  cliRepoRoot: string,
-  harnessDir: string,
-  env: Readonly<Record<string, string | undefined>>,
+const isSymbolicLinkLite = (filePath: string): boolean => {
+  const st = lstatSync(filePath, { throwIfNoEntry: false })
+  return st !== undefined && st.isSymbolicLink()
+}
+
+const isFileLite = (filePath: string): boolean => {
+  const st = lstatSync(filePath, { throwIfNoEntry: false })
+  return st !== undefined && !st.isSymbolicLink() && st.isFile()
+}
+
+const digestFileFromIo = (
+  filePath: string,
+  io: Pick<
+    PreInvocationFingerprintIo,
+    "existsSync" | "isFileSync" | "isSymbolicLinkSync" | "readBytesSync" | "statMtimeMsSync"
+  >,
+  contentHash: boolean,
 ): Option.Option<string> => {
-  if (!existsSync(join(repoRoot, ".git"))) return Option.none()
-  const statusOut = tryOr(
-    () =>
-      execFileSync("git", GIT_FINGERPRINT_STATUS_ARGS, {
-        cwd: repoRoot,
-        timeout: 2_000,
-        maxBuffer: GIT_FINGERPRINT_MAX_BUFFER_BYTES,
-        encoding: "utf8",
-      }),
-    undefined,
-  )
-  if (statusOut === undefined) return Option.none()
-  const head = resolveGitHeadStateLite(repoRoot, env)
+  const isSym = tryOr(() => io.isSymbolicLinkSync(filePath), true)
+  if (isSym) return Option.none()
+  const exists = tryOr(() => io.existsSync(filePath), undefined)
+  if (exists === undefined) return Option.none()
+  if (!exists) return Option.some("absent")
+  const isFile = tryOr(() => io.isFileSync(filePath), false)
+  if (!isFile) return Option.none()
+  if (contentHash) {
+    const hex = tryOr(
+      () => createHash("sha256").update(io.readBytesSync(filePath)).digest("hex"),
+      undefined,
+    )
+    return Option.fromUndefinedOr(hex)
+  }
+  const statFn = io.statMtimeMsSync
+  const meta =
+    statFn !== undefined
+      ? tryOr(() => {
+          const mtime = statFn(filePath)
+          return mtime !== undefined ? `mtime:${String(mtime)}` : undefined
+        }, undefined)
+      : tryOr(() => `len:${String(io.readBytesSync(filePath).length)}`, undefined)
+  return Option.fromUndefinedOr(meta)
+}
+
+const computePreInvocationFingerprintFromIo = (
+  io: PreInvocationFingerprintIo,
+): Option.Option<string> => {
+  if (!tryOr(() => io.existsSync(join(io.repoRoot, ".git")), false)) return Option.none()
+  const head = io.resolveHead()
   if (head.gitBranch === null && head.headSha === null) return Option.none()
-  const relHarness = relative(repoRoot, harnessDir).replace(/\\/g, "/")
-  const customRel =
-    relHarness.length > 0 &&
-    relHarness !== "." &&
-    !relHarness.startsWith("..") &&
-    !isAbsolute(relHarness)
-      ? relHarness
-      : undefined
-  const isHarnessRel = (p: string): boolean =>
-    p === ".harness" ||
-    p.startsWith(".harness/") ||
-    (customRel !== undefined && (p === customRel || p.startsWith(`${customRel}/`)))
-  const isExcludedIgnoredRel = (p: string): boolean =>
-    p.length === 0 ||
-    isHarnessRel(p) ||
-    p === ".env" ||
-    p === ".dev.vars" ||
-    !isStampIncludedLite(p)
   const hash = createHash("sha256")
   hash.update(`branch:${head.gitBranch ?? ""}\nsha:${head.headSha ?? ""}\n`)
-  const seen = new Set<string>()
-  const ignoredFiles: Array<string> = []
-  const collectIgnoredDir = (dirRel: string, absDir: string): boolean => {
-    const dirIsSymOrGit =
-      match(lstatNoThrow(absDir))
-        .with({ _tag: "Failure" }, () => true)
-        .with({ _tag: "Success" }, ({ success: st }) => st === undefined || st.isSymbolicLink())
-        .exhaustive() || tryOr(() => existsSync(join(absDir, ".git")), true)
-    if (dirIsSymOrGit) return false
-    const dirEntries = tryOr(() => readdirSync(absDir, { withFileTypes: true }), undefined)
-    if (dirEntries === undefined) return false
-    const sorted = [...dirEntries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-    for (const entry of sorted) {
-      const childRel = `${dirRel}/${entry.name}`
-      if (isExcludedIgnoredRel(childRel)) continue
-      const childAbs = join(absDir, entry.name)
-      if (entry.isSymbolicLink() || entry.name === ".git") return false
-      if (entry.isDirectory()) {
-        if (!collectIgnoredDir(childRel, childAbs)) return false
-        continue
-      }
-      ignoredFiles.push(childRel)
-    }
-    return true
-  }
-  const entries = statusOut.split("\0")
-  for (let i = 0; i < entries.length; i += 1) {
-    const entry = entries[i]
-    if (entry === undefined || entry.length < 4) continue
-    const xy = entry.slice(0, 2)
-    const relPath = entry.slice(3)
-    if (xy === "!!") {
-      const trimmedRel = relPath.endsWith("/") ? relPath.slice(0, -1) : relPath
-      if (isExcludedIgnoredRel(trimmedRel)) continue
-      if (relPath.endsWith("/")) {
-        if (!collectIgnoredDir(trimmedRel, join(repoRoot, trimmedRel))) return Option.none()
-      } else {
-        ignoredFiles.push(trimmedRel)
-      }
-      continue
-    }
-    if (xy[0] === "R" || xy[1] === "R" || xy[0] === "C" || xy[1] === "C") {
-      const orig = entries[i + 1] ?? ""
-      i += 1
-      if (orig.length > 0 && !isHarnessRel(orig)) hash.update(`renamed-from:${orig}\n`)
-    }
-    if (relPath.length === 0 || isHarnessRel(relPath)) continue
-    seen.add(relPath)
-    const d = digestWorkspaceRelPath(repoRoot, relPath)
-    if (d === undefined) return Option.none()
-    hash.update(`dirty:${xy}:${relPath}:${d}\n`)
-  }
-  ignoredFiles.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
-  let prevIgnored = ""
-  for (const relPath of ignoredFiles) {
-    if (relPath === prevIgnored || seen.has(relPath)) continue
-    prevIgnored = relPath
-    const d = digestWorkspaceRelPath(repoRoot, relPath)
-    if (d === undefined) return Option.none()
-    hash.update(`ignored:${relPath}:${d}\n`)
-  }
   const stateInputs: ReadonlyArray<readonly [string, boolean]> = [
     ["friction-log.jsonl", true],
     ["verify-stamp.json", true],
@@ -602,33 +498,140 @@ const computeFingerprintLite = (
     ["last-done.json", true],
   ]
   for (const [f, contentHash] of stateInputs) {
-    const d = unwrapOpt(digestFileLite(join(harnessDir, f), contentHash))
+    const d = unwrapOpt(digestFileFromIo(join(io.harnessDir, f), io, contentHash))
     if (d === undefined) return Option.none()
     hash.update(`state:${f}:${d}\n`)
   }
-  const localTsgo = join(repoRoot, "node_modules", "@effect", "tsgo", "package.json")
-  const wsRoot = findWorkspaceRootLite(cliRepoRoot)
-  const tsgoPath = existsSync(localTsgo)
-    ? localTsgo
-    : join(wsRoot, "node_modules", "@effect", "tsgo", "package.json")
-  const repoTsconfig = join(repoRoot, "tsconfig.base.json")
-  const tsconfigPath = existsSync(repoTsconfig) ? repoTsconfig : join(wsRoot, "tsconfig.base.json")
   const fixedInputs: ReadonlyArray<readonly [string, string, boolean]> = [
-    ["tsgo", tsgoPath, false],
-    ["tsconfig", tsconfigPath, true],
-    ["cluster", join(repoRoot, "libs/harness/graph/cluster.yaml"), true],
-    ["devvars", join(repoRoot, ".dev.vars"), false],
-    ["envfile", join(repoRoot, ".env"), false],
+    ["tsgo", io.resolveTsgoPkgJsonPath(), false],
+    ["tsconfig", io.resolveTsconfigPath(), true],
+    ["cluster", join(io.repoRoot, "libs/harness/graph/cluster.yaml"), true],
+    ["devvars", join(io.repoRoot, ".dev.vars"), false],
+    ["envfile", join(io.repoRoot, ".env"), false],
   ]
   for (const [label, path, contentHash] of fixedInputs) {
-    const d = unwrapOpt(digestFileLite(path, contentHash))
+    const d = unwrapOpt(digestFileFromIo(path, io, contentHash))
     if (d === undefined) return Option.none()
     hash.update(`${label}:${d}\n`)
   }
+  const env = io.getEnv()
   hash.update(
-    `env:${env["HARNESS_OLLAMA_URL"] ?? env["OLLAMA_HOST"] ?? ""}|${env["OMNIGRAPH_URL"] ?? ""}|false|false\n`,
+    `env:${env["HARNESS_OLLAMA_URL"] ?? env["OLLAMA_HOST"] ?? ""}|${env["OMNIGRAPH_URL"] ?? ""}|${String(Boolean(io.skipBackgroundDaemons))}|${String(Boolean(io.hasDecisionLayer))}\n`,
   )
   return Option.some(hash.digest("hex"))
+}
+
+const computeFingerprintLite = (
+  repoRoot: string,
+  cliRepoRoot: string,
+  harnessDir: string,
+  env: Readonly<Record<string, string | undefined>>,
+): Option.Option<string> => {
+  const wsRoot = findWorkspaceRootLite(cliRepoRoot)
+  return computePreInvocationFingerprintFromIo({
+    repoRoot,
+    harnessDir,
+    existsSync,
+    isFileSync: isFileLite,
+    isSymbolicLinkSync: isSymbolicLinkLite,
+    readBytesSync: (filePath) => readFileSync(filePath),
+    statMtimeMsSync: (filePath) => statSync(filePath).mtimeMs,
+    getEnv: () => env,
+    resolveHead: () => resolveGitHeadStateLite(repoRoot, env),
+    resolveTsgoPkgJsonPath: () => {
+      const localTsgo = join(repoRoot, "node_modules", "@effect", "tsgo", "package.json")
+      return tryOr(() => existsSync(localTsgo), false)
+        ? localTsgo
+        : join(wsRoot, "node_modules", "@effect", "tsgo", "package.json")
+    },
+    resolveTsconfigPath: () => {
+      const repoTsconfig = join(repoRoot, "tsconfig.base.json")
+      return tryOr(() => existsSync(repoTsconfig), false)
+        ? repoTsconfig
+        : join(wsRoot, "tsconfig.base.json")
+    },
+  })
+}
+
+const isSafeHarnessLeafPathWith = (
+  repoRoot: string,
+  harnessDir: string,
+  leafPath: string,
+  io: SafeHarnessLeafPathIo,
+  requireExistingFile: boolean = true,
+): boolean => {
+  const absRepo = resolve(repoRoot)
+  const absHarness = resolve(harnessDir)
+  const absLeaf = resolve(leafPath)
+  const env = io.getEnv()
+  const hasOverride = env["HARNESS_STATE_DIR"] !== undefined && env["HARNESS_STATE_DIR"] !== ""
+  const inRepo = isInsideRootLite(absRepo, absHarness)
+
+  const failUnsafe = (reason: string): false => {
+    io.onUnsafe?.(reason)
+    return false
+  }
+
+  const hasSymlinkAncestor = (targetPath: string, stopAt: string): boolean => {
+    let curr = targetPath
+    while (true) {
+      if (tryOr(() => io.isSymbolicLinkSync(curr), true)) return true
+      if (curr === stopAt) return false
+      const parent = dirname(curr)
+      if (parent === curr) return false
+      curr = parent
+    }
+  }
+
+  if (tryOr(() => io.isSymbolicLinkSync(absHarness), true)) {
+    return failUnsafe(`symlink detected at ${harnessDir}`)
+  }
+  if (
+    hasSymlinkAncestor(absHarness, inRepo ? absRepo : absHarness) ||
+    hasSymlinkAncestor(absLeaf, inRepo ? absRepo : absHarness)
+  ) {
+    return failUnsafe(`symlink detected in ${leafPath}`)
+  }
+
+  if (!hasOverride || inRepo) {
+    let anchor: string | undefined = absHarness
+    while (anchor !== undefined && !tryOr(() => io.existsSync(anchor!), false)) {
+      const parent = dirname(anchor)
+      anchor = parent === anchor ? undefined : parent
+    }
+    const realRepo = tryOr(() => io.realpathSync(absRepo), undefined)
+    const realAnchor =
+      anchor !== undefined ? tryOr(() => io.realpathSync(anchor), undefined) : undefined
+    if (
+      realRepo === undefined ||
+      realAnchor === undefined ||
+      !isInsideRootLite(realRepo, realAnchor)
+    ) {
+      return failUnsafe(`cache dir ${harnessDir} resolves outside repoRoot`)
+    }
+  }
+  if (tryOr(() => io.existsSync(absLeaf), true)) {
+    if (!tryOr(() => io.isFileSync(absLeaf), false)) {
+      return failUnsafe(`cache path ${leafPath} is not a regular file`)
+    }
+    const realHarness = tryOr(() => io.realpathSync(absHarness), undefined)
+    const realLeaf = tryOr(() => io.realpathSync(absLeaf), undefined)
+    if (
+      realHarness === undefined ||
+      realLeaf === undefined ||
+      !isInsideRootLite(realHarness, realLeaf)
+    ) {
+      return failUnsafe(`cache path ${leafPath} resolves outside ${harnessDir}`)
+    }
+    if (inRepo) {
+      const realRepo = tryOr(() => io.realpathSync(absRepo), undefined)
+      if (realRepo === undefined || !isInsideRootLite(realRepo, realLeaf)) {
+        return failUnsafe(`cache path ${leafPath} resolves outside ${repoRoot}`)
+      }
+    }
+    return true
+  }
+  return !requireExistingFile
 }
 
 const isSafeHarnessLeafPath = (
@@ -636,65 +639,20 @@ const isSafeHarnessLeafPath = (
   harnessDir: string,
   leafPath: string,
   env: Readonly<Record<string, string | undefined>>,
-): boolean => {
-  const absRepo = resolve(repoRoot)
-  const absHarness = resolve(harnessDir)
-  const absLeaf = resolve(leafPath)
-  const hasOverride = env["HARNESS_STATE_DIR"] !== undefined && env["HARNESS_STATE_DIR"] !== ""
-  const inRepo = isInsideRootLite(absRepo, absHarness)
-
-  const checkNoSymlink = (targetPath: string, stopAt: string): boolean => {
-    let curr = targetPath
-    while (true) {
-      const isSymOrErr = match(lstatNoThrow(curr))
-        .with({ _tag: "Failure" }, () => true)
-        .with({ _tag: "Success" }, ({ success: st }) => st !== undefined && st.isSymbolicLink())
-        .exhaustive()
-      if (isSymOrErr) return false
-      if (curr === stopAt) break
-      const parent = dirname(curr)
-      if (parent === curr) break
-      curr = parent
-    }
-    return true
-  }
-
-  if (!checkNoSymlink(absLeaf, absHarness)) return false
-  if (!checkNoSymlink(absHarness, inRepo ? absRepo : absHarness)) return false
-
-  if (!hasOverride || inRepo) {
-    let anchor = absHarness
-    while (!existsSync(anchor)) {
-      const parent = dirname(anchor)
-      if (parent === anchor) return false
-      anchor = parent
-    }
-    const realRepo = tryOr(() => realpathSync(absRepo), undefined)
-    const realAnchor = tryOr(() => realpathSync(anchor), undefined)
-    if (
-      realRepo === undefined ||
-      realAnchor === undefined ||
-      !isInsideRootLite(realRepo, realAnchor)
-    ) {
-      return false
-    }
-  }
-  if (!existsRegularFileLite(absLeaf)) return false
-  const realHarness = tryOr(() => realpathSync(absHarness), undefined)
-  const realLeaf = tryOr(() => realpathSync(absLeaf), undefined)
-  if (
-    realHarness === undefined ||
-    realLeaf === undefined ||
-    !isInsideRootLite(realHarness, realLeaf)
-  ) {
-    return false
-  }
-  if (inRepo) {
-    const realRepo = tryOr(() => realpathSync(absRepo), undefined)
-    if (realRepo === undefined || !isInsideRootLite(realRepo, realLeaf)) return false
-  }
-  return true
-}
+): boolean =>
+  isSafeHarnessLeafPathWith(
+    repoRoot,
+    harnessDir,
+    leafPath,
+    {
+      existsSync,
+      isFileSync: isFileLite,
+      isSymbolicLinkSync: isSymbolicLinkLite,
+      realpathSync,
+      getEnv: () => env,
+    },
+    true,
+  )
 
 const isSafeSessionCachePath = (
   repoRoot: string,
@@ -765,14 +723,14 @@ const resolveRealPathLite = (targetPath: string): Option.Option<string> =>
 export { availableParallelism as getHostAvailableParallelism } from "node:os"
 
 export {
-  GIT_FINGERPRINT_MAX_BUFFER_BYTES,
-  GIT_FINGERPRINT_STATUS_ARGS,
   appendHookTelemetryLite,
+  computePreInvocationFingerprintFromIo,
   computeFingerprintLite as computePreInvocationFingerprintLite,
   existsRegularFileLite,
   findWorkspaceRootLite,
   isIngestSnapshotUpToDateLite,
   isInsideRootLite,
+  isSafeHarnessLeafPathWith,
   readGraphHeadMetaLite,
   readHookStdinCallback,
   resolveGitHeadStateLite,

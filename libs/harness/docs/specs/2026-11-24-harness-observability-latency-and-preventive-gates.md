@@ -28,12 +28,15 @@ enforced_by:
   - apps/harness-mcp/src/tools/workflow-plan.tools.ts
   - apps/harness-mcp/src/tools/review-route-helpers.ts
   - apps/harness-mcp/src/tools/lsp-and-telemetry.tools.ts
+  - apps/harness-mcp/src/tools/lsp-session-cache.ts
+  - apps/harness-mcp/src/tools/tool-registry.ts
   - apps/harness-cli/src/commands/declarative-cli.ts
   - apps/harness-cli/src/commands/session-learn-report.command.ts
   - apps/harness-cli/src/commands/session-fastpath.ts
   - apps/harness-cli/src/commands/verify-and-done.command.ts
   - apps/harness-cli/src/commands/verify-doc-fastpath.ts
   - apps/harness-cli/src/commands/plan-and-repair.command.ts
+  - apps/harness-cli/src/commands/plan-snapshot-fastpath.ts
   - apps/harness-cli/src/commands/repo-path.ts
   - apps/harness-cli/src/commands/daemon-and-omnigraph.service.ts
   - apps/harness-cli/src/commands/nx-affected-git.helpers.ts
@@ -58,12 +61,17 @@ enforced_by:
   - libs/harness/gates/src/policy-command-rules.ts
   - libs/harness/gates/src/policy-worker-isolation.ts
   - libs/harness/gates/src/ears-lint.ts
+  - libs/harness/gates/src/verify-stamp.ts
+  - libs/harness/gates/src/mutation-check.ts
   - libs/harness/gates/src/plugins/ast-gate-visitors.ts
   - libs/harness/gates/src/plugins/ast-fail-closed-laws.ts
   - libs/harness/gates/src/plugins/ast-workflow-fence-law.ts
   - libs/harness/gates/src/plugins/gc/gc-catalog-doc-truth.ts
   - libs/harness/gates/src/plugins/gc/gc-topology-entropy.plugin.ts
   - libs/harness/gates/src/plugins/gc/gc-hook-fastpath.ts
+  - libs/harness/gates/src/mutation/mutation-barrel-reachability.ts
+  - libs/harness/gates/src/mutation/mutation-package-batch.ts
+  - libs/harness/gates/src/mutation/mutation-target-discovery.ts
   - libs/harness/gates/src/mutation/mutation-test-reachability.ts
   - libs/harness/graph/src/extractor/ast-policy-extractor.ts
   - libs/harness/infra/src/node-host-io.ts
@@ -72,6 +80,8 @@ enforced_by:
   - libs/harness/infra/src/omnigraph-session.ts
   - libs/harness/infra/src/worktree-repo-root.ts
   - tools/oxlint/syntax-bans.js
+  - tools/package-vitest-batch.mjs
+  - tools/vitest-pool-helpers.mjs
 spans:
   - HarnessMcp.dispatchTool
   - HarnessMcp.resolveContainedRepoRoot
@@ -130,7 +140,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ### 2 · Wave 2 — Inner-Loop Latency Speedups (Warm LSP, Scoped Mutation Fallback, Lean Session Cache, Incremental Plan-Check)
 
-**Source (`apps/harness-mcp/src/tools/lsp-and-telemetry.tools.ts`, `libs/harness/gates/src/mutation/mutation-test-reachability.ts`, `apps/harness-cli/src/commands/session-fastpath.ts`, `plan-and-repair.command.ts`):** Eliminates the four dominant interactive latency sinks measured in WF-4 telemetry (`harness_lsp_diagnostics` `455.8s`, `plan-check` `298.8s`, `mutate` fallback cascades `152.8s`, and `hook:session` misses `128.9s`).
+**Source (`apps/harness-mcp/src/tools/lsp-and-telemetry.tools.ts`, `lsp-session-cache.ts`, `mcp-helpers.ts`, `tool-registry.ts`, `libs/harness/gates/src/verify-stamp.ts`, `mutation-check.ts`, `mutation/mutation-barrel-reachability.ts`, `mutation/mutation-package-batch.ts`, `mutation/mutation-target-discovery.ts`, `mutation/mutation-test-reachability.ts`, `libs/harness/infra/src/hook-io.ts`, `apps/harness-cli/src/commands/session-fastpath.ts`, `plan-and-repair.command.ts`, `plan-snapshot-fastpath.ts`, `tools/package-vitest-batch.mjs`, `tools/vitest-pool-helpers.mjs`):** Eliminates the four dominant interactive latency sinks measured in WF-4 telemetry (`harness_lsp_diagnostics` `455.8s`, `plan-check` `298.8s`, `mutate` fallback cascades `152.8s`, and `hook:session` misses `128.9s`).
 
 | ID      | Pattern      | Requirement                                                                                                                                                                                                                                                                    | Effect Symbol           | Verification |
 | ------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------- | ------------ |
