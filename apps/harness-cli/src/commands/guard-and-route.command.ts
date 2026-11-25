@@ -46,7 +46,10 @@ const formatGuardTelemetryDetail = (
 ): string | undefined =>
   match(decision)
     .with({ verdict: "allow" }, () =>
-      source === "escalated" ? "escalated;verdict=allow" : undefined,
+      match(source)
+        .with("escalated", () => "escalated;verdict=allow")
+        .with("static", "path", () => undefined)
+        .exhaustive(),
     )
     .with({ verdict: "deny" }, { verdict: "ask" }, ({ verdict, reason }) => {
       const compactReason = reason.replace(/\s+/g, " ").trim()
@@ -342,10 +345,13 @@ export const handleGuard = (
         combinedSource = source
       } else {
         const nextStrictest = pickStrictestDecision(combinedDecision, d)
-        if (
-          (nextStrictest === d && nextStrictest !== combinedDecision) ||
-          (nextStrictest.verdict === d.verdict && source === "escalated")
-        ) {
+        const prefersEscalated =
+          nextStrictest.verdict === d.verdict &&
+          match(source)
+            .with("escalated", () => true)
+            .with("static", "path", () => false)
+            .exhaustive()
+        if ((nextStrictest === d && nextStrictest !== combinedDecision) || prefersEscalated) {
           combinedSource = source
         }
         combinedDecision = nextStrictest
@@ -400,11 +406,14 @@ export const handleRoute = (
           "IdiomRouterV1 returned review (no matching agent-patterns/*.md with >= 0.7 confidence)",
       })
     }
-    if (source === "degraded-fallback") {
-      process.stderr.write(
-        `[harness:route] DecisionModel unavailable (source=degraded-fallback); returning '${block}'.\n`,
-      )
-    }
+    match(source)
+      .with("degraded-fallback", () => {
+        process.stderr.write(
+          `[harness:route] DecisionModel unavailable (source=degraded-fallback); returning '${block}'.\n`,
+        )
+      })
+      .with("deterministic", "hybrid-retrieval", "model", () => undefined)
+      .exhaustive()
     const stdout = block === "review" || block === "effect" ? block : `agent-patterns/${block}.md`
     return {
       exitCode: 0,

@@ -65,7 +65,11 @@ export type LeaseTakeoverDecision = LeaseTakeoverAllow | LeaseTakeoverHeld | Lea
 const evaluateWriterLeaseTakeover = (
   input: LeaseTakeoverEvaluationInput,
 ): LeaseTakeoverDecision => {
-  if (input.metaState === "corrupt") {
+  const isCorruptMeta = match(input.metaState)
+    .with("corrupt", () => true)
+    .with("present", "missing", () => false)
+    .exhaustive()
+  if (isCorruptMeta) {
     return {
       _tag: "Corrupt",
       reason: input.metaCorruptReason ?? "Corrupt writer lease metadata file",

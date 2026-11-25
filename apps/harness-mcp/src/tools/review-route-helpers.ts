@@ -8,6 +8,7 @@ import {
   NxScopeTag,
   NxTierTag,
   RemediationReviewContext,
+  ReviewChangedLines,
   ReviewDepth,
   ReviewGraphContextBundle,
   type ReviewRoutingPlan,
@@ -23,6 +24,9 @@ import { type HarnessGraph, findTestsReaching } from "@harness/graph"
 import { reconcileReviewSlicesWithSelections } from "@harness/decision"
 import { nodeSyncHostIo } from "@harness/infra"
 import { type GraphResolutionStatus, isPathInsideRoot, type ServerOptions } from "./mcp-helpers.js"
+import { ReviewGitBaseRef, deriveChangedLineCountFromGit } from "./review-route-git.js"
+
+export { ReviewGitBaseRef, deriveChangedLineCountFromGit }
 
 const BoundedRepoRoot = Schema.String.pipe(
   Schema.check(Schema.isBetweenLength(1, 1024)),
@@ -40,9 +44,18 @@ export const ReviewRouteInputSchema = Schema.Struct({
       description: "Optional bounded diff summary text",
     }),
   ),
-  changedLineCount: Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0))).annotate({
-    description: "Non-negative count of changed lines",
-  }),
+  changedLineCount: Schema.optional(
+    ReviewChangedLines.annotate({
+      description:
+        "Optional non-negative count of changed lines (auto-derived from git diff when omitted)",
+    }),
+  ),
+  baseRef: Schema.optional(
+    ReviewGitBaseRef.annotate({
+      description:
+        "Optional base git ref (e.g. main or HEAD~1) to diff against when deriving changedLineCount",
+    }),
+  ),
   touchedTiers: Schema.optional(
     Schema.Array(NxTierTag)
       .pipe(Schema.check(Schema.isMaxLength(16)))
@@ -74,6 +87,9 @@ export const ReviewRouteInputSchema = Schema.Struct({
     }),
   ),
 })
+
+export const ReviewRouteToolInput = ReviewRouteInputSchema
+export type ReviewRouteToolInput = typeof ReviewRouteToolInput.Type
 
 export const decodeReviewRouteInput = Schema.decodeUnknownEffect(ReviewRouteInputSchema)
 
@@ -257,12 +273,16 @@ export const escalatePlanOnDiagnostics = (plan: ReviewRoutingPlan): ReviewRoutin
               mandatory: true,
             }),
           ]
+      const activeDepth: "skip" | "lite" | "focused" | "full" = active.depth
       const nextDepth =
         nextSelections.length >= 3
           ? ReviewDepth.make("full")
-          : active.depth === "lite"
-            ? ReviewDepth.make("focused")
-            : active.depth
+          : match(activeDepth)
+              .with("lite", () => ReviewDepth.make("focused"))
+              .with("skip", () => active.depth)
+              .with("focused", () => active.depth)
+              .with("full", () => active.depth)
+              .exhaustive()
       const reviewSlices =
         active.reviewSlices !== undefined
           ? reconcileReviewSlicesWithSelections(active.reviewSlices, nextSelections)

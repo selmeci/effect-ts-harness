@@ -19,7 +19,11 @@ import {
   WorkspaceTreeHash,
 } from "./workflow.js"
 import type { ShipAttemptKey, ShipAttemptStatus } from "./workflow-ship.js"
-import { ErrorReasonMessage, toErrorReasonMessage } from "./workspace-and-process.js"
+import {
+  ErrorReasonMessage,
+  formatBoundedErrorMessage,
+  toErrorReasonMessage,
+} from "./workspace-and-process.js"
 
 const SEQ_KEY_WIDTH = 20
 const MAX_SEQ_KEY_BIGINT = 10n ** 20n - 1n
@@ -346,13 +350,17 @@ export const toBoundedReason = (
   raw: unknown,
   fallback = "Workflow store request failed",
 ): WorkflowStoreFailureReason => {
-  const cleanFallback = fallback.trim().slice(0, MAX_WORKFLOW_STORE_FAILURE_REASON_LEN).trim()
-  const effectiveFallback =
-    cleanFallback.length > 0 ? cleanFallback : "Workflow store request failed"
-  const sanitized = toErrorReasonMessage(raw, effectiveFallback)
-    .slice(0, MAX_WORKFLOW_STORE_FAILURE_REASON_LEN)
-    .trim()
-  return WorkflowStoreFailureReason.make(sanitized.length > 0 ? sanitized : effectiveFallback)
+  const cleanFallback = formatBoundedErrorMessage({
+    prefix: fallback.trim(),
+    maxChars: MAX_WORKFLOW_STORE_FAILURE_REASON_LEN,
+    fallback: "Workflow store request failed",
+  })
+  const sanitized = formatBoundedErrorMessage({
+    prefix: toErrorReasonMessage(raw, cleanFallback),
+    maxChars: MAX_WORKFLOW_STORE_FAILURE_REASON_LEN,
+    fallback: cleanFallback,
+  })
+  return WorkflowStoreFailureReason.make(sanitized)
 }
 
 /** Exact declared stored GQ 2.1 query names in `libs/harness/graph/workflow-queries/workflows.gq`. */

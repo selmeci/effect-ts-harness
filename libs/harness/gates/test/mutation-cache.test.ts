@@ -52,7 +52,7 @@ import {
 } from "../src/mutation/mutation-cache.js"
 import { decideSpanBudgets, type SpanSample } from "../src/span-budget.js"
 import { resolveHarnessStateDir } from "../src/worktree.js"
-import { testHostIo } from "./helpers/test-host-io.js"
+import { isolatedTestHostIo, testHostIo } from "./helpers/test-host-io.js"
 
 const setupTempRepo = (
   domainSource: string,
@@ -210,7 +210,7 @@ describe("MutationCache", () => {
   it("disk cache roundtrips, handles corrupt JSON/EACCES/symlinks, and bounds entries", () => {
     const { repoRoot } = setupTempRepo("export const isSame = (a: number, b: number) => a === b\n")
     try {
-      expect(loadMutationCache(repoRoot, testHostIo)).toEqual(emptyMutationCacheStore())
+      expect(loadMutationCache(repoRoot, isolatedTestHostIo)).toEqual(emptyMutationCacheStore())
 
       const key1 = computeContentSha256("entry-1")
       const store1: MutationCacheStore = {
@@ -219,11 +219,13 @@ describe("MutationCache", () => {
           [key1]: makeSignedEntry(key1, "m1"),
         },
       }
-      expect(saveMutationCacheAtomic(repoRoot, store1, testHostIo, TEST_CACHE_AUTH)).toEqual({
+      expect(
+        saveMutationCacheAtomic(repoRoot, store1, isolatedTestHostIo, TEST_CACHE_AUTH),
+      ).toEqual({
         _tag: "Saved",
       })
-      expect(loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)).toEqual(store1)
-      expect(loadMutationCacheWithStatus(repoRoot, testHostIo)).toEqual({
+      expect(loadMutationCache(repoRoot, isolatedTestHostIo, TEST_CACHE_AUTH)).toEqual(store1)
+      expect(loadMutationCacheWithStatus(repoRoot, isolatedTestHostIo)).toEqual({
         _tag: "Unsafe",
         reason: "missing HMAC secret",
       })
@@ -231,15 +233,15 @@ describe("MutationCache", () => {
         _tag: "Disabled",
         reason: ErrorReasonMessage.make("keychain locked"),
       }
-      expect(loadMutationCacheWithStatus(repoRoot, testHostIo, disabledAuth)).toEqual({
+      expect(loadMutationCacheWithStatus(repoRoot, isolatedTestHostIo, disabledAuth)).toEqual({
         _tag: "Unsafe",
         reason: "keychain locked",
       })
-      expect(saveMutationCacheAtomic(repoRoot, store1, testHostIo, disabledAuth)).toEqual({
+      expect(saveMutationCacheAtomic(repoRoot, store1, isolatedTestHostIo, disabledAuth)).toEqual({
         _tag: "Skipped",
         reason: "keychain locked",
       })
-      expect(loadMutationCache(repoRoot, testHostIo)).toEqual(emptyMutationCacheStore())
+      expect(loadMutationCache(repoRoot, isolatedTestHostIo)).toEqual(emptyMutationCacheStore())
 
       const stateDir = resolveHarnessStateDir(repoRoot)
       const cacheDir = join(stateDir, "cache")
@@ -247,17 +249,17 @@ describe("MutationCache", () => {
 
       // Corrupt JSON & schema-invalid JSON
       writeFileSync(cacheFile, "{not-valid-json", "utf8")
-      expect(loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)).toEqual(
+      expect(loadMutationCache(repoRoot, isolatedTestHostIo, TEST_CACHE_AUTH)).toEqual(
         emptyMutationCacheStore(),
       )
       writeFileSync(cacheFile, JSON.stringify({ version: "wrong-v", entries: {} }), "utf8")
-      expect(loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)).toEqual(
+      expect(loadMutationCache(repoRoot, isolatedTestHostIo, TEST_CACHE_AUTH)).toEqual(
         emptyMutationCacheStore(),
       )
 
       // EACCES fail-safe on load & save
       const eaccesIo: SyncHostIo = {
-        ...testHostIo,
+        ...isolatedTestHostIo,
         readTextSync: () => {
           throw new Error("EACCES: permission denied")
         },
@@ -277,12 +279,12 @@ describe("MutationCache", () => {
       const outsideTarget = join(repoRoot, "outside.json")
       writeFileSync(outsideTarget, JSON.stringify(store1), "utf8")
       symlinkSync(outsideTarget, cacheFile)
-      expect(loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)).toEqual(
+      expect(loadMutationCache(repoRoot, isolatedTestHostIo, TEST_CACHE_AUTH)).toEqual(
         emptyMutationCacheStore(),
       )
-      expect(saveMutationCacheAtomic(repoRoot, store1, testHostIo, TEST_CACHE_AUTH)._tag).toBe(
-        "Skipped",
-      )
+      expect(
+        saveMutationCacheAtomic(repoRoot, store1, isolatedTestHostIo, TEST_CACHE_AUTH)._tag,
+      ).toBe("Skipped")
       expect(readFileSync(outsideTarget, "utf8")).toBe(JSON.stringify(store1))
       rmSync(cacheFile)
 
@@ -293,10 +295,10 @@ describe("MutationCache", () => {
         symlinkSync(outsideDir, stateDir)
         let mkdirCalled = false
         const spyMkdirIo: SyncHostIo = {
-          ...testHostIo,
+          ...isolatedTestHostIo,
           mkdirRecursiveSync: (dirPath, mode) => {
             mkdirCalled = true
-            testHostIo.mkdirRecursiveSync(dirPath, mode)
+            isolatedTestHostIo.mkdirRecursiveSync(dirPath, mode)
           },
         }
         expect(loadMutationCache(repoRoot, spyMkdirIo, TEST_CACHE_AUTH)).toEqual(
@@ -310,11 +312,11 @@ describe("MutationCache", () => {
       }
 
       // Realpath escape outside stateDir fails closed even if lstat reports non-symlink
-      saveMutationCacheAtomic(repoRoot, store1, testHostIo, TEST_CACHE_AUTH)
+      saveMutationCacheAtomic(repoRoot, store1, isolatedTestHostIo, TEST_CACHE_AUTH)
       const escapeRealpathIo: SyncHostIo = {
-        ...testHostIo,
+        ...isolatedTestHostIo,
         realpathSync: (p) =>
-          p === cacheFile ? "/outside/evil-cache.json" : testHostIo.realpathSync(p),
+          p === cacheFile ? "/outside/evil-cache.json" : isolatedTestHostIo.realpathSync(p),
       }
       expect(loadMutationCache(repoRoot, escapeRealpathIo, TEST_CACHE_AUTH)).toEqual(
         emptyMutationCacheStore(),
@@ -355,10 +357,10 @@ describe("MutationCache", () => {
       }
       let exactWrittenJson = ""
       const captureExactIo: SyncHostIo = {
-        ...testHostIo,
+        ...isolatedTestHostIo,
         writeTextSync: (p, content) => {
           exactWrittenJson = content
-          testHostIo.writeTextSync(p, content)
+          isolatedTestHostIo.writeTextSync(p, content)
         },
       }
       saveMutationCacheAtomic(
@@ -380,10 +382,10 @@ describe("MutationCache", () => {
       saveMutationCacheAtomic(
         repoRoot,
         { version: MUTATION_CACHE_SCHEMA_VERSION, entries: manyEntries },
-        testHostIo,
+        isolatedTestHostIo,
         TEST_CACHE_AUTH,
       )
-      const loadedBounded = loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)
+      const loadedBounded = loadMutationCache(repoRoot, isolatedTestHostIo, TEST_CACHE_AUTH)
       expect(Object.keys(loadedBounded.entries).length).toBe(MAX_MUTATION_CACHE_ENTRIES)
       const oldestKey = computeContentSha256("many-0")
       const newestKey = computeContentSha256(`many-${MAX_MUTATION_CACHE_ENTRIES + 9}`)
@@ -584,7 +586,7 @@ describe("MutationCache", () => {
         stderr: "not a git repository",
       }
       const mockIo: SyncHostIo = {
-        ...testHostIo,
+        ...isolatedTestHostIo,
         execFileSync: (cmd, _args, opts) => {
           if (cmd === "git") return notGit
           if (opts?.env?.["HARNESS_ACTIVE_MUTANT_ID"] === undefined) {
@@ -613,7 +615,7 @@ describe("MutationCache", () => {
       const callsAfterFirst = baselineCalls + mutantCalls
       expect(callsAfterFirst).toBeGreaterThan(0)
 
-      const cacheAfterFirst = loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)
+      const cacheAfterFirst = loadMutationCache(repoRoot, isolatedTestHostIo, TEST_CACHE_AUTH)
       const firstEntry = Object.values(cacheAfterFirst.entries)[0]!
       const firstKey = firstEntry.key
       expect(firstEntry.lastAccessedAt).toBeUndefined()
@@ -632,7 +634,7 @@ describe("MutationCache", () => {
       expect(secondReport.cachedKilledCount).toBe(firstReport.killedCount)
       expect(baselineCalls).toBe(1)
       expect(mutantCalls).toBe(0)
-      const cacheAfterSecond = loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH)
+      const cacheAfterSecond = loadMutationCache(repoRoot, isolatedTestHostIo, TEST_CACHE_AUTH)
       expect(cacheAfterSecond.entries[firstKey]?.recordedAt).toBe(firstEntry.recordedAt)
       expect(cacheAfterSecond.entries[firstKey]?.lastAccessedAt).toBe("2026-11-18T16:05:00.000Z")
       expect(cacheAfterSecond.entries[firstKey]?.mac).toBe(firstEntry.mac)
@@ -653,7 +655,7 @@ describe("MutationCache", () => {
       // TimedOut aborts fail-closed and NEVER caches kills to disk
       rmSync(resolveHarnessStateDir(repoRoot), { recursive: true, force: true })
       const timeoutIo: SyncHostIo = {
-        ...testHostIo,
+        ...isolatedTestHostIo,
         execFileSync: (cmd, _args, opts) => {
           if (cmd === "git") return notGit
           if (opts?.env?.["HARNESS_ACTIVE_MUTANT_ID"] === undefined) {
@@ -671,7 +673,7 @@ describe("MutationCache", () => {
       expect(timeoutReport.killedCount).toBe(0)
       expect(timeoutReport.diagnostic).toContain("timed out")
       expect(
-        Object.keys(loadMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH).entries),
+        Object.keys(loadMutationCache(repoRoot, isolatedTestHostIo, TEST_CACHE_AUTH).entries),
       ).toHaveLength(0)
     } finally {
       rmSync(repoRoot, { recursive: true, force: true })
@@ -1374,6 +1376,63 @@ process.exit(1);
       expect(captured[1]?.args).toEqual(["vitest", "run", "--bail=1", "a.test.ts"])
     } finally {
       rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("REQ-1.1 closure isolation: fixture 'libs/' strings without fs/hostIo do not trigger allLibsSrcDigest fallback", () => {
+    const { repoRoot } = setupTempRepo("export const x = 1\n")
+    try {
+      const otherDir = join(repoRoot, "libs", "other", "core", "src")
+      mkdirSync(otherDir, { recursive: true })
+      writeFileSync(join(otherDir, "dep.ts"), "export const v = 1\n")
+      const dir = join(repoRoot, "libs", "sample", "domain", "src")
+      writeFileSync(
+        join(dir, "fixture-str.ts"),
+        'export const pathHint = "libs/demo/core/src/a.ts"\n',
+      )
+      writeFileSync(
+        join(dir, "fs-no-libs.ts"),
+        'import { readFileSync } from "node:fs"\nexport const f = () => readFileSync("foo.txt", "utf8")\n',
+      )
+      writeFileSync(
+        join(dir, "fs-with-libs.ts"),
+        'import { readFileSync } from "node:fs"\nexport const f = () => readFileSync("libs/other/core/src/dep.ts", "utf8")\n',
+      )
+
+      const d0 = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
+      const getC = (relFile: string, d = d0) =>
+        match(
+          computeFileMutationClosureDigest({
+            repoRoot,
+            relFile,
+            allReachingTests: [],
+            digests: d,
+            hostIo: testHostIo,
+          }),
+        )
+          .with({ _tag: "Ok" }, (ok) => ok)
+          .with({ _tag: "Disabled" }, ({ reason }) => {
+            throw new Error(`Expected Ok: ${reason}`)
+          })
+          .exhaustive()
+
+      const cFixtureBefore = getC("libs/sample/domain/src/fixture-str.ts")
+      const cFsNoLibs = getC("libs/sample/domain/src/fs-no-libs.ts")
+      const cFsWithLibsBefore = getC("libs/sample/domain/src/fs-with-libs.ts")
+      expect(cFixtureBefore.usedFallbackAllLibs).toBe(false)
+      expect(cFsNoLibs.usedFallbackAllLibs).toBe(false)
+      expect(cFsWithLibsBefore.usedFallbackAllLibs).toBe(true)
+
+      writeFileSync(join(otherDir, "dep.ts"), "export const v = 2\n")
+      const d1 = unwrapOpt(computeMutationContextDigests(repoRoot, testHostIo))
+      expect(getC("libs/sample/domain/src/fixture-str.ts", d1).closureDigest).toBe(
+        cFixtureBefore.closureDigest,
+      )
+      expect(getC("libs/sample/domain/src/fs-with-libs.ts", d1).closureDigest).not.toBe(
+        cFsWithLibsBefore.closureDigest,
+      )
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true })
     }
   })
 })

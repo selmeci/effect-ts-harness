@@ -57,7 +57,6 @@ export const EARS_GUARD_PAIR_RELATIONS = [
 export const EarsGuardPairRelation = Schema.Literals(EARS_GUARD_PAIR_RELATIONS)
 export type EarsGuardPairRelation = typeof EarsGuardPairRelation.Type
 
-
 export const EarsConsistencyRuleId = Schema.Literals(["EARS-01", "EARS-02", "EARS-03"]).pipe(
   Schema.brand("EarsConsistencyRuleId"),
 )
@@ -234,14 +233,40 @@ export const evaluateEarsConsistencyReport = (
       }
 
       const guardRel = resolveGuardPairRelation(first, second, priors)
-      const guardsOverlap = guardRel !== "mutually_exclusive"
+      const guardFlags = match(guardRel)
+        .with("mutually_exclusive", () => ({
+          overlaps: false,
+          firstCoversSecond: false,
+          strictlySubsumes: false,
+        }))
+        .with("equivalent", () => ({
+          overlaps: true,
+          firstCoversSecond: true,
+          strictlySubsumes: false,
+        }))
+        .with("first_subsumes_second", () => ({
+          overlaps: true,
+          firstCoversSecond: true,
+          strictlySubsumes: true,
+        }))
+        .with("second_subsumes_first", () => ({
+          overlaps: true,
+          firstCoversSecond: false,
+          strictlySubsumes: false,
+        }))
+        .with("independent_overlapping", () => ({
+          overlaps: true,
+          firstCoversSecond: false,
+          strictlySubsumes: false,
+        }))
+        .exhaustive()
+      const guardsOverlap = guardFlags.overlaps
       const sameOutcome =
         first.outcomeTag === second.outcomeTag && first.polarity === second.polarity
 
       // EARS-02: Earlier clause shadows subsequent clause
       const firstCoversSecondState = doesFirstStateCoverSecond(first, second)
-      const firstCoversSecondGuard =
-        guardRel === "equivalent" || guardRel === "first_subsumes_second"
+      const firstCoversSecondGuard = guardFlags.firstCoversSecond
 
       if (firstCoversSecondState && firstCoversSecondGuard && sameOutcome) {
         violations.push({
@@ -260,7 +285,7 @@ export const evaluateEarsConsistencyReport = (
 
       if (
         firstCoversSecondState &&
-        guardRel === "first_subsumes_second" &&
+        guardFlags.strictlySubsumes &&
         !sameOutcome &&
         first.activeStateVariant === second.activeStateVariant
       ) {
@@ -319,7 +344,6 @@ export const evaluateEarsConsistencyReport = (
     clauses.length > 0 &&
     (input.requireExhaustiveStateCoverage === true ||
       (input.requireExhaustiveStateCoverage !== false && hasStateDrivenClause))
-
 
   if (shouldCheckStateCoverage) {
     const clausesBySymbol = new Map<EarsEffectSymbolName, Array<EarsSemanticClause>>()

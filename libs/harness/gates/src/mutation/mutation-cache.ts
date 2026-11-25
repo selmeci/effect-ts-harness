@@ -254,7 +254,11 @@ const inspectAncestorPath = (targetPath: string, hostIo: SyncHostIo): AncestorPa
         : ("unsafe" as const)
     })
     .exhaustive()
-  if (symState === "unsafe") return "unsafe"
+  const canInspectExists = match(symState)
+    .with("unsafe", () => false)
+    .with("not-symlink", () => true)
+    .exhaustive()
+  if (!canInspectExists) return "unsafe"
   const exists = checkExists(targetPath, hostIo)
   if (exists === undefined) return "unsafe"
   return exists ? "safe-exists" : "absent"
@@ -275,11 +279,16 @@ const checkCacheAncestors = (
   let passedStateDir = false
   while (true) {
     const ancestorState = inspectAncestorPath(cur, hostIo)
-    if (ancestorState === "unsafe") return undefined
-    if (ancestorState === "safe-exists") {
-      if (deepest === undefined) deepest = cur
-      if (!stateInRepo && passedStateDir) break
-    }
+    const stepAction = match(ancestorState)
+      .with("unsafe", () => ({ aborted: true, shouldBreak: true }))
+      .with("safe-exists", () => {
+        if (deepest === undefined) deepest = cur
+        return { aborted: false, shouldBreak: !stateInRepo && passedStateDir }
+      })
+      .with("absent", () => ({ aborted: false, shouldBreak: false }))
+      .exhaustive()
+    if (stepAction.aborted) return undefined
+    if (stepAction.shouldBreak) break
     if (cur === resolvedState) passedStateDir = true
     if (
       cur === resolvedRoot ||

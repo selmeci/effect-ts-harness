@@ -290,10 +290,11 @@ const closeNetServer = (
   }).pipe(
     Effect.andThen(
       shouldUnlinkSocket()
-        ? fs.remove(socketPath, { force: true }).pipe(Effect.ignore)
+        ? fs
+            .remove(socketPath, { force: true })
+            .pipe(Effect.catch((err) => Effect.logDebug("Failed to remove daemon socket", err)))
         : Effect.void,
     ),
-    Effect.ignore,
   )
 
 const handleDefaultServerLine = (line: string, socket: net.Socket): void => {
@@ -450,9 +451,9 @@ const processDaemonQueuedLine = (
       Effect.onInterrupt(() =>
         Effect.all([Fiber.interrupt(closeWatcherFiber), Fiber.interrupt(handlerFiber)], {
           concurrency: "unbounded",
-        }).pipe(Effect.ignore),
+        }).pipe(Effect.asVoid),
       ),
-      Effect.ensuring(Fiber.interrupt(closeWatcherFiber).pipe(Effect.ignore)),
+      Effect.ensuring(Fiber.interrupt(closeWatcherFiber).pipe(Effect.asVoid)),
     )
     yield* match(exit)
       .with({ _tag: "Success" }, ({ value: responseLine }) =>
@@ -551,7 +552,7 @@ const makeUnixSocketDaemonLayer = (
             yield* Effect.addFinalizer(() =>
               Effect.all([Queue.shutdown(lineQueue), Queue.shutdown(shipQueue)], {
                 concurrency: "unbounded",
-              }).pipe(Effect.ignore),
+              }).pipe(Effect.asVoid),
             )
             runLineHandler = (line: string, socket: net.Socket): void => {
               const isShip = isShipCommandLine(line)

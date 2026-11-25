@@ -1,7 +1,7 @@
 ---
 id: harness:SPEC-0033
 title: Harness Worktree MCP Routing, Inner-Loop Latency Speedups, Accurate Triage, and Preventive AST/GC Gates
-status: proposed
+status: accepted
 archetype: framework
 date: 2026-11-24
 owners:
@@ -27,6 +27,7 @@ enforced_by:
   - apps/harness-mcp/src/tools/git-diff.tools.ts
   - apps/harness-mcp/src/tools/workflow-plan.tools.ts
   - apps/harness-mcp/src/tools/review-route-helpers.ts
+  - apps/harness-mcp/src/tools/review-route-git.ts
   - apps/harness-mcp/src/tools/lsp-and-telemetry.tools.ts
   - apps/harness-mcp/src/tools/lsp-session-cache.ts
   - apps/harness-mcp/src/tools/tool-registry.ts
@@ -51,29 +52,45 @@ enforced_by:
   - apps/harness-cli/src/commands/omnigraph-workflow-backup.ts
   - apps/harness-cli/src/commands/omnigraph-workflow-journal.ts
   - apps/harness-cli/test/adapter-config.test.ts
+  - apps/harness-cli/test/adapter-skills-parity.test.ts
+  - apps/harness-cli/test/adapter-isolation-and-cold-start.test.ts
+  - libs/harness/contract/src/ast-and-gate-primitives.ts
   - libs/harness/contract/src/workflow-ship.ts
+  - libs/harness/contract/src/workflow-storage.ts
   - libs/harness/contract/src/workflow-timeouts.ts
+  - libs/harness/contract/src/workspace-and-process.ts
   - libs/harness/decision/src/triage-decision.ts
   - libs/harness/decision/src/guard-decision.ts
+  - libs/harness/gates/src/ast-cache.ts
   - libs/harness/gates/src/telemetry.ts
   - libs/harness/gates/src/policy.ts
   - libs/harness/gates/src/policy-command-lists.ts
   - libs/harness/gates/src/policy-command-rules.ts
   - libs/harness/gates/src/policy-worker-isolation.ts
+  - libs/harness/gates/src/policy-worker-isolation-helpers.ts
   - libs/harness/gates/src/ears-lint.ts
   - libs/harness/gates/src/verify-stamp.ts
   - libs/harness/gates/src/mutation-check.ts
   - libs/harness/gates/src/plugins/ast-gate-visitors.ts
   - libs/harness/gates/src/plugins/ast-fail-closed-laws.ts
+  - libs/harness/gates/src/plugins/ast-literal-branch-law.ts
+  - libs/harness/gates/src/plugins/ast-wave3-laws.ts
   - libs/harness/gates/src/plugins/ast-workflow-fence-law.ts
+  - libs/harness/gates/src/plugins/ast-workflow-status-law.ts
+  - libs/harness/gates/src/plugins/self-dogfooding-plugin.ts
   - libs/harness/gates/src/plugins/gc/gc-catalog-doc-truth.ts
   - libs/harness/gates/src/plugins/gc/gc-topology-entropy.plugin.ts
+  - libs/harness/gates/src/plugins/gc/gc-runtime-props.ts
   - libs/harness/gates/src/plugins/gc/gc-hook-fastpath.ts
+  - libs/harness/gates/src/plugins/gc/gc-workspace-io.ts
   - libs/harness/gates/src/mutation/mutation-barrel-reachability.ts
   - libs/harness/gates/src/mutation/mutation-package-batch.ts
   - libs/harness/gates/src/mutation/mutation-target-discovery.ts
   - libs/harness/gates/src/mutation/mutation-test-reachability.ts
   - libs/harness/graph/src/extractor/ast-policy-extractor.ts
+  - libs/harness/graph/src/extractor/brand-boundary-extractor.ts
+  - libs/harness/graph/src/extractor/reducer-policy-extractor.ts
+  - libs/harness/graph/src/extractor/extractor-types-and-helpers.ts
   - libs/harness/infra/src/node-host-io.ts
   - libs/harness/infra/src/hook-fastpath.ts
   - libs/harness/infra/src/hook-io.ts
@@ -95,7 +112,7 @@ spans:
   - SyntaxBans.decide
   - EffectLaws.decide
   - GraphGc.decide
-  - SelfDogfooding.decide
+  - TestIntegrity.decide
   - EarsSpecLint.decide
 services: []
 errors:
@@ -151,7 +168,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ### 3 · Wave 3 — Preventive AST, GC, Graph, Contract, and Review-Surface Gates
 
-**Source (`libs/harness/gates/src/plugins/ast-gate-visitors.ts`, `ast-fail-closed-laws.ts`, `ast-workflow-fence-law.ts`, `libs/harness/gates/src/plugins/gc/gc-catalog-doc-truth.ts`, `gc-topology-entropy.plugin.ts`, `libs/harness/gates/src/ears-lint.ts`, `libs/harness/contract/src/workflow-ship.ts`, `workflow-timeouts.ts`, `libs/harness/graph/src/extractor/ast-policy-extractor.ts`, `apps/harness-mcp/src/tools/graph-navigation.tools.ts`, `apps/harness-cli/test/adapter-config.test.ts`, `tools/oxlint/syntax-bans.js`):** Promotes every systemic defect class discovered in PR #48 review and specialist audits into deterministic enforcement gates.
+**Source (`libs/harness/gates/src/ast-cache.ts`, `src/plugins/ast-gate-visitors.ts`, `ast-fail-closed-laws.ts`, `ast-literal-branch-law.ts`, `ast-wave3-laws.ts`, `ast-workflow-fence-law.ts`, `ast-workflow-status-law.ts`, `self-dogfooding-plugin.ts`, `libs/harness/gates/src/plugins/gc/gc-workspace-io.ts`, `gc-catalog-doc-truth.ts`, `gc-topology-entropy.plugin.ts`, `gc-runtime-props.ts`, `libs/harness/gates/src/ears-lint.ts`, `policy-worker-isolation.ts`, `policy-worker-isolation-helpers.ts`, `policy.ts`, `libs/harness/contract/src/workspace-and-process.ts`, `workflow-ship.ts`, `workflow-storage.ts`, `workflow-timeouts.ts`, `ast-and-gate-primitives.ts`, `libs/harness/graph/src/extractor/ast-policy-extractor.ts`, `brand-boundary-extractor.ts`, `reducer-policy-extractor.ts`, `extractor-types-and-helpers.ts`, `apps/harness-mcp/src/tools/graph-navigation.tools.ts`, `review-route-helpers.ts`, `review-route-git.ts`, `apps/harness-cli/test/adapter-config.test.ts`, `adapter-skills-parity.test.ts`, `adapter-isolation-and-cold-start.test.ts`, `tools/oxlint/syntax-bans.js`):** Promotes every systemic defect class discovered in PR #48 review and specialist audits into deterministic enforcement gates.
 
 | ID       | Pattern      | Requirement                                                                                                                                                                                                                                                                                               | Effect Symbol          | Verification |
 | -------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- | ------------ |
@@ -165,7 +182,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | REQ-3.8  | Event-driven | **When** `HarnessMcp.routeReview` is invoked without an explicit `changedLineCount` argument, `executeReviewRouteTool` **shall** derive `changedLineCount` automatically from `git diff --numstat` instead of failing argument decoding.                                                                  | HarnessMcp.routeReview | UnitTest     |
 | REQ-3.9  | Ubiquitous   | Multi-stage workflow timeout validators in `@harness/contract` **shall** enforce settle timeout budgets strictly exceeding `STAGES.length` multiplied by the per-stage command timeout budget.                                                                                                            | —                      | UnitTest     |
 | REQ-3.10 | Ubiquitous   | Bounded error message formatters in `@harness/contract` **shall** preserve trailing escalation suffixes within character caps via a shared `formatBoundedErrorMessage` helper rather than raw leading `.slice(0, maxChars)` truncation.                                                                   | —                      | UnitTest     |
-| REQ-3.11 | Ubiquitous   | The `harness-cli` adapter parity test suite **shall** partition `adapter-config.test.ts` into focused test files each staying below `1100` lines and `25` test cases under `SelfDogfooding.decide`.                                                                                                       | SelfDogfooding.decide  | UnitTest     |
+| REQ-3.11 | Ubiquitous   | The `harness-cli` adapter parity test suite **shall** partition `adapter-config.test.ts` into focused test files each staying below `1100` lines and `25` test cases under `TestIntegrity.decide`.                                                                                                        | TestIntegrity.decide   | UnitTest     |
 
 ## Assumptions
 
@@ -173,8 +190,8 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 - **REQ-1.9:** `GuardV1` `DecisionModel` timeout increases from `1500ms` to `2500ms` to absorb brief Ollama contention without exceeding interactive hook UX latency limits.
 - **REQ-2.1:** Warm `TypeScriptProgramSession` cache in `harness-mcp` is bounded (e.g. LRU of up to `4` `repoRoot` entries) and evicted on `tsconfig*.json` `mtimeMs` change or server shutdown.
 - **REQ-2.3:** Excluding routine source-file diffs from the `session` pre-invocation fingerprint preserves full freshness for `.harness/friction-log.jsonl`, `verify-stamp.json`, `last-done.json`, `graph-snapshot.json`, `HEAD` SHA, and active branch changes; source-file freshness continues to be enforced by `ingest`, `verify`, and `done`.
-- **REQ-3.1:** Explicit logging allowlist for `Effect.ignore` inside cleanup/finalizer blocks permits only side-effecting log/telemetry sinks (`Effect.log*`, `recordTelemetry*`) and never backup recovery, lock release, or store persistence calls.
-- **REQ-3.11:** Splitting `adapter-config.test.ts` preserves every existing assertion with zero coverage reduction while creating ~400+ lines of headroom below the `1500`-line `SelfDogfooding.decide` limit.
+- **REQ-3.1:** Explicit logging allowlist for `Effect.ignore` inside cleanup/finalizer blocks permits only side-effecting log/telemetry sinks (`Effect.log*`, `recordTelemetry*`, `process.stderr.write`) and never backup recovery, lock release, or store persistence calls.
+- **REQ-3.11:** Splitting `adapter-config.test.ts` preserves every existing assertion with zero coverage reduction while creating ~400+ lines of headroom below the `1500`-line `TestIntegrity.decide` limit.
 
 ## Out of scope
 

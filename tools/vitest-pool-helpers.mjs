@@ -7,18 +7,32 @@ import { fileURLToPath } from "node:url"
 const HEAVY_META_TESTS = new Set([
   "mutation-check.test.ts",
   "mutation-speedup.test.ts",
+  "mutation-cache.test.ts",
+  "mutation-cache-hardening.test.ts",
+  "mutation-scoped-fallback.test.ts",
   "self-dogfooding-capability-plugins.test.ts",
+  "self-dogfooding-governance-plugins.test.ts",
   "self-dogfooding-plugin-harness.test.ts",
   "milestone5-dst-ears-mutation-dpo.test.ts",
   "policy-check.test.ts",
+  "policy-check-architecture-and-layers.test.ts",
+  "policy-check-patterns-and-types.test.ts",
   "type-extractor.test.ts",
+  "governance-nodes.test.ts",
   "graph-projector.test.ts",
   "structural-search.test.ts",
   "workflow-graph-assets.test.ts",
+  "workflow-graph-assets-sync.test.ts",
   "ts-compiler-overlay-service.test.ts",
 ])
 
-const VERY_HEAVY_TESTS = new Set(["policy-check.test.ts", "type-extractor.test.ts"])
+const VERY_HEAVY_TESTS = new Set([
+  "policy-check.test.ts",
+  "policy-check-architecture-and-layers.test.ts",
+  "policy-check-patterns-and-types.test.ts",
+  "type-extractor.test.ts",
+  "governance-nodes.test.ts",
+])
 
 export const sortTestsByStaticSpeed = (tests) =>
   [...tests].sort((a, b) => {
@@ -76,9 +90,9 @@ export const resolveBatchConcurrency = (mutantCount, warmMode, env = process.env
   }
   const coreLimit = Math.max(2, Math.floor(totalCores / 2))
   if (warmMode) {
-    return Math.min(8, Math.max(1, Math.min(mutantCount, Math.ceil(mutantCount / 2))), coreLimit)
+    return Math.min(12, Math.max(1, Math.min(mutantCount, Math.ceil(mutantCount / 2))), coreLimit)
   }
-  return Math.min(8, coreLimit, mutantCount)
+  return Math.min(12, coreLimit, mutantCount)
 }
 
 export const createBatchTempTracker = () => {
@@ -417,28 +431,39 @@ export const runCoverageProbe = async ({
       })
       coveringByMutant.set(mId, sorted)
 
-      const fastestFile = sorted[0]
-      if (fastestFile !== undefined) {
-        const durMs = fileDurationMs.get(fastestFile) ?? 500
-        const byTestName = perTestByMutantFile.get(mId)?.get(fastestFile)
-        const distinctTotal = totalTestsByFile.get(fastestFile) ?? 0
+      const targetedPlans = []
+      for (const file of sorted) {
+        const durMs = fileDurationMs.get(file) ?? 500
+        const byTestName = perTestByMutantFile.get(mId)?.get(file)
+        const distinctTotal = totalTestsByFile.get(file) ?? 0
         if (
-          (durMs >= 1_200 || isHeavyMetaTest(fastestFile)) &&
+          (durMs >= 1_200 || isHeavyMetaTest(file)) &&
           byTestName !== undefined &&
           byTestName.size > 0 &&
           (distinctTotal === 0 || byTestName.size < distinctTotal || byTestName.size <= 6)
         ) {
-          const pickedTests = [...byTestName.entries()]
+          const picked = [...byTestName.entries()]
             .sort((a, b) => (a[1] !== b[1] ? a[1] - b[1] : a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
             .slice(0, 6)
-            .map(([name]) => escapeRegexLiteral(name))
-          if (pickedTests.length > 0) {
-            targetedByMutant.set(mId, {
-              file: fastestFile,
+          if (picked.length > 0) {
+            const sumDurMs = picked.reduce((acc, [, d]) => acc + d, 0)
+            const pickedTests = picked.map(([name]) => escapeRegexLiteral(name))
+            targetedPlans.push({
+              file,
               pattern: `^(?:${pickedTests.join("|")})$`,
+              count: pickedTests.length,
+              sumDurMs,
             })
           }
         }
+      }
+      if (targetedPlans.length > 0) {
+        targetedPlans.sort((a, b) => {
+          if (a.count !== b.count) return a.count - b.count
+          if (a.sumDurMs !== b.sumDurMs) return a.sumDurMs - b.sumDurMs
+          return a.file < b.file ? -1 : a.file > b.file ? 1 : 0
+        })
+        targetedByMutant.set(mId, targetedPlans.slice(0, 3))
       }
     }
     return { coveringByMutant, targetedByMutant }
@@ -450,7 +475,7 @@ export const runCoverageProbe = async ({
   }
 }
 
-const MAX_WORKER_RSS_BYTES = 750 * 1024 * 1024
+const MAX_WORKER_RSS_BYTES = 2048 * 1024 * 1024
 
 export const createWarmVitestWorker = async ({
   vitestNodeEntry,
@@ -732,21 +757,21 @@ export const runWarmMutantWithWorker = async ({
     }
   }
 
-  const targeted = coverageInfo?.targetedByMutant?.get(mutantId)
-  if (targeted) {
+  const rawTargeted = coverageInfo?.targetedByMutant?.get(mutantId)
+  const targetedList = Array.isArray(rawTargeted) ? rawTargeted : rawTargeted ? [rawTargeted] : []
+  for (const targeted of targetedList) {
     const w0 = await ensureWorker()
-    if (w0) {
-      const stage0 = await w0.runSubset(
-        mutantId,
-        [targeted.file],
-        timeoutMs,
-        targetFilePath,
-        targeted.pattern,
-      )
-      await maybeRecycle()
-      if (stage0 !== null && (stage0._tag !== "Exited" || stage0.exitCode !== 0)) {
-        return { id: mutantId, result: stage0 }
-      }
+    if (!w0) break
+    const stage0 = await w0.runSubset(
+      mutantId,
+      [targeted.file],
+      timeoutMs,
+      targetFilePath,
+      targeted.pattern,
+    )
+    await maybeRecycle()
+    if (stage0 !== null && (stage0._tag !== "Exited" || stage0.exitCode !== 0)) {
+      return { id: mutantId, result: stage0 }
     }
   }
 

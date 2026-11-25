@@ -129,8 +129,8 @@ const matchesInstalledModel = (installedName: string, targetModel: string): bool
 const cancelResponseBodyQuietly = (response: Response): Effect.Effect<void> =>
   Effect.tryPromise({
     try: () => (response.body !== null ? response.body.cancel() : Promise.resolve()),
-    catch: () => undefined,
-  }).pipe(Effect.orElseSucceed(() => undefined))
+    catch: (cause) => toErrorReasonMessage(cause, "Failed to cancel Ollama response body"),
+  }).pipe(Effect.catch((err) => Effect.logDebug("Failed to cancel Ollama response body", err)))
 
 export const embedBatchViaOllama = Effect.fn("OllamaEmbeddingClient.embedBatch")(function* (
   texts: ReadonlyArray<EmbeddingSourceText>,

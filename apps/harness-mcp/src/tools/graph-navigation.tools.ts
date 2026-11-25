@@ -8,9 +8,11 @@ import {
   KnowledgeQueryText,
   type NxScopeTag,
   type NxTierTag,
+  ReviewChangedLines,
   ReviewRawDiffInput,
   ReviewRawFileInput,
   ReviewRouteToolOutput,
+  type WorkflowStoreUnavailableError,
   isPureInterruptCause,
   toErrorReasonMessage,
 } from "@harness/contract"
@@ -43,6 +45,7 @@ import {
   McpToolName,
   type McpToolPluginDescriptor,
   normalizeProjectPath,
+  ProjectPathEscapeError,
   resolveContainedRepoRoot,
   resolveDefaultRepoRoot,
   resolveGraphWithStatus,
@@ -52,10 +55,12 @@ import {
   buildReviewGraphContextBundle,
   collectManifestTagsForFiles,
   decodeReviewRouteInput,
+  deriveChangedLineCountFromGit,
   escalatePlanOnDiagnostics,
   resolveReviewRouteTimeoutMs,
   type ReviewRouteExecutionContext,
   ReviewRouteInputSchema,
+  type ReviewRouteToolInput,
 } from "./review-route-helpers.js"
 import { graphHasNodesForKind } from "./retrieval-search-helpers.js"
 
@@ -155,27 +160,58 @@ const decodeStructuralSearchInput = Schema.decodeUnknownEffect(StructuralSearchI
 const decodeRouteInput = Schema.decodeUnknownEffect(RouteInputSchema)
 
 export const executeReviewRouteTool = Effect.fn("HarnessMcp.routeReview")(function* (
-  input: ReviewRawDiffInput,
+  input: ReviewRouteToolInput,
   context?: ReviewRouteExecutionContext,
 ): Effect.fn.Return<
   ReviewRouteToolOutput,
   InvalidReviewRouteInputError,
   DecisionModel.DecisionModel
 > {
-  yield* Schema.decodeEffect(ReviewRawDiffInput)(input).pipe(
-    Effect.mapError(
-      (schemaError) =>
-        new InvalidReviewRouteInputError({
-          offendingPath: input.changedFiles[0] ?? ReviewRawFileInput.make(""),
-          reason: toErrorReasonMessage(schemaError),
-        }),
-    ),
+  const mapRouteInputError = (schemaError: unknown): InvalidReviewRouteInputError => {
+    const firstFile = Array.isArray(input?.changedFiles) ? input.changedFiles[0] : undefined
+    return new InvalidReviewRouteInputError({
+      offendingPath: match(Schema.decodeUnknownOption(ReviewRawFileInput)(firstFile))
+        .with({ _tag: "Some" }, ({ value }) => value)
+        .with({ _tag: "None" }, () => ReviewRawFileInput.make("unknown"))
+        .exhaustive(),
+      reason: toErrorReasonMessage(schemaError),
+    })
+  }
+
+  const toInvalidRepoRootError = (
+    rawRepoRoot: string,
+    err: ProjectPathEscapeError | WorkflowStoreUnavailableError,
+  ): InvalidReviewRouteInputError =>
+    new InvalidReviewRouteInputError({
+      offendingPath: match(Schema.decodeOption(ReviewRawFileInput)(rawRepoRoot.slice(0, 512)))
+        .with({ _tag: "Some" }, ({ value }) => value)
+        .with({ _tag: "None" }, () => ReviewRawFileInput.make("repoRoot"))
+        .exhaustive(),
+      reason: toErrorReasonMessage(
+        match(err)
+          .with({ _tag: "ProjectPathEscapeError" }, (e) => e.message)
+          .with({ _tag: "WorkflowStoreUnavailableError" }, (e) => e.reason)
+          .exhaustive(),
+      ),
+    })
+
+  const parsed = yield* decodeReviewRouteInput(input).pipe(Effect.mapError(mapRouteInputError))
+  const normalizedFiles = yield* normalizeReviewFilePaths(
+    parsed.changedFiles.map((f) => ReviewRawFileInput.make(f)),
   )
 
-  const normalizedFiles = yield* normalizeReviewFilePaths(input.changedFiles)
+  const requestedRepoRoot = parsed.repoRoot
+  const effectiveRepoRoot =
+    context?.repoRoot !== undefined
+      ? context.repoRoot
+      : requestedRepoRoot !== undefined
+        ? yield* resolveContainedRepoRoot(requestedRepoRoot).pipe(
+            Effect.mapError((err) => toInvalidRepoRootError(requestedRepoRoot, err)),
+          )
+        : undefined
 
   const manifestResult = yield* Effect.gen(function* () {
-    if (context?.repoRoot === undefined) {
+    if (effectiveRepoRoot === undefined) {
       return {
         tiers: [] as ReadonlyArray<NxTierTag>,
         scopes: [] as ReadonlyArray<NxScopeTag>,
@@ -186,47 +222,59 @@ export const executeReviewRouteTool = Effect.fn("HarnessMcp.routeReview")(functi
         ] as ReadonlyArray<ErrorReasonMessage>,
       }
     }
-    if (!nodeSyncHostIo.existsSync(context.repoRoot)) {
+    if (!nodeSyncHostIo.existsSync(effectiveRepoRoot)) {
       return {
         tiers: [] as ReadonlyArray<NxTierTag>,
         scopes: [] as ReadonlyArray<NxScopeTag>,
         warnings: [
-          toErrorReasonMessage(`Configured repoRoot does not exist on disk: ${context.repoRoot}`),
+          toErrorReasonMessage(`Configured repoRoot does not exist on disk: ${effectiveRepoRoot}`),
         ] as ReadonlyArray<ErrorReasonMessage>,
       }
     }
-    return yield* collectManifestTagsForFiles(context.repoRoot, normalizedFiles)
+    return yield* collectManifestTagsForFiles(effectiveRepoRoot, normalizedFiles)
   })
 
-  const mergedTiers = [...new Set([...input.touchedTiers, ...manifestResult.tiers])]
-  const mergedScopes = [...new Set([...input.touchedScopes, ...manifestResult.scopes])]
+  const derivedLineResult =
+    parsed.changedLineCount !== undefined
+      ? { changedLineCount: parsed.changedLineCount, warning: undefined }
+      : effectiveRepoRoot !== undefined
+        ? yield* deriveChangedLineCountFromGit(effectiveRepoRoot, normalizedFiles, parsed.baseRef)
+        : {
+            changedLineCount: ReviewChangedLines.make(0),
+            warning: ErrorReasonMessage.make(
+              "No repoRoot supplied; changedLineCount auto-derivation unavailable",
+            ),
+          }
+
+  const allWarnings = [
+    ...manifestResult.warnings,
+    ...(derivedLineResult.warning !== undefined ? [derivedLineResult.warning] : []),
+  ]
+  const mergedTiers = [...new Set([...(parsed.touchedTiers ?? []), ...manifestResult.tiers])]
+  const mergedScopes = [...new Set([...(parsed.touchedScopes ?? []), ...manifestResult.scopes])]
 
   const enrichedInput = yield* Schema.decodeEffect(ReviewRawDiffInput)({
-    ...input,
     changedFiles: normalizedFiles,
+    diffSummary: parsed.diffSummary ?? "",
+    changedLineCount: derivedLineResult.changedLineCount,
     touchedTiers: mergedTiers,
     touchedScopes: mergedScopes,
-  }).pipe(
-    Effect.mapError(
-      (schemaError) =>
-        new InvalidReviewRouteInputError({
-          offendingPath: input.changedFiles[0] ?? ReviewRawFileInput.make(""),
-          reason: toErrorReasonMessage(schemaError),
-        }),
-    ),
-  )
+    ...(parsed.timeoutMs !== undefined ? { timeoutMs: parsed.timeoutMs } : {}),
+    ...(parsed.remediationContext !== undefined
+      ? { remediationContext: parsed.remediationContext }
+      : {}),
+  }).pipe(Effect.mapError(mapRouteInputError))
 
   const signals = yield* inferReviewDiffSignals(enrichedInput)
   const rawPlan = yield* routeReviewDiff(enrichedInput, signals)
-  const escalatedPlan =
-    manifestResult.warnings.length > 0 ? escalatePlanOnDiagnostics(rawPlan) : rawPlan
+  const escalatedPlan = allWarnings.length > 0 ? escalatePlanOnDiagnostics(rawPlan) : rawPlan
   const plan = attachReviewSlicesIfThresholdReached(signals, escalatedPlan)
   const reviewSlices = match(plan)
     .with({ _tag: "ActiveReviewPlan" }, (active) => active.reviewSlices)
     .with({ _tag: "SkipReviewPlan" }, () => undefined)
     .exhaustive()
   const graphContext = buildReviewGraphContextBundle(
-    context?.repoRoot,
+    effectiveRepoRoot,
     context?.graph,
     signals.changedFiles,
   )
@@ -242,7 +290,7 @@ export const executeReviewRouteTool = Effect.fn("HarnessMcp.routeReview")(functi
     plan,
     signals,
     graphContext,
-    warnings: manifestResult.warnings,
+    warnings: allWarnings,
     degraded: isDegraded,
     ...(reviewSlices !== undefined ? { reviewSlices } : {}),
     ...(combinedDegradedReason !== undefined
@@ -517,10 +565,16 @@ export const buildGraphNavigationToolDescriptors = (
         }
         const patternFile =
           block === "review" || block === "effect" ? null : `agent-patterns/${block}.md`
-        const routeDegraded = graphStatus.degraded || baseRoute.source === "degraded-fallback"
+        const isDecisionModelFallback = match(baseRoute.source)
+          .with("degraded-fallback", () => true)
+          .with("deterministic", () => false)
+          .with("hybrid-retrieval", () => false)
+          .with("model", () => false)
+          .exhaustive()
+        const routeDegraded = graphStatus.degraded || isDecisionModelFallback
         const routeDegradedReason = [
           graphStatus.degradedReason,
-          baseRoute.source === "degraded-fallback" ? "decision-model-fallback" : undefined,
+          isDecisionModelFallback ? "decision-model-fallback" : undefined,
         ]
           .filter((v): v is string => v !== undefined && v.length > 0)
           .join("; ")
@@ -569,23 +623,17 @@ export const buildGraphNavigationToolDescriptors = (
           )
         }
         const effectiveTimeoutMs = resolveReviewRouteTimeoutMs(parsed.timeoutMs, options)
-        const rawInput = yield* Schema.decodeEffect(ReviewRawDiffInput)({
+        const toolInput: ReviewRouteToolInput = {
+          ...parsed,
           changedFiles: effectiveChangedFiles,
-          diffSummary: parsed.diffSummary ?? "",
-          changedLineCount: parsed.changedLineCount,
-          touchedTiers: parsed.touchedTiers ?? [],
-          touchedScopes: parsed.touchedScopes ?? [],
           ...(effectiveTimeoutMs !== undefined ? { timeoutMs: effectiveTimeoutMs } : {}),
-          ...(parsed.remediationContext !== undefined
-            ? { remediationContext: parsed.remediationContext }
-            : {}),
-        })
+        }
         const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
         const graphStatus = yield* resolveGraphWithStatus(
           { ...options, repoRoot: effectiveRoot },
           args,
         )
-        return yield* executeReviewRouteTool(rawInput, {
+        return yield* executeReviewRouteTool(toolInput, {
           repoRoot: effectiveRoot,
           graph: graphStatus.graph,
           graphStatus,

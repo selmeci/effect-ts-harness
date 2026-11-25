@@ -2982,6 +2982,747 @@ function checkMaxTestsPerFileEstree(programNode, filename, report) {
   }
 }
 
+const WAVE3_CORE_SRC_RE =
+  /(?:^|\/)libs\/(?:[^/]+\/core|harness\/(?:gates|graph|decision|ingest))\/src\//
+const WAVE3_REF_RANGE_GIT_SUBCMDS = new Set([
+  "diff",
+  "rev-parse",
+  "merge-base",
+  "log",
+  "show",
+  "cat-file",
+  "checkout",
+  "branch",
+  "tag",
+  "worktree",
+  "ls-files",
+  "reset",
+  "rev-list",
+])
+const WAVE3_GIT_TWO_TOKEN_FLAGS = new Set(["-C", "-c", "--git-dir", "--work-tree"])
+const WAVE3_CANONICAL_CLOSED_LITERAL_TYPES = new Set(
+  [
+    "AdrStatus AntiPatternRuleId AstGatePackageTag CanonicalCliCommandName CanonicalMcpToolName CascadeStageName",
+    "CircuitBreakerStatus CodeModActionKind CodeModEngineKind ConceptKind ConceptLatticeErrorReason DaemonServerErrorKind",
+    "DstExecutionTier DstHazardRiskLevel EarsClauseOutcomeKind EarsClausePatternKind EarsClausePolarity EarsConsistencyRuleId",
+    "EarsConsistencyViolationKind EarsGuardPairRelation EarsPatternKind EarsStatus EmbeddingCacheErrorKind",
+    "EmbeddingCacheOperation EmbeddingNodeKind EmbeddingUnavailableCause EntityNodeTag EscalationDecision FrictionEventKind",
+    "FrictionLogState GateCategory GateVerdict GcFindingKind GovernanceDocKind GovernanceDocLifecycleStatus GovernanceDocStatus",
+    "GraphRewriteErrorReason HttpMethod LatencyExceededDimension LayerKind MigrationEngineKind MutantCategory MutateDiffMode",
+    "MutateEnforcementMode NxAffectedTargetFlag NxScopeTag NxTierTag OmnigraphChangeOp OmnigraphConfigDriftKind",
+    "OmnigraphConflictKind OmnigraphDiagnosticSeverity OmnigraphEntityKind OmnigraphLintPolicy OmnigraphLintStatus",
+    "OmnigraphReconcileReason PackageTag PackageVerifyExecutable PackageVerifyFailureKind PackageVerifyTarget RelationTag",
+    "RemediationFindingSeverity ReviewDepth ReviewRoutingSource ReviewerId RewriteMode RewritePhase RewriteRuleCategory",
+    "RuleSynthesisFailureStage RunnerId SelfDogfoodingRuleId ShipAttemptStatus ShipErrorTag ShipRunOrigin ShipStage",
+    "SpanBudgetRuleId SpanBudgetViolationKind StageLatencyStatus StandardRoleName StdinReadErrorKind SubprocessFailureKind",
+    "TelemetryCategory TelemetryEngineSource TelemetryOutcome TelemetrySurface TierTopologyRuleId VerificationStatus",
+    "ViolationRule WorkflowAttemptVerdict WorkflowBackupMode WorkflowDoctorCheckStatus WorkflowDoctorMode WorkflowGqQueryName",
+    "WorkflowLevel WorkflowProjectionStatus WorkflowRunState WorkflowStartOutcome WorkflowStoreAvailabilityState",
+    "WorkflowUnitKind WorkflowUnitStatus WorkspaceFsOperation WorktreePathKind",
+  ]
+    .join(" ")
+    .split(" "),
+)
+
+function isWave3ProdSrc(filename) {
+  return (
+    typeof filename === "string" &&
+    !isTestFilePath(filename) &&
+    !/(?:^|\/)test\/(?!fixtures\/)/.test(filename) &&
+    /(?:^|\/)src\//.test(filename)
+  )
+}
+
+function getEstreeStaticMemberName(memNode) {
+  if (memNode == null || memNode.type !== "MemberExpression") return null
+  if (memNode.computed !== true) {
+    return memNode.property?.type === "Identifier" ? memNode.property.name : null
+  }
+  return getStaticModuleString(memNode.property)
+}
+
+function isWave3PureLoggingCallEstree(callNode, context, getEffectMemberName) {
+  if (callNode == null || callNode.type !== "CallExpression") return false
+  const c = unwrapEstreeExpr(callNode.callee)
+  if (c == null) return false
+  const effMethod = getEffectMemberName != null ? getEffectMemberName(c) : null
+  if (effMethod != null && /^log(?:Debug|Info|Warning|Error|Fatal|Trace)?$/.test(effMethod)) {
+    return true
+  }
+  if (c.type === "Identifier") {
+    return c.name.startsWith("recordTelemetry")
+  }
+  if (c.type === "MemberExpression") {
+    const txt = getNodeSourceText(context, c)
+    return txt === "process.stderr.write"
+  }
+  return false
+}
+
+function getWave3UnwrappedPipeEstree(callNode) {
+  if (callNode == null || callNode.type !== "CallExpression") return null
+  const c = unwrapEstreeExpr(callNode.callee)
+  if (c != null && c.type === "MemberExpression" && getEstreeStaticMemberName(c) === "pipe") {
+    return { subject: c.object, ops: Array.isArray(callNode.arguments) ? callNode.arguments : [] }
+  }
+  if (
+    c != null &&
+    isIdentifier(c, "pipe") &&
+    Array.isArray(callNode.arguments) &&
+    callNode.arguments.length >= 2
+  ) {
+    return { subject: callNode.arguments[0], ops: callNode.arguments.slice(1) }
+  }
+  return null
+}
+
+function getWave3PipeStagesBeforeEstree(opNode) {
+  const parent = opNode?.parent
+  const piped = getWave3UnwrappedPipeEstree(parent)
+  if (piped == null) return null
+  const uOp = unwrapEstreeExpr(opNode)
+  const idx = piped.ops.findIndex((o) => o === opNode || unwrapEstreeExpr(o) === uOp)
+  if (idx === -1) return null
+  return [piped.subject, ...piped.ops.slice(0, idx)]
+}
+
+function isWave3FnExprEstree(n) {
+  return n != null && (n.type === "ArrowFunctionExpression" || n.type === "FunctionExpression")
+}
+
+function isWave3TargetPureLoggingEstree(target, context, getEffectMemberName) {
+  if (target == null) return false
+  let hasLog = false
+  let hasUnsafe = false
+  const visit = (n) => {
+    if (n == null || hasUnsafe) return
+    if (
+      n.type === "AssignmentExpression" ||
+      n.type === "UpdateExpression" ||
+      n.type === "ThrowStatement" ||
+      n.type === "NewExpression" ||
+      (n.type === "UnaryExpression" && n.operator === "delete")
+    ) {
+      hasUnsafe = true
+      return
+    }
+    if (n.type === "CallExpression") {
+      if (isWave3PureLoggingCallEstree(n, context, getEffectMemberName)) {
+        hasLog = true
+      } else {
+        const effWrap = getEffectMemberName != null ? getEffectMemberName(n.callee) : null
+        const isValidWrap =
+          (effWrap === "sync" || effWrap === "try" || effWrap === "suspend" || effWrap === "tap") &&
+          Array.isArray(n.arguments) &&
+          n.arguments.length >= 1 &&
+          isWave3FnExprEstree(unwrapEstreeExpr(n.arguments[0]))
+        if (!isValidWrap) {
+          hasUnsafe = true
+          return
+        }
+      }
+    }
+    walkEstreeChildren(n, visit)
+  }
+  visit(target)
+  return hasLog && !hasUnsafe
+}
+
+function areWave3AllStagesPureLoggingEstree(stages, context, getEffectMemberName) {
+  return (
+    Array.isArray(stages) &&
+    stages.length > 0 &&
+    stages.every((s) => isWave3TargetPureLoggingEstree(s, context, getEffectMemberName))
+  )
+}
+
+function isWave3InsideFinalizerOrCompEstree(node, getEffectMemberName, scopeNamespaceNames) {
+  let curr = node?.parent
+  let child = node
+  while (curr != null) {
+    if (curr.type === "CallExpression" && Array.isArray(curr.arguments)) {
+      const effMethod = getEffectMemberName != null ? getEffectMemberName(curr.callee) : null
+      if (effMethod === "addFinalizer" && curr.arguments[0] === child) return true
+      if (
+        (effMethod === "onExit" ||
+          effMethod === "ensuring" ||
+          effMethod === "onInterrupt" ||
+          effMethod === "acquireRelease") &&
+        ((curr.arguments.length === 1 && curr.arguments[0] === child) ||
+          (curr.arguments.length >= 2 && curr.arguments[1] === child))
+      ) {
+        return true
+      }
+      if (
+        effMethod === "acquireUseRelease" &&
+        curr.arguments.length >= 3 &&
+        curr.arguments[2] === child
+      ) {
+        return true
+      }
+      const c = unwrapEstreeExpr(curr.callee)
+      if (c != null && c.type === "MemberExpression") {
+        const m = getEstreeStaticMemberName(c)
+        const obj = unwrapEstreeExpr(c.object)
+        const isScopeFin =
+          m === "addFinalizer" && obj?.type === "Identifier" && scopeNamespaceNames.has(obj.name)
+        if (
+          (isScopeFin || m === "withCompensation") &&
+          ((curr.arguments.length === 1 && curr.arguments[0] === child) ||
+            (curr.arguments.length >= 2 && curr.arguments[1] === child))
+        ) {
+          return true
+        }
+      } else if (isIdentifier(c, "withCompensation")) {
+        if (
+          (curr.arguments.length === 1 && curr.arguments[0] === child) ||
+          (curr.arguments.length >= 2 && curr.arguments[1] === child)
+        ) {
+          return true
+        }
+      }
+    }
+    if (
+      curr.type === "FunctionDeclaration" &&
+      curr.id?.name != null &&
+      /compensat/i.test(curr.id.name)
+    ) {
+      return true
+    }
+    if (
+      curr.type === "MethodDefinition" &&
+      curr.key?.type === "Identifier" &&
+      /compensat/i.test(curr.key.name)
+    ) {
+      return true
+    }
+    if (
+      curr.type === "VariableDeclarator" &&
+      curr.id?.type === "Identifier" &&
+      /compensat/i.test(curr.id.name)
+    ) {
+      return true
+    }
+    child = curr
+    curr = curr.parent
+  }
+  return false
+}
+
+function collectWave3BlockLocalsEstree(blockNode) {
+  const locals = new Map()
+  if (blockNode == null || !Array.isArray(blockNode.body)) return locals
+  for (const stmt of blockNode.body) {
+    if (stmt == null || stmt.type !== "VariableDeclaration" || !Array.isArray(stmt.declarations)) {
+      continue
+    }
+    for (const d of stmt.declarations) {
+      if (d?.id?.type === "Identifier" && d.init != null) locals.set(d.id.name, d.init)
+    }
+  }
+  return locals
+}
+
+function resolveWave3LocalExprEstree(expr, locals, depth = 0) {
+  const u = unwrapEstreeExpr(expr)
+  if (u == null || depth >= 4 || u.type !== "Identifier") return u
+  const next = locals.get(u.name)
+  return next !== undefined ? resolveWave3LocalExprEstree(next, locals, depth + 1) : u
+}
+
+function isWave3EmptyOrVoidExprEstree(expr) {
+  const u = unwrapEstreeExpr(expr)
+  if (u == null) return false
+  if (u.type === "Literal" && u.value === null) return true
+  if (u.type === "UnaryExpression" && u.operator === "void") return true
+  return u.type === "Identifier" && u.name === "undefined"
+}
+
+function isWave3EmptyOrVoidCallbackEstree(expr) {
+  const fn = unwrapEstreeExpr(expr)
+  if (!isWave3FnExprEstree(fn) || fn.body == null) return false
+  if (fn.body.type !== "BlockStatement") return isWave3EmptyOrVoidExprEstree(fn.body)
+  if (!Array.isArray(fn.body.body) || fn.body.body.length === 0) return true
+  const locals = collectWave3BlockLocalsEstree(fn.body)
+  let sawReturn = false
+  let nonEmpty = false
+  const visit = (n) => {
+    if (n == null || nonEmpty) return
+    if (
+      n !== fn &&
+      (n.type === "ArrowFunctionExpression" ||
+        n.type === "FunctionExpression" ||
+        n.type === "FunctionDeclaration")
+    ) {
+      return
+    }
+    if (n.type === "ReturnStatement") {
+      sawReturn = true
+      if (
+        n.argument != null &&
+        !isWave3EmptyOrVoidExprEstree(resolveWave3LocalExprEstree(n.argument, locals))
+      ) {
+        nonEmpty = true
+      }
+    }
+    walkEstreeChildren(n, visit)
+  }
+  visit(fn.body)
+  return (
+    !nonEmpty &&
+    (sawReturn ||
+      fn.body.body.every(
+        (s) => s != null && (s.type === "VariableDeclaration" || s.type === "EmptyStatement"),
+      ))
+  )
+}
+
+function isWave3SilentCatchCallbackEstree(expr, context, getEffectMemberName) {
+  const fn = unwrapEstreeExpr(expr)
+  if (!isWave3FnExprEstree(fn) || fn.body == null) return false
+
+  const hasTopLevelUnconditionalLogOrFail = (node) => {
+    const u = unwrapEstreeExpr(node)
+    if (u == null) return false
+    if (
+      u.type === "ArrowFunctionExpression" ||
+      u.type === "FunctionExpression" ||
+      u.type === "FunctionDeclaration" ||
+      u.type === "ConditionalExpression" ||
+      u.type === "LogicalExpression"
+    ) {
+      return false
+    }
+    if (u.type === "YieldExpression" && u.argument != null) {
+      return hasTopLevelUnconditionalLogOrFail(u.argument)
+    }
+    if (u.type === "CallExpression") {
+      if (isWave3PureLoggingCallEstree(u, context, getEffectMemberName)) return true
+      const effMethod = getEffectMemberName != null ? getEffectMemberName(u.callee) : null
+      if (effMethod === "fail" || effMethod === "failCause" || effMethod === "die") return true
+      return (
+        Array.isArray(u.arguments) && u.arguments.some((a) => hasTopLevelUnconditionalLogOrFail(a))
+      )
+    }
+    if (u.type === "VariableDeclaration" && Array.isArray(u.declarations)) {
+      return u.declarations.some(
+        (d) => d?.init != null && hasTopLevelUnconditionalLogOrFail(d.init),
+      )
+    }
+    if (u.type === "ExpressionStatement") return hasTopLevelUnconditionalLogOrFail(u.expression)
+    return false
+  }
+
+  const isSilentEff = (e, locals) => {
+    const u = resolveWave3LocalExprEstree(e, locals)
+    if (u == null) return false
+    if (u.type === "YieldExpression" && u.argument != null) return isSilentEff(u.argument, locals)
+    if (u.type === "ConditionalExpression") {
+      return isSilentEff(u.consequent, locals) || isSilentEff(u.alternate, locals)
+    }
+    if (isWave3EmptyOrVoidExprEstree(u)) return true
+    if (getEffectMemberName != null && getEffectMemberName(u) === "void") return true
+    if (u.type !== "CallExpression") return false
+    const effM = getEffectMemberName != null ? getEffectMemberName(u.callee) : null
+    if (effM === "succeed") {
+      return (
+        u.arguments?.[0] == null ||
+        isWave3EmptyOrVoidExprEstree(resolveWave3LocalExprEstree(u.arguments[0], locals))
+      )
+    }
+    if (effM === "sync")
+      return u.arguments?.[0] != null && isWave3EmptyOrVoidCallbackEstree(u.arguments[0])
+    if (effM === "gen") {
+      const gFn = u.arguments?.[0] != null ? unwrapEstreeExpr(u.arguments[0]) : null
+      return gFn != null && isWave3FnExprEstree(gFn) && isSilentFnBody(gFn)
+    }
+    if (effM === "asVoid") {
+      const inner =
+        u.arguments?.[0] != null ? resolveWave3LocalExprEstree(u.arguments[0], locals) : null
+      if (inner == null) return false
+      const innerM =
+        inner.type === "CallExpression" && getEffectMemberName != null
+          ? getEffectMemberName(inner.callee)
+          : null
+      return isSilentEff(inner, locals) || innerM === "succeed" || innerM === "sync"
+    }
+    const piped = getWave3UnwrappedPipeEstree(u)
+    if (
+      piped != null &&
+      piped.ops.some(
+        (op) =>
+          (getEffectMemberName != null && getEffectMemberName(op) === "asVoid") ||
+          (op?.type === "CallExpression" &&
+            getEffectMemberName != null &&
+            getEffectMemberName(op.callee) === "asVoid"),
+      )
+    ) {
+      const subj = resolveWave3LocalExprEstree(piped.subject, locals)
+      const subjM =
+        subj?.type === "CallExpression" && getEffectMemberName != null
+          ? getEffectMemberName(subj.callee)
+          : null
+      return isSilentEff(subj, locals) || subjM === "succeed" || subjM === "sync"
+    }
+    return false
+  }
+
+  const checkStmtSeq = (stmts, locals, initialPriorLog) => {
+    let priorLog = initialPriorLog
+    let sawRet = false
+    for (const s of stmts) {
+      if (s == null) continue
+      const res = checkStmt(s, locals, priorLog)
+      if (res.hasSilent) return { hasSilent: true, sawRet: true, terminated: true }
+      if (res.sawRet) sawRet = true
+      if (res.terminated) return { hasSilent: false, sawRet, terminated: true }
+      if (res.unconditionalLog) priorLog = true
+    }
+    return { hasSilent: false, sawRet, terminated: false }
+  }
+
+  const checkStmt = (stmt, locals, priorLog) => {
+    if (stmt == null) {
+      return { hasSilent: false, sawRet: false, terminated: false, unconditionalLog: false }
+    }
+    if (stmt.type === "ReturnStatement") {
+      if (stmt.argument == null) {
+        return { hasSilent: !priorLog, sawRet: true, terminated: true, unconditionalLog: false }
+      }
+      if (hasTopLevelUnconditionalLogOrFail(stmt.argument)) {
+        return { hasSilent: false, sawRet: true, terminated: true, unconditionalLog: true }
+      }
+      return {
+        hasSilent: !priorLog && isSilentEff(stmt.argument, locals),
+        sawRet: true,
+        terminated: true,
+        unconditionalLog: false,
+      }
+    }
+    if (stmt.type === "ThrowStatement") {
+      return { hasSilent: false, sawRet: true, terminated: true, unconditionalLog: true }
+    }
+    if (stmt.type === "BlockStatement" && Array.isArray(stmt.body)) {
+      const r = checkStmtSeq(stmt.body, locals, priorLog)
+      return {
+        hasSilent: r.hasSilent,
+        sawRet: r.sawRet,
+        terminated: r.terminated,
+        unconditionalLog: false,
+      }
+    }
+    if (stmt.type === "IfStatement") {
+      const c = checkStmt(stmt.consequent, locals, priorLog)
+      if (c.hasSilent) {
+        return { hasSilent: true, sawRet: true, terminated: true, unconditionalLog: false }
+      }
+      const a = stmt.alternate != null ? checkStmt(stmt.alternate, locals, priorLog) : null
+      if (a?.hasSilent) {
+        return { hasSilent: true, sawRet: true, terminated: true, unconditionalLog: false }
+      }
+      return {
+        hasSilent: false,
+        sawRet: c.sawRet || Boolean(a?.sawRet),
+        terminated: c.terminated && Boolean(a?.terminated),
+        unconditionalLog: false,
+      }
+    }
+    if (stmt.type === "SwitchStatement" && Array.isArray(stmt.cases)) {
+      let anyRet = false
+      for (const cs of stmt.cases) {
+        const r = checkStmtSeq(Array.isArray(cs?.consequent) ? cs.consequent : [], locals, priorLog)
+        if (r.hasSilent) {
+          return { hasSilent: true, sawRet: true, terminated: true, unconditionalLog: false }
+        }
+        if (r.sawRet) anyRet = true
+      }
+      return { hasSilent: false, sawRet: anyRet, terminated: false, unconditionalLog: false }
+    }
+    if (stmt.type === "TryStatement") {
+      const b = checkStmt(stmt.block, locals, priorLog)
+      if (b.hasSilent) {
+        return { hasSilent: true, sawRet: true, terminated: true, unconditionalLog: false }
+      }
+      const h = stmt.handler != null ? checkStmt(stmt.handler.body, locals, priorLog) : null
+      if (h?.hasSilent) {
+        return { hasSilent: true, sawRet: true, terminated: true, unconditionalLog: false }
+      }
+      const f = stmt.finalizer != null ? checkStmt(stmt.finalizer, locals, priorLog) : null
+      if (f?.hasSilent) {
+        return { hasSilent: true, sawRet: true, terminated: true, unconditionalLog: false }
+      }
+      return {
+        hasSilent: false,
+        sawRet: b.sawRet || Boolean(h?.sawRet) || Boolean(f?.sawRet),
+        terminated: false,
+        unconditionalLog: false,
+      }
+    }
+    if (
+      stmt.type === "WhileStatement" ||
+      stmt.type === "DoWhileStatement" ||
+      stmt.type === "ForStatement" ||
+      stmt.type === "ForOfStatement" ||
+      stmt.type === "ForInStatement" ||
+      stmt.type === "LabeledStatement"
+    ) {
+      const r = checkStmt(stmt.body, locals, priorLog)
+      return {
+        hasSilent: r.hasSilent,
+        sawRet: r.sawRet,
+        terminated: false,
+        unconditionalLog: false,
+      }
+    }
+    return {
+      hasSilent: false,
+      sawRet: false,
+      terminated: false,
+      unconditionalLog: hasTopLevelUnconditionalLogOrFail(stmt),
+    }
+  }
+
+  const isSilentFnBody = (targetFn) => {
+    if (targetFn.body == null) return false
+    if (targetFn.body.type !== "BlockStatement") {
+      return (
+        !hasTopLevelUnconditionalLogOrFail(targetFn.body) && isSilentEff(targetFn.body, new Map())
+      )
+    }
+    if (!Array.isArray(targetFn.body.body) || targetFn.body.body.length === 0) return true
+    const locals = collectWave3BlockLocalsEstree(targetFn.body)
+    const r = checkStmtSeq(targetFn.body.body, locals, false)
+    if (r.hasSilent) return true
+    if (r.sawRet) return false
+    return targetFn.body.body.every(
+      (s) => s != null && (s.type === "VariableDeclaration" || s.type === "EmptyStatement"),
+    )
+  }
+
+  return isSilentFnBody(fn)
+}
+
+function unwrapWave3NullishTypePartsEstree(tsTypeNode) {
+  if (tsTypeNode == null) return []
+  if (tsTypeNode.type === "TSParenthesizedType")
+    return unwrapWave3NullishTypePartsEstree(tsTypeNode.typeAnnotation)
+  if (tsTypeNode.type !== "TSUnionType" || !Array.isArray(tsTypeNode.types)) return [tsTypeNode]
+  return tsTypeNode.types.filter(
+    (t) =>
+      t != null &&
+      t.type !== "TSUndefinedKeyword" &&
+      t.type !== "TSNullKeyword" &&
+      !(t.type === "TSLiteralType" && t.literal?.type === "Literal" && t.literal.value === null),
+  )
+}
+
+function isWave3ClosedStringUnionTypeEstree(tsTypeNode, closedTypeNames) {
+  if (tsTypeNode == null) return false
+  if (tsTypeNode.type === "TSParenthesizedType") {
+    return isWave3ClosedStringUnionTypeEstree(tsTypeNode.typeAnnotation, closedTypeNames)
+  }
+  if (tsTypeNode.type === "TSTypeReference" && tsTypeNode.typeName?.type === "Identifier") {
+    return closedTypeNames.has(tsTypeNode.typeName.name)
+  }
+  if (
+    tsTypeNode.type === "TSTypeQuery" &&
+    tsTypeNode.exprName?.type === "TSQualifiedName" &&
+    tsTypeNode.exprName.left?.type === "Identifier" &&
+    tsTypeNode.exprName.right?.name === "Type"
+  ) {
+    return closedTypeNames.has(tsTypeNode.exprName.left.name)
+  }
+  if (tsTypeNode.type === "TSUnionType" && Array.isArray(tsTypeNode.types)) {
+    const nonNullish = unwrapWave3NullishTypePartsEstree(tsTypeNode)
+    if (nonNullish.length === 1) {
+      return isWave3ClosedStringUnionTypeEstree(nonNullish[0], closedTypeNames)
+    }
+    if (nonNullish.length >= 2) {
+      return nonNullish.every(
+        (t) =>
+          t.type === "TSLiteralType" &&
+          t.literal?.type === "Literal" &&
+          typeof t.literal.value === "string",
+      )
+    }
+  }
+  return false
+}
+
+function hasWave3GlobWordSegmentEstree(text) {
+  if (typeof text !== "string" || text.length === 0) return false
+  return text
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[^A-Za-z0-9]+/)
+    .some((tok) => /^globs?\d*$/i.test(tok))
+}
+
+function isWave3BackslashEscaperFnEstree(expr) {
+  const fn = unwrapEstreeExpr(expr)
+  if (
+    !isWave3FnExprEstree(fn) ||
+    !Array.isArray(fn.params) ||
+    fn.params[0]?.type !== "Identifier"
+  ) {
+    return false
+  }
+  const pName = fn.params[0].name
+  let body = null
+  if (fn.body?.type !== "BlockStatement") {
+    body = unwrapEstreeExpr(fn.body)
+  } else if (
+    Array.isArray(fn.body.body) &&
+    fn.body.body.length === 1 &&
+    fn.body.body[0]?.type === "ReturnStatement"
+  ) {
+    body = unwrapEstreeExpr(fn.body.body[0].argument)
+  }
+  if (body == null) return false
+  if (body.type === "BinaryExpression" && body.operator === "+") {
+    const r = unwrapEstreeExpr(body.right)
+    return getStaticModuleString(body.left) === "\\" && r?.type === "Identifier" && r.name === pName
+  }
+  if (
+    body.type === "TemplateLiteral" &&
+    body.expressions?.length === 1 &&
+    body.quasis?.length === 2
+  ) {
+    const s = unwrapEstreeExpr(body.expressions[0])
+    const head = body.quasis[0]?.value?.cooked ?? body.quasis[0]?.value?.raw ?? ""
+    const tail = body.quasis[1]?.value?.cooked ?? body.quasis[1]?.value?.raw ?? ""
+    return head === "\\" && tail === "" && s?.type === "Identifier" && s.name === pName
+  }
+  return false
+}
+
+function isWave3GlobWildcardPatEstree(expr) {
+  const lit = getStaticModuleString(expr)
+  if (lit != null) return /[*?]/.test(lit)
+  const u = unwrapEstreeExpr(expr)
+  if (u == null || u.type !== "Literal" || !(u.regex != null || u.value instanceof RegExp)) {
+    return false
+  }
+  const pat = typeof u.regex?.pattern === "string" ? u.regex.pattern : (u.value?.source ?? "")
+  return /(?:\\\*|\\\?(?![A-Za-z]))/.test(pat) || /\[(?:\\?[*?])+\]/.test(pat)
+}
+
+function hasWave3GlobReplaceChainEstree(expr) {
+  let found = false
+  const visit = (n) => {
+    if (n == null || found) return
+    if (n.type === "CallExpression" && Array.isArray(n.arguments)) {
+      const c = unwrapEstreeExpr(n.callee)
+      if (c != null && c.type === "MemberExpression") {
+        const m = getEstreeStaticMemberName(c)
+        if ((m === "replace" || m === "replaceAll") && n.arguments.length >= 2) {
+          const repStr = getStaticModuleString(n.arguments[1])
+          if (
+            repStr !== "\\$&" &&
+            !isWave3BackslashEscaperFnEstree(n.arguments[1]) &&
+            isWave3GlobWildcardPatEstree(n.arguments[0])
+          ) {
+            found = true
+            return
+          }
+        }
+        if (m === "join") {
+          const inner = unwrapEstreeExpr(c.object)
+          if (
+            inner?.type === "CallExpression" &&
+            Array.isArray(inner.arguments) &&
+            inner.arguments.length >= 1
+          ) {
+            const innerC = unwrapEstreeExpr(inner.callee)
+            if (
+              getEstreeStaticMemberName(innerC) === "split" &&
+              isWave3GlobWildcardPatEstree(inner.arguments[0])
+            ) {
+              found = true
+              return
+            }
+          }
+        }
+      }
+    }
+    walkEstreeChildren(n, visit)
+  }
+  visit(expr)
+  return found
+}
+
+function evalWave3StaticSentinelEstree(expr) {
+  const u = unwrapEstreeExpr(expr)
+  if (u == null) return null
+  const lit = getStaticModuleString(u)
+  if (lit != null) {
+    if (/^0+$/.test(lit)) return lit.length
+    if (/^[fF]+$/.test(lit)) return -lit.length
+    return null
+  }
+  if (u.type === "BinaryExpression" && u.operator === "+") {
+    const l = evalWave3StaticSentinelEstree(u.left)
+    const r = evalWave3StaticSentinelEstree(u.right)
+    return l != null && r != null && l * r > 0 ? l + r : null
+  }
+  if (u.type !== "CallExpression" || !Array.isArray(u.arguments)) return null
+  const c = unwrapEstreeExpr(u.callee)
+  const m = getEstreeStaticMemberName(c)
+  if (m == null) return null
+  if (m === "repeat" && u.arguments.length === 1) {
+    const recv = evalWave3StaticSentinelEstree(c.object)
+    const cnt = unwrapEstreeExpr(u.arguments[0])
+    return recv != null && cnt?.type === "Literal" && typeof cnt.value === "number"
+      ? recv * cnt.value
+      : null
+  }
+  if ((m === "padStart" || m === "padEnd") && u.arguments.length === 2) {
+    const lenNode = unwrapEstreeExpr(u.arguments[0])
+    const fill = evalWave3StaticSentinelEstree(u.arguments[1])
+    const recvText = getStaticModuleString(c.object)
+    if (
+      lenNode?.type !== "Literal" ||
+      typeof lenNode.value !== "number" ||
+      fill == null ||
+      recvText == null
+    ) {
+      return null
+    }
+    if (recvText === "") return fill > 0 ? lenNode.value : -lenNode.value
+    const recv = evalWave3StaticSentinelEstree(c.object)
+    return recv != null && recv * fill > 0 && lenNode.value >= Math.abs(recv)
+      ? fill > 0
+        ? lenNode.value
+        : -lenNode.value
+      : null
+  }
+  if (m === "join" && u.arguments.length === 1 && getStaticModuleString(u.arguments[0]) === "") {
+    const fc = unwrapEstreeExpr(c.object)
+    if (fc?.type !== "CallExpression" || !Array.isArray(fc.arguments) || fc.arguments.length !== 1)
+      return null
+    const fm = unwrapEstreeExpr(fc.callee)
+    if (getEstreeStaticMemberName(fm) !== "fill") return null
+    const fill = evalWave3StaticSentinelEstree(fc.arguments[0])
+    const arr = unwrapEstreeExpr(fm.object)
+    if (
+      fill == null ||
+      arr == null ||
+      (arr.type !== "CallExpression" && arr.type !== "NewExpression") ||
+      !Array.isArray(arr.arguments) ||
+      arr.arguments.length !== 1
+    ) {
+      return null
+    }
+    const ctor = unwrapEstreeExpr(arr.callee)
+    const lenArg = unwrapEstreeExpr(arr.arguments[0])
+    return isIdentifier(ctor, "Array") &&
+      lenArg?.type === "Literal" &&
+      typeof lenArg.value === "number"
+      ? fill * lenArg.value
+      : null
+  }
+  return null
+}
+
 const syntaxBans = {
   create(context) {
     const discriminantAliasNames = createDiscriminantAliasTracker()
@@ -2993,7 +3734,77 @@ const syntaxBans = {
     const allowedDdlTemplateNodes = new Set()
     const effectModuleNamespaceNames = new Set()
     const effectNamespaceNames = new Set(["Effect"])
+    const effectMethodAliases = new Map()
+    const scopeNamespaceNames = new Set(["Scope"])
     const bannedRunAliases = new Map()
+    const wave3ClosedTypeNames = new Set(WAVE3_CANONICAL_CLOSED_LITERAL_TYPES)
+    const wave3ClosedPropsByType = new Map()
+    const wave3FnReturnTypes = new Map()
+    const WAVE3_OPEN_INFO = { isClosed: false, typeName: null, inlineProps: null }
+    const WAVE3_CLOSED_INFO = { isClosed: true, typeName: null, inlineProps: null }
+    const wave3VarScopes = [
+      { isFnBoundary: true, vars: new Map(), globs: new Set(), gitArgs: new Map() },
+    ]
+    const pushWave3Scope = (isFnBoundary = false) =>
+      wave3VarScopes.push({ isFnBoundary, vars: new Map(), globs: new Set(), gitArgs: new Map() })
+    const popWave3Scope = () => {
+      if (wave3VarScopes.length > 1) wave3VarScopes.pop()
+    }
+    const recordWave3Var = (name, info, hoistToFn = false) => {
+      if (!hoistToFn) {
+        wave3VarScopes[wave3VarScopes.length - 1].vars.set(name, info)
+        return
+      }
+      for (let i = wave3VarScopes.length - 1; i >= 0; i--) {
+        if (wave3VarScopes[i].isFnBoundary) {
+          wave3VarScopes[i].vars.set(name, info)
+          return
+        }
+      }
+    }
+    const recordWave3GlobVar = (name, hoistToFn = false) => {
+      if (!hoistToFn) {
+        wave3VarScopes[wave3VarScopes.length - 1].globs.add(name)
+        return
+      }
+      for (let i = wave3VarScopes.length - 1; i >= 0; i--) {
+        if (wave3VarScopes[i].isFnBoundary) {
+          wave3VarScopes[i].globs.add(name)
+          return
+        }
+      }
+    }
+    const recordWave3GitArgVar = (name, arrNode, hoistToFn = false) => {
+      if (!hoistToFn) {
+        wave3VarScopes[wave3VarScopes.length - 1].gitArgs.set(name, arrNode)
+        return
+      }
+      for (let i = wave3VarScopes.length - 1; i >= 0; i--) {
+        if (wave3VarScopes[i].isFnBoundary) {
+          wave3VarScopes[i].gitArgs.set(name, arrNode)
+          return
+        }
+      }
+    }
+    const lookupWave3Var = (name) => {
+      for (let i = wave3VarScopes.length - 1; i >= 0; i--) {
+        const val = wave3VarScopes[i].vars.get(name)
+        if (val !== undefined) return val
+      }
+      return undefined
+    }
+    const isWave3GlobVar = (name) => wave3VarScopes.some((s) => s.globs.has(name))
+    const resolveWave3GitArgs = (expr) => {
+      const u = unwrapEstree(expr)
+      if (u == null) return null
+      if (u.type === "ArrayExpression") return u
+      if (u.type !== "Identifier") return null
+      for (let i = wave3VarScopes.length - 1; i >= 0; i--) {
+        const f = wave3VarScopes[i].gitArgs.get(u.name)
+        if (f !== undefined) return f
+      }
+      return null
+    }
     let hasSqliteMigratorImport = false
     const reportedNodes = new WeakSet()
 
@@ -3003,6 +3814,7 @@ const syntaxBans = {
         cur != null &&
         (cur.type === "TSAsExpression" ||
           cur.type === "TSTypeAssertion" ||
+          cur.type === "TSSatisfiesExpression" ||
           cur.type === "TSNonNullExpression" ||
           cur.type === "ParenthesizedExpression")
       ) {
@@ -3016,12 +3828,7 @@ const syntaxBans = {
       if (u == null) return false
       if (u.type === "Identifier") return effectNamespaceNames.has(u.name)
       if (u.type === "MemberExpression") {
-        const propName =
-          u.computed !== true && u.property?.type === "Identifier"
-            ? u.property.name
-            : u.computed === true
-              ? getStaticModuleString(u.property)
-              : null
+        const propName = getEstreeStaticMemberName(u)
         if (propName === "Effect") {
           const inner = unwrapEstree(u.object)
           return (
@@ -3032,6 +3839,294 @@ const syntaxBans = {
         }
       }
       return false
+    }
+
+    const getWave3EffectMemberName = (expr) => {
+      const u = unwrapEstree(expr)
+      if (u == null) return null
+      if (u.type === "Identifier") return effectMethodAliases.get(u.name) ?? null
+      if (u.type === "MemberExpression" && isEffectNamespaceExpr(u.object)) {
+        return getEstreeStaticMemberName(u)
+      }
+      return null
+    }
+
+    const isWave3SchemaLiteralsEstree = (init) => {
+      const target = unwrapPipeTargetEstree(init)
+      if (target == null || target.type !== "CallExpression") return false
+      if (getCalleeName(target.callee) !== "Schema.Literals") return false
+      const arg0 = unwrapEstree(target.arguments?.[0])
+      if (arg0 == null || arg0.type !== "ArrayExpression" || !Array.isArray(arg0.elements)) {
+        return false
+      }
+      return (
+        arg0.elements.filter((el) => el != null && getStaticModuleString(unwrapEstree(el)) != null)
+          .length >= 2
+      )
+    }
+
+    const resolveWave3TypeNodeInfo = (tsTypeNode) => {
+      if (tsTypeNode == null) return WAVE3_OPEN_INFO
+      if (isWave3ClosedStringUnionTypeEstree(tsTypeNode, wave3ClosedTypeNames)) {
+        return WAVE3_CLOSED_INFO
+      }
+      const parts = unwrapWave3NullishTypePartsEstree(tsTypeNode)
+      if (parts.length !== 1) return WAVE3_OPEN_INFO
+      let single = parts[0]
+      while (
+        single?.type === "TSParenthesizedType" ||
+        (single?.type === "TSTypeReference" &&
+          single.typeName?.type === "Identifier" &&
+          single.typeName.name === "Readonly" &&
+          single.typeParameters?.params?.[0] != null)
+      ) {
+        single =
+          single.type === "TSParenthesizedType"
+            ? single.typeAnnotation
+            : single.typeParameters.params[0]
+      }
+      if (single != null && isWave3ClosedStringUnionTypeEstree(single, wave3ClosedTypeNames)) {
+        return WAVE3_CLOSED_INFO
+      }
+      if (single?.type === "TSTypeReference" && single.typeName?.type === "Identifier") {
+        if (wave3ClosedPropsByType.has(single.typeName.name)) {
+          return { isClosed: false, typeName: single.typeName.name, inlineProps: null }
+        }
+      }
+      if (single?.type === "TSTypeLiteral" && Array.isArray(single.members)) {
+        const inlineProps = new Map()
+        for (const mem of single.members) {
+          if (mem?.type === "TSPropertySignature" && mem.key?.type === "Identifier") {
+            const info = resolveWave3TypeNodeInfo(mem.typeAnnotation?.typeAnnotation)
+            if (info.isClosed || info.typeName != null || info.inlineProps != null) {
+              inlineProps.set(mem.key.name, info)
+            }
+          }
+        }
+        if (inlineProps.size > 0) return { isClosed: false, typeName: null, inlineProps }
+      }
+      return WAVE3_OPEN_INFO
+    }
+
+    const recordWave3TypeMembers = (typeName, members) => {
+      if (!Array.isArray(members)) return
+      const propMap = wave3ClosedPropsByType.get(typeName) ?? new Map()
+      for (const mem of members) {
+        if (mem?.type === "TSPropertySignature" && mem.key?.type === "Identifier") {
+          const info = resolveWave3TypeNodeInfo(mem.typeAnnotation?.typeAnnotation)
+          if (info.isClosed || info.typeName != null || info.inlineProps != null) {
+            propMap.set(mem.key.name, info)
+          }
+        }
+      }
+      if (propMap.size > 0) wave3ClosedPropsByType.set(typeName, propMap)
+    }
+
+    const resolveWave3ExprInfo = (expr) => {
+      const u = unwrapEstree(expr)
+      if (u == null || u.type === "UnaryExpression") return WAVE3_OPEN_INFO
+      if (u.type === "Identifier") return lookupWave3Var(u.name) ?? WAVE3_OPEN_INFO
+      if (u.type === "CallExpression") {
+        const c = unwrapEstree(u.callee)
+        if (c?.type === "Identifier") return wave3FnReturnTypes.get(c.name) ?? WAVE3_OPEN_INFO
+      }
+      if (u.type === "MemberExpression") {
+        const propName = getEstreeStaticMemberName(u)
+        if (propName != null) {
+          const recv = resolveWave3ExprInfo(u.object)
+          if (recv.inlineProps != null) return recv.inlineProps.get(propName) ?? WAVE3_OPEN_INFO
+          if (recv.typeName != null) {
+            return wave3ClosedPropsByType.get(recv.typeName)?.get(propName) ?? WAVE3_OPEN_INFO
+          }
+        }
+      }
+      return WAVE3_OPEN_INFO
+    }
+
+    const bindWave3Pattern = (pat, info, hoist) => {
+      if (pat == null) return
+      if (pat.type === "AssignmentPattern") {
+        bindWave3Pattern(pat.left, info, hoist)
+        return
+      }
+      if (pat.type === "Identifier") {
+        recordWave3Var(pat.name, info, hoist)
+        return
+      }
+      if (pat.type === "ObjectPattern" && Array.isArray(pat.properties)) {
+        for (const prop of pat.properties) {
+          if (prop == null || prop.type !== "Property") continue
+          const keyName = getEstreeBindingPropName(prop)
+          const propInfo =
+            keyName == null
+              ? WAVE3_OPEN_INFO
+              : (info.inlineProps?.get(keyName) ??
+                (info.typeName != null
+                  ? wave3ClosedPropsByType.get(info.typeName)?.get(keyName)
+                  : undefined) ??
+                WAVE3_OPEN_INFO)
+          bindWave3Pattern(prop.value, propInfo, hoist)
+        }
+      }
+    }
+
+    const checkWave3SentinelEstree = (node, filename) => {
+      if (!isWave3ProdSrc(filename)) return
+      if (Math.abs(evalWave3StaticSentinelEstree(node) ?? 0) !== 64) return
+      for (let p = node.parent; p != null; p = p.parent) {
+        const pt = p.type
+        if (
+          pt !== "BinaryExpression" &&
+          pt !== "CallExpression" &&
+          pt !== "MemberExpression" &&
+          pt !== "NewExpression" &&
+          pt !== "TSAsExpression" &&
+          pt !== "TSTypeAssertion" &&
+          pt !== "TSNonNullExpression" &&
+          pt !== "ParenthesizedExpression"
+        ) {
+          break
+        }
+        if (unwrapEstree(p) === p && Math.abs(evalWave3StaticSentinelEstree(p) ?? 0) === 64) {
+          return
+        }
+      }
+      reportOnce(
+        node,
+        `[fabricated-sentinel-hash] Fabricated 64-character sentinel hash in '${filename}' is banned — use ContentSha256 or Option/Error.`,
+      )
+    }
+
+    const checkWave3RegExpEstree = (node, filename) => {
+      if (
+        !isWave3ProdSrc(filename) ||
+        !Array.isArray(node.arguments) ||
+        node.arguments.length < 1
+      ) {
+        return
+      }
+      const ctor = unwrapEstree(node.callee)
+      const isGlobalThisRegExp =
+        ctor?.type === "MemberExpression" &&
+        isIdentifier(unwrapEstree(ctor.object), "globalThis") &&
+        getEstreeStaticMemberName(ctor) === "RegExp"
+      if (!isIdentifier(ctor, "RegExp") && !isGlobalThisRegExp) return
+      const arg0 = unwrapEstree(node.arguments[0])
+      if (arg0 == null || getStaticModuleString(arg0) != null) return
+      let hasGlobIdent = false
+      const findGlobId = (n) => {
+        if (n == null || hasGlobIdent) return
+        if (
+          n.type === "Identifier" &&
+          (isWave3GlobVar(n.name) || hasWave3GlobWordSegmentEstree(n.name))
+        ) {
+          hasGlobIdent = true
+          return
+        }
+        walkEstreeChildren(n, findGlobId)
+      }
+      findGlobId(arg0)
+      let inGlobFn = false
+      for (let c = node.parent; c != null; c = c.parent) {
+        if (
+          (c.type === "FunctionDeclaration" &&
+            c.id?.name != null &&
+            hasWave3GlobWordSegmentEstree(c.id.name)) ||
+          (c.type === "MethodDefinition" &&
+            c.key?.type === "Identifier" &&
+            hasWave3GlobWordSegmentEstree(c.key.name)) ||
+          (c.type === "VariableDeclarator" &&
+            c.id?.type === "Identifier" &&
+            hasWave3GlobWordSegmentEstree(c.id.name))
+        ) {
+          inGlobFn = true
+          break
+        }
+      }
+      if (hasWave3GlobReplaceChainEstree(arg0) || hasGlobIdent || inGlobFn) {
+        reportOnce(
+          node,
+          `[dynamic-glob-regexp] Dynamic glob-derived 'RegExp(...)' in '${filename}' is banned — use a bounded literal matcher or segment parser.`,
+        )
+      }
+    }
+
+    const checkWave3IgnoreExprEstree = (exprNode, opName, filename) => {
+      if (!isWave3ProdSrc(filename)) return
+      const p = exprNode.parent
+      if (exprNode.type === "Identifier") {
+        if (p?.type === "MemberExpression" && p.property === exprNode && p.computed !== true) return
+        if (
+          (p?.type === "MethodDefinition" || p?.type === "PropertyDefinition") &&
+          p.key === exprNode &&
+          p.computed !== true
+        )
+          return
+        if (p?.type === "FunctionDeclaration" && p.id === exprNode) return
+        if (p?.type === "ImportSpecifier" && (p.local === exprNode || p.imported === exprNode))
+          return
+        if (p?.type === "TSTypeQuery" || p?.type === "TSTypeReference") return
+      }
+      if (p?.type === "VariableDeclarator" && (p.id === exprNode || p.init === exprNode)) return
+      if (
+        p?.type === "Property" &&
+        ((p.key === exprNode && p.computed !== true) || p.parent?.type === "ObjectPattern")
+      ) {
+        return
+      }
+      const parentCall =
+        p?.type === "CallExpression" && unwrapEstree(p.callee) === exprNode ? p : null
+      const opNode = parentCall ?? exprNode
+      const stages =
+        parentCall != null &&
+        Array.isArray(parentCall.arguments) &&
+        parentCall.arguments.length >= 1
+          ? [parentCall.arguments[0]]
+          : getWave3PipeStagesBeforeEstree(opNode)
+      if (
+        (WAVE3_CORE_SRC_RE.test(filename) ||
+          isWave3InsideFinalizerOrCompEstree(
+            opNode,
+            getWave3EffectMemberName,
+            scopeNamespaceNames,
+          )) &&
+        !areWave3AllStagesPureLoggingEstree(stages, context, getWave3EffectMemberName)
+      ) {
+        reportOnce(
+          opNode,
+          `[silent-error-swallow] Swallowing errors with Effect.${opName} in '${filename}' is banned outside pure logging/telemetry.`,
+        )
+      }
+    }
+
+    const hasWave3ClosedLiteralComparisonEstree = (testExpr) => {
+      let found = false
+      const check = (n) => {
+        if (n == null || found) return
+        const u = unwrapEstree(n)
+        if (
+          u != null &&
+          u.type === "BinaryExpression" &&
+          (u.operator === "===" ||
+            u.operator === "!==" ||
+            u.operator === "==" ||
+            u.operator === "!=")
+        ) {
+          const l = unwrapEstree(u.left)
+          const r = unwrapEstree(u.right)
+          const lStr = getStaticModuleString(l) != null
+          const rStr = getStaticModuleString(r) != null
+          const isClosedExpr = (e) =>
+            e != null && e.type !== "UnaryExpression" && resolveWave3ExprInfo(e).isClosed
+          if ((lStr && !rStr && isClosedExpr(r)) || (rStr && !lStr && isClosedExpr(l))) {
+            found = true
+            return
+          }
+        }
+        walkEstreeChildren(n, check)
+      }
+      check(testExpr)
+      return found
     }
 
     const isBannedEffectRunMethodName = (methodName, filename) => {
@@ -3560,48 +4655,132 @@ const syntaxBans = {
         effectModuleNamespaceNames.clear()
         effectNamespaceNames.clear()
         effectNamespaceNames.add("Effect")
+        effectMethodAliases.clear()
+        scopeNamespaceNames.clear()
+        scopeNamespaceNames.add("Scope")
         bannedRunAliases.clear()
+        wave3ClosedTypeNames.clear()
+        for (const t of WAVE3_CANONICAL_CLOSED_LITERAL_TYPES) wave3ClosedTypeNames.add(t)
+        wave3ClosedPropsByType.clear()
+        wave3FnReturnTypes.clear()
+        wave3VarScopes.length = 0
+        pushWave3Scope(true)
         hasSqliteMigratorImport = false
         if (node.body && Array.isArray(node.body)) {
+          const unwrapTopDecl = (stmt) =>
+            stmt?.type === "ExportNamedDeclaration" && stmt.declaration != null
+              ? stmt.declaration
+              : stmt
           for (const stmt of node.body) {
             if (stmt.type === "ImportDeclaration") {
               recordContractImports(stmt)
-            } else if (stmt.type === "VariableDeclaration" && Array.isArray(stmt.declarations)) {
-              for (const decl of stmt.declarations) {
-                recordSchemaDeclarator(decl)
-              }
-            } else if (stmt.type === "ExportNamedDeclaration" && stmt.declaration) {
+              const impSrc = typeof stmt.source?.value === "string" ? stmt.source.value : ""
               if (
-                stmt.declaration.type === "VariableDeclaration" &&
-                Array.isArray(stmt.declaration.declarations)
+                stmt.importKind !== "type" &&
+                (impSrc === "effect" || impSrc === "effect/Effect" || impSrc === "effect/Scope") &&
+                Array.isArray(stmt.specifiers)
               ) {
-                for (const decl of stmt.declaration.declarations) {
-                  recordSchemaDeclarator(decl)
+                for (const spec of stmt.specifiers) {
+                  if (spec == null || spec.importKind === "type") continue
+                  if (spec.type === "ImportNamespaceSpecifier" && spec.local?.name) {
+                    if (impSrc === "effect") effectModuleNamespaceNames.add(spec.local.name)
+                    else if (impSrc === "effect/Effect") effectNamespaceNames.add(spec.local.name)
+                    else if (impSrc === "effect/Scope") scopeNamespaceNames.add(spec.local.name)
+                  } else if (spec.type === "ImportSpecifier" && spec.local?.name) {
+                    const impName = spec.imported?.name ?? spec.local.name
+                    if (impSrc === "effect" && impName === "Effect")
+                      effectNamespaceNames.add(spec.local.name)
+                    else if (impSrc === "effect" && impName === "Scope")
+                      scopeNamespaceNames.add(spec.local.name)
+                    else if (impSrc === "effect/Effect" && impName !== "Effect") {
+                      effectMethodAliases.set(spec.local.name, impName)
+                    }
+                  }
                 }
-              } else if (stmt.declaration.type === "FunctionDeclaration" && stmt.declaration.id) {
-                if (
-                  stmt.declaration.id.name.endsWith("Schema") ||
-                  stmt.declaration.id.name.startsWith("make")
-                ) {
-                  schemaVarNames.add(stmt.declaration.id.name)
+              }
+            }
+            const d = unwrapTopDecl(stmt)
+            if (d?.type === "VariableDeclaration" && Array.isArray(d.declarations)) {
+              for (const decl of d.declarations) {
+                recordSchemaDeclarator(decl)
+                if (decl?.id?.type === "Identifier" && decl.init != null) {
+                  if (isWave3SchemaLiteralsEstree(decl.init)) wave3ClosedTypeNames.add(decl.id.name)
+                  const initU = unwrapEstree(decl.init)
+                  if (
+                    hasWave3GlobWordSegmentEstree(decl.id.name) ||
+                    hasWave3GlobReplaceChainEstree(decl.init)
+                  ) {
+                    recordWave3GlobVar(decl.id.name, true)
+                  }
+                  if (initU?.type === "ArrayExpression")
+                    recordWave3GitArgVar(decl.id.name, initU, true)
                 }
+              }
+            } else if (d?.type === "FunctionDeclaration" && d.id) {
+              if (d.id.name.endsWith("Schema") || d.id.name.startsWith("make")) {
+                schemaVarNames.add(d.id.name)
+              }
+            } else if (d?.type === "TSTypeAliasDeclaration" && d.id != null) {
+              if (containsBrandTypeReference(d.typeAnnotation, brandedTypeNames)) {
+                brandedTypeNames.add(d.id.name)
+              }
+              if (isWave3ClosedStringUnionTypeEstree(d.typeAnnotation, wave3ClosedTypeNames)) {
+                wave3ClosedTypeNames.add(d.id.name)
+              }
+            }
+          }
+          for (let pass = 0; pass < 2; pass++) {
+            for (const stmt of node.body) {
+              const d = unwrapTopDecl(stmt)
+              if (d?.type === "TSInterfaceDeclaration" && d.id?.name) {
+                recordWave3TypeMembers(d.id.name, d.body?.body)
               } else if (
-                stmt.declaration.type === "TSTypeAliasDeclaration" &&
-                stmt.declaration.id != null &&
-                containsBrandTypeReference(stmt.declaration.typeAnnotation, brandedTypeNames)
+                d?.type === "TSTypeAliasDeclaration" &&
+                d.id?.name &&
+                d.typeAnnotation?.type === "TSTypeLiteral"
               ) {
-                brandedTypeNames.add(stmt.declaration.id.name)
+                recordWave3TypeMembers(d.id.name, d.typeAnnotation.members)
               }
-            } else if (stmt.type === "FunctionDeclaration" && stmt.id) {
-              if (stmt.id.name.endsWith("Schema") || stmt.id.name.startsWith("make")) {
-                schemaVarNames.add(stmt.id.name)
-              }
-            } else if (
-              stmt.type === "TSTypeAliasDeclaration" &&
-              stmt.id != null &&
-              containsBrandTypeReference(stmt.typeAnnotation, brandedTypeNames)
+            }
+          }
+          for (const stmt of node.body) {
+            const d = unwrapTopDecl(stmt)
+            if (
+              d?.type === "FunctionDeclaration" &&
+              d.id?.name &&
+              d.returnType?.typeAnnotation != null
             ) {
-              brandedTypeNames.add(stmt.id.name)
+              const retInfo = resolveWave3TypeNodeInfo(d.returnType.typeAnnotation)
+              if (retInfo.isClosed || retInfo.typeName != null || retInfo.inlineProps != null) {
+                wave3FnReturnTypes.set(d.id.name, retInfo)
+              }
+            } else if (d?.type === "VariableDeclaration" && Array.isArray(d.declarations)) {
+              for (const decl of d.declarations) {
+                if (decl?.id?.type === "Identifier" && decl.init != null) {
+                  const fn = unwrapEstree(decl.init)
+                  if (isWave3FnExprEstree(fn) && fn.returnType?.typeAnnotation != null) {
+                    const retInfo = resolveWave3TypeNodeInfo(fn.returnType.typeAnnotation)
+                    if (
+                      retInfo.isClosed ||
+                      retInfo.typeName != null ||
+                      retInfo.inlineProps != null
+                    ) {
+                      wave3FnReturnTypes.set(decl.id.name, retInfo)
+                    }
+                  }
+                }
+                if (d.kind === "var") {
+                  const varInfo =
+                    decl?.id?.typeAnnotation?.typeAnnotation != null
+                      ? resolveWave3TypeNodeInfo(decl.id.typeAnnotation.typeAnnotation)
+                      : decl?.init != null
+                        ? resolveWave3ExprInfo(decl.init)
+                        : WAVE3_OPEN_INFO
+                  if (varInfo.isClosed || varInfo.typeName != null || varInfo.inlineProps != null) {
+                    bindWave3Pattern(decl.id, varInfo, true)
+                  }
+                }
+              }
             }
           }
         }
@@ -3679,7 +4858,9 @@ const syntaxBans = {
           }
           if (
             node.importKind !== "type" &&
-            (importSource === "effect" || importSource === "effect/Effect") &&
+            (importSource === "effect" ||
+              importSource === "effect/Effect" ||
+              importSource === "effect/Scope") &&
             Array.isArray(node.specifiers)
           ) {
             const isEnforcedSrc =
@@ -3695,6 +4876,8 @@ const syntaxBans = {
               if (spec.type === "ImportNamespaceSpecifier" && spec.local?.name) {
                 if (importSource === "effect") {
                   effectModuleNamespaceNames.add(spec.local.name)
+                } else if (importSource === "effect/Scope") {
+                  scopeNamespaceNames.add(spec.local.name)
                 } else {
                   effectNamespaceNames.add(spec.local.name)
                 }
@@ -3703,6 +4886,17 @@ const syntaxBans = {
                 const localName = spec.local?.name
                 if (importSource === "effect" && importedName === "Effect" && localName) {
                   effectNamespaceNames.add(localName)
+                }
+                if (importSource === "effect" && importedName === "Scope" && localName) {
+                  scopeNamespaceNames.add(localName)
+                }
+                if (
+                  importSource === "effect/Effect" &&
+                  localName &&
+                  importedName != null &&
+                  importedName !== "Effect"
+                ) {
+                  effectMethodAliases.set(localName, importedName)
                 }
                 if (importSource === "effect/Effect" && isEnforcedSrc && importedName != null) {
                   const isBannedSync =
@@ -3809,6 +5003,35 @@ const syntaxBans = {
       },
       VariableDeclarator(node) {
         checkNeverVariableDeclarator(context, node)
+        const isVar = node.parent?.type === "VariableDeclaration" && node.parent.kind === "var"
+        if (node.id?.type === "Identifier" && node.init != null) {
+          if (isWave3SchemaLiteralsEstree(node.init)) {
+            wave3ClosedTypeNames.add(node.id.name)
+          }
+          const fnInit = unwrapEstree(node.init)
+          if (isWave3FnExprEstree(fnInit) && fnInit.returnType?.typeAnnotation != null) {
+            const retInfo = resolveWave3TypeNodeInfo(fnInit.returnType.typeAnnotation)
+            if (retInfo.isClosed || retInfo.typeName != null || retInfo.inlineProps != null) {
+              wave3FnReturnTypes.set(node.id.name, retInfo)
+            }
+          }
+          if (
+            hasWave3GlobWordSegmentEstree(node.id.name) ||
+            hasWave3GlobReplaceChainEstree(node.init)
+          ) {
+            recordWave3GlobVar(node.id.name, isVar)
+          }
+          if (fnInit?.type === "ArrayExpression") {
+            recordWave3GitArgVar(node.id.name, fnInit, isVar)
+          }
+        }
+        const wave3InitInfo =
+          node.id?.typeAnnotation?.typeAnnotation != null
+            ? resolveWave3TypeNodeInfo(node.id.typeAnnotation.typeAnnotation)
+            : node.init != null
+              ? resolveWave3ExprInfo(node.init)
+              : WAVE3_OPEN_INFO
+        bindWave3Pattern(node.id, wave3InitInfo, isVar)
         const filenameForRun = getNormalizedFilename()
         if (
           !isTestFilePath(filenameForRun) &&
@@ -3823,18 +5046,25 @@ const syntaxBans = {
         }
         if (node.init != null) {
           const unwrappedInit = unwrapEstree(node.init)
+          if (
+            unwrappedInit?.type === "MemberExpression" &&
+            isEffectNamespaceExpr(unwrappedInit.object) &&
+            node.id?.type === "Identifier"
+          ) {
+            const effM = getEstreeStaticMemberName(unwrappedInit)
+            if (effM != null) effectMethodAliases.set(node.id.name, effM)
+          }
           if (isEffectNamespaceExpr(unwrappedInit)) {
             if (node.id?.type === "Identifier") {
               effectNamespaceNames.add(node.id.name)
             } else if (node.id?.type === "ObjectPattern" && Array.isArray(node.id.properties)) {
               for (const prop of node.id.properties) {
                 const propName = getEstreeBindingPropName(prop)
-                if (
-                  propName != null &&
-                  prop.value?.type === "Identifier" &&
-                  isBannedEffectRunMethodName(propName, filenameForRun)
-                ) {
-                  bannedRunAliases.set(prop.value.name, propName)
+                if (propName != null && prop.value?.type === "Identifier") {
+                  effectMethodAliases.set(prop.value.name, propName)
+                  if (isBannedEffectRunMethodName(propName, filenameForRun)) {
+                    bannedRunAliases.set(prop.value.name, propName)
+                  }
                 }
               }
             }
@@ -3855,12 +5085,11 @@ const syntaxBans = {
               ) {
                 for (const nested of prop.value.properties) {
                   const propName = getEstreeBindingPropName(nested)
-                  if (
-                    propName != null &&
-                    nested.value?.type === "Identifier" &&
-                    isBannedEffectRunMethodName(propName, filenameForRun)
-                  ) {
-                    bannedRunAliases.set(nested.value.name, propName)
+                  if (propName != null && nested.value?.type === "Identifier") {
+                    effectMethodAliases.set(nested.value.name, propName)
+                    if (isBannedEffectRunMethodName(propName, filenameForRun)) {
+                      bannedRunAliases.set(nested.value.name, propName)
+                    }
                   }
                 }
               }
@@ -3902,6 +5131,18 @@ const syntaxBans = {
       TSTypeAliasDeclaration(node) {
         const filename = getNormalizedFilename()
         checkTypeAliasDeclaration(node, filename)
+        if (node.id?.type === "Identifier") {
+          if (isWave3ClosedStringUnionTypeEstree(node.typeAnnotation, wave3ClosedTypeNames)) {
+            wave3ClosedTypeNames.add(node.id.name)
+          } else if (node.typeAnnotation?.type === "TSTypeLiteral") {
+            recordWave3TypeMembers(node.id.name, node.typeAnnotation.members)
+          }
+        }
+      },
+      TSInterfaceDeclaration(node) {
+        if (node.id?.type === "Identifier") {
+          recordWave3TypeMembers(node.id.name, node.body?.body)
+        }
       },
       ClassDeclaration(node) {
         const filename = getNormalizedFilename()
@@ -3921,17 +5162,84 @@ const syntaxBans = {
       AssignmentExpression(node) {
         recordDiscriminantAliasesFromBinding(node.left, node.right, discriminantAliasNames)
       },
-      BlockStatement() {
+      BlockStatement(node) {
         discriminantAliasNames.pushScope()
+        pushWave3Scope(false)
+        if (Array.isArray(node.body)) {
+          for (const stmt of node.body) {
+            if (
+              stmt?.type === "FunctionDeclaration" &&
+              stmt.id?.name &&
+              stmt.returnType?.typeAnnotation != null
+            ) {
+              const retInfo = resolveWave3TypeNodeInfo(stmt.returnType.typeAnnotation)
+              if (retInfo.isClosed || retInfo.typeName != null || retInfo.inlineProps != null) {
+                wave3FnReturnTypes.set(stmt.id.name, retInfo)
+              }
+            } else if (stmt?.type === "VariableDeclaration" && Array.isArray(stmt.declarations)) {
+              for (const d of stmt.declarations) {
+                if (d?.id?.type === "Identifier" && d.init != null) {
+                  const uInit = unwrapEstree(d.init)
+                  if (
+                    hasWave3GlobWordSegmentEstree(d.id.name) ||
+                    hasWave3GlobReplaceChainEstree(d.init)
+                  ) {
+                    recordWave3GlobVar(d.id.name, stmt.kind === "var")
+                  }
+                  if (uInit?.type === "ArrayExpression")
+                    recordWave3GitArgVar(d.id.name, uInit, stmt.kind === "var")
+                }
+              }
+            }
+          }
+        }
       },
       "BlockStatement:exit"() {
         discriminantAliasNames.popScope()
+        popWave3Scope()
+      },
+      ForStatement() {
+        pushWave3Scope(false)
+      },
+      "ForStatement:exit"() {
+        popWave3Scope()
+      },
+      ForOfStatement() {
+        pushWave3Scope(false)
+      },
+      "ForOfStatement:exit"() {
+        popWave3Scope()
+      },
+      ForInStatement() {
+        pushWave3Scope(false)
+      },
+      "ForInStatement:exit"() {
+        popWave3Scope()
+      },
+      CatchClause(node) {
+        pushWave3Scope(false)
+        if (node.param != null) {
+          bindWave3Pattern(
+            node.param,
+            resolveWave3TypeNodeInfo(node.param.typeAnnotation?.typeAnnotation),
+            false,
+          )
+        }
+      },
+      "CatchClause:exit"() {
+        popWave3Scope()
       },
       FunctionDeclaration(node) {
         discriminantAliasNames.pushScope()
         recordFunctionParamDiscriminantAliases(node, discriminantAliasNames)
         reportAsync(node)
         checkNeverParams(context, node)
+        if (node.id?.name && node.returnType?.typeAnnotation != null) {
+          const retInfo = resolveWave3TypeNodeInfo(node.returnType.typeAnnotation)
+          if (retInfo.isClosed || retInfo.typeName != null || retInfo.inlineProps != null) {
+            wave3FnReturnTypes.set(node.id.name, retInfo)
+          }
+        }
       },
       "FunctionDeclaration:exit"() {
         discriminantAliasNames.popScope()
@@ -3957,6 +5265,78 @@ const syntaxBans = {
       AwaitExpression(node) {
         context.report({ node, message: asyncMessage })
       },
+      ":function"(node) {
+        pushWave3Scope(true)
+        if (Array.isArray(node.params)) {
+          for (const p of node.params) {
+            const pat = p?.type === "AssignmentPattern" ? p.left : p
+            bindWave3Pattern(
+              p,
+              resolveWave3TypeNodeInfo(pat?.typeAnnotation?.typeAnnotation),
+              false,
+            )
+          }
+        }
+        if (node.body?.type === "BlockStatement") {
+          const visitHoisted = (s) => {
+            if (s == null) return
+            if (s.type === "FunctionDeclaration") {
+              if (s.id?.name && s.returnType?.typeAnnotation != null) {
+                const retInfo = resolveWave3TypeNodeInfo(s.returnType.typeAnnotation)
+                if (retInfo.isClosed || retInfo.typeName != null || retInfo.inlineProps != null) {
+                  wave3FnReturnTypes.set(s.id.name, retInfo)
+                }
+              }
+              return
+            }
+            if (
+              s.type === "ArrowFunctionExpression" ||
+              s.type === "FunctionExpression" ||
+              s.type === "ClassDeclaration" ||
+              s.type === "ClassExpression"
+            ) {
+              return
+            }
+            if (
+              s.type === "VariableDeclaration" &&
+              s.kind === "var" &&
+              Array.isArray(s.declarations)
+            ) {
+              for (const decl of s.declarations) {
+                if (decl?.id?.type === "Identifier" && decl.init != null) {
+                  const uInit = unwrapEstree(decl.init)
+                  if (
+                    hasWave3GlobWordSegmentEstree(decl.id.name) ||
+                    hasWave3GlobReplaceChainEstree(decl.init)
+                  ) {
+                    recordWave3GlobVar(decl.id.name, true)
+                  }
+                  if (uInit?.type === "ArrayExpression") {
+                    recordWave3GitArgVar(decl.id.name, uInit, true)
+                  }
+                }
+                const varInfo =
+                  decl?.id?.typeAnnotation?.typeAnnotation != null
+                    ? resolveWave3TypeNodeInfo(decl.id.typeAnnotation.typeAnnotation)
+                    : decl?.init != null
+                      ? resolveWave3ExprInfo(decl.init)
+                      : WAVE3_OPEN_INFO
+                if (varInfo.isClosed || varInfo.typeName != null || varInfo.inlineProps != null) {
+                  bindWave3Pattern(decl.id, varInfo, true)
+                }
+              }
+              return
+            }
+            walkEstreeChildren(s, visitHoisted)
+          }
+          if (Array.isArray(node.body.body)) {
+            for (const stmt of node.body.body) visitHoisted(stmt)
+          }
+        }
+      },
+      ":function:exit"() {
+        popWave3Scope()
+      },
       SwitchStatement(node) {
         context.report({ node, message: switchBanMessage })
       },
@@ -3968,6 +5348,10 @@ const syntaxBans = {
           isAliasedDiscriminantTest(node.test, discriminantAliasNames)
         ) {
           context.report({ node, message: discriminantIfBanMessage })
+          return
+        }
+        if (isWave3ProdSrc(filename) && hasWave3ClosedLiteralComparisonEstree(node.test)) {
+          reportOnce(node, discriminantIfBanMessage)
           return
         }
         if (node.alternate != null && node.alternate.type === "IfStatement") {
@@ -3982,6 +5366,10 @@ const syntaxBans = {
           isAliasedDiscriminantTest(node.test, discriminantAliasNames)
         ) {
           context.report({ node, message: discriminantIfBanMessage })
+          return
+        }
+        if (isWave3ProdSrc(filename) && hasWave3ClosedLiteralComparisonEstree(node.test)) {
+          reportOnce(node, discriminantIfBanMessage)
         }
       },
       NewExpression(node) {
@@ -3995,6 +5383,16 @@ const syntaxBans = {
         ) {
           context.report({ node, message: impureDomainGlobalMessage })
         }
+        checkWave3RegExpEstree(node, filename)
+      },
+      Identifier(node) {
+        const effM = effectMethodAliases.get(node.name)
+        if (effM === "ignore" || effM === "ignoreCause") {
+          checkWave3IgnoreExprEstree(node, effM, getNormalizedFilename())
+        }
+      },
+      BinaryExpression(node) {
+        checkWave3SentinelEstree(node, getNormalizedFilename())
       },
       MemberExpression(node) {
         const filename = getNormalizedFilename()
@@ -4027,6 +5425,12 @@ const syntaxBans = {
               message:
                 "bare-cause-has-interrupts: Point-free Cause.hasInterrupts or Cause.hasInterruptsOnly in production src/ can misclassify composite Fail+Interrupt causes — use isPureInterruptCause from @harness/contract instead.",
             })
+          }
+        }
+        if (isWave3ProdSrc(filename) && isEffectNamespaceExpr(node.object)) {
+          const effMemName = getEstreeStaticMemberName(node)
+          if (effMemName === "ignore" || effMemName === "ignoreCause") {
+            checkWave3IgnoreExprEstree(node, effMemName, filename)
           }
         }
         if (
@@ -4105,6 +5509,173 @@ const syntaxBans = {
       },
       CallExpression(node) {
         const filename = getNormalizedFilename()
+
+        if (isWave3ProdSrc(filename)) {
+          checkWave3SentinelEstree(node, filename)
+          checkWave3RegExpEstree(node, filename)
+          const effM = getWave3EffectMemberName(node.callee)
+          if (
+            effM != null &&
+            Array.isArray(node.arguments) &&
+            (WAVE3_CORE_SRC_RE.test(filename) ||
+              isWave3InsideFinalizerOrCompEstree(
+                node,
+                getWave3EffectMemberName,
+                scopeNamespaceNames,
+              ))
+          ) {
+            const pipeStages = getWave3PipeStagesBeforeEstree(node)
+            const isPiped = pipeStages != null
+            if (effM === "orElseSucceed") {
+              const isDataLast = isPiped || node.arguments.length === 1
+              const cb = isDataLast ? node.arguments[0] : node.arguments[1]
+              const stages = isDataLast ? pipeStages : [node.arguments[0]]
+              if (
+                cb != null &&
+                isWave3EmptyOrVoidCallbackEstree(cb) &&
+                !areWave3AllStagesPureLoggingEstree(stages, context, getWave3EffectMemberName)
+              ) {
+                reportOnce(
+                  node,
+                  `[silent-error-swallow] Silent Effect.orElseSucceed(() => void/undefined) in '${filename}' is banned — return a typed fallback or log/propagate the error.`,
+                )
+              }
+            } else if (
+              effM === "catch" ||
+              effM === "catchAll" ||
+              effM === "catchCause" ||
+              effM === "catchAllCause" ||
+              effM === "orElse"
+            ) {
+              const isDataLast = isPiped || node.arguments.length === 1
+              const cb = isDataLast ? node.arguments[0] : node.arguments[1]
+              const stages = isDataLast ? pipeStages : [node.arguments[0]]
+              if (
+                cb != null &&
+                isWave3SilentCatchCallbackEstree(cb, context, getWave3EffectMemberName) &&
+                !areWave3AllStagesPureLoggingEstree(stages, context, getWave3EffectMemberName)
+              ) {
+                reportOnce(
+                  node,
+                  `[silent-error-swallow] Silent Effect.${effM} returning void/undefined without logging or re-failing in '${filename}' is banned.`,
+                )
+              }
+            } else if (effM === "catchTag" || effM === "catchIf") {
+              const isDataLast = isPiped || node.arguments.length === 2
+              const cb = isDataLast ? node.arguments[1] : node.arguments[2]
+              const stages = isDataLast
+                ? pipeStages
+                : node.arguments[0] != null
+                  ? [node.arguments[0]]
+                  : null
+              if (
+                cb != null &&
+                isWave3SilentCatchCallbackEstree(cb, context, getWave3EffectMemberName) &&
+                !areWave3AllStagesPureLoggingEstree(stages, context, getWave3EffectMemberName)
+              ) {
+                reportOnce(
+                  node,
+                  `[silent-error-swallow] Silent Effect.${effM} returning void/undefined without logging or re-failing in '${filename}' is banned.`,
+                )
+              }
+            } else if (effM === "catchTags") {
+              const a0 = node.arguments[0]
+              const isObjFirst = unwrapEstree(a0)?.type === "ObjectExpression"
+              const isDataLast = isPiped || isObjFirst || node.arguments.length === 1
+              const objExpr = isDataLast ? a0 : node.arguments[1]
+              const stages = isDataLast ? pipeStages : a0 != null ? [a0] : null
+              const obj = unwrapEstree(objExpr)
+              if (
+                obj?.type === "ObjectExpression" &&
+                Array.isArray(obj.properties) &&
+                !areWave3AllStagesPureLoggingEstree(stages, context, getWave3EffectMemberName) &&
+                obj.properties.some(
+                  (p) =>
+                    p?.type === "Property" &&
+                    isWave3SilentCatchCallbackEstree(p.value, context, getWave3EffectMemberName),
+                )
+              ) {
+                reportOnce(
+                  node,
+                  `[silent-error-swallow] Silent Effect.catchTags handler returning void/undefined without logging or re-failing in '${filename}' is banned.`,
+                )
+              }
+            }
+          }
+          const w3Callee = unwrapEstreeExpr(node.callee)
+          const fnName =
+            w3Callee?.type === "Identifier"
+              ? w3Callee.name
+              : w3Callee?.type === "MemberExpression"
+                ? getEstreeStaticMemberName(w3Callee)
+                : null
+          const checkGitArrayEstree = (arrNode) => {
+            if (
+              arrNode == null ||
+              arrNode.type !== "ArrayExpression" ||
+              !Array.isArray(arrNode.elements)
+            ) {
+              return
+            }
+            let subIdx = -1
+            let subName = null
+            for (let i = 0; i < arrNode.elements.length; i++) {
+              const s = getStaticModuleString(arrNode.elements[i])
+              if (s == null) continue
+              if (WAVE3_GIT_TWO_TOKEN_FLAGS.has(s)) {
+                i++
+                continue
+              }
+              if (s.startsWith("-")) continue
+              subIdx = i
+              subName = s
+              break
+            }
+            if (subIdx === -1 || subName == null || !WAVE3_REF_RANGE_GIT_SUBCMDS.has(subName))
+              return
+            let seenEnd = false
+            for (let i = subIdx + 1; i < arrNode.elements.length; i++) {
+              const s = getStaticModuleString(arrNode.elements[i])
+              if (s != null) {
+                if (s === "--end-of-options") seenEnd = true
+                if (s === "--") break
+                continue
+              }
+              if (!seenEnd) {
+                reportOnce(
+                  node,
+                  `[unsafe-dynamic-git-ref] Dynamic git '${subName}' ref argument in '${filename}' lacks preceding '--end-of-options' separator.`,
+                )
+                return
+              }
+            }
+          }
+          if (
+            (fnName === "spawnSync" ||
+              fnName === "execFile" ||
+              fnName === "execFileSync" ||
+              fnName === "execFileAsync" ||
+              fnName === "execFileAsyncEffect") &&
+            Array.isArray(node.arguments) &&
+            node.arguments.length >= 2 &&
+            getStaticModuleString(node.arguments[0]) === "git"
+          ) {
+            const arr = resolveWave3GitArgs(node.arguments[1])
+            if (arr != null) checkGitArrayEstree(arr)
+          } else if (
+            fnName != null &&
+            (fnName.startsWith("execGit") || fnName.startsWith("runGit")) &&
+            Array.isArray(node.arguments)
+          ) {
+            for (const a of node.arguments) {
+              const arr = resolveWave3GitArgs(a)
+              if (arr != null) {
+                checkGitArrayEstree(arr)
+                break
+              }
+            }
+          }
+        }
 
         if (
           isRequireCallee(node.callee) &&
@@ -4695,6 +6266,7 @@ const syntaxBans = {
       Literal(node) {
         if (typeof node.value !== "string") return
         const filename = getNormalizedFilename()
+        checkWave3SentinelEstree(node, filename)
         if (
           isClefEndpointCheckedSrcFile(filename) &&
           isInvalidClefEndpointLiteralText(node.value)
@@ -4704,6 +6276,7 @@ const syntaxBans = {
       },
       TemplateLiteral(node) {
         const filename = getNormalizedFilename()
+        checkWave3SentinelEstree(node, filename)
         if (!isClefEndpointCheckedSrcFile(filename) || !Array.isArray(node.quasis)) return
         const text = node.quasis
           .map((q) => (q != null && q.value != null ? (q.value.cooked ?? q.value.raw ?? "") : ""))

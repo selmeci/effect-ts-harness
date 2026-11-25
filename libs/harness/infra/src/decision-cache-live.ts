@@ -38,10 +38,7 @@ const decodePersistedStore = Schema.decodeOption(
   Schema.fromJsonString(PersistedDecisionStoreSchema),
 )
 
-type InFlightDecision = Deferred.Deferred<
-  Option.Option<DecisionCachePayloadJson>,
-  WorkspaceFsError
->
+type InFlightDecision = Deferred.Deferred<Option.Option<DecisionCachePayloadJson>, WorkspaceFsError>
 
 interface DecisionCacheState {
   readonly loaded: boolean
@@ -173,7 +170,15 @@ const makeDecisionCacheLayer = (options?: {
             Effect.andThen(fs.writeFileString(tmpPath, json)),
             Effect.andThen(fs.rename(tmpPath, filePath)),
             Effect.mapError((err) => toWriteError(filePath, err)),
-            Effect.ensuring(fs.remove(tmpPath, { force: true }).pipe(Effect.ignore)),
+            Effect.ensuring(
+              fs
+                .remove(tmpPath, { force: true })
+                .pipe(
+                  Effect.catch((err) =>
+                    Effect.logDebug("Failed to remove temporary decision cache file", err),
+                  ),
+                ),
+            ),
           )
         })
 
@@ -219,10 +224,7 @@ const makeDecisionCacheLayer = (options?: {
                 { ...loaded, entries: nextEntries, misses: loaded.misses + 1 },
               ] as const
             }
-            return [
-              Option.some(existing.payload),
-              { ...loaded, hits: loaded.hits + 1 },
-            ] as const
+            return [Option.some(existing.payload), { ...loaded, hits: loaded.hits + 1 }] as const
           }),
         )
       })
@@ -377,7 +379,7 @@ const makeDecisionCacheLayer = (options?: {
                   nextInFlight.delete(input.key)
                   return { ...state, inFlight: nextInFlight }
                 }).pipe(
-                  Effect.andThen(Deferred.succeed(deferred, Option.none()).pipe(Effect.ignore)),
+                  Effect.andThen(Deferred.succeed(deferred, Option.none()).pipe(Effect.asVoid)),
                 ),
               )
               .exhaustive(),

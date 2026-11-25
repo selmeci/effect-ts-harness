@@ -103,14 +103,15 @@ export const evaluateSpanSaturationViolations = (
 
   for (const obs of observations) {
     for (const spanName of getAncestorSpanNamesAndSelf(obs)) {
-      if (
-        obs.exitTag === "Failure" &&
-        typeof obs.errorTag === "string" &&
-        obs.errorTag.length > 0
-      ) {
-        recordTag(errorTagsBySpan, spanName, obs.errorTag)
-        recordTag(branchTagsBySpan, spanName, obs.errorTag)
-      }
+      match(obs.exitTag)
+        .with("Failure", () => {
+          if (typeof obs.errorTag === "string" && obs.errorTag.length > 0) {
+            recordTag(errorTagsBySpan, spanName, obs.errorTag)
+            recordTag(branchTagsBySpan, spanName, obs.errorTag)
+          }
+        })
+        .with("Success", "Defect", undefined, () => {})
+        .exhaustive()
       if (typeof obs.valueTag === "string" && obs.valueTag.length > 0) {
         recordTag(branchTagsBySpan, spanName, obs.valueTag)
       }

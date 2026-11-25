@@ -12,7 +12,7 @@ import {
   WorkflowTimestampMs,
   WorkspaceTreeHash,
 } from "./workflow.js"
-import { ErrorReasonMessage } from "./workspace-and-process.js"
+import { ErrorReasonMessage, formatBoundedErrorMessage } from "./workspace-and-process.js"
 
 const SHIP_ATTEMPT_KEY_RE = /^[a-z0-9][a-z0-9-]{7,63}#[1-9]\d*$/
 
@@ -346,41 +346,67 @@ export type WorkflowShipResponse = typeof WorkflowShipResponse.Type
 const MAX_FAILURE_MESSAGE_CHARS = 2048
 
 const formatBoundedShipGateFailure = (error: ShipGateFailedError): string => {
-  const full = error.message.trim()
-  if (full.length < MAX_FAILURE_MESSAGE_CHARS) {
-    return full
-  }
   const breakerNote = match(error.circuitBreakerStatus)
     .with("tripped", () => " [circuit breaker tripped]")
     .with("clear", () => "")
     .exhaustive()
   const prefix = `Ship gate '${error.stage}' failed with exit code ${error.exitCode}${breakerNote}`
   const escSuffix = error.escalationMessage !== undefined ? ` — ${error.escalationMessage}` : ""
-  const stderrSeparator = ": "
-  const stderrBudget =
-    MAX_FAILURE_MESSAGE_CHARS - prefix.length - escSuffix.length - stderrSeparator.length
-  if (stderrBudget <= 0) {
-    const withoutStderr = `${prefix}${escSuffix}`
-    if (withoutStderr.length < MAX_FAILURE_MESSAGE_CHARS) {
-      return withoutStderr
-    }
-    const escBudget = MAX_FAILURE_MESSAGE_CHARS - prefix.length
-    return `${prefix}${escSuffix.slice(0, escBudget)}`.trim()
+  if (escSuffix.length > 0 && prefix.trim().length + escSuffix.length > MAX_FAILURE_MESSAGE_CHARS) {
+    return formatBoundedErrorMessage({
+      prefix,
+      detail: error.escalationMessage,
+      separator: " — ",
+      maxChars: MAX_FAILURE_MESSAGE_CHARS,
+      fallback: "Ship workflow failed",
+    })
   }
-  const stderrTail = error.stderrSummary.slice(-stderrBudget)
-  return `${prefix}${stderrSeparator}${stderrTail}${escSuffix}`.trim()
+  return formatBoundedErrorMessage({
+    prefix,
+    detail: error.stderrSummary,
+    trailingSuffix: escSuffix,
+    separator: ": ",
+    maxChars: MAX_FAILURE_MESSAGE_CHARS,
+    fallback: "Ship workflow failed",
+  })
 }
 
 const formatBoundedMutationRestore = (error: MutationRestoreError): string => {
-  const full = error.message.trim()
-  if (full.length < MAX_FAILURE_MESSAGE_CHARS) {
-    return full
-  }
   const actualPart = error.actual !== undefined ? `got ${error.actual}` : "actual hash unavailable"
   const base = `Mutation backup restore or tree check failed: expected ${error.expected}, ${actualPart}`
-  const detailBudget = MAX_FAILURE_MESSAGE_CHARS - base.length - 3
-  const detailText = error.detail ?? ""
-  return `${base} (${detailText.slice(-detailBudget)})`.trim()
+  const trimmedDetail = error.detail?.trim() ?? ""
+  if (trimmedDetail.length === 0) {
+    return formatBoundedErrorMessage({
+      prefix: base,
+      maxChars: MAX_FAILURE_MESSAGE_CHARS,
+      fallback: "Ship workflow failed",
+    })
+  }
+  const trimmedBase = base.trim()
+  const detailBudget = MAX_FAILURE_MESSAGE_CHARS - trimmedBase.length - 3
+  const slicedDetail =
+    detailBudget > 0
+      ? formatBoundedErrorMessage({
+          prefix: "",
+          detail: trimmedDetail,
+          maxChars: detailBudget,
+        })
+      : ""
+  if (slicedDetail.length > 0) {
+    return formatBoundedErrorMessage({
+      prefix: base,
+      detail: error.detail,
+      trailingSuffix: ")",
+      separator: " (",
+      maxChars: MAX_FAILURE_MESSAGE_CHARS,
+      fallback: "Ship workflow failed",
+    })
+  }
+  return formatBoundedErrorMessage({
+    prefix: base,
+    maxChars: MAX_FAILURE_MESSAGE_CHARS,
+    fallback: "Ship workflow failed",
+  })
 }
 
 /** Extracts a typed `ShipWorkflowError` message safely as a bounded `ShipFailureMessage`. */
@@ -389,7 +415,11 @@ export const toShipFailureMessage = (error: ShipWorkflowError): ShipFailureMessa
     .with({ _tag: "ShipGateFailedError" }, formatBoundedShipGateFailure)
     .with({ _tag: "MutationRestoreError" }, formatBoundedMutationRestore)
     .with({ _tag: "ShipTreeMismatchError" }, { _tag: "ShipTreeDriftError" }, (e) =>
-      e.message.trim().slice(0, MAX_FAILURE_MESSAGE_CHARS).trim(),
+      formatBoundedErrorMessage({
+        prefix: e.message.trim(),
+        maxChars: MAX_FAILURE_MESSAGE_CHARS,
+        fallback: "Ship workflow failed",
+      }),
     )
     .exhaustive()
   return ShipFailureMessage.make(bounded.length > 0 ? bounded : "Ship workflow failed")

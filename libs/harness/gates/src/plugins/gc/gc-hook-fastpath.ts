@@ -352,9 +352,12 @@ const extractStaticRuntimeSpecifiers = (
       if (isDynImport || isRequire) {
         const spec = extractStringLiteralText(node.arguments[0])
         if (spec === undefined) {
-          if (profile === "session-no-infra-barrel" || profile === "hook-entry-lightweight") {
-            specifiers.push("<non-literal-dynamic-import>")
-          }
+          match(profile)
+            .with("session-no-infra-barrel", "hook-entry-lightweight", () => {
+              specifiers.push("<non-literal-dynamic-import>")
+            })
+            .with("standard", "policy-zero-dep", () => {})
+            .exhaustive()
         } else {
           const isAllowedLazyFallback =
             profile === "hook-entry-lightweight" &&

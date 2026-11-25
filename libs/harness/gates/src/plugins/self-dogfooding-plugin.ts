@@ -44,7 +44,7 @@ import {
 } from "./ast-gate-law-helpers.js"
 import { type SelfDogfoodingInput } from "./self-dogfooding-contract.js"
 import { isProvisionTapErrorRollback } from "./ast-fail-closed-laws.js"
-import { isUnfencedOmnigraphMutationCall } from "./ast-workflow-fence-law.js"
+import { findWorkflowFenceViolation } from "./ast-workflow-fence-law.js"
 
 const isExcludedProductionPath = (normPath: string): boolean =>
   normPath.endsWith(".test.ts") ||
@@ -509,12 +509,15 @@ export const decideSelfDogfooding = Effect.fn("SelfDogfooding.decide")(function*
             node,
           )
         }
-        if (/(?:^|\/)src\//.test(normPath) && isUnfencedOmnigraphMutationCall(node, sourceFile)) {
-          pushWalkViolation(
-            SelfDogfoodingRuleId.make("omnigraph-fenced-mutation"),
-            `Non-lease Omnigraph mutation in '${file.filePath}' omits single-writer expectedLeaseEpoch fencing.`,
-            node,
-          )
+        if (/(?:^|\/)src\//.test(normPath)) {
+          const fenceViolation = findWorkflowFenceViolation(node, sourceFile, normPath)
+          if (fenceViolation !== undefined) {
+            pushWalkViolation(
+              SelfDogfoodingRuleId.make(fenceViolation.rule),
+              fenceViolation.message,
+              node,
+            )
+          }
         }
 
         if (isIgnoredChmodPermissionCall(node, sourceFile)) {

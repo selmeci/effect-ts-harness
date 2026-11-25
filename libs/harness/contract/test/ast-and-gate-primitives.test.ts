@@ -465,6 +465,9 @@ describe("@harness/contract AST, SHA-256 & gate primitives", () => {
     expect(() => encodeURIComponent(mcpSurrogateHighBound)).not.toThrow()
     const mcpNonSurrogate = toMcpToolInputName(`${"x".repeat(226)}\uD7FF${"y".repeat(60)}`)
     expect(mcpNonSurrogate).toHaveLength(256)
+    const mcpAllSurrogates = toMcpToolInputName("😀".repeat(150))
+    expect(mcpAllSurrogates.length).toBeLessThanOrEqual(256)
+    expect(() => encodeURIComponent(mcpAllSurrogates)).not.toThrow()
     const rootLongA = toCompilerRepoRootInput(`${"/".repeat(4999)}a`)
     const rootLongB = toCompilerRepoRootInput(`${"/".repeat(4999)}b`)
     expect(rootLongA).not.toBe(rootLongB)
@@ -475,6 +478,9 @@ describe("@harness/contract AST, SHA-256 & gate primitives", () => {
     expect(rootSurrogateSplit).toHaveLength(4095)
     expect(() => encodeURIComponent(rootSurrogateSplit)).not.toThrow()
     expect(toCompilerOverlayErrorReason("e".repeat(9000))).toHaveLength(8192)
+    const boomOverlayReason = toCompilerOverlayErrorReason(`boom-${"z".repeat(9000)}`)
+    expect(boomOverlayReason).toHaveLength(8192)
+    expect(boomOverlayReason.startsWith("boom-")).toBe(true)
     expect(toCompilerOverlayErrorReason("", "fallback")).toBe("fallback")
 
     const report = makeVerdictReport([], {

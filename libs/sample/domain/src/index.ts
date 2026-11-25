@@ -34,7 +34,15 @@ export const uploadPhoto = Effect.fn("Sample.uploadPhoto")(function* (input: Cre
     (_, exit) =>
       match(exit)
         .with({ _tag: "Success" }, () => Effect.void)
-        .with({ _tag: "Failure" }, () => counter.decrement(input.albumId).pipe(Effect.catch(() => Effect.void)))
+        .with({ _tag: "Failure" }, () =>
+          counter
+            .decrement(input.albumId)
+            .pipe(
+              Effect.catch((err) =>
+                Effect.logDebug("Failed to decrement album counter during rollback", err),
+              ),
+            ),
+        )
         .exhaustive(),
   )
 })

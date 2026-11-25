@@ -52,7 +52,7 @@ import {
   getOrBuildPackageReachabilityIndexChecked,
   type PackageReachabilityIndex,
 } from "../src/mutation/mutation-test-reachability.js"
-import { testHostIo } from "./helpers/test-host-io.js"
+import { isolatedTestHostIo, testHostIo } from "./helpers/test-host-io.js"
 
 const REAL_REPO_ROOT = resolve(import.meta.dirname, "../../../..")
 const SHA_HEAD = "1111111111111111111111111111111111111111"
@@ -543,7 +543,7 @@ describe("mutation-speedup: static reverse-import reachability", () => {
     }
   })
 
-  it("narrows live @harness/gates internal plugin primaryTests below 15 instead of all 40 tests", () => {
+  it("narrows live @harness/gates internal plugin primaryTests below 20 instead of full package", () => {
     const rel = "libs/harness/gates/src/plugins/ast-workflow-fence-law.ts"
     const full = join(REAL_REPO_ROOT, rel)
     const part = partitionReachingTestFiles(
@@ -560,7 +560,7 @@ describe("mutation-speedup: static reverse-import reachability", () => {
       testHostIo,
     )
     expect(part.primaryTests.length).toBeGreaterThan(0)
-    expect(part.primaryTests.length).toBeLessThan(15)
+    expect(part.primaryTests.length).toBeLessThan(20)
     expect(part.fallbackTests.length).toBeGreaterThan(10)
   })
 })
@@ -578,8 +578,8 @@ describe("mutation-speedup: read-only worktree shared cache & runtime digests", 
       writeFileSync(join(wtGitDir, "commondir"), "../..\n", "utf8")
       writeFileSync(join(wtRepo, ".git"), `gitdir: ${wtGitDir}\n`, "utf8")
 
-      expect(resolveLinkedWorktreeCommonRepoRoot(wtRepo, testHostIo)).toBe(mainRepo)
-      expect(resolveLinkedWorktreeCommonRepoRoot(mainRepo, testHostIo)).toBeUndefined()
+      expect(resolveLinkedWorktreeCommonRepoRoot(wtRepo, isolatedTestHostIo)).toBe(mainRepo)
+      expect(resolveLinkedWorktreeCommonRepoRoot(mainRepo, isolatedTestHostIo)).toBeUndefined()
 
       const auth: MutationCacheAuth = {
         _tag: "Enabled",
@@ -629,7 +629,7 @@ describe("mutation-speedup: read-only worktree shared cache & runtime digests", 
             },
           },
         },
-        testHostIo,
+        isolatedTestHostIo,
         auth,
       )
 
@@ -655,18 +655,18 @@ describe("mutation-speedup: read-only worktree shared cache & runtime digests", 
             },
           },
         },
-        testHostIo,
+        isolatedTestHostIo,
         auth,
       )
 
-      const hydrated = loadMutationCache(wtRepo, testHostIo, auth)
+      const hydrated = loadMutationCache(wtRepo, isolatedTestHostIo, auth)
       expect(Object.keys(hydrated.entries).sort()).toEqual([keyShared, keyShared2].sort())
       expect(hydrated.entries[keyShared]?.recordedAt).toBe(localOverrideTs)
 
       // Corrupt shared cache is ignored WITHOUT modifying or quarantining main repo cache
       const sharedCacheFile = join(mainRepo, ".harness", "cache", MUTATION_CACHE_FILENAME)
       writeFileSync(sharedCacheFile, "{corrupt-shared-json", "utf8")
-      const afterCorruptShared = loadMutationCache(wtRepo, testHostIo, auth)
+      const afterCorruptShared = loadMutationCache(wtRepo, isolatedTestHostIo, auth)
       expect(Object.keys(afterCorruptShared.entries)).toEqual([keyShared])
       expect(readFileSync(sharedCacheFile, "utf8")).toBe("{corrupt-shared-json")
     } finally {

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
 import { Deferred, Effect, Fiber, Option } from "effect"
+import { match } from "ts-pattern"
 import {
   AstSourceContent,
   AstSourceFilePath,
@@ -187,6 +188,27 @@ describe("@harness/infra reliability", () => {
         ]).pipe(Effect.forkChild)
         yield* Effect.yieldNow
         yield* Fiber.interrupt(fiber)
+      }),
+  )
+
+  it.live(
+    "execFileAsyncEffect classifies ERR_CHILD_PROCESS_STDIO_MAXBUFFER as SpawnFailed even when timeoutMs is set",
+    () =>
+      Effect.gen(function* () {
+        const res = yield* execFileAsyncEffect(
+          process.execPath,
+          ["-e", "process.stdout.write('x'.repeat(8192))"],
+          { timeoutMs: 5_000, maxBufferBytes: 1024 },
+        )
+        expect(res._tag).toBe("SpawnFailed")
+        match(res)
+          .with({ _tag: "SpawnFailed" }, (failed) => {
+            expect(failed.errorCode).toBe("ERR_CHILD_PROCESS_STDIO_MAXBUFFER")
+          })
+          .with({ _tag: "Exited" }, { _tag: "TimedOut" }, { _tag: "Signaled" }, () => {
+            expect.unreachable("Expected ERR_CHILD_PROCESS_STDIO_MAXBUFFER to map to SpawnFailed")
+          })
+          .exhaustive()
       }),
   )
 })

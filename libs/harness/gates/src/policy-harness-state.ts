@@ -1,4 +1,5 @@
 import * as path from "node:path"
+import { match } from "ts-pattern"
 import {
   extractDetailedCommandSegments,
   normalizeShellLineContinuations,
@@ -454,44 +455,87 @@ const VAR_DECL_BUILTINS: ReadonlySet<string> = new Set(
   "export local readonly declare typeset".split(" "),
 )
 
+type ShellQuoteMode = "'" | '"' | "$'" | undefined
+
+interface ShellQuoteStep {
+  readonly handled: boolean
+  readonly extraAdvance: number
+  readonly nextQuote: ShellQuoteMode
+  readonly consumedText: string
+}
+
+const consumeEscapeStep = (text: string, index: number, quote: ShellQuoteMode): ShellQuoteStep => ({
+  handled: true,
+  extraAdvance: 1,
+  nextQuote: quote,
+  consumedText: text.slice(index, index + 2),
+})
+
+const stepShellQuote = (
+  text: string,
+  index: number,
+  quote: ShellQuoteMode,
+  options: { readonly stripHashComments: boolean; readonly inspectDoubleQuoted: boolean },
+): ShellQuoteStep => {
+  const ch = text[index]!
+  return match<ShellQuoteMode, ShellQuoteStep>(quote)
+    .with("'", () => ({
+      handled: true,
+      extraAdvance: 0,
+      nextQuote: ch === "'" ? undefined : quote,
+      consumedText: ch,
+    }))
+    .with("$'", () => {
+      if (ch === "'") {
+        return { handled: true, extraAdvance: 0, nextQuote: undefined, consumedText: ch }
+      }
+      if (ch === "\\") return consumeEscapeStep(text, index, quote)
+      return { handled: true, extraAdvance: 0, nextQuote: quote, consumedText: ch }
+    })
+    .with('"', () => {
+      if (ch === "\\") return consumeEscapeStep(text, index, quote)
+      if (ch === '"') {
+        return { handled: true, extraAdvance: 0, nextQuote: undefined, consumedText: ch }
+      }
+      return {
+        handled: !options.inspectDoubleQuoted,
+        extraAdvance: 0,
+        nextQuote: quote,
+        consumedText: "",
+      }
+    })
+    .with(undefined, () => {
+      if (ch === "\\") return consumeEscapeStep(text, index, quote)
+      if (ch === "$" && text[index + 1] === "'") {
+        return { handled: true, extraAdvance: 1, nextQuote: "$'", consumedText: "$'" }
+      }
+      if (ch === "'" || ch === '"') {
+        return { handled: true, extraAdvance: 0, nextQuote: ch, consumedText: ch }
+      }
+      if (options.stripHashComments && ch === "#" && (index === 0 || /\s/.test(text[index - 1]!))) {
+        let extraAdvance = 0
+        while (index + extraAdvance < text.length && text[index + extraAdvance] !== "\n") {
+          extraAdvance++
+        }
+        return { handled: true, extraAdvance, nextQuote: quote, consumedText: "" }
+      }
+      return { handled: false, extraAdvance: 0, nextQuote: quote, consumedText: "" }
+    })
+    .exhaustive()
+}
+
 const findBalancedParenEnd = (text: string, openIdx: number): number => {
   let depth = 1
-  let quote: "'" | '"' | "$'" | undefined
+  let quote: ShellQuoteMode
   for (let i = openIdx + 1; i < text.length; i++) {
     const ch = text[i]!
-    if (quote === "'") {
-      if (ch === "'") quote = undefined
-      continue
-    }
-    if (quote === "$'") {
-      if (ch === "\\") {
-        i++
-        continue
-      }
-      if (ch === "'") quote = undefined
-      continue
-    }
-    if (quote === '"') {
-      if (ch === "\\") {
-        i++
-        continue
-      }
-      if (ch === '"') quote = undefined
-      continue
-    }
-    if (ch === "\\") {
-      i++
-      continue
-    }
-    if (ch === "$" && text[i + 1] === "'") {
-      quote = "$'"
-      i++
-      continue
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch
-      continue
-    }
+    const step = stepShellQuote(text, i, quote, {
+      stripHashComments: false,
+      inspectDoubleQuoted: false,
+    })
+    i += step.extraAdvance
+    quote = step.nextQuote
+    if (step.handled) continue
     if (ch === "(") {
       depth++
       continue
@@ -515,42 +559,16 @@ const findClosingBacktick = (text: string, openIdx: number): number => {
 
 export const extractExecutedShellSnippets = (command: string): ReadonlyArray<string> => {
   const snippets: Array<string> = []
-  let quote: "'" | '"' | "$'" | undefined
+  let quote: ShellQuoteMode
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!
-    if (quote === "'") {
-      if (ch === "'") quote = undefined
-      continue
-    }
-    if (quote === "$'") {
-      if (ch === "\\") {
-        i++
-        continue
-      }
-      if (ch === "'") quote = undefined
-      continue
-    }
-    if (ch === "\\") {
-      i++
-      continue
-    }
-    if (quote === undefined && ch === "$" && command[i + 1] === "'") {
-      quote = "$'"
-      i++
-      continue
-    }
-    if (quote === undefined && (ch === "'" || ch === '"')) {
-      quote = ch
-      continue
-    }
-    if (quote === '"' && ch === '"') {
-      quote = undefined
-      continue
-    }
-    if (quote === undefined && ch === "#" && (i === 0 || /\s/.test(command[i - 1]!))) {
-      while (i < command.length && command[i] !== "\n") i++
-      continue
-    }
+    const step = stepShellQuote(command, i, quote, {
+      stripHashComments: true,
+      inspectDoubleQuoted: true,
+    })
+    i += step.extraAdvance
+    quote = step.nextQuote
+    if (step.handled) continue
     if (
       (ch === "$" && command[i + 1] === "(") ||
       (quote === undefined && (ch === "<" || ch === ">") && command[i + 1] === "(")
@@ -572,38 +590,16 @@ export const extractExecutedShellSnippets = (command: string): ReadonlyArray<str
 }
 
 export const hasUnexpandedShellVariable = (text: string): boolean => {
-  let quote: "'" | '"' | "$'" | undefined
+  let quote: ShellQuoteMode
   for (let i = 0; i < text.length; i++) {
     const ch = text[i]!
-    if (quote === "'") {
-      if (ch === "'") quote = undefined
-      continue
-    }
-    if (quote === "$'") {
-      if (ch === "\\") {
-        i++
-        continue
-      }
-      if (ch === "'") quote = undefined
-      continue
-    }
-    if (ch === "\\") {
-      i++
-      continue
-    }
-    if (quote === undefined && ch === "$" && text[i + 1] === "'") {
-      quote = "$'"
-      i++
-      continue
-    }
-    if (quote === undefined && ch === "'") {
-      quote = "'"
-      continue
-    }
-    if (ch === '"') {
-      quote = quote === '"' ? undefined : '"'
-      continue
-    }
+    const step = stepShellQuote(text, i, quote, {
+      stripHashComments: false,
+      inspectDoubleQuoted: true,
+    })
+    i += step.extraAdvance
+    quote = step.nextQuote
+    if (step.handled) continue
     if (
       ch === "$" &&
       text[i + 1] !== undefined &&
@@ -659,48 +655,18 @@ const expandShellVariablesOnce = (
   vars: ReadonlyMap<string, string>,
 ): { readonly text: string; readonly overflowed: boolean } => {
   let out = ""
-  let quote: "'" | '"' | "$'" | undefined
+  let quote: ShellQuoteMode
   for (let i = 0; i < command.length; i++) {
     if (out.length > MAX_EXPANDED_COMMAND_LENGTH) return { text: out, overflowed: true }
     const ch = command[i]!
-    if (quote === "'") {
-      if (ch === "'") quote = undefined
-      out += ch
-      continue
-    }
-    if (quote === "$'") {
-      if (ch === "'") {
-        quote = undefined
-        out += ch
-        continue
-      }
-      if (ch === "\\") {
-        out += ch + (i + 1 < command.length ? command[++i]! : "")
-        continue
-      }
-      out += ch
-      continue
-    }
-    if (ch === "\\") {
-      out += ch + (i + 1 < command.length ? command[++i]! : "")
-      continue
-    }
-    if (quote === undefined && ch === "$" && command[i + 1] === "'") {
-      quote = "$'"
-      out += "$'"
-      i++
-      continue
-    }
-    if (quote === undefined && ch === "'") {
-      quote = "'"
-      out += ch
-      continue
-    }
-    if (ch === '"') {
-      quote = quote === '"' ? undefined : '"'
-      out += ch
-      continue
-    }
+    const step = stepShellQuote(command, i, quote, {
+      stripHashComments: false,
+      inspectDoubleQuoted: true,
+    })
+    out += step.consumedText
+    i += step.extraAdvance
+    quote = step.nextQuote
+    if (step.handled) continue
     if (ch === "$" && command[i + 1] === "{") {
       const closeIdx = command.indexOf("}", i + 2)
       if (closeIdx !== -1) {

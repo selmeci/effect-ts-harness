@@ -1407,4 +1407,60 @@ describe("Type-aware Effect<A, E, R> and Layer<ROut, E, RIn> extractor", () => {
       fs.rmSync(tmpRoot, { recursive: true, force: true })
     }
   })
+
+  it("flags if/ternary branching on closed string literal unions (plain and branded) and handles typeof, optional unions, loose ops, parens, and predicates", () => {
+    const graph = extractTypeAwareGraphFromSource([
+      {
+        filePath: "libs/sample/domain/src/stage.ts",
+        packageTag: "domain",
+        content: [
+          'import { Schema } from "effect"',
+          'import { match } from "ts-pattern"',
+          'export type PlainStage = "pending" | "done"',
+          'export type Mode = "a" | "b"',
+          'export const BrandedStage = Schema.Literals(["pending", "done"]).pipe(Schema.brand("BrandedStage"))',
+          "export type BrandedStage = typeof BrandedStage.Type",
+          'export const badPlainIf = (stage: PlainStage): number => { if (stage === "done") return 1; return 0 }',
+          'export const badPlainTernary = (stage: PlainStage): number => (stage === "done" ? 1 : 0)',
+          'export const badBrandedIf = (stage: BrandedStage): number => { if (stage === "done") return 1; return 0 }',
+          'export const badBrandedTernary = (stage: BrandedStage): number => (stage === "done" ? 1 : 0)',
+          'export const badOptionalUnion = (stage: PlainStage | undefined): number => { if (stage === "done") return 1; return 0 }',
+          'export const badLooseIf = (stage: PlainStage): number => { if (stage == "done") return 1; return 0 }',
+          'export const badLooseTernary = (stage: PlainStage): number => (stage != "done" ? 1 : 0)',
+          'export const badParenLiteral = (mode: Mode): number => { if (mode === ("a")) return 1; return 0 }',
+          'export const badShadowedName = (t: PlainStage): number => { if (t === "done") return 1; return 0 }',
+          'export const badFilterUnion = (items: ReadonlyArray<PlainStage>): number => items.filter((s) => s === "done").length',
+          'export const okOpenString = (raw: string): number => { if (raw === "done") return 1; return 0 }',
+          'export const okTypeof = (x: unknown): number => { if (typeof x === "string" || (typeof x) === "string" || typeof x !== "string") return 1; return 0 }',
+          'export const okTypeofAlias = (x: unknown): number => { const t = typeof x; const u = t; if (t === "string" || (u) === ("number")) return 1; return 0 }',
+          'export const okSingleLiteral = (): number => { const only = "done" as const; if (only === "done") return 1; return 0 }',
+          'export const okFilterTypeof = (items: ReadonlyArray<unknown>): number => items.filter((x) => (typeof x) === "string").length',
+          "export const okExhaustiveMatch = (stage: PlainStage, branded: BrandedStage): number => {",
+          '  const a = match(stage).with("pending", () => 0).with("done", () => 1).exhaustive()',
+          '  const b = match(branded).with(BrandedStage.make("pending"), () => 0).with(BrandedStage.make("done"), () => 1).exhaustive()',
+          "  return a + b",
+          "}",
+        ].join("\n"),
+      },
+    ])
+
+    const discriminantViolations = (graph.branchingViolations ?? []).filter(
+      (v) => v.rule === "discriminant-branching",
+    )
+    expect(discriminantViolations.map((v) => v.enclosingSymbol)).toEqual([
+      "libs/sample/domain/src/stage.ts#badPlainIf",
+      "libs/sample/domain/src/stage.ts#badBrandedIf",
+      "libs/sample/domain/src/stage.ts#badOptionalUnion",
+      "libs/sample/domain/src/stage.ts#badLooseIf",
+      "libs/sample/domain/src/stage.ts#badParenLiteral",
+      "libs/sample/domain/src/stage.ts#badShadowedName",
+      "libs/sample/domain/src/stage.ts#badPlainTernary",
+      "libs/sample/domain/src/stage.ts#badBrandedTernary",
+      "libs/sample/domain/src/stage.ts#badLooseTernary",
+      "libs/sample/domain/src/stage.ts#badFilterUnion",
+    ])
+    for (const v of discriminantViolations) {
+      expect(v.message).toContain("ts-pattern")
+    }
+  })
 })

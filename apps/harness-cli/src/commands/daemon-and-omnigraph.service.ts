@@ -357,9 +357,13 @@ export const formatSubprocessError = (err: unknown): string => {
 const hasGitRef = (repoRoot: string, ref: string): boolean =>
   Result.getOrElse(
     Result.try(() => {
-      const res = nodeSyncHostIo.execFileSync("git", ["rev-parse", "--verify", ref], {
-        cwd: repoRoot,
-      })
+      const res = nodeSyncHostIo.execFileSync(
+        "git",
+        ["rev-parse", "--verify", "--end-of-options", ref],
+        {
+          cwd: repoRoot,
+        },
+      )
       return match(res)
         .with({ _tag: "Exited" }, ({ exitCode }) => exitCode === 0)
         .with({ _tag: "TimedOut" }, { _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => false)

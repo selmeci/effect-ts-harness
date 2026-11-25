@@ -1,8 +1,8 @@
 import { mkdirSync, writeFileSync } from "node:fs"
 import { createConnection } from "node:net"
 import { join } from "node:path"
-import { Context, Deferred, Effect, Fiber, Layer, Scope } from "effect"
-import { WorkflowEngine } from "effect/workflow"
+import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, Scope } from "effect"
+import { Workflow, WorkflowEngine } from "effect/workflow"
 import { match } from "ts-pattern"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import {
@@ -1328,4 +1328,155 @@ describe("WF-4 Unix-socket daemon workflow.ship RPC", () => {
       ),
     )
   })
+
+  it("settles composite interrupt causes without swallowing failures and cleans listeners via Effect.ensuring on defects", async () => {
+    await withActiveShipRuntime(
+      "ship-composite-interrupt-ensuring",
+      ({ worktreeRoot, runtime, allowedScope, ephemeralRunId }) =>
+        Effect.gen(function* () {
+          const origEngine = Context.get(runtime.shipWorkflowContext, WorkflowEngine.WorkflowEngine)
+          const interruptedExecutions: Array<string> = []
+          const compositeCause = Cause.combine(
+            Cause.fail(
+              new ShipGateFailedError({
+                stage: "gc-strict",
+                exitCode: GateExitCode.make(1),
+                stderrSummary: GateStderrSummary.make("composite gate failure"),
+                circuitBreakerStatus: "clear",
+              }),
+            ),
+            Cause.interrupt(1),
+          )
+
+          const compositeEngineContext = Context.add(
+            runtime.shipWorkflowContext,
+            WorkflowEngine.WorkflowEngine,
+            {
+              ...origEngine,
+              execute: () => Effect.failCause(compositeCause),
+              interrupt: (workflow, executionId) => {
+                interruptedExecutions.push(executionId)
+                return origEngine.interrupt(workflow, executionId)
+              },
+              poll: () =>
+                Effect.succeedSome(
+                  new Workflow.Complete({
+                    exit: Exit.failCause(Cause.interrupt(1)),
+                  }),
+                ),
+            },
+          )
+
+          const compositeFailExit = yield* Effect.exit(
+            handleDaemonWorkflowShipRequest({
+              requestId: "req-composite-fail-interrupt",
+              rawPayload: { repoRoot: worktreeRoot },
+              scope: allowedScope,
+              runtime: { ...runtime, shipWorkflowContext: compositeEngineContext },
+            }),
+          )
+          match(compositeFailExit)
+            .with({ _tag: "Success" }, ({ value: envelope }) => {
+              expect(envelope.ok).toBe(false)
+              if (!envelope.ok) {
+                expect(envelope.error).toContain("composite gate failure")
+              }
+            })
+            .with({ _tag: "Failure" }, () => {
+              expect.unreachable("Expected Effect.result to surface Fail+Interrupt as rpcError")
+            })
+            .exhaustive()
+
+          const compositeDieContext = Context.add(
+            runtime.shipWorkflowContext,
+            WorkflowEngine.WorkflowEngine,
+            {
+              ...origEngine,
+              execute: () =>
+                Effect.failCause(
+                  Cause.combine(Cause.die(new Error("composite die")), Cause.interrupt(1)),
+                ),
+              interrupt: (workflow, executionId) => {
+                interruptedExecutions.push(executionId)
+                return origEngine.interrupt(workflow, executionId)
+              },
+              poll: () =>
+                Effect.succeedSome(
+                  new Workflow.Complete({
+                    exit: Exit.failCause(Cause.interrupt(1)),
+                  }),
+                ),
+            },
+          )
+          const compositeDieExit = yield* Effect.exit(
+            handleDaemonWorkflowShipRequest({
+              requestId: "req-composite-die-interrupt",
+              rawPayload: { repoRoot: worktreeRoot },
+              scope: allowedScope,
+              runtime: { ...runtime, shipWorkflowContext: compositeDieContext },
+            }),
+          )
+          match(compositeDieExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(Cause.hasInterrupts(cause)).toBe(true)
+              expect(Cause.hasDies(cause)).toBe(true)
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected Die+Interrupt failure exit")
+            })
+            .exhaustive()
+
+          expect(interruptedExecutions).toHaveLength(2)
+          expect(runtime.shipProgressListeners.size).toBe(0)
+          const attemptsAfterComposite =
+            yield* runtime.shipAttemptStore.listAttemptsForRun(ephemeralRunId)
+          expect(attemptsAfterComposite.map((a) => [a.attempt, a.status])).toEqual([
+            [1, "failed"],
+            [2, "failed"],
+          ])
+
+          const gateStarted = yield* Deferred.make<void>()
+          const releaseGate = yield* Deferred.make<void>()
+          const defectEngineContext = Context.add(
+            runtime.shipWorkflowContext,
+            WorkflowEngine.WorkflowEngine,
+            {
+              ...origEngine,
+              execute: () =>
+                Deferred.succeed(gateStarted, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseGate)),
+                  Effect.andThen(Effect.never),
+                ),
+            },
+          )
+          const defectAttemptStore: typeof runtime.shipAttemptStore = {
+            ...runtime.shipAttemptStore,
+            updateStatus: () => Effect.die(new Error("updateStatus defect during settle")),
+          }
+          const defectExit = yield* Effect.exit(
+            handleDaemonWorkflowShipRequest({
+              requestId: "req-settle-defect-cleanup",
+              rawPayload: { repoRoot: worktreeRoot },
+              scope: allowedScope,
+              runtime: {
+                ...runtime,
+                shipWorkflowContext: defectEngineContext,
+                shipAttemptStore: defectAttemptStore,
+              },
+              settleTimeoutMs: WorkflowTimeoutMs.make(50),
+            }),
+          )
+          match(defectExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(Cause.hasDies(cause)).toBe(true)
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected defect failure exit")
+            })
+            .exhaustive()
+          yield* Deferred.succeed(releaseGate, undefined)
+          expect(runtime.shipProgressListeners.size).toBe(0)
+        }),
+    )
+  }, 45_000)
 })

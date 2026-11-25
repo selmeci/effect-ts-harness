@@ -27,6 +27,9 @@ import {
   readdirOrReport,
   readTextOrReport,
 } from "./gc-helpers.js"
+import { checkAlwaysPopulatedOptionalRuntimeProps } from "./gc-runtime-props.js"
+
+export { checkAlwaysPopulatedOptionalRuntimeProps }
 
 export const checkUnusedContractExports = (
   repoRoot: string,
@@ -505,6 +508,7 @@ export const evaluateTopologyEntropyPlugin = (
 
   if (input.workspaceRoot !== undefined && input.hostIo !== undefined) {
     findings.push(...checkChainedEqualityTernaries(input.workspaceRoot, input.hostIo))
+    findings.push(...checkAlwaysPopulatedOptionalRuntimeProps(input.workspaceRoot, input.hostIo))
   }
 
   return findings

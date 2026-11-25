@@ -63,7 +63,7 @@ import {
   recordKilledMutantsToCache,
 } from "../src/mutation/mutation-suite-helpers.js"
 import { resolveHarnessStateDir } from "../src/worktree.js"
-import { testHostIo } from "./helpers/test-host-io.js"
+import { isolatedTestHostIo, testHostIo } from "./helpers/test-host-io.js"
 
 const TEST_HMAC_SECRET = Redacted.make(
   MutationCacheHmacSecret.make("hardening-hmac-secret-0123456789abcdef"),
@@ -352,11 +352,11 @@ describe("MutationCache hardening & regressions", () => {
         saveMutationCacheAtomic(
           repoRoot,
           { version: MUTATION_CACHE_SCHEMA_VERSION, entries: {} },
-          testHostIo,
+          isolatedTestHostIo,
         )._tag,
       ).toBe("Skipped")
 
-      expect(loadMutationCacheWithStatus(repoRoot, testHostIo, TEST_CACHE_AUTH)._tag).toBe(
+      expect(loadMutationCacheWithStatus(repoRoot, isolatedTestHostIo, TEST_CACHE_AUTH)._tag).toBe(
         "Missing",
       )
 
@@ -383,7 +383,7 @@ describe("MutationCache hardening & regressions", () => {
         }),
         "utf8",
       )
-      const loaded = loadMutationCacheWithStatus(repoRoot, testHostIo, TEST_CACHE_AUTH)
+      const loaded = loadMutationCacheWithStatus(repoRoot, isolatedTestHostIo, TEST_CACHE_AUTH)
       match(loaded)
         .with({ _tag: "Loaded" }, ({ droppedEntryCount, store }) => {
           expect(droppedEntryCount).toBe(2)
@@ -396,7 +396,7 @@ describe("MutationCache hardening & regressions", () => {
 
       // Corrupt top-level JSON is quarantined to .corrupt
       writeFileSync(cacheFile, "{broken", "utf8")
-      const corruptRes = loadMutationCacheWithStatus(repoRoot, testHostIo, TEST_CACHE_AUTH)
+      const corruptRes = loadMutationCacheWithStatus(repoRoot, isolatedTestHostIo, TEST_CACHE_AUTH)
       match(corruptRes)
         .with({ _tag: "Corrupt" }, ({ quarantinedPath }) => {
           expect(quarantinedPath).toBe(`${cacheFile}.corrupt`)
@@ -920,12 +920,12 @@ describe("MutationCache hardening & regressions", () => {
       const cacheDir = join(resolveHarnessStateDir(repoRoot), "cache")
 
       const enoentSymIo: SyncHostIo = {
-        ...testHostIo,
+        ...isolatedTestHostIo,
         isSymbolicLinkSync: (p) => {
-          if (p === cacheDir && !testHostIo.existsSync(p)) {
+          if (p === cacheDir && !isolatedTestHostIo.existsSync(p)) {
             throw Object.assign(new Error("missing"), { code: "ENOENT" })
           }
-          return testHostIo.isSymbolicLinkSync(p)
+          return isolatedTestHostIo.isSymbolicLinkSync(p)
         },
       }
       expect(saveMutationCacheAtomic(repoRoot, store, enoentSymIo, TEST_CACHE_AUTH)._tag).toBe(
@@ -933,10 +933,10 @@ describe("MutationCache hardening & regressions", () => {
       )
 
       const eaccesSymIo: SyncHostIo = {
-        ...testHostIo,
+        ...isolatedTestHostIo,
         isSymbolicLinkSync: (p) => {
           if (p === cacheDir) throw Object.assign(new Error("denied"), { code: "EACCES" })
-          return testHostIo.isSymbolicLinkSync(p)
+          return isolatedTestHostIo.isSymbolicLinkSync(p)
         },
       }
       match(saveMutationCacheAtomic(repoRoot, store, eaccesSymIo, TEST_CACHE_AUTH))
@@ -949,12 +949,12 @@ describe("MutationCache hardening & regressions", () => {
         .exhaustive()
 
       const nonStrCodeIo: SyncHostIo = {
-        ...testHostIo,
+        ...isolatedTestHostIo,
         isSymbolicLinkSync: (p) => {
-          if (p === cacheDir && !testHostIo.existsSync(p)) {
+          if (p === cacheDir && !isolatedTestHostIo.existsSync(p)) {
             throw Object.assign(new Error("numeric"), { code: 123 })
           }
-          return testHostIo.isSymbolicLinkSync(p)
+          return isolatedTestHostIo.isSymbolicLinkSync(p)
         },
       }
       rmSync(cacheDir, { recursive: true, force: true })
@@ -963,11 +963,12 @@ describe("MutationCache hardening & regressions", () => {
       )
 
       const nullThrowIo: SyncHostIo = {
-        ...testHostIo,
+        ...isolatedTestHostIo,
         isSymbolicLinkSync: (p) => {
-          if (p === cacheDir && testHostIo.existsSync(p)) return testHostIo.isSymbolicLinkSync(p)
+          if (p === cacheDir && isolatedTestHostIo.existsSync(p))
+            return isolatedTestHostIo.isSymbolicLinkSync(p)
           if (p === cacheDir) throw null
-          return testHostIo.isSymbolicLinkSync(p)
+          return isolatedTestHostIo.isSymbolicLinkSync(p)
         },
       }
       rmSync(cacheDir, { recursive: true, force: true })
@@ -1266,18 +1267,20 @@ it("second should not run", () => {
       expect(cacheEntries[key]?.status).toBe("killed")
 
       // flushMutationCache: Saved -> true, Failed -> false, Skipped (symlink) -> false
-      expect(flushMutationCache(repoRoot, testHostIo, TEST_CACHE_AUTH, cacheEntries)).toBe(true)
+      expect(flushMutationCache(repoRoot, isolatedTestHostIo, TEST_CACHE_AUTH, cacheEntries)).toBe(
+        true,
+      )
       const failMkdirIo: SyncHostIo = {
-        ...testHostIo,
+        ...isolatedTestHostIo,
         mkdirRecursiveSync: () => {
           throw new Error("EACCES: mkdir")
         },
       }
       expect(flushMutationCache(repoRoot, failMkdirIo, TEST_CACHE_AUTH, cacheEntries)).toBe(false)
       const symlinkStateIo: SyncHostIo = {
-        ...testHostIo,
+        ...isolatedTestHostIo,
         isSymbolicLinkSync: (p) =>
-          p.endsWith(".harness") ? true : testHostIo.isSymbolicLinkSync(p),
+          p.endsWith(".harness") ? true : isolatedTestHostIo.isSymbolicLinkSync(p),
       }
       expect(flushMutationCache(repoRoot, symlinkStateIo, TEST_CACHE_AUTH, cacheEntries)).toBe(
         false,

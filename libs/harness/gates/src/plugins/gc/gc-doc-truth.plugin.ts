@@ -18,7 +18,12 @@ import {
   extractGateRuleIdsFromSources,
 } from "./gc-rule-ids.js"
 import { checkHookMatcherToolParity } from "./gc-hook-parity.js"
-import { auditCatalogDocTruthInContent, checkCatalogDocTruth } from "./gc-catalog-doc-truth.js"
+import {
+  WORKER_ISOLATION_PARITY_DOC_PATHS,
+  auditCatalogDocTruthInContent,
+  auditWorkerIsolationSubcommandParity,
+  checkCatalogDocTruth,
+} from "./gc-catalog-doc-truth.js"
 import {
   ADAPTER_SKILL_PARITY_CLAUSES,
   auditAdapterSkillParityPair,
@@ -27,8 +32,10 @@ import {
 
 export {
   ADAPTER_SKILL_PARITY_CLAUSES,
+  WORKER_ISOLATION_PARITY_DOC_PATHS,
   auditAdapterSkillParityPair,
   auditCatalogDocTruthInContent,
+  auditWorkerIsolationSubcommandParity,
   extractGateRuleIdsFromSources,
 }
 
@@ -220,7 +227,10 @@ const checkHookTimeouts = (
       })
     })
     .with({ _tag: "Some" }, ({ value: parsed }) => {
-      const container = rootKey === "hooks" ? parsed.hooks : parsed["effect-harness"]
+      const container = match(rootKey)
+        .with("hooks", () => parsed.hooks)
+        .with("effect-harness", () => parsed["effect-harness"])
+        .exhaustive()
       if (container === undefined) {
         findings.push({
           kind: "hook-timeout-parity",
@@ -624,7 +634,6 @@ export const evaluateDocTruthPlugin = (input: GraphEntropyInput): ReadonlyArray<
         inRuleTable = "rule-prose"
         continue
       }
-      if (inRuleTable === "none") continue
       if (!trimmed.startsWith("|")) {
         inRuleTable = "none"
         continue
@@ -634,10 +643,11 @@ export const evaluateDocTruthPlugin = (input: GraphEntropyInput): ReadonlyArray<
       if (secondPipe === -1) continue
       const col1 = trimmed.slice(firstPipe + 1, secondPipe).trim()
       if (/^[\s:-]+$/.test(col1)) continue
-      const ruleMatches =
-        inRuleTable === "rule-id"
-          ? [...col1.matchAll(/`([a-z][a-z0-9]*(?:-[a-z0-9]+)+)`/g)]
-          : [...col1.matchAll(/^`([a-z][a-z0-9]*(?:-[a-z0-9]+)+)`$/g)]
+      const ruleMatches = match(inRuleTable)
+        .with("none", () => [])
+        .with("rule-id", () => [...col1.matchAll(/`([a-z][a-z0-9]*(?:-[a-z0-9]+)+)`/g)])
+        .with("rule-prose", () => [...col1.matchAll(/^`([a-z][a-z0-9]*(?:-[a-z0-9]+)+)`$/g)])
+        .exhaustive()
       for (const m of ruleMatches) {
         const ruleId = m[1]!
         if (!knownGateRuleIds.has(ruleId) && !seenRules.has(ruleId)) {

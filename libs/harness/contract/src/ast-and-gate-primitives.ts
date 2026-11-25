@@ -240,6 +240,8 @@ export const SelfDogfoodingRuleId = Schema.Literals([
   "unhandled-effect-promise",
   "provision-tap-error-leak",
   "omnigraph-fenced-mutation",
+  "direct-daemon-workflow-interrupt",
+  "unguarded-workflow-status-update",
 ])
 export type SelfDogfoodingRuleId = typeof SelfDogfoodingRuleId.Type
 

@@ -224,6 +224,7 @@ export {
   extractServicesAndErrors,
   extractTypeAwareGraphFromSource,
   extractTypeGraph,
+  extractTypeGraphChecked,
   extractWorkspaceTypeAwareGraph,
   findWorkspaceSrcFiles,
   findWorkspaceTestFiles,
@@ -412,6 +413,10 @@ export {
   extractGovernanceSummary,
   type ExtractedEarsRequirementRow,
 } from "./extractor/governance-body-extractor.js"
+export {
+  isTableSeparatorRow,
+  splitMarkdownTableCells,
+} from "./extractor/governance-markdown-helpers.js"
 export {
   CompilerOverlayErrorReason,
   CompilerRepoRootInput,

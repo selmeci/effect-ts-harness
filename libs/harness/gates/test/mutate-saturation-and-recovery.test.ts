@@ -34,7 +34,7 @@ import {
   readPackageManifest,
   resolveLibPackageClassificationChecked,
 } from "../src/mutation/mutation-target-discovery.js"
-import { testHostIo } from "./helpers/test-host-io.js"
+import { isolatedTestHostIo, testHostIo } from "./helpers/test-host-io.js"
 
 const writePkg = (
   repoRoot: string,
@@ -925,14 +925,16 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
         "utf8",
       )
 
-      expect(writeVerifyStamp(dir, testHostIo, "impl/custom").taskBranch).toBe("impl/custom")
-      expect(writeVerifyStamp(dir, testHostIo, "   ").taskBranch).toBe("unknown")
+      expect(writeVerifyStamp(dir, isolatedTestHostIo, "impl/custom").taskBranch).toBe(
+        "impl/custom",
+      )
+      expect(writeVerifyStamp(dir, isolatedTestHostIo, "   ").taskBranch).toBe("unknown")
 
       const stampFile = join(dir, ".harness", "mutate-stamp.json")
-      expect(Result.isSuccess(removeMutateStamp(dir, testHostIo))).toBe(true)
-      expect(testHostIo.existsSync(stampFile)).toBe(false)
+      expect(Result.isSuccess(removeMutateStamp(dir, isolatedTestHostIo))).toBe(true)
+      expect(isolatedTestHostIo.existsSync(stampFile)).toBe(false)
 
-      writeMutateStamp(dir, testHostIo, {
+      writeMutateStamp(dir, isolatedTestHostIo, {
         enforcementMode: "strict",
         diffMode: "working-tree",
         scannedCandidateFiles: MutantCount.make(1),
@@ -946,7 +948,7 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
         passed: MutateStampPassed.make(true),
       })
       const enoentIo: SyncHostIo = {
-        ...testHostIo,
+        ...isolatedTestHostIo,
         unlinkSync: () => {
           throw { code: "ENOENT" }
         },
@@ -954,7 +956,7 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
       expect(Result.isSuccess(removeMutateStamp(dir, enoentIo))).toBe(true)
       for (const thrownVal of [null, "boom", new Error("EPERM: denied")] as const) {
         const failUnlinkIo: SyncHostIo = {
-          ...testHostIo,
+          ...isolatedTestHostIo,
           unlinkSync: () => {
             throw thrownVal
           },
@@ -962,22 +964,22 @@ describe("Wave 2B #63 & P0/P1/P2 saturation: mutation-backup, discovery, mutatio
         expect(Result.isFailure(removeMutateStamp(dir, failUnlinkIo))).toBe(true)
       }
       const outsideRealpathIo: SyncHostIo = {
-        ...testHostIo,
+        ...isolatedTestHostIo,
         realpathSync: (p) =>
-          p === stampFile ? "/outside/mutate-stamp.json" : testHostIo.realpathSync(p),
+          p === stampFile ? "/outside/mutate-stamp.json" : isolatedTestHostIo.realpathSync(p),
       }
       expect(Result.isFailure(removeMutateStamp(dir, outsideRealpathIo))).toBe(true)
 
-      const hashBase = computeWorkspaceTreeHashChecked(dir, testHostIo)
+      const hashBase = computeWorkspaceTreeHashChecked(dir, isolatedTestHostIo)
       mkdirSync(join(dir, "apps", "demo", ".harness"), { recursive: true })
       writeFileSync(join(dir, "apps", "demo", ".harness", "telemetry-log.jsonl"), '{"ev":1}\n')
-      expect(computeWorkspaceTreeHashChecked(dir, testHostIo)).toEqual(hashBase)
+      expect(computeWorkspaceTreeHashChecked(dir, isolatedTestHostIo)).toEqual(hashBase)
       mkdirSync(join(dir, "libs", "demo", "src", ".harness"), { recursive: true })
       writeFileSync(
         join(dir, "libs", "demo", "src", ".harness", "backdoor.ts"),
         "export const x = 1\n",
       )
-      expect(computeWorkspaceTreeHashChecked(dir, testHostIo)).not.toEqual(hashBase)
+      expect(computeWorkspaceTreeHashChecked(dir, isolatedTestHostIo)).not.toEqual(hashBase)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

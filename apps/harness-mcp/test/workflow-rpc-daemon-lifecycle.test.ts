@@ -1,7 +1,19 @@
 import { mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Context, Effect, Exit, Layer, Schema, Scope, Semaphore, SynchronizedRef } from "effect"
+import {
+  Cause,
+  Context,
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  Schema,
+  Scope,
+  Semaphore,
+  SynchronizedRef,
+} from "effect"
 import { DurableDeferred, WorkflowEngine } from "effect/workflow"
 import { match } from "ts-pattern"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
@@ -23,6 +35,7 @@ import {
   WorkflowExecutionId,
   WorkflowRunId,
   WorkflowRunOutcome,
+  type WorkflowRunRecord,
   type WorkflowShipAttemptRecord,
   WorkflowStoreOperation,
   WorkflowStoreUnavailableError,
@@ -76,6 +89,7 @@ import {
   inspectActiveUnitCycle,
   resolveRunTarget,
   validateRpcRepoRoot,
+  withRunLock,
 } from "../src/daemon/workflow-rpc-shared.js"
 import {
   buildStatusSummaryForRuntime,
@@ -826,6 +840,184 @@ describe("WF-3 Unix-socket daemon doctor, lease fencing, offline & pause lifecyc
             writerLeaseEpoch: LeaseEpoch.make(1),
             outcome: WorkflowRunOutcome.cases.NotFound.make({}),
           })
+        }),
+      ),
+    )
+  })
+
+  it("holds withRunLock uninterruptibly until interruptAndSettleTaskWorkflow and aborted projection settle on Fiber.interrupt", async () => {
+    const workBase = mkdtempSync(join(tmpdir(), "wf3-abort-uninterruptible-"))
+    tempDirs.push(workBase)
+    const { canonicalDir, baseSha } = initTestGitRepo(workBase, "abort-repo")
+    const validatedCanonical = await Effect.runPromise(
+      validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
+    )
+    const allowedScope = {
+      _tag: "Allowed" as const,
+      resolvedRoot: validatedCanonical.worktreeRoot,
+      validatedWorktree: validatedCanonical,
+      daemonWorktree: validatedCanonical,
+    }
+    const abortRunId = WorkflowRunId.make("run-uninterruptible-abort-1")
+    const abortPlan = makeSingleUnitManualPlan(abortRunId, baseSha)
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scope = yield* Scope.Scope
+          const storedRuns = new Map<WorkflowRunId, WorkflowRunRecord>()
+          const abortProjectionStarted = yield* Deferred.make<void>()
+          const releaseAbortProjection = yield* Deferred.make<void>()
+
+          const projectionWriterLayer = Layer.succeed(WorkflowProjectionWriter, {
+            upsertRun: (run) =>
+              Effect.gen(function* () {
+                yield* match(run.state)
+                  .with("aborted", () =>
+                    Deferred.succeed(abortProjectionStarted, undefined).pipe(
+                      Effect.andThen(Deferred.await(releaseAbortProjection)),
+                    ),
+                  )
+                  .with("running", "waiting", "completed", () => Effect.void)
+                  .exhaustive()
+                storedRuns.set(run.runId, run)
+              }),
+            upsertUnit: () => Effect.void,
+            upsertAttempt: () => Effect.void,
+          })
+          const readModelLayer = Layer.succeed(WorkflowReadModelQuery, {
+            getRun: (id) => {
+              const found = storedRuns.get(id)
+              return found !== undefined ? Effect.succeedSome(found) : Effect.succeedNone
+            },
+            listRuns: Effect.succeed([...storedRuns.values()]),
+            listUnits: () => Effect.succeed([]),
+            listAttempts: () => Effect.succeed([]),
+            probeAvailability: Effect.succeed("ready" as const),
+          })
+          const shipGateRunnerLayer = Layer.succeed(ShipGateRunner, {
+            computeTreeHash: () => Effect.succeed(WorkspaceTreeHash.make("a".repeat(64))),
+            recoverMutationBackup: () => Effect.void,
+            executeStageCommand: (input) =>
+              Effect.succeed(
+                ShipStagePassed.make({
+                  stage: input.stage,
+                  durationMs: GateDurationMs.make(1),
+                }),
+              ),
+            reportStageProgress: () => Effect.void,
+          })
+          const shipAttemptStoreLayer = Layer.succeed(ShipAttemptStore, {
+            allocateAttempt: ({ runId }) =>
+              Effect.succeed({
+                shipKey: ShipAttemptKey.make(`${runId}#1`),
+                runId,
+                attempt: ShipAttempt.make(1),
+                treeHash: WorkspaceTreeHash.make("a".repeat(64)),
+                status: "running",
+                updatedMs: WorkflowTimestampMs.make(1),
+              }),
+            updateStatus: ({ runId, attempt, status }) =>
+              Effect.succeed({
+                shipKey: ShipAttemptKey.make(`${runId}#${attempt}`),
+                runId,
+                attempt,
+                treeHash: WorkspaceTreeHash.make("a".repeat(64)),
+                status,
+                updatedMs: WorkflowTimestampMs.make(1),
+              }),
+            listAttemptsForRun: () => Effect.succeed([]),
+          })
+          const portsLayer = Layer.mergeAll(
+            makeCompletedVerifierLayer(),
+            makeNoopWorktreeLayer(validatedCanonical.worktreeRoot),
+            UnitAgentDispatcherLive,
+            reviewStubLayer,
+            projectionWriterLayer,
+            readModelLayer,
+            shipGateRunnerLayer,
+            shipAttemptStoreLayer,
+          )
+          const fullLayer = Layer.merge(HarnessTaskWorkflowLayer, ShipWorkflowLayer).pipe(
+            Layer.provideMerge(Layer.merge(WorkflowEngine.layerMemory, portsLayer)),
+          )
+          const workflowContext = yield* Layer.buildWithScope(fullLayer, scope)
+          const runtime: WorkflowDaemonRuntime = {
+            workflowContext,
+            shipWorkflowContext: workflowContext,
+            engine: Context.get(workflowContext, WorkflowEngine.WorkflowEngine),
+            projectionWriter: Context.get(workflowContext, WorkflowProjectionWriter),
+            readModelQuery: Context.get(workflowContext, WorkflowReadModelQuery),
+            unitVerifier: Context.get(workflowContext, UnitVerifier),
+            unitAgentDispatcher: Context.get(workflowContext, UnitAgentDispatcher),
+            worktreePort: Context.get(workflowContext, WorkflowWorktreePort),
+            reviewRouter: Context.get(workflowContext, WorkflowReviewRouter),
+            shipGateRunner: Context.get(workflowContext, ShipGateRunner),
+            shipAttemptStore: Context.get(workflowContext, ShipAttemptStore),
+            shipProgressListeners: new Map(),
+            shipGateController: createShipActiveGateController(),
+            leaseFence: { commonGitDir: validatedCanonical.commonGitDir },
+            plansRef: yield* SynchronizedRef.make<ReadonlyMap<WorkflowRunId, CompiledPlan>>(
+              new Map(),
+            ),
+            runMutexesRef: yield* SynchronizedRef.make<
+              ReadonlyMap<WorkflowRunId, Semaphore.Semaphore>
+            >(new Map()),
+            shipWorktreeMutexesRef: yield* SynchronizedRef.make<
+              ReadonlyMap<AbsoluteRepoRoot, Semaphore.Semaphore>
+            >(new Map()),
+            rebuildMutex: Semaphore.makeUnsafe(1),
+            rebuildRpcGateSemaphore: Semaphore.makeUnsafe(16),
+            rebuildProjectionGateSemaphore: Semaphore.makeUnsafe(16),
+            journalWriteMutex: Semaphore.makeUnsafe(1),
+            canonicalRepoRoot: validatedCanonical.worktreeRoot,
+            commonGitDir: validatedCanonical.commonGitDir,
+            hostIo: nodeSyncHostIo,
+          }
+
+          const startEnv = yield* handleDaemonWorkflowStartRequest({
+            requestId: "req-start-uninterruptible-abort",
+            rawPayload: { repoRoot: validatedCanonical.worktreeRoot, plan: abortPlan },
+            scope: allowedScope,
+            runtime,
+          })
+          expect(startEnv.ok).toBe(true)
+
+          const abortFiber = yield* handleDaemonWorkflowAbortRequest({
+            requestId: "req-abort-uninterruptible",
+            rawPayload: { repoRoot: validatedCanonical.worktreeRoot, runId: abortRunId },
+            scope: allowedScope,
+            runtime,
+          }).pipe(Effect.forkChild)
+
+          yield* Deferred.await(abortProjectionStarted)
+          let lockAcquiredAfterInterrupt = false
+          const contenderFiber = yield* withRunLock(
+            runtime,
+            abortRunId,
+            Effect.sync(() => {
+              lockAcquiredAfterInterrupt = true
+            }),
+          ).pipe(Effect.forkChild)
+
+          yield* Fiber.interrupt(abortFiber).pipe(Effect.forkChild)
+          yield* Effect.sleep("50 millis")
+          expect(lockAcquiredAfterInterrupt).toBe(false)
+
+          yield* Deferred.succeed(releaseAbortProjection, undefined)
+          const abortExit = yield* Fiber.await(abortFiber)
+          match(abortExit)
+            .with({ _tag: "Failure" }, ({ cause }) => {
+              expect(Cause.hasInterrupts(cause)).toBe(true)
+            })
+            .with({ _tag: "Success" }, () => {
+              expect.unreachable("Expected interrupted abort exit")
+            })
+            .exhaustive()
+
+          yield* Fiber.join(contenderFiber)
+          expect(lockAcquiredAfterInterrupt).toBe(true)
+          expect(storedRuns.get(abortRunId)?.state).toBe("aborted")
         }),
       ),
     )

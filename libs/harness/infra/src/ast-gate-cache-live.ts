@@ -211,7 +211,15 @@ const makeAstGateCacheLayer = (options?: {
             Effect.andThen(fs.writeFileString(tmpPath, json)),
             Effect.andThen(fs.rename(tmpPath, filePath)),
             Effect.mapError((err) => toWriteError(filePath, err)),
-            Effect.ensuring(fs.remove(tmpPath, { force: true }).pipe(Effect.ignore)),
+            Effect.ensuring(
+              fs
+                .remove(tmpPath, { force: true })
+                .pipe(
+                  Effect.catch((err) =>
+                    Effect.logDebug("Failed to remove temporary AST cache file", err),
+                  ),
+                ),
+            ),
           )
         })
 

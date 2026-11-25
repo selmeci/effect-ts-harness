@@ -33,11 +33,8 @@ import {
   syncSessionCacheAndProject,
 } from "./service-and-layer-extractor.js"
 import { extractEffectFns } from "./effect-fn-extractor.js"
-import {
-  checkDeciderTracing,
-  checkEventSourcingReducers,
-  checkMissingAggregateIdGuard,
-} from "./decider-reducer-extractor.js"
+import { checkDeciderTracing, checkMissingAggregateIdGuard } from "./decider-reducer-extractor.js"
+import { checkEventSourcingReducers } from "./reducer-policy-extractor.js"
 import { checkUnassertedStateFieldsForInputs } from "./test-and-governance-extractor.js"
 
 /**

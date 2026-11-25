@@ -212,147 +212,149 @@ const initSharedWorkerdBridge = (): Effect.Effect<SharedWorkerdBridge> =>
     const tmpDir = mkdtempSync(join(tmpdir(), "harness-es-workerd-"))
     const bridgeScope = yield* Scope.make()
 
-      let spawnedWorker: Worker | undefined
-      const { callbackPort, worker } = yield* Effect.callback<{
-        readonly callbackPort: number
-        readonly worker: Worker
-      }>((resume) => {
-        const w = new Worker(BRIDGE_WORKER_SCRIPT, { eval: true })
-        spawnedWorker = w
-        let settled = false
-        w.once("message", (msg: { readonly callbackPort: number }) => {
-          if (!settled) {
-            settled = true
-            resume(Effect.succeed({ callbackPort: msg.callbackPort, worker: w }))
-          }
-        })
-        w.on("error", (err) => {
-          if (!settled) {
-            settled = true
-            resume(Effect.die(err))
-          } else {
-            process.stderr.write(
-              `[es-infra:workerd] Late bridge worker error: ${err instanceof Error ? err.message : String(err)}\n`,
-            )
-          }
-        })
-        w.once("exit", (code) => {
-          if (!settled) {
-            settled = true
-            resume(
-              Effect.die(
-                new Error(
-                  `Workerd bridge worker exited prematurely with code ${code} before initialization`,
-                ),
+    let spawnedWorker: Worker | undefined
+    const { callbackPort, worker } = yield* Effect.callback<{
+      readonly callbackPort: number
+      readonly worker: Worker
+    }>((resume) => {
+      const w = new Worker(BRIDGE_WORKER_SCRIPT, { eval: true })
+      spawnedWorker = w
+      let settled = false
+      w.once("message", (msg: { readonly callbackPort: number }) => {
+        if (!settled) {
+          settled = true
+          resume(Effect.succeed({ callbackPort: msg.callbackPort, worker: w }))
+        }
+      })
+      w.on("error", (err) => {
+        if (!settled) {
+          settled = true
+          resume(Effect.die(err))
+        } else {
+          process.stderr.write(
+            `[es-infra:workerd] Late bridge worker error: ${err instanceof Error ? err.message : String(err)}\n`,
+          )
+        }
+      })
+      w.once("exit", (code) => {
+        if (!settled) {
+          settled = true
+          resume(
+            Effect.die(
+              new Error(
+                `Workerd bridge worker exited prematurely with code ${code} before initialization`,
               ),
-            )
-          }
-        })
-      }).pipe(
-        Effect.onError(() => cleanupBridgeResources(bridgeScope, spawnedWorker, tmpDir)),
+            ),
+          )
+        }
+      })
+    }).pipe(Effect.onError(() => cleanupBridgeResources(bridgeScope, spawnedWorker, tmpDir)))
+
+    const workerd = yield* Workerd.pipe(Effect.provide(WorkerdLive))
+
+    const ports = yield* workerd
+      .serve({
+        sockets: [
+          {
+            name: "main",
+            address: "127.0.0.1:0",
+            http: {},
+            service: { name: "main" },
+          },
+        ],
+        services: [
+          {
+            name: "storage",
+            disk: { path: tmpDir, writable: true },
+          },
+          {
+            name: "callback",
+            external: {
+              address: `127.0.0.1:${String(callbackPort)}`,
+              http: {},
+            },
+          },
+          {
+            name: "main",
+            worker: {
+              compatibilityDate: workerd.compatibilityDate,
+              modules: [
+                {
+                  name: "worker.js",
+                  esModule: DO_WORKER_ES_MODULE,
+                },
+              ],
+              durableObjectNamespaces: [
+                {
+                  className: "HarnessSqlDurableObject",
+                  uniqueKey: "harness-es-sql-do",
+                  enableSql: true,
+                },
+              ],
+              durableObjectStorage: { localDisk: "storage" },
+              bindings: [
+                {
+                  name: "DO",
+                  durableObjectNamespace: {
+                    className: "HarnessSqlDurableObject",
+                  },
+                },
+                {
+                  name: "CALLBACK",
+                  service: { name: "callback" },
+                },
+              ],
+            },
+          },
+        ],
+      })
+      .pipe(
+        Scope.provide(bridgeScope),
+        Effect.onError(() => cleanupBridgeResources(bridgeScope, worker, tmpDir)),
+        Effect.orDie,
       )
 
-      const workerd = yield* Workerd.pipe(Effect.provide(WorkerdLive))
-
-      const ports = yield* workerd
-        .serve({
-          sockets: [
-            {
-              name: "main",
-              address: "127.0.0.1:0",
-              http: {},
-              service: { name: "main" },
-            },
-          ],
-          services: [
-            {
-              name: "storage",
-              disk: { path: tmpDir, writable: true },
-            },
-            {
-              name: "callback",
-              external: {
-                address: `127.0.0.1:${String(callbackPort)}`,
-                http: {},
-              },
-            },
-            {
-              name: "main",
-              worker: {
-                compatibilityDate: workerd.compatibilityDate,
-                modules: [
-                  {
-                    name: "worker.js",
-                    esModule: DO_WORKER_ES_MODULE,
-                  },
-                ],
-                durableObjectNamespaces: [
-                  {
-                    className: "HarnessSqlDurableObject",
-                    uniqueKey: "harness-es-sql-do",
-                    enableSql: true,
-                  },
-                ],
-                durableObjectStorage: { localDisk: "storage" },
-                bindings: [
-                  {
-                    name: "DO",
-                    durableObjectNamespace: {
-                      className: "HarnessSqlDurableObject",
-                    },
-                  },
-                  {
-                    name: "CALLBACK",
-                    service: { name: "callback" },
-                  },
-                ],
-              },
-            },
-          ],
-        })
-        .pipe(
-          Scope.provide(bridgeScope),
-          Effect.onError(() => cleanupBridgeResources(bridgeScope, worker, tmpDir)),
-          Effect.orDie,
-        )
-
-      const callSync = (payload: Record<string, unknown>): BridgeExecResult => {
-        const sab = new SharedArrayBuffer(4)
-        const i32 = new Int32Array(sab)
-        const { port1, port2 } = new MessageChannel()
-        worker.postMessage({ ...payload, sab, port: port2 }, [port2])
-        const waitResult = Atomics.wait(i32, 0, 0, BRIDGE_CALL_TIMEOUT_MS)
-        if (waitResult === "timed-out") {
+    const callSync = (payload: Record<string, unknown>): BridgeExecResult => {
+      const sab = new SharedArrayBuffer(4)
+      const i32 = new Int32Array(sab)
+      const { port1, port2 } = new MessageChannel()
+      worker.postMessage({ ...payload, sab, port: port2 }, [port2])
+      const waitResult = Atomics.wait(i32, 0, 0, BRIDGE_CALL_TIMEOUT_MS)
+      return match(waitResult)
+        .with("timed-out", (): BridgeExecResult => {
           port1.close()
           return {
             ok: false,
             message: `Workerd SQLite bridge timed out after ${BRIDGE_CALL_TIMEOUT_MS}ms`,
           }
-        }
-        const received = receiveMessageOnPort(port1)
-        port1.close()
-        if (received === undefined) {
-          return { ok: false, message: "No response received from workerd bridge" }
-        }
-        return received.message as BridgeExecResult
-      }
+        })
+        .with("ok", "not-equal", (): BridgeExecResult => {
+          const received = receiveMessageOnPort(port1)
+          port1.close()
+          if (received === undefined) {
+            return { ok: false, message: "No response received from workerd bridge" }
+          }
+          return received.message as BridgeExecResult
+        })
+        .exhaustive()
+    }
 
-      const initRes = callSync({ type: "set-workerd-port", workerdPort: ports.main })
-      if (!initRes.ok) {
-        yield* cleanupBridgeResources(bridgeScope, worker, tmpDir)
-        return yield* Effect.die(
-          new Error(initRes.message ?? "Failed to initialize workerd SQLite bridge port"),
-        )
-      }
+    const initRes = callSync({ type: "set-workerd-port", workerdPort: ports.main })
+    if (!initRes.ok) {
+      yield* cleanupBridgeResources(bridgeScope, worker, tmpDir)
+      return yield* Effect.die(
+        new Error(initRes.message ?? "Failed to initialize workerd SQLite bridge port"),
+      )
+    }
 
-      const bridge: SharedWorkerdBridge = {
-        worker,
-        scope: bridgeScope,
-        tmpDir,
-        callSync,
-      }
-      return bridge
-    })
+    const bridge: SharedWorkerdBridge = {
+      worker,
+      scope: bridgeScope,
+      tmpDir,
+      callSync,
+    }
+    return bridge
+  })
 
 const acquireSharedWorkerdBridge = (): Effect.Effect<SharedWorkerdBridge, never, Scope.Scope> =>
   Effect.acquireRelease(

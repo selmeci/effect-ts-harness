@@ -7,7 +7,8 @@ import {
   type TypeNode,
   type UnionTypeNode,
 } from "ts-morph"
-import type { BranchingViolation } from "../model.js"
+import { match } from "ts-pattern"
+import type { BranchingViolation, PackageTag } from "../model.js"
 
 export {
   computeDynamicPaths,
@@ -180,6 +181,21 @@ export const isClosedFiniteUnionType = (argType: Type, locationNode: Node): bool
     }
     return false
   })
+}
+
+const isStringLiteralOrBrandedStringLiteral = (member: Type): boolean => {
+  if (member.isStringLiteral()) return true
+  if (member.isIntersection()) {
+    return member.getIntersectionTypes().some((part) => part.isStringLiteral())
+  }
+  return false
+}
+
+export const isClosedStringLiteralUnionType = (type: Type): boolean => {
+  if (!type.isUnion()) return false
+  const members = type.getUnionTypes().filter((u) => !u.isUndefined() && !u.isNull())
+  if (members.length < 2) return false
+  return members.every(isStringLiteralOrBrandedStringLiteral)
 }
 
 export const findEnclosingSymbolName = (node: Node, relPath: string): string => {
@@ -412,6 +428,42 @@ export const containsInlineObjectTypeAst = (typeNode: Node | undefined): boolean
   if (Node.isTypeLiteral(typeNode)) return true
   return typeNode.getDescendantsOfKind(SyntaxKind.TypeLiteral).length > 0
 }
+
+export const TAG_GUARD_CALLEES = new Set([
+  "Exit.isSuccess",
+  "Exit.isFailure",
+  "Option.isSome",
+  "Option.isNone",
+  "Either.isRight",
+  "Either.isLeft",
+  "Result.isSuccess",
+  "Result.isFailure",
+])
+
+export const isEqualityOpKind = (opKind: SyntaxKind): boolean =>
+  opKind === SyntaxKind.EqualsEqualsEqualsToken ||
+  opKind === SyntaxKind.ExclamationEqualsEqualsToken ||
+  opKind === SyntaxKind.EqualsEqualsToken ||
+  opKind === SyntaxKind.ExclamationEqualsToken
+
+export const isLiteralNode = (n: Node): boolean =>
+  Node.isStringLiteral(n) ||
+  Node.isNumericLiteral(n) ||
+  Node.isNoSubstitutionTemplateLiteral(n) ||
+  n.getKind() === SyntaxKind.TrueKeyword ||
+  n.getKind() === SyntaxKind.FalseKeyword
+
+export const isContractOrDomainTag = (tag: PackageTag): boolean =>
+  match(tag)
+    .with("contract", "domain", () => true)
+    .with("service", "infra", "app", "unknown", () => false)
+    .exhaustive()
+
+export const isInfraOrAppTag = (tag: PackageTag): boolean =>
+  match(tag)
+    .with("infra", "app", () => true)
+    .with("contract", "domain", "service", "unknown", () => false)
+    .exhaustive()
 
 export const getSchemaDecodedType = (schemaExpr: Node): Type | null => {
   const exprType = schemaExpr.getType()

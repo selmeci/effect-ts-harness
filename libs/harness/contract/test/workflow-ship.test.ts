@@ -36,6 +36,7 @@ import {
   WorkspaceTreeHash,
   decodeShipAttemptKey,
   encodeShipAttemptKey,
+  formatBoundedErrorMessage,
   toShipFailureMessage,
 } from "../src/index.js"
 
@@ -528,5 +529,214 @@ describe("workflow-ship contracts", () => {
       },
     }
     expect(shipQuerySample.wf_insert_ship_attempt.shipKey).toBe(`${sampleRunId}#1`)
+  })
+
+  it("preserves trailing escalation suffixes and UTF-16 surrogate boundaries in formatBoundedErrorMessage", () => {
+    const suffix = " — [ESCALATE: MANUAL_INTERVENTION]"
+    const detailOverflow = formatBoundedErrorMessage({
+      prefix: "Gate failed",
+      separator: ": ",
+      detail: `${"x".repeat(200)}TAIL_DIAGNOSTIC`,
+      trailingSuffix: suffix,
+      maxChars: 80,
+      fallback: "Fallback error",
+    })
+    expect(detailOverflow.length).toBe(80)
+    expect(detailOverflow.startsWith("Gate failed: ")).toBe(true)
+    expect(detailOverflow).toContain("TAIL_DIAGNOSTIC")
+    expect(detailOverflow.endsWith(suffix)).toBe(true)
+
+    const prefixOverflow = formatBoundedErrorMessage({
+      prefix: "VeryLongPrefixThatExceedsRemainingBudgetWhenCombinedWithSuffix",
+      separator: ": ",
+      detail: "ignored-detail",
+      trailingSuffix: suffix,
+      maxChars: 50,
+      fallback: "Fallback error",
+    })
+    expect(prefixOverflow.length).toBe(50)
+    expect(prefixOverflow.endsWith(suffix)).toBe(true)
+    expect(prefixOverflow).not.toContain("ignored-detail")
+
+    const surrogateDetail = `prefix-${"😀".repeat(20)}-END`
+    const surrogateBounded = formatBoundedErrorMessage({
+      prefix: "Err",
+      separator: ": ",
+      detail: surrogateDetail,
+      trailingSuffix: " [ESC]",
+      maxChars: 24,
+    })
+    expect(surrogateBounded.length).toBeLessThanOrEqual(24)
+    expect(surrogateBounded.endsWith("-END [ESC]")).toBe(true)
+    expect(() => encodeURIComponent(surrogateBounded)).not.toThrow()
+
+    expect(
+      formatBoundedErrorMessage({
+        prefix: "Err",
+        detail: "detail",
+        trailingSuffix: " [ESC]",
+        maxChars: 0,
+        fallback: "Fallback",
+      }),
+    ).toBe("")
+
+    expect(
+      formatBoundedErrorMessage({
+        prefix: "   ",
+        detail: "   ",
+        maxChars: 8,
+        fallback: "  FallbackError  ",
+      }),
+    ).toBe("Fallback")
+
+    const surrogatePrefixBounded = formatBoundedErrorMessage({
+      prefix: "AA😀",
+      separator: ": ",
+      detail: "ignored",
+      trailingSuffix: " [ESC]",
+      maxChars: 9,
+    })
+    expect(surrogatePrefixBounded).toBe("AA [ESC]")
+    expect(() => encodeURIComponent(surrogatePrefixBounded)).not.toThrow()
+
+    const surrogateFallbackBounded = formatBoundedErrorMessage({
+      prefix: "   ",
+      detail: "   ",
+      maxChars: 3,
+      fallback: "AA😀",
+    })
+    expect(surrogateFallbackBounded).toBe("AA")
+    expect(() => encodeURIComponent(surrogateFallbackBounded)).not.toThrow()
+    expect(
+      formatBoundedErrorMessage({
+        prefix: "   ",
+        detail: "   ",
+        maxChars: 1,
+        fallback: "😀",
+      }),
+    ).toBe("")
+
+    const surrogateDetailBudgetOne = formatBoundedErrorMessage({
+      prefix: "Err",
+      separator: ": ",
+      detail: "😀",
+      trailingSuffix: " [ESC]",
+      maxChars: 12,
+    })
+    expect(surrogateDetailBudgetOne).toBe("Err [ESC]")
+    expect(surrogateDetailBudgetOne).not.toBe("Err:  [ESC]")
+
+    const emptyPrefixDetail = formatBoundedErrorMessage({
+      prefix: "   ",
+      separator: ": ",
+      detail: "detail",
+      trailingSuffix: " [ESC]",
+      maxChars: 12,
+    })
+    expect(emptyPrefixDetail).toBe("detail [ESC]")
+
+    const emptyPrefixSurrogateBudgetOne = formatBoundedErrorMessage({
+      prefix: "   ",
+      separator: ": ",
+      detail: "😀",
+      trailingSuffix: " [ESC]",
+      maxChars: 7,
+    })
+    expect(emptyPrefixSurrogateBudgetOne).toBe("[ESC]")
+
+    const suffixExceedsBudget = formatBoundedErrorMessage({
+      prefix: "VeryLongPrefixThatMustYieldToSuffix",
+      separator: ": ",
+      detail: "detail",
+      trailingSuffix: " — [ESCALATE: SUFFIX_TAIL]",
+      maxChars: 12,
+    })
+    expect(suffixExceedsBudget).toBe("SUFFIX_TAIL]")
+    expect(suffixExceedsBudget.length).toBeLessThanOrEqual(12)
+
+    const surrogateSuffixExceedsBudget = formatBoundedErrorMessage({
+      prefix: "Prefix",
+      trailingSuffix: ` — ${"😀".repeat(5)}`,
+      maxChars: 5,
+    })
+    expect(surrogateSuffixExceedsBudget).toBe("😀😀")
+    expect(surrogateSuffixExceedsBudget.length).toBeLessThanOrEqual(5)
+    expect(() => encodeURIComponent(surrogateSuffixExceedsBudget)).not.toThrow()
+
+    const surrogateSuffixSplitChar = formatBoundedErrorMessage({
+      prefix: "Prefix",
+      trailingSuffix: " — A😀B",
+      maxChars: 2,
+    })
+    expect(surrogateSuffixSplitChar).toBe("B")
+    expect(() => encodeURIComponent(surrogateSuffixSplitChar)).not.toThrow()
+
+    const whitespaceSuffixFallback = formatBoundedErrorMessage({
+      prefix: "FallbackPrefix",
+      trailingSuffix: "          ",
+      maxChars: 5,
+    })
+    expect(whitespaceSuffixFallback).toBe("Fallb")
+
+    expect(
+      formatBoundedErrorMessage({
+        prefix: "Err",
+        detail: "detail",
+        trailingSuffix: " [ESC]",
+        maxChars: -1,
+        fallback: "Fallback",
+      }),
+    ).toBe("")
+    expect(
+      formatBoundedErrorMessage({
+        prefix: "Err",
+        detail: "detail",
+        trailingSuffix: " [ESC]",
+        maxChars: Number.NaN,
+        fallback: "Fallback",
+      }),
+    ).toBe("")
+  })
+
+  it("omits unmatched parentheses in formatBoundedMutationRestore when base fills budget", () => {
+    const baseOverflowErr = new MutationRestoreError(
+      {
+        expected: WorkspaceTreeHash.make("a".repeat(1000), { disableChecks: true }),
+        actual: WorkspaceTreeHash.make("b".repeat(1000), { disableChecks: true }),
+        detail: ShipFailureMessage.make("restore-detail-omitted"),
+      },
+      { disableChecks: true },
+    )
+    const baseOverflowMsg = toShipFailureMessage(baseOverflowErr)
+    expect(baseOverflowMsg.length).toBe(2048)
+    expect(baseOverflowMsg.endsWith(")")).toBe(false)
+    expect(baseOverflowMsg).not.toContain("(")
+
+    const surrogateDetailBudgetOneHash = "a".repeat(1964)
+    const tightDetailErr = new MutationRestoreError(
+      {
+        expected: WorkspaceTreeHash.make(surrogateDetailBudgetOneHash, { disableChecks: true }),
+        detail: ShipFailureMessage.make("😀"),
+      },
+      { disableChecks: true },
+    )
+    const tightDetailMsg = toShipFailureMessage(tightDetailErr)
+    expect(tightDetailMsg.length).toBeLessThanOrEqual(2048)
+    expect(tightDetailMsg.endsWith(")")).toBe(false)
+    expect(tightDetailMsg).not.toContain("(")
+
+    const surrogateEscOnlyErr = new ShipGateFailedError({
+      stage: ShipStage.make("verify"),
+      exitCode: GateExitCode.make(1),
+      stderrSummary: GateStderrSummary.make("stderr-ignored"),
+      circuitBreakerStatus: CircuitBreakerStatus.make("clear"),
+      escalationMessage: ShipFailureMessage.make("😀".repeat(1024)),
+    })
+    const surrogateEscOnlyBounded = toShipFailureMessage(surrogateEscOnlyErr)
+    expect(surrogateEscOnlyBounded.length).toBeLessThanOrEqual(2048)
+    expect(
+      surrogateEscOnlyBounded.startsWith("Ship gate 'verify' failed with exit code 1 — "),
+    ).toBe(true)
+    expect(() => encodeURIComponent(surrogateEscOnlyBounded)).not.toThrow()
   })
 })

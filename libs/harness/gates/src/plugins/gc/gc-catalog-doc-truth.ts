@@ -5,6 +5,7 @@ import {
   compareCodeUnits,
 } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
+import { WORKER_ISOLATED_WORKFLOW_SUBCOMMANDS } from "../../policy-worker-isolation.js"
 import { type GcFinding, collectMarkdownFilesRecursive, readTextOrReport } from "./gc-helpers.js"
 
 const LIVE_CATALOG_TOP_LEVEL_DOCS: ReadonlyArray<string> = [
@@ -211,6 +212,158 @@ export const auditCatalogDocTruthInContent = (
   return findings
 }
 
+export const WORKER_ISOLATION_PARITY_DOC_PATHS: ReadonlyArray<string> = [
+  "libs/harness/docs/adr/0018-durable-effect-workflow-omnigraph-engine-and-agent-runners.md",
+  "adapters/claude-code/README.md",
+  "adapters/claude-code/skills/effect-harness/SKILL.md",
+  "adapters/antigravity/plugins/effect-harness/README.md",
+  "adapters/antigravity/plugins/effect-harness/skills/effect-harness/SKILL.md",
+]
+
+const extractWorkerIsolatedDocSubcommands = (
+  afterWorkerText: string,
+): ReadonlyArray<string> | undefined => {
+  const inlinePipeMatch = /`harness\s+workflow\s+([^`\n]+)`/i.exec(afterWorkerText)
+  if (inlinePipeMatch !== null) {
+    return inlinePipeMatch[1]!
+      .split(/[|/]/)
+      .map((tok) => tok.replace(/`/g, "").trim())
+      .filter((tok) => tok.length > 0)
+  }
+  const parenListMatch = /`harness\s+workflow`\s*\(([^)\n]+)\)/i.exec(afterWorkerText)
+  if (parenListMatch !== null) {
+    return parenListMatch[1]!
+      .split(/[|/]/)
+      .map((tok) => tok.replace(/`/g, "").trim())
+      .filter((tok) => tok.length > 0)
+  }
+  return undefined
+}
+
+/**
+ * REQ-3.5: Verifies `policy.ts`, `ADR-0018`, and Claude Code / Antigravity `README.md` + `SKILL.md`
+ * stay synchronized with `WORKER_ISOLATED_WORKFLOW_SUBCOMMANDS`.
+ */
+export const auditWorkerIsolationSubcommandParity = (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  findingsOut: Array<GcFinding> = [],
+): ReadonlyArray<GcFinding> => {
+  const policyPath = join(repoRoot, "libs/harness/gates/src/policy.ts")
+  const policyWorkerPath = join(repoRoot, "libs/harness/gates/src/policy-worker-isolation.ts")
+  const hasWorkerIsolationSurface =
+    hostIo.existsSync(policyPath) ||
+    hostIo.existsSync(policyWorkerPath) ||
+    WORKER_ISOLATION_PARITY_DOC_PATHS.some((rel) => hostIo.existsSync(join(repoRoot, rel)))
+  if (!hasWorkerIsolationSurface) {
+    return findingsOut
+  }
+
+  if (hostIo.existsSync(policyPath)) {
+    const policyText = readTextOrReport(policyPath, hostIo, repoRoot, findingsOut)
+    if (policyText !== undefined) {
+      const joined = WORKER_ISOLATED_WORKFLOW_SUBCOMMANDS.join("|")
+      const interpolatesCanonicalConst =
+        /\$\{\s*WORKER_ISOLATED_WORKFLOW_SUBCOMMANDS\.join\(\s*["'][^"']+["']\s*\)\s*\}/.test(
+          policyText,
+        )
+      const hasAllJoined = policyText.includes(joined)
+      if (!interpolatesCanonicalConst && !hasAllJoined) {
+        findingsOut.push({
+          kind: "worker-isolation-subcommand-parity",
+          nodeId: "policy.ts:worker-isolation-subcommands",
+          location: "libs/harness/gates/src/policy.ts",
+          message: `policy.ts worker isolation deny reason does not derive from WORKER_ISOLATED_WORKFLOW_SUBCOMMANDS (${joined}).`,
+          action:
+            "Import and interpolate WORKER_ISOLATED_WORKFLOW_SUBCOMMANDS in libs/harness/gates/src/policy.ts.",
+        })
+      }
+    }
+  }
+
+  const canonicalSet = new Set<string>(WORKER_ISOLATED_WORKFLOW_SUBCOMMANDS)
+  for (const relDoc of WORKER_ISOLATION_PARITY_DOC_PATHS) {
+    const absDoc = join(repoRoot, relDoc)
+    if (!hostIo.existsSync(absDoc)) {
+      findingsOut.push({
+        kind: "worker-isolation-subcommand-parity",
+        nodeId: `${relDoc}:missing-doc`,
+        location: relDoc,
+        message: `Required worker isolation documentation file "${relDoc}" is missing.`,
+        action: `Create "${relDoc}" documenting HARNESS_UNIT_WORKER=1 blocked workflow subcommands (${WORKER_ISOLATED_WORKFLOW_SUBCOMMANDS.join("|")}).`,
+      })
+      continue
+    }
+    const content = readTextOrReport(absDoc, hostIo, repoRoot, findingsOut)
+    if (content === undefined) continue
+    const lines = content.split(/\r?\n/)
+    const workerWindows: Array<{ readonly lineNum: number; readonly afterWorkerText: string }> = []
+    for (let i = 0; i < lines.length; i++) {
+      const markerMatch = /\bHARNESS_UNIT_WORKER\b/.exec(lines[i]!)
+      if (markerMatch !== null) {
+        const afterOnLine = lines[i]!.slice(markerMatch.index)
+        const snippet = [afterOnLine, lines[i + 1] ?? ""].join(" ")
+        workerWindows.push({ lineNum: i + 1, afterWorkerText: snippet })
+      }
+    }
+    if (workerWindows.length === 0) {
+      findingsOut.push({
+        kind: "worker-isolation-subcommand-parity",
+        nodeId: `${relDoc}:missing-worker-isolation`,
+        location: relDoc,
+        message: `Documentation "${relDoc}" is missing HARNESS_UNIT_WORKER=1 workflow isolation subcommand documentation.`,
+        action: `Document HARNESS_UNIT_WORKER=1 blocked workflow subcommands (${WORKER_ISOLATED_WORKFLOW_SUBCOMMANDS.join("|")}) in "${relDoc}".`,
+      })
+      continue
+    }
+    const parsedLists = workerWindows
+      .map((w) => ({
+        lineNum: w.lineNum,
+        tokens: extractWorkerIsolatedDocSubcommands(w.afterWorkerText),
+      }))
+      .filter(
+        (entry): entry is { readonly lineNum: number; readonly tokens: ReadonlyArray<string> } =>
+          entry.tokens !== undefined,
+      )
+    const firstLine = workerWindows[0]!.lineNum
+    if (parsedLists.length === 0) {
+      findingsOut.push({
+        kind: "worker-isolation-subcommand-parity",
+        nodeId: `${relDoc}:missing-subcmd-list`,
+        location: `${relDoc}:${firstLine}`,
+        message: `Documentation "${relDoc}:${firstLine}" HARNESS_UNIT_WORKER=1 clause lacks a parseable 'harness workflow' blocked subcommand list.`,
+        action: `Document blocked workflow subcommands (${WORKER_ISOLATED_WORKFLOW_SUBCOMMANDS.join("|")}) after HARNESS_UNIT_WORKER=1 in "${relDoc}".`,
+      })
+      continue
+    }
+    const foundTokens = new Set<string>(parsedLists.flatMap((entry) => entry.tokens))
+    for (const subcmd of WORKER_ISOLATED_WORKFLOW_SUBCOMMANDS) {
+      if (!foundTokens.has(subcmd)) {
+        findingsOut.push({
+          kind: "worker-isolation-subcommand-parity",
+          nodeId: `${relDoc}:missing-subcmd:${subcmd}`,
+          location: `${relDoc}:${firstLine}`,
+          message: `Documentation "${relDoc}:${firstLine}" HARNESS_UNIT_WORKER=1 clause omits blocked workflow subcommand '${subcmd}'.`,
+          action: `Add '${subcmd}' to the HARNESS_UNIT_WORKER=1 blocked subcommand list in "${relDoc}".`,
+        })
+      }
+    }
+    for (const extra of foundTokens) {
+      if (!canonicalSet.has(extra)) {
+        findingsOut.push({
+          kind: "worker-isolation-subcommand-parity",
+          nodeId: `${relDoc}:extra-subcmd:${extra}`,
+          location: `${relDoc}:${firstLine}`,
+          message: `Documentation "${relDoc}:${firstLine}" HARNESS_UNIT_WORKER=1 clause lists stale/extra workflow subcommand '${extra}' not in WORKER_ISOLATED_WORKFLOW_SUBCOMMANDS.`,
+          action: `Remove '${extra}' from the HARNESS_UNIT_WORKER=1 blocked subcommand list in "${relDoc}".`,
+        })
+      }
+    }
+  }
+
+  return findingsOut
+}
+
 export const checkCatalogDocTruth = (
   repoRoot: string,
   hostIo: SyncHostIo,
@@ -233,4 +386,5 @@ export const checkCatalogDocTruth = (
     if (content === undefined) continue
     findings.push(...auditCatalogDocTruthInContent(relDoc, content))
   }
+  auditWorkerIsolationSubcommandParity(repoRoot, hostIo, findings)
 }
