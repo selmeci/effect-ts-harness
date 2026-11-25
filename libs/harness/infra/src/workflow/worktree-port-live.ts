@@ -104,7 +104,7 @@ const cleanupStaleWorktreeDir = (
     if (!hostIo.existsSync(worktreeDir)) {
       return
     }
-    const removeArgs = ["worktree", "remove", "--force", worktreeDir]
+    const removeArgs = ["worktree", "remove", "--force", "--", worktreeDir]
     const removeRes = yield* runGitCommand(hostIo, canonicalRepoRoot, removeArgs)
     yield* match(removeRes)
       .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {
@@ -170,7 +170,7 @@ const resolveWorktreeAddArgs = (
   baseSha: string,
 ): Effect.Effect<ReadonlyArray<string>, WorkspaceFsError> =>
   Effect.gen(function* () {
-    const showRefArgs = ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]
+    const showRefArgs = ["show-ref", "--verify", "--quiet", "--", `refs/heads/${branch}`]
     const showRefRes = yield* runGitCommand(hostIo, canonicalRepoRoot, showRefArgs)
     const branchExists = yield* match(showRefRes)
       .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {
@@ -218,15 +218,15 @@ const resolveWorktreeAddArgs = (
       .exhaustive()
 
     if (!branchExists) {
-      return ["worktree", "add", "-b", branch, worktreeDir, baseSha] as const
+      return ["worktree", "add", "-b", branch, "--", worktreeDir, baseSha] as const
     }
 
-    const ancestorArgs = ["merge-base", "--is-ancestor", baseSha, branch]
+    const ancestorArgs = ["merge-base", "--is-ancestor", "--end-of-options", baseSha, branch]
     const ancestorRes = yield* runGitCommand(hostIo, canonicalRepoRoot, ancestorArgs)
     return yield* match(ancestorRes)
       .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {
         if (exitCode === 0) {
-          return Effect.succeed(["worktree", "add", worktreeDir, branch] as const)
+          return Effect.succeed(["worktree", "add", "--", worktreeDir, branch] as const)
         }
         if (exitCode === 1) {
           return Effect.fail(
@@ -330,7 +330,7 @@ export const provisionWorkflowWorktreesImpl = Effect.fn("Harness.provisionWorkfl
               }
               parentDirs.add(dirname(entry.cwd))
               if (hostIo.existsSync(entry.cwd)) {
-                const removeArgs = ["worktree", "remove", "--force", entry.cwd]
+                const removeArgs = ["worktree", "remove", "--force", "--", entry.cwd]
                 const removeRes = yield* runGitCommand(hostIo, canonicalRepoRoot, removeArgs)
                 yield* assertGitSuccess(canonicalRepoRoot, removeArgs, removeRes)
               }
@@ -443,7 +443,7 @@ export const removeWorktreeCheckoutsImpl = Effect.fn("Harness.removeWorktreeChec
             parentDirs.add(dirname(entry.cwd))
             const removeRes = yield* Effect.try({
               try: () =>
-                hostIo.execFileSync("git", ["worktree", "remove", "--force", entry.cwd], {
+                hostIo.execFileSync("git", ["worktree", "remove", "--force", "--", entry.cwd], {
                   cwd: receipt.canonicalRepoRoot,
                 }),
               catch: (cause) => toErrorReasonMessage(cause),
@@ -582,7 +582,7 @@ export const mergeSliceWaveImpl = Effect.fn("Harness.mergeSliceWave")(function* 
   const mergedBranches: Array<SliceBranchName> = []
 
   for (const branch of input.branches) {
-    const ancestorArgs = ["merge-base", "--is-ancestor", branch, "HEAD"]
+    const ancestorArgs = ["merge-base", "--is-ancestor", "--end-of-options", branch, "HEAD"]
     const ancestorRes = yield* runGitCommand(hostIo, input.canonicalRepoRoot, ancestorArgs)
     const isAlreadyMerged = yield* match(ancestorRes)
       .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {
@@ -634,7 +634,7 @@ export const mergeSliceWaveImpl = Effect.fn("Harness.mergeSliceWave")(function* 
       continue
     }
 
-    const mergeArgs = ["merge", "--no-ff", "--no-edit", branch]
+    const mergeArgs = ["merge", "--no-ff", "--no-edit", "--end-of-options", branch]
     const mergeRes = yield* runGitCommand(hostIo, input.canonicalRepoRoot, mergeArgs)
     const mergeOutcome = yield* match(mergeRes)
       .with({ _tag: "Exited" }, ({ exitCode, stderr, stdout }) => {

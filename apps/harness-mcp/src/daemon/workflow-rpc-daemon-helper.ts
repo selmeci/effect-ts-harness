@@ -9,6 +9,7 @@ import {
   WorkflowAbortRequest,
   type WorkflowAbortResponse,
   WorkflowDaemonCapability,
+  type WorkflowExecutionId,
   type WorkflowPollBudget,
   WorkflowResumeRequest,
   WorkflowResumeResponse,
@@ -302,47 +303,52 @@ export const handleDaemonWorkflowResumeRequest = Effect.fn("WorkflowRpcDaemon.ha
                       workflow: HarnessTaskWorkflow,
                       executionId: target.executionId,
                     })
-                    yield* DurableDeferred.succeed(deferred, { token, value: { decision } }).pipe(
-                      Effect.provideContext(runtime.workflowContext),
-                    )
+                    yield* Effect.uninterruptible(
+                      Effect.gen(function* () {
+                        yield* DurableDeferred.succeed(deferred, {
+                          token,
+                          value: { decision },
+                        }).pipe(Effect.provideContext(runtime.workflowContext))
 
-                    yield* match(decision)
-                      .with("abort", () =>
-                        waitForWorkflowCompletion(
-                          runtime,
-                          target.executionId,
-                          `Timed out waiting for aborted workflow run '${target.runId}' to settle`,
-                          ABORT_SETTLE_BUDGET.maxAttempts,
-                          ABORT_SETTLE_BUDGET.intervalMs,
-                        ),
-                      )
-                      .with("retry", () =>
-                        waitBoundedUntil(
-                          Effect.gen(function* () {
-                            const updatedUnits = yield* runtime.readModelQuery
-                              .listUnits(target.runId)
-                              .pipe(Effect.mapError(storeOrLeaseToBoundedReason))
-                            const u = updatedUnits.find((item) => item.unitId === targetUnitId)
-                            return u !== undefined && !isUnitStatus(u, "escalated")
-                              ? Option.some(true as const)
-                              : Option.none<true>()
-                          }),
-                        ).pipe(
-                          Effect.flatMap((settled) =>
-                            match(settled)
-                              .with({ _tag: "Some" }, () => Effect.void)
-                              .with({ _tag: "None" }, () =>
-                                Effect.fail(
-                                  toBoundedReason(
-                                    `Timed out waiting for retried unit '${targetUnitId}' to leave escalated state`,
-                                  ),
-                                ),
-                              )
-                              .exhaustive(),
-                          ),
-                        ),
-                      )
-                      .exhaustive()
+                        yield* match(decision)
+                          .with("abort", () =>
+                            waitForWorkflowCompletion(
+                              runtime,
+                              target.executionId,
+                              `Timed out waiting for aborted workflow run '${target.runId}' to settle`,
+                              ABORT_SETTLE_BUDGET.maxAttempts,
+                              ABORT_SETTLE_BUDGET.intervalMs,
+                            ),
+                          )
+                          .with("retry", () =>
+                            waitBoundedUntil(
+                              Effect.gen(function* () {
+                                const updatedUnits = yield* runtime.readModelQuery
+                                  .listUnits(target.runId)
+                                  .pipe(Effect.mapError(storeOrLeaseToBoundedReason))
+                                const u = updatedUnits.find((item) => item.unitId === targetUnitId)
+                                return u !== undefined && !isUnitStatus(u, "escalated")
+                                  ? Option.some(true as const)
+                                  : Option.none<true>()
+                              }),
+                            ).pipe(
+                              Effect.flatMap((settled) =>
+                                match(settled)
+                                  .with({ _tag: "Some" }, () => Effect.void)
+                                  .with({ _tag: "None" }, () =>
+                                    Effect.fail(
+                                      toBoundedReason(
+                                        `Timed out waiting for retried unit '${targetUnitId}' to leave escalated state`,
+                                      ),
+                                    ),
+                                  )
+                                  .exhaustive(),
+                              ),
+                            ),
+                          )
+                          .exhaustive()
+                      }),
+                    )
 
                     return WorkflowResumeResponse.cases.EscalationResolved.make({
                       runId: target.runId,
@@ -382,6 +388,29 @@ export const handleDaemonWorkflowResumeRequest = Effect.fn("WorkflowRpcDaemon.ha
   },
 )
 
+const interruptAndSettleTaskWorkflow = Effect.fn(
+  "WorkflowRpcDaemon.interruptAndSettleTaskWorkflow",
+)(function* (
+  runtime: NonNullable<WorkflowRpcHandlerInput["runtime"]>,
+  executionId: WorkflowExecutionId,
+  runId: WorkflowRunId,
+) {
+  yield* Effect.uninterruptible(
+    Effect.gen(function* () {
+      yield* HarnessTaskWorkflow.interrupt(executionId).pipe(
+        Effect.provideContext(runtime.workflowContext),
+      )
+      yield* waitForWorkflowCompletion(
+        runtime,
+        executionId,
+        `Timed out waiting for workflow run '${runId}' interrupt to reach terminal state`,
+        ABORT_SETTLE_BUDGET.maxAttempts,
+        ABORT_SETTLE_BUDGET.intervalMs,
+      )
+    }),
+  )
+})
+
 /** Processes `workflow.abort` over daemon Unix socket IPC. */
 export const handleDaemonWorkflowAbortRequest = Effect.fn("WorkflowRpcDaemon.handleAbortRequest")(
   function* (input: WorkflowRpcHandlerInput): Effect.fn.Return<WorkflowRpcEnvelope> {
@@ -415,91 +444,86 @@ export const handleDaemonWorkflowAbortRequest = Effect.fn("WorkflowRpcDaemon.han
                 )
                 .exhaustive()
 
-              if (needsInterrupt) {
-                yield* HarnessTaskWorkflow.interrupt(target.executionId).pipe(
-                  Effect.provideContext(runtime.workflowContext),
-                )
-                yield* waitForWorkflowCompletion(
-                  runtime,
-                  target.executionId,
-                  `Timed out waiting for workflow run '${target.runId}' interrupt to reach terminal state`,
-                  ABORT_SETTLE_BUDGET.maxAttempts,
-                  ABORT_SETTLE_BUDGET.intervalMs,
-                )
-              }
+              return yield* Effect.uninterruptible(
+                Effect.gen(function* () {
+                  if (needsInterrupt) {
+                    yield* interruptAndSettleTaskWorkflow(runtime, target.executionId, target.runId)
+                  }
 
-              const finalPoll = yield* pollExecution(runtime, target.executionId)
-              const terminalState = yield* match(finalPoll)
-                .with({ _tag: "None" }, () =>
-                  Effect.fail(
-                    toBoundedReason(
-                      `Workflow run '${target.runId}' did not reach a terminal state after interrupt`,
-                    ),
-                  ),
-                )
-                .with({ _tag: "Some" }, ({ value }) =>
-                  match(value)
-                    .with({ _tag: "Suspended" }, () =>
+                  const finalPoll = yield* pollExecution(runtime, target.executionId)
+                  const terminalState = yield* match(finalPoll)
+                    .with({ _tag: "None" }, () =>
                       Effect.fail(
                         toBoundedReason(
-                          `Workflow run '${target.runId}' remained suspended after interrupt`,
+                          `Workflow run '${target.runId}' did not reach a terminal state after interrupt`,
                         ),
                       ),
                     )
-                    .with({ _tag: "Complete" }, ({ exit }) =>
-                      Effect.succeed(
-                        Exit.match(exit, {
-                          onSuccess: () => "completed" as const,
-                          onFailure: () => "aborted" as const,
-                        }),
-                      ),
-                    )
-                    .exhaustive(),
-                )
-                .exhaustive()
-
-              return yield* match(terminalState)
-                .with("completed", () =>
-                  Effect.succeed<WorkflowAbortResponse>({
-                    runId: target.runId,
-                    executionId: target.executionId,
-                    state: "completed",
-                  }),
-                )
-                .with("aborted", () =>
-                  Effect.gen(function* () {
-                    const runOpt = yield* runtime.readModelQuery
-                      .getRun(target.runId)
-                      .pipe(Effect.mapError(storeOrLeaseToBoundedReason))
-                    yield* match(runOpt)
-                      .with({ _tag: "None" }, () => Effect.void)
-                      .with({ _tag: "Some" }, ({ value: run }) =>
-                        isRunTerminalState(run.state)
-                          ? Effect.void
-                          : Clock.currentTimeMillis.pipe(
-                              Effect.flatMap((millis) =>
-                                runtime.projectionWriter
-                                  .upsertRun({
-                                    ...run,
-                                    state: "aborted",
-                                    updatedMs: WorkflowTimestampMs.make(
-                                      Math.max(0, Math.floor(millis)),
-                                    ),
-                                  })
-                                  .pipe(Effect.mapError(storeOrLeaseToBoundedReason)),
-                              ),
+                    .with({ _tag: "Some" }, ({ value }) =>
+                      match(value)
+                        .with({ _tag: "Suspended" }, () =>
+                          Effect.fail(
+                            toBoundedReason(
+                              `Workflow run '${target.runId}' remained suspended after interrupt`,
                             ),
-                      )
-                      .exhaustive()
+                          ),
+                        )
+                        .with({ _tag: "Complete" }, ({ exit }) =>
+                          Effect.succeed(
+                            Exit.match(exit, {
+                              onSuccess: () => "completed" as const,
+                              onFailure: () => "aborted" as const,
+                            }),
+                          ),
+                        )
+                        .exhaustive(),
+                    )
+                    .exhaustive()
 
-                    return {
-                      runId: target.runId,
-                      executionId: target.executionId,
-                      state: "aborted",
-                    } satisfies WorkflowAbortResponse
-                  }),
-                )
-                .exhaustive()
+                  return yield* match(terminalState)
+                    .with("completed", () =>
+                      Effect.succeed<WorkflowAbortResponse>({
+                        runId: target.runId,
+                        executionId: target.executionId,
+                        state: "completed",
+                      }),
+                    )
+                    .with("aborted", () =>
+                      Effect.gen(function* () {
+                        const runOpt = yield* runtime.readModelQuery
+                          .getRun(target.runId)
+                          .pipe(Effect.mapError(storeOrLeaseToBoundedReason))
+                        yield* match(runOpt)
+                          .with({ _tag: "None" }, () => Effect.void)
+                          .with({ _tag: "Some" }, ({ value: run }) =>
+                            isRunTerminalState(run.state)
+                              ? Effect.void
+                              : Clock.currentTimeMillis.pipe(
+                                  Effect.flatMap((millis) =>
+                                    runtime.projectionWriter
+                                      .upsertRun({
+                                        ...run,
+                                        state: "aborted",
+                                        updatedMs: WorkflowTimestampMs.make(
+                                          Math.max(0, Math.floor(millis)),
+                                        ),
+                                      })
+                                      .pipe(Effect.mapError(storeOrLeaseToBoundedReason)),
+                                  ),
+                                ),
+                          )
+                          .exhaustive()
+
+                        return {
+                          runId: target.runId,
+                          executionId: target.executionId,
+                          state: "aborted",
+                        } satisfies WorkflowAbortResponse
+                      }),
+                    )
+                    .exhaustive()
+                }),
+              )
             }),
           )
         }),

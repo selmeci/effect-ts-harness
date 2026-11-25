@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 import {
   AttemptNumber,
   EscalationOrdinal,
+  MultiStageTimeoutBudgetInput,
   SHIP_STAGES,
   ShipAttempt,
   ShipAttemptKey,
@@ -20,6 +21,8 @@ import {
   WorkflowPollBudget,
   WorkflowRunAbortTarget,
   WorkflowRunId,
+  WorkflowStageCount,
+  WorkflowStageLabel,
   WorkflowTimeoutBudgets,
   WorkflowTimeoutMs,
   decodeShipAttemptKey,
@@ -28,6 +31,7 @@ import {
   encodeShipAttemptKey,
   encodeWorkflowActivityName,
   encodeWorkflowDeferredName,
+  validateMultiStageTimeoutBudget,
   validateWorkflowTimeoutBudgets,
 } from "../src/index.js"
 
@@ -844,5 +848,197 @@ describe("workflow-protocol & workflow-timeouts", () => {
     for (const bad of badShipKeys) {
       expect(Result.isFailure(decodeShipAttemptKey(bad))).toBe(true)
     }
+  })
+
+  it("validates MultiStageTimeoutBudgetInput and enforces settleMs > stageCount * perStageCommandMs", () => {
+    const stageCount = WorkflowStageCount.make(4)
+    const perStageCommandMs = WorkflowTimeoutMs.make(1_000)
+    const workflowLabel = WorkflowStageLabel.make("CustomPipeline")
+
+    const equalRes = validateMultiStageTimeoutBudget(
+      MultiStageTimeoutBudgetInput.make({
+        stageCount,
+        perStageCommandMs,
+        settleMs: WorkflowTimeoutMs.make(4_000),
+        workflowLabel,
+      }),
+    )
+    match(equalRes)
+      .with({ _tag: "Failure" }, ({ failure }) => {
+        expect(failure).toContain("CustomPipeline")
+        expect(failure).toContain("4000")
+        expect(failure).toContain("4")
+        expect(failure).toContain("1000")
+      })
+      .with({ _tag: "Success" }, () =>
+        expect.unreachable("Expected equal settleMs to fail validateMultiStageTimeoutBudget"),
+      )
+      .exhaustive()
+
+    const belowRes = validateMultiStageTimeoutBudget(
+      MultiStageTimeoutBudgetInput.make({
+        stageCount,
+        perStageCommandMs,
+        settleMs: WorkflowTimeoutMs.make(3_999),
+        workflowLabel,
+      }),
+    )
+    match(belowRes)
+      .with({ _tag: "Failure" }, ({ failure }) => {
+        expect(failure).toContain(
+          "settleMs (3999) must exceed stageCount (4) * perStageCommandMs (1000) = 4000",
+        )
+      })
+      .with({ _tag: "Success" }, () =>
+        expect.unreachable("Expected below-limit settleMs to fail validateMultiStageTimeoutBudget"),
+      )
+      .exhaustive()
+
+    const aboveRes = validateMultiStageTimeoutBudget(
+      MultiStageTimeoutBudgetInput.make({
+        stageCount,
+        perStageCommandMs,
+        settleMs: WorkflowTimeoutMs.make(4_001),
+        workflowLabel,
+      }),
+    )
+    match(aboveRes)
+      .with({ _tag: "Success" }, ({ success }) => expect(success).toBe(4_001))
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        expect.unreachable(`Expected 4001ms to pass validateMultiStageTimeoutBudget: ${failure}`),
+      )
+      .exhaustive()
+
+    const invalidNumericInputs: ReadonlyArray<unknown> = ["4", null, undefined, Number.NaN, 1.5, -1]
+    for (const invalidValue of invalidNumericInputs) {
+      match(Schema.decodeUnknownResult(WorkflowStageCount)(invalidValue))
+        .with({ _tag: "Failure" }, () => undefined)
+        .with({ _tag: "Success" }, () =>
+          expect.unreachable(
+            `Expected WorkflowStageCount decode failure for ${String(invalidValue)}`,
+          ),
+        )
+        .exhaustive()
+      match(Schema.decodeUnknownResult(MultiStageTimeoutBudgetInput)(invalidValue))
+        .with({ _tag: "Failure" }, () => undefined)
+        .with({ _tag: "Success" }, () =>
+          expect.unreachable(
+            `Expected MultiStageTimeoutBudgetInput decode failure for top-level ${String(invalidValue)}`,
+          ),
+        )
+        .exhaustive()
+      match(
+        Schema.decodeUnknownResult(MultiStageTimeoutBudgetInput)({
+          stageCount: invalidValue,
+          perStageCommandMs: 1_000,
+          settleMs: 5_000,
+          workflowLabel: "CustomPipeline",
+        }),
+      )
+        .with({ _tag: "Failure" }, () => undefined)
+        .with({ _tag: "Success" }, () =>
+          expect.unreachable(
+            `Expected MultiStageTimeoutBudgetInput decode failure for stageCount=${String(invalidValue)}`,
+          ),
+        )
+        .exhaustive()
+    }
+
+    expect(Result.isFailure(Schema.decodeResult(WorkflowStageCount)(0))).toBe(true)
+    expect(Result.isFailure(Schema.decodeResult(WorkflowStageLabel)(""))).toBe(true)
+    expect(Result.isFailure(Schema.decodeResult(WorkflowStageLabel)("  padded "))).toBe(true)
+    expect(Result.isFailure(Schema.decodeResult(WorkflowStageLabel)("a".repeat(129)))).toBe(true)
+  })
+
+  it("enforces settleMs > stageCount * perStageCommandMs across bounded stageCount and perStageCommandMs boundaries", () => {
+    const stageCountArb = Arbitrary.schema(
+      Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 1, maximum: 20 }))),
+    )
+    const perStageCommandMsArb = Arbitrary.schema(
+      Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 1, maximum: 10_000 }))),
+    )
+    const pairArb = Arbitrary.all({
+      stageCount: stageCountArb,
+      perStageCommandMs: perStageCommandMsArb,
+    })
+    const workflowLabel = WorkflowStageLabel.make("PropPipeline")
+
+    const propCheck = Effect.runSync(
+      Arbitrary.checkEffect(
+        pairArb,
+        ({ stageCount: rawStageCount, perStageCommandMs: rawPerStageMs }) => {
+          const stageCount = WorkflowStageCount.make(rawStageCount)
+          const perStageCommandMs = WorkflowTimeoutMs.make(rawPerStageMs)
+          const limit = stageCount * perStageCommandMs
+
+          const atLimitOk = match(
+            validateMultiStageTimeoutBudget(
+              MultiStageTimeoutBudgetInput.make({
+                stageCount,
+                perStageCommandMs,
+                settleMs: WorkflowTimeoutMs.make(limit),
+                workflowLabel,
+              }),
+            ),
+          )
+            .with({ _tag: "Failure" }, ({ failure }) =>
+              failure.includes(
+                `settleMs (${limit}) must exceed stageCount (${stageCount}) * perStageCommandMs (${perStageCommandMs}) = ${limit}`,
+              ),
+            )
+            .with({ _tag: "Success" }, () => false)
+            .exhaustive()
+
+          const belowLimitOk =
+            limit > 1
+              ? match(
+                  validateMultiStageTimeoutBudget(
+                    MultiStageTimeoutBudgetInput.make({
+                      stageCount,
+                      perStageCommandMs,
+                      settleMs: WorkflowTimeoutMs.make(limit - 1),
+                      workflowLabel,
+                    }),
+                  ),
+                )
+                  .with({ _tag: "Failure" }, ({ failure }) =>
+                    failure.includes(
+                      `settleMs (${limit - 1}) must exceed stageCount (${stageCount}) * perStageCommandMs (${perStageCommandMs}) = ${limit}`,
+                    ),
+                  )
+                  .with({ _tag: "Success" }, () => false)
+                  .exhaustive()
+              : match(
+                  Schema.decodeResult(MultiStageTimeoutBudgetInput)({
+                    stageCount,
+                    perStageCommandMs,
+                    settleMs: limit - 1,
+                    workflowLabel,
+                  }),
+                )
+                  .with({ _tag: "Failure" }, () => true)
+                  .with({ _tag: "Success" }, () => false)
+                  .exhaustive()
+
+          const aboveLimitOk = match(
+            validateMultiStageTimeoutBudget(
+              MultiStageTimeoutBudgetInput.make({
+                stageCount,
+                perStageCommandMs,
+                settleMs: WorkflowTimeoutMs.make(limit + 1),
+                workflowLabel,
+              }),
+            ),
+          )
+            .with({ _tag: "Success" }, ({ success }) => success === limit + 1)
+            .with({ _tag: "Failure" }, () => false)
+            .exhaustive()
+
+          return atLimitOk && belowLimitOk && aboveLimitOk
+        },
+        { runs: 150, seed: 27 },
+      ),
+    )
+    expect(propCheck._tag).toBe("Passed")
   })
 })

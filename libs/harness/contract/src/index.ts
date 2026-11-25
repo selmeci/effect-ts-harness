@@ -34,6 +34,7 @@ export {
 export {
   ActiveMutantId,
   BatchExitCode,
+  type BoundedErrorMessageOptions,
   CANONICAL_CLI_COMMAND_NAMES,
   CANONICAL_MCP_TOOL_NAMES,
   CanonicalCliCommandName,
@@ -68,6 +69,7 @@ export {
   WorkspaceFileStat,
   WorkspaceFsError,
   WorkspaceFsOperation,
+  formatBoundedErrorMessage,
   isPureInterruptCause,
   toCompilerOverlayErrorReason,
   toCompilerRepoRootInput,
@@ -379,11 +381,15 @@ export {
   toBoundedReason,
 } from "./workflow-storage.js"
 export {
+  MultiStageTimeoutBudgetInput,
   WORKFLOW_TIMEOUT_BUDGETS,
   WorkflowPollAttempts,
   WorkflowPollBudget,
+  WorkflowStageCount,
+  WorkflowStageLabel,
   WorkflowTimeoutBudgets,
   WorkflowTimeoutMs,
+  validateMultiStageTimeoutBudget,
   validateWorkflowTimeoutBudgets,
 } from "./workflow-timeouts.js"
 export {

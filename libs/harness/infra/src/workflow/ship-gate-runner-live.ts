@@ -544,9 +544,9 @@ export const executeStageCommandImpl = Effect.fn("ShipGateRunner.executeStageCom
           Effect.onInterrupt(() =>
             Effect.all([Fiber.interrupt(cancelWatcher), Fiber.interrupt(cmdFiber)], {
               concurrency: "unbounded",
-            }).pipe(Effect.ignore),
+            }).pipe(Effect.asVoid),
           ),
-          Effect.ensuring(Fiber.interrupt(cancelWatcher).pipe(Effect.ignore)),
+          Effect.ensuring(Fiber.interrupt(cancelWatcher).pipe(Effect.asVoid)),
         )
 
         const durationMs = toGateDurationMs(nowMs() - startedMs)

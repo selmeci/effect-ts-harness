@@ -18,14 +18,22 @@ import {
 const HEAVY_META_TEST_BASENAMES: ReadonlySet<string> = new Set([
   "mutation-check.test.ts",
   "mutation-speedup.test.ts",
+  "mutation-cache.test.ts",
+  "mutation-cache-hardening.test.ts",
+  "mutation-scoped-fallback.test.ts",
   "self-dogfooding-capability-plugins.test.ts",
+  "self-dogfooding-governance-plugins.test.ts",
   "self-dogfooding-plugin-harness.test.ts",
   "milestone5-dst-ears-mutation-dpo.test.ts",
   "policy-check.test.ts",
+  "policy-check-architecture-and-layers.test.ts",
+  "policy-check-patterns-and-types.test.ts",
   "type-extractor.test.ts",
+  "governance-nodes.test.ts",
   "graph-projector.test.ts",
   "structural-search.test.ts",
   "workflow-graph-assets.test.ts",
+  "workflow-graph-assets-sync.test.ts",
   "ts-compiler-overlay-service.test.ts",
 ])
 

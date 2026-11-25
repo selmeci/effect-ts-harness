@@ -38,9 +38,18 @@ import {
 import { analyzeSqliteMigratorFromRecordAst } from "./sqlite-migrator-ast.js"
 import { collectWorkflowBodyViolations } from "./workflow-body-ast.js"
 import {
+  collectWave3FailClosedViolations,
   isSilentDecodeOrStoreFallback,
   isUntypedCatchCauseWithoutInterruptGuard,
 } from "./ast-fail-closed-laws.js"
+import {
+  collectClosedLiteralComparisonViolations,
+  collectSilentEffectSwallowViolations,
+} from "./ast-wave3-laws.js"
+import {
+  isDirectDaemonWorkflowInterruptCall,
+  isUnguardedWorkflowStatusUpdateCall,
+} from "./ast-workflow-fence-law.js"
 import {
   collectContractShapeViolations,
   collectMaxTestCaseLineViolations,
@@ -384,6 +393,14 @@ export const visitSourceFileSinglePass = (
       const m = `Silent decode/workflow-store fallback in '${fp}' is banned — propagate typed failure.`
       pushViolation(catEff, "silent-decode-fallback", m, node)
     }
+    if (isProdSrc && isDirectDaemonWorkflowInterruptCall(node, sourceFile, norm)) {
+      const m = `Direct Workflow.interrupt(...) in '${fp}' must use an interruptAndSettle* helper.`
+      pushViolation(catEff, "direct-daemon-workflow-interrupt", m, node)
+    }
+    if (isProdSrc && isUnguardedWorkflowStatusUpdateCall(node, sourceFile)) {
+      const m = `Workflow status update in '${fp}' lacks a preceding .status precondition guard.`
+      pushViolation(catEff, "unguarded-workflow-status-update", m, node)
+    }
     if (!isTest && isIgnoredChmodPermissionCall(node, sourceFile)) {
       const m = `Ignoring chmodSync/fchmodSync failure in '${fp}' is banned.`
       pushViolation(catSyntax, "ignored-chmod-permission", m, node)
@@ -597,6 +614,15 @@ export const visitSourceFileSinglePass = (
   if (!isTestOrHelper && /(?:^|\/)(?:libs|apps)\/.*\/src\//.test(norm)) {
     for (const v of collectWorkflowBodyViolations(sourceFile, norm)) {
       pushViolation(catSyntax, "nondeterministic-workflow-body", v.message, v.node)
+    }
+    for (const v of collectSilentEffectSwallowViolations(sourceFile, norm)) {
+      pushViolation(catEff, v.rule, v.message, v.node)
+    }
+    for (const v of collectClosedLiteralComparisonViolations(sourceFile, norm)) {
+      pushViolation(catSyntax, v.rule, v.message, v.node)
+    }
+    for (const v of collectWave3FailClosedViolations(sourceFile, norm)) {
+      pushViolation(catSyntax, v.rule, v.message, v.node)
     }
   }
   if (sourceFile.text.includes("fromRecord")) {

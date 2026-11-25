@@ -361,10 +361,13 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
         if (!gcFreshOk || !ontologyFreshOk) {
           allVerifyPreceded = false
         }
-        if (e.outcome === "fail") {
-          gcFreshOk = false
-          ontologyFreshOk = false
-        }
+        match(e.outcome)
+          .with("fail", () => {
+            gcFreshOk = false
+            ontologyFreshOk = false
+          })
+          .with("ok", "deny", "ask", "fallback", () => {})
+          .exhaustive()
       })
       .otherwise(() => {})
   }

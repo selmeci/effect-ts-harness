@@ -63,6 +63,7 @@ export {
   evaluateTopologyEntropyPlugin,
   evaluateBranchingSqliteViolations,
   checkUnusedContractExports,
+  checkAlwaysPopulatedOptionalRuntimeProps,
 } from "./plugins/gc/gc-topology-entropy.plugin.js"
 export {
   MAX_TEST_SOURCE_DOMAINS,
@@ -75,8 +76,10 @@ export { evaluateGovernanceDocsPlugin } from "./plugins/gc/gc-governance-docs.pl
 export { evaluatePackageAndMigrationPlugin } from "./plugins/gc/gc-package-and-migration.plugin.js"
 export {
   ADAPTER_SKILL_PARITY_CLAUSES,
+  WORKER_ISOLATION_PARITY_DOC_PATHS,
   auditAdapterSkillParityPair,
   auditCatalogDocTruthInContent,
+  auditWorkerIsolationSubcommandParity,
   evaluateDocTruthPlugin,
   extractGateRuleIdsFromSources,
 } from "./plugins/gc/gc-doc-truth.plugin.js"

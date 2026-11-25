@@ -132,6 +132,18 @@ const isImportActualCall = (expr: ts.Expression): boolean =>
   ts.isPropertyAccessExpression(expr) &&
   (expr.name.text === "importActual" || expr.name.text === "importMock")
 
+const REPO_FS_IO_IDENTIFIERS: ReadonlySet<string> = new Set([
+  "readFileSync",
+  "readdirSync",
+  "readTextSync",
+  "existsSync",
+  "statSync",
+  "lstatSync",
+  "hostIo",
+  "REPO_ROOT",
+  "REAL_REPO_ROOT",
+])
+
 const scanSourceAst = (source: string): AstClosureScan => {
   const pre = ts.preProcessFile(source, true, true)
   const specifiers: Array<string> = pre.importedFiles.map((f) => f.fileName)
@@ -142,6 +154,7 @@ const scanSourceAst = (source: string): AstClosureScan => {
   let needsTools = false
   let needsApps = false
   let referencesLibs = false
+  let hasRepoFsIo = false
 
   const recordText = (text: string) => {
     if (matchesBucketText(text, "docs")) needsDocs = true
@@ -154,6 +167,9 @@ const scanSourceAst = (source: string): AstClosureScan => {
 
   const sf = ts.createSourceFile("closure.ts", source, ts.ScriptTarget.Latest, true)
   const visit = (node: ts.Node) => {
+    if (ts.isIdentifier(node) && REPO_FS_IO_IDENTIFIERS.has(node.text)) {
+      hasRepoFsIo = true
+    }
     if (ts.isCallExpression(node)) {
       const isDynImport = node.expression.kind === ts.SyntaxKind.ImportKeyword
       const isRequire = ts.isIdentifier(node.expression) && node.expression.text === "require"
@@ -188,7 +204,7 @@ const scanSourceAst = (source: string): AstClosureScan => {
     needsAdapters,
     needsTools,
     needsApps,
-    referencesLibs,
+    referencesLibs: referencesLibs && hasRepoFsIo,
   }
 }
 

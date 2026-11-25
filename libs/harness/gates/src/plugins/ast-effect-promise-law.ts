@@ -1,3 +1,4 @@
+import { match } from "ts-pattern"
 import { ts } from "@harness/graph"
 
 export interface EffectPromiseAliases {
@@ -71,19 +72,23 @@ const collectBindingElement = (
   const rawProp = el.propertyName !== undefined ? getPropertyNameText(el.propertyName) : undefined
   const targetName = rawProp ?? (ts.isIdentifier(el.name) ? el.name.text : undefined)
   if (targetName === undefined) return
-  if (kind === "namespace" && targetName === "Effect") {
-    if (ts.isIdentifier(el.name)) {
-      aliases.effectModuleAliases.add(el.name.text)
-      return
-    }
-    if (ts.isObjectBindingPattern(el.name)) {
-      for (const nested of el.name.elements) collectBindingElement(nested, "module", aliases)
-    }
-    return
-  }
-  if (kind === "module" && targetName === "promise" && ts.isIdentifier(el.name)) {
-    aliases.promiseFnAliases.add(el.name.text)
-  }
+  match(kind)
+    .with("namespace", () => {
+      if (targetName !== "Effect") return
+      if (ts.isIdentifier(el.name)) {
+        aliases.effectModuleAliases.add(el.name.text)
+        return
+      }
+      if (ts.isObjectBindingPattern(el.name)) {
+        for (const nested of el.name.elements) collectBindingElement(nested, "module", aliases)
+      }
+    })
+    .with("module", () => {
+      if (targetName === "promise" && ts.isIdentifier(el.name)) {
+        aliases.promiseFnAliases.add(el.name.text)
+      }
+    })
+    .exhaustive()
 }
 
 const collectNamedBindingAlias = (

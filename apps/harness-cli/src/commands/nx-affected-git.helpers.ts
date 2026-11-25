@@ -51,9 +51,13 @@ export const tryGitDiffRange = (
   Result.getOrElse(
     Result.try({
       try: (): TryGitDiffRangeResult => {
-        const res = hostIo.execFileSync("git", ["diff", "--name-only", range], {
-          cwd: repoRoot,
-        })
+        const res = hostIo.execFileSync(
+          "git",
+          ["diff", "--name-only", "--end-of-options", range, "--"],
+          {
+            cwd: repoRoot,
+          },
+        )
         return match(res)
           .with({ _tag: "Exited" }, ({ exitCode, stdout, stderr }) => {
             if (exitCode === 0) {

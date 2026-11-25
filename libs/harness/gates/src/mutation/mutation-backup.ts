@@ -204,7 +204,9 @@ export const extractGitDiffModifiedLinesChecked = (
 
   const resolveCommitSha = (ref: string): string | undefined => {
     if (ref.startsWith("-")) return undefined
-    return match(runGit(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]))
+    return match(
+      runGit(["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`]),
+    )
       .with({ _tag: "Success" }, ({ success }) => {
         const trimmed = success.trim()
         return COMMIT_SHA_RE.test(trimmed) ? trimmed : undefined
@@ -214,7 +216,7 @@ export const extractGitDiffModifiedLinesChecked = (
   }
 
   const isAncestorCommit = (ancestorRef: string, descendantRef: string): boolean =>
-    match(runGit(["merge-base", "--is-ancestor", ancestorRef, descendantRef]))
+    match(runGit(["merge-base", "--is-ancestor", "--end-of-options", ancestorRef, descendantRef]))
       .with({ _tag: "Success" }, () => true)
       .with({ _tag: "Failure" }, () => false)
       .exhaustive()
@@ -253,7 +255,7 @@ export const extractGitDiffModifiedLinesChecked = (
     }
     return match(
       Result.flatMap(
-        runGit(["diff", "-U0", mergeHeadSha, "--", "libs/", "apps/"]),
+        runGit(["diff", "-U0", "--end-of-options", mergeHeadSha, "--", "libs/", "apps/"]),
         (diffStdout) => {
           const lineMap = new Map<string, Set<number>>()
           mergeLineMaps(lineMap, parseGitDiffModifiedLines(diffStdout))
@@ -275,21 +277,26 @@ export const extractGitDiffModifiedLinesChecked = (
       return Result.fail(`Invalid baseRef '${baseRef}': must not start with '-'`)
     }
     const effectiveBaseRef = resolveEffectiveBaseRef(baseRef)
-    return Result.flatMap(runGit(["rev-parse", "--verify", `${effectiveBaseRef}^{commit}`]), () =>
-      Result.flatMap(runGit(["merge-base", "HEAD", effectiveBaseRef]), (mbStdout) => {
-        const mergeBase = mbStdout.trim()
-        if (mergeBase.length === 0) {
-          return Result.fail(`git merge-base HEAD ${effectiveBaseRef} returned empty output`)
-        }
-        return Result.flatMap(
-          runGit(["diff", "-U0", mergeBase, "--", "libs/", "apps/"]),
-          (diffStdout) => {
-            const lineMap = new Map<string, Set<number>>()
-            mergeLineMaps(lineMap, parseGitDiffModifiedLines(diffStdout))
-            return Result.map(collectUntrackedLibsFiles(lineMap), () => lineMap)
+    return Result.flatMap(
+      runGit(["rev-parse", "--verify", "--end-of-options", `${effectiveBaseRef}^{commit}`]),
+      () =>
+        Result.flatMap(
+          runGit(["merge-base", "--end-of-options", "HEAD", effectiveBaseRef]),
+          (mbStdout) => {
+            const mergeBase = mbStdout.trim()
+            if (mergeBase.length === 0) {
+              return Result.fail(`git merge-base HEAD ${effectiveBaseRef} returned empty output`)
+            }
+            return Result.flatMap(
+              runGit(["diff", "-U0", "--end-of-options", mergeBase, "--", "libs/", "apps/"]),
+              (diffStdout) => {
+                const lineMap = new Map<string, Set<number>>()
+                mergeLineMaps(lineMap, parseGitDiffModifiedLines(diffStdout))
+                return Result.map(collectUntrackedLibsFiles(lineMap), () => lineMap)
+              },
+            )
           },
-        )
-      }),
+        ),
     )
   }
 

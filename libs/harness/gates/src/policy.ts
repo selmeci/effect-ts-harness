@@ -38,6 +38,7 @@ import {
 } from "./policy-harness-state.js"
 import {
   MAX_SUBSHELL_INSPECT_DEPTH,
+  WORKER_ISOLATED_WORKFLOW_SUBCOMMANDS,
   classifyWorkerFileAccess,
   extractEmbeddedCommandPayloads,
   isWorkerDaemonCredentialFilePath,
@@ -79,6 +80,7 @@ export {
   SECRET_FILE_PATTERN,
   SHELL_OPERATORS,
   SKIP_NX_CACHE_BANNED_REASON,
+  WORKER_ISOLATED_WORKFLOW_SUBCOMMANDS,
   classifyWorkerFileAccess,
   isCommandAllowed,
   isHarnessStateMutationCommand,
@@ -348,8 +350,7 @@ const explainDirectCommandDenyRule = (
     if (isWorkerRecursiveWorkflowCommand(trimmed)) {
       return {
         ruleId: "worker-recursive-workflow-command",
-        reason:
-          "Worker isolation mode (HARNESS_UNIT_WORKER=1) bans recursive 'harness workflow start|resume|ship|abort|doctor|complete --phase llm' and 'harness done' invocations.",
+        reason: `Worker isolation mode (HARNESS_UNIT_WORKER=1) bans recursive 'harness workflow ${WORKER_ISOLATED_WORKFLOW_SUBCOMMANDS.join("|")}' and 'harness done' invocations.`,
       }
     }
     if (isWorkerDaemonCredentialShellAccess(trimmed)) {

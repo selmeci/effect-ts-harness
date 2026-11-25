@@ -329,6 +329,7 @@ const executeRunMessage = async (msg) => {
       HARNESS_STATE_DIR: msg.stateDir,
     })
     if (
+      !warmIsolate &&
       typeof msg.invalidateFile === "string" &&
       msg.invalidateFile.length > 0 &&
       typeof vitest.invalidateFile === "function"

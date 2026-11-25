@@ -1,5 +1,6 @@
 import { Effect } from "effect"
 import { match, P } from "ts-pattern"
+import { isTableSeparatorRow, splitMarkdownTableCells } from "@harness/graph"
 
 export type EarsLintFindingKind =
   | "no-requirements-table"
@@ -87,15 +88,6 @@ const stripMarkup = (text: string): string => text.replace(/[*_`]/g, "").trim()
 const isTableRow = (line: string): boolean => {
   const trimmed = line.trim()
   return trimmed.startsWith("|") && trimmed.includes("|", 1)
-}
-
-const parseTableRow = (line: string): Array<string> => {
-  const trimmed = line.trim()
-  if (!trimmed.startsWith("|")) return []
-  const parts = trimmed.split("|")
-  const sliceStart = 1
-  const sliceEnd = parts[parts.length - 1] === "" ? parts.length - 1 : parts.length
-  return parts.slice(sliceStart, sliceEnd).map((s) => s.trim())
 }
 
 interface TableContext {
@@ -336,8 +328,8 @@ export const decideEarsSpecQuality = Effect.fn("EarsSpecLint.decide")(function* 
 
     // Table parsing
     if (isTableRow(rawLine)) {
-      const cells = parseTableRow(rawLine)
-      const isSep = cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c))
+      const cells = splitMarkdownTableCells(rawLine)
+      const isSep = isTableSeparatorRow(cells)
 
       if (currentTable === null) {
         if (!isSep && cells.length >= 2) {

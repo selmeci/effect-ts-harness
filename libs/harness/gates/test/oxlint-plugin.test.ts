@@ -353,4 +353,487 @@ describe("oxlint syntax-bans & test-integrity Drizzle sealing", () => {
     ).toBe(2)
     expect(reports.filter((r) => r.message.includes("bare-cause-has-interrupts")).length).toBe(1)
   })
+
+  it("REQ-3.1 ESTree parity: flags aliased/bracket Effect.ignore, silent catchTag/acquireRelease, and console.*", async () => {
+    const plugin = await loadSyntaxBansPlugin()
+    const syntaxBans = plugin.rules["syntax-bans"]
+    const reports: Array<{ message: string }> = []
+    const visitor = syntaxBans.create({
+      filename: "/repo/libs/demo/core/src/wave3-estree.ts",
+      sourceCode: { text: "", getText: () => "console.warn" },
+      report: (r: { message: string }) => reports.push(r),
+    })
+
+    visitor.Program?.({ type: "Program", body: [] })
+    visitor.ImportDeclaration?.({
+      type: "ImportDeclaration",
+      source: { type: "Literal", value: "effect/Effect" },
+      specifiers: [
+        {
+          type: "ImportSpecifier",
+          imported: { type: "Identifier", name: "ignore" },
+          local: { type: "Identifier", name: "ig" },
+        },
+      ],
+    })
+    visitor.Identifier?.({
+      type: "Identifier",
+      name: "ig",
+      parent: {
+        type: "CallExpression",
+        callee: { type: "Identifier", name: "ig" },
+        arguments: [{ type: "Identifier", name: "eff" }],
+      },
+    })
+    visitor.MemberExpression?.({
+      type: "MemberExpression",
+      computed: true,
+      object: { type: "Identifier", name: "Effect" },
+      property: { type: "Literal", value: "ignoreCause" },
+      parent: {
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "eff" },
+          property: { type: "Identifier", name: "pipe" },
+        },
+        arguments: [],
+      },
+    })
+    visitor.CallExpression?.({
+      type: "CallExpression",
+      callee: {
+        type: "MemberExpression",
+        computed: false,
+        object: { type: "Identifier", name: "Effect" },
+        property: { type: "Identifier", name: "catchTag" },
+      },
+      arguments: [
+        { type: "Literal", value: "E" },
+        {
+          type: "ArrowFunctionExpression",
+          params: [],
+          body: {
+            type: "MemberExpression",
+            computed: false,
+            object: { type: "Identifier", name: "Effect" },
+            property: { type: "Identifier", name: "void" },
+          },
+        },
+      ],
+    })
+    const safeEff = {
+      type: "CallExpression",
+      callee: {
+        type: "MemberExpression",
+        computed: false,
+        object: { type: "Identifier", name: "Effect" },
+        property: { type: "Identifier", name: "logWarning" },
+      },
+      arguments: [{ type: "Literal", value: "ok" }],
+    }
+    const safePipeArgs: Array<Record<string, unknown>> = []
+    const safePipe = {
+      type: "CallExpression",
+      callee: {
+        type: "MemberExpression",
+        computed: false,
+        object: safeEff,
+        property: { type: "Identifier", name: "pipe" },
+      },
+      arguments: safePipeArgs,
+    }
+    const safeIgnore = {
+      type: "MemberExpression",
+      computed: false,
+      object: { type: "Identifier", name: "Effect" },
+      property: { type: "Identifier", name: "ignore" },
+      parent: safePipe,
+    }
+    safePipeArgs.push(safeIgnore)
+    visitor.MemberExpression?.(safeIgnore)
+
+    expect(reports.filter((r) => r.message.includes("silent-error-swallow")).length).toBe(3)
+  })
+
+  it("REQ-3.2 ESTree parity: tracks closed interface properties per-type, skips 1-variant Literals, and avoids open .status FPs", async () => {
+    const plugin = await loadSyntaxBansPlugin()
+    const syntaxBans = plugin.rules["syntax-bans"]
+    const reports: Array<{ message: string }> = []
+    const visitor = syntaxBans.create({
+      filename: "/repo/libs/demo/domain/src/closed-estree.ts",
+      sourceCode: { text: "", getText: () => "" },
+      report: (r: { message: string }) => reports.push(r),
+    })
+
+    visitor.Program?.({ type: "Program", body: [] })
+    visitor.VariableDeclarator?.({
+      type: "VariableDeclarator",
+      id: { type: "Identifier", name: "One" },
+      init: {
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "Schema" },
+          property: { type: "Identifier", name: "Literals" },
+        },
+        arguments: [{ type: "ArrayExpression", elements: [{ type: "Literal", value: "only" }] }],
+      },
+    })
+    visitor.TSInterfaceDeclaration?.({
+      type: "TSInterfaceDeclaration",
+      id: { type: "Identifier", name: "Attempt" },
+      body: {
+        type: "TSInterfaceBody",
+        body: [
+          {
+            type: "TSPropertySignature",
+            key: { type: "Identifier", name: "rel" },
+            typeAnnotation: {
+              typeAnnotation: {
+                type: "TSTypeReference",
+                typeName: { type: "Identifier", name: "EarsGuardPairRelation" },
+              },
+            },
+          },
+        ],
+      },
+    })
+    visitor[":function"]?.({
+      params: [
+        {
+          type: "Identifier",
+          name: "attempt",
+          typeAnnotation: {
+            typeAnnotation: {
+              type: "TSTypeReference",
+              typeName: { type: "Identifier", name: "Attempt" },
+            },
+          },
+        },
+        {
+          type: "Identifier",
+          name: "http",
+          typeAnnotation: { typeAnnotation: { type: "TSStringKeyword" } },
+        },
+        {
+          type: "Identifier",
+          name: "one",
+          typeAnnotation: {
+            typeAnnotation: {
+              type: "TSTypeQuery",
+              exprName: {
+                type: "TSQualifiedName",
+                left: { type: "Identifier", name: "One" },
+                right: { type: "Identifier", name: "Type" },
+              },
+            },
+          },
+        },
+      ],
+    })
+    visitor.IfStatement?.({
+      type: "IfStatement",
+      test: {
+        type: "BinaryExpression",
+        operator: "===",
+        left: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "attempt" },
+          property: { type: "Identifier", name: "rel" },
+        },
+        right: { type: "Literal", value: "equivalent" },
+      },
+    })
+    visitor.IfStatement?.({
+      type: "IfStatement",
+      test: {
+        type: "BinaryExpression",
+        operator: "===",
+        left: {
+          type: "MemberExpression",
+          computed: false,
+          object: { type: "Identifier", name: "http" },
+          property: { type: "Identifier", name: "rel" },
+        },
+        right: { type: "Literal", value: "ok" },
+      },
+    })
+    visitor.ConditionalExpression?.({
+      type: "ConditionalExpression",
+      test: {
+        type: "BinaryExpression",
+        operator: "===",
+        left: { type: "Identifier", name: "one" },
+        right: { type: "Literal", value: "only" },
+      },
+    })
+    visitor[":function:exit"]?.({})
+    expect(reports.filter((r) => r.message.includes("discriminated")).length).toBe(1)
+
+    const defReports: Array<{ message: string }> = []
+    const defVisitor = syntaxBans.create({
+      filename: "/repo/libs/demo/domain/src/default-param-closed.ts",
+      sourceCode: { text: "", getText: () => "" },
+      report: (r: { message: string }) => defReports.push(r),
+    })
+    defVisitor.Program?.({ type: "Program", body: [] })
+    defVisitor[":function"]?.({
+      params: [
+        {
+          type: "AssignmentPattern",
+          left: {
+            type: "Identifier",
+            name: "depth",
+            typeAnnotation: {
+              typeAnnotation: {
+                type: "TSTypeReference",
+                typeName: { type: "Identifier", name: "ReviewDepth" },
+              },
+            },
+          },
+          right: { type: "Literal", value: "lite" },
+        },
+      ],
+    })
+    defVisitor.IfStatement?.({
+      type: "IfStatement",
+      test: {
+        type: "BinaryExpression",
+        operator: "===",
+        left: { type: "Identifier", name: "depth" },
+        right: { type: "Literal", value: "lite" },
+      },
+    })
+    defVisitor[":function:exit"]?.({})
+    expect(defReports.filter((r) => r.message.includes("discriminated")).length).toBe(1)
+  })
+
+  it("REQ-3.4 ESTree parity: catches sentinel padStart/Array.fill, MethodDefinition.key glob RegExp (/ [ * ? ] /g), global* zero-FP, and spawnSync -- vs --end-of-options", async () => {
+    const plugin = await loadSyntaxBansPlugin()
+    const syntaxBans = plugin.rules["syntax-bans"]
+    const reports: Array<{ message: string }> = []
+    const visitor = syntaxBans.create({
+      filename: "/repo/libs/demo/infra/src/fail-closed-estree.ts",
+      sourceCode: { text: "", getText: () => "" },
+      report: (r: { message: string }) => reports.push(r),
+    })
+
+    visitor.Program?.({ type: "Program", body: [] })
+    visitor.NewExpression?.({
+      type: "NewExpression",
+      callee: { type: "Identifier", name: "RegExp" },
+      arguments: [
+        {
+          type: "CallExpression",
+          callee: {
+            type: "MemberExpression",
+            computed: false,
+            object: { type: "Identifier", name: "rawPat" },
+            property: { type: "Identifier", name: "replace" },
+          },
+          arguments: [
+            { type: "Literal", regex: { pattern: "[*?]", flags: "g" } },
+            { type: "Literal", value: ".*" },
+          ],
+        },
+      ],
+    })
+    visitor.CallExpression?.({
+      type: "CallExpression",
+      callee: {
+        type: "MemberExpression",
+        computed: false,
+        object: { type: "Literal", value: "" },
+        property: { type: "Identifier", name: "padStart" },
+      },
+      arguments: [
+        { type: "Literal", value: 64 },
+        { type: "Literal", value: "0" },
+      ],
+    })
+    visitor.NewExpression?.({
+      type: "NewExpression",
+      callee: { type: "Identifier", name: "RegExp" },
+      arguments: [{ type: "Identifier", name: "globalPrefix" }],
+    })
+    visitor.CallExpression?.({
+      type: "CallExpression",
+      callee: { type: "Identifier", name: "RegExp" },
+      arguments: [{ type: "Identifier", name: "dyn" }],
+      parent: { type: "MethodDefinition", key: { type: "Identifier", name: "matchGlob" } },
+    })
+    visitor.CallExpression?.({
+      type: "CallExpression",
+      callee: { type: "Identifier", name: "spawnSync" },
+      arguments: [
+        { type: "Literal", value: "git" },
+        {
+          type: "ArrayExpression",
+          elements: [
+            { type: "Literal", value: "diff" },
+            { type: "Identifier", name: "ref" },
+            { type: "Literal", value: "--" },
+            { type: "Literal", value: "a.ts" },
+          ],
+        },
+      ],
+    })
+    visitor.CallExpression?.({
+      type: "CallExpression",
+      callee: { type: "Identifier", name: "spawnSync" },
+      arguments: [
+        { type: "Literal", value: "git" },
+        {
+          type: "ArrayExpression",
+          elements: [
+            { type: "Literal", value: "diff" },
+            { type: "Literal", value: "--end-of-options" },
+            { type: "Identifier", name: "ref" },
+            { type: "Literal", value: "--" },
+            { type: "Literal", value: "a.ts" },
+          ],
+        },
+      ],
+    })
+
+    expect(reports.filter((r) => r.message.includes("fabricated-sentinel-hash")).length).toBe(1)
+    expect(reports.filter((r) => r.message.includes("dynamic-glob-regexp")).length).toBe(2)
+    expect(reports.filter((r) => r.message.includes("unsafe-dynamic-git-ref")).length).toBe(1)
+  })
+
+  it("REQ-3.1 ESTree parity: rejects Effect.sync mutations, local log(), and ternary/mixed silent catches", async () => {
+    const plugin = await loadSyntaxBansPlugin()
+    const syntaxBans = plugin.rules["syntax-bans"]
+    const reports: Array<{ message: string }> = []
+    const visitor = syntaxBans.create({
+      filename: "/repo/libs/demo/core/src/pass2-swallow-estree.ts",
+      sourceCode: { text: "", getText: () => "" },
+      report: (r: { message: string }) => reports.push(r),
+    })
+
+    visitor.Program?.({ type: "Program", body: [] })
+    const makePipe = (subject: Record<string, unknown>) => {
+      const pipeArgs: Array<Record<string, unknown>> = []
+      const pipeCall = {
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          computed: false,
+          object: subject,
+          property: { type: "Identifier", name: "pipe" },
+        },
+        arguments: pipeArgs,
+      }
+      const ign = {
+        type: "MemberExpression",
+        computed: false,
+        object: { type: "Identifier", name: "Effect" },
+        property: { type: "Identifier", name: "ignore" },
+        parent: pipeCall,
+      }
+      pipeArgs.push(ign)
+      visitor.MemberExpression?.(ign)
+    }
+
+    makePipe({
+      type: "CallExpression",
+      callee: {
+        type: "MemberExpression",
+        computed: false,
+        object: { type: "Identifier", name: "Effect" },
+        property: { type: "Identifier", name: "sync" },
+      },
+      arguments: [
+        {
+          type: "ArrowFunctionExpression",
+          body: {
+            type: "BlockStatement",
+            body: [
+              {
+                type: "ExpressionStatement",
+                expression: {
+                  type: "AssignmentExpression",
+                  operator: "=",
+                  left: { type: "Identifier", name: "dirty" },
+                  right: { type: "Literal", value: true },
+                },
+              },
+              {
+                type: "ExpressionStatement",
+                expression: {
+                  type: "CallExpression",
+                  callee: {
+                    type: "MemberExpression",
+                    computed: false,
+                    object: { type: "Identifier", name: "Effect" },
+                    property: { type: "Identifier", name: "logDebug" },
+                  },
+                  arguments: [{ type: "Literal", value: "x" }],
+                },
+              },
+            ],
+          },
+        },
+      ],
+    })
+    makePipe({
+      type: "CallExpression",
+      callee: {
+        type: "MemberExpression",
+        computed: false,
+        object: { type: "Identifier", name: "Effect" },
+        property: { type: "Identifier", name: "sync" },
+      },
+      arguments: [
+        {
+          type: "ArrowFunctionExpression",
+          body: {
+            type: "CallExpression",
+            callee: { type: "Identifier", name: "log" },
+            arguments: [{ type: "Literal", value: "local" }],
+          },
+        },
+      ],
+    })
+    visitor.CallExpression?.({
+      type: "CallExpression",
+      callee: {
+        type: "MemberExpression",
+        computed: false,
+        object: { type: "Identifier", name: "Effect" },
+        property: { type: "Identifier", name: "catchAll" },
+      },
+      arguments: [
+        {
+          type: "ArrowFunctionExpression",
+          body: {
+            type: "ConditionalExpression",
+            test: { type: "Identifier", name: "ok" },
+            consequent: {
+              type: "CallExpression",
+              callee: {
+                type: "MemberExpression",
+                computed: false,
+                object: { type: "Identifier", name: "Effect" },
+                property: { type: "Identifier", name: "logWarning" },
+              },
+              arguments: [{ type: "Literal", value: "w" }],
+            },
+            alternate: {
+              type: "MemberExpression",
+              computed: false,
+              object: { type: "Identifier", name: "Effect" },
+              property: { type: "Identifier", name: "void" },
+            },
+          },
+        },
+      ],
+    })
+
+    expect(reports.filter((r) => r.message.includes("silent-error-swallow")).length).toBe(3)
+  })
 })

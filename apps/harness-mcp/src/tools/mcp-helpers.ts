@@ -413,9 +413,13 @@ const formatLspFailDetail = (
   outcome: TelemetryOutcome,
   result: unknown,
 ): string | undefined => {
+  const isFailOutcome = match(outcome)
+    .with("fail", () => true)
+    .with("ok", "fallback", "ask", "deny", () => false)
+    .exhaustive()
   if (
     toolName !== "harness_lsp_diagnostics" ||
-    outcome !== "fail" ||
+    !isFailOutcome ||
     typeof result !== "object" ||
     result === null
   ) {
@@ -501,11 +505,15 @@ export const recordMcpToolTelemetry = (
     result !== null &&
     "clean" in result &&
     result.clean === false
+  const isMemoryFallback = match(engineSource)
+    .with("memory-fallback", () => true)
+    .with("omnigraph", "local", "decision-model", () => false)
+    .exhaustive()
   const outcome: TelemetryOutcome =
     degradedReason !== undefined
       ? "fallback"
       : (toolName === "harness_gq_query" || toolName === "harness_search_knowledge") &&
-          engineSource === "memory-fallback"
+          isMemoryFallback
         ? "fallback"
         : isCleanFalseFail
           ? "fail"

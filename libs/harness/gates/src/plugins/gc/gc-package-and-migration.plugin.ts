@@ -137,15 +137,25 @@ export const evaluatePackageAndMigrationPlugin = (
               }),
           }).pipe(
             Effect.ensuring(
-              Effect.ignore(
-                Effect.try({
-                  try: () => {
-                    if (hostIo.existsSync(tmpPath)) {
-                      hostIo.unlinkSync(tmpPath)
-                    }
-                  },
-                  catch: () => undefined,
-                }),
+              Effect.try({
+                try: () => {
+                  if (hostIo.existsSync(tmpPath)) {
+                    hostIo.unlinkSync(tmpPath)
+                  }
+                },
+                catch: (err) =>
+                  new WorkspaceFsError({
+                    filePath: WorkspaceFilePath.make(tmpPath),
+                    operation: WorkspaceFsOperation.make("write"),
+                    reason: toErrorReasonMessage(err, "Cleanup unlink failed"),
+                  }),
+              }).pipe(
+                Effect.catch((err) =>
+                  Effect.logDebug("Failed to remove temporary atomic write file", {
+                    tmpPath,
+                    reason: err.reason,
+                  }),
+                ),
               ),
             ),
           )

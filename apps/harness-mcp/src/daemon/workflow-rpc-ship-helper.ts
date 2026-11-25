@@ -134,14 +134,16 @@ const recordFailedAttemptStatusAndFail = (
   failureReason: WorkflowStoreFailureReason,
 ): Effect.Effect<never, WorkflowStoreFailureReason> =>
   attemptStore.updateStatus({ runId, attempt, status: "failed" }).pipe(
-    Effect.tapError((err) =>
-      Effect.logWarning("Failed to record failed WfShipAttempt status", err),
-    ),
-    Effect.ignore,
+    Effect.catch((err) => Effect.logWarning("Failed to record failed WfShipAttempt status", err)),
     Effect.andThen(Effect.fail(failureReason)),
   )
 
 const EARLY_ABORT_POLL_MAX_ATTEMPTS = 5
+
+const cleanupListenerAndGate = (runtime: WorkflowDaemonRuntime, listenerKey: string): void => {
+  runtime.shipProgressListeners.delete(listenerKey)
+  runtime.shipGateController.clear(listenerKey)
+}
 
 const interruptAndSettleShipAttempt = (input: {
   readonly runtime: WorkflowDaemonRuntime
@@ -156,10 +158,6 @@ const interruptAndSettleShipAttempt = (input: {
     Effect.gen(function* () {
       yield* ShipWorkflow.interrupt(input.executionId).pipe(
         Effect.provideContext(input.runtime.shipWorkflowContext),
-        Effect.tapError((err) =>
-          Effect.logWarning("Failed to interrupt timed-out ShipWorkflow execution", err),
-        ),
-        Effect.ignore,
       )
 
       yield* input.runtime.shipGateController.cancelAndAwait(input.listenerKey).pipe(
@@ -174,7 +172,6 @@ const interruptAndSettleShipAttempt = (input: {
             )
             .exhaustive(),
         ),
-        Effect.ignore,
       )
 
       const pollExecution = ShipWorkflow.poll(input.executionId).pipe(
@@ -220,10 +217,6 @@ const interruptAndSettleShipAttempt = (input: {
             )
             .exhaustive(),
         ),
-        Effect.tapError((err) =>
-          Effect.logWarning("Failed to poll interrupted ShipWorkflow execution", err),
-        ),
-        Effect.ignore,
       )
 
       yield* input.attemptStore
@@ -233,15 +226,17 @@ const interruptAndSettleShipAttempt = (input: {
           status: "failed",
         })
         .pipe(
-          Effect.tapError((err) =>
+          Effect.catch((err) =>
             Effect.logWarning("Failed to record failed WfShipAttempt status", err),
           ),
-          Effect.ignore,
         )
-
-      input.runtime.shipProgressListeners.delete(input.listenerKey)
-      input.runtime.shipGateController.clear(input.listenerKey)
-    }),
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          cleanupListenerAndGate(input.runtime, input.listenerKey)
+        }),
+      ),
+    ),
   )
 
 /** Processes streaming `workflow.ship` over daemon Unix socket IPC. */
@@ -334,85 +329,42 @@ export const handleDaemonWorkflowShipRequest = Effect.fn("WorkflowRpcDaemon.hand
                       )
                     })
 
-                    const execExit = yield* Effect.exit(
-                      restore(
-                        ShipWorkflow.execute(payload).pipe(
-                          Effect.provideContext(shipWorkflowContext),
-                          Effect.timeoutOption(Duration.millis(settleTimeoutMs)),
+                    return yield* Effect.gen(function* () {
+                      const execExit = yield* Effect.exit(
+                        restore(
+                          ShipWorkflow.execute(payload).pipe(
+                            Effect.provideContext(shipWorkflowContext),
+                            Effect.timeoutOption(Duration.millis(settleTimeoutMs)),
+                          ),
                         ),
-                      ),
-                    )
+                      )
 
-                    const settleAndCleanup = (): Effect.Effect<void> => {
-                      if (settleHandled) {
-                        return Effect.void
-                      }
-                      settleHandled = true
-                      return interruptAndSettleShipAttempt({
-                        runtime,
-                        attemptStore,
-                        executionId,
-                        runId: target.runId,
-                        attempt: allocated.attempt,
-                        listenerKey,
-                        sawProgressEvent,
-                      })
-                    }
-
-                    return yield* Exit.match(execExit, {
-                      onSuccess: (receiptOpt) =>
-                        match(receiptOpt)
-                          .with({ _tag: "Some" }, ({ value: receipt }) => {
-                            shipProgressListeners.delete(listenerKey)
-                            runtime.shipGateController.clear(listenerKey)
-                            return attemptStore
-                              .updateStatus({
-                                runId: target.runId,
-                                attempt: allocated.attempt,
-                                status: "passed",
-                              })
-                              .pipe(
-                                Effect.mapError(storeOrLeaseToBoundedReason),
-                                Effect.as<WorkflowShipResponse>({
-                                  runId: target.runId,
-                                  attempt: allocated.attempt,
-                                  executionId,
-                                  treeHash,
-                                  runOrigin: target.runOrigin,
-                                  outcome: WorkflowShipOutcome.cases.Passed.make({
-                                    receipt,
-                                    stages,
-                                  }),
-                                }),
-                              )
-                          })
-                          .with({ _tag: "None" }, () =>
-                            settleAndCleanup().pipe(
-                              Effect.andThen(
-                                Effect.fail(
-                                  toBoundedReason(
-                                    `Ship workflow '${target.runId}' timed out after ${settleTimeoutMs}ms`,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          )
-                          .exhaustive(),
-                      onFailure: (cause) => {
-                        if (isPureInterruptCause(cause)) {
-                          return settleAndCleanup().pipe(Effect.andThen(Effect.interrupt))
+                      const settleAndCleanup = (): Effect.Effect<void> => {
+                        if (settleHandled) {
+                          return Effect.void
                         }
-                        shipProgressListeners.delete(listenerKey)
-                        runtime.shipGateController.clear(listenerKey)
-                        return match(Cause.findErrorOption(cause))
-                          .with({ _tag: "Some" }, ({ value: err }) => {
-                            const shipError = asShipWorkflowError(err)
-                            if (shipError !== undefined) {
+                        settleHandled = true
+                        return interruptAndSettleShipAttempt({
+                          runtime,
+                          attemptStore,
+                          executionId,
+                          runId: target.runId,
+                          attempt: allocated.attempt,
+                          listenerKey,
+                          sawProgressEvent,
+                        })
+                      }
+
+                      return yield* Exit.match(execExit, {
+                        onSuccess: (receiptOpt) =>
+                          match(receiptOpt)
+                            .with({ _tag: "Some" }, ({ value: receipt }) => {
+                              cleanupListenerAndGate(runtime, listenerKey)
                               return attemptStore
                                 .updateStatus({
                                   runId: target.runId,
                                   attempt: allocated.attempt,
-                                  status: "failed",
+                                  status: "passed",
                                 })
                                 .pipe(
                                   Effect.mapError(storeOrLeaseToBoundedReason),
@@ -422,40 +374,102 @@ export const handleDaemonWorkflowShipRequest = Effect.fn("WorkflowRpcDaemon.hand
                                     executionId,
                                     treeHash,
                                     runOrigin: target.runOrigin,
-                                    outcome: WorkflowShipOutcome.cases.Failed.make({
-                                      runId: target.runId,
-                                      attempt: allocated.attempt,
-                                      treeHash,
+                                    outcome: WorkflowShipOutcome.cases.Passed.make({
+                                      receipt,
                                       stages,
-                                      error: shipError,
                                     }),
                                   }),
                                 )
-                            }
-                            return recordFailedAttemptStatusAndFail(
-                              attemptStore,
-                              target.runId,
-                              allocated.attempt,
-                              toBoundedReason(
-                                Cause.pretty(cause),
-                                "Ship workflow failed unexpectedly",
+                            })
+                            .with({ _tag: "None" }, () =>
+                              settleAndCleanup().pipe(
+                                Effect.andThen(
+                                  Effect.fail(
+                                    toBoundedReason(
+                                      `Ship workflow '${target.runId}' timed out after ${settleTimeoutMs}ms`,
+                                    ),
+                                  ),
+                                ),
                               ),
                             )
-                          })
-                          .with({ _tag: "None" }, () =>
-                            recordFailedAttemptStatusAndFail(
-                              attemptStore,
-                              target.runId,
-                              allocated.attempt,
-                              toBoundedReason(
-                                Cause.pretty(cause),
-                                "Ship workflow failed unexpectedly",
+                            .exhaustive(),
+                        onFailure: (cause) =>
+                          match(Cause.findInterrupt(cause))
+                            .with({ _tag: "Success" }, () =>
+                              settleAndCleanup().pipe(
+                                Effect.andThen(
+                                  isPureInterruptCause(cause)
+                                    ? Effect.interrupt
+                                    : Effect.failCause(
+                                        Cause.map(cause, (err) =>
+                                          toBoundedReason(err, "Ship workflow failed unexpectedly"),
+                                        ),
+                                      ),
+                                ),
                               ),
-                            ),
-                          )
-                          .exhaustive()
-                      },
-                    })
+                            )
+                            .with({ _tag: "Failure" }, () => {
+                              cleanupListenerAndGate(runtime, listenerKey)
+                              return match(Cause.findErrorOption(cause))
+                                .with({ _tag: "Some" }, ({ value: err }) => {
+                                  const shipError = asShipWorkflowError(err)
+                                  if (shipError !== undefined) {
+                                    return attemptStore
+                                      .updateStatus({
+                                        runId: target.runId,
+                                        attempt: allocated.attempt,
+                                        status: "failed",
+                                      })
+                                      .pipe(
+                                        Effect.mapError(storeOrLeaseToBoundedReason),
+                                        Effect.as<WorkflowShipResponse>({
+                                          runId: target.runId,
+                                          attempt: allocated.attempt,
+                                          executionId,
+                                          treeHash,
+                                          runOrigin: target.runOrigin,
+                                          outcome: WorkflowShipOutcome.cases.Failed.make({
+                                            runId: target.runId,
+                                            attempt: allocated.attempt,
+                                            treeHash,
+                                            stages,
+                                            error: shipError,
+                                          }),
+                                        }),
+                                      )
+                                  }
+                                  return recordFailedAttemptStatusAndFail(
+                                    attemptStore,
+                                    target.runId,
+                                    allocated.attempt,
+                                    toBoundedReason(
+                                      Cause.pretty(cause),
+                                      "Ship workflow failed unexpectedly",
+                                    ),
+                                  )
+                                })
+                                .with({ _tag: "None" }, () =>
+                                  recordFailedAttemptStatusAndFail(
+                                    attemptStore,
+                                    target.runId,
+                                    allocated.attempt,
+                                    toBoundedReason(
+                                      Cause.pretty(cause),
+                                      "Ship workflow failed unexpectedly",
+                                    ),
+                                  ),
+                                )
+                                .exhaustive()
+                            })
+                            .exhaustive(),
+                      })
+                    }).pipe(
+                      Effect.ensuring(
+                        Effect.sync(() => {
+                          cleanupListenerAndGate(runtime, listenerKey)
+                        }),
+                      ),
+                    )
                   }).pipe(Effect.provideService(ShipAttemptStore, shipAttemptStore)),
                 ),
               )

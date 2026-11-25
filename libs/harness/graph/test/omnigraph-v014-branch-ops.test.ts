@@ -914,7 +914,7 @@ describe("Omnigraph v0.14.0 cursor, env, auth & merge hardening (RFC-0009)", () 
             target: "main",
             cleanupBranches: ["impl/task", "plan/task"],
             fetch: mockFetch,
-          }).pipe(Effect.provide(makeOmnigraphSyncLayer(extendedTestHostIo)))
+          }).pipe(Effect.provide(makeOmnigraphSyncLayer(extendedTestHostIo, {})))
 
           expect(headMetaWrittenBeforeCleanupDelete).toBe(true)
           const finalMeta = readGraphHeadMeta(tmpRepo, extendedTestHostIo, {})

@@ -20,6 +20,7 @@ import {
   parseGovernanceDocFileChecked,
   renderMermaid,
   resolveNode,
+  splitMarkdownTableCells,
   toOmnigraphNdjson,
 } from "../src/index.js"
 import { testHostIo } from "./helpers/test-host-io.js"
@@ -978,6 +979,22 @@ describe("AdrDocNode, EarsSpecNode, GovernsSymbol, and SpecifiesSymbol", () => {
           expect.unreachable("Expected Ok governance doc result")
         })
         .exhaustive()
+    })
+  })
+
+  describe("splitMarkdownTableCells", () => {
+    it("preserves escaped trailing pipes, double backslashes before delimiters, and multi-backtick code spans", () => {
+      expect(splitMarkdownTableCells("| a | b \\|")).toEqual(["a", "b |"])
+      expect(splitMarkdownTableCells("| a | b \\\\|")).toEqual(["a", "b \\"])
+      expect(splitMarkdownTableCells("| a \\\\| b |")).toEqual(["a \\", "b"])
+      expect(splitMarkdownTableCells("| `a | b` |")).toEqual(["`a | b`"])
+      expect(splitMarkdownTableCells("| ``a | b`` |")).toEqual(["``a | b``"])
+      expect(splitMarkdownTableCells("| ``a ` b | c`` |")).toEqual(["``a ` b | c``"])
+      expect(splitMarkdownTableCells("| `a \\| b` |")).toEqual(["`a | b`"])
+      expect(splitMarkdownTableCells("| `a \\\\ b` |")).toEqual(["`a \\\\ b`"])
+      expect(splitMarkdownTableCells("| \\`a | b |")).toEqual(["`a", "b"])
+      expect(splitMarkdownTableCells("| a \\| b |")).toEqual(["a | b"])
+      expect(splitMarkdownTableCells("| a \\\\\\| b |")).toEqual(["a \\| b"])
     })
   })
 })

@@ -1,3 +1,4 @@
+import { match } from "ts-pattern"
 import { decodeAnsiCEscape, normalizeShellLineContinuations } from "./policy-ansi-c.js"
 import { PNPM_VALUE_FLAGS } from "./policy-command-rules.js"
 
@@ -96,45 +97,55 @@ const splitShellWords = (
     const ch = command[i]!
     if (quote !== undefined) {
       unquoted += " "
-      if (quote === "$'") {
-        if (ch === "'") {
-          quote = undefined
-          ansiCNulTruncated = false
-          continue
-        }
-        if (ch === "\\") {
-          const decoded = decodeAnsiCEscape(command, i)
-          if (!ansiCNulTruncated) {
-            const nulIdx = decoded.text.indexOf("\0")
-            if (nulIdx !== -1) {
-              current += decoded.text.slice(0, nulIdx)
-              ansiCNulTruncated = true
-            } else {
-              current += decoded.text
-            }
+      match(quote)
+        .with("$'", () => {
+          if (ch === "'") {
+            quote = undefined
+            ansiCNulTruncated = false
+            return
           }
-          unquoted += " ".repeat(decoded.consumed - 1)
-          i += decoded.consumed - 1
-          continue
-        }
-        if (!ansiCNulTruncated) {
+          if (ch === "\\") {
+            const decoded = decodeAnsiCEscape(command, i)
+            if (!ansiCNulTruncated) {
+              const nulIdx = decoded.text.indexOf("\0")
+              if (nulIdx !== -1) {
+                current += decoded.text.slice(0, nulIdx)
+                ansiCNulTruncated = true
+              } else {
+                current += decoded.text
+              }
+            }
+            unquoted += " ".repeat(decoded.consumed - 1)
+            i += decoded.consumed - 1
+            return
+          }
+          if (!ansiCNulTruncated) {
+            current += ch
+          }
+        })
+        .with("'", () => {
+          if (ch === "'") {
+            quote = undefined
+            return
+          }
           current += ch
-        }
-        continue
-      }
-      if (ch === quote) {
-        quote = undefined
-        continue
-      }
-      if (quote === '"' && ch === "\\" && i + 1 < command.length) {
-        current += command[++i]!
-        unquoted += " "
-        continue
-      }
-      if (quote === '"' && (ch === "`" || (ch === "$" && command[i + 1] === "("))) {
-        hasDoubleQuotedSubstitution = true
-      }
-      current += ch
+        })
+        .with('"', () => {
+          if (ch === '"') {
+            quote = undefined
+            return
+          }
+          if (ch === "\\" && i + 1 < command.length) {
+            current += command[++i]!
+            unquoted += " "
+            return
+          }
+          if (ch === "`" || (ch === "$" && command[i + 1] === "(")) {
+            hasDoubleQuotedSubstitution = true
+          }
+          current += ch
+        })
+        .exhaustive()
       continue
     }
     if (ch === "$" && command[i + 1] === "'") {

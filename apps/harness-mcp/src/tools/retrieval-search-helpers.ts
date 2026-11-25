@@ -76,23 +76,38 @@ export const collectLinkedSymbols = (
   for (const [nodeIdx, node] of Graph.nodes(graph.graph)) {
     match(node)
       .with({ _tag: "PatternDoc" }, (p) => {
-        if (kind === "PatternDoc" && p.slug === rawId) {
-          for (const s of p.coveredSpans ?? []) addNonEmpty(s)
-          for (const t of p.coveredTags ?? []) addNonEmpty(t)
-        }
+        match(kind)
+          .with("PatternDoc", () => {
+            if (p.slug === rawId) {
+              for (const s of p.coveredSpans ?? []) addNonEmpty(s)
+              for (const t of p.coveredTags ?? []) addNonEmpty(t)
+            }
+          })
+          .with("AdrDoc", "EarsRequirement", () => {})
+          .exhaustive()
       })
       .with({ _tag: "AdrDoc" }, (adr) => {
-        if (kind === "AdrDoc" && adr.id === rawId) {
-          for (const s of adr.governedSymbols ?? []) addNonEmpty(s)
-          for (const s of adr.referencedSpans ?? []) addNonEmpty(s)
-          for (const s of adr.referencedServices ?? []) addNonEmpty(s)
-          for (const s of adr.referencedErrors ?? []) addNonEmpty(s)
-        }
+        match(kind)
+          .with("AdrDoc", () => {
+            if (adr.id === rawId) {
+              for (const s of adr.governedSymbols ?? []) addNonEmpty(s)
+              for (const s of adr.referencedSpans ?? []) addNonEmpty(s)
+              for (const s of adr.referencedServices ?? []) addNonEmpty(s)
+              for (const s of adr.referencedErrors ?? []) addNonEmpty(s)
+            }
+          })
+          .with("PatternDoc", "EarsRequirement", () => {})
+          .exhaustive()
       })
       .with({ _tag: "EarsRequirement" }, (req) => {
-        if (kind === "EarsRequirement" && req.id === rawId) {
-          addNonEmpty(req.effectSymbol)
-        }
+        match(kind)
+          .with("EarsRequirement", () => {
+            if (req.id === rawId) {
+              addNonEmpty(req.effectSymbol)
+            }
+          })
+          .with("PatternDoc", "AdrDoc", () => {})
+          .exhaustive()
       })
       .with({ _tag: "TraceabilityTuple" }, (tt) => {
         const matchesAdr = kind === "AdrDoc" && tt.adrId === rawId

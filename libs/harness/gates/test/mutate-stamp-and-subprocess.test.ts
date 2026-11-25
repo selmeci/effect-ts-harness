@@ -35,7 +35,7 @@ import { computeMutationContextDigestsChecked } from "../src/mutation/mutation-c
 import { parseDstSeedEnv } from "../src/verify-stamp.js"
 import { runDomainMutationSuite } from "../src/mutation-check.js"
 import { runVitestTargetList } from "../src/mutation-subprocess-helpers.js"
-import { testHostIo } from "./helpers/test-host-io.js"
+import { isolatedTestHostIo, testHostIo } from "./helpers/test-host-io.js"
 import { makeSubprocessFixture } from "./helpers/mutation-subprocess-fixture.js"
 
 describe("verify-stamp, policy, and rule-synthesizer: mutate stamp lifecycle, guard denial, and TCB protection", () => {
@@ -47,17 +47,17 @@ describe("verify-stamp, policy, and rule-synthesizer: mutate stamp lifecycle, gu
       writeFileSync(srcFile, "export const x = 1\n", "utf8")
 
       // Missing stamp
-      const missing = checkMutateStamp(dir, testHostIo)
+      const missing = checkMutateStamp(dir, isolatedTestHostIo)
       expect(missing._tag).toBe("Invalid")
 
       // Corrupt JSON
       mkdirSync(join(dir, ".harness"), { recursive: true })
       writeFileSync(join(dir, ".harness", "mutate-stamp.json"), "{bad-json", "utf8")
-      const corrupt = checkMutateStamp(dir, testHostIo)
+      const corrupt = checkMutateStamp(dir, isolatedTestHostIo)
       expect(corrupt._tag).toBe("Invalid")
 
       // Advisory enforcementMode rejected
-      writeMutateStamp(dir, testHostIo, {
+      writeMutateStamp(dir, isolatedTestHostIo, {
         enforcementMode: "advisory",
         diffMode: "working-tree",
         scannedCandidateFiles: MutantCount.make(1),
@@ -70,11 +70,11 @@ describe("verify-stamp, policy, and rule-synthesizer: mutate stamp lifecycle, gu
         equivalentCount: MutantCount.make(0),
         passed: MutateStampPassed.make(true),
       })
-      const advisory = checkMutateStamp(dir, testHostIo)
+      const advisory = checkMutateStamp(dir, isolatedTestHostIo)
       expect(advisory._tag).toBe("Invalid")
 
       // Valid strict stamp accepted
-      writeMutateStamp(dir, testHostIo, {
+      writeMutateStamp(dir, isolatedTestHostIo, {
         enforcementMode: "strict",
         diffMode: "working-tree",
         scannedCandidateFiles: MutantCount.make(1),
@@ -87,27 +87,27 @@ describe("verify-stamp, policy, and rule-synthesizer: mutate stamp lifecycle, gu
         equivalentCount: MutantCount.make(0),
         passed: MutateStampPassed.make(true),
       })
-      const valid = checkMutateStamp(dir, testHostIo)
+      const valid = checkMutateStamp(dir, isolatedTestHostIo)
       expect(valid._tag).toBe("Valid")
 
       // VerifyStamp carries mutateEnforcementMode + mutantsEvaluated
-      const verifyStamp = writeVerifyStamp(dir, testHostIo, "impl/test", undefined, {
+      const verifyStamp = writeVerifyStamp(dir, isolatedTestHostIo, "impl/test", undefined, {
         mutateEnforcementMode: "strict",
         mutantsEvaluated: MutantCount.make(2),
       })
       expect(verifyStamp.mutateEnforcementMode).toBe("strict")
       expect(verifyStamp.mutantsEvaluated).toBe(2)
-      const checkedVerify = checkVerifyStamp(dir, testHostIo)
+      const checkedVerify = checkVerifyStamp(dir, isolatedTestHostIo)
       expect(checkedVerify.valid).toBe(true)
 
       // Stale treeHash after file edit rejected
       writeFileSync(srcFile, "export const x = 2\n", "utf8")
-      const stale = checkMutateStamp(dir, testHostIo)
+      const stale = checkMutateStamp(dir, isolatedTestHostIo)
       expect(stale._tag).toBe("Invalid")
 
       // removeMutateStamp cleans up
-      removeMutateStamp(dir, testHostIo)
-      expect(checkMutateStamp(dir, testHostIo)._tag).toBe("Invalid")
+      removeMutateStamp(dir, isolatedTestHostIo)
+      expect(checkMutateStamp(dir, isolatedTestHostIo)._tag).toBe("Invalid")
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -136,7 +136,7 @@ describe("mutate-stamp-and-subprocess diff, retry & markdown hygiene", () => {
       const stampPath = join(dir, ".harness", "mutate-stamp.json")
 
       // missing
-      expect(checkMutateStamp(dir, testHostIo)).toEqual({
+      expect(checkMutateStamp(dir, isolatedTestHostIo)).toEqual({
         _tag: "Invalid",
         reason:
           "Missing .harness/mutate-stamp.json. Run pnpm harness mutate --strict after your latest edits before verify.",
@@ -145,10 +145,10 @@ describe("mutate-stamp-and-subprocess diff, retry & markdown hygiene", () => {
       // missing
       mkdirSync(join(dir, ".harness"), { recursive: true })
       const statFailIo: SyncHostIo = {
-        ...testHostIo,
+        ...isolatedTestHostIo,
         existsSync: (p) => {
           if (p === stampPath) throw new Error("stat EACCES")
-          return testHostIo.existsSync(p)
+          return isolatedTestHostIo.existsSync(p)
         },
       }
       expect(checkMutateStamp(dir, statFailIo)).toEqual({
@@ -157,10 +157,10 @@ describe("mutate-stamp-and-subprocess diff, retry & markdown hygiene", () => {
       })
       writeFileSync(stampPath, "{}", "utf8")
       const readFailIo: SyncHostIo = {
-        ...testHostIo,
+        ...isolatedTestHostIo,
         readTextSync: (p) => {
           if (p === stampPath) throw new Error("read EIO")
-          return testHostIo.readTextSync(p)
+          return isolatedTestHostIo.readTextSync(p)
         },
       }
       expect(checkMutateStamp(dir, readFailIo)).toEqual({
@@ -170,14 +170,14 @@ describe("mutate-stamp-and-subprocess diff, retry & markdown hygiene", () => {
 
       // corrupt JSON
       writeFileSync(stampPath, "{not-json", "utf8")
-      expect(checkMutateStamp(dir, testHostIo)).toEqual({
+      expect(checkMutateStamp(dir, isolatedTestHostIo)).toEqual({
         _tag: "Invalid",
         reason:
           "Invalid .harness/mutate-stamp.json. Run pnpm harness mutate --strict after your latest edits before verify.",
       })
 
       // advisory
-      writeMutateStamp(dir, testHostIo, {
+      writeMutateStamp(dir, isolatedTestHostIo, {
         enforcementMode: "advisory",
         diffMode: "working-tree",
         scannedCandidateFiles: MutantCount.make(1),
@@ -190,14 +190,14 @@ describe("mutate-stamp-and-subprocess diff, retry & markdown hygiene", () => {
         equivalentCount: MutantCount.make(0),
         passed: MutateStampPassed.make(true),
       })
-      expect(checkMutateStamp(dir, testHostIo)).toEqual({
+      expect(checkMutateStamp(dir, isolatedTestHostIo)).toEqual({
         _tag: "Invalid",
         reason:
           "Advisory .harness/mutate-stamp.json is insufficient for verify. Run pnpm harness mutate --strict after your latest edits before verify.",
       })
 
       // totalMutants: 0
-      writeMutateStamp(dir, testHostIo, {
+      writeMutateStamp(dir, isolatedTestHostIo, {
         enforcementMode: "strict",
         diffMode: "working-tree",
         scannedCandidateFiles: MutantCount.make(1),
@@ -210,10 +210,10 @@ describe("mutate-stamp-and-subprocess diff, retry & markdown hygiene", () => {
         equivalentCount: MutantCount.make(0),
         passed: MutateStampPassed.make(true),
       })
-      expect(checkMutateStamp(dir, testHostIo)._tag).toBe("Invalid")
+      expect(checkMutateStamp(dir, isolatedTestHostIo)._tag).toBe("Invalid")
 
       // survivedCount > 0
-      writeMutateStamp(dir, testHostIo, {
+      writeMutateStamp(dir, isolatedTestHostIo, {
         enforcementMode: "strict",
         diffMode: "working-tree",
         scannedCandidateFiles: MutantCount.make(1),
@@ -226,10 +226,10 @@ describe("mutate-stamp-and-subprocess diff, retry & markdown hygiene", () => {
         equivalentCount: MutantCount.make(0),
         passed: MutateStampPassed.make(true),
       })
-      expect(checkMutateStamp(dir, testHostIo)._tag).toBe("Invalid")
+      expect(checkMutateStamp(dir, isolatedTestHostIo)._tag).toBe("Invalid")
 
       // killedCount !== totalMutants
-      writeMutateStamp(dir, testHostIo, {
+      writeMutateStamp(dir, isolatedTestHostIo, {
         enforcementMode: "strict",
         diffMode: "working-tree",
         scannedCandidateFiles: MutantCount.make(1),
@@ -242,10 +242,10 @@ describe("mutate-stamp-and-subprocess diff, retry & markdown hygiene", () => {
         equivalentCount: MutantCount.make(0),
         passed: MutateStampPassed.make(true),
       })
-      expect(checkMutateStamp(dir, testHostIo)._tag).toBe("Invalid")
+      expect(checkMutateStamp(dir, isolatedTestHostIo)._tag).toBe("Invalid")
 
       // missing requiredDiffFiles coverage
-      writeMutateStamp(dir, testHostIo, {
+      writeMutateStamp(dir, isolatedTestHostIo, {
         enforcementMode: "strict",
         diffMode: "working-tree",
         scannedCandidateFiles: MutantCount.make(1),
@@ -258,7 +258,7 @@ describe("mutate-stamp-and-subprocess diff, retry & markdown hygiene", () => {
         equivalentCount: MutantCount.make(0),
         passed: MutateStampPassed.make(true),
       })
-      expect(checkMutateStamp(dir, testHostIo, ["libs/demo/domain/src/other.ts"])).toEqual({
+      expect(checkMutateStamp(dir, isolatedTestHostIo, ["libs/demo/domain/src/other.ts"])).toEqual({
         _tag: "Invalid",
         reason:
           "Mutate stamp does not cover required diff file(s): libs/demo/domain/src/other.ts. Run pnpm harness mutate --strict.",
@@ -266,8 +266,9 @@ describe("mutate-stamp-and-subprocess diff, retry & markdown hygiene", () => {
 
       // symlink refusal
       const symlinkIo: SyncHostIo = {
-        ...testHostIo,
-        isSymbolicLinkSync: (p) => (p === srcFile ? true : testHostIo.isSymbolicLinkSync(p)),
+        ...isolatedTestHostIo,
+        isSymbolicLinkSync: (p) =>
+          p === srcFile ? true : isolatedTestHostIo.isSymbolicLinkSync(p),
       }
       expect(checkMutateStamp(dir, symlinkIo)).toEqual({
         _tag: "Invalid",
@@ -277,10 +278,10 @@ describe("mutate-stamp-and-subprocess diff, retry & markdown hygiene", () => {
 
       // unreadable file refusal
       const unreadIo: SyncHostIo = {
-        ...testHostIo,
+        ...isolatedTestHostIo,
         readBytesSync: (p) => {
           if (p === srcFile) throw new Error("EACCES")
-          return testHostIo.readBytesSync(p)
+          return isolatedTestHostIo.readBytesSync(p)
         },
       }
       expect(checkMutateStamp(dir, unreadIo)).toEqual({
@@ -291,7 +292,7 @@ describe("mutate-stamp-and-subprocess diff, retry & markdown hygiene", () => {
 
       // treeHash mismatch
       writeFileSync(srcFile, "export const x = 2\n", "utf8")
-      expect(checkMutateStamp(dir, testHostIo)).toEqual({
+      expect(checkMutateStamp(dir, isolatedTestHostIo)).toEqual({
         _tag: "Invalid",
         reason:
           "Workspace files changed since last mutate --strict. Run pnpm harness mutate --strict after your latest edits before verify.",

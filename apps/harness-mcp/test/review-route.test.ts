@@ -1,9 +1,12 @@
+import * as childProcess from "node:child_process"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { Cause, Effect, Schema } from "effect"
+import type * as DecisionModel from "effect/ai/DecisionModel"
 import { describe, expect, it } from "vitest"
 import {
+  type InvalidReviewRouteInputError,
   NxScopeTag,
   NxTierTag,
   REVIEW_SLICE_FILE_THRESHOLD,
@@ -14,6 +17,7 @@ import {
   ReviewRawDiffInput,
   ReviewRawFileInput,
   ReviewRouteToolOutput,
+  ReviewSignalPath,
   ReviewSummaryText,
   ReviewTimeoutMillis,
   ReviewerId,
@@ -24,6 +28,8 @@ import { runWithTestTracer } from "@harness/ingest"
 import { match } from "ts-pattern"
 import { executeToolEffect } from "../src/server.js"
 import { executeReviewRouteTool } from "../src/tools/graph-navigation.tools.js"
+import { deriveChangedLineCountFromGit } from "../src/tools/review-route-helpers.js"
+import { ReviewGitBaseRef } from "../src/tools/review-route-git.js"
 import { executeTool } from "./execute-tool-helper.js"
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../../..")
@@ -498,7 +504,10 @@ describe("harness_review_route MCP tool", () => {
 
   it("10. enforces input bounds and maps > 16 touchedTiers in executeReviewRouteTool to InvalidReviewRouteInputError", async () => {
     await expectSchemaRejection({ changedFiles: [], changedLineCount: 1 }, REPO_ROOT)
-    await expectSchemaRejection({ changedFiles: ["docs/notes.md"] }, REPO_ROOT)
+    await expectSchemaRejection(
+      { changedFiles: ["docs/notes.md"], changedLineCount: -1 },
+      REPO_ROOT,
+    )
     await expectSchemaRejection(
       {
         changedFiles: Array.from({ length: 201 }, (_, i) => `docs/file-${i}.md`),
@@ -739,5 +748,337 @@ describe("harness_review_route MCP tool", () => {
     expect(subdirOut.signals.changedFiles).toEqual([
       "adapters/claude-code/skills/effect-code-review/SKILL.md",
     ])
+  })
+
+  it("16. auto-derives changedLineCount via git diff --numstat and untracked files when omitted (REQ-3.8)", async () => {
+    const graph = buildHarnessGraph({ fns: [], services: [], layers: [], errors: [] })
+    const runGit = (cwd: string, args: ReadonlyArray<string>): void => {
+      childProcess.execFileSync("git", args, { cwd, stdio: "pipe" })
+    }
+
+    await withTempDir(async (tmpRepo) => {
+      runGit(tmpRepo, ["init"])
+      runGit(tmpRepo, ["config", "user.email", "test@example.com"])
+      runGit(tmpRepo, ["config", "user.name", "Test User"])
+      fs.writeFileSync(path.join(tmpRepo, "tracked.txt"), "line1\nline2\n", "utf8")
+      fs.writeFileSync(path.join(tmpRepo, "asset.bin"), Buffer.from([0, 1, 2, 3]))
+      runGit(tmpRepo, ["add", "tracked.txt", "asset.bin"])
+      runGit(tmpRepo, ["commit", "-m", "init"])
+
+      // Modify tracked.txt (+185 lines) and asset.bin (binary) plus an untracked 5-line file.
+      const addedLines = Array.from({ length: 185 }, (_, i) => `extra-${i}`).join("\n")
+      fs.writeFileSync(path.join(tmpRepo, "tracked.txt"), `line1\nline2\n${addedLines}\n`, "utf8")
+      fs.writeFileSync(path.join(tmpRepo, "asset.bin"), Buffer.from([0, 1, 2, 4, 5]))
+      fs.writeFileSync(path.join(tmpRepo, "untracked.txt"), "u1\nu2\nu3\nu4\nu5\n", "utf8")
+
+      const directDerived = await Effect.runPromise(
+        deriveChangedLineCountFromGit(tmpRepo, [
+          ReviewSignalPath.make("tracked.txt"),
+          ReviewSignalPath.make("asset.bin"),
+          ReviewSignalPath.make("untracked.txt"),
+        ]),
+      )
+      expect(directDerived.changedLineCount).toBe(190)
+      expect(directDerived.warning).toBeUndefined()
+
+      const autoRaw = await executeTool(
+        "harness_review_route",
+        {
+          changedFiles: ["tracked.txt", "asset.bin", "untracked.txt"],
+          diffSummary: "Auto-derived line count check",
+          repoRoot: tmpRepo,
+        },
+        {
+          repoRoot: tmpRepo,
+          graph,
+          skipOmnigraphSpawn: true,
+          skipTelemetry: true,
+          skipActiveWorkspaceLookup: true,
+          decisionLayer: makeMockDecisionModelLayer({ reviewDepthLabel: ReviewDepth.make("skip") }),
+        },
+      )
+      const autoOut = Schema.decodeUnknownSync(ReviewRouteToolOutput)(autoRaw)
+      expect(autoOut.signals.changedLineCount).toBe(190)
+      expect(autoOut.warnings).toHaveLength(0)
+      expect(autoOut.plan._tag).toBe("ActiveReviewPlan")
+      expect(autoOut.plan.depth).toBe("full")
+      expect(
+        autoOut.plan._tag === "ActiveReviewPlan" &&
+          autoOut.plan.selections.some(
+            (s) => s.reviewer === ReviewerId.make("effect-architecture-reviewer"),
+          ),
+      ).toBe(true)
+
+      const overrideOut = await executeReviewRouteTool(
+        {
+          changedFiles: ["tracked.txt"],
+          diffSummary: "Explicit override",
+          changedLineCount: ReviewChangedLines.make(4),
+        },
+        { repoRoot: tmpRepo, graph },
+      ).pipe(
+        Effect.provide(makeMockDecisionModelLayer({ reviewDepthLabel: ReviewDepth.make("skip") })),
+        Effect.runPromise,
+      )
+      expect(overrideOut.signals.changedLineCount).toBe(4)
+    })
+
+    await withTempDir(async (nonGitDir) => {
+      fs.writeFileSync(path.join(nonGitDir, "notes.md"), "hello\n", "utf8")
+      const fallbackOut = await executeReviewRouteTool(
+        {
+          changedFiles: ["notes.md"],
+          diffSummary: "Non-git fallback",
+        },
+        { repoRoot: nonGitDir, graph },
+      ).pipe(
+        Effect.provide(makeMockDecisionModelLayer({ reviewDepthLabel: ReviewDepth.make("skip") })),
+        Effect.runPromise,
+      )
+      expect(fallbackOut.signals.changedLineCount).toBe(0)
+      expect(fallbackOut.warnings.length).toBeGreaterThan(0)
+      match(fallbackOut.plan)
+        .with({ _tag: "ActiveReviewPlan" }, (active) => {
+          expect(active.depth).toBe("focused")
+          expect(
+            active.selections.some(
+              (s) => s.reviewer === ReviewerId.make("effect-architecture-reviewer"),
+            ),
+          ).toBe(true)
+        })
+        .with({ _tag: "SkipReviewPlan" }, () => {
+          expect.unreachable("Expected ActiveReviewPlan")
+        })
+        .exhaustive()
+    })
+  })
+
+  it("17. handles unborn repo, deleted lines, untracked no-newline, binary \\0, and symlink files in deriveChangedLineCountFromGit", async () => {
+    const runGit = (cwd: string, args: ReadonlyArray<string>): void => {
+      childProcess.execFileSync("git", args, { cwd, stdio: "pipe" })
+    }
+
+    await withTempDir(async (unbornRepo) => {
+      runGit(unbornRepo, ["init"])
+      runGit(unbornRepo, ["config", "user.email", "test@example.com"])
+      runGit(unbornRepo, ["config", "user.name", "Test User"])
+      fs.writeFileSync(path.join(unbornRepo, "staged.txt"), "s1\ns2\n", "utf8")
+      runGit(unbornRepo, ["add", "staged.txt"])
+      fs.writeFileSync(path.join(unbornRepo, "staged.txt"), "s1\ns2\ns3\n", "utf8")
+      fs.writeFileSync(path.join(unbornRepo, "no-nl.txt"), "u1\nu2\nu3", "utf8")
+      fs.writeFileSync(path.join(unbornRepo, "blob.bin"), Buffer.from([0x41, 0x00, 0x42]))
+      fs.symlinkSync(path.join(unbornRepo, "no-nl.txt"), path.join(unbornRepo, "link.txt"))
+
+      const unbornDerived = await Effect.runPromise(
+        deriveChangedLineCountFromGit(unbornRepo, [
+          ReviewSignalPath.make("staged.txt"),
+          ReviewSignalPath.make("no-nl.txt"),
+          ReviewSignalPath.make("blob.bin"),
+          ReviewSignalPath.make("link.txt"),
+        ]),
+      )
+      expect(unbornDerived.changedLineCount).toBe(6)
+      expect(unbornDerived.warning).toBeUndefined()
+
+      runGit(unbornRepo, ["add", "staged.txt", "no-nl.txt"])
+      runGit(unbornRepo, ["commit", "-m", "initial"])
+      fs.writeFileSync(path.join(unbornRepo, "staged.txt"), "s1\n", "utf8")
+      fs.writeFileSync(path.join(unbornRepo, "no-nl.txt"), "u1", "utf8")
+
+      const deletedDerived = await Effect.runPromise(
+        deriveChangedLineCountFromGit(unbornRepo, [
+          ReviewSignalPath.make("staged.txt"),
+          ReviewSignalPath.make("no-nl.txt"),
+        ]),
+      )
+      // staged.txt lost 2 lines (0 added, 2 deleted); no-nl.txt changed 3 lines -> 1 line (1 added, 3 deleted)
+      expect(deletedDerived.changedLineCount).toBe(6)
+      expect(deletedDerived.warning).toBeUndefined()
+    })
+  })
+
+  it("18. supports explicit baseRef on committed branch diff, warns on invalid/missing repoRoot, and preserves tracked lines on untracked read failure", async () => {
+    const graph = buildHarnessGraph({ fns: [], services: [], layers: [], errors: [] })
+    const runGit = (cwd: string, args: ReadonlyArray<string>): void => {
+      childProcess.execFileSync("git", args, { cwd, stdio: "pipe" })
+    }
+
+    await withTempDir(async (tmpDir) => {
+      const branchRepo = path.join(tmpDir, "repo")
+      fs.mkdirSync(branchRepo, { recursive: true })
+      runGit(branchRepo, ["init", "-b", "main"])
+      runGit(branchRepo, ["config", "user.email", "test@example.com"])
+      runGit(branchRepo, ["config", "user.name", "Test User"])
+      fs.writeFileSync(path.join(branchRepo, "app.ts"), "export const a = 1\n", "utf8")
+      runGit(branchRepo, ["add", "app.ts"])
+      runGit(branchRepo, ["commit", "-m", "main base"])
+      runGit(branchRepo, ["checkout", "-b", "feature"])
+      fs.writeFileSync(
+        path.join(branchRepo, "app.ts"),
+        "export const a = 1\nexport const b = 2\nexport const c = 3\n",
+        "utf8",
+      )
+      runGit(branchRepo, ["add", "app.ts"])
+      runGit(branchRepo, ["commit", "-m", "feature changes"])
+
+      const branchRaw = await executeTool(
+        "harness_review_route",
+        {
+          changedFiles: ["app.ts"],
+          diffSummary: "Feature diff against main",
+          baseRef: ReviewGitBaseRef.make("main"),
+          repoRoot: branchRepo,
+        },
+        {
+          repoRoot: branchRepo,
+          graph,
+          skipOmnigraphSpawn: true,
+          skipTelemetry: true,
+          skipActiveWorkspaceLookup: true,
+          decisionLayer: makeMockDecisionModelLayer({ reviewDepthLabel: ReviewDepth.make("skip") }),
+        },
+      )
+      const branchOut = Schema.decodeUnknownSync(ReviewRouteToolOutput)(branchRaw)
+      expect(branchOut.signals.changedLineCount).toBe(2)
+      expect(branchOut.warnings).toEqual([])
+
+      runGit(branchRepo, ["checkout", "main"])
+      fs.writeFileSync(
+        path.join(branchRepo, "upstream.ts"),
+        Array.from({ length: 10 }, (_, idx) => `export const u${idx} = ${idx}`).join("\n") + "\n",
+        "utf8",
+      )
+      runGit(branchRepo, ["add", "upstream.ts"])
+      runGit(branchRepo, ["commit", "-m", "main diverged upstream commit"])
+      runGit(branchRepo, ["checkout", "feature"])
+
+      const divergedBranchRaw = await executeTool(
+        "harness_review_route",
+        {
+          changedFiles: ["app.ts", "upstream.ts"],
+          diffSummary: "Feature diff after main diverged uses merge-base",
+          baseRef: ReviewGitBaseRef.make("main"),
+          repoRoot: branchRepo,
+        },
+        {
+          repoRoot: branchRepo,
+          graph,
+          skipOmnigraphSpawn: true,
+          skipTelemetry: true,
+          skipActiveWorkspaceLookup: true,
+          decisionLayer: makeMockDecisionModelLayer({ reviewDepthLabel: ReviewDepth.make("skip") }),
+        },
+      )
+      const divergedOut = Schema.decodeUnknownSync(ReviewRouteToolOutput)(divergedBranchRaw)
+      expect(divergedOut.signals.changedLineCount).toBe(2)
+      expect(divergedOut.warnings).toEqual([])
+
+      await expectSchemaRejection(
+        { changedFiles: ["app.ts"], baseRef: "--exec=bad", repoRoot: branchRepo },
+        branchRepo,
+      )
+
+      const missingDirRes = await Effect.runPromise(
+        deriveChangedLineCountFromGit(path.join(tmpDir, "missing"), [
+          ReviewSignalPath.make("app.ts"),
+        ]),
+      )
+      expect(missingDirRes.changedLineCount).toBe(0)
+      expect(missingDirRes.warning).toContain("does not exist on disk")
+
+      const linkRoot = path.join(tmpDir, "repo-link")
+      fs.symlinkSync(branchRepo, linkRoot)
+      const symlinkRootRes = await Effect.runPromise(
+        deriveChangedLineCountFromGit(linkRoot, [ReviewSignalPath.make("app.ts")]),
+      )
+      expect(symlinkRootRes.changedLineCount).toBe(0)
+      expect(symlinkRootRes.warning).toContain("must not be a symlink")
+
+      fs.writeFileSync(
+        path.join(branchRepo, "app.ts"),
+        "export const a = 1\nexport const b = 2\nexport const c = 3\nexport const d = 4\n",
+        "utf8",
+      )
+      fs.writeFileSync(path.join(branchRepo, "bad-utf8.txt"), Buffer.from([0xff, 0xfe, 0x80]))
+      const partialRes = await Effect.runPromise(
+        deriveChangedLineCountFromGit(branchRepo, [
+          ReviewSignalPath.make("app.ts"),
+          ReviewSignalPath.make("bad-utf8.txt"),
+        ]),
+      )
+      expect(partialRes.changedLineCount).toBe(1)
+      expect(partialRes.warning).toContain("Failed to inspect untracked file")
+    })
+  })
+
+  it("19. handles omitted repoRoot + changedLineCount, resolves input repoRoot when context.repoRoot is omitted, and maps missing changedFiles cleanly", async () => {
+    const graph = buildHarnessGraph({ fns: [], services: [], layers: [], errors: [] })
+    const omittedOut = await executeReviewRouteTool(
+      {
+        changedFiles: ["docs/notes.md"],
+        diffSummary: "No repoRoot and no changedLineCount",
+      },
+      { graph },
+    ).pipe(
+      Effect.provide(makeMockDecisionModelLayer({ reviewDepthLabel: ReviewDepth.make("skip") })),
+      Effect.runPromise,
+    )
+    expect(omittedOut.signals.changedLineCount).toBe(0)
+    expect(
+      omittedOut.warnings.some((w) =>
+        w.includes("No repoRoot supplied; changedLineCount auto-derivation unavailable"),
+      ),
+    ).toBe(true)
+    match(omittedOut.plan)
+      .with({ _tag: "ActiveReviewPlan" }, (active) => {
+        expect(active.depth).toBe("focused")
+        expect(active.selections.map((s) => s.reviewer)).toContain(
+          ReviewerId.make("effect-architecture-reviewer"),
+        )
+      })
+      .with({ _tag: "SkipReviewPlan" }, () => {
+        expect.unreachable("Expected ActiveReviewPlan")
+      })
+      .exhaustive()
+
+    const inputRootOut = await executeReviewRouteTool(
+      {
+        changedFiles: ["libs/harness/contract/src/review-routing.ts"],
+        diffSummary: "Direct repoRoot without context.repoRoot",
+        changedLineCount: ReviewChangedLines.make(5),
+        repoRoot: REPO_ROOT,
+      },
+      { graph },
+    ).pipe(
+      Effect.provide(makeMockDecisionModelLayer({ reviewDepthLabel: ReviewDepth.make("lite") })),
+      Effect.runPromise,
+    )
+    expect(inputRootOut.warnings).toEqual([])
+    expect(inputRootOut.signals.touchedTiers).toContain("type:contract")
+
+    await expectFailureTag(
+      executeReviewRouteTool(
+        {
+          changedFiles: ["docs/notes.md"],
+          changedLineCount: ReviewChangedLines.make(1),
+          repoRoot: "/etc",
+        },
+        { graph },
+      ).pipe(Effect.provide(makeMockDecisionModelLayer())),
+      "InvalidReviewRouteInputError",
+    )
+
+    const malformedCall: Effect.Effect<
+      ReviewRouteToolOutput,
+      InvalidReviewRouteInputError,
+      DecisionModel.DecisionModel
+    > = Reflect.apply(executeReviewRouteTool, undefined, [{}])
+    await expectFailureTag(
+      malformedCall.pipe(Effect.provide(makeMockDecisionModelLayer())),
+      "InvalidReviewRouteInputError",
+      {
+        offendingPath: "unknown",
+      },
+    )
   })
 })

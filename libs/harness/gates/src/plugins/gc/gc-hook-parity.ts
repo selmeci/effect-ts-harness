@@ -328,7 +328,10 @@ const checkSingleAdapterParity = (
       )
     })
     .with({ _tag: "Some" }, ({ value }) => {
-      const container = rootKey === "hooks" ? value.hooks : value["effect-harness"]
+      const container = match(rootKey)
+        .with("hooks", () => value.hooks)
+        .with("effect-harness", () => value["effect-harness"])
+        .exhaustive()
       if (container === undefined) {
         findings.push(
           makeParityFinding(

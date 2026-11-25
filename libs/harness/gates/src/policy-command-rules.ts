@@ -1,5 +1,6 @@
 /** Zero-dependency static guard rules, allowlists, denylists, and leading-env strippers
  * shared by `policy.ts` under the `policy-zero-dep` closure profile. */
+import { match } from "ts-pattern"
 
 import {
   ALLOWLIST,
@@ -249,7 +250,7 @@ export const stripSafeLeadingEnvVarsDetailed = (command: string): StripLeadingEn
 export const stripSafeLeadingEnvVars = (command: string): string =>
   stripSafeLeadingEnvVarsDetailed(command).rest
 
-const splitCommandTokens = (command: string): ReadonlyArray<string> => {
+export const splitCommandTokens = (command: string): ReadonlyArray<string> => {
   const tokens: Array<string> = []
   let current = ""
   let inToken = false
@@ -261,10 +262,17 @@ const splitCommandTokens = (command: string): ReadonlyArray<string> => {
         quote = undefined
         continue
       }
-      if (quote === '"' && ch === "\\" && i + 1 < command.length) {
-        current += command[++i]!
-        continue
-      }
+      const escaped = match(quote)
+        .with('"', () => {
+          if (ch === "\\" && i + 1 < command.length) {
+            current += command[++i]!
+            return true
+          }
+          return false
+        })
+        .with("'", () => false)
+        .exhaustive()
+      if (escaped) continue
       current += ch
       continue
     }
@@ -432,34 +440,43 @@ export const hasExpandableShellVariable = (rawSegment: string): boolean => {
   let quote: "'" | '"' | undefined
   for (let i = 0; i < rawSegment.length; i++) {
     const ch = rawSegment[i]!
-    if (quote === "'") {
-      if (ch === "'") {
-        quote = undefined
-      }
-      continue
-    }
-    if (ch === "\\") {
-      i++
-      continue
-    }
-    const next = rawSegment[i + 1]
-    if (quote === '"') {
-      if (ch === '"') {
-        quote = undefined
-        continue
-      }
-      if (ch === "$" && next !== undefined && SHELL_VAR_START_PATTERN.test(next)) {
-        return true
-      }
-      continue
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch
-      continue
-    }
-    if (ch === "$" && next !== undefined && SHELL_VAR_START_PATTERN.test(next)) {
-      return true
-    }
+    const handled = match(quote)
+      .with("'", () => {
+        if (ch === "'") quote = undefined
+        return "continue" as const
+      })
+      .with('"', () => {
+        if (ch === "\\") {
+          i++
+          return "continue" as const
+        }
+        if (ch === '"') {
+          quote = undefined
+          return "continue" as const
+        }
+        const next = rawSegment[i + 1]
+        if (ch === "$" && next !== undefined && SHELL_VAR_START_PATTERN.test(next)) {
+          return "true" as const
+        }
+        return "continue" as const
+      })
+      .with(undefined, () => {
+        if (ch === "\\") {
+          i++
+          return "continue" as const
+        }
+        if (ch === "'" || ch === '"') {
+          quote = ch
+          return "continue" as const
+        }
+        const next = rawSegment[i + 1]
+        if (ch === "$" && next !== undefined && SHELL_VAR_START_PATTERN.test(next)) {
+          return "true" as const
+        }
+        return "continue" as const
+      })
+      .exhaustive()
+    if (handled === "true") return true
   }
   return false
 }

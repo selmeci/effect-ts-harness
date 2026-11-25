@@ -150,7 +150,17 @@ const gatherChangedPaths = Effect.fnUntraced(function* (
   const committed = yield* runGitNullDelimitedPaths(
     hostIo,
     cwd,
-    ["-c", "core.quotePath=false", "diff", "--no-renames", "--name-only", "-z", `${baseSha}..HEAD`],
+    [
+      "-c",
+      "core.quotePath=false",
+      "diff",
+      "--no-renames",
+      "--name-only",
+      "-z",
+      "--end-of-options",
+      `${baseSha}..HEAD`,
+      "--",
+    ],
     env,
   )
   const unstaged = yield* runGitNullDelimitedPaths(

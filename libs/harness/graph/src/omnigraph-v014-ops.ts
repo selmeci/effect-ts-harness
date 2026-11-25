@@ -470,8 +470,8 @@ export interface OmnigraphBlobStatResult {
 const cancelResponseBody = (res: Response): Effect.Effect<void> =>
   Effect.tryPromise({
     try: () => (res.body ? res.body.cancel() : Promise.resolve()),
-    catch: () => undefined,
-  }).pipe(Effect.orElseSucceed(() => undefined))
+    catch: (cause) => new OmnigraphLoadError({ cause }),
+  }).pipe(Effect.catch((err) => Effect.logDebug("Failed to cancel Omnigraph response body", err)))
 
 export const executePollChanges = (
   og: Omnigraph,
@@ -593,7 +593,10 @@ export const executeGetBlobText = (
     ),
     Effect.catchIf(
       (err) => err.cause instanceof NotFoundError,
-      () => Effect.succeed<string | null>(null),
+      (err) =>
+        Effect.logDebug("Omnigraph blob not found; returning null", err).pipe(
+          Effect.as<string | null>(null),
+        ),
     ),
   )
 
@@ -729,7 +732,7 @@ export const executeLoadWithStaleRefork = (
     }).pipe(
       Effect.catchIf(
         (err) => err.cause instanceof NotFoundError,
-        () => Effect.void,
+        (err) => Effect.logDebug("Stale Omnigraph branch already absent during delete", err),
       ),
     )
 

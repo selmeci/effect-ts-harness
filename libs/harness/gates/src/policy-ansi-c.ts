@@ -1,48 +1,53 @@
 /** Zero-dependency ANSI-C ($'...') escape decoder and shell line-continuation normalizer
  * shared by `policy-shell-parser.ts` under the `policy-zero-dep` closure profile. */
+import { match } from "ts-pattern"
 
 export const normalizeShellLineContinuations = (command: string): string => {
   let out = ""
   let quote: "'" | '"' | "$'" | undefined
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!
-    if (quote === "$'") {
-      if (ch === "\\" && i + 1 < command.length) {
-        out += ch + command[++i]!
-        continue
-      }
-      if (ch === "'") quote = undefined
-      out += ch
-      continue
-    }
-    if (quote === "'") {
-      if (ch === "'") quote = undefined
-      out += ch
-      continue
-    }
-    if (quote === '"') {
-      if (ch === '"') {
-        quote = undefined
-        out += ch
-        continue
-      }
-      if (ch === "\\") {
-        if (command[i + 1] === "\n") {
-          i += 1
-          continue
-        }
-        if (command[i + 1] === "\r" && command[i + 2] === "\n") {
-          i += 2
-          continue
-        }
-        if (i + 1 < command.length) {
+    const handled = match(quote)
+      .with("$'", () => {
+        if (ch === "\\" && i + 1 < command.length) {
           out += ch + command[++i]!
-          continue
+          return true
         }
-      }
-      out += ch
-      continue
-    }
+        if (ch === "'") quote = undefined
+        out += ch
+        return true
+      })
+      .with("'", () => {
+        if (ch === "'") quote = undefined
+        out += ch
+        return true
+      })
+      .with('"', () => {
+        if (ch === '"') {
+          quote = undefined
+          out += ch
+          return true
+        }
+        if (ch === "\\") {
+          if (command[i + 1] === "\n") {
+            i += 1
+            return true
+          }
+          if (command[i + 1] === "\r" && command[i + 2] === "\n") {
+            i += 2
+            return true
+          }
+          if (i + 1 < command.length) {
+            out += ch + command[++i]!
+            return true
+          }
+        }
+        out += ch
+        return true
+      })
+      .with(undefined, () => false)
+      .exhaustive()
+    if (handled) continue
     if (ch === "$" && command[i + 1] === "'") {
       quote = "$'"
       out += "$'"

@@ -238,7 +238,12 @@ const resolveDiffBase = (
   Effect.gen(function* () {
     if (baseRef !== undefined) {
       const validRef = yield* validateBaseRef(baseRef)
-      const mergeBase = (yield* execGitOk(root, ["merge-base", validRef, "HEAD"])).trim()
+      const mergeBase = (yield* execGitOk(root, [
+        "merge-base",
+        "--end-of-options",
+        validRef,
+        "HEAD",
+      ])).trim()
       if (mergeBase.length === 0) {
         return yield* failGitDiff(`git merge-base returned empty output for '${validRef}'`)
       }
@@ -376,19 +381,54 @@ export const executeGitDiffTool = Effect.fn("HarnessMcp.gitDiff")(function* (
   const [statRaw, nameOnlyRaw, untrackedRaw, fullDiffRaw] = yield* input.statOnly === true
     ? Effect.all(
         [
-          execGitOk(root, ["diff", "--stat", "--no-color", diffBase, ...pathArgs]),
-          execGitOk(root, ["diff", "--name-only", "-z", diffBase, ...pathArgs]),
-          execGitOk(root, ["ls-files", "--others", "--exclude-standard", "-z", ...pathArgs]),
+          execGitOk(root, [
+            "diff",
+            "--stat",
+            "--no-color",
+            "--end-of-options",
+            diffBase,
+            ...pathArgs,
+          ]),
+          execGitOk(root, ["diff", "--name-only", "-z", "--end-of-options", diffBase, ...pathArgs]),
+          execGitOk(root, [
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--end-of-options",
+            ...pathArgs,
+          ]),
           Effect.succeed(""),
         ],
         { concurrency: "unbounded" },
       )
     : Effect.all(
         [
-          execGitOk(root, ["diff", "--stat", "--no-color", diffBase, ...pathArgs]),
-          execGitOk(root, ["diff", "--name-only", "-z", diffBase, ...pathArgs]),
-          execGitOk(root, ["ls-files", "--others", "--exclude-standard", "-z", ...pathArgs]),
-          execGitOk(root, ["diff", "--no-color", "--no-ext-diff", diffBase, ...pathArgs]),
+          execGitOk(root, [
+            "diff",
+            "--stat",
+            "--no-color",
+            "--end-of-options",
+            diffBase,
+            ...pathArgs,
+          ]),
+          execGitOk(root, ["diff", "--name-only", "-z", "--end-of-options", diffBase, ...pathArgs]),
+          execGitOk(root, [
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--end-of-options",
+            ...pathArgs,
+          ]),
+          execGitOk(root, [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--end-of-options",
+            diffBase,
+            ...pathArgs,
+          ]),
         ],
         { concurrency: "unbounded" },
       )

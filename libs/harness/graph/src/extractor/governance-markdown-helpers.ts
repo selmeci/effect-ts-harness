@@ -35,29 +35,73 @@ export const stripMarkdownInline = (raw: string): string =>
 export const splitMarkdownTableCells = (rowLine: string): Array<string> => {
   const trimmed = rowLine.trim()
   if (!trimmed.startsWith("|")) return []
-  const body = trimmed.endsWith("|") ? trimmed.slice(1, -1) : trimmed.slice(1)
+  let end = trimmed.length
+  if (trimmed.endsWith("|")) {
+    let backslashCount = 0
+    for (let k = trimmed.length - 2; k >= 1 && trimmed[k] === "\\"; k--) {
+      backslashCount++
+    }
+    if (backslashCount % 2 === 0) {
+      end = trimmed.length - 1
+    }
+  }
+  const body = trimmed.slice(1, end)
   const cells: Array<string> = []
   let current = ""
-  let inBackticks = false
-  for (let i = 0; i < body.length; i++) {
+  let inBacktickLen = 0
+  let i = 0
+  while (i < body.length) {
     const ch = body[i]!
-    const prev = i > 0 ? body[i - 1] : ""
-    if (ch === "`" && prev !== "\\") {
-      inBackticks = !inBackticks
-      current += ch
+    if (ch === "`") {
+      let runLen = 1
+      while (i + runLen < body.length && body[i + runLen] === "`") {
+        runLen++
+      }
+      if (inBacktickLen === 0) {
+        inBacktickLen = runLen
+      } else {
+        if (runLen === inBacktickLen) {
+          inBacktickLen = 0
+        }
+      }
+      current += body.slice(i, i + runLen)
+      i += runLen
       continue
     }
-    if (ch === "|" && !inBackticks && prev !== "\\") {
+    if (inBacktickLen > 0) {
+      if (ch === "\\") {
+        const next = body[i + 1]
+        if (next === "\\") {
+          current += "\\\\"
+          i += 2
+          continue
+        }
+        if (next === "|") {
+          current += "|"
+          i += 2
+          continue
+        }
+      }
+      current += ch
+      i++
+      continue
+    }
+    if (ch === "\\") {
+      const next = body[i + 1]
+      if (next === "\\" || next === "|" || next === "`") {
+        current += next
+        i += 2
+        continue
+      }
+    }
+    if (ch === "|") {
       cells.push(current.trim())
       current = ""
-      continue
-    }
-    if (ch === "\\" && i + 1 < body.length && body[i + 1] === "|") {
-      current += "|"
       i++
       continue
     }
     current += ch
+    i++
   }
   cells.push(current.trim())
   return cells

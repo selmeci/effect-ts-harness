@@ -17,6 +17,7 @@ import {
   cleanName,
   decomposeType,
   decomposeTypeNode,
+  isContractOrDomainTag,
 } from "./extractor-types-and-helpers.js"
 
 export const extractEffectFns = (
@@ -41,10 +42,7 @@ export const extractEffectFns = (
     const typeText = typeNode?.getText() ?? ""
     const initText = init?.getText() ?? ""
 
-    const isLayer =
-      typeText.includes("Layer") ||
-      initText.startsWith("Layer.") ||
-      (init !== undefined && Node.isCallExpression(init) && init.getExpression().getText().startsWith("Layer."))
+    const isLayer = typeText.includes("Layer") || initText.startsWith("Layer.")
     if (isLayer) continue
 
     let isEffectFn = false
@@ -61,16 +59,22 @@ export const extractEffectFns = (
               spanName = args[0].getText().replace(/^["'`]|["'`]$/g, "")
             }
           })
-          .with("Effect.fnUntraced", () => { isEffectFn = true; spanName = varName })
+          .with("Effect.fnUntraced", () => {
+            isEffectFn = true
+            spanName = varName
+          })
           .otherwise(() => {})
       } else {
-        if (innerExpr.getText() === "Effect.fnUntraced") { isEffectFn = true; spanName = varName }
+        if (innerExpr.getText() === "Effect.fnUntraced") {
+          isEffectFn = true
+          spanName = varName
+        }
       }
     }
 
     if (
       !isEffectFn &&
-      (filePkgTag === "domain" || filePkgTag === "contract") &&
+      isContractOrDomainTag(filePkgTag) &&
       init &&
       (Node.isArrowFunction(init) || Node.isFunctionExpression(init)) &&
       init.getParameters().length === 2 &&
@@ -78,9 +82,7 @@ export const extractEffectFns = (
     ) {
       isEffectFn = true
       spanName =
-        varName.startsWith("evolve") && varName.length > 6
-          ? `${varName.slice(6)}.evolve`
-          : varName
+        varName.startsWith("evolve") && varName.length > 6 ? `${varName.slice(6)}.evolve` : varName
     }
 
     if (!isEffectFn || !init) continue
@@ -313,14 +315,22 @@ export const extractEffectFns = (
           const arg = callExpr.getArguments()[0]
           if (arg) {
             match(arg.getKind())
-              .with(SyntaxKind.NewExpression, () => { errorTags.add((arg as NewExpression).getExpression().getText()) })
-              .with(SyntaxKind.Identifier, () => { errorTags.add(arg.getText()) })
+              .with(SyntaxKind.NewExpression, () => {
+                errorTags.add((arg as NewExpression).getExpression().getText())
+              })
+              .with(SyntaxKind.Identifier, () => {
+                errorTags.add(arg.getText())
+              })
               .otherwise(() => {})
           }
         } else {
           if (calleeText.endsWith(".make")) {
             const errorId = calleeText.replace(/\.make$/, "")
-            if (errorId.endsWith("Error") || errors.some((e) => e.errorTag === errorId) || referencedErrors.has(errorId)) {
+            if (
+              errorId.endsWith("Error") ||
+              errors.some((e) => e.errorTag === errorId) ||
+              referencedErrors.has(errorId)
+            ) {
               errorTags.add(errorId)
             }
           }
@@ -406,7 +416,7 @@ export const extractEffectFns = (
     }
   }
 
-  if (filePkgTag === "domain" || filePkgTag === "contract") {
+  if (isContractOrDomainTag(filePkgTag)) {
     for (const fnDecl of sourceFile.getFunctions()) {
       if (!fnDecl.isExported()) continue
       const fnName = fnDecl.getName()

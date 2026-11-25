@@ -508,7 +508,19 @@ const mapAsyncExecCompletion = (
         : "Subprocess execution failed"
   const errCode = typeof rawCode === "string" ? rawCode : undefined
 
-  if (errCode === "ETIMEDOUT" || (killed && hasTimeout)) {
+  if (errCode === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+    return {
+      _tag: "SpawnFailed",
+      spawnError: errMessage,
+      errorCode: errCode,
+      stdout,
+      stderr,
+    }
+  }
+  if (
+    errCode === "ETIMEDOUT" ||
+    (killed && hasTimeout && (rawSignal !== null || errCode === undefined))
+  ) {
     return {
       _tag: "TimedOut",
       stdout,

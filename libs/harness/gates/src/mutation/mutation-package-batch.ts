@@ -617,7 +617,20 @@ export interface QueuedPackageEntry {
   readonly mutantKeys: ReadonlyMap<string, ContentSha256>
 }
 
-/** Executes queued package batches using one persistent warm Vitest pool per multi-file package. */
+const PACKAGE_BATCH_CHUNK_MAX_FILES = 4
+
+const chunkQueuedPackageEntries = (
+  entries: ReadonlyArray<QueuedPackageEntry>,
+  maxFiles: number = PACKAGE_BATCH_CHUNK_MAX_FILES,
+): ReadonlyArray<ReadonlyArray<QueuedPackageEntry>> => {
+  const chunks: Array<ReadonlyArray<QueuedPackageEntry>> = []
+  for (let i = 0; i < entries.length; i += maxFiles) {
+    chunks.push(entries.slice(i, i + maxFiles))
+  }
+  return chunks
+}
+
+/** Executes queued package batches using one persistent warm Vitest pool per chunk (up to 4 files). */
 export function executeQueuedPackageBatches(input: {
   readonly repoRoot: string
   readonly backupPath: string
@@ -660,43 +673,55 @@ export function executeQueuedPackageBatches(input: {
       continue
     }
 
-    const allPkgTestSet = new Set<string>()
-    for (const q of queuedEntries) {
-      for (const t of q.input.primaryTests) allPkgTestSet.add(t)
-      for (const t of [...q.input.scopedFallbackTests, ...q.input.packageFallbackTests]) {
-        allPkgTestSet.add(t)
+    const chunks = chunkQueuedPackageEntries(queuedEntries, PACKAGE_BATCH_CHUNK_MAX_FILES)
+    let doneFiles = 0
+    for (const chunk of chunks) {
+      const chunkTestSet = new Set<string>()
+      let chunkMutants = 0
+      for (const q of chunk) {
+        chunkMutants += q.input.uncachedMutants.length
+        for (const t of q.input.primaryTests) chunkTestSet.add(t)
+        for (const t of [...q.input.scopedFallbackTests, ...q.input.packageFallbackTests]) {
+          chunkTestSet.add(t)
+        }
       }
+      const chunkStartedMs = Date.now()
+      const pkgBatchRes = runPackageMutantBatchChecked({
+        repoRoot: input.repoRoot,
+        pkgKey,
+        backupPath: input.backupPath,
+        hostIo: input.hostIo,
+        baseSubprocessEnv: input.baseSubprocessEnv,
+        allPackageTests: Array.from(chunkTestSet),
+        files: chunk.map((q) => q.input),
+      })
+      const entryByRel = new Map(chunk.map((q) => [q.input.file.relFile, q]))
+      const batchAbort = match(pkgBatchRes)
+        .with({ _tag: "Abort" }, ({ partialResults, diagnostic }) => {
+          for (const pr of partialResults) {
+            const matched = entryByRel.get(pr.file.relFile)
+            if (matched === undefined) continue
+            input.finalizeEntry(matched, pr)
+          }
+          return diagnostic
+        })
+        .with({ _tag: "Ok" }, ({ fileResults }) => {
+          for (const fr of fileResults) {
+            const matched = entryByRel.get(fr.file.relFile)
+            if (matched === undefined) continue
+            const finErr = input.finalizeEntry(matched, fr)
+            if (finErr !== undefined) return finErr
+          }
+          return undefined
+        })
+        .exhaustive()
+      doneFiles += chunk.length
+      const elapsedSec = ((Date.now() - chunkStartedMs) / 1000).toFixed(1)
+      process.stderr.write(
+        `[mutation-check] ${pkgKey} (${doneFiles}/${queuedEntries.length} files, ${chunkMutants} mutants) done in ${elapsedSec}s\n`,
+      )
+      if (batchAbort !== undefined) return batchAbort
     }
-    const pkgBatchRes = runPackageMutantBatchChecked({
-      repoRoot: input.repoRoot,
-      pkgKey,
-      backupPath: input.backupPath,
-      hostIo: input.hostIo,
-      baseSubprocessEnv: input.baseSubprocessEnv,
-      allPackageTests: Array.from(allPkgTestSet),
-      files: queuedEntries.map((q) => q.input),
-    })
-    const entryByRel = new Map(queuedEntries.map((q) => [q.input.file.relFile, q]))
-    const batchAbort = match(pkgBatchRes)
-      .with({ _tag: "Abort" }, ({ partialResults, diagnostic }) => {
-        for (const pr of partialResults) {
-          const matched = entryByRel.get(pr.file.relFile)
-          if (matched === undefined) continue
-          input.finalizeEntry(matched, pr)
-        }
-        return diagnostic
-      })
-      .with({ _tag: "Ok" }, ({ fileResults }) => {
-        for (const fr of fileResults) {
-          const matched = entryByRel.get(fr.file.relFile)
-          if (matched === undefined) continue
-          const finErr = input.finalizeEntry(matched, fr)
-          if (finErr !== undefined) return finErr
-        }
-        return undefined
-      })
-      .exhaustive()
-    if (batchAbort !== undefined) return batchAbort
   }
   return undefined
 }

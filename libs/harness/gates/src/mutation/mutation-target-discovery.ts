@@ -599,10 +599,13 @@ export const findReachingTestFilesChecked = (
 ):
   | { readonly _tag: "Ok"; readonly files: ReadonlyArray<string> }
   | { readonly _tag: "Error"; readonly reason: string } => {
-  const testDir =
-    file.tier === "app-pure" && file.scope === "apps"
-      ? join(repoRoot, "apps", file.pkgDir, "test")
-      : join(repoRoot, "libs", file.scope, file.pkgDir, "test")
+  const testDir = match(file.tier)
+    .with("app-pure", () =>
+      file.scope === "apps"
+        ? join(repoRoot, "apps", file.pkgDir, "test")
+        : join(repoRoot, "libs", file.scope, file.pkgDir, "test"),
+    )
+    .otherwise(() => join(repoRoot, "libs", file.scope, file.pkgDir, "test"))
   const existsRes = existsGuarded(testDir, hostIo)
   const testDirExists = match(existsRes)
     .with({ _tag: "Success" }, ({ success }) => success)
@@ -689,10 +692,11 @@ export const partitionReachingTestFilesChecked = (
   match(findReachingTestFilesChecked(repoRoot, file, hostIo))
     .with({ _tag: "Error" }, (err) => err)
     .with({ _tag: "Ok" }, ({ files: allTests }) => {
-      const pkgDirRel =
-        file.tier === "app-pure" && file.scope === "apps"
-          ? `apps/${file.pkgDir}`
-          : `libs/${file.scope}/${file.pkgDir}`
+      const pkgDirRel = match(file.tier)
+        .with("app-pure", () =>
+          file.scope === "apps" ? `apps/${file.pkgDir}` : `libs/${file.scope}/${file.pkgDir}`,
+        )
+        .otherwise(() => `libs/${file.scope}/${file.pkgDir}`)
       return partitionEligibleTestsChecked({
         repoRoot,
         pkgDirRel,

@@ -46,7 +46,15 @@ const makeWorkspaceFsLayer = (
               Effect.andThen(fs.writeFileString(tmpPath, content)),
               Effect.andThen(fs.rename(tmpPath, filePath)),
               Effect.mapError((err) => toWorkspaceFsError(filePath, "write", err)),
-              Effect.ensuring(fs.remove(tmpPath, { force: true }).pipe(Effect.ignore)),
+              Effect.ensuring(
+                fs
+                  .remove(tmpPath, { force: true })
+                  .pipe(
+                    Effect.catch((err) =>
+                      Effect.logDebug("Failed to remove temporary WorkspaceFs file", err),
+                    ),
+                  ),
+              ),
             )
           }),
         exists: (filePath) =>
@@ -95,15 +103,17 @@ const makeWorkspaceFsHostIoLayer = (hostIo: SyncHostIo): Layer.Layer<WorkspaceFs
           catch: (err) => toWorkspaceFsError(filePath, "write", err),
         }).pipe(
           Effect.ensuring(
-            Effect.ignore(
-              Effect.try({
-                try: () => {
-                  if (hostIo.existsSync(tmpPath)) {
-                    hostIo.unlinkSync(tmpPath)
-                  }
-                },
-                catch: () => undefined,
-              }),
+            Effect.try({
+              try: () => {
+                if (hostIo.existsSync(tmpPath)) {
+                  hostIo.unlinkSync(tmpPath)
+                }
+              },
+              catch: (err) => toWorkspaceFsError(filePath, "write", err),
+            }).pipe(
+              Effect.catch((err) =>
+                Effect.logDebug("Failed to unlink temporary WorkspaceFs file", err),
+              ),
             ),
           ),
         )

@@ -276,13 +276,14 @@ export const computeSpanSaturation = (
     for (const ancestor of ancestors) {
       if (ancestor.name.startsWith("Test:")) continue
       const targetEntry = ensureEntry(ancestor.name)
-      if (
-        span.exitTag === "Failure" &&
-        typeof span.errorTag === "string" &&
-        span.errorTag.length > 0
-      ) {
-        targetEntry.errorTags.add(span.errorTag)
-      }
+      match(span.exitTag)
+        .with("Failure", () => {
+          if (typeof span.errorTag === "string" && span.errorTag.length > 0) {
+            targetEntry.errorTags.add(span.errorTag)
+          }
+        })
+        .with("Success", "Defect", "Interrupt", undefined, () => {})
+        .exhaustive()
       if (typeof span.valueTag === "string" && span.valueTag.length > 0) {
         targetEntry.valueTags.add(span.valueTag)
       }

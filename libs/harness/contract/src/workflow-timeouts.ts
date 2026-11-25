@@ -23,6 +23,45 @@ export const WorkflowPollBudget = Schema.Struct({
 })
 export type WorkflowPollBudget = typeof WorkflowPollBudget.Type
 
+/** Branded positive integer count of stages in a multi-stage workflow. */
+export const WorkflowStageCount = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(1)),
+  Schema.brand("WorkflowStageCount"),
+)
+export type WorkflowStageCount = typeof WorkflowStageCount.Type
+
+/** Branded trimmed non-empty label identifying a multi-stage workflow in timeout diagnostics. */
+export const WorkflowStageLabel = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(128)),
+  Schema.brand("WorkflowStageLabel"),
+)
+export type WorkflowStageLabel = typeof WorkflowStageLabel.Type
+
+/** Input for `validateMultiStageTimeoutBudget` (`settleMs > stageCount * perStageCommandMs`). */
+export const MultiStageTimeoutBudgetInput = Schema.Struct({
+  stageCount: WorkflowStageCount,
+  perStageCommandMs: WorkflowTimeoutMs,
+  settleMs: WorkflowTimeoutMs,
+  workflowLabel: WorkflowStageLabel,
+})
+export type MultiStageTimeoutBudgetInput = typeof MultiStageTimeoutBudgetInput.Type
+
+/** Validates that a multi-stage workflow settle budget strictly exceeds `stageCount * perStageCommandMs`. */
+export const validateMultiStageTimeoutBudget = (
+  input: MultiStageTimeoutBudgetInput,
+): Result.Result<WorkflowTimeoutMs, ErrorReasonMessage> => {
+  const minStageBudgetMs = input.stageCount * input.perStageCommandMs
+  if (input.settleMs <= minStageBudgetMs) {
+    return Result.fail(
+      ErrorReasonMessage.make(
+        `${input.workflowLabel} settleMs (${input.settleMs}) must exceed stageCount (${input.stageCount}) * perStageCommandMs (${input.perStageCommandMs}) = ${minStageBudgetMs}`,
+      ),
+    )
+  }
+  return Result.succeed(input.settleMs)
+}
+
 /** Canonical hierarchy of workflow daemon, socket, verifier, store HTTP, settle, and lease timeouts. */
 export const WorkflowTimeoutBudgets = Schema.Struct({
   defaultSocketMs: WorkflowTimeoutMs,
@@ -114,23 +153,25 @@ export const validateWorkflowTimeoutBudgets = (
       ),
     )
   }
-  const minShipStageBudgetMs = SHIP_STAGES.length * budgets.shipGateCommandMs
-  if (budgets.shipWorkflowSettleMs <= minShipStageBudgetMs) {
-    return Result.fail(
-      ErrorReasonMessage.make(
-        `shipWorkflowSettleMs (${budgets.shipWorkflowSettleMs}) must exceed ${SHIP_STAGES.length} * shipGateCommandMs (${minShipStageBudgetMs})`,
-      ),
-    )
-  }
-  if (budgets.shipGateCommandMs <= budgets.workflowServerSocketMs) {
-    return Result.fail(
-      ErrorReasonMessage.make(
-        `shipGateCommandMs (${budgets.shipGateCommandMs}) must exceed workflowServerSocketMs (${budgets.workflowServerSocketMs})`,
-      ),
-    )
-  }
+  const shipStageBudget = validateMultiStageTimeoutBudget(
+    MultiStageTimeoutBudgetInput.make({
+      stageCount: WorkflowStageCount.make(SHIP_STAGES.length),
+      perStageCommandMs: budgets.shipGateCommandMs,
+      settleMs: budgets.shipWorkflowSettleMs,
+      workflowLabel: WorkflowStageLabel.make("ShipWorkflow"),
+    }),
+  )
+  return Result.flatMap(shipStageBudget, () => {
+    if (budgets.shipGateCommandMs <= budgets.workflowServerSocketMs) {
+      return Result.fail(
+        ErrorReasonMessage.make(
+          `shipGateCommandMs (${budgets.shipGateCommandMs}) must exceed workflowServerSocketMs (${budgets.workflowServerSocketMs})`,
+        ),
+      )
+    }
 
-  return Result.succeed(budgets)
+    return Result.succeed(budgets)
+  })
 }
 
 /** Single-source canonical timeout budgets consumed across daemon, verifier, store, and MCP RPC layers, validated at module initialization (`SPEC-0027 REQ-2.2`). */

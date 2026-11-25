@@ -222,16 +222,92 @@ const fnv1a64Hex = (raw: string): string => {
 const isHighSurrogate = (code: number): boolean => code >= 0xd800 && code <= 0xdbff
 const isLowSurrogate = (code: number): boolean => code >= 0xdc00 && code <= 0xdfff
 
+const sliceHeadSafe = (raw: string, maxLen: number): string => {
+  const end = Math.min(raw.length, Math.max(0, maxLen))
+  const cut =
+    isHighSurrogate(raw.charCodeAt(end - 1)) && isLowSurrogate(raw.charCodeAt(end)) ? end - 1 : end
+  return raw.slice(0, cut)
+}
+
+const sliceTailSafe = (raw: string, maxLen: number): string => {
+  const start = Math.max(0, raw.length - Math.max(0, maxLen))
+  const cut =
+    isHighSurrogate(raw.charCodeAt(start - 1)) && isLowSurrogate(raw.charCodeAt(start))
+      ? start + 1
+      : start
+  return raw.slice(cut)
+}
+
+export interface BoundedErrorMessageOptions {
+  readonly prefix: string
+  readonly detail?: string | undefined
+  readonly trailingSuffix?: string | undefined
+  readonly separator?: string | undefined
+  readonly maxChars: number
+  readonly fallback?: string | undefined
+}
+
+const assembleBoundedMessage = (
+  rawPrefix: string,
+  rawDetail: string,
+  trailingSuffix: string,
+  separator: string,
+  maxChars: number,
+): string => {
+  const prefix = rawPrefix.trim()
+  const detail = rawDetail.trim()
+  if (trailingSuffix.length > maxChars) {
+    const sliced = sliceTailSafe(trailingSuffix, maxChars).trim()
+    return sliced.length > 0 ? sliced : sliceHeadSafe(prefix, maxChars)
+  }
+  const prefixAndSuffixLen = prefix.length + trailingSuffix.length
+  if (prefixAndSuffixLen > maxChars) {
+    return `${sliceHeadSafe(prefix, maxChars - trailingSuffix.length)}${trailingSuffix}`
+  }
+  const effectiveSeparator = prefix.length > 0 ? separator : ""
+  const detailBudget = maxChars - prefixAndSuffixLen - effectiveSeparator.length
+  if (detail.length > 0 && detailBudget > 0) {
+    const slicedDetail = sliceTailSafe(detail, detailBudget).trimStart()
+    if (slicedDetail.length > 0) {
+      return `${prefix}${effectiveSeparator}${slicedDetail}${trailingSuffix}`
+    }
+  }
+  return `${prefix}${trailingSuffix}`
+}
+
+/**
+ * Formats a bounded error message within `maxChars` while preserving `trailingSuffix` intact
+ * whenever `trailingSuffix.length <= maxChars`, trimming `detail` from the head (keeping its
+ * diagnostic tail) and truncating `prefix` only if needed, with UTF-16 surrogate-pair safety.
+ */
+export const formatBoundedErrorMessage = (options: BoundedErrorMessageOptions): string => {
+  const maxChars = Number.isFinite(options.maxChars) ? Math.max(0, Math.floor(options.maxChars)) : 0
+  if (maxChars === 0) {
+    return ""
+  }
+  const fallback = (options.fallback ?? "").trim()
+  const trimmed = assembleBoundedMessage(
+    options.prefix,
+    options.detail ?? "",
+    options.trailingSuffix ?? "",
+    options.separator ?? "",
+    maxChars,
+  ).trim()
+  if (trimmed.length > 0) {
+    return trimmed
+  }
+  if (fallback.length === 0) {
+    return ""
+  }
+  return sliceHeadSafe(fallback, maxChars).trim()
+}
+
 const truncateWithHashDigest = (raw: string, maxLength: number): string => {
   if (raw.length <= maxLength) {
     return raw
   }
   const suffix = `…[len=${raw.length},h=${fnv1a64Hex(raw)}]`
-  let prefixEnd = maxLength - suffix.length
-  if (isHighSurrogate(raw.charCodeAt(prefixEnd - 1)) && isLowSurrogate(raw.charCodeAt(prefixEnd))) {
-    prefixEnd -= 1
-  }
-  return `${raw.slice(0, prefixEnd)}${suffix}`
+  return `${sliceHeadSafe(raw, maxLength - suffix.length)}${sliceTailSafe(suffix, maxLength)}`
 }
 
 export const CompilerRepoRootPath = WorkspaceFilePath.pipe(Schema.brand("CompilerRepoRootPath"))
@@ -255,10 +331,14 @@ export type CompilerOverlayErrorReason = typeof CompilerOverlayErrorReason.Type
 export const toCompilerOverlayErrorReason = (
   raw: string,
   fallback = "Compiler overlay operation failed",
-): CompilerOverlayErrorReason => {
-  const normalized = raw.length > 0 ? raw : fallback.length > 0 ? fallback : "Unknown error"
-  return CompilerOverlayErrorReason.make(normalized.slice(0, 8192))
-}
+): CompilerOverlayErrorReason =>
+  CompilerOverlayErrorReason.make(
+    formatBoundedErrorMessage({
+      prefix: raw,
+      maxChars: 8192,
+      fallback: fallback.trim().length > 0 ? fallback : "Unknown error",
+    }),
+  )
 
 export class TsCompilerOverlayError extends Schema.TaggedError<TsCompilerOverlayError>()(
   "TsCompilerOverlayError",

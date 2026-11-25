@@ -13,6 +13,8 @@ import {
   extractBarrelImportUsage,
 } from "../src/mutation/mutation-barrel-reachability.js"
 import {
+  type QueuedPackageEntry,
+  executeQueuedPackageBatches,
   runPackageMutantBatchChecked,
   runSingleFileVitestPass,
 } from "../src/mutation/mutation-package-batch.js"
@@ -22,6 +24,7 @@ import {
 } from "../src/mutation/mutation-target-discovery.js"
 import {
   buildPackageReachabilityIndexChecked,
+  isHeavyMetaTestAbsPath,
   resolvePackageImport,
   selectReachabilityPartition,
 } from "../src/mutation/mutation-test-reachability.js"
@@ -1018,6 +1021,140 @@ describe("mutation-scoped-fallback: two-stage fallback execution", () => {
           .exhaustive()
       }
     } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("chunks executeQueuedPackageBatches at 4 files with incremental finalize and classifies heavy split tests", () => {
+    for (const heavyBase of [
+      "policy-check-architecture-and-layers.test.ts",
+      "policy-check-patterns-and-types.test.ts",
+      "governance-nodes.test.ts",
+      "mutation-cache.test.ts",
+      "mutation-scoped-fallback.test.ts",
+    ]) {
+      expect(isHeavyMetaTestAbsPath(`/repo/libs/demo/test/${heavyBase}`)).toBe(true)
+    }
+    expect(isHeavyMetaTestAbsPath("/repo/libs/demo/test/fast-unit.test.ts")).toBe(false)
+
+    const dir = mkdtempSync(join(tmpdir(), "pkg-chunk-"))
+    const stderrLines: Array<string> = []
+    const origWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      stderrLines.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+      return true
+    }) as typeof process.stderr.write
+    try {
+      const makeEntry = (idx: number): QueuedPackageEntry => {
+        const relFile = `libs/demo/core/src/f${idx}.ts`
+        const src = `export const f${idx} = (n: number): number => n + 1`
+        const mut = discoverDomainMutants(relFile, src)[0]!
+        return {
+          pkgKey: "demo/core",
+          mutantKeys: new Map(),
+          input: {
+            file: makeDomainFile(dir, relFile),
+            originalContent: src,
+            schemaSource: compileMutantSchemaModule(relFile, src, [mut]).schemaSource,
+            mutants: [mut],
+            uncachedMutants: [mut],
+            primaryTests: [`libs/demo/core/test/f${idx}.test.ts`],
+            scopedFallbackTests: [],
+            packageFallbackTests: [],
+            fallbackTests: [],
+            cachedHitIds: new Set(),
+          },
+        }
+      }
+      const makeMockBatchIo = (batchSizes: Array<number>): SyncHostIo => ({
+        ...testHostIo,
+        existsSync: (p) =>
+          p.endsWith("vitest.mjs") ||
+          p.endsWith("package-vitest-batch.mjs") ||
+          testHostIo.existsSync(p),
+        mkdirRecursiveSync: () => {},
+        writeTextSync: (_p, content) => {
+          if (content.includes('"files":')) {
+            batchSizes.push((JSON.parse(content) as { files: ReadonlyArray<unknown> }).files.length)
+          }
+        },
+        unlinkSync: () => {},
+        execFileSync: (_cmd, _args, opts) => {
+          const planPath = opts?.env?.["HARNESS_PACKAGE_PLAN_FILE"] ?? ""
+          const count = batchSizes[batchSizes.length - 1] ?? 0
+          const startIdx = batchSizes.slice(0, -1).reduce((a, b) => a + b, 0)
+          void planPath
+          return {
+            _tag: "Exited",
+            exitCode: 0,
+            stdout: JSON.stringify(
+              Array.from({ length: count }, (_, k) => {
+                const entry = entriesFive[startIdx + k]!
+                return {
+                  relFile: entry.input.file.relFile,
+                  primaryResults: entry.input.uncachedMutants.map((m) => ({
+                    id: m.id,
+                    result: {
+                      _tag: "Exited",
+                      exitCode: 1,
+                      stdout: "Tests 1 failed (1)",
+                      stderr: "",
+                    },
+                  })),
+                  scopedFallbackResults: [],
+                  packageFallbackResults: [],
+                }
+              }),
+            ),
+            stderr: "",
+          }
+        },
+      })
+
+      const entriesFive = [0, 1, 2, 3, 4].map(makeEntry)
+      const sizesFour: Array<number> = []
+      const finalizedFour: Array<string> = []
+      const errFour = executeQueuedPackageBatches({
+        repoRoot: dir,
+        backupPath: join(dir, ".harness", "backup.json"),
+        hostIo: makeMockBatchIo(sizesFour),
+        baseSubprocessEnv: {},
+        queuedByPkg: new Map([["demo/core", entriesFive.slice(0, 4)]]),
+        finalizeEntry: (e) => {
+          finalizedFour.push(e.input.file.relFile)
+          return undefined
+        },
+        recordPartialOnAbort: () => {},
+      })
+      expect(errFour).toBeUndefined()
+      expect(sizesFour).toEqual([4])
+      expect(finalizedFour).toHaveLength(4)
+
+      const sizesFive: Array<number> = []
+      const finalizedFive: Array<string> = []
+      const errFive = executeQueuedPackageBatches({
+        repoRoot: dir,
+        backupPath: join(dir, ".harness", "backup.json"),
+        hostIo: makeMockBatchIo(sizesFive),
+        baseSubprocessEnv: {},
+        queuedByPkg: new Map([["demo/core", entriesFive]]),
+        finalizeEntry: (e) => {
+          finalizedFive.push(e.input.file.relFile)
+          return undefined
+        },
+        recordPartialOnAbort: () => {},
+      })
+      expect(errFive).toBeUndefined()
+      expect(sizesFive).toEqual([4, 1])
+      expect(finalizedFive).toHaveLength(5)
+      expect(stderrLines.join("")).toContain(
+        "[mutation-check] demo/core (4/5 files, 4 mutants) done in ",
+      )
+      expect(stderrLines.join("")).toContain(
+        "[mutation-check] demo/core (5/5 files, 1 mutants) done in ",
+      )
+    } finally {
+      process.stderr.write = origWrite
       rmSync(dir, { recursive: true, force: true })
     }
   })

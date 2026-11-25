@@ -357,12 +357,15 @@ const makeFailClosedHookResult = (
     (rawStdin !== undefined
       ? detectAntigravityHookPayload(rawStdin)
       : (hookStdinTracker?.isAntigravityDetected() ?? false))
-  return requested === "guard"
-    ? makeGuardDenyResult(isAntigravity, reason, extraStderr)
-    : normalizeDoneResultForCli(
+  return match(requested)
+    .with("guard", () => makeGuardDenyResult(isAntigravity, reason, extraStderr))
+    .with("done", () =>
+      normalizeDoneResultForCli(
         makeDoneBlockResult(isAntigravity, reason, extraStderr),
         hasDoneCliFlag(argv),
-      )
+      ),
+    )
+    .exhaustive()
 }
 
 export const resolveCliInfraLayer = Effect.fnUntraced(function* (

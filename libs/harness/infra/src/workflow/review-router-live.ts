@@ -224,7 +224,9 @@ export const routeWorkflowReviewImpl = Effect.fn("Harness.routeWorkflowReview")(
     yield* runGitStdout(hostIo, input.canonicalRepoRoot, [
       "diff",
       "--name-only",
+      "--end-of-options",
       `${input.baseSha}..HEAD`,
+      "--",
     ]),
   )
   const unstaged = parseLineList(
@@ -256,12 +258,16 @@ export const routeWorkflowReviewImpl = Effect.fn("Harness.routeWorkflowReview")(
   const numstatOut = yield* runGitStdout(hostIo, input.canonicalRepoRoot, [
     "diff",
     "--numstat",
+    "--end-of-options",
     input.baseSha,
+    "--",
   ])
   const statOut = yield* runGitStdout(hostIo, input.canonicalRepoRoot, [
     "diff",
     "--stat",
+    "--end-of-options",
     input.baseSha,
+    "--",
   ])
 
   let untrackedLineCount = 0
