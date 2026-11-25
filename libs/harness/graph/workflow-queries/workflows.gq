@@ -868,6 +868,66 @@ query wf_update_attempt(
   } where attemptKey = $attemptKey
 }
 
+query wf_ship_attempts_for_run($runId: String) {
+  match {
+    $s: WfShipAttempt
+    $s.runId = $runId
+  }
+  return {
+    $s.shipKey as shipKey,
+    $s.runId as runId,
+    $s.attempt as attempt,
+    $s.treeHash as treeHash,
+    $s.status as status,
+    $s.updatedMs as updatedMs
+  }
+  order { $s.attempt asc }
+}
+
+query wf_get_ship_attempt($shipKey: String) {
+  match {
+    $s: WfShipAttempt
+    $s.shipKey = $shipKey
+  }
+  return {
+    $s.shipKey as shipKey,
+    $s.runId as runId,
+    $s.attempt as attempt,
+    $s.treeHash as treeHash,
+    $s.status as status,
+    $s.updatedMs as updatedMs
+  }
+}
+
+query wf_insert_ship_attempt(
+  $shipKey: String,
+  $runId: String,
+  $attempt: I32,
+  $treeHash: String,
+  $status: String,
+  $updatedMs: I64
+) {
+  insert WfShipAttempt {
+    shipKey: $shipKey,
+    runId: $runId,
+    attempt: $attempt,
+    treeHash: $treeHash,
+    status: $status,
+    updatedMs: $updatedMs
+  }
+}
+
+query wf_update_ship_attempt(
+  $shipKey: String,
+  $status: String,
+  $updatedMs: I64
+) {
+  update WfShipAttempt set {
+    status: $status,
+    updatedMs: $updatedMs
+  } where shipKey = $shipKey
+}
+
 query wf_delete_run_views($runId: String) {
   delete WfAttempt where runId = $runId
   delete WfUnit where runId = $runId

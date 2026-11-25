@@ -9,6 +9,7 @@ import {
   WorkflowDoctorMode,
   WorkflowLevel,
   WorkflowRunId,
+  WorkflowShipResponse,
   WorkflowStatusSummary,
   type WorkflowStoreUnavailableError,
   WorkspaceFilePath,
@@ -23,6 +24,7 @@ import {
   getWorkflowStatusViaDaemon,
   nodeSyncHostIo,
   resumeWorkflowViaDaemon,
+  shipWorkflowViaDaemon,
   startWorkflowViaDaemon,
   validateWorktreeRepoRoot,
   type WorkflowDaemonRpcOptions,
@@ -46,10 +48,13 @@ import {
   formatErrorText,
   formatOutput,
   formatUnitRejectionSummary,
+  formatWorkflowShipOutcome,
+  formatWorkflowShipProgressLine,
   isWorkflowCliValidationError,
   okResult,
   parseWorkflowCliArgs,
   requireRunId,
+  resolveOptionalRunId,
   validationFail,
 } from "./workflow-command-helpers.js"
 
@@ -62,6 +67,7 @@ const DEFAULT_WORKFLOW_DEPS = {
   getWorkflowStatus: getWorkflowStatusViaDaemon,
   completeWorkflow: completeWorkflowViaDaemon,
   resumeWorkflow: resumeWorkflowViaDaemon,
+  shipWorkflow: shipWorkflowViaDaemon,
   doctorWorkflow: doctorWorkflowViaDaemon,
   abortWorkflow: abortWorkflowViaDaemon,
 } as const
@@ -355,6 +361,29 @@ const executeResume = (
     return okResult(yield* deps.resumeWorkflow(resumeRequest, deps.daemonOptions), flags.json)
   })
 
+const executeShip = (
+  flags: ParsedWorkflowFlags,
+  options: CliEnv | undefined,
+  deps: ResolvedWorkflowCliDeps,
+): Effect.Effect<CliResult, WorkflowCliError> =>
+  Effect.gen(function* () {
+    const repoRoot = yield* validateOptionalRepoRoot(flags.values["repo-root"], options, deps)
+    const runId = yield* resolveOptionalRunId(flags.values)
+    const response = yield* deps.shipWorkflow(
+      { repoRoot, ...(runId !== undefined ? { runId } : {}) },
+      {
+        ...deps.daemonOptions,
+        onProgress: (ev) => {
+          if (!flags.json) {
+            process.stderr.write(`${formatWorkflowShipProgressLine(ev)}\n`)
+          }
+        },
+      },
+    )
+    const encoded = yield* Schema.encodeEffect(WorkflowShipResponse)(response)
+    return formatWorkflowShipOutcome(response, flags.json, encoded)
+  })
+
 const resolveWorkflowDeps = (deps?: WorkflowCliDeps): ResolvedWorkflowCliDeps => ({
   daemonOptions: deps?.daemonOptions,
   compilePlan: deps?.compilePlan ?? DEFAULT_WORKFLOW_DEPS.compilePlan,
@@ -363,11 +392,12 @@ const resolveWorkflowDeps = (deps?: WorkflowCliDeps): ResolvedWorkflowCliDeps =>
   getWorkflowStatus: deps?.getWorkflowStatus ?? DEFAULT_WORKFLOW_DEPS.getWorkflowStatus,
   completeWorkflow: deps?.completeWorkflow ?? DEFAULT_WORKFLOW_DEPS.completeWorkflow,
   resumeWorkflow: deps?.resumeWorkflow ?? DEFAULT_WORKFLOW_DEPS.resumeWorkflow,
+  shipWorkflow: deps?.shipWorkflow ?? DEFAULT_WORKFLOW_DEPS.shipWorkflow,
   doctorWorkflow: deps?.doctorWorkflow ?? DEFAULT_WORKFLOW_DEPS.doctorWorkflow,
   abortWorkflow: deps?.abortWorkflow ?? DEFAULT_WORKFLOW_DEPS.abortWorkflow,
 })
 
-/** Executes `harness workflow <compile|start|status|complete|resume|doctor|abort>`. */
+/** Executes `harness workflow <compile|start|status|complete|resume|ship|doctor|abort>`. */
 export const handleWorkflow = Effect.fn("HarnessCli.workflow")(function* (
   args: ReadonlyArray<string>,
   options?: CliEnv,
@@ -397,7 +427,7 @@ export const handleWorkflow = Effect.fn("HarnessCli.workflow")(function* (
           .with("status", () =>
             validateRepo().pipe(
               Effect.flatMap((repoRoot) =>
-                decodeOptional(WorkflowRunId, flags.values["run-id"], "--run-id").pipe(
+                resolveOptionalRunId(flags.values).pipe(
                   Effect.flatMap((runId) =>
                     resolvedDeps.getWorkflowStatus(
                       { repoRoot, ...(runId !== undefined ? { runId } : {}) },
@@ -412,6 +442,7 @@ export const handleWorkflow = Effect.fn("HarnessCli.workflow")(function* (
           )
           .with("complete", () => executeComplete(flags, options, resolvedDeps))
           .with("resume", () => executeResume(flags, options, resolvedDeps))
+          .with("ship", () => executeShip(flags, options, resolvedDeps))
           .with("doctor", () =>
             Effect.gen(function* () {
               const rawMode = flags.values.mode?.trim()

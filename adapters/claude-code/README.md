@@ -43,7 +43,7 @@ Claude Code executes hooks defined in `adapters/claude-code/hooks.json` at key s
    Executes upon starting or resuming a session. Runs `SessionHandoff.decide` to evaluate uncommitted changes, active git branch, `.harness/verify-stamp.json` freshness, and environment health.
 2. **`PreToolUse` (`harness guard`):**
    Evaluates commands and file edits before execution:
-   - Matcher `Bash`: Blocks force pushes, unstaged checkouts, and destructive commands; when `HARNESS_UNIT_WORKER=1` is set on unit worker invocations (automatic runner spawning lands in WF-5), blocks recursive `harness workflow start|resume|abort|doctor|complete --phase llm`, `harness done`, and shell access to `daemon.sock` or `auth-tokens.json`. Intercepts `alchemy deploy` and `alchemy destroy` to require interactive confirmation.
+   - Matcher `Bash`: Blocks force pushes, unstaged checkouts, and destructive commands; when `HARNESS_UNIT_WORKER=1` is set on unit worker invocations (automatic runner spawning lands in WF-5), blocks recursive `harness workflow start|resume|ship|abort|doctor|complete --phase llm`, `harness done`, and shell access to `daemon.sock` or `auth-tokens.json`. Intercepts `alchemy deploy` and `alchemy destroy` to require interactive confirmation.
    - Matcher `Edit|Write|MultiEdit`: Blocks writes to squashed subtree directories `repos/effect` and `repos/alchemy`, blocks direct modification of `.harness/verify-stamp.json`, and under `HARNESS_UNIT_WORKER=1` denies access to `daemon.sock` and `auth-tokens.json`.
    - Matcher `Read|Grep|Glob|LS|Find`: Enforces secret-file and protected harness-state deny rules (`daemon.sock`, `auth-tokens.json`, `<git-common-dir>/harness/**`) across read/search tools in all modes.
 3. **`PostToolUse` (`harness ingest`):**
@@ -77,7 +77,7 @@ Use the workflow skills to drive task progress through each lifecycle stage or e
 
 ### 2. `effect-lfg` (`/effect-lfg`)
 
-- **When to Use:** Autonomous end-to-end pipeline orchestrator. Use when you want to pass a requirement, bug report, or EARS spec and have the harness run hands-off from start to finish (EARS spec with explicit `## Assumptions` $\rightarrow$ `stub<A, E, R>()` & `plan-check` $\rightarrow$ subagent implementation $\rightarrow$ 7-lens specialist review & auto-fix $\rightarrow$ `learn`, `gc --strict`, `mutate --strict`, `verify`, `done` $\rightarrow$ git commit & optional PR).
+- **When to Use:** Autonomous end-to-end pipeline orchestrator. Use when you want to pass a requirement, bug report, or EARS spec and have the harness run hands-off from start to finish (EARS spec with explicit `## Assumptions` $\rightarrow$ `stub<A, E, R>()` & `plan-check` $\rightarrow$ subagent implementation $\rightarrow$ 7-lens specialist review & auto-fix $\rightarrow$ `learn`, `workflow complete --phase llm`, `workflow ship` (`format-check`, `gc --strict`, `ontology check --strict`, `mutate --strict`, `verify`, `done --cli`) $\rightarrow$ git commit & optional PR).
 - **Trigger / Starter Prompt:**
   ```text
   "/effect-lfg Add a Sample.archiveAlbum use-case to libs/sample that marks an album archived or fails with AlbumNotFoundError."
@@ -166,5 +166,5 @@ Invoke specialist review subagents as read-only inspectors during implementation
    CI=true node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts verify
    ```
 4. **Orchestrate Durable Task Workflows & Determinism Gates:**
-   - Control `HarnessTaskWorkflow` runs via `harness workflow` (`compile | start | status | complete | resume | doctor | abort`) over `<git-common-dir>/harness/daemon.sock`, and inspect status read-only with `harness_workflow_plan`.
+   - Control `HarnessTaskWorkflow` and `ShipWorkflow` runs via `harness workflow` (`compile | start | status | complete | resume | ship | doctor | abort`) over `<git-common-dir>/harness/daemon.sock`, and inspect status read-only with `harness_workflow_plan`.
    - Workflow definition modules containing `Workflow.make(...)` are checked across `toLayer`/`register` handlers and same-module helper functions by the `nondeterministic-workflow-body` AST and `oxlint` rule (`harness/syntax-bans`), requiring side effects, clock/randomness, env, fs, git, Omnigraph, and network calls to run inside `Activity.make({ execute: ... })`.

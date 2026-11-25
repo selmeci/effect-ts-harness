@@ -97,6 +97,46 @@ describe("Harness Gates: Loop Circuit Breaker & Mutation Deciders", () => {
       expect(status.repeatedKey).toBe("guard_escalation::alchemy dev")
     })
 
+    it.effect("clamps threshold < 2 (0 and 1) up to 2 in decideLoopThrashing", () =>
+      Effect.gen(function* () {
+        const singleEvent: ReadonlyArray<FrictionEvent> = [
+          {
+            kind: "verify_failure",
+            timestamp: "2026-10-27T10:00:00.000Z",
+            summary: "lint failure",
+            detail: "d1",
+          },
+        ]
+        const twoEvents: ReadonlyArray<FrictionEvent> = [
+          ...singleEvent,
+          {
+            kind: "verify_failure",
+            timestamp: "2026-10-27T10:01:00.000Z",
+            summary: "lint failure",
+            detail: "d2",
+          },
+        ]
+
+        for (const threshold of [0, 1]) {
+          const empty = yield* decideLoopThrashing([], threshold)
+          expect(empty.threshold).toBe(2)
+          expect(empty.stuck).toBe(false)
+
+          const oneStatus = yield* decideLoopThrashing(singleEvent, threshold)
+          expect(oneStatus.threshold).toBe(2)
+          expect(oneStatus.consecutiveCount).toBe(1)
+          expect(oneStatus.stuck).toBe(false)
+          expect(oneStatus.escalationMessage).toBeNull()
+
+          const twoStatus = yield* decideLoopThrashing(twoEvents, threshold)
+          expect(twoStatus.threshold).toBe(2)
+          expect(twoStatus.consecutiveCount).toBe(2)
+          expect(twoStatus.stuck).toBe(true)
+          expect(twoStatus.escalationMessage).toContain("threshold: 2")
+        }
+      }),
+    )
+
     it.effect.prop(
       "LoopCircuitBreaker.decide: stuck is true if and only if consecutive failure count meets or exceeds threshold",
       {

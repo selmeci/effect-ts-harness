@@ -1,7 +1,8 @@
 import { realpathSync } from "node:fs"
+import * as net from "node:net"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Effect } from "effect"
+import { Deferred, Effect, Fiber, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   CompiledPlan,
@@ -23,6 +24,7 @@ import {
   completeWorkflowViaDaemon,
   doctorWorkflowViaDaemon,
   getWorkflowStatusViaDaemon,
+  queryUnixSocketLineDetailed,
   resumeWorkflowViaDaemon,
   startScopedUnixSocketDaemon,
   startWorkflowViaDaemon,
@@ -191,5 +193,140 @@ describe("DaemonClient WF-3 IPC", () => {
         ).pipe(Effect.provide(UnixSocketDaemonLive))
       }),
     ),
+  )
+
+  it.live(
+    "applies SHIP_DAEMON_SERVER_SOCKET_TIMEOUT_MS before queueing so queued workflow.ship survives short socketTimeoutMs",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot } = initGitRepo(dir)
+          const commonGitDir = GitCommonDirPath.make(realpathSync.native(join(repoRoot, ".git")))
+          const { socketPath } = resolveWorkflowRuntimePaths(commonGitDir)
+
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(repoRoot), {
+                socketTimeoutMs: 60,
+                lineHandler: (line: string) => {
+                  const parsed = decodeJsonLine(line)
+                  const id = parsed.id ?? ""
+                  return Effect.sleep("150 millis").pipe(
+                    Effect.as(JSON.stringify({ id, ok: true, command: parsed.command })),
+                  )
+                },
+              })
+
+              const requests = yield* Effect.forEach(
+                [1, 2, 3],
+                (idx) =>
+                  queryUnixSocketLineDetailed(
+                    socketPath,
+                    JSON.stringify({ id: `ship-${idx}`, command: "workflow.ship" }),
+                    { timeoutMs: 2000 },
+                  ),
+                { concurrency: "unbounded" },
+              )
+
+              const decodeShipReply = Schema.decodeUnknownEffect(
+                Schema.fromJsonString(
+                  Schema.Struct({
+                    id: Schema.String,
+                    ok: Schema.Boolean,
+                    command: Schema.String,
+                  }),
+                ),
+              )
+              for (const [idx, res] of requests.entries()) {
+                const line = match(res)
+                  .with({ _tag: "Reply" }, ({ line: replyLine }) => replyLine)
+                  .with({ _tag: "Unavailable" }, () => expect.unreachable("Expected Reply"))
+                  .exhaustive()
+                const body = yield* decodeShipReply(line)
+                expect(body.ok).toBe(true)
+                expect(body.id).toBe(`ship-${idx + 1}`)
+              }
+            }),
+          ).pipe(Effect.provide(UnixSocketDaemonLive))
+        }),
+      ),
+  )
+
+  it.live(
+    "client socket.destroy() mid-request interrupts active lineHandler while keeping queue worker alive for subsequent requests",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot } = initGitRepo(dir)
+          const commonGitDir = GitCommonDirPath.make(realpathSync.native(join(repoRoot, ".git")))
+          const { socketPath } = resolveWorkflowRuntimePaths(commonGitDir)
+          const handlerStarted = yield* Deferred.make<void>()
+          const handlerInterrupted = yield* Deferred.make<void>()
+          const allWorkersAlive = yield* Deferred.make<void>()
+          let interruptedCount = 0
+          let concurrentPings = 0
+
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              yield* startScopedUnixSocketDaemon(WorkspaceFilePath.make(repoRoot), {
+                lineHandler: (line: string) => {
+                  const parsed = decodeJsonLine(line)
+                  const id = parsed.id ?? ""
+                  const command = parsed.command ?? ""
+                  if (command === "hang") {
+                    return Effect.sync(() => {
+                      Deferred.doneUnsafe(handlerStarted, Effect.void)
+                    }).pipe(
+                      Effect.andThen(Effect.never),
+                      Effect.onInterrupt(() =>
+                        Effect.sync(() => {
+                          interruptedCount += 1
+                          Deferred.doneUnsafe(handlerInterrupted, Effect.void)
+                        }),
+                      ),
+                    )
+                  }
+                  return Effect.gen(function* () {
+                    concurrentPings += 1
+                    if (concurrentPings === 4) {
+                      Deferred.doneUnsafe(allWorkersAlive, Effect.void)
+                    }
+                    yield* Deferred.await(allWorkersAlive)
+                    return JSON.stringify({ id, ok: true, command })
+                  })
+                },
+              })
+
+              const clientSocket = yield* Effect.sync(() => net.createConnection(socketPath))
+              yield* Effect.callback<void>((resume) => {
+                clientSocket.once("connect", () => {
+                  clientSocket.write(`${JSON.stringify({ id: "h1", command: "hang" })}\n`)
+                  resume(Effect.void)
+                })
+                clientSocket.once("error", () => resume(Effect.void))
+              })
+
+              yield* Deferred.await(handlerStarted)
+              yield* Effect.sync(() => {
+                clientSocket.destroy()
+              })
+              yield* Deferred.await(handlerInterrupted)
+              expect(interruptedCount).toBe(1)
+
+              const pingFibers = yield* Effect.forEach([1, 2, 3, 4], (idx) =>
+                queryUnixSocketLineDetailed(
+                  socketPath,
+                  JSON.stringify({ id: `p-${idx}`, command: "ping-after" }),
+                  { timeoutMs: 2000 },
+                ).pipe(Effect.forkChild),
+              )
+              const pingResults = yield* Effect.forEach(pingFibers, (fiber) => Fiber.join(fiber))
+              for (const res of pingResults) {
+                expect(res._tag).toBe("Reply")
+              }
+            }),
+          ).pipe(Effect.provide(UnixSocketDaemonLive))
+        }),
+      ),
   )
 })

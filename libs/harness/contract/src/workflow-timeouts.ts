@@ -1,4 +1,5 @@
 import { Result, Schema } from "effect"
+import { SHIP_STAGES } from "./workflow.js"
 import { ErrorReasonMessage } from "./workspace-and-process.js"
 
 /** Branded positive integer duration in milliseconds used across workflow IPC, verification, and lease timeouts. */
@@ -34,6 +35,10 @@ export const WorkflowTimeoutBudgets = Schema.Struct({
   abortSettleIntervalMs: WorkflowTimeoutMs,
   workflowCompleteIpcMs: WorkflowTimeoutMs,
   workflowServerSocketMs: WorkflowTimeoutMs,
+  shipGateCommandMs: WorkflowTimeoutMs,
+  shipWorkflowSettleMs: WorkflowTimeoutMs,
+  shipWorkflowIpcMs: WorkflowTimeoutMs,
+  shipServerSocketMs: WorkflowTimeoutMs,
   httpRequestTimeoutMs: WorkflowTimeoutMs,
   claimTimeoutMs: WorkflowTimeoutMs,
   writerLeaseHeartbeatTtlMs: WorkflowTimeoutMs,
@@ -51,6 +56,10 @@ const RAW_WORKFLOW_TIMEOUT_BUDGETS: WorkflowTimeoutBudgets = {
   abortSettleIntervalMs: WorkflowTimeoutMs.make(50),
   workflowCompleteIpcMs: WorkflowTimeoutMs.make(150_000),
   workflowServerSocketMs: WorkflowTimeoutMs.make(160_000),
+  shipGateCommandMs: WorkflowTimeoutMs.make(300_000),
+  shipWorkflowSettleMs: WorkflowTimeoutMs.make(SHIP_STAGES.length * 300_000 + 60_000),
+  shipWorkflowIpcMs: WorkflowTimeoutMs.make(1_890_000),
+  shipServerSocketMs: WorkflowTimeoutMs.make(1_920_000),
   httpRequestTimeoutMs: WorkflowTimeoutMs.make(15_000),
   claimTimeoutMs: WorkflowTimeoutMs.make(6 * 60 * 60 * 1_000),
   writerLeaseHeartbeatTtlMs: WorkflowTimeoutMs.make(45_000),
@@ -88,6 +97,35 @@ export const validateWorkflowTimeoutBudgets = (
     return Result.fail(
       ErrorReasonMessage.make(
         `workflowIpcMs (${budgets.workflowIpcMs}) must exceed abortSettleBudgetMs (${abortSettleBudgetMs})`,
+      ),
+    )
+  }
+  if (budgets.shipServerSocketMs <= budgets.shipWorkflowIpcMs) {
+    return Result.fail(
+      ErrorReasonMessage.make(
+        `shipServerSocketMs (${budgets.shipServerSocketMs}) must exceed shipWorkflowIpcMs (${budgets.shipWorkflowIpcMs})`,
+      ),
+    )
+  }
+  if (budgets.shipWorkflowIpcMs <= budgets.shipWorkflowSettleMs) {
+    return Result.fail(
+      ErrorReasonMessage.make(
+        `shipWorkflowIpcMs (${budgets.shipWorkflowIpcMs}) must exceed shipWorkflowSettleMs (${budgets.shipWorkflowSettleMs})`,
+      ),
+    )
+  }
+  const minShipStageBudgetMs = SHIP_STAGES.length * budgets.shipGateCommandMs
+  if (budgets.shipWorkflowSettleMs <= minShipStageBudgetMs) {
+    return Result.fail(
+      ErrorReasonMessage.make(
+        `shipWorkflowSettleMs (${budgets.shipWorkflowSettleMs}) must exceed ${SHIP_STAGES.length} * shipGateCommandMs (${minShipStageBudgetMs})`,
+      ),
+    )
+  }
+  if (budgets.shipGateCommandMs <= budgets.workflowServerSocketMs) {
+    return Result.fail(
+      ErrorReasonMessage.make(
+        `shipGateCommandMs (${budgets.shipGateCommandMs}) must exceed workflowServerSocketMs (${budgets.workflowServerSocketMs})`,
       ),
     )
   }

@@ -1,4 +1,4 @@
-import { Cause, Effect, Exit, Option, Schema, Semaphore, SynchronizedRef } from "effect"
+import { Cause, Context, Effect, Exit, Option, Schema, Semaphore, SynchronizedRef } from "effect"
 import { WorkflowEngine } from "effect/workflow"
 import { match } from "ts-pattern"
 import {
@@ -20,7 +20,7 @@ import {
   WorkflowRpcRequestId,
   type WorkflowRpcResult,
   type WorkflowRpcSuccessEnvelope,
-  type WorkflowRunId,
+  WorkflowRunId,
   type WorkflowRunRecord,
   type WorkflowRunState,
   type WorkflowStoreFailureReason,
@@ -157,20 +157,64 @@ export interface WorkflowRpcHandlerInput {
   readonly runtime?: WorkflowDaemonRuntime | undefined
 }
 
+const RebuildRpcGateHeldRef = Context.Reference<boolean>("WorkflowRpcDaemon/RebuildRpcGateHeld", {
+  defaultValue: () => false,
+})
+
+const withRebuildRpcGate = <A, E>(
+  runtime: WorkflowDaemonRuntime,
+  effect: Effect.Effect<A, E>,
+): Effect.Effect<A, E> =>
+  Effect.gen(function* () {
+    const alreadyHeld = yield* RebuildRpcGateHeldRef
+    if (alreadyHeld) {
+      return yield* effect
+    }
+    return yield* runtime.rebuildRpcGateSemaphore.withPermits(1)(
+      Effect.provideService(effect, RebuildRpcGateHeldRef, true),
+    )
+  })
+
+const acquireMutexFromRef = <K>(
+  mutexesRef: SynchronizedRef.SynchronizedRef<ReadonlyMap<K, Semaphore.Semaphore>>,
+  key: K,
+): Effect.Effect<Semaphore.Semaphore> =>
+  SynchronizedRef.modifyEffect(mutexesRef, (map) => {
+    const existing = map.get(key)
+    if (existing !== undefined) {
+      return Effect.succeed([existing, map] as const)
+    }
+    const sem = Semaphore.makeUnsafe(1)
+    return Effect.succeed([sem, new Map(map).set(key, sem)] as const)
+  })
+
+/** Serializes RPC operations targeting the same `runId` under `rebuildRpcGateSemaphore`. */
 export const withRunLock = <A, E>(
   runtime: WorkflowDaemonRuntime,
   runId: WorkflowRunId,
   effect: Effect.Effect<A, E>,
 ): Effect.Effect<A, E> =>
-  runtime.rebuildRpcGateSemaphore.withPermits(1)(
-    SynchronizedRef.modifyEffect(runtime.runMutexesRef, (map) => {
-      const existing = map.get(runId)
-      if (existing !== undefined) {
-        return Effect.succeed([existing, map] as const)
-      }
-      const sem = Semaphore.makeUnsafe(1)
-      return Effect.succeed([sem, new Map(map).set(runId, sem)] as const)
-    }).pipe(Effect.flatMap((sem) => sem.withPermit(effect))),
+  withRebuildRpcGate(
+    runtime,
+    acquireMutexFromRef(runtime.runMutexesRef, runId).pipe(
+      Effect.flatMap((sem) => sem.withPermit(effect)),
+    ),
+  )
+
+/**
+ * Serializes `workflow.ship` operations targeting the same canonical `worktreeRoot`.
+ * Lock order invariant: ALWAYS acquire `withWorktreeShipLock` OUTSIDE `withRunLock`.
+ */
+export const withWorktreeShipLock = <A, E>(
+  runtime: WorkflowDaemonRuntime,
+  worktreeRoot: AbsoluteRepoRoot,
+  effect: Effect.Effect<A, E>,
+): Effect.Effect<A, E> =>
+  withRebuildRpcGate(
+    runtime,
+    acquireMutexFromRef(runtime.shipWorktreeMutexesRef, worktreeRoot).pipe(
+      Effect.flatMap((sem) => sem.withPermit(effect)),
+    ),
   )
 
 export const withRebuildLock = <A, E>(

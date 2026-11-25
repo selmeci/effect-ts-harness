@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto"
 import {
   Context,
-  type Duration,
   Effect,
   Exit,
   Layer,
@@ -22,6 +21,7 @@ import {
   type LeaseFilePath,
   LeaseHolderId,
   LeaseHolderPid,
+  type ShipStreamProgressEvent,
   toBoundedReason,
   validateWorkflowTimeoutBudgets,
   WORKFLOW_TIMEOUT_BUDGETS,
@@ -31,24 +31,23 @@ import {
   type WorkflowTimeoutBudgets,
   WriterLeaseHeldError,
 } from "@harness/contract"
-import { HarnessTaskWorkflowLayer } from "@harness/gates"
+import { HarnessTaskWorkflowLayer, ShipWorkflowLayer } from "@harness/gates"
 import type { OmnigraphClient } from "@harness/graph"
 import {
   type ActiveWriterLease,
+  type ShipActiveGateController,
   acquireWriterLease,
+  createShipActiveGateController,
   makeHarnessWorkflowEngineLayer,
-  makeUnitVerifierLayer,
-  makeWorkflowProjectionWriterLayer,
-  makeWorkflowReadModelQueryLayer,
-  makeWorkflowReviewRouterLayer,
-  makeWorkflowWorktreePortLayer,
   nodeSyncHostIo,
   resolveWorkflowRuntimePaths,
-  UnitAgentDispatcherLive,
   type WorkflowReadModelLeaseFence,
-  type WorkflowReadModelOptions,
 } from "@harness/infra"
 import {
+  ShipAttemptStore,
+  type ShipAttemptStoreShape,
+  ShipGateRunner,
+  type ShipGateRunnerShape,
   UnitAgentDispatcher,
   type UnitAgentDispatcherShape,
   UnitVerifier,
@@ -70,10 +69,30 @@ import {
   forkWorkflowLeaseWatchers,
   invokeOnLeaseLost,
 } from "./workflow-lease-watchers.js"
+import {
+  buildWorkflowPortsLayer,
+  resolveDaemonKnownEntityTypes,
+  type WorkflowDaemonServices,
+  type WorkflowEngineDaemonMode,
+  type WorkflowEngineDaemonOptions,
+  type WorkflowPortsServices,
+  type WorkflowTaskDaemonServices,
+  type WorkflowTaskServices,
+} from "./workflow-ports-daemon-helper.js"
 
 type Omnigraph = InstanceType<typeof OmnigraphClient>
 
-export { DEFAULT_WRITER_LEASE_HEARTBEAT_INTERVAL_MS, forkWorkflowLeaseWatchers, invokeOnLeaseLost }
+export {
+  DEFAULT_WRITER_LEASE_HEARTBEAT_INTERVAL_MS,
+  forkWorkflowLeaseWatchers,
+  invokeOnLeaseLost,
+  type WorkflowDaemonServices,
+  type WorkflowEngineDaemonMode,
+  type WorkflowEngineDaemonOptions,
+  type WorkflowPortsServices,
+  type WorkflowTaskDaemonServices,
+  type WorkflowTaskServices,
+}
 export const MAX_CONCURRENT_RUN_LOCKS = 1024
 const WORKFLOW_DAEMON_ENGINE_OP = WorkflowStoreOperation.make("HarnessDaemon.workflowEngine")
 
@@ -86,20 +105,9 @@ const ExistingLockMetaSchema = Schema.fromJsonString(
 )
 const decodeExistingLockMetaOption = Schema.decodeUnknownOption(ExistingLockMetaSchema)
 
-export type WorkflowEngineDaemonMode = "auto" | "required" | "disabled"
-
-export type WorkflowPortsServices =
-  | UnitVerifier
-  | UnitAgentDispatcher
-  | WorkflowWorktreePort
-  | WorkflowReviewRouter
-  | WorkflowProjectionWriter
-  | WorkflowReadModelQuery
-
-export type WorkflowDaemonServices = WorkflowEngine.WorkflowEngine | WorkflowPortsServices
-
 export interface WorkflowDaemonRuntime {
-  readonly workflowContext: Context.Context<WorkflowDaemonServices>
+  readonly workflowContext: Context.Context<WorkflowTaskDaemonServices>
+  readonly shipWorkflowContext: Context.Context<WorkflowDaemonServices>
   readonly engine: WorkflowEngine.WorkflowEngine["Service"]
   readonly projectionWriter: WorkflowProjectionWriterShape
   readonly readModelQuery: WorkflowReadModelQueryShape
@@ -107,10 +115,17 @@ export interface WorkflowDaemonRuntime {
   readonly unitAgentDispatcher: UnitAgentDispatcherShape
   readonly worktreePort: WorkflowWorktreePortShape
   readonly reviewRouter: WorkflowReviewRouterShape
+  readonly shipGateRunner: ShipGateRunnerShape
+  readonly shipAttemptStore: ShipAttemptStoreShape
+  readonly shipProgressListeners: Map<string, (event: ShipStreamProgressEvent) => void>
+  readonly shipGateController: ShipActiveGateController
   readonly leaseFence: WorkflowReadModelLeaseFence
   readonly plansRef: SynchronizedRef.SynchronizedRef<ReadonlyMap<WorkflowRunId, CompiledPlan>>
   readonly runMutexesRef: SynchronizedRef.SynchronizedRef<
     ReadonlyMap<WorkflowRunId, Semaphore.Semaphore>
+  >
+  readonly shipWorktreeMutexesRef: SynchronizedRef.SynchronizedRef<
+    ReadonlyMap<AbsoluteRepoRoot, Semaphore.Semaphore>
   >
   readonly rebuildMutex: Semaphore.Semaphore
   readonly rebuildRpcGateSemaphore: Semaphore.Semaphore
@@ -121,31 +136,6 @@ export interface WorkflowDaemonRuntime {
   readonly hostIo: ExtendedHostIo
   readonly client?: Omnigraph | undefined
   readonly env?: Readonly<Record<string, string | undefined>> | undefined
-}
-
-export interface WorkflowEngineDaemonOptions {
-  readonly mode: WorkflowEngineDaemonMode
-  readonly client?: Omnigraph | undefined
-  readonly env?: Readonly<Record<string, string | undefined>> | undefined
-  readonly hostIo?: ExtendedHostIo | undefined
-  readonly holderId?: LeaseHolderId | undefined
-  readonly holderPid?: LeaseHolderPid | undefined
-  readonly nowMs?: (() => number) | undefined
-  readonly isPidAlive?: ((pid: number) => boolean) | undefined
-  readonly readProcessStartTime?: ((pid: number) => string | undefined) | undefined
-  readonly heartbeatIntervalMs?: number | undefined
-  readonly knownEntityTypes?: ReadonlyArray<string> | undefined
-  readonly onLeaseLost?: ((reason: string) => void) | undefined
-  readonly shardsPerGroup?: number | undefined
-  readonly entityMessagePollInterval?: Duration.Input | undefined
-  readonly entityReplyPollInterval?: Duration.Input | undefined
-  readonly workflowPortsLayer?: Layer.Layer<WorkflowPortsServices> | undefined
-  readonly unitVerifierLayer?: Layer.Layer<UnitVerifier> | undefined
-  readonly worktreePortLayer?: Layer.Layer<WorkflowWorktreePort> | undefined
-  readonly agentDispatcherLayer?: Layer.Layer<UnitAgentDispatcher> | undefined
-  readonly reviewRouterLayer?: Layer.Layer<WorkflowReviewRouter> | undefined
-  readonly projectionWriterLayer?: Layer.Layer<WorkflowProjectionWriter> | undefined
-  readonly readModelQueryLayer?: Layer.Layer<WorkflowReadModelQuery> | undefined
 }
 
 export type StartedWorkflowEngineState =
@@ -229,63 +219,6 @@ const makeProjectionRunLock = (
     )
 }
 
-const buildWorkflowPortsLayer = (
-  repoRoot: AbsoluteRepoRoot,
-  options: WorkflowEngineDaemonOptions,
-  leaseFence: WorkflowReadModelLeaseFence,
-  runLock: <A, E>(runId: WorkflowRunId, effect: Effect.Effect<A, E>) => Effect.Effect<A, E>,
-  readGate: <A, E>(effect: Effect.Effect<A, E>) => Effect.Effect<A, E>,
-): Layer.Layer<WorkflowPortsServices> => {
-  const readModelOptions: WorkflowReadModelOptions = {
-    repoRoot,
-    ...leaseFence,
-    runLock,
-    readGate,
-    ...(options.client !== undefined ? { client: options.client } : {}),
-    ...(options.hostIo !== undefined ? { hostIo: options.hostIo } : {}),
-    ...(options.env !== undefined ? { env: options.env } : {}),
-    ...(options.nowMs !== undefined ? { nowMs: options.nowMs } : {}),
-  }
-  let resolved: Layer.Layer<WorkflowPortsServices> =
-    options.workflowPortsLayer ??
-    Layer.mergeAll(
-      makeUnitVerifierLayer({
-        ...(options.hostIo !== undefined ? { hostIo: options.hostIo } : {}),
-        ...(options.env !== undefined ? { env: options.env } : {}),
-        ...(options.nowMs !== undefined ? { nowMs: options.nowMs } : {}),
-      }),
-      makeWorkflowWorktreePortLayer({
-        repoRoot,
-        ...(options.hostIo !== undefined ? { hostIo: options.hostIo } : {}),
-      }),
-      UnitAgentDispatcherLive,
-      makeWorkflowReviewRouterLayer(
-        options.hostIo !== undefined ? { hostIo: options.hostIo } : undefined,
-      ),
-      makeWorkflowProjectionWriterLayer(readModelOptions),
-      makeWorkflowReadModelQueryLayer(readModelOptions),
-    )
-  if (options.unitVerifierLayer !== undefined) {
-    resolved = Layer.merge(resolved, options.unitVerifierLayer)
-  }
-  if (options.worktreePortLayer !== undefined) {
-    resolved = Layer.merge(resolved, options.worktreePortLayer)
-  }
-  if (options.agentDispatcherLayer !== undefined) {
-    resolved = Layer.merge(resolved, options.agentDispatcherLayer)
-  }
-  if (options.reviewRouterLayer !== undefined) {
-    resolved = Layer.merge(resolved, options.reviewRouterLayer)
-  }
-  if (options.projectionWriterLayer !== undefined) {
-    resolved = Layer.merge(resolved, options.projectionWriterLayer)
-  }
-  if (options.readModelQueryLayer !== undefined) {
-    resolved = Layer.merge(resolved, options.readModelQueryLayer)
-  }
-  return resolved
-}
-
 const acquireLeaseAndBuildEngineInScope = (input: {
   readonly targetScope: Scope.Scope
   readonly commonGitDir: GitCommonDirPath
@@ -328,9 +261,14 @@ const acquireLeaseAndBuildEngineInScope = (input: {
     const runMutexesRef = yield* SynchronizedRef.make<
       ReadonlyMap<WorkflowRunId, Semaphore.Semaphore>
     >(new Map())
+    const shipWorktreeMutexesRef = yield* SynchronizedRef.make<
+      ReadonlyMap<AbsoluteRepoRoot, Semaphore.Semaphore>
+    >(new Map())
     const projectionMutexesRef = yield* SynchronizedRef.make<
       ReadonlyMap<WorkflowRunId, Semaphore.Semaphore>
     >(new Map())
+    const shipProgressListeners = new Map<string, (event: ShipStreamProgressEvent) => void>()
+    const shipGateController = createShipActiveGateController()
     const rebuildMutex = Semaphore.makeUnsafe(1)
     const rebuildRpcGateSemaphore = Semaphore.makeUnsafe(MAX_CONCURRENT_RUN_LOCKS)
     const rebuildProjectionGateSemaphore = Semaphore.makeUnsafe(MAX_CONCURRENT_RUN_LOCKS)
@@ -342,6 +280,7 @@ const acquireLeaseAndBuildEngineInScope = (input: {
     const readModelReadGate = <A, E>(effect: Effect.Effect<A, E>): Effect.Effect<A, E> =>
       rebuildProjectionGateSemaphore.withPermits(1)(effect)
 
+    const knownEntityTypes = resolveDaemonKnownEntityTypes(options.knownEntityTypes)
     const engineLayer = makeHarnessWorkflowEngineLayer(input.repoRoot, {
       expectedLeaseEpoch: lease.leaseEpoch,
       expectedLeaseOwner: lease.owner,
@@ -350,9 +289,7 @@ const acquireLeaseAndBuildEngineInScope = (input: {
       ...(options.client !== undefined ? { client: options.client } : {}),
       ...(options.hostIo !== undefined ? { hostIo: options.hostIo } : {}),
       ...(options.env !== undefined ? { env: options.env } : {}),
-      ...(options.knownEntityTypes !== undefined
-        ? { knownEntityTypes: options.knownEntityTypes }
-        : {}),
+      ...(knownEntityTypes !== undefined ? { knownEntityTypes } : {}),
       ...(options.shardsPerGroup !== undefined ? { shardsPerGroup: options.shardsPerGroup } : {}),
       ...(options.entityMessagePollInterval !== undefined
         ? { entityMessagePollInterval: options.entityMessagePollInterval }
@@ -368,14 +305,17 @@ const acquireLeaseAndBuildEngineInScope = (input: {
       leaseFence,
       projectionRunLock,
       readModelReadGate,
+      shipProgressListeners,
+      shipGateController,
     )
-    const workflowStackLayer = HarnessTaskWorkflowLayer.pipe(
+    const workflowStackLayer = Layer.merge(HarnessTaskWorkflowLayer, ShipWorkflowLayer).pipe(
       Layer.provideMerge(Layer.merge(engineLayer, portsLayer)),
     )
     const workflowContext = yield* Layer.buildWithScope(workflowStackLayer, input.targetScope)
 
     const runtime: WorkflowDaemonRuntime = {
       workflowContext,
+      shipWorkflowContext: workflowContext,
       engine: Context.get(workflowContext, WorkflowEngine.WorkflowEngine),
       projectionWriter: Context.get(workflowContext, WorkflowProjectionWriter),
       readModelQuery: Context.get(workflowContext, WorkflowReadModelQuery),
@@ -383,9 +323,14 @@ const acquireLeaseAndBuildEngineInScope = (input: {
       unitAgentDispatcher: Context.get(workflowContext, UnitAgentDispatcher),
       worktreePort: Context.get(workflowContext, WorkflowWorktreePort),
       reviewRouter: Context.get(workflowContext, WorkflowReviewRouter),
+      shipGateRunner: Context.get(workflowContext, ShipGateRunner),
+      shipAttemptStore: Context.get(workflowContext, ShipAttemptStore),
+      shipProgressListeners,
+      shipGateController,
       leaseFence,
       plansRef,
       runMutexesRef,
+      shipWorktreeMutexesRef,
       rebuildMutex,
       rebuildRpcGateSemaphore,
       rebuildProjectionGateSemaphore,

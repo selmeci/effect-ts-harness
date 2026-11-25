@@ -349,7 +349,7 @@ const explainDirectCommandDenyRule = (
       return {
         ruleId: "worker-recursive-workflow-command",
         reason:
-          "Worker isolation mode (HARNESS_UNIT_WORKER=1) bans recursive 'harness workflow start|resume|abort|doctor|complete --phase llm' and 'harness done' invocations.",
+          "Worker isolation mode (HARNESS_UNIT_WORKER=1) bans recursive 'harness workflow start|resume|ship|abort|doctor|complete --phase llm' and 'harness done' invocations.",
       }
     }
     if (isWorkerDaemonCredentialShellAccess(trimmed)) {

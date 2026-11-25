@@ -1,6 +1,6 @@
 # Autonomous Signal-Routed 7-Lens Review, Stamp-Safe Gates & Shipping (Stages 4–6)
 
-This reference governs **Stage 4 (Signal-Routed 7-Lens Specialist Review & Autonomous Fix Loop)**, **Stage 5 (Compounding Learnings & Final Deterministic Gate Sequence)**, and **Stage 6 (Git Commit, Optional Push/PR & Closeout)** of `effect-lfg`.
+This reference governs **Stage 4 (Signal-Routed 7-Lens Specialist Review & Autonomous Fix Loop)**, **Stage 5 (Stamp-Safe LLM Phase & Durable `ShipWorkflow` Pipeline)**, and **Stage 6 (Git Commit, Optional Push/PR & Closeout)** of `effect-lfg`.
 
 ---
 
@@ -33,7 +33,7 @@ Follow the adjudication rubric from `resolving-effect-review-feedback`:
 
 1. **Adjudicate via Graph MCP:** For every finding reported by the specialist reviewers, verify type and ontology facts with `harness_resolve`, `harness_callers`, `harness_ontology_why`, and `harness_tests_reaching`.
 2. **Hunt AST Twins (`class-fix`):** Whenever a valid defect is confirmed, run `harness_structural_search` (`@ast-grep/napi`) across the workspace to locate and fix all identical occurrences in a single pass.
-3. **Sync Contracts, Specs & ADRs First:** If a valid fix alters a contract Schema, error tag, `Effect.fn` signature, `Context.Service` port, EARS clause, or ADR invariant, update the EARS spec / ADR first and re-run `pnpm harness plan-check` (and update `## 4. Verified Plan Topology Graph`) so `.harness/plan-graph-snapshot.json` matches the post-review implementation graph before Stage 5 (`verify -> done`).
+3. **Sync Contracts, Specs & ADRs First:** If a valid fix alters a contract Schema, error tag, `Effect.fn` signature, `Context.Service` port, EARS clause, or ADR invariant, update the EARS spec / ADR first and re-run `pnpm harness plan-check` (and update `## 4. Verified Plan Topology Graph`) so `.harness/plan-graph-snapshot.json` matches the post-review implementation graph before Stage 5 (LLM phase + `pnpm harness workflow ship [--run <id>]`).
 4. **Apply Eligible Fixes & Record Residuals:**
    - Autonomously apply all valid `fix`, `class-fix`, and `doc-sync-fix` items (dispatching scoped `gemini-4-hydrogen-medium` fixer subagents via `invoke_subagent` or `swarm` when changes span multiple packages).
    - Record any `decline-with-evidence` items or non-blocking advisory notes in a `## Residual & Declined Review Findings` section for the final PR body / closeout report.
@@ -44,47 +44,53 @@ Follow the adjudication rubric from `resolving-effect-review-feedback`:
 
 ---
 
-## 2. Stage 5 — Stamp-Safe Compounding Learnings & Final Deterministic Gate Sequence
+## 2. Stage 5 — Stamp-Safe LLM Phase & Durable Ship Pipeline (`ShipWorkflow`)
 
 > [!IMPORTANT]
-> `.harness/verify-stamp.json` records the SHA-256 hash (`treeHash`) of all tracked workspace files at the moment `harness verify` runs. Editing **any** file (including spec frontmatter, ADRs, or `agent-patterns/*.md` from `harness learn`) _after_ `harness verify` invalidates the stamp and causes `harness done` (and the session `Stop` hook) to block completion.
+> `.harness/verify-stamp.json` records the SHA-256 hash (`treeHash`) of all tracked workspace files at the moment `harness verify` runs. Editing **any** file (including spec frontmatter, ADRs, or `agent-patterns/*.md` from `harness learn`) _after_ `pnpm harness workflow ship` invalidates the stamp and triggers `ShipTreeDriftError` or causes the session `Stop` hook to block completion.
 
-Always execute Stage 5 in this exact stamp-safe order:
+Always execute Stage 5 in this exact stamp-safe order (`compile -> start -> complete/resume -> routeReview -> LLM phase -> workflow ship`):
 
 ### Step 5.1 — Finalize Spec Status (`status: accepted`)
 
 Update `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` (or `docs/specs/`) frontmatter from `status: proposed` to `status: accepted`. Confirm all `enforced_by`, `spans`, `services`, and `errors` entries match the implemented code 1:1.
 
-### Step 5.2 — Autonomous Compounding Learnings (`harness learn`)
+### Step 5.2 — LLM Phase: Autonomous Learnings, Explicit Formatting & Phase Completion
 
-1. Run `harness learn`:
+1. Run `pnpm harness learn`:
    ```bash
-   node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts learn
+   pnpm harness learn
    ```
 2. Inspect `.harness/friction-log.jsonl` clusters (`Friction.decide` + `LearnProposalV1`) and any gate blind spots uncovered in Stage 4:
    - Autonomously apply clear, deterministic promotions across the 5 targets (`agent-pattern` in `agent-patterns/*.md`, `triage-rule` in `DETERMINISTIC_TRIAGE_RULES`, `guard-allowlist` in `ALLOWLIST`, `ast-graph-gate` in `@harness/contract` / `@harness/gates` (`HarnessTierTopology.decide`, `SelfDogfooding.decide`) / `tools/oxlint/syntax-bans.js` / `policy-check.ts`, or `adr` in `libs/<scope>/docs/adr/`).
    - Never append prose warnings to `AGENTS.md`.
    - Note: Modifying `.oxlintrc.json`, `tools/oxlint/*`, or `policies.cedar` triggers a human confirmation prompt via `harness guard`; only touch protected linter policy files when a high-confidence gate escape requires it, otherwise promote via `agent-patterns/*.md`, `DETERMINISTIC_TRIAGE_RULES`, or an ADR.
-3. Refresh any `wc -l` / numeric LOC tables in `docs/**`, `libs/*/docs/**`, `apps/*/docs/**`, and `README.md` that reference files modified in Stages 3–5, and clear processed friction logs:
+3. Refresh any `wc -l` / numeric LOC tables in `docs/**`, `libs/*/docs/**`, `apps/*/docs/**`, and `README.md` that reference files modified in Stages 3–5, format only your touched paths (`pnpm oxfmt --write <explicit paths>`), clear processed friction logs, and (when running under `HarnessTaskWorkflow`) complete the LLM phase:
    ```bash
-   node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts learn --clear
+   pnpm oxfmt --write <explicit touched paths>
+   pnpm harness learn --clear
+   pnpm harness workflow complete --phase llm --run-id <id> --repo-root <abs>
    ```
+   (For standalone non-plan tasks outside `HarnessTaskWorkflow`, omit `pnpm harness workflow complete --phase llm`.)
 
-### Step 5.3 — Final Deterministic Gate Sequence (`gc` -> `ontology` -> `mutate` -> `verify` -> `done`)
+### Step 5.3 — Durable `ShipWorkflow` Pipeline (`pnpm harness workflow ship`)
 
-With all code, tests, specs, ADRs, and learning promotions written to disk, execute the complete verification sequence (`WaitMsBeforeAsync: 10000` on each command):
+With all code, tests, specs, ADRs, formatting, and learning promotions written to disk, invoke the single durable ship command (`WaitMsBeforeAsync: 10000`):
 
 ```bash
-node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts gc --strict
-node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts ontology check --strict
-node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts mutate --strict
-CI=true node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts verify
-CI=true node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts done
+pnpm harness workflow ship --run <id> [--repo-root <abs>]
+# Or, for standalone non-plan tasks without a compiled workflow run (ephemeral mode):
+pnpm harness workflow ship
 ```
 
-- If any gate fails, fix the root cause and re-run the full sequence from `gc --strict` through `done`.
-- If `harness verify` exits with code `2` (`[ESCALATE: STUCK LOOP DETECTED]`), stop immediately and report the blocker.
-- Once `harness done` succeeds, **do not modify any tracked workspace file**.
+Under `ShipWorkflow` (`idempotencyKey = "${runId}:${treeHash}:${attempt}"`), `pnpm harness workflow ship` enforces:
+
+1. **Deterministic 6-Stage Order (`RunGate/<stage>`):** Executes `format-check` -> `gc-strict` -> `ontology-check-strict` (`ontology check --strict`) -> `mutate-strict` -> `verify` -> `done --cli` (`pnpm harness done --cli` bypasses Stop-hook stdin and converts blocks into non-zero exit code `1`).
+2. **Pre/Post Workspace Tree-Hash Guarantees:** Asserts `ShipGateRunner.computeTreeHash` matches `payload.treeHash` before each stage (failing immediately with `ShipTreeMismatchError` and zero gate execution on mismatch) and verifies post-done immutability (failing closed with `ShipTreeDriftError` if workspace files drift after `done --cli`).
+3. **Startup Mutation Backup Recovery:** Runs `ShipGateRunner.recoverMutationBackup` (`recoverStartupBackup`) prior to `mutate --strict` and asserts `computeTreeHash === payload.treeHash` afterwards (`MutationRestoreError` on failure or drift).
+4. **Monotonic OCC `WfShipAttempt` Tracking & Streaming Progress:** Allocates strictly increasing `WfShipAttempt` integers via `ShipAttemptStore.allocateAttempt` under Omnigraph OCC fencing and streams `ShipStreamProgressEvent` NDJSON frames over `<git-common-dir>/harness/daemon.sock`.
+5. **Circuit-Breaker Escalation (`exitCode: 2`):** `ShipGateFailedError` surfaces `LoopCircuitBreaker.decide` status without double-counting `verify`'s own `verify_failure` event. If `pnpm harness workflow ship` exits with code `2` (`[ESCALATE: STUCK LOOP DETECTED]`), **never retry blindly** — stop immediately and report the blocker.
+6. **Root-Cause Repair:** If a stage fails with exit code `1`, fix the root cause (re-running `learn --clear` and `oxfmt --write <explicit paths>` if files changed) and re-run `pnpm harness workflow ship`. Once `workflow ship` succeeds, **do not modify any tracked workspace file**.
 
 ---
 
@@ -117,7 +123,7 @@ Run `git remote` once to determine the shipping path:
      - **Summary & Spec Link:** `<scope>:SPEC-NNNN` (`libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md`) and any governing ADR (`<scope>:ADR-NNNN`).
      - **Verified Plan Topology Graph:** The Mermaid graph from `harness plan-check`.
      - **Assumptions Recorded (`## Assumptions`):** Explicit defaults chosen during Stage 1 autonomous EARS specification.
-     - **Verification & Gate Receipt:** Confirmation of passing `gc --strict`, `ontology check --strict`, `mutate --strict`, `verify`, and `done`.
+     - **Verification & Gate Receipt:** Confirmation of passing `pnpm harness workflow ship` (`ShipWorkflow`: `format-check`, `gc-strict`, `ontology-check-strict`, `mutate-strict`, `verify`, and `done --cli` with `WfShipAttempt` OCC receipt).
      - **Residual & Declined Review Findings:** Any report-only or declined items from Stage 4.
    - Merging always stays with the user unless explicitly granted for this run.
 

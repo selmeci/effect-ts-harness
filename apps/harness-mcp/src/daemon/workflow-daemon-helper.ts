@@ -51,6 +51,7 @@ export const WORKFLOW_DAEMON_CAPABILITIES: ReadonlyArray<WorkflowDaemonCapabilit
   WorkflowDaemonCapability.make("workflow.resume"),
   WorkflowDaemonCapability.make("workflow.abort"),
   WorkflowDaemonCapability.make("workflow.doctor"),
+  WorkflowDaemonCapability.make("workflow.ship"),
 ]
 
 export interface WorkflowDaemonHandshakeContext {

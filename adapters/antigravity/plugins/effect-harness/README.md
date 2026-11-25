@@ -45,7 +45,7 @@ The plugin registers four lifecycle hooks to enforce safety constraints and inde
    - Blocks direct writes to `.harness/verify-stamp.json` (stamp forgery prevention).
    - Blocks reads of secret files and protected harness runtime state (`daemon.sock`, `auth-tokens.json`, `<git-common-dir>/harness/**`).
    - Blocks destructive shell commands (`git push --force`, `rm -rf`).
-   - When `HARNESS_UNIT_WORKER=1` is set on unit worker invocations (automatic runner spawning lands in WF-5), blocks recursive `harness workflow start|resume|abort|doctor|complete --phase llm`, `harness done`, and direct access to `daemon.sock` or `auth-tokens.json`.
+   - When `HARNESS_UNIT_WORKER=1` is set on unit worker invocations (automatic runner spawning lands in WF-5), blocks recursive `harness workflow start|resume|ship|abort|doctor|complete --phase llm`, `harness done`, and direct access to `daemon.sock` or `auth-tokens.json`.
    - Requires explicit human approval for `alchemy deploy` and `alchemy destroy`.
 3. **`PostToolUse` (`harness ingest --format=antigravity`):**
    Matcher `edit_file|write_file|replace_file_content|multi_replace_file_content|write_to_file` — executes immediately following file write or replacement operations. Incrementally parses modified TypeScript ASTs, EARS specifications, and ADR documents into `.harness/index.sqlite` and the resident Omnigraph property graph.
@@ -78,7 +78,7 @@ Use the workflow skills to guide agents through specific development phases or r
 
 ### 2. `effect-lfg` (`/effect-lfg`)
 
-- **When to Use:** Autonomous end-to-end pipeline orchestrator. Use when you want to pass a requirement, bug report, or EARS spec and have the harness run hands-off from start to finish (EARS spec with explicit `## Assumptions` $\rightarrow$ `stub<A, E, R>()` & `plan-check` $\rightarrow$ subagent implementation $\rightarrow$ 7-lens specialist review & auto-fix $\rightarrow$ `learn`, `gc --strict`, `mutate --strict`, `verify`, `done` $\rightarrow$ git commit & optional PR).
+- **When to Use:** Autonomous end-to-end pipeline orchestrator. Use when you want to pass a requirement, bug report, or EARS spec and have the harness run hands-off from start to finish (EARS spec with explicit `## Assumptions` $\rightarrow$ `stub<A, E, R>()` & `plan-check` $\rightarrow$ subagent implementation $\rightarrow$ 7-lens specialist review & auto-fix $\rightarrow$ `learn`, `workflow complete --phase llm`, `workflow ship` (`format-check`, `gc --strict`, `ontology check --strict`, `mutate --strict`, `verify`, `done --cli`) $\rightarrow$ git commit & optional PR).
 - **Trigger / Starter Prompt:**
   ```text
   "/effect-lfg Add a Sample.archiveAlbum use-case to libs/sample that marks an album archived or fails with AlbumNotFoundError."
@@ -173,5 +173,5 @@ Invoke specialist review subagents as read-only inspectors during implementation
    node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts doctor
    ```
 4. **Orchestrate Durable Task Workflows & Determinism Gates:**
-   - Control `HarnessTaskWorkflow` runs via `harness workflow` (`compile | start | status | complete | resume | doctor | abort`) over `<git-common-dir>/harness/daemon.sock`, and inspect status read-only with `harness_workflow_plan`.
+   - Control `HarnessTaskWorkflow` and `ShipWorkflow` runs via `harness workflow` (`compile | start | status | complete | resume | ship | doctor | abort`) over `<git-common-dir>/harness/daemon.sock`, and inspect status read-only with `harness_workflow_plan`.
    - Workflow definition modules containing `Workflow.make(...)` are checked across `toLayer`/`register` handlers and same-module helper functions by the `nondeterministic-workflow-body` AST and `oxlint` rule (`harness/syntax-bans`), requiring side effects, clock/randomness, env, fs, git, Omnigraph, and network calls to run inside `Activity.make({ execute: ... })`.

@@ -725,7 +725,7 @@ describe("Antigravity adapter & plugin configuration", () => {
           "{path, path/posix, path/win32, crypto, url}",
           "Phase 5 Step 0",
           "ontology check --strict",
-          "workflow <compile|start|status|complete|resume|doctor|abort>",
+          "workflow <compile|start|status|complete|resume|ship|doctor|abort>",
           "HARNESS_UNIT_WORKER=1",
           "nondeterministic-workflow-body",
           ...CANONICAL_MCP_TOOL_NAMES,
@@ -992,7 +992,7 @@ describe("Antigravity adapter & plugin configuration", () => {
     )
     expect(rootReadme).toContain("Exposes 20")
     expect(rootReadme).toContain(
-      "workflow <compile\\|start\\|status\\|complete\\|resume\\|doctor\\|abort>",
+      "workflow <compile\\|start\\|status\\|complete\\|resume\\|ship\\|doctor\\|abort>",
     )
     expect(rootReadme).toContain("HARNESS_UNIT_WORKER=1")
     expect(rootReadme).toContain("nondeterministic-workflow-body")
@@ -1475,6 +1475,24 @@ describe("Antigravity adapter & plugin configuration", () => {
           (f) => f.kind === "adapter-skill-parity",
         ),
       ).toBe(true)
+    }
+  })
+
+  it("SPEC-0032 REQ-3.2: AGENTS.md, adapter READMEs & skills cover ShipWorkflow & worker isolation", () => {
+    const read = (p: string) => readFileSync(resolve(repoRoot, p), "utf8")
+    const agents = read("AGENTS.md")
+    expect(read("adapters/claude-code/rules/AGENTS.md")).toBe(agents)
+    expect(read("adapters/antigravity/plugins/effect-harness/rules/AGENTS.md")).toBe(agents)
+    const toks = ["pnpm harness workflow ship", "workflow complete --phase llm", "ShipWorkflow"]
+    for (const t of toks) expect(agents).toContain(t)
+    for (const d of [pluginDir, resolve(repoRoot, "adapters/claude-code")]) {
+      for (const f of ["effect-lfg/SKILL.md", "effect-lfg/references/review-and-shipping.md"])
+        for (const t of toks) expect(readFileSync(resolve(d, "skills", f), "utf8")).toContain(t)
+      for (const p of ["README.md", "skills/effect-harness/SKILL.md"]) {
+        const s = readFileSync(resolve(d, p), "utf8")
+        expect(s).toContain("start|resume|ship|abort|doctor|complete --phase llm")
+        expect(s).not.toContain("start|resume|abort|doctor|complete --phase llm")
+      }
     }
   })
 })

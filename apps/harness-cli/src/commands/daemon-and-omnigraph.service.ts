@@ -29,6 +29,7 @@ import type {
   doctorWorkflowViaDaemon,
   getWorkflowStatusViaDaemon,
   resumeWorkflowViaDaemon,
+  shipWorkflowViaDaemon,
   startWorkflowViaDaemon,
   validateWorktreeRepoRoot,
   WorkflowDaemonRpcOptions,
@@ -112,6 +113,7 @@ export type WorkflowCliDeps = {
   readonly getWorkflowStatus?: typeof getWorkflowStatusViaDaemon | undefined
   readonly completeWorkflow?: typeof completeWorkflowViaDaemon | undefined
   readonly resumeWorkflow?: typeof resumeWorkflowViaDaemon | undefined
+  readonly shipWorkflow?: typeof shipWorkflowViaDaemon | undefined
   readonly doctorWorkflow?: typeof doctorWorkflowViaDaemon | undefined
   readonly abortWorkflow?: typeof abortWorkflowViaDaemon | undefined
   readonly daemonOptions?: WorkflowDaemonRpcOptions | undefined

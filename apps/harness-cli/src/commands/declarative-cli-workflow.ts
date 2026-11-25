@@ -1,39 +1,7 @@
-import { Effect, Option } from "effect"
+import type { Effect } from "effect"
 import { Argument, Command as CliCommand, Flag } from "effect/cli"
-import { match } from "ts-pattern"
 import type { HarnessCommandRegistry } from "./command-registry.js"
-
-const appendStringFlag = (
-  out: Array<string>,
-  flagName: string,
-  opt: Option.Option<string>,
-): void => {
-  match(opt)
-    .with({ _tag: "Some" }, ({ value }) => {
-      out.push(`--${flagName}=${value}`)
-    })
-    .with({ _tag: "None" }, () => {})
-    .exhaustive()
-}
-
-const appendNumberFlag = (
-  out: Array<string>,
-  flagName: string,
-  opt: Option.Option<number>,
-): void => {
-  match(opt)
-    .with({ _tag: "Some" }, ({ value }) => {
-      out.push(`--${flagName}=${value}`)
-    })
-    .with({ _tag: "None" }, () => {})
-    .exhaustive()
-}
-
-const appendBoolFlag = (out: Array<string>, flagName: string, enabled: boolean): void => {
-  if (enabled) {
-    out.push(`--${flagName}`)
-  }
-}
+import { appendBoolFlag, appendNumberFlag, appendStringFlag } from "./declarative-cli-flags.js"
 
 /** Builds the `harness workflow` declarative CLI subcommand (`effect/cli`). */
 export const makeWorkflowSubcommand = (
@@ -51,6 +19,7 @@ export const makeWorkflowSubcommand = (
       maxConcurrency: Flag.optional(Flag.Int("max-concurrency")),
       input: Flag.optional(Flag.String("input")),
       plan: Flag.optional(Flag.String("plan")),
+      run: Flag.optional(Flag.String("run")),
       runId: Flag.optional(Flag.String("run-id")),
       unit: Flag.optional(Flag.String("unit")),
       phase: Flag.optional(Flag.String("phase")),
@@ -68,6 +37,7 @@ export const makeWorkflowSubcommand = (
       appendNumberFlag(raw, "max-concurrency", flags.maxConcurrency)
       appendStringFlag(raw, "input", flags.input)
       appendStringFlag(raw, "plan", flags.plan)
+      appendStringFlag(raw, "run", flags.run)
       appendStringFlag(raw, "run-id", flags.runId)
       appendStringFlag(raw, "unit", flags.unit)
       appendStringFlag(raw, "phase", flags.phase)
