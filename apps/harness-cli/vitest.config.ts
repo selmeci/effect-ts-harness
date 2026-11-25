@@ -6,6 +6,7 @@ export default defineConfig({
     testTimeout: 10_000,
     env: {
       HARNESS_DISABLE_LIVE_TELEMETRY: "1",
+      HARNESS_WORKTREE_ID: "",
     },
   },
 })

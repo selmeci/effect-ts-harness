@@ -276,6 +276,194 @@ function isVacuousLengthNonNegativeAssertionEstree(node) {
   )
 }
 
+const DOT_HARNESS_WRITE_CALLEES_ESTREE = new Set([
+  "saveGraphSnapshot",
+  "saveGraphSnapshotEffect",
+  "syncToOmnigraphAndSnapshot",
+  "writeFileSync",
+  "writeTextSync",
+  "appendFileSync",
+  "appendTextSync",
+  "writeTextWithModeSync",
+])
+
+function getCalleeTerminalNameEstree(expr) {
+  const u = unwrapEstreeExpr(expr)
+  if (u == null) return null
+  if (u.type === "Identifier") return u.name
+  if (
+    u.type === "MemberExpression" &&
+    u.computed !== true &&
+    u.property != null &&
+    u.property.type === "Identifier"
+  ) {
+    return u.property.name
+  }
+  return null
+}
+
+function isDotHarnessRelativeLiteralTextEstree(text) {
+  if (typeof text !== "string") return false
+  const trimmed = text.replace(/^\.[\\/]/, "")
+  return (
+    trimmed === ".harness" || trimmed.startsWith(".harness/") || trimmed.startsWith(".harness\\")
+  )
+}
+
+function isProcessCwdCallEstree(node) {
+  const u = unwrapEstreeExpr(node)
+  if (u == null || u.type !== "CallExpression") return false
+  if (Array.isArray(u.arguments) && u.arguments.length > 0) return false
+  const callee = unwrapEstreeExpr(u.callee)
+  return (
+    callee != null &&
+    callee.type === "MemberExpression" &&
+    callee.computed !== true &&
+    isIdentifier(unwrapEstreeExpr(callee.object), "process") &&
+    isIdentifier(callee.property, "cwd")
+  )
+}
+
+function containsDotHarnessSegmentEstree(node, context) {
+  const txt = getNodeSourceText(context, node)
+  if (txt.length > 0) {
+    return /(?:^|["'`\\/])\.harness(?:[\\/"'`]|$)/.test(txt)
+  }
+  const u = unwrapEstreeExpr(node)
+  if (u == null) return false
+  const staticStr = getStaticModuleString(u)
+  if (staticStr != null) {
+    return /(?:^|[\\/])\.harness(?:[\\/]|$)/.test(staticStr)
+  }
+  if (u.type === "TemplateLiteral" && Array.isArray(u.quasis)) {
+    return u.quasis.some((q) => {
+      const val = q?.value?.cooked ?? q?.value?.raw ?? ""
+      return /(?:^|[\\/])\.harness(?:[\\/]|$)/.test(val)
+    })
+  }
+  if (u.type === "BinaryExpression" && u.operator === "+") {
+    return (
+      containsDotHarnessSegmentEstree(u.left, context) ||
+      containsDotHarnessSegmentEstree(u.right, context)
+    )
+  }
+  return false
+}
+
+function isProcessCwdDotHarnessJoinOrResolveEstree(node, context) {
+  if (node == null || node.type !== "CallExpression") return false
+  const name = getCalleeTerminalNameEstree(node.callee)
+  if (
+    (name !== "join" && name !== "resolve") ||
+    !Array.isArray(node.arguments) ||
+    node.arguments.length < 2
+  ) {
+    return false
+  }
+  const baseArg = node.arguments[0]
+  if (baseArg == null || !isProcessCwdCallEstree(baseArg)) return false
+  return node.arguments.slice(1).some((arg) => containsDotHarnessSegmentEstree(arg, context))
+}
+
+function isNonCwdJoinOrResolveCallEstree(node) {
+  if (node == null || node.type !== "CallExpression") return false
+  const name = getCalleeTerminalNameEstree(node.callee)
+  if (
+    (name !== "join" && name !== "resolve") ||
+    !Array.isArray(node.arguments) ||
+    node.arguments.length < 2
+  ) {
+    return false
+  }
+  const baseArg = node.arguments[0]
+  if (baseArg == null || isProcessCwdCallEstree(baseArg)) return false
+  const baseStr = getStaticModuleString(unwrapEstreeExpr(baseArg))
+  return (
+    baseStr == null ||
+    (!isDotHarnessRelativeLiteralTextEstree(baseStr) &&
+      baseStr !== "." &&
+      baseStr !== "./" &&
+      baseStr !== "")
+  )
+}
+
+function hasUnisolatedDotHarnessArgExprEstree(expr, context) {
+  const u = unwrapEstreeExpr(expr)
+  if (u == null) return false
+  const staticStr = getStaticModuleString(u)
+  if (staticStr != null) {
+    return isDotHarnessRelativeLiteralTextEstree(staticStr)
+  }
+  if (u.type === "TemplateLiteral" && Array.isArray(u.quasis) && u.quasis.length > 0) {
+    const headText = u.quasis[0]?.value?.cooked ?? u.quasis[0]?.value?.raw ?? ""
+    return isDotHarnessRelativeLiteralTextEstree(headText)
+  }
+  if (u.type === "ObjectExpression" && Array.isArray(u.properties)) {
+    return u.properties.some((p) => {
+      if (p == null) return false
+      if (p.type === "Property" || p.type === "ObjectProperty") {
+        return hasUnisolatedDotHarnessArgExprEstree(p.value, context)
+      }
+      if (p.type === "SpreadElement") {
+        return hasUnisolatedDotHarnessArgExprEstree(p.argument, context)
+      }
+      return false
+    })
+  }
+  if (u.type === "ArrayExpression" && Array.isArray(u.elements)) {
+    return u.elements.some((el) => {
+      if (el == null) return false
+      return el.type === "SpreadElement"
+        ? hasUnisolatedDotHarnessArgExprEstree(el.argument, context)
+        : hasUnisolatedDotHarnessArgExprEstree(el, context)
+    })
+  }
+  if (u.type === "ConditionalExpression") {
+    return (
+      hasUnisolatedDotHarnessArgExprEstree(u.consequent, context) ||
+      hasUnisolatedDotHarnessArgExprEstree(u.alternate, context)
+    )
+  }
+  if (u.type === "BinaryExpression" || u.type === "LogicalExpression") {
+    if (hasUnisolatedDotHarnessArgExprEstree(u.left, context)) return true
+    if (u.type === "BinaryExpression" && u.operator === "+") {
+      const leftTxt = getStaticModuleString(unwrapEstreeExpr(u.left))
+      return (
+        (leftTxt === "" || leftTxt === "." || leftTxt === "./") &&
+        hasUnisolatedDotHarnessArgExprEstree(u.right, context)
+      )
+    }
+    return hasUnisolatedDotHarnessArgExprEstree(u.right, context)
+  }
+  if (u.type === "CallExpression") {
+    if (
+      isProcessCwdDotHarnessJoinOrResolveEstree(u, context) ||
+      isNonCwdJoinOrResolveCallEstree(u)
+    ) {
+      return false
+    }
+    return (
+      Array.isArray(u.arguments) &&
+      u.arguments.some((a) => hasUnisolatedDotHarnessArgExprEstree(a, context))
+    )
+  }
+  return false
+}
+
+function isUnisolatedDotHarnessTestWriteCallEstree(node, context) {
+  if (node == null || node.type !== "CallExpression") return false
+  const tn = getCalleeTerminalNameEstree(node.callee)
+  if (
+    tn != null &&
+    DOT_HARNESS_WRITE_CALLEES_ESTREE.has(tn) &&
+    Array.isArray(node.arguments) &&
+    node.arguments.some((a) => hasUnisolatedDotHarnessArgExprEstree(a, context))
+  ) {
+    return true
+  }
+  return isProcessCwdDotHarnessJoinOrResolveEstree(node, context)
+}
+
 function isPureTierProcessEnvBannedPath(filename) {
   const libsMatch = /(?:^|\/)(libs\/[^/]+\/[^/]+\/src\/.*)$/.exec(filename)
   if (libsMatch == null) return false
@@ -6511,6 +6699,16 @@ const testIntegrity = {
           context.report({ node, message: testSkipOrOnlyMessage })
         }
         const filename = getNormalizedFilename()
+        if (
+          /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(filename) &&
+          isUnisolatedDotHarnessTestWriteCallEstree(node, context)
+        ) {
+          context.report({
+            node,
+            message:
+              "[unisolated-dot-harness-test-write] Tests must not write to live .harness/ paths — use os.tmpdir().",
+          })
+        }
         if (
           isRequireCallee(node.callee) &&
           Array.isArray(node.arguments) &&

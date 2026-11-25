@@ -705,34 +705,42 @@ export const getCalleeTerminalName = (expr: ts.Expression): string | undefined =
   return ts.isIdentifier(u) ? u.text : ts.isPropertyAccessExpression(u) ? u.name.text : undefined
 }
 
-const isDotHarnessRelativeLiteralText = (text: string): boolean => {
-  const trimmed = text.replace(/^\.[\\/]/, "")
-  return (
-    trimmed === ".harness" || trimmed.startsWith(".harness/") || trimmed.startsWith(".harness\\")
-  )
+const isDotHarnessRelativeLiteralText = (text: string): boolean =>
+  /^(?:\.[\\/])?\.harness(?:[\\/]|$)/.test(text)
+
+const getJoinOrResolveBaseArg = (node: ts.CallExpression): ts.Expression | undefined => {
+  const name = getCalleeTerminalName(node.expression)
+  return (name === "join" || name === "resolve") && node.arguments.length >= 2
+    ? node.arguments[0]
+    : undefined
+}
+
+const isProcessCwdCall = (expr: ts.Expression): boolean => {
+  const u = unwrapExpr(expr)
+  if (!ts.isCallExpression(u) || u.arguments.length > 0) return false
+  const callee = unwrapExpr(u.expression)
+  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== "cwd") return false
+  const recv = unwrapExpr(callee.expression)
+  return ts.isIdentifier(recv) && recv.text === "process"
 }
 
 export const isProcessCwdDotHarnessJoinOrResolve = (
   node: ts.CallExpression,
   sf: ts.SourceFile,
 ): boolean => {
-  const name = getCalleeTerminalName(node.expression)
-  if ((name !== "join" && name !== "resolve") || node.arguments.length < 2) return false
-  const baseArg = node.arguments[0]
+  const baseArg = getJoinOrResolveBaseArg(node)
   return (
     baseArg !== undefined &&
-    unwrapExpr(baseArg).getText(sf) === "process.cwd()" &&
+    isProcessCwdCall(baseArg) &&
     node.arguments
       .slice(1)
       .some((arg) => /(?:^|["'`\\/])\.harness(?:[\\/"'`]|$)/.test(arg.getText(sf)))
   )
 }
 
-const isNonCwdJoinOrResolveCall = (node: ts.CallExpression, sf: ts.SourceFile): boolean => {
-  const name = getCalleeTerminalName(node.expression)
-  if ((name !== "join" && name !== "resolve") || node.arguments.length < 2) return false
-  const baseArg = node.arguments[0]
-  if (baseArg === undefined || unwrapExpr(baseArg).getText(sf) === "process.cwd()") return false
+const isNonCwdJoinOrResolveCall = (node: ts.CallExpression): boolean => {
+  const baseArg = getJoinOrResolveBaseArg(node)
+  if (baseArg === undefined || isProcessCwdCall(baseArg)) return false
   const baseStr = isStaticStringLiteralText(baseArg)
   return (
     baseStr === undefined ||
@@ -755,8 +763,11 @@ export const hasUnisolatedDotHarnessArgExpr = (expr: ts.Expression, sf: ts.Sourc
         : ts.isSpreadAssignment(p) && hasUnisolatedDotHarnessArgExpr(p.expression, sf),
     )
   }
-  if (ts.isArrayLiteralExpression(u))
-    return u.elements.some((el) => hasUnisolatedDotHarnessArgExpr(el, sf))
+  if (ts.isArrayLiteralExpression(u)) {
+    return u.elements.some((el) =>
+      hasUnisolatedDotHarnessArgExpr(ts.isSpreadElement(el) ? el.expression : el, sf),
+    )
+  }
   if (ts.isConditionalExpression(u)) {
     return (
       hasUnisolatedDotHarnessArgExpr(u.whenTrue, sf) ||
@@ -775,7 +786,7 @@ export const hasUnisolatedDotHarnessArgExpr = (expr: ts.Expression, sf: ts.Sourc
     return hasUnisolatedDotHarnessArgExpr(u.right, sf)
   }
   if (ts.isCallExpression(u)) {
-    if (isProcessCwdDotHarnessJoinOrResolve(u, sf) || isNonCwdJoinOrResolveCall(u, sf)) return false
+    if (isProcessCwdDotHarnessJoinOrResolve(u, sf) || isNonCwdJoinOrResolveCall(u)) return false
     return u.arguments.some((a) => hasUnisolatedDotHarnessArgExpr(a, sf))
   }
   return false

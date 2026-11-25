@@ -18,6 +18,7 @@ describe("harness cli baseline", () => {
     expect(COMMANDS).toEqual([
       "guard",
       "route",
+      "review-route",
       "plan-check",
       "plan-synth",
       "repair",

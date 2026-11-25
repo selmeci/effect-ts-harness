@@ -137,7 +137,7 @@ export const runCliEffect = (
 
     const category: TelemetryCategory = match(requested)
       .with("guard", () => "guard" as const)
-      .with("route", () => "routing" as const)
+      .with("route", "review-route", () => "routing" as const)
       .with("ontology", () => "ontology" as const)
       .with("plan-check", "verify", "gc", "mutate", "bench", "benchmark", () => "gate" as const)
       .otherwise(() => "lifecycle" as const)

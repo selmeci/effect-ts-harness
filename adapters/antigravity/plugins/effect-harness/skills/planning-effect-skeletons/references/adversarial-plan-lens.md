@@ -55,9 +55,9 @@ Skeletons often declare optimistic, domain-only errors while ignoring operationa
 ## Adversarial Audit Workflow
 
 1. **Verify Topological Integrity:**
-   Ensure `harness plan-check` passed with exit code `0` and inspect the output Mermaid topology:
+   Ensure `harness plan-check` passed with exit code `0` and inspect the output Mermaid topology via `--mermaid`:
    ```bash
-   node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts plan-check
+   node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts plan-check --mermaid
    ```
 2. **Review Skeleton Signatures:**
    Check the `E` and `R` channels across all `stub<A, E, R>()` declarations in `type:core`, `type:domain`, and `type:infra`.

@@ -1,8 +1,8 @@
 import * as path from "node:path"
 import { match } from "ts-pattern"
+import { normalizeHeredocAwareContinuations, stripSafeDataHeredocBodies } from "./policy-heredoc.js"
 import {
   extractDetailedCommandSegments,
-  normalizeShellLineContinuations,
   toCommandView,
   unwrapCommandSegment,
   type DetailedCommandSegment,
@@ -393,10 +393,11 @@ const isHarnessStateAccessSegment = (
 const prepareStateCommandVariants = (
   command: string,
 ): { readonly variants: ReadonlyArray<string>; readonly overflowed: boolean } => {
-  const norm = normalizeShellLineContinuations(command)
-  const exp = expandCommandVariables(norm)
+  const norm = normalizeHeredocAwareContinuations(command)
+  const stripped = stripSafeDataHeredocBodies(norm)
+  const exp = expandCommandVariables(stripped)
   return {
-    variants: exp.text === norm ? [norm] : [norm, exp.text],
+    variants: exp.text === stripped ? [stripped] : [stripped, exp.text],
     overflowed: exp.overflowed,
   }
 }

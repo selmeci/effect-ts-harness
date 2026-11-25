@@ -536,7 +536,172 @@ const isSafeGitConfigGetCommand = (tokens: ReadonlyArray<string>): boolean => {
   return positionalCount >= 1 && positionalCount <= 2
 }
 
-export const isCommandAllowed = (command: string): boolean => {
+const SAFE_XARGS_FLAGS: ReadonlySet<string> = new Set(["-0", "--null", "-r", "--no-run-if-empty"])
+const SAFE_WC_FLAGS: ReadonlySet<string> = new Set(
+  "-l -w -c -m -L --lines --words --bytes --chars --max-line-length".split(" "),
+)
+const SAFE_OXFMT_CHECK_FLAGS: ReadonlySet<string> = new Set(
+  "--check --list-different --no-error-on-unmatched-pattern --".split(" "),
+)
+const OXLINT_VALUE_FLAGS: ReadonlySet<string> = new Set(
+  "-f --format --tsconfig --ignore-pattern -D --deny -A --allow -W --warn".split(" "),
+)
+const UNSAFE_OXLINT_FLAG_PATTERN =
+  /^(?:--fix(?:=|-|$)|--fix-suggestions(?:=|$)|--fix-dangerously(?:=|$)|--write(?:=|$)|-w$|--output(?:=|$)|-o|-c(?:=|$)|-c[^=]|--config(?:=|$)|--import-plugin(?:=|$))/
+
+const unwrapSafePnpmCheckPrefix = (
+  consumer: ReadonlyArray<string>,
+  targetBin: "oxfmt" | "oxlint",
+): ReadonlyArray<string> | undefined => {
+  if (consumer[0] === targetBin) return consumer.slice(1)
+  if (consumer[0] === "pnpm" && consumer[1] === targetBin) return consumer.slice(2)
+  if (consumer[0] === "pnpm" && consumer[1] === "exec") {
+    if (consumer[2] === targetBin) return consumer.slice(3)
+    if (consumer[2] === "--" && consumer[3] === targetBin) return consumer.slice(4)
+  }
+  return undefined
+}
+
+const isSafeOxfmtCheckArgs = (args: ReadonlyArray<string>): boolean => {
+  let sawCheck = false
+  for (const arg of args) {
+    if (arg === "--check") sawCheck = true
+    if (!SAFE_OXFMT_CHECK_FLAGS.has(arg)) return false
+  }
+  return sawCheck
+}
+
+const isSafeOxlintArgs = (args: ReadonlyArray<string>): boolean => {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!
+    if (UNSAFE_OXLINT_FLAG_PATTERN.test(arg)) return false
+    if (arg === "--") {
+      return i === args.length - 1
+    }
+    if (OXLINT_VALUE_FLAGS.has(arg)) {
+      const val = args[++i]
+      if (val === undefined || val.includes("..")) return false
+      continue
+    }
+    const eqIdx = arg.indexOf("=")
+    if (eqIdx > 0 && arg.startsWith("-")) {
+      const flagName = arg.slice(0, eqIdx)
+      const val = arg.slice(eqIdx + 1)
+      if (OXLINT_VALUE_FLAGS.has(flagName)) {
+        if (val.length === 0 || val.includes("..")) return false
+        continue
+      }
+      if (val.includes("..")) return false
+    }
+    if (arg.startsWith("-")) continue
+    return false
+  }
+  return true
+}
+
+/** Returns true when a piped `xargs` consumer uses strictly read-only flags and an allowlisted check command. */
+export const isSafeReadOnlyXargsSegment = (command: string): boolean => {
+  const { rest: trimmed } = stripSafeLeadingEnvVarsDetailed(command)
+  if (trimmed === "" || hasExpandableShellVariable(trimmed) || /[`()]/.test(trimmed)) {
+    return false
+  }
+  const tokens = splitCommandTokens(trimmed)
+  if (tokens[0] !== "xargs") return false
+  let i = 1
+  while (i < tokens.length) {
+    const tok = tokens[i]!
+    if (tok === "--") {
+      i++
+      break
+    }
+    if (SAFE_XARGS_FLAGS.has(tok) || /^-[0r]+$/.test(tok)) {
+      i++
+      continue
+    }
+    if (tok.startsWith("-")) return false
+    break
+  }
+  const consumer = tokens.slice(i)
+  if (consumer.length === 0) return false
+  if (consumer[0] === "wc") {
+    return consumer
+      .slice(1)
+      .every((arg) => arg === "--" || SAFE_WC_FLAGS.has(arg) || /^-[lwcmL]+$/.test(arg))
+  }
+  const oxfmtArgs = unwrapSafePnpmCheckPrefix(consumer, "oxfmt")
+  if (oxfmtArgs !== undefined) return isSafeOxfmtCheckArgs(oxfmtArgs)
+  const oxlintArgs = unwrapSafePnpmCheckPrefix(consumer, "oxlint")
+  if (oxlintArgs !== undefined) return isSafeOxlintArgs(oxlintArgs)
+  return false
+}
+
+const isSimpleSafePipeFilter = (segment: string): boolean => {
+  const tokens = splitCommandTokens(segment.trim())
+  const head = tokens[0]
+  if (head === undefined) return false
+  const joined = tokens.join(" ")
+  if (
+    head === "grep" ||
+    head === "head" ||
+    head === "tail" ||
+    head === "wc" ||
+    head === "cat" ||
+    head === "cut"
+  ) {
+    return true
+  }
+  if (head === "rg") {
+    return !/(?:^|\s)--(?:pre|pre-glob|hostname-bin)(?:=|\s|$)/.test(joined)
+  }
+  if (head === "sort") {
+    return !/(?:^|\s)(?:-[^\s-]*o|--output(?:=|\s|$))/.test(joined)
+  }
+  return false
+}
+
+const splitUnquotedPipeParts = (command: string): ReadonlyArray<string> | undefined => {
+  const parts: Array<string> = []
+  let quote: "'" | '"' | undefined
+  let start = 0
+  let sawPipe = false
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!
+    if (quote !== undefined) {
+      quote = match(quote)
+        .with("'", () => (ch === "'" ? undefined : quote))
+        .with('"', () => {
+          if (ch === "\\" && i + 1 < command.length) i++
+          return ch === '"' ? undefined : quote
+        })
+        .exhaustive()
+      continue
+    }
+    if (ch === "\\" && i + 1 < command.length) {
+      i++
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    if (ch === "\n" || ch === ";" || command.startsWith("&&", i) || command.startsWith("||", i)) {
+      return undefined
+    }
+    if (ch === "&" && command[i - 1] !== ">" && command[i + 1] !== ">") {
+      return undefined
+    }
+    if (ch === "|" && command[i - 1] !== ">") {
+      parts.push(command.slice(start, i).trim())
+      start = i + 1
+      sawPipe = true
+    }
+  }
+  if (!sawPipe) return undefined
+  parts.push(command.slice(start).trim())
+  return parts
+}
+
+const isSingleCommandAllowed = (command: string): boolean => {
   const { rest: trimmed, sawWorktreeId } = stripSafeLeadingEnvVarsDetailed(command)
   if (trimmed === "") return false
   if (sawWorktreeId && WORKTREE_ID_BLOCKED_HARNESS_PATTERN.test(trimmed)) {
@@ -607,4 +772,18 @@ export const isCommandAllowed = (command: string): boolean => {
     if (prefix.endsWith(" ") || prefix.endsWith("/")) return trimmed.startsWith(prefix)
     return trimmed.startsWith(prefix + " ")
   })
+}
+
+export const isCommandAllowed = (command: string): boolean => {
+  const pipeParts = splitUnquotedPipeParts(command)
+  if (pipeParts !== undefined) {
+    return (
+      pipeParts.length >= 2 &&
+      isSingleCommandAllowed(pipeParts[0]!) &&
+      pipeParts
+        .slice(1)
+        .every((part) => isSafeReadOnlyXargsSegment(part) || isSimpleSafePipeFilter(part))
+    )
+  }
+  return isSingleCommandAllowed(command)
 }

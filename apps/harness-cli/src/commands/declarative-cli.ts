@@ -13,6 +13,11 @@ import {
 } from "./command-registry.js"
 import { COMMANDS, type CliEnv, type CliResult, isCommand } from "./daemon-and-omnigraph.service.js"
 import { appendBoolFlag, appendNumberFlag, appendStringFlag } from "./declarative-cli-flags.js"
+import {
+  makePlanCheckSubcommand,
+  makeReportSubcommand,
+  makeReviewRouteSubcommand,
+} from "./declarative-cli-extra.js"
 import { makeWorkflowSubcommand } from "./declarative-cli-workflow.js"
 import {
   hasDoneCliFlag,
@@ -81,20 +86,7 @@ export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.E
     },
   )
 
-  const planCheckCommand = CliCommand.make(
-    "plan-check",
-    {
-      graphOnly: boolFlag("graph-only"),
-      verify: boolFlag("verify"),
-      args: variadicArgs,
-    },
-    ({ graphOnly, verify, args }) => {
-      const raw: Array<string> = [...args]
-      appendBoolFlag(raw, "graph-only", graphOnly)
-      appendBoolFlag(raw, "verify", verify)
-      return runSubcommand("plan-check", raw)
-    },
-  )
+  const planCheckCommand = makePlanCheckSubcommand(runSubcommand)
 
   const planSynthCommand = CliCommand.make(
     "plan-synth",
@@ -239,24 +231,7 @@ export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.E
     },
   )
 
-  const reportCommand = CliCommand.make(
-    "report",
-    {
-      format: Flag.optional(Flag.String("format")),
-      clear: boolFlag("clear"),
-      reset: boolFlag("reset"),
-      all: boolFlag("all"),
-      args: variadicArgs,
-    },
-    ({ format, clear, reset, all, args }) => {
-      const raw: Array<string> = [...args]
-      appendStringFlag(raw, "format", format)
-      appendBoolFlag(raw, "clear", clear)
-      appendBoolFlag(raw, "reset", reset)
-      appendBoolFlag(raw, "all", all)
-      return runSubcommand("report", raw)
-    },
-  )
+  const reportCommand = makeReportSubcommand(runSubcommand)
 
   const checkOpenApiCommand = CliCommand.make(
     "check-openapi",
@@ -332,6 +307,7 @@ export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.E
     CliCommand.withSubcommands([
       guardCommand,
       forwardFormatSubcommand("route"),
+      makeReviewRouteSubcommand(runSubcommand),
       planCheckCommand,
       planSynthCommand,
       repairCommand,

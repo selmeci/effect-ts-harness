@@ -372,6 +372,7 @@ export class CliCommandNotFoundError extends Schema.TaggedError<CliCommandNotFou
 export const CanonicalCliCommandName = Schema.Literals([
   "guard",
   "route",
+  "review-route",
   "plan-check",
   "plan-synth",
   "repair",

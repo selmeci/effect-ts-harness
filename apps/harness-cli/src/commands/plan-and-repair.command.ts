@@ -32,6 +32,7 @@ import {
   resolveClusterRepoRoot,
   resolveNxAffectedArgs,
 } from "./daemon-and-omnigraph.service.js"
+import { formatPlanCheckCompactSummary } from "./declarative-cli-extra.js"
 import { runOfflineOmnigraphLintGate } from "./omnigraph-auth-and-drift.js"
 import {
   computeSyncEmbeddingsForGraph,
@@ -422,11 +423,20 @@ export const handlePlanCheck = (
           }
 
           const earsErr = yield* checkPlanEarsConsistency(governanceDocs)
+          const stubCount = Array.from(fnIndex.bySpanName.values()).filter((fn) => fn.isStub).length
           return match(earsErr)
             .with({ _tag: "Some" }, ({ value }) => value)
             .with({ _tag: "None" }, () => ({
               exitCode: 0,
-              stdout: checkResult.mermaid,
+              stdout: argv.includes("--mermaid")
+                ? checkResult.mermaid
+                : formatPlanCheckCompactSummary({
+                    snapshotReused: reused,
+                    nodeCount: Graph.nodeCount(graph.graph),
+                    edgeCount: Graph.edgeCount(graph.graph),
+                    stubCount,
+                    mermaid: checkResult.mermaid,
+                  }),
               stderr: "",
             }))
             .exhaustive()

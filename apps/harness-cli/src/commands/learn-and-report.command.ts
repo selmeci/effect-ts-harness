@@ -264,35 +264,98 @@ export const handleLearn = (
     }
   })
 
+type ReportFormatResolution =
+  | { readonly _tag: "Ok"; readonly format: "json" | "markdown" }
+  | { readonly _tag: "Err"; readonly reason: string }
+
+const resolveReportFormat = (argv: ReadonlyArray<string>): ReportFormatResolution => {
+  const hasJsonFlag = argv.includes("--json")
+  let explicitFormat: "json" | "markdown" | undefined
+
+  const startIdx = argv[0] === "report" ? 1 : 0
+  for (let i = startIdx; i < argv.length; i += 1) {
+    const arg = argv[i] ?? ""
+    if (arg === "--format" || arg.startsWith("--format=")) {
+      const isInline = arg.startsWith("--format=")
+      const rawFmt = isInline ? arg.slice("--format=".length) : argv[i + 1]
+      if (rawFmt === undefined) {
+        return { _tag: "Err", reason: "Missing value for --format" }
+      }
+      const parsedFmt = match(rawFmt)
+        .with("json", () => ({ _tag: "Ok" as const, fmt: "json" as const }))
+        .with("markdown", () => ({ _tag: "Ok" as const, fmt: "markdown" as const }))
+        .otherwise(() => ({
+          _tag: "Err" as const,
+          reason: `Unsupported --format '${rawFmt}' (expected json or markdown)`,
+        }))
+      const fmtErr = match(parsedFmt)
+        .with({ _tag: "Ok" }, ({ fmt }) => {
+          explicitFormat = fmt
+          return undefined
+        })
+        .with({ _tag: "Err" }, ({ reason }) => reason)
+        .exhaustive()
+      if (fmtErr !== undefined) {
+        return { _tag: "Err", reason: fmtErr }
+      }
+      if (!isInline) {
+        i += 1
+      }
+    }
+  }
+
+  return match(explicitFormat)
+    .with("markdown", () =>
+      hasJsonFlag
+        ? {
+            _tag: "Err" as const,
+            reason: "Conflicting flags: --json cannot be combined with --format markdown",
+          }
+        : { _tag: "Ok" as const, format: "markdown" as const },
+    )
+    .with("json", undefined, () => ({ _tag: "Ok" as const, format: "json" as const }))
+    .exhaustive()
+}
+
 export const handleReport = (
   argv: ReadonlyArray<string>,
   options: CliEnv | undefined,
 ): Effect.Effect<CliResult> =>
   Effect.sync(() => {
-    const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
-    if (argv.includes("--reset") || argv.includes("--clear")) {
-      clearTelemetryEventsSafe(repoRoot, nodeSyncHostIo)
-    }
-    const events = readTelemetryEventsSafe(repoRoot, nodeSyncHostIo)
-    const frictionEvents = readFrictionEventsSafe(repoRoot, nodeSyncHostIo)
-    const stampCheck = checkVerifyStamp(repoRoot, nodeSyncHostIo)
-    const report = buildSessionReport({
-      events,
-      frictionEvents,
-      stampValid: stampCheck.valid,
-      cumulative: argv.includes("--all"),
-    })
-    if (
-      (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) &&
-      !shouldSuppressLiveRepoTestSideEffects(repoRoot)
-    ) {
-      writeSessionReportFilesSafe(repoRoot, report, nodeSyncHostIo)
-    }
-    return {
-      exitCode: 0,
-      stdout: argv.includes("--format=markdown")
-        ? renderSessionReportMarkdown(report)
-        : JSON.stringify(report),
-      stderr: "",
-    }
+    return match(resolveReportFormat(argv))
+      .with({ _tag: "Err" }, ({ reason }) => ({
+        exitCode: 1,
+        stdout: "",
+        stderr: `${reason}\n`,
+      }))
+      .with({ _tag: "Ok" }, ({ format: outputFormat }) => {
+        const repoRoot = options?.repoRoot ?? findWorkspaceRoot()
+        if (argv.includes("--reset") || argv.includes("--clear")) {
+          clearTelemetryEventsSafe(repoRoot, nodeSyncHostIo)
+        }
+        const events = readTelemetryEventsSafe(repoRoot, nodeSyncHostIo)
+        const frictionEvents = readFrictionEventsSafe(repoRoot, nodeSyncHostIo)
+        const stampCheck = checkVerifyStamp(repoRoot, nodeSyncHostIo)
+        const report = buildSessionReport({
+          events,
+          frictionEvents,
+          stampValid: stampCheck.valid,
+          cumulative: argv.includes("--all"),
+        })
+        if (
+          (options?.repoRoot !== undefined || options?.skipAutoSessionReport !== true) &&
+          !shouldSuppressLiveRepoTestSideEffects(repoRoot)
+        ) {
+          writeSessionReportFilesSafe(repoRoot, report, nodeSyncHostIo)
+        }
+        return {
+          exitCode: 0,
+          stdout: match(outputFormat)
+            .with("markdown", () => renderSessionReportMarkdown(report))
+            .with("json", () => JSON.stringify(report))
+            .exhaustive(),
+          stderr: "",
+        }
+      })
+      .exhaustive()
   })

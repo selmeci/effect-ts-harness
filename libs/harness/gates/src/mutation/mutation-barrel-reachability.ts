@@ -191,6 +191,10 @@ export const extractBarrelExportIndex = (
   return { exportsByTarget, wildcardTargets }
 }
 
+const isImportActualCall = (expr: ts.Expression): boolean =>
+  ts.isPropertyAccessExpression(expr) &&
+  (expr.name.text === "importActual" || expr.name.text === "importMock")
+
 /** Extracts runtime barrel import usage (named symbols vs wildcard/default/side-effect) for a module. */
 export const extractBarrelImportUsage = (
   relPath: string,
@@ -245,13 +249,24 @@ export const extractBarrelImportUsage = (
   }
 
   const visitCalls = (node: ts.Node): void => {
+    if (
+      ts.isImportEqualsDeclaration(node) &&
+      !node.isTypeOnly &&
+      ts.isExternalModuleReference(node.moduleReference) &&
+      ts.isStringLiteralLike(node.moduleReference.expression) &&
+      resolveImport(relPath, node.moduleReference.expression.text) === barrelRel
+    ) {
+      sawRuntimeBarrelRef = true
+      importsAllFromBarrel = true
+    }
     if (ts.isCallExpression(node) && node.arguments.length >= 1) {
       const firstArg = node.arguments[0]
-      if (firstArg !== undefined && ts.isStringLiteral(firstArg)) {
+      if (firstArg !== undefined && ts.isStringLiteralLike(firstArg)) {
         const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword
         const isRequireCall = ts.isIdentifier(node.expression) && node.expression.text === "require"
+        const isViImportActual = isImportActualCall(node.expression)
         if (
-          (isDynamicImport || isRequireCall) &&
+          (isDynamicImport || isRequireCall || isViImportActual) &&
           resolveImport(relPath, firstArg.text) === barrelRel
         ) {
           sawRuntimeBarrelRef = true

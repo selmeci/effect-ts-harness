@@ -23,18 +23,21 @@ Google Code Wiki and other generated/prose docs are out — never cite them.
 ## Workflow (one task)
 
 plan (in Effect idioms, `agent-patterns/planning.md` template) → skeleton with `stub<A, E, R>(...args)` typechecks →
-`pnpm harness plan-check` (`plan/<task>` branch) → implement (isolate concurrent subagents in isolated git worktrees for full-slice `plan-check -> verify` flows, or `HARNESS_WORKTREE_ID=<unit>` for package-scoped `nx run <pkg>:verify` workers in a shared checkout) → review (`effect-code-review`, reviewers selected by `Harness.routeReviewDiff`) → LLM phase (`pnpm harness learn` promotes `.harness/friction-log.jsonl` into recipes/gates via `compounding-effect-learnings`; set EARS specs `accepted`; run `pnpm format` (or scoped `pnpm oxfmt --write <touched paths>`); then `pnpm harness learn --clear` and `pnpm harness workflow complete --phase llm`) → final ship pipeline, with no file edits from here on: `pnpm harness workflow ship [--run <id>]` (executing `format-check` → `gc --strict` (`GraphGc.decide`) → `ontology check --strict` → `mutate --strict` → `verify` (`SpanBudget.decide`, `.harness/verify-stamp.json`, `impl/<task>`) → `done --cli` under `ShipWorkflow` + `SpanBudget.decide` + `WfShipAttempt` OCC; standalone non-plan tasks run `pnpm harness workflow ship` in ephemeral mode without `--run`). Any edit after `verify` invalidates the stamp (it hashes every non-ignored file), so `learn` and all doc/format changes always precede the final gates / `workflow ship`.
+`pnpm harness plan-check` (`plan/<task>` branch; compact JSON summary by default, pass `--mermaid` for full Mermaid topology) → implement (isolate concurrent subagents in isolated git worktrees for full-slice `plan-check -> verify` flows, or `HARNESS_WORKTREE_ID=<unit>` for package-scoped `nx run <pkg>:verify` workers in a shared checkout) → review (`effect-code-review`, reviewers selected by `Harness.routeReviewDiff` via `harness_review_route` or `pnpm harness review-route`) → LLM phase (`pnpm harness learn` promotes `.harness/friction-log.jsonl` into recipes/gates via `compounding-effect-learnings`; set EARS specs `accepted`; run `pnpm format` (or scoped `pnpm oxfmt --write <touched paths>`); then `pnpm harness learn --clear` and `pnpm harness workflow complete --phase llm`) → final ship pipeline, with no file edits from here on: `pnpm harness workflow ship [--run <id>]` (executing `format-check` → `gc --strict` (`GraphGc.decide`) → `ontology check --strict` → `mutate --strict` → `verify` (`SpanBudget.decide`, `.harness/verify-stamp.json`, `impl/<task>`) → `done --cli` under `ShipWorkflow` + `SpanBudget.decide` + `WfShipAttempt` OCC; standalone non-plan tasks run `pnpm harness workflow ship` in ephemeral mode without `--run`). Any edit after `verify` invalidates the stamp (it hashes every non-ignored file), so `learn` and all doc/format changes always precede the final gates / `workflow ship`.
 
 ### MCP-First Tooling Preference
 
 Always prefer in-process MCP tools over spawning shell subcommands to eliminate process overhead and guard prompt friction:
 
-- **LSP & Type Diagnostics:** `harness_lsp_diagnostics` (replaces slow shell lint/typecheck runs during development).
-- **Ontology & Architecture:** `harness_ontology_check`, `harness_ontology_why`, `harness_ontology_impact` (trace and audit EARS specs and ADR invariants).
-- **Test Impact Analysis:** `harness_tests_reaching` (determines affected test files for touched symbols).
-- **Session Telemetry:** `harness_telemetry_report` (reviews session metrics and friction logs).
-- **Graph Queries:** `harness_gq_query`, `harness_structural_search`.
-- **Task Lifecycle Gates (CLI only):** Use `pnpm harness <cmd>` (`plan-check`, `gc --strict`, `verify`, `done`, `workflow <compile|start|status|complete|resume|ship|doctor|abort>`) strictly for task state transitions, durable workflow orchestration/shipping, and cryptographic verify-stamp generation.
+- **MCP Parameter Cheat-Sheet:**
+  - `harness_lsp_diagnostics({ file | project, repoRoot?, overlays? })` — strict `@effect/tsgo` type/Effect diagnostics (replaces slow shell lint/typecheck runs during development).
+  - `harness_ontology_check({ scope?, repoRoot? })`, `harness_ontology_why({ symbolOrSpan, repoRoot? })`, `harness_ontology_impact({ symbolOrSpan, repoRoot? })` — trace and audit EARS specs and ADR invariants.
+  - `harness_tests_reaching({ symbolOrSpan, repoRoot? })` — determines affected test files for touched symbols.
+  - `harness_telemetry_report({ format?, cumulative?, repoRoot? })` — reviews session metrics and friction logs.
+  - `harness_gq_query({ queryName, params?, branch?, repoRoot? })`, `harness_structural_search({ pattern, paths?, repoRoot? })` — graph queries and `@ast-grep/napi` AST search.
+  - `harness_git_diff({ baseRef?, paths?, statOnly?, repoRoot? })`, `harness_review_route({ changedFiles, baseRef?, repoRoot? })` — lock-free diffs and monotonic specialist review routing.
+- **Swarm Brief Header Standard:** Every swarm/subagent worker brief MUST start with `REPO_ROOT=<abs path>`, instruct workers to pass absolute paths starting with `<abs path>/` to file tools and `repoRoot: "<abs path>"` to MCP tools, and mandate MCP-first diagnostics (`harness_lsp_diagnostics`, `harness_ontology_check`) before CLI fallbacks.
+- **Task Lifecycle Gates (CLI only):** Use `pnpm harness <cmd>` (canonical CLI subcommands including `plan-check [--mermaid]`, `review-route`, `report [--json]`, `gc --strict`, `verify`, `done`, `workflow <compile|start|status|complete|resume|ship|doctor|abort>`) strictly for task state transitions, durable workflow orchestration/shipping, and cryptographic verify-stamp generation.
 
 ## Nx taxonomy & Package Archetypes
 

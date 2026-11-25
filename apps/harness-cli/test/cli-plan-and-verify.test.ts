@@ -54,7 +54,7 @@ describe("harness-cli v2 plan-check & verify", () => {
       }
     })
 
-    it("succeeds with clean workspace, writes plan snapshot, and renders mermaid", async () => {
+    it("succeeds with clean workspace, writes plan snapshot, outputs compact JSON by default, and renders mermaid with --mermaid", async () => {
       const dir = mkdtempSync(join(tmpdir(), "harness-cli-plan-clean-"))
       try {
         const srcDir = join(dir, "libs", "sample", "src")
@@ -66,8 +66,18 @@ describe("harness-cli v2 plan-check & verify", () => {
 
         const res = await runCli(["plan-check"], { repoRoot: dir })
         expect(res.exitCode).toBe(0)
-        expect(res.stdout).toContain("flowchart TD")
-        expect(res.stdout).toContain("Sample.fnA")
+        expect(res.stdout).not.toContain("flowchart TD")
+        expect(res.stdout.length).toBeLessThan(1024)
+        expect(JSON.parse(res.stdout)).toMatchObject({
+          valid: true,
+          snapshotReused: false,
+          mermaidOmitted: true,
+        })
+
+        const mermaidRes = await runCli(["plan-check", "--mermaid"], { repoRoot: dir })
+        expect(mermaidRes.exitCode).toBe(0)
+        expect(mermaidRes.stdout).toContain("flowchart TD")
+        expect(mermaidRes.stdout).toContain("Sample.fnA")
 
         const snapshotPath = join(dir, ".harness", "plan-graph-snapshot.json")
         const snapshotContent = readFileSync(snapshotPath, "utf-8")
@@ -89,8 +99,8 @@ describe("harness-cli v2 plan-check & verify", () => {
       }
     })
 
-    it("extracts workspace HarnessGraph, runs checkEffectGraph, outputs mermaid diagram, and exits 0 on clean workspace with --graph-only", async () => {
-      const res = await runCli(["plan-check", "--graph-only"])
+    it("extracts workspace HarnessGraph, runs checkEffectGraph, outputs mermaid diagram with --mermaid, and exits 0 on clean workspace with --graph-only", async () => {
+      const res = await runCli(["plan-check", "--graph-only", "--mermaid"])
       expect(res.exitCode).toBe(0)
       expect(res.stdout).toContain("flowchart TD")
       expect(res.stdout).toContain("Album.decide")
@@ -107,7 +117,7 @@ describe("harness-cli v2 plan-check & verify", () => {
           `import { Effect } from "effect"\nexport const fnA = Effect.fn("Sample.fnA")(function* () { return 1 })\n`,
         )
 
-        const res = await runCli(["plan-check", "--graph-only"], { repoRoot: dir })
+        const res = await runCli(["plan-check", "--graph-only", "--mermaid"], { repoRoot: dir })
         expect(res.exitCode).toBe(0)
         expect(res.stdout).toContain("flowchart TD")
         expect(res.stdout).toContain("Sample.fnA")

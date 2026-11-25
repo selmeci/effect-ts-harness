@@ -137,7 +137,7 @@ When all Slice Workers in Wave `w` report completion with passing `verify` commi
      pnpm harness gc --strict
      pnpm harness ontology check --strict
      ```
-     (`pnpm harness plan-check` on the controller workspace updates `<controllerRoot>/.harness/plan-graph-snapshot.json`, prints the updated Mermaid topology diagram for `## 4. Verified Plan Topology Graph`, and reconciles `plan/branch-feat_<epic-slug>` in the shared Omnigraph cluster.)
+     (`pnpm harness plan-check` on the controller workspace updates `<controllerRoot>/.harness/plan-graph-snapshot.json`, emits a compact JSON summary by default — pass `--mermaid` to print the updated Mermaid topology diagram for `## 4. Verified Plan Topology Graph` — and reconciles `plan/branch-feat_<epic-slug>` in the shared Omnigraph cluster.)
    - Commit the updated spec if modified during Step D4.
 3. **Clean Up Completed Slice Worktrees:**
    - **Order Invariant:** Always complete `git merge --no-ff slice/<epic-slug>-<slice-id>` **before** calling `swarm` (`action: "kill"`, `name: "slice-<id>"`), because the `swarm` tool's `kill` action deletes the worker's `workspace: "share"` directory.

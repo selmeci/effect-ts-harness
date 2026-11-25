@@ -22,6 +22,7 @@ import {
   resolveContainedRepoRoot,
   type ServerOptions,
 } from "./mcp-helpers.js"
+import { hasValidWorkspaceRootMarker } from "./mcp-repo-root.js"
 import {
   buildOverlayCacheKey,
   canonicalizePath,
@@ -580,6 +581,13 @@ export const buildLspAndTelemetryToolDescriptors = (
         const overlays = typedArgs.overlays
         const root = yield* resolveContainedRepoRoot(typedArgs.repoRoot, options)
         if (overlays !== undefined && Object.keys(overlays).length > 0) {
+          if (!nodeSyncHostIo.existsSync(root) || !nodeSyncHostIo.isDirectorySync(root)) {
+            return yield* new ProjectPathEscapeError({
+              projectPath: root,
+              repoRoot: root,
+              message: `Resolved repoRoot '${root}' does not exist or is not a directory. Pass an explicit 'repoRoot' pointing to an existing repository root.`,
+            })
+          }
           return yield* runSyncLspBranch(() =>
             evaluateOverlaysDiagnostics(root, overlays, file, project, lspSessionCache),
           )
@@ -587,6 +595,13 @@ export const buildLspAndTelemetryToolDescriptors = (
         if (options?.lspDiagnosticsRunner !== undefined) {
           const runner = options.lspDiagnosticsRunner
           return yield* runSyncLspBranch(() => runner({ file, project }))
+        }
+        if (!hasValidWorkspaceRootMarker(findRepoRoot(root))) {
+          return yield* new ProjectPathEscapeError({
+            projectPath: root,
+            repoRoot: root,
+            message: `Resolved repoRoot '${root}' is not a valid workspace root (missing 'pnpm-workspace.yaml' or '.git'). Pass an explicit 'repoRoot' pointing to the repository root.`,
+          })
         }
         return yield* runDefaultLspDiagnostics(
           root,
@@ -606,11 +621,20 @@ export const buildLspAndTelemetryToolDescriptors = (
         const root = yield* resolveContainedRepoRoot(repoRoot, options)
         const events = readTelemetryEvents(root, nodeSyncHostIo)
         const frictionEvents = readFrictionEvents(root, nodeSyncHostIo)
-        const report = buildSessionReport({
+        const baseReport = buildSessionReport({
           events,
           frictionEvents,
           ...(cumulative === true ? { cumulative: true } : {}),
         })
+        const report = hasValidWorkspaceRootMarker(findRepoRoot(root))
+          ? baseReport
+          : {
+              ...baseReport,
+              recommendations: [
+                ...baseReport.recommendations,
+                `Warning: resolvedRepoRoot '${root}' is not a valid workspace root (missing 'pnpm-workspace.yaml' or '.git'). Pass an explicit 'repoRoot' pointing to the repository root.`,
+              ],
+            }
         if (format === "markdown") {
           return { markdown: renderSessionReportMarkdown(report), report, resolvedRepoRoot: root }
         }

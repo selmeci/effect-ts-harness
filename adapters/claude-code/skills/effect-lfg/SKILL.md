@@ -93,11 +93,11 @@ Stage 6: Git Commit, Optional Push/PR & <promise>DONE</promise>
 
 1. Call `harness_route` for each non-trivial capability and read the matched `agent-patterns/*.md` recipe.
 2. Define boundary Schemas and `Schema.TaggedError` classes in `type:contract` (`0` workspace dependencies), pure `Context.Service` ports in `type:service` (zero `Layer.*` constructors or `node:*` imports), and `stub<A, E, R>(...args)` skeletons in `type:domain` / `type:core` / `type:infra` (keeping `*.decide` strictly pure with `R = never`, and honoring `HarnessTierTopology.decide` and `SelfDogfooding.decide` across all 5 hexagonal tiers: single `type:*` tag per package, explicit named exports in `index.ts` barrels with no `export *`, zero `node:*` outside `type:infra` except `path`/`crypto`/`url`, zero `process.env` outside `type:infra`/`type:app`, and zero module-scope mutable caches).
-3. Run the deterministic plan gate:
+3. Run the deterministic plan gate (pass `--mermaid` when generating the topology diagram, otherwise `plan-check` emits a compact JSON summary):
    ```bash
-   pnpm harness plan-check
+   pnpm harness plan-check --mermaid
    ```
-4. Append the verified Mermaid topology diagram printed by `plan-check` into `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` under `## 4. Verified Plan Topology Graph`, apply the Pre-Implementation Adversarial Plan Lens, and author/update `libs/<scope>/docs/adr/NNNN-<slug>.md` when the Counterfactual Eligibility Rule holds (on Route D, defer epic-wide `accepted` ADR creation until Step D5 when all `enforced_by` files exist).
+4. Append the verified Mermaid topology diagram printed by `plan-check --mermaid` into `libs/<scope>/docs/specs/YYYY-MM-DD-<slug>.md` under `## 4. Verified Plan Topology Graph`, apply the Pre-Implementation Adversarial Plan Lens, and author/update `libs/<scope>/docs/adr/NNNN-<slug>.md` when the Counterfactual Eligibility Rule holds (on Route D, defer epic-wide `accepted` ADR creation until Step D5 when all `enforced_by` files exist).
 5. Verify governance docs with `pnpm harness gc --strict` and `harness_ontology_check`.
 
 ### Stage 3 — Package-Isolated `haiku` / `sonnet` Implementation & Tests
@@ -105,7 +105,7 @@ Stage 6: Git Commit, Optional Push/PR & <promise>DONE</promise>
 **REQUIRED SUB-SKILL:** Use `executing-effect-stubs` (executed across downstream packages after Stage 2 on Routes A/C, or inside each slice worktree on Route D):
 
 1. Partition implementation by Nx package boundaries (`type:domain` / `type:core`, `type:infra`, `scope:web`).
-2. When 2+ downstream packages have stubs, dispatch parallel `haiku` / `sonnet` implementer subagents (using `HARNESS_WORKTREE_ID=<unit>` when sharing a single checkout for package-scoped `pnpm --filter <pkg> run typecheck && pnpm --filter <pkg> run lint && pnpm --filter <pkg> run test` or `CI=true pnpm nx run <project>:verify` checks to avoid concurrent Nx daemon/cache lock contention in shared checkouts — package implementers never run monorepo `plan-check`, `verify`, or `done`) with the 4-part prompt (Target Stubs, EARS Clauses, Pattern Reference, Package Gate `pnpm --filter <pkg> run typecheck && pnpm --filter <pkg> run lint && pnpm --filter <pkg> run test` / `CI=true pnpm nx run <project>:verify`). Omit monitoring workers for focused single-wave runs and terminate any active monitor immediately once implementation/remediation waves settle. When only a single downstream package has stubs, implement it inline under the same package gate.
+2. When 2+ downstream packages have stubs, dispatch parallel `haiku` / `sonnet` implementer subagents (using `HARNESS_WORKTREE_ID=<unit>` when sharing a single checkout for package-scoped `pnpm --filter <pkg> run typecheck && pnpm --filter <pkg> run lint && pnpm --filter <pkg> run test` or `CI=true pnpm nx run <project>:verify` checks to avoid concurrent Nx daemon/cache lock contention in shared checkouts — package implementers never run monorepo `plan-check`, `verify`, or `done`) with the **Swarm Brief Header Standard** (`REPO_ROOT=<abs path>`, absolute paths for `Read`/`Edit`/`Write`, `repoRoot: "<abs path>"` for MCP tools, and MCP-first diagnostics before CLI fallbacks) plus the 4-part prompt (Target Stubs, EARS Clauses, Pattern Reference, Package Gate `pnpm --filter <pkg> run typecheck && pnpm --filter <pkg> run lint && pnpm --filter <pkg> run test` / `CI=true pnpm nx run <project>:verify`). Omit monitoring workers for focused single-wave runs and terminate any active monitor immediately once implementation/remediation waves settle. When only a single downstream package has stubs, implement it inline under the same package gate.
 3. Ensure every EARS clause is verified by `@effect/vitest` (`it.effect` + `runWithTestTracer` + `checkSpanBudgets`), negative tests assert exact error instances via `Cause.findErrorOption(exit.cause)`, and every pure `*.decide` / reducer has `it.effect.prop` / `it.prop` property-based tests over `Schema.Array(EventUnionSchema)`.
 
 ### Swarm Seam Checklist (Pre-Review)
@@ -168,6 +168,27 @@ Follow [references/review-and-shipping.md](references/review-and-shipping.md) to
    - **Local-only or no remote configured:** Leave the verified commit on the branch.
    - **Remote configured and PR shipping appropriate/requested:** Push the branch (`git push -u origin HEAD`) and open/update the PR (`gh pr create` or `ce-commit-push-pr mode:pipeline`) carrying the EARS Spec summary, Verified Mermaid Topology, `## Assumptions`, and `## Residual Review Findings`. If push or PR creation fails due to credentials/network, keep the verified local commit, note the push error in the closeout report, and finish cleanly.
 3. Output the structured closeout summary followed by `<promise>DONE</promise>`.
+
+---
+
+## MCP Parameter Cheat-Sheet & Swarm Brief Header Standard
+
+Use exact MCP parameter names across all stages and worker prompts:
+
+- `harness_lsp_diagnostics({ file | project, repoRoot?, overlays? })`
+- `harness_ontology_check({ scope?, repoRoot? })` (CLI strict flag: `pnpm harness ontology check --strict`)
+- `harness_ontology_why({ symbolOrSpan, repoRoot? })`
+- `harness_git_diff({ baseRef?, paths?, statOnly?, repoRoot? })`
+- `harness_tests_reaching({ symbolOrSpan, repoRoot? })`
+- `harness_structural_search({ pattern, paths?, repoRoot? })`
+- `harness_review_route({ changedFiles, baseRef?, repoRoot? })`
+
+Every parallel subagent brief MUST start with:
+
+```text
+REPO_ROOT=<abs path>
+IMPORTANT: Pass absolute paths starting with <abs path>/ to Read, Edit, and Write, and pass repoRoot: "<abs path>" to MCP tools. Run MCP-first diagnostics (harness_lsp_diagnostics, harness_ontology_check) before CLI fallbacks.
+```
 
 ---
 

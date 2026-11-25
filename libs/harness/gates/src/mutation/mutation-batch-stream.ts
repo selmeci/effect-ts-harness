@@ -320,3 +320,62 @@ export const writePackageBatchPlan = (input: {
     }))
     .exhaustive()
 }
+
+/** Emits a throttled stderr progress line during multi-file package mutation batches. */
+export const maybeEmitPackageBatchProgress = (input: {
+  readonly pkgKey: string
+  readonly completed: number
+  readonly totalFiles: number
+  readonly killedCount: number
+  readonly survivedCount: number
+  readonly batchStartedMs: number
+  readonly lastProgressMs: number
+}): number => {
+  const nowMs = Date.now()
+  const due =
+    input.totalFiles >= 2 &&
+    (input.completed === 1 ||
+      input.completed === input.totalFiles ||
+      input.completed % 5 === 0 ||
+      nowMs - input.lastProgressMs >= 15_000)
+  if (!due) return input.lastProgressMs
+  const elapsedSec = (Math.max(0, nowMs - input.batchStartedMs) / 1000).toFixed(1)
+  process.stderr.write(
+    `[mutation-check] ${input.pkgKey} progress: ${input.completed}/${input.totalFiles} files (${input.killedCount} killed, ${input.survivedCount} survived, ${elapsedSec}s)\n`,
+  )
+  return nowMs
+}
+
+/** Tallies file mutant outcomes and emits throttled stderr progress for multi-file batches. */
+export const recordBatchFileProgress = (input: {
+  readonly pkgKey: string
+  readonly fileOutcomes: ReadonlyMap<
+    string,
+    { readonly status: "killed" | "survived" | "equivalent" }
+  >
+  readonly completed: number
+  readonly totalFiles: number
+  readonly batchStartedMs: number
+  readonly counts: { killed: number; survived: number; lastProgressMs: number }
+}): void => {
+  for (const outcome of input.fileOutcomes.values()) {
+    match(outcome.status)
+      .with("survived", () => {
+        input.counts.survived += 1
+      })
+      .with("killed", () => {
+        input.counts.killed += 1
+      })
+      .with("equivalent", () => {})
+      .exhaustive()
+  }
+  input.counts.lastProgressMs = maybeEmitPackageBatchProgress({
+    pkgKey: input.pkgKey,
+    completed: input.completed,
+    totalFiles: input.totalFiles,
+    killedCount: input.counts.killed,
+    survivedCount: input.counts.survived,
+    batchStartedMs: input.batchStartedMs,
+    lastProgressMs: input.counts.lastProgressMs,
+  })
+}

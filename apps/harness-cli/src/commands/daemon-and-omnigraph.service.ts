@@ -76,6 +76,7 @@ export const ensureLocalOmnigraphReady = (repoRoot: string): Effect.Effect<boole
 export const COMMANDS = [
   "guard",
   "route",
+  "review-route",
   "plan-check",
   "plan-synth",
   "repair",
