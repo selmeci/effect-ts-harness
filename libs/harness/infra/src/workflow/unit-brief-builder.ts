@@ -22,6 +22,9 @@ export interface BuildUnitBriefInput {
 
 const MAX_HOLE_BUNDLE_TOKENS = 1500
 const MAX_BRIEF_PROMPT_CHARS = 65_536
+const PRIOR_REJECTION_RESERVED_CHARS = 2048
+const TRUNCATION_MARKER = "... [truncated]"
+const WRAPPER_TAG_RE = /<(\/?\s*(?:prior-rejection|typed-hole-context)(?:\s[^>]*)?)>/gi
 
 const sanitizeUntrustedText = (raw: string): string => {
   const normalized = raw.replaceAll("\r\n", "\n")
@@ -34,7 +37,7 @@ const sanitizeUntrustedText = (raw: string): string => {
       out += normalized[i]
     }
   }
-  return out
+  return out.replace(WRAPPER_TAG_RE, "[$1]")
 }
 
 const formatCommaList = (items: ReadonlyArray<string>): string =>
@@ -108,7 +111,69 @@ const fitBoundedSection = (spec: BoundedSectionSpec, maxChars: number): string |
   if (bodyBudget <= 0) {
     return undefined
   }
-  return `${spec.prefix}${spec.body.slice(0, bodyBudget)}${spec.suffix}`
+  if (spec.body.length <= bodyBudget) {
+    return `${spec.prefix}${spec.body}${spec.suffix}`
+  }
+  if (bodyBudget <= TRUNCATION_MARKER.length) {
+    return `${spec.prefix}${spec.body.slice(0, bodyBudget)}${spec.suffix}`
+  }
+  const sliceLen = bodyBudget - TRUNCATION_MARKER.length
+  return `${spec.prefix}${spec.body.slice(0, sliceLen)}${TRUNCATION_MARKER}${spec.suffix}`
+}
+
+const compactOwnedPathLines = (
+  ownedPathLines: ReadonlyArray<string>,
+  ownedPathsBudget: number,
+): ReadonlyArray<string> => {
+  const fullJoined = ownedPathLines.join("\n")
+  if (fullJoined.length <= ownedPathsBudget) {
+    return ownedPathLines
+  }
+  const kept: Array<string> = []
+  let usedChars = 0
+  for (let i = 0; i < ownedPathLines.length; i += 1) {
+    const line = ownedPathLines[i]
+    if (line === undefined) {
+      continue
+    }
+    const remainingCount = ownedPathLines.length - (i + 1)
+    const notice = remainingCount > 0 ? `\n... (+${remainingCount} more owned paths truncated)` : ""
+    const addedLen = (kept.length > 0 ? 1 : 0) + line.length
+    if (usedChars + addedLen + notice.length <= ownedPathsBudget) {
+      kept.push(line)
+      usedChars += addedLen
+    } else {
+      break
+    }
+  }
+  const truncatedCount = ownedPathLines.length - kept.length
+  if (truncatedCount > 0) {
+    kept.push(`... (+${truncatedCount} more owned paths truncated)`)
+  }
+  return kept
+}
+
+const truncateHeaderText = (text: string, maxChars: number): string =>
+  `${text.slice(0, maxChars - TRUNCATION_MARKER.length).trimEnd()}${TRUNCATION_MARKER}`
+
+const normalizeBriefPromptText = (raw: string): string => {
+  let normalized = raw.trim()
+  if (normalized.length === 0) {
+    normalized = "REPO_ROOT=."
+  }
+  if (normalized.startsWith("-")) {
+    normalized = `Unit brief:\n${normalized}`
+  }
+  if (normalized.length > MAX_BRIEF_PROMPT_CHARS) {
+    normalized = normalized.slice(0, MAX_BRIEF_PROMPT_CHARS).trimEnd()
+  }
+  if (normalized.length === 0) {
+    return "REPO_ROOT=."
+  }
+  if (normalized.startsWith("-")) {
+    normalized = `Unit brief:\n${normalized}`.slice(0, MAX_BRIEF_PROMPT_CHARS).trimEnd()
+  }
+  return normalized
 }
 
 const allocateBothSections = (
@@ -141,7 +206,12 @@ const assembleBriefPromptText = (
   const remaining = MAX_BRIEF_PROMPT_CHARS - fixedMinChars
   if (remaining < 0) {
     const maxHeaderChars = Math.max(0, MAX_BRIEF_PROMPT_CHARS - 2 - workspaceRulesText.length)
-    return `${headerText.slice(0, maxHeaderChars).trimEnd()}\n\n${workspaceRulesText}`
+    const truncatedHeader = truncateHeaderText(headerText, maxHeaderChars)
+    const combined =
+      truncatedHeader.length > 0
+        ? `${truncatedHeader}\n\n${workspaceRulesText}`
+        : workspaceRulesText
+    return normalizeBriefPromptText(combined)
   }
 
   const variableSections: ReadonlyArray<string> = match([
@@ -165,7 +235,9 @@ const assembleBriefPromptText = (
     .with([false, false], () => [])
     .exhaustive()
 
-  return [headerText, ...variableSections, workspaceRulesText].join("\n\n").trim()
+  return normalizeBriefPromptText(
+    [headerText, ...variableSections, workspaceRulesText].join("\n\n"),
+  )
 }
 
 /** Pure deterministic `UnitBrief` builder embedding `REPO_ROOT`, owned paths, slice/hole context, and retry rejection feedback. */
@@ -184,7 +256,7 @@ const buildUnitBrief = (input: BuildUnitBriefInput): UnitBrief => {
     ])
     .exhaustive()
 
-  const ownedPathLines =
+  const rawOwnedPathLines =
     input.unit.ownedRelPaths.length > 0
       ? input.unit.ownedRelPaths.map((p) => `- ${p}`)
       : ["- (none)"]
@@ -214,19 +286,6 @@ const buildUnitBrief = (input: BuildUnitBriefInput): UnitBrief => {
 
   const holeLines = selectBoundedHoleBundles(input.holeBundles)
 
-  const headerText = [
-    `REPO_ROOT=${input.cwd}`,
-    `UNIT_ID=${input.unit.unitId}`,
-    `ATTEMPT=${input.attempt}`,
-    ...unitMetadataLines,
-    "",
-    "Owned paths (edit ONLY within these paths):",
-    ...ownedPathLines,
-    "",
-    ...keyLines,
-    verificationInstruction,
-  ].join("\n")
-
   const holeSpec: BoundedSectionSpec | undefined =
     holeLines.length > 0
       ? {
@@ -248,9 +307,50 @@ const buildUnitBrief = (input: BuildUnitBriefInput): UnitBrief => {
   const workspaceRulesText = [
     "Workspace rules (HARNESS_UNIT_WORKER=1):",
     `- Pass absolute paths rooted at ${input.cwd} to file tools.`,
-    "- Do not modify files outside ownedRelPaths, .harness/ state/stamps, or repos/.",
+    "- Do not modify files outside ownedRelPaths.",
+    "- Do not modify anything under .harness/ (state/stamps/worktrees) or repos/.",
     "- Do not run workflow lifecycle commands (pnpm harness done, workflow start/resume/ship/abort/doctor) or alchemy deploy/destroy.",
   ].join("\n")
+
+  const headerPrefixLines = [
+    `REPO_ROOT=${input.cwd}`,
+    `UNIT_ID=${input.unit.unitId}`,
+    `ATTEMPT=${input.attempt}`,
+    ...unitMetadataLines,
+    "",
+    "Owned paths (edit ONLY within these paths):",
+  ]
+  const headerSuffixLines = ["", ...keyLines, verificationInstruction]
+
+  const reservedRejectionChars =
+    rejectionSpec !== undefined
+      ? Math.min(
+          rejectionSpec.prefix.length + rejectionSpec.body.length + rejectionSpec.suffix.length,
+          PRIOR_REJECTION_RESERVED_CHARS,
+        ) + 2
+      : 0
+
+  const maxHeaderBudget = Math.max(
+    0,
+    MAX_BRIEF_PROMPT_CHARS - 2 - workspaceRulesText.length - reservedRejectionChars,
+  )
+
+  const ownedPathLines =
+    input.unit.ownedRelPaths.length > 0
+      ? compactOwnedPathLines(
+          rawOwnedPathLines,
+          Math.max(
+            0,
+            maxHeaderBudget - [...headerPrefixLines, ...headerSuffixLines].join("\n").length - 1,
+          ),
+        )
+      : rawOwnedPathLines
+
+  const rawHeaderText = [...headerPrefixLines, ...ownedPathLines, ...headerSuffixLines].join("\n")
+  const headerText =
+    rawHeaderText.length > maxHeaderBudget
+      ? truncateHeaderText(rawHeaderText, maxHeaderBudget)
+      : rawHeaderText
 
   const promptText = assembleBriefPromptText(
     headerText,

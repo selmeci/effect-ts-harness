@@ -8,6 +8,7 @@ import {
   LeaseEpoch,
   LeaseFilePath,
   LeaseHolderId,
+  MaxConcurrency,
   MergeSliceWaveOutcome,
   MessageKey,
   NxProjectName,
@@ -16,7 +17,9 @@ import {
   PackageVerifyCommand,
   PlanSha256,
   ReplyKey,
+  RunnerId,
   SliceBranchName,
+  UnitAgentDispatchResult,
   UnitEscalation,
   UnitOutcome,
   UnitRejection,
@@ -29,6 +32,7 @@ import {
   WorkflowTimestampMs,
   WriterLeaseHeldError,
   makeWorkflowUnitKey,
+  toAgentFailureReason,
 } from "@harness/contract"
 import { WorkflowProjectionWriter, WorkflowReadModelQuery } from "@harness/service"
 import {
@@ -1219,6 +1223,7 @@ describe("WF-3 WorkflowReadModel rebuild lease fencing, CAS & replay hardening",
         const err = yield* rebuildWorkflowReadModelViews(harness.getRepoRoot(), { client }).pipe(
           Effect.flip,
         )
+        expect(err).toBeInstanceOf(WorkflowStoreUnavailableError)
         match(err)
           .with({ _tag: "WorkflowStoreUnavailableError" }, (e) => {
             expect(e.reason).toContain("targets unknown unit")
@@ -1229,6 +1234,186 @@ describe("WF-3 WorkflowReadModel rebuild lease fencing, CAS & replay hardening",
           .exhaustive()
       }).pipe(
         Effect.ensuring(cleanupRunsAndJournal(client, [unknownUnitRunId]).pipe(Effect.ignore)),
+        Effect.provide(layer),
+      ),
+    )
+  })
+
+  it("F-8.1: rebuildWorkflowReadModelViews preserves escalationKind on AuthRequired/MergeConflict and handles FatalFailed DispatchUnitAgent replies", async () => {
+    const client = createClient()
+    const layer = Layer.merge(
+      makeWorkflowProjectionWriterLayer({ repoRoot: harness.getRepoRoot(), client }),
+      makeWorkflowReadModelQueryLayer({ repoRoot: harness.getRepoRoot(), client }),
+    )
+    const runId = WorkflowRunId.make("run-f81-escalation-kind-1")
+    const unitAuth = WorkUnitId.make("slice-auth-1")
+    const unitMerge = WorkUnitId.make("slice-merge-2")
+    const unitFatal = WorkUnitId.make("slice-fatal-3")
+    const plan: CompiledPlan = {
+      runId,
+      level: "epic",
+      mode: {
+        _tag: "Automatic",
+        runner: RunnerId.make("claude-code"),
+        maxConcurrency: MaxConcurrency.make(2),
+      },
+      baseSha: GitCommitSha.make("e".repeat(40)),
+      planSha: PlanSha256.make("f".repeat(64)),
+      units: [
+        {
+          _tag: "SliceUnit",
+          unitId: unitAuth,
+          waveIndex: WaveIndex.make(0),
+          dependsOn: [],
+          ownedRelPaths: [OwnedRelPath.make("libs/alpha")],
+          earsKeys: [],
+          branch: SliceBranchName.make("slice/auth-1"),
+        },
+        {
+          _tag: "SliceUnit",
+          unitId: unitMerge,
+          waveIndex: WaveIndex.make(0),
+          dependsOn: [],
+          ownedRelPaths: [OwnedRelPath.make("libs/beta")],
+          earsKeys: [],
+          branch: SliceBranchName.make("slice/merge-2"),
+        },
+        {
+          _tag: "SliceUnit",
+          unitId: unitFatal,
+          waveIndex: WaveIndex.make(0),
+          dependsOn: [],
+          ownedRelPaths: [OwnedRelPath.make("libs/gamma")],
+          earsKeys: [],
+          branch: SliceBranchName.make("slice/fatal-3"),
+        },
+      ],
+      sharedStepPaths: [],
+    }
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const query = yield* WorkflowReadModelQuery
+        yield* insertJournalMessage(client, {
+          shardId: "default:0",
+          entityId: runId,
+          tag: "run",
+          payload: JSON.stringify({ plan }),
+        })
+        yield* insertJournalMessage(client, {
+          shardId: "default:0",
+          entityId: runId,
+          tag: "deferred",
+          payload: JSON.stringify({
+            name: `unit/${unitAuth}/1`,
+            exit: {
+              _tag: "Success",
+              value: UnitOutcome.cases.Escalated.make({
+                unitId: unitAuth,
+                escalation: UnitEscalation.cases.AuthRequired.make({
+                  runner: RunnerId.make("claude-code"),
+                }),
+              }),
+            },
+          }),
+        })
+        yield* insertJournalMessage(client, {
+          shardId: "default:0",
+          entityId: runId,
+          tag: "deferred",
+          payload: JSON.stringify({
+            name: `unit/${unitMerge}/1`,
+            exit: {
+              _tag: "Success",
+              value: UnitOutcome.cases.Escalated.make({
+                unitId: unitMerge,
+                escalation: UnitEscalation.cases.MergeConflict.make({
+                  branch: SliceBranchName.make("slice/merge-2"),
+                }),
+              }),
+            },
+          }),
+        })
+        const dispatchAuthMsg = yield* insertJournalMessage(client, {
+          shardId: "default:0",
+          entityId: runId,
+          tag: "activity",
+          payload: JSON.stringify({ name: `DispatchUnitAgent/${unitAuth}/2` }),
+        })
+        yield* insertJournalReplyExit(client, dispatchAuthMsg, {
+          _tag: "Success",
+          value: {
+            _tag: "Complete",
+            exit: {
+              _tag: "Success",
+              value: UnitAgentDispatchResult.cases.AuthRequired.make({
+                runner: RunnerId.make("antigravity"),
+              }),
+            },
+          },
+        })
+        const dispatchFatalMsg = yield* insertJournalMessage(client, {
+          shardId: "default:0",
+          entityId: runId,
+          tag: "activity",
+          payload: JSON.stringify({ name: `DispatchUnitAgent/${unitFatal}/1` }),
+        })
+        yield* insertJournalReplyExit(client, dispatchFatalMsg, {
+          _tag: "Success",
+          value: {
+            _tag: "Complete",
+            exit: {
+              _tag: "Success",
+              value: UnitAgentDispatchResult.cases.FatalFailed.make({
+                reason: toAgentFailureReason("AgentExitError", "spawn ENOENT"),
+              }),
+            },
+          },
+        })
+
+        yield* rebuildWorkflowReadModelViews(harness.getRepoRoot(), {
+          client,
+          nowMs: () => 60_000,
+        })
+        const attempts = yield* query.listAttempts(runId)
+        expect(attempts).toHaveLength(4)
+        const byUnit = new Map(attempts.map((a) => [`${a.unitId}#${a.attempt}`, a]))
+        expect(byUnit.get(`${unitAuth}#1`)).toMatchObject({
+          verdict: "rejected",
+          rejection: { _tag: "AgentFailed", escalationKind: "AuthRequired" },
+        })
+        expect(byUnit.get(`${unitMerge}#1`)).toMatchObject({
+          verdict: "rejected",
+          rejection: { _tag: "AgentFailed", escalationKind: "MergeConflict" },
+        })
+        expect(byUnit.get(`${unitAuth}#2`)).toMatchObject({
+          verdict: "rejected",
+          rejection: { _tag: "AgentFailed", escalationKind: "AuthRequired" },
+        })
+        expect(byUnit.get(`${unitFatal}#1`)).toMatchObject({
+          verdict: "rejected",
+          rejection: { _tag: "AgentFailed" },
+        })
+        match(byUnit.get(`${unitFatal}#1`))
+          .with({ verdict: "rejected" }, ({ rejection }) => {
+            match(rejection)
+              .with({ _tag: "AgentFailed" }, (a) => {
+                expect(a.reason).toContain("spawn ENOENT")
+              })
+              .with(
+                { _tag: "WriteSetViolation" },
+                { _tag: "PackageVerifyFailed" },
+                { _tag: "StampMissing" },
+                () => expect.unreachable("Expected AgentFailed"),
+              )
+              .exhaustive()
+          })
+          .with({ verdict: "completed" }, { verdict: "dispatched" }, undefined, () =>
+            expect.unreachable("Expected rejected FatalFailed attempt"),
+          )
+          .exhaustive()
+      }).pipe(
+        Effect.ensuring(cleanupRunsAndJournal(client, [runId]).pipe(Effect.ignore)),
         Effect.provide(layer),
       ),
     )

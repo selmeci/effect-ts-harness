@@ -5,15 +5,17 @@ import { Cause, Effect, Layer, Option } from "effect"
 import { match } from "ts-pattern"
 import {
   AgentAuthRequiredError,
-  AgentExitCode,
   AgentExitError,
+  AgentNonZeroExitCode,
   AgentResultText,
   type AgentRunRequest,
+  AgentSuccessExitCode,
   AttemptNumber,
   MaxConcurrency,
   OwnedRelPath,
   ReviewDepth,
   RunnerId,
+  UnavailableAgentUsage,
   UnitRejection,
   WorkflowRunId,
   WorkspaceFilePath,
@@ -54,9 +56,9 @@ describe("WorkflowReviewRouter & UnitAgentDispatcher", () => {
               capturedRequests.push(request)
               return Effect.succeed({
                 runner: request.runner,
-                exit: AgentExitCode.make(0),
+                exit: AgentSuccessExitCode.make(0),
                 resultText: AgentResultText.make("ok"),
-                usage: { status: "unavailable" },
+                usage: UnavailableAgentUsage.make({}),
               })
             },
           })
@@ -103,7 +105,7 @@ describe("WorkflowReviewRouter & UnitAgentDispatcher", () => {
               Effect.fail(
                 new AgentExitError({
                   runner: request.runner,
-                  exit: AgentExitCode.make(2),
+                  exit: AgentNonZeroExitCode.make(2),
                 }),
               ),
           })

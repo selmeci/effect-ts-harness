@@ -1,17 +1,21 @@
+import { lstatSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Effect, Layer, Result, Schema } from "effect"
+import { Effect, Layer, Result, Schema, Semaphore } from "effect"
 import { match } from "ts-pattern"
 import {
-  AgentExitCode,
   AgentExitError,
+  AgentNonZeroExitCode,
   type AgentRunRequest,
   type AgentRunResult,
   type AgentRunnerError,
   AgentTimeoutError,
   AgentToolDeniedError,
+  type AntigravityRunRequest,
+  AntigravityRunnerProfile,
+  type ClaudeCodeRunRequest,
+  RunnerConfigFilePath,
   type RunnerId,
-  RunnerProfile,
   TimeoutMillis,
   WORKFLOW_TIMEOUT_BUDGETS,
   toAgentDiagnosticDetail,
@@ -31,12 +35,13 @@ import {
   spawnSupervisedAgentProcess,
 } from "./runner-process-supervision.js"
 import {
+  ANTIGRAVITY_RUNNER_PROFILE,
+  CLAUDE_CODE_RUNNER_PROFILE,
   buildAntigravityArgv,
   buildClaudeCodeArgv,
   buildClaudeHooksSettingsJson,
   buildClaudeMcpConfigJson,
   buildRunnerEnv,
-  getRunnerProfile,
   resolveHarnessInstallationRoot,
 } from "./runner-profiles.js"
 
@@ -58,6 +63,7 @@ export interface ClaudeCodeRunnerOptions {
   readonly killGraceMs?: number | undefined
   readonly harnessRoot?: string | undefined
   readonly pgidDir?: string | undefined
+  readonly statUidSync?: ((filePath: string) => number | undefined) | undefined
   readonly runProcess?:
     | ((
         cmd: string,
@@ -87,104 +93,226 @@ export interface AgentRunnerPortOptions {
   readonly antigravityOptions?: AntigravityRunnerOptions | undefined
 }
 
-const resolvePgidBaseDir = (cwd: string, io: ExtendedHostIo, pgidDir?: string): string => {
+const defaultStatUidSync = (targetPath: string): number | undefined =>
+  lstatSync(targetPath, { throwIfNoEntry: false })?.uid
+
+const resolveFallbackPgidDir = (
+  io: ExtendedHostIo,
+  runner: RunnerId,
+  statUidSync?: (filePath: string) => number | undefined,
+): Effect.Effect<string, AgentRunnerError> =>
+  Effect.gen(function* () {
+    const uidSuffix = typeof process.getuid === "function" ? String(process.getuid()) : "user"
+    const fallbackDir = join(tmpdir(), `harness-runner-pgids-${uidSuffix}`)
+    if (io.isSymbolicLinkSync(fallbackDir)) {
+      return yield* new AgentExitError({
+        runner,
+        exit: AgentNonZeroExitCode.make(1),
+        kind: "exit",
+        detail: toAgentDiagnosticDetail(
+          `Refusing symlink fallback PGID directory '${fallbackDir}'`,
+        ),
+      })
+    }
+
+    const mkdirRes = Result.try({
+      try: () => {
+        io.mkdirRecursiveSync(fallbackDir, 0o700)
+      },
+      catch: (err) => (err instanceof Error ? err.message : String(err)),
+    })
+    yield* match(mkdirRes)
+      .with({ _tag: "Success" }, () => Effect.void)
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        Effect.fail(
+          new AgentExitError({
+            runner,
+            exit: AgentNonZeroExitCode.make(1),
+            kind: "exit",
+            detail: toAgentDiagnosticDetail(
+              `Failed to create fallback PGID directory '${fallbackDir}': ${failure}`,
+            ),
+          }),
+        ),
+      )
+      .exhaustive()
+
+    if (io.isSymbolicLinkSync(fallbackDir) || !io.isDirectorySync(fallbackDir)) {
+      return yield* new AgentExitError({
+        runner,
+        exit: AgentNonZeroExitCode.make(1),
+        kind: "exit",
+        detail: toAgentDiagnosticDetail(
+          `Fallback PGID path '${fallbackDir}' is a symlink or not a directory`,
+        ),
+      })
+    }
+
+    if (process.platform !== "win32") {
+      const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined
+      if (currentUid !== undefined) {
+        const readUid = statUidSync ?? defaultStatUidSync
+        const dirUid = Result.getOrElse(
+          Result.try(() => readUid(fallbackDir)),
+          () => undefined,
+        )
+        if (dirUid !== currentUid) {
+          return yield* new AgentExitError({
+            runner,
+            exit: AgentNonZeroExitCode.make(1),
+            kind: "exit",
+            detail: toAgentDiagnosticDetail(
+              `Refusing fallback PGID directory '${fallbackDir}' not owned by uid ${currentUid} (actual=${String(dirUid)})`,
+            ),
+          })
+        }
+      }
+
+      const dirMode = io.statModeSync(fallbackDir)
+      if (dirMode === undefined || (dirMode & 0o077) !== 0) {
+        return yield* new AgentExitError({
+          runner,
+          exit: AgentNonZeroExitCode.make(1),
+          kind: "exit",
+          detail: toAgentDiagnosticDetail(
+            `Refusing insecure permissions on fallback PGID directory '${fallbackDir}' (expected 0o700)`,
+          ),
+        })
+      }
+    }
+
+    return fallbackDir
+  })
+
+const resolvePgidBaseDir = (
+  cwd: string,
+  io: ExtendedHostIo,
+  runner: RunnerId,
+  pgidDir?: string,
+  statUidSync?: (filePath: string) => number | undefined,
+): Effect.Effect<string, AgentRunnerError> => {
   if (pgidDir !== undefined) {
-    return pgidDir
+    return Effect.succeed(pgidDir)
   }
   const gitCommonDir = Result.getOrElse(
     Result.try(() => (io.existsSync(join(cwd, ".git")) ? resolveGitCommonDir(cwd, io) : null)),
     () => null,
   )
   return gitCommonDir !== null
-    ? join(gitCommonDir, "harness", "runner-pgids")
-    : join(tmpdir(), "harness-runner-pgids")
+    ? Effect.succeed(join(gitCommonDir, "harness", "runner-pgids"))
+    : resolveFallbackPgidDir(io, runner, statUidSync)
 }
 
 const makeRunnerPgidRecordPath = (
   request: AgentRunRequest,
   io: ExtendedHostIo,
   pgidDir?: string,
-): string | undefined =>
-  request.runId !== undefined
-    ? join(
-        resolvePgidBaseDir(request.cwd, io, pgidDir),
-        `${request.runId}-${request.brief.unitId}-${request.brief.attempt}.json`,
-      )
-    : undefined
+  statUidSync?: (filePath: string) => number | undefined,
+): Effect.Effect<string, AgentRunnerError> =>
+  resolvePgidBaseDir(request.cwd, io, request.runner, pgidDir, statUidSync).pipe(
+    Effect.map((baseDir) =>
+      join(baseDir, `${request.runId}-${request.brief.unitId}-${request.brief.attempt}.json`),
+    ),
+  )
 
 const loadValidatedMcpConfigJson = (
   io: ExtendedHostIo,
   providedMcpConfigPath: string,
-): Effect.Effect<string, AgentRunnerError> => {
-  if (io.isSymbolicLinkSync(providedMcpConfigPath) || !io.isFileSync(providedMcpConfigPath)) {
-    return Effect.fail(
-      new AgentExitError({
+): Effect.Effect<string, AgentRunnerError> =>
+  Effect.gen(function* () {
+    if (io.isSymbolicLinkSync(providedMcpConfigPath) || !io.isFileSync(providedMcpConfigPath)) {
+      return yield* new AgentExitError({
         runner: "claude-code",
-        exit: AgentExitCode.make(1),
+        exit: AgentNonZeroExitCode.make(1),
+        kind: "exit",
         detail: toAgentDiagnosticDetail(
           `Invalid or missing mcpConfigPath '${providedMcpConfigPath}'`,
         ),
-      }),
-    )
-  }
+      })
+    }
 
-  const realPathRes = Result.try({
-    try: () => io.realpathSync(providedMcpConfigPath),
-    catch: (err) => (err instanceof Error ? err.message : String(err)),
-  })
-  const realPath = match(realPathRes)
-    .with({ _tag: "Success" }, ({ success }) => success)
-    .with({ _tag: "Failure" }, () => undefined)
-    .exhaustive()
-  if (realPath === undefined || realPath !== providedMcpConfigPath) {
-    return Effect.fail(
-      new AgentExitError({
-        runner: "claude-code",
-        exit: AgentExitCode.make(1),
-        detail: toAgentDiagnosticDetail(
-          `Refusing symlinked or non-canonical mcpConfigPath '${providedMcpConfigPath}'`,
+    const realPathRes = Result.try({
+      try: () => io.realpathSync(providedMcpConfigPath),
+      catch: (err) => (err instanceof Error ? err.message : String(err)),
+    })
+    yield* match(realPathRes)
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        Effect.fail(
+          new AgentExitError({
+            runner: "claude-code",
+            exit: AgentNonZeroExitCode.make(1),
+            kind: "exit",
+            detail: toAgentDiagnosticDetail(
+              `Failed to canonicalize mcpConfigPath '${providedMcpConfigPath}': ${failure}`,
+            ),
+          }),
         ),
-      }),
-    )
-  }
+      )
+      .with({ _tag: "Success" }, ({ success: realPath }) =>
+        realPath !== providedMcpConfigPath
+          ? Effect.fail(
+              new AgentExitError({
+                runner: "claude-code",
+                exit: AgentNonZeroExitCode.make(1),
+                kind: "exit",
+                detail: toAgentDiagnosticDetail(
+                  `Refusing symlinked or non-canonical mcpConfigPath '${providedMcpConfigPath}' (resolved to '${realPath}')`,
+                ),
+              }),
+            )
+          : Effect.void,
+      )
+      .exhaustive()
 
-  const bytesRes = Result.try({
-    try: () =>
-      Buffer.from(io.readBytesPrefixSync(providedMcpConfigPath, MAX_MCP_CONFIG_BYTES)).toString(
-        "utf8",
-      ),
-    catch: (err) => (err instanceof Error ? err.message : String(err)),
-  })
-  return match(bytesRes)
-    .with({ _tag: "Failure" }, ({ failure }) =>
-      Effect.fail(
-        new AgentExitError({
-          runner: "claude-code",
-          exit: AgentExitCode.make(1),
-          detail: toAgentDiagnosticDetail(
-            `Failed to read mcpConfigPath '${providedMcpConfigPath}': ${failure}`,
-          ),
-        }),
-      ),
-    )
-    .with({ _tag: "Success" }, ({ success: raw }) =>
-      match(decodeMcpConfigResult(raw))
-        .with({ _tag: "Failure" }, ({ failure }) =>
-          Effect.fail(
+    const bytesRes = Result.try({
+      try: () => io.readBytesPrefixSync(providedMcpConfigPath, MAX_MCP_CONFIG_BYTES + 1),
+      catch: (err) => (err instanceof Error ? err.message : String(err)),
+    })
+    return yield* match(bytesRes)
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        Effect.fail(
+          new AgentExitError({
+            runner: "claude-code",
+            exit: AgentNonZeroExitCode.make(1),
+            kind: "exit",
+            detail: toAgentDiagnosticDetail(
+              `Failed to read mcpConfigPath '${providedMcpConfigPath}': ${failure}`,
+            ),
+          }),
+        ),
+      )
+      .with({ _tag: "Success" }, ({ success: bytes }) => {
+        if (bytes.length > MAX_MCP_CONFIG_BYTES) {
+          return Effect.fail(
             new AgentExitError({
               runner: "claude-code",
-              exit: AgentExitCode.make(1),
+              exit: AgentNonZeroExitCode.make(1),
+              kind: "exit",
               detail: toAgentDiagnosticDetail(
-                `Invalid JSON in mcpConfigPath '${providedMcpConfigPath}': ${String(failure)}`,
+                `mcpConfigPath '${providedMcpConfigPath}' exceeds ${MAX_MCP_CONFIG_BYTES} bytes limit`,
               ),
             }),
-          ),
-        )
-        .with({ _tag: "Success" }, ({ success }) => Effect.succeed(encodeMcpConfig(success)))
-        .exhaustive(),
-    )
-    .exhaustive()
-}
+          )
+        }
+        const raw = Buffer.from(bytes).toString("utf8")
+        return match(decodeMcpConfigResult(raw))
+          .with({ _tag: "Failure" }, ({ failure }) =>
+            Effect.fail(
+              new AgentExitError({
+                runner: "claude-code",
+                exit: AgentNonZeroExitCode.make(1),
+                kind: "exit",
+                detail: toAgentDiagnosticDetail(
+                  `Invalid JSON in mcpConfigPath '${providedMcpConfigPath}': ${String(failure)}`,
+                ),
+              }),
+            ),
+          )
+          .with({ _tag: "Success" }, ({ success }) => Effect.succeed(encodeMcpConfig(success)))
+          .exhaustive()
+      })
+      .exhaustive()
+  })
 
 const mapExecResult = (
   runner: RunnerId,
@@ -209,7 +337,8 @@ const mapExecResult = (
       Effect.fail(
         new AgentExitError({
           runner,
-          exit: AgentExitCode.make(1),
+          exit: AgentNonZeroExitCode.make(1),
+          kind: "signal",
           detail: toAgentDiagnosticDetail(
             stderr.trim().length > 0
               ? `Terminated by signal ${signal}: ${stderr.trim()}`
@@ -218,17 +347,23 @@ const mapExecResult = (
         }),
       ),
     )
-    .with({ _tag: "SpawnFailed" }, ({ spawnError, stderr }) =>
-      Effect.fail(
+    .with({ _tag: "SpawnFailed" }, ({ spawnError, stderr }) => {
+      const binaryName = match(runner)
+        .with("claude-code", () => "claude")
+        .with("antigravity", () => "agy")
+        .exhaustive()
+      const baseMsg = stderr.trim().length > 0 ? `${spawnError}: ${stderr.trim()}` : spawnError
+      return Effect.fail(
         new AgentExitError({
           runner,
-          exit: AgentExitCode.make(1),
+          exit: AgentNonZeroExitCode.make(1),
+          kind: "spawn-failed",
           detail: toAgentDiagnosticDetail(
-            stderr.trim().length > 0 ? `${spawnError}: ${stderr.trim()}` : spawnError,
+            `${baseMsg} — ensure '${binaryName}' is installed and executable on PATH (run 'pnpm harness workflow doctor')`,
           ),
         }),
-      ),
-    )
+      )
+    })
     .with({ _tag: "Exited" }, ({ exitCode, stdout, stderr }) =>
       match(parseOutput(exitCode, stdout, stderr))
         .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))
@@ -249,29 +384,49 @@ const writeTempConfigFile = (
     catch: (err) =>
       new AgentExitError({
         runner: "claude-code",
-        exit: AgentExitCode.make(1),
+        exit: AgentNonZeroExitCode.make(1),
+        kind: "exit",
         detail: toAgentDiagnosticDetail(
           `Failed to write scoped runner config '${filePath}': ${err instanceof Error ? err.message : String(err)}`,
         ),
       }),
   })
 
-/** Executes an automatic unit via `claude -p` (`REQ-4.1`, `REQ-4.2`). */
+const toClaudeFallbackOptions = (
+  options?: AntigravityRunnerOptions,
+): ClaudeCodeRunnerOptions | undefined =>
+  options === undefined
+    ? undefined
+    : {
+        ...(options.hostIo !== undefined ? { hostIo: options.hostIo } : {}),
+        ...(options.env !== undefined ? { env: options.env } : {}),
+        ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+        ...(options.killGraceMs !== undefined ? { killGraceMs: options.killGraceMs } : {}),
+        ...(options.harnessRoot !== undefined ? { harnessRoot: options.harnessRoot } : {}),
+        ...(options.pgidDir !== undefined ? { pgidDir: options.pgidDir } : {}),
+        ...(options.statUidSync !== undefined ? { statUidSync: options.statUidSync } : {}),
+        ...(options.runProcess !== undefined ? { runProcess: options.runProcess } : {}),
+      }
+
+/** Executes an automatic unit via `claude -p` (`SPEC-0036 REQ-1.1`, `SPEC-0036 REQ-2.1`). */
 export const runClaudeCodeImpl = Effect.fn("ClaudeCodeRunner.run")(function* (
-  request: AgentRunRequest,
+  request: ClaudeCodeRunRequest,
   options?: ClaudeCodeRunnerOptions,
 ): Effect.fn.Return<AgentRunResult, AgentRunnerError> {
   const io = options?.hostIo ?? nodeSyncHostIo
   const parentEnv = options?.env ?? io.getEnv()
-  const profile = getRunnerProfile("claude-code")
+  const profile = CLAUDE_CODE_RUNNER_PROFILE
   const timeoutMs = options?.timeoutMs ?? profile.timeoutMillis
   const killGraceMs = options?.killGraceMs ?? WORKFLOW_TIMEOUT_BUDGETS.agentKillGraceMs
   const harnessRoot = options?.harnessRoot ?? resolveHarnessInstallationRoot()
-  const pgidRecordPath = makeRunnerPgidRecordPath(request, io, options?.pgidDir)
+  const pgidRecordPath = yield* makeRunnerPgidRecordPath(
+    request,
+    io,
+    options?.pgidDir,
+    options?.statUidSync,
+  )
 
-  if (pgidRecordPath !== undefined) {
-    yield* reapOrphanAttemptProcessGroup(pgidRecordPath, io)
-  }
+  yield* reapOrphanAttemptProcessGroup(pgidRecordPath, io, "claude-code")
 
   const providedMcpConfigPath = request.brief.mcpConfigPath
   const validatedMcpJson =
@@ -287,7 +442,8 @@ export const runClaudeCodeImpl = Effect.fn("ClaudeCodeRunner.run")(function* (
           catch: (err) =>
             new AgentExitError({
               runner: "claude-code",
-              exit: AgentExitCode.make(1),
+              exit: AgentNonZeroExitCode.make(1),
+              kind: "exit",
               detail: toAgentDiagnosticDetail(
                 `Failed to create temporary Claude config directory: ${err instanceof Error ? err.message : String(err)}`,
               ),
@@ -325,8 +481,8 @@ export const runClaudeCodeImpl = Effect.fn("ClaudeCodeRunner.run")(function* (
       const argv = buildClaudeCodeArgv({
         profile,
         promptText: request.brief.promptText,
-        mcpConfigPath,
-        hooksSettingsPath,
+        mcpConfigPath: RunnerConfigFilePath.make(mcpConfigPath),
+        hooksSettingsPath: RunnerConfigFilePath.make(hooksSettingsPath),
       })
       const childEnv = buildRunnerEnv("claude-code", parentEnv)
       const execProcess =
@@ -343,7 +499,7 @@ export const runClaudeCodeImpl = Effect.fn("ClaudeCodeRunner.run")(function* (
         env: childEnv,
         timeoutMs,
         killGraceMs,
-        ...(pgidRecordPath !== undefined ? { pgidRecordPath } : {}),
+        pgidRecordPath,
       })
 
       return yield* mapExecResult("claude-code", timeoutMs, execRes, parseClaudeCodeOutput)
@@ -351,9 +507,9 @@ export const runClaudeCodeImpl = Effect.fn("ClaudeCodeRunner.run")(function* (
   )
 })
 
-/** Executes an automatic unit via `agy -p` (`REQ-4.1`, `REQ-4.3`). */
+/** Executes an automatic unit via `agy -p` (`SPEC-0036 REQ-1.1`, `SPEC-0036 REQ-3.1`). */
 export const runAntigravityImpl = Effect.fn("AntigravityRunner.run")(function* (
-  request: AgentRunRequest,
+  request: AntigravityRunRequest,
   options?: AntigravityRunnerOptions,
 ): Effect.fn.Return<AgentRunResult, AgentRunnerError> {
   if (request.mcpIsolation === "hard") {
@@ -369,24 +525,35 @@ export const runAntigravityImpl = Effect.fn("AntigravityRunner.run")(function* (
         ),
       )
       .with("fallback-claude", () =>
-        runClaudeCodeImpl(
-          {
-            ...request,
+        Effect.gen(function* () {
+          yield* Effect.logWarning(
+            `Antigravity runner falling back to 'claude-code' for hard MCP isolation (unit=${request.brief.unitId})`,
+          )
+          yield* Effect.annotateCurrentSpan({
+            fallbackFrom: "antigravity",
             runner: "claude-code",
-          },
-          options,
-        ),
+          })
+          return yield* runClaudeCodeImpl(
+            {
+              runId: request.runId,
+              runner: "claude-code",
+              brief: request.brief,
+              cwd: request.cwd,
+            },
+            toClaudeFallbackOptions(options),
+          )
+        }),
       )
       .exhaustive()
   }
 
   const io = options?.hostIo ?? nodeSyncHostIo
   const parentEnv = options?.env ?? io.getEnv()
-  const baseProfile = getRunnerProfile("antigravity")
+  const baseProfile = ANTIGRAVITY_RUNNER_PROFILE
   const timeoutMs = options?.timeoutMs ?? baseProfile.timeoutMillis
   const effectiveProfile =
     timeoutMs !== baseProfile.timeoutMillis
-      ? RunnerProfile.make({
+      ? AntigravityRunnerProfile.make({
           ...baseProfile,
           timeoutMillis: TimeoutMillis.make(Math.max(1, Math.round(timeoutMs))),
         })
@@ -402,15 +569,19 @@ export const runAntigravityImpl = Effect.fn("AntigravityRunner.run")(function* (
   const backoffMs = Number.isFinite(rawBackoffMs)
     ? Math.max(0, Math.floor(rawBackoffMs))
     : WORKFLOW_TIMEOUT_BUDGETS.agentStartupRetryBackoffMs
-  const pgidRecordPath = makeRunnerPgidRecordPath(request, io, options?.pgidDir)
+  const pgidRecordPath = yield* makeRunnerPgidRecordPath(
+    request,
+    io,
+    options?.pgidDir,
+    options?.statUidSync,
+  )
 
-  if (pgidRecordPath !== undefined) {
-    yield* reapOrphanAttemptProcessGroup(pgidRecordPath, io)
-  }
+  yield* reapOrphanAttemptProcessGroup(pgidRecordPath, io, "antigravity")
 
   const argv = buildAntigravityArgv({
     profile: effectiveProfile,
     promptText: request.brief.promptText,
+    killGraceMs,
   })
   const childEnv = buildRunnerEnv("antigravity", parentEnv)
   const execProcess =
@@ -429,7 +600,7 @@ export const runAntigravityImpl = Effect.fn("AntigravityRunner.run")(function* (
         env: childEnv,
         timeoutMs,
         killGraceMs,
-        ...(pgidRecordPath !== undefined ? { pgidRecordPath } : {}),
+        pgidRecordPath,
       })
       const shouldRetry = match(execRes)
         .with(
@@ -476,74 +647,120 @@ const mergeAntigravityOptions = (
         ...options.antigravityOptions,
       }
 
-/** Dispatches `AgentRunRequest` to `ClaudeCodeRunnerLive` or `AntigravityRunnerLive` exhaustively (`REQ-4.1`). */
+/** Dispatches `AgentRunRequest` to `ClaudeCodeRunnerLive` or `AntigravityRunnerLive` exhaustively (`SPEC-0036 REQ-1.1`). */
 export const runAgentRunnerImpl = Effect.fn("AgentRunner.run")(function* (
   request: AgentRunRequest,
   options?: AgentRunnerPortOptions,
 ): Effect.fn.Return<AgentRunResult, AgentRunnerError> {
-  return yield* match(request.runner)
-    .with("claude-code", () => runClaudeCodeImpl(request, mergeClaudeOptions(options)))
-    .with("antigravity", () => runAntigravityImpl(request, mergeAntigravityOptions(options)))
+  return yield* match(request)
+    .with({ runner: "claude-code" }, (claudeReq) =>
+      runClaudeCodeImpl(claudeReq, mergeClaudeOptions(options)),
+    )
+    .with({ runner: "antigravity" }, (agyReq) =>
+      runAntigravityImpl(agyReq, mergeAntigravityOptions(options)),
+    )
     .exhaustive()
 })
 
-/** Builds a parameterized `AgentRunnerPort` layer. */
+/** Builds a parameterized `AgentRunnerPort` layer with per-instance `profile.maxConcurrency` semaphores. */
 const makeAgentRunnerPortLayer = (options?: AgentRunnerPortOptions): Layer.Layer<AgentRunnerPort> =>
-  Layer.succeed(AgentRunnerPort, {
-    run: (request) => runAgentRunnerImpl(request, options),
-  } satisfies AgentRunnerPortShape)
+  Layer.effect(
+    AgentRunnerPort,
+    Effect.gen(function* () {
+      const claudeSemaphore = yield* Semaphore.make(CLAUDE_CODE_RUNNER_PROFILE.maxConcurrency)
+      const antigravitySemaphore = yield* Semaphore.make(ANTIGRAVITY_RUNNER_PROFILE.maxConcurrency)
+      return {
+        run: (request) =>
+          match(request)
+            .with({ runner: "claude-code" }, (claudeReq) =>
+              claudeSemaphore.withPermits(1)(
+                runClaudeCodeImpl(claudeReq, mergeClaudeOptions(options)),
+              ),
+            )
+            .with({ runner: "antigravity" }, (agyReq) =>
+              antigravitySemaphore.withPermits(1)(
+                runAntigravityImpl(agyReq, mergeAntigravityOptions(options)),
+              ),
+            )
+            .exhaustive(),
+      } satisfies AgentRunnerPortShape
+    }),
+  )
 
-/** Builds a Claude-only `AgentRunnerPort` layer. */
+/** Builds a Claude-only `AgentRunnerPort` layer with per-instance `CLAUDE_CODE_RUNNER_PROFILE.maxConcurrency` semaphore. */
 const makeClaudeCodeRunnerLayer = (
   options?: ClaudeCodeRunnerOptions,
 ): Layer.Layer<AgentRunnerPort> =>
-  Layer.succeed(AgentRunnerPort, {
-    run: (request) =>
-      match(request.runner)
-        .with("claude-code", () => runClaudeCodeImpl(request, options))
-        .with("antigravity", () =>
-          Effect.fail(
-            new AgentExitError({
-              runner: request.runner,
-              exit: AgentExitCode.make(1),
-              detail: toAgentDiagnosticDetail(
-                "ClaudeCodeRunner cannot execute request for runner 'antigravity'",
+  Layer.effect(
+    AgentRunnerPort,
+    Effect.gen(function* () {
+      const semaphore = yield* Semaphore.make(CLAUDE_CODE_RUNNER_PROFILE.maxConcurrency)
+      return {
+        run: (request) =>
+          match(request)
+            .with({ runner: "claude-code" }, (claudeReq) =>
+              semaphore.withPermits(1)(runClaudeCodeImpl(claudeReq, options)),
+            )
+            .with({ runner: "antigravity" }, () =>
+              Effect.fail(
+                new AgentExitError({
+                  runner: request.runner,
+                  exit: AgentNonZeroExitCode.make(1),
+                  kind: "exit",
+                  detail: toAgentDiagnosticDetail(
+                    "ClaudeCodeRunner cannot execute request for runner 'antigravity'",
+                  ),
+                }),
               ),
-            }),
-          ),
-        )
-        .exhaustive(),
-  } satisfies AgentRunnerPortShape)
+            )
+            .exhaustive(),
+      } satisfies AgentRunnerPortShape
+    }),
+  )
 
-/** Builds an Antigravity-only `AgentRunnerPort` layer. */
+/** Builds an Antigravity-only `AgentRunnerPort` layer with per-instance `ANTIGRAVITY_RUNNER_PROFILE.maxConcurrency` semaphore. */
 const makeAntigravityRunnerLayer = (
   options?: AntigravityRunnerOptions,
 ): Layer.Layer<AgentRunnerPort> =>
-  Layer.succeed(AgentRunnerPort, {
-    run: (request) =>
-      match(request.runner)
-        .with("antigravity", () => runAntigravityImpl(request, options))
-        .with("claude-code", () =>
-          Effect.fail(
-            new AgentExitError({
-              runner: request.runner,
-              exit: AgentExitCode.make(1),
-              detail: toAgentDiagnosticDetail(
-                "AntigravityRunner cannot execute request for runner 'claude-code'",
+  Layer.effect(
+    AgentRunnerPort,
+    Effect.gen(function* () {
+      const semaphore = yield* Semaphore.make(ANTIGRAVITY_RUNNER_PROFILE.maxConcurrency)
+      return {
+        run: (request) =>
+          match(request)
+            .with({ runner: "antigravity" }, (agyReq) =>
+              semaphore.withPermits(1)(runAntigravityImpl(agyReq, options)),
+            )
+            .with({ runner: "claude-code" }, () =>
+              Effect.fail(
+                new AgentExitError({
+                  runner: request.runner,
+                  exit: AgentNonZeroExitCode.make(1),
+                  kind: "exit",
+                  detail: toAgentDiagnosticDetail(
+                    "AntigravityRunner cannot execute request for runner 'claude-code'",
+                  ),
+                }),
               ),
-            }),
-          ),
-        )
-        .exhaustive(),
-  } satisfies AgentRunnerPortShape)
+            )
+            .exhaustive(),
+      } satisfies AgentRunnerPortShape
+    }),
+  )
 
 /** Live `AgentRunnerPort` layer dispatching over `claude-code` and `antigravity`. */
 export const AgentRunnerPortLive: Layer.Layer<AgentRunnerPort> = makeAgentRunnerPortLayer()
 
-/** Dedicated Claude Code runner layer (`REQ-4.2`). */
+/** Dedicated Claude Code runner layer (`SPEC-0036 REQ-2.1`). */
 export const ClaudeCodeRunnerLive: Layer.Layer<AgentRunnerPort> = makeClaudeCodeRunnerLayer()
 
-/** Dedicated Antigravity runner layer (`REQ-4.3`). */
+/** Dedicated Antigravity runner layer (`SPEC-0036 REQ-3.1`). */
 export const AntigravityRunnerLive: Layer.Layer<AgentRunnerPort> = makeAntigravityRunnerLayer()
 
-export { makeAgentRunnerPortLayer, makeAntigravityRunnerLayer, makeClaudeCodeRunnerLayer }
+export {
+  makeAgentRunnerPortLayer,
+  makeAntigravityRunnerLayer,
+  makeClaudeCodeRunnerLayer,
+  makeRunnerPgidRecordPath,
+}

@@ -57,8 +57,7 @@ const HARNESS_STAMP_ARTIFACTS: ReadonlySet<string> = new Set([
   ".harness/mutate-stamp.json",
 ])
 
-const isHarnessInternalArtifact = (rel: string): boolean =>
-  HARNESS_STAMP_ARTIFACTS.has(rel) || rel.startsWith(".harness/runner-pgids/")
+const isHarnessInternalArtifact = (rel: string): boolean => HARNESS_STAMP_ARTIFACTS.has(rel)
 
 const decodeOwnedRelPathOption = Schema.decodeOption(OwnedRelPath)
 

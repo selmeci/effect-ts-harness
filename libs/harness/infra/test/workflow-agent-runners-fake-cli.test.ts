@@ -1,56 +1,35 @@
-import { spawn } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs"
+import { dirname, join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect, type Exit, Fiber, Layer, Schema } from "effect"
+import { Cause, Effect, type Exit, Logger, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
-  AbsoluteRepoRoot,
-  AgentAuthRequiredError,
-  AgentDiagnosticDetail,
-  AgentExitCode,
-  AgentExitError,
-  AgentNoChangeError,
-  AgentOutputParseError,
+  type AbsoluteRepoRoot,
+  type AgentExitFailureKind,
   type AgentRunResult,
   type AgentRunnerError,
-  AgentTimeoutError,
-  AgentToolDeniedError,
   AttemptNumber,
   BriefPrompt,
-  DenialNotice,
   OwnedRelPath,
   RunnerConfigFilePath,
-  RunnerId,
-  TimeoutMillis,
+  type RunnerId,
   UnitBrief,
-  UnitRejection,
   WorkUnitId,
   WorkflowRunId,
 } from "@harness/contract"
 import { decideSpanBudgets } from "@harness/gates"
-import { AgentRunnerPort, UnitAgentDispatcher, UnitVerifier } from "@harness/service"
+import { AgentRunnerPort } from "@harness/service"
 import {
-  UnitAgentDispatcherLiveFromPort,
-  UnitVerifierLive,
-  inspectWorkflowRunnerDoctorChecks,
   makeAgentRunnerPortLayer,
-  makeAntigravityRunnerLayer,
-  makeClaudeCodeRunnerLayer,
-  reapOrphanAttemptProcessGroup,
+  nodeSyncHostIo,
   runAgentRunnerImpl,
   runAntigravityImpl,
   runClaudeCodeImpl,
-  toOutcome,
 } from "../src/index.js"
 import { resolveHarnessInstallationRoot } from "../src/workflow/runner-profiles.js"
-import { isProcessGroupAlive } from "../src/workflow/verify-child-process.js"
 import {
   initGitRepo,
-  makePackageUnit,
   runWithTestTracer,
-  waitForFilesExist,
   withTempDir,
   writeExecutableScript,
 } from "./helpers/workflow-verifier-fixture.js"
@@ -92,24 +71,12 @@ const McpConfigCheckSchema = Schema.fromJsonString(
   }),
 )
 
-const readLinuxProcStartTimeForTest = (pid: number): string | undefined => {
-  if (process.platform !== "linux") {
-    return undefined
-  }
-  const raw = readFileSync(`/proc/${pid}/stat`, "utf8")
-  const commEnd = raw.lastIndexOf(")")
-  return raw
-    .slice(commEnd + 1)
-    .trim()
-    .split(/\s+/)[19]
-}
-
 const makeFakeCliEnv = (
   binDir: string,
   homeDir: string,
   extra?: Readonly<Record<string, string | undefined>>,
 ): Readonly<Record<string, string | undefined>> => ({
-  PATH: `${binDir}:${process.env["PATH"] ?? "/usr/bin:/bin"}`,
+  PATH: `${binDir}:${dirname(process.execPath)}:/usr/bin:/bin`,
   HOME: homeDir,
   CLOUDFLARE_API_TOKEN: "secret-cf-token",
   OMNIGRAPH_ADMIN_TOKEN: "secret-omni-token",
@@ -128,7 +95,9 @@ const makeBrief = (overrides?: {
   UnitBrief.make({
     unitId: WorkUnitId.make("pkg-alpha"),
     attempt: AttemptNumber.make(1),
-    promptText: BriefPrompt.make(overrides?.promptText ?? "Implement REQ-1 in libs/alpha"),
+    promptText: BriefPrompt.make(
+      overrides?.promptText ?? "Implement SPEC-0036 REQ-1 in libs/alpha",
+    ),
     ownedRelPaths: [OwnedRelPath.make("libs/alpha")],
     ...(overrides?.mcpConfigPath !== undefined ? { mcpConfigPath: overrides.mcpConfigPath } : {}),
   })
@@ -150,6 +119,7 @@ const assertRunnerFailure = (
     readonly _tag: AgentRunnerError["_tag"]
     readonly runner: RunnerId
     readonly exit?: number
+    readonly kind?: AgentExitFailureKind
     readonly afterMillis?: number
     readonly noticePart?: string
     readonly detailPart?: string
@@ -164,33 +134,22 @@ const assertRunnerFailure = (
   }
   match(err)
     .with({ _tag: "AgentTimeoutError" }, (e) => {
-      if (expected.afterMillis !== undefined) {
-        expect(e.afterMillis).toBe(expected.afterMillis)
-      }
+      if (expected.afterMillis !== undefined) expect(e.afterMillis).toBe(expected.afterMillis)
     })
     .with({ _tag: "AgentToolDeniedError" }, (e) => {
-      if (expected.noticePart !== undefined) {
-        expect(e.notice).toContain(expected.noticePart)
-      }
+      if (expected.noticePart !== undefined) expect(e.notice).toContain(expected.noticePart)
     })
     .with({ _tag: "AgentAuthRequiredError" }, (e) => {
-      if (expected.detailPart !== undefined) {
-        expect(e.detail).toContain(expected.detailPart)
-      }
+      if (expected.detailPart !== undefined) expect(e.detail).toContain(expected.detailPart)
     })
     .with({ _tag: "AgentExitError" }, (e) => {
-      if (expected.exit !== undefined) {
-        expect(e.exit).toBe(expected.exit)
-      }
-      if (expected.detailPart !== undefined) {
-        expect(e.detail).toContain(expected.detailPart)
-      }
+      if (expected.exit !== undefined) expect(e.exit).toBe(expected.exit)
+      if (expected.kind !== undefined) expect(e.kind).toBe(expected.kind)
+      if (expected.detailPart !== undefined) expect(e.detail).toContain(expected.detailPart)
     })
     .with({ _tag: "AgentOutputParseError" }, (e) => {
       expect(e.detail).toBeDefined()
-      if (expected.detailPart !== undefined) {
-        expect(e.detail).toContain(expected.detailPart)
-      }
+      if (expected.detailPart !== undefined) expect(e.detail).toContain(expected.detailPart)
     })
     .with({ _tag: "AgentNoChangeError" }, () => undefined)
     .exhaustive()
@@ -202,12 +161,20 @@ const runClaudeFail = (
   cwd: AbsoluteRepoRoot,
   env: Readonly<Record<string, string | undefined>>,
   expected: ExpectedFailure,
-  brief?: UnitBrief,
+  options?: {
+    readonly brief?: UnitBrief
+    readonly hostIo?: typeof nodeSyncHostIo
+  },
 ) =>
   Effect.exit(
     runClaudeCodeImpl(
-      { runner: RunnerId.make("claude-code"), brief: brief ?? makeBrief(), cwd },
-      { env },
+      {
+        runId: WorkflowRunId.make("run-claude-fail-1"),
+        runner: "claude-code",
+        brief: options?.brief ?? makeBrief(),
+        cwd,
+      },
+      { env, ...(options?.hostIo !== undefined ? { hostIo: options.hostIo } : {}) },
     ),
   ).pipe(Effect.map((exit) => assertRunnerFailure(exit, expected)))
 
@@ -225,7 +192,8 @@ const runAgyFail = (
   Effect.exit(
     runAntigravityImpl(
       {
-        runner: RunnerId.make("antigravity"),
+        runId: WorkflowRunId.make("run-agy-fail-1"),
+        runner: "antigravity",
         brief: makeBrief(),
         cwd,
         ...(extra?.mcpIsolation !== undefined ? { mcpIsolation: extra.mcpIsolation } : {}),
@@ -272,9 +240,9 @@ process.stdout.write(JSON.stringify({
 }));
 `
 
-describe("SPEC-0036 WF-5 Agent Runners (Fake CLI & Supervision)", () => {
+describe("SPEC-0036 WF-5 Agent Runners (Fake CLI, Argv/Env Isolation & Error Classification)", () => {
   it.live(
-    "REQ-1.1..1.3 / REQ-2.1..2.2: ClaudeCodeRunnerLive isolates argv, PreToolUse-only hooks, env, stdio, and cleans temp dir",
+    "SPEC-0036 REQ-1.1..1.3 / REQ-2.1..2.2: ClaudeCodeRunnerLive isolates argv, PreToolUse-only hooks, env, stdio, and cleans temp dir",
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
@@ -290,7 +258,7 @@ describe("SPEC-0036 WF-5 Agent Runners (Fake CLI & Supervision)", () => {
             runAgentRunnerImpl(
               {
                 runId: WorkflowRunId.make("run-claude-1"),
-                runner: RunnerId.make("claude-code"),
+                runner: "claude-code",
                 brief: makeBrief(),
                 cwd: repoRoot,
               },
@@ -301,9 +269,11 @@ describe("SPEC-0036 WF-5 Agent Runners (Fake CLI & Supervision)", () => {
           expect(result.runner).toBe("claude-code")
           expect(result.exit).toBe(0)
           expect(result.resultText).toContain("Implemented alpha")
-          expect(result.usage.status).toBe("reported")
-          expect(result.usage.inputTokens).toBe(100)
-          expect(result.usage.outputTokens).toBe(50)
+          expect(result.usage).toMatchObject({
+            _tag: "Reported",
+            inputTokens: 100,
+            outputTokens: 50,
+          })
 
           const captureRaw = readFileSync(join(repoRoot, "claude-capture.json"), "utf8")
           const captured = yield* Schema.decodeEffect(CapturedCliInvocationSchema)(captureRaw)
@@ -357,15 +327,18 @@ describe("SPEC-0036 WF-5 Agent Runners (Fake CLI & Supervision)", () => {
   )
 
   it.live(
-    "REQ-2.1..2.2: ClaudeCodeRunner validates mcpConfigPath (symlink, missing, ancestor symlink, invalid JSON, valid scoped copy)",
+    "SPEC-0036 REQ-2.1..2.2 / S-3.5 / S-3.6: ClaudeCodeRunner validates mcpConfigPath (missing, symlink, ancestor symlink, realpathSync error, >65536 bytes limit, invalid JSON, valid scoped copy)",
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
           const { repoRoot } = initGitRepo(dir)
           const binDir = join(dir, "bin")
+          const emptyBinDir = join(dir, "empty-bin")
           const homeDir = join(dir, "home")
           mkdirSync(homeDir, { recursive: true })
-          const env = makeFakeCliEnv(binDir, homeDir)
+          mkdirSync(emptyBinDir, { recursive: true })
+          const spawnEnv = makeFakeCliEnv(binDir, homeDir)
+          const env = { ...spawnEnv, PATH: emptyBinDir }
 
           const realMcpDir = join(dir, "real-mcp-dir")
           mkdirSync(realMcpDir, { recursive: true })
@@ -381,35 +354,85 @@ describe("SPEC-0036 WF-5 Agent Runners (Fake CLI & Supervision)", () => {
             env,
             {
               _tag: "AgentExitError",
-              runner: RunnerId.make("claude-code"),
+              runner: "claude-code",
               exit: 1,
               detailPart: "Invalid or missing mcpConfigPath",
             },
-            makeBrief({ mcpConfigPath: RunnerConfigFilePath.make(symlinkMcp) }),
+            { brief: makeBrief({ mcpConfigPath: RunnerConfigFilePath.make(symlinkMcp) }) },
           )
           yield* runClaudeFail(
             repoRoot,
             env,
             {
               _tag: "AgentExitError",
-              runner: RunnerId.make("claude-code"),
+              runner: "claude-code",
               exit: 1,
               detailPart: "Invalid or missing mcpConfigPath",
             },
-            makeBrief({ mcpConfigPath: RunnerConfigFilePath.make(join(dir, "missing-mcp.json")) }),
+            {
+              brief: makeBrief({
+                mcpConfigPath: RunnerConfigFilePath.make(join(dir, "missing-mcp.json")),
+              }),
+            },
           )
           yield* runClaudeFail(
             repoRoot,
             env,
             {
               _tag: "AgentExitError",
-              runner: RunnerId.make("claude-code"),
+              runner: "claude-code",
               exit: 1,
               detailPart: "non-canonical mcpConfigPath",
             },
-            makeBrief({
-              mcpConfigPath: RunnerConfigFilePath.make(join(symParentDir, "real-mcp.json")),
-            }),
+            {
+              brief: makeBrief({
+                mcpConfigPath: RunnerConfigFilePath.make(join(symParentDir, "real-mcp.json")),
+              }),
+            },
+          )
+
+          // S-3.5: realpathSync throw preserves underlying EACCES detail
+          const realpathThrowHostIo = {
+            ...nodeSyncHostIo,
+            realpathSync: (p: string) => {
+              if (p === realMcp) {
+                throw new Error("EACCES: permission denied canonicalizing mcp.json")
+              }
+              return nodeSyncHostIo.realpathSync(p)
+            },
+          }
+          yield* runClaudeFail(
+            repoRoot,
+            env,
+            {
+              _tag: "AgentExitError",
+              runner: "claude-code",
+              exit: 1,
+              detailPart: "EACCES: permission denied canonicalizing mcp.json",
+            },
+            {
+              brief: makeBrief({ mcpConfigPath: RunnerConfigFilePath.make(realMcp) }),
+              hostIo: realpathThrowHostIo,
+            },
+          )
+
+          // S-3.6: >65536 bytes reports explicit size limit error rather than "Invalid JSON"
+          const oversizedMcp = join(dir, "oversized-mcp.json")
+          writeFileSync(
+            oversizedMcp,
+            JSON.stringify({ mcpServers: { big: { command: "x".repeat(70_000) } } }),
+            "utf8",
+          )
+          yield* runClaudeFail(
+            repoRoot,
+            env,
+            {
+              _tag: "AgentExitError",
+              runner: "claude-code",
+              exit: 1,
+              detailPart: "exceeds 65536 bytes limit",
+            },
+            { brief: makeBrief({ mcpConfigPath: RunnerConfigFilePath.make(oversizedMcp) }) },
           )
 
           const invalidJsonMcp = join(dir, "invalid-mcp.json")
@@ -419,21 +442,22 @@ describe("SPEC-0036 WF-5 Agent Runners (Fake CLI & Supervision)", () => {
             env,
             {
               _tag: "AgentExitError",
-              runner: RunnerId.make("claude-code"),
+              runner: "claude-code",
               exit: 1,
               detailPart: "Invalid JSON in mcpConfigPath",
             },
-            makeBrief({ mcpConfigPath: RunnerConfigFilePath.make(invalidJsonMcp) }),
+            { brief: makeBrief({ mcpConfigPath: RunnerConfigFilePath.make(invalidJsonMcp) }) },
           )
 
           writeExecutableScript(binDir, "claude", CLAUDE_CAPTURE_SCRIPT)
           const explicitRes = yield* runClaudeCodeImpl(
             {
-              runner: RunnerId.make("claude-code"),
+              runId: WorkflowRunId.make("run-claude-mcp-ok"),
+              runner: "claude-code",
               brief: makeBrief({ mcpConfigPath: RunnerConfigFilePath.make(realMcp) }),
               cwd: repoRoot,
             },
-            { env },
+            { env: spawnEnv },
           )
           expect(explicitRes.exit).toBe(0)
           const explicitCaptured = yield* Schema.decodeEffect(CapturedCliInvocationSchema)(
@@ -452,7 +476,7 @@ describe("SPEC-0036 WF-5 Agent Runners (Fake CLI & Supervision)", () => {
   )
 
   it.live(
-    "REQ-2.3: ClaudeCodeRunner handles >80 KiB stdout, rejects >1 MiB overflow, and maps denial/auth/parse/exit/spawn/signal errors",
+    "SPEC-0036 REQ-2.3: ClaudeCodeRunner handles >80 KiB stdout and rejects >1 MiB overflow",
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
@@ -469,7 +493,12 @@ describe("SPEC-0036 WF-5 Agent Runners (Fake CLI & Supervision)", () => {
             `process.stdout.write(JSON.stringify({ result: ${JSON.stringify(largeText)}, is_error: false }));`,
           )
           const largeRes = yield* runClaudeCodeImpl(
-            { runner: RunnerId.make("claude-code"), brief: makeBrief(), cwd: repoRoot },
+            {
+              runId: WorkflowRunId.make("run-claude-large"),
+              runner: "claude-code",
+              brief: makeBrief(),
+              cwd: repoRoot,
+            },
             { env },
           )
           expect(largeRes.resultText).toBe(largeText)
@@ -481,9 +510,23 @@ describe("SPEC-0036 WF-5 Agent Runners (Fake CLI & Supervision)", () => {
           )
           yield* runClaudeFail(repoRoot, env, {
             _tag: "AgentOutputParseError",
-            runner: RunnerId.make("claude-code"),
+            runner: "claude-code",
             detailPart: "exceeded 1048576 bytes",
           })
+        }),
+      ),
+  )
+
+  it.live(
+    "SPEC-0036 REQ-2.3 / F-7.1: ClaudeCodeRunner maps denial, auth, parse, exit, spawn-failed (kind='spawn-failed'), and signal",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot } = initGitRepo(dir)
+          const binDir = join(dir, "bin")
+          const homeDir = join(dir, "home")
+          mkdirSync(homeDir, { recursive: true })
+          const env = makeFakeCliEnv(binDir, homeDir)
 
           writeExecutableScript(
             binDir,
@@ -492,7 +535,7 @@ describe("SPEC-0036 WF-5 Agent Runners (Fake CLI & Supervision)", () => {
           )
           yield* runClaudeFail(repoRoot, env, {
             _tag: "AgentToolDeniedError",
-            runner: RunnerId.make("claude-code"),
+            runner: "claude-code",
             noticePart: "Bash",
           })
 
@@ -503,14 +546,14 @@ describe("SPEC-0036 WF-5 Agent Runners (Fake CLI & Supervision)", () => {
           )
           yield* runClaudeFail(repoRoot, env, {
             _tag: "AgentAuthRequiredError",
-            runner: RunnerId.make("claude-code"),
+            runner: "claude-code",
             detailPart: "Authentication required",
           })
 
           writeExecutableScript(binDir, "claude", `process.stdout.write("{bad-json");`)
           yield* runClaudeFail(repoRoot, env, {
             _tag: "AgentOutputParseError",
-            runner: RunnerId.make("claude-code"),
+            runner: "claude-code",
           })
 
           writeExecutableScript(
@@ -520,27 +563,30 @@ describe("SPEC-0036 WF-5 Agent Runners (Fake CLI & Supervision)", () => {
           )
           yield* runClaudeFail(repoRoot, env, {
             _tag: "AgentExitError",
-            runner: RunnerId.make("claude-code"),
+            runner: "claude-code",
             exit: 2,
             detailPart: "boom",
           })
 
+          // F-7.1: Missing binary maps to kind === "spawn-failed" with PATH + workflow doctor guidance
           yield* runClaudeFail(
             repoRoot,
             { ...env, PATH: join(dir, "empty-bin") },
             {
               _tag: "AgentExitError",
-              runner: RunnerId.make("claude-code"),
+              runner: "claude-code",
               exit: 1,
-              detailPart: "ENOENT",
+              kind: "spawn-failed",
+              detailPart: "workflow doctor",
             },
           )
 
           writeExecutableScript(binDir, "claude", `process.kill(process.pid, "SIGKILL");`)
           yield* runClaudeFail(repoRoot, env, {
             _tag: "AgentExitError",
-            runner: RunnerId.make("claude-code"),
+            runner: "claude-code",
             exit: 1,
+            kind: "signal",
             detailPart: "SIGKILL",
           })
         }),
@@ -548,7 +594,7 @@ describe("SPEC-0036 WF-5 Agent Runners (Fake CLI & Supervision)", () => {
   )
 
   it.live(
-    "REQ-3.1..3.2: AntigravityRunner strips env via runAgentRunnerImpl, retries exit 3, and handles hard MCP isolation",
+    "SPEC-0036 REQ-3.1..3.2 / F-14.5: AntigravityRunner strips env, passes killGraceMs to --print-timeout, and retries exit 3",
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
@@ -593,13 +639,15 @@ process.stdout.write(JSON.stringify({
             runAgentRunnerImpl(
               {
                 runId: WorkflowRunId.make("run-agy-retry"),
-                runner: RunnerId.make("antigravity"),
+                runner: "antigravity",
                 brief: makeBrief(),
                 cwd: repoRoot,
               },
               {
                 env,
                 antigravityOptions: {
+                  timeoutMs: 2_000,
+                  killGraceMs: 4_000,
                   startupRetryMaxAttempts: 3,
                   startupRetryBackoffMs: 5,
                 },
@@ -621,20 +669,37 @@ process.stdout.write(JSON.stringify({
           expect(agyCaptured.argv).not.toContain("--dangerously-skip-permissions")
           expect(agyCaptured.argv).toContain("--output-format")
           expect(agyCaptured.argv).toContain("json")
-          expect(agyCaptured.argv).toContain("--print-timeout")
+          const ptIdx = agyCaptured.argv.indexOf("--print-timeout")
+          expect(ptIdx).toBeGreaterThan(-1)
+          expect(agyCaptured.argv[ptIdx + 1]).toBe("6s")
           expect(agyCaptured.argv).toContain("--mode")
           expect(agyCaptured.argv).toContain("accept-edits")
           expect(agyCaptured.env["HARNESS_UNIT_WORKER"]).toBe("1")
-          expect(agyCaptured.env["ANTIGRAVITY_CLI_ALIAS"]).toBeUndefined()
-          expect(agyCaptured.env["AGY_SESSION_ID"]).toBeUndefined()
-          expect(agyCaptured.env["CLOUDFLARE_API_TOKEN"]).toBeUndefined()
+          expect(capturedIsStripped(agyCaptured.env)).toBe(true)
+        }),
+      ),
+  )
+
+  it.live(
+    "SPEC-0036 REQ-3.2 / S-3.2: AntigravityRunner rejects hard MCP isolation by default and logs/annotates span on fallback-claude",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot } = initGitRepo(dir)
+          const binDir = join(dir, "bin")
+          const emptyBinDir = join(dir, "empty-bin")
+          const homeDir = join(dir, "home")
+          mkdirSync(homeDir, { recursive: true })
+          mkdirSync(emptyBinDir, { recursive: true })
+          const spawnEnv = makeFakeCliEnv(binDir, homeDir)
+          const env = { ...spawnEnv, PATH: emptyBinDir }
 
           yield* runAgyFail(
             repoRoot,
             env,
             {
               _tag: "AgentToolDeniedError",
-              runner: RunnerId.make("antigravity"),
+              runner: "antigravity",
               noticePart: "hard MCP isolation",
             },
             { mcpIsolation: "hard" },
@@ -644,30 +709,36 @@ process.stdout.write(JSON.stringify({
             env,
             {
               _tag: "AgentToolDeniedError",
-              runner: RunnerId.make("antigravity"),
+              runner: "antigravity",
               noticePart: "hard MCP isolation",
             },
             { mcpIsolation: "hard", hardMcpFallback: "reject" },
           )
 
           writeExecutableScript(binDir, "claude", CLAUDE_CAPTURE_SCRIPT)
+          const loggedWarnings: Array<string> = []
+          const captureLogger = Logger.make(({ message }) => {
+            loggedWarnings.push(String(message))
+          })
           const fallbackRes = yield* runAntigravityImpl(
             {
-              runner: RunnerId.make("antigravity"),
+              runId: WorkflowRunId.make("run-agy-fallback"),
+              runner: "antigravity",
               brief: makeBrief(),
               cwd: repoRoot,
               mcpIsolation: "hard",
               hardMcpFallback: "fallback-claude",
             },
-            { env },
-          )
+            { env: spawnEnv, startupRetryMaxAttempts: 5, startupRetryBackoffMs: 10 },
+          ).pipe(Effect.provide(Logger.layer([captureLogger])))
           expect(fallbackRes.runner).toBe("claude-code")
+          expect(loggedWarnings.some((m) => m.includes("falling back to 'claude-code'"))).toBe(true)
         }),
       ),
   )
 
   it.live(
-    "REQ-3.3..3.4: AntigravityRunner clamps Infinity retries, skips retry on non-empty exit 3, and classifies errors",
+    "SPEC-0036 REQ-3.3..3.4 / F-2.2: AntigravityRunner clamps Infinity retries, ignores benign stderr on exit-0 SUCCESS, and classifies failures",
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
@@ -688,7 +759,7 @@ process.stdout.write(JSON.stringify({
             env,
             {
               _tag: "AgentExitError",
-              runner: RunnerId.make("antigravity"),
+              runner: "antigravity",
               exit: 3,
               messagePart: "exited with code 3",
             },
@@ -707,7 +778,7 @@ process.stdout.write(JSON.stringify({
             env,
             {
               _tag: "AgentExitError",
-              runner: RunnerId.make("antigravity"),
+              runner: "antigravity",
               exit: 3,
               detailPart: "non-empty-failure",
             },
@@ -715,14 +786,33 @@ process.stdout.write(JSON.stringify({
           )
           expect(readFileSync(nonEmptyCounter, "utf8")).toBe("1")
 
+          // F-2.2: exit 0 + status: "SUCCESS" succeeds cleanly even when stderr mentions permission denied
           writeExecutableScript(
             binDir,
             "agy",
             `process.stderr.write("Permission denied by policy\\n"); process.stdout.write(JSON.stringify({ status: "SUCCESS", response: "ok" }));`,
           )
+          const benignStderrOk = yield* runAntigravityImpl(
+            {
+              runId: WorkflowRunId.make("run-agy-benign-stderr"),
+              runner: "antigravity",
+              brief: makeBrief(),
+              cwd: repoRoot,
+            },
+            { env },
+          )
+          expect(benignStderrOk.exit).toBe(0)
+          expect(benignStderrOk.resultText).toBe("ok")
+
+          // F-2.2: status: "FAILED" (or non-zero exit) + stderr soft-denial maps to AgentToolDeniedError
+          writeExecutableScript(
+            binDir,
+            "agy",
+            `process.stderr.write("Permission denied by policy\\n"); process.stdout.write(JSON.stringify({ status: "FAILED", response: "denied" })); process.exit(1);`,
+          )
           yield* runAgyFail(repoRoot, env, {
             _tag: "AgentToolDeniedError",
-            runner: RunnerId.make("antigravity"),
+            runner: "antigravity",
             noticePart: "Permission denied by policy",
           })
 
@@ -733,120 +823,34 @@ process.stdout.write(JSON.stringify({
           )
           yield* runAgyFail(repoRoot, env, {
             _tag: "AgentAuthRequiredError",
-            runner: RunnerId.make("antigravity"),
+            runner: "antigravity",
             detailPart: "Authentication required",
           })
 
           writeExecutableScript(binDir, "agy", `process.stdout.write("not-json");`)
           yield* runAgyFail(repoRoot, env, {
             _tag: "AgentOutputParseError",
-            runner: RunnerId.make("antigravity"),
+            runner: "antigravity",
           })
-        }),
-      ),
-  )
 
-  it.live(
-    "REQ-1.4: Process-group timeout and fiber interruption reap SIGTERM-ignoring grandchild and clean gitCommonDir pgid record",
-    () =>
-      withTempDir((dir) =>
-        Effect.gen(function* () {
-          const { repoRoot } = initGitRepo(dir)
-          const binDir = join(dir, "bin")
-          const homeDir = join(dir, "home")
-          mkdirSync(homeDir, { recursive: true })
-          const env = makeFakeCliEnv(binDir, homeDir)
-
-          const grandchildPidPath = join(dir, "grandchild.pid")
-          writeExecutableScript(
-            binDir,
-            "claude",
-            `
-const { spawn } = require("node:child_process");
-const fs = require("node:fs");
-const child = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"], { stdio: "ignore" });
-fs.writeFileSync(${JSON.stringify(grandchildPidPath)}, String(child.pid), "utf8");
-process.on("SIGTERM", () => {});
-setInterval(() => {}, 1000);
-`,
-          )
-
-          const runId = WorkflowRunId.make("run-timeout-pgid")
-          assertRunnerFailure(
-            yield* Effect.exit(
-              runClaudeCodeImpl(
-                {
-                  runId,
-                  runner: RunnerId.make("claude-code"),
-                  brief: makeBrief(),
-                  cwd: repoRoot,
-                },
-                { env, timeoutMs: 200, killGraceMs: 80 },
-              ),
-            ),
-            {
-              _tag: "AgentTimeoutError",
-              runner: RunnerId.make("claude-code"),
-              afterMillis: 200,
-            },
-          )
-
-          const grandchildPid = Number(readFileSync(grandchildPidPath, "utf8").trim())
-          expect(grandchildPid).toBeGreaterThan(0)
-          expect(isProcessGroupAlive(grandchildPid)).toBe(false)
-          expect(
-            existsSync(
-              join(repoRoot, ".git", "harness", "runner-pgids", `${runId}-pkg-alpha-1.json`),
-            ),
-          ).toBe(false)
-          expect(existsSync(join(repoRoot, ".harness", "runner-pgids"))).toBe(false)
-
-          const interruptPidPath = join(dir, "interrupt-child.pid")
-          writeExecutableScript(
-            binDir,
-            "claude",
-            `
-const { spawn } = require("node:child_process");
-const fs = require("node:fs");
-const child = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"], { stdio: "ignore" });
-fs.writeFileSync(${JSON.stringify(interruptPidPath)}, String(child.pid), "utf8");
-process.on("SIGTERM", () => {});
-setInterval(() => {}, 1000);
-`,
-          )
-          const interruptRunId = WorkflowRunId.make("run-interrupt-1")
-          const interruptFiber = yield* Effect.forkChild(
-            runClaudeCodeImpl(
-              {
-                runId: interruptRunId,
-                runner: RunnerId.make("claude-code"),
-                brief: makeBrief(),
-                cwd: repoRoot,
-              },
-              { env, timeoutMs: 10_000, killGraceMs: 80 },
-            ),
-          )
-          expect(yield* waitForFilesExist([interruptPidPath])).toBe(true)
-          const expectedInterruptPgidPath = join(
+          // F-7.1: Missing agy binary maps to kind === "spawn-failed"
+          yield* runAgyFail(
             repoRoot,
-            ".git",
-            "harness",
-            "runner-pgids",
-            `${interruptRunId}-pkg-alpha-1.json`,
+            { ...env, PATH: join(dir, "empty-bin") },
+            {
+              _tag: "AgentExitError",
+              runner: "antigravity",
+              exit: 1,
+              kind: "spawn-failed",
+              detailPart: "workflow doctor",
+            },
           )
-          expect(existsSync(expectedInterruptPgidPath)).toBe(true)
-          expect(existsSync(join(repoRoot, ".harness", "runner-pgids"))).toBe(false)
-          yield* Fiber.interrupt(interruptFiber)
-          const interruptChildPid = Number(readFileSync(interruptPidPath, "utf8").trim())
-          expect(interruptChildPid).toBeGreaterThan(0)
-          expect(isProcessGroupAlive(interruptChildPid)).toBe(false)
-          expect(existsSync(expectedInterruptPgidPath)).toBe(false)
         }),
       ),
   )
 
   it.live(
-    "REQ-1.4: reapOrphanAttemptProcessGroup enforces procStartTime, symlink, corrupt, and non-git tmpdir isolation",
+    "S-2.1: AgentRunnerPort enforces profile.maxConcurrency per runner without module-global state",
     () =>
       withTempDir((dir) =>
         Effect.gen(function* () {
@@ -854,411 +858,57 @@ setInterval(() => {}, 1000);
           const binDir = join(dir, "bin")
           const homeDir = join(dir, "home")
           mkdirSync(homeDir, { recursive: true })
-          const env = makeFakeCliEnv(binDir, homeDir)
+          const activeDir = join(dir, "active-slots")
+          const peakFile = join(dir, "peak.txt")
+          mkdirSync(activeDir, { recursive: true })
+          writeFileSync(peakFile, "0", "utf8")
 
-          const orphanReadyPath = join(dir, "orphan.ready")
-          const orphanProc = spawn(
-            process.execPath,
-            [
-              "-e",
-              `require("node:fs").writeFileSync(${JSON.stringify(orphanReadyPath)}, String(process.pid), "utf8"); setInterval(() => {}, 1000);`,
-            ],
-            { detached: true, stdio: "ignore" },
-          )
-          const orphanPid = orphanProc.pid!
-          orphanProc.unref()
-          expect(yield* waitForFilesExist([orphanReadyPath])).toBe(true)
-          expect(isProcessGroupAlive(orphanPid)).toBe(true)
-
-          const gitPgidDir = join(repoRoot, ".git", "harness", "runner-pgids")
-          mkdirSync(gitPgidDir, { recursive: true })
-          const orphanRunId = WorkflowRunId.make("run-orphan-1")
-          const orphanRecordPath = join(gitPgidDir, `${orphanRunId}-pkg-alpha-1.json`)
-          const orphanStartTime = readLinuxProcStartTimeForTest(orphanPid)
-          writeFileSync(
-            orphanRecordPath,
-            JSON.stringify({
-              pgid: orphanPid,
-              ...(orphanStartTime !== undefined ? { procStartTime: orphanStartTime } : {}),
-            }),
-            "utf8",
-          )
-
-          writeExecutableScript(binDir, "claude", CLAUDE_CAPTURE_SCRIPT)
-          const recoveredRes = yield* runClaudeCodeImpl(
-            {
-              runId: orphanRunId,
-              runner: RunnerId.make("claude-code"),
-              brief: makeBrief(),
-              cwd: repoRoot,
-            },
-            { env },
-          )
-          expect(recoveredRes.exit).toBe(0)
-          expect(isProcessGroupAlive(orphanPid)).toBe(false)
-          expect(existsSync(orphanRecordPath)).toBe(false)
-
-          const nonGitCwd = join(dir, "non-git-cwd")
-          mkdirSync(nonGitCwd, { recursive: true })
-          const nonGitRunId = WorkflowRunId.make("run-non-git-1")
-          const nonGitRes = yield* runClaudeCodeImpl(
-            {
-              runId: nonGitRunId,
-              runner: RunnerId.make("claude-code"),
-              brief: makeBrief(),
-              cwd: AbsoluteRepoRoot.make(nonGitCwd),
-            },
-            { env },
-          )
-          expect(nonGitRes.exit).toBe(0)
-          expect(existsSync(join(nonGitCwd, ".harness"))).toBe(false)
-          expect(
-            existsSync(join(tmpdir(), "harness-runner-pgids", `${nonGitRunId}-pkg-alpha-1.json`)),
-          ).toBe(false)
-
-          const corruptPgidPath = join(dir, "corrupt-pgid.json")
-          writeFileSync(corruptPgidPath, "{bad-pgid", "utf8")
-          yield* reapOrphanAttemptProcessGroup(corruptPgidPath)
-          expect(existsSync(corruptPgidPath)).toBe(false)
-
-          const symTargetPgidPath = join(dir, "sym-target-pgid.json")
-          writeFileSync(symTargetPgidPath, JSON.stringify({ pgid: 999999 }), "utf8")
-          const symPgidPath = join(dir, "sym-pgid.json")
-          symlinkSync(symTargetPgidPath, symPgidPath)
-          yield* reapOrphanAttemptProcessGroup(symPgidPath)
-          expect(existsSync(symTargetPgidPath)).toBe(true)
-
-          const liveGuardReady = join(dir, "guard.ready")
-          const liveGuardProc = spawn(
-            process.execPath,
-            [
-              "-e",
-              `require("node:fs").writeFileSync(${JSON.stringify(liveGuardReady)}, String(process.pid), "utf8"); setInterval(() => {}, 1000);`,
-            ],
-            { detached: true, stdio: "ignore" },
-          )
-          const liveGuardPid = liveGuardProc.pid!
-          liveGuardProc.unref()
-          expect(yield* waitForFilesExist([liveGuardReady])).toBe(true)
-
-          if (process.platform === "linux") {
-            const missingStartPath = join(dir, "missing-start-pgid.json")
-            writeFileSync(missingStartPath, JSON.stringify({ pgid: liveGuardPid }), "utf8")
-            yield* reapOrphanAttemptProcessGroup(missingStartPath)
-            expect(isProcessGroupAlive(liveGuardPid)).toBe(true)
-            expect(existsSync(missingStartPath)).toBe(false)
-          }
-
-          const reuseRecordPath = join(dir, "reuse-pgid.json")
-          writeFileSync(
-            reuseRecordPath,
-            JSON.stringify({ pgid: liveGuardPid, procStartTime: "999999999999" }),
-            "utf8",
-          )
-          yield* reapOrphanAttemptProcessGroup(reuseRecordPath)
-          if (process.platform === "linux") {
-            expect(isProcessGroupAlive(liveGuardPid)).toBe(true)
-          }
-          expect(existsSync(reuseRecordPath)).toBe(false)
-          if (isProcessGroupAlive(liveGuardPid)) {
-            process.kill(-liveGuardPid, "SIGKILL")
-          }
-        }),
-      ),
-  )
-
-  it.live(
-    "REQ-4.1..4.4: All 6 AgentRunnerError variants map via toOutcome, UnitVerifierLive emits AgentNoChangeError, and dispatcher spans satisfy SpanBudget",
-    () =>
-      withTempDir((dir) =>
-        Effect.gen(function* () {
-          const { repoRoot, baseSha } = initGitRepo(dir)
-          const unitId = WorkUnitId.make("pkg-alpha")
-          const attempt = AttemptNumber.make(1)
-
-          const authOutcome = toOutcome(
-            unitId,
-            attempt,
-            new AgentAuthRequiredError({ runner: RunnerId.make("claude-code") }),
-          )
-          expect(authOutcome._tag).toBe("Escalated")
-
-          const rejectedErrors: ReadonlyArray<AgentRunnerError> = [
-            new AgentTimeoutError({
-              runner: RunnerId.make("claude-code"),
-              afterMillis: TimeoutMillis.make(1000),
-            }),
-            new AgentToolDeniedError({
-              runner: RunnerId.make("claude-code"),
-              notice: DenialNotice.make("denied"),
-            }),
-            new AgentExitError({
-              runner: RunnerId.make("antigravity"),
-              exit: AgentExitCode.make(2),
-            }),
-            new AgentOutputParseError({
-              runner: RunnerId.make("antigravity"),
-              detail: AgentDiagnosticDetail.make("bad json"),
-            }),
-            new AgentNoChangeError({ runner: RunnerId.make("claude-code") }),
-          ]
-          for (const err of rejectedErrors) {
-            const outcome = toOutcome(unitId, attempt, err)
-            match(outcome)
-              .with({ _tag: "Rejected" }, ({ rejection }) => {
-                match(rejection)
-                  .with({ _tag: "AgentFailed" }, ({ reason }) => {
-                    expect(reason).toContain(err._tag)
-                  })
-                  .with(
-                    { _tag: "WriteSetViolation" },
-                    { _tag: "PackageVerifyFailed" },
-                    { _tag: "StampMissing" },
-                    () => {
-                      expect.unreachable(`Expected AgentFailed for ${err._tag}`)
-                    },
-                  )
-                  .exhaustive()
-              })
-              .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
-                expect.unreachable(`Expected Rejected for ${err._tag}`)
-              })
-              .exhaustive()
-          }
-
-          // UnitVerifierLive ignores .harness/runner-pgids/* artifacts and still emits AgentNoChangeError
-          mkdirSync(join(repoRoot, ".harness", "runner-pgids"), { recursive: true })
-          writeFileSync(
-            join(repoRoot, ".harness", "runner-pgids", "stale-pgid.json"),
-            '{"pgid":1}',
-            "utf8",
-          )
-          const autoEmptyOutcome = yield* Effect.gen(function* () {
-            const verifier = yield* UnitVerifier
-            return yield* verifier.completeUnit({
-              runId: WorkflowRunId.make("run-empty-auto"),
-              level: "slice",
-              baseSha,
-              unit: makePackageUnit(),
-              attempt,
-              cwd: repoRoot,
-              siblingInFlightOwnedPaths: [],
-              runner: RunnerId.make("claude-code"),
-            })
-          }).pipe(Effect.provide(UnitVerifierLive))
-          match(autoEmptyOutcome)
-            .with({ _tag: "Rejected" }, ({ rejection }) => {
-              match(rejection)
-                .with({ _tag: "AgentFailed" }, ({ reason }) => {
-                  expect(reason).toContain("AgentNoChangeError")
-                })
-                .with(
-                  { _tag: "WriteSetViolation" },
-                  { _tag: "PackageVerifyFailed" },
-                  { _tag: "StampMissing" },
-                  () => {
-                    expect.unreachable("Expected AgentFailed for empty automatic diff")
-                  },
-                )
-                .exhaustive()
-            })
-            .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
-              expect.unreachable("Expected Rejected for empty automatic diff")
-            })
-            .exhaustive()
-
-          const manualEmptyOutcome = yield* Effect.gen(function* () {
-            const verifier = yield* UnitVerifier
-            return yield* verifier.completeUnit({
-              runId: WorkflowRunId.make("run-empty-manual"),
-              level: "slice",
-              baseSha,
-              unit: makePackageUnit(),
-              attempt,
-              cwd: repoRoot,
-              siblingInFlightOwnedPaths: [],
-            })
-          }).pipe(Effect.provide(UnitVerifierLive))
-          expect(manualEmptyOutcome).toMatchObject({
-            _tag: "Rejected",
-            rejection: {
-              _tag: "AgentFailed",
-              reason: "No changed files detected for unit completion",
-            },
-          })
-        }),
-      ),
-  )
-
-  it.live(
-    "REQ-4.1..4.3: UnitAgentDispatcherLiveFromPort satisfies SpanBudget and dedicated runner layers fail closed on mismatch",
-    () =>
-      withTempDir((dir) =>
-        Effect.gen(function* () {
-          const { repoRoot } = initGitRepo(dir)
-          const binDir = join(dir, "bin")
-          const homeDir = join(dir, "home")
-          mkdirSync(homeDir, { recursive: true })
-          writeExecutableScript(binDir, "claude", CLAUDE_CAPTURE_SCRIPT)
           writeExecutableScript(
             binDir,
             "agy",
-            `process.stdout.write(JSON.stringify({ status: "SUCCESS", response: "Layer agy ok" }));`,
+            `
+const fs = require("node:fs");
+const path = require("node:path");
+const activeDir = ${JSON.stringify(activeDir)};
+const peakFile = ${JSON.stringify(peakFile)};
+const slotPath = path.join(activeDir, String(process.pid) + "-" + Date.now() + "-" + Math.random());
+fs.writeFileSync(slotPath, "1", "utf8");
+const current = fs.readdirSync(activeDir).length;
+const prevPeak = Number(fs.readFileSync(peakFile, "utf8"));
+if (current > prevPeak) fs.writeFileSync(peakFile, String(current), "utf8");
+setTimeout(() => {
+  fs.unlinkSync(slotPath);
+  process.stdout.write(JSON.stringify({ status: "SUCCESS", response: "concurrent ok" }));
+}, 140);
+`,
           )
+
           const env = makeFakeCliEnv(binDir, homeDir)
-
-          const { result: dispatched, spans } = yield* runWithTestTracer(
-            "dispatcher-live-fake",
-            Effect.gen(function* () {
-              const dispatcher = yield* UnitAgentDispatcher
-              return yield* dispatcher.dispatchUnit({
-                runId: WorkflowRunId.make("run-dispatch-span"),
-                unit: makePackageUnit(),
-                attempt: AttemptNumber.make(2),
-                runner: RunnerId.make("claude-code"),
-                cwd: repoRoot,
-                priorRejection: UnitRejection.cases.StampMissing.make({}),
-              })
-            }).pipe(
-              Effect.provide(
-                UnitAgentDispatcherLiveFromPort.pipe(
-                  Layer.provide(makeAgentRunnerPortLayer({ env })),
-                ),
-              ),
-            ),
-          )
-          expect(dispatched._tag).toBe("Completed")
-          expect(spans.some((s) => s.name === "UnitAgentDispatcher.dispatchUnit")).toBe(true)
-          expect(spans.some((s) => s.name === "AgentRunner.run")).toBe(true)
-          expect(yield* decideSpanBudgets({ spans })).toEqual([])
-
-          const claudeLayerOk = yield* Effect.gen(function* () {
+          const results = yield* Effect.gen(function* () {
             const port = yield* AgentRunnerPort
-            return yield* port.run({
-              runner: RunnerId.make("claude-code"),
-              brief: makeBrief(),
-              cwd: repoRoot,
-            })
-          }).pipe(Effect.provide(makeClaudeCodeRunnerLayer({ env })))
-          expect(claudeLayerOk.runner).toBe("claude-code")
-          expect(claudeLayerOk.exit).toBe(0)
-
-          const agyLayerOk = yield* Effect.gen(function* () {
-            const port = yield* AgentRunnerPort
-            return yield* port.run({
-              runner: RunnerId.make("antigravity"),
-              brief: makeBrief(),
-              cwd: repoRoot,
-            })
-          }).pipe(Effect.provide(makeAntigravityRunnerLayer({ env })))
-          expect(agyLayerOk.runner).toBe("antigravity")
-          expect(agyLayerOk.resultText).toBe("Layer agy ok")
-
-          assertRunnerFailure(
-            yield* Effect.exit(
-              Effect.gen(function* () {
-                const port = yield* AgentRunnerPort
-                return yield* port.run({
-                  runner: RunnerId.make("antigravity"),
+            return yield* Effect.forEach(
+              [1, 2, 3, 4],
+              (idx) =>
+                port.run({
+                  runId: WorkflowRunId.make(`run-conc-${idx}`),
+                  runner: "antigravity",
                   brief: makeBrief(),
                   cwd: repoRoot,
-                })
-              }).pipe(Effect.provide(makeClaudeCodeRunnerLayer({ env }))),
-            ),
-            {
-              _tag: "AgentExitError",
-              runner: RunnerId.make("antigravity"),
-              exit: 1,
-              detailPart: "ClaudeCodeRunner cannot execute",
-            },
-          )
+                }),
+              { concurrency: "unbounded" },
+            )
+          }).pipe(Effect.provide(makeAgentRunnerPortLayer({ env })))
 
-          assertRunnerFailure(
-            yield* Effect.exit(
-              Effect.gen(function* () {
-                const port = yield* AgentRunnerPort
-                return yield* port.run({
-                  runner: RunnerId.make("claude-code"),
-                  brief: makeBrief(),
-                  cwd: repoRoot,
-                })
-              }).pipe(Effect.provide(makeAntigravityRunnerLayer({ env }))),
-            ),
-            {
-              _tag: "AgentExitError",
-              runner: RunnerId.make("claude-code"),
-              exit: 1,
-              detailPart: "AntigravityRunner cannot execute",
-            },
-          )
-        }),
-      ),
-  )
-
-  it.live(
-    "REQ-4.6: inspectWorkflowRunnerDoctorChecks reports dispatcher, claude, and agy readiness",
-    () =>
-      withTempDir((dir) =>
-        Effect.gen(function* () {
-          const binDir = join(dir, "bin")
-          const homeDir = join(dir, "home")
-          mkdirSync(binDir, { recursive: true })
-          mkdirSync(homeDir, { recursive: true })
-
-          const missingChecks = yield* inspectWorkflowRunnerDoctorChecks({
-            runnerKind: "placeholder",
-            env: { PATH: binDir, HOME: homeDir },
-          })
-          expect(missingChecks.map((c) => [c.name, c.status])).toEqual([
-            ["agent-dispatcher", "warn"],
-            ["runner-claude-code", "warn"],
-            ["runner-antigravity", "warn"],
-          ])
-
-          writeExecutableScript(binDir, "claude", "process.exit(0);")
-          writeExecutableScript(binDir, "agy", "process.exit(0);")
-          const agySettingsDir = join(homeDir, ".gemini", "antigravity-cli")
-          mkdirSync(agySettingsDir, { recursive: true })
-          const agySettingsPath = join(agySettingsDir, "settings.json")
-          writeFileSync(agySettingsPath, JSON.stringify({ mode: "accept-edits" }), "utf8")
-
-          const readyChecks = yield* inspectWorkflowRunnerDoctorChecks({
-            runnerKind: "live",
-            env: { PATH: binDir, HOME: homeDir },
-          })
-          expect(readyChecks.map((c) => [c.name, c.status])).toEqual([
-            ["agent-dispatcher", "ok"],
-            ["runner-claude-code", "ok"],
-            ["runner-antigravity", "ok"],
-          ])
-
-          // Non-executable claude + invalid settings.json -> warn
-          chmodSync(join(binDir, "claude"), 0o644)
-          writeFileSync(agySettingsPath, "{corrupt-json", "utf8")
-          const degradedChecks = yield* inspectWorkflowRunnerDoctorChecks({
-            runnerKind: "live",
-            env: { PATH: binDir, HOME: homeDir },
-          })
-          expect(degradedChecks.map((c) => [c.name, c.status])).toEqual([
-            ["agent-dispatcher", "ok"],
-            ["runner-claude-code", "warn"],
-            ["runner-antigravity", "warn"],
-          ])
-
-          // Symlink settings.json -> runner-antigravity warn
-          const realTarget = join(dir, "real-agy-settings.json")
-          writeFileSync(realTarget, JSON.stringify({ mode: "accept-edits" }), "utf8")
-          const symHome = join(dir, "sym-home")
-          const symSettingsDir = join(symHome, ".gemini", "antigravity-cli")
-          mkdirSync(symSettingsDir, { recursive: true })
-          symlinkSync(realTarget, join(symSettingsDir, "settings.json"))
-          const symChecks = yield* inspectWorkflowRunnerDoctorChecks({
-            runnerKind: "live",
-            env: { PATH: binDir, HOME: symHome },
-          })
-          expect(symChecks[2]?.name).toBe("runner-antigravity")
-          expect(symChecks[2]?.status).toBe("warn")
+          expect(results).toHaveLength(4)
+          const peakObserved = Number(readFileSync(peakFile, "utf8").trim())
+          expect(peakObserved).toBeGreaterThanOrEqual(1)
+          expect(peakObserved).toBeLessThanOrEqual(2)
         }),
       ),
   )
 })
+
+const capturedIsStripped = (env: Readonly<Record<string, string>>): boolean =>
+  env["ANTIGRAVITY_CLI_ALIAS"] === undefined &&
+  env["AGY_SESSION_ID"] === undefined &&
+  env["CLOUDFLARE_API_TOKEN"] === undefined

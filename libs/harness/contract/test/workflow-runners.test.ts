@@ -2,30 +2,31 @@ import { Cause, Schema } from "effect"
 import { match } from "ts-pattern"
 import { describe, expect, it } from "vitest"
 import {
-  AGENT_USAGE_STATUSES,
+  AGENT_EXIT_FAILURE_KINDS,
   ANTIGRAVITY_MODES,
   AbsoluteRepoRoot,
   AgentAuthRequiredError,
   AgentCostUsd,
   AgentDiagnosticDetail,
   AgentDurationMillis,
-  AgentExitCode,
   AgentExitError,
+  AgentExitFailureKind,
   AgentFailureReason,
   AgentMaxTurns,
   AgentNoChangeError,
+  AgentNonZeroExitCode,
   AgentOutputParseError,
   AgentResultText,
   AgentRunRequest,
   AgentRunResult,
   AgentRunnerError,
   AgentSessionId,
+  AgentSuccessExitCode,
   AgentTimeoutError,
   AgentTokenCount,
   AgentToolDeniedError,
   AgentTurnCount,
   AgentUsage,
-  AgentUsageStatus,
   AntigravityMode,
   AttemptNumber,
   BriefPrompt,
@@ -44,12 +45,15 @@ import {
   PackageVerifyCommand,
   PackageVerifyFailureKind,
   PermissionRule,
+  ReportedAgentUsage,
   RunnerConfigFilePath,
   RunnerId,
   RunnerProfile,
   TimeoutMillis,
+  UnavailableAgentUsage,
   UnitAgentRequest,
   UnitBrief,
+  UnitMode,
   UnitRejection,
   WorkUnitId,
   WorkflowRunId,
@@ -137,8 +141,8 @@ describe("@harness/contract workflow-runners schemas & helpers (SPEC-0036)", () 
 
     expectCases(
       TimeoutMillis,
-      [1, 5_000, 600_000],
-      [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "5000", null],
+      [1, 5_000, 600_000, 2_147_483_647],
+      [0, -1, 1.5, 2_147_483_648, Number.NaN, Number.POSITIVE_INFINITY, "5000", null],
     )
 
     expectCases(
@@ -148,8 +152,11 @@ describe("@harness/contract workflow-runners schemas & helpers (SPEC-0036)", () 
     )
   })
 
-  it("validates AgentExitCode, AgentResultText, BriefPrompt, RunnerConfigFilePath, and AgentDiagnosticDetail", () => {
-    expectCases(AgentExitCode, [0, 1, 137, 255], [-1, 256, 1.5, Number.NaN, "0", null])
+  it("validates AgentSuccessExitCode, AgentNonZeroExitCode, AgentExitFailureKind, AgentResultText, BriefPrompt, RunnerConfigFilePath, and AgentDiagnosticDetail", () => {
+    expectCases(AgentSuccessExitCode, [0], [-1, 1, 255, "0", null])
+    expectCases(AgentNonZeroExitCode, [1, 137, 255], [0, -1, 256, 1.5, Number.NaN, "1", null])
+    expect(AGENT_EXIT_FAILURE_KINDS).toEqual(["exit", "signal", "spawn-failed"])
+    expectCases(AgentExitFailureKind, AGENT_EXIT_FAILURE_KINDS, ["", "timeout", null])
 
     expectCases(
       AgentResultText,
@@ -209,7 +216,7 @@ describe("@harness/contract workflow-runners schemas & helpers (SPEC-0036)", () 
     )
   })
 
-  it("validates AntigravityMode, McpIsolationLevel, McpFallbackPolicy, and AgentUsageStatus literal unions", () => {
+  it("validates AntigravityMode, McpIsolationLevel, McpFallbackPolicy, and UnitMode automatic isolation", () => {
     expect(ANTIGRAVITY_MODES).toEqual(["accept-edits", "auto", "plan"])
     expectCases(AntigravityMode, ANTIGRAVITY_MODES, ["", "manual", "AUTO", null])
     for (const mode of ANTIGRAVITY_MODES) {
@@ -244,25 +251,29 @@ describe("@harness/contract workflow-runners schemas & helpers (SPEC-0036)", () 
       expect(label).toBe(policy)
     }
 
-    expect(AGENT_USAGE_STATUSES).toEqual(["reported", "unavailable"])
-    expectCases(AgentUsageStatus, AGENT_USAGE_STATUSES, ["", "partial", null])
-    for (const status of AGENT_USAGE_STATUSES) {
-      const decoded = expectDecodeSuccess(AgentUsageStatus, status)
-      const label = match(decoded)
-        .with("reported", () => "reported")
-        .with("unavailable", () => "unavailable")
-        .exhaustive()
-      expect(label).toBe(status)
-    }
+    const autoMode = expectDecodeSuccess(UnitMode, {
+      _tag: "Automatic",
+      runner: "antigravity",
+      maxConcurrency: 2,
+      mcpIsolation: "hard",
+      hardMcpFallback: "fallback-claude",
+    })
+    expect(autoMode).toEqual({
+      _tag: "Automatic",
+      runner: "antigravity",
+      maxConcurrency: 2,
+      mcpIsolation: "hard",
+      hardMcpFallback: "fallback-claude",
+    })
   })
 
   it("validates AgentUsage, UnitBrief, RunnerProfile (with binary/runner refinement), AgentRunRequest, and AgentRunResult", () => {
-    const unavailableUsage = expectDecodeSuccess(AgentUsage, { status: "unavailable" })
-    expect(unavailableUsage).toEqual({ status: "unavailable" })
-    expect(Schema.encodeSync(AgentUsage)(unavailableUsage)).toEqual({ status: "unavailable" })
+    const unavailableUsage = expectDecodeSuccess(AgentUsage, { _tag: "Unavailable" })
+    expect(unavailableUsage).toEqual(UnavailableAgentUsage.make({}))
+    expect(Schema.encodeSync(AgentUsage)(unavailableUsage)).toEqual({ _tag: "Unavailable" })
 
     const fullUsage = expectDecodeSuccess(AgentUsage, {
-      status: "reported",
+      _tag: "Reported",
       inputTokens: 1200,
       outputTokens: 350,
       thinkingTokens: 150,
@@ -272,13 +283,25 @@ describe("@harness/contract workflow-runners schemas & helpers (SPEC-0036)", () 
       durationMillis: 9200,
       sessionId: "sess-abc-123",
     })
-    expect(fullUsage.totalTokens).toBe(1700)
+    expect(fullUsage).toEqual(
+      ReportedAgentUsage.make({
+        inputTokens: AgentTokenCount.make(1200),
+        outputTokens: AgentTokenCount.make(350),
+        thinkingTokens: AgentTokenCount.make(150),
+        totalTokens: AgentTokenCount.make(1700),
+        numTurns: AgentTurnCount.make(4),
+        totalCostUsd: AgentCostUsd.make(0.042),
+        durationMillis: AgentDurationMillis.make(9200),
+        sessionId: AgentSessionId.make("sess-abc-123"),
+      }),
+    )
     expect(Schema.decodeSync(AgentUsage)(Schema.encodeSync(AgentUsage)(fullUsage))).toEqual(
       fullUsage,
     )
-    expectDecodeFailure(AgentUsage, { status: "reported", inputTokens: -1 })
-    expectDecodeFailure(AgentUsage, { status: "reported", totalCostUsd: -0.5 })
-    expectDecodeFailure(AgentUsage, { status: "unknown" })
+    expectDecodeFailure(AgentUsage, { _tag: "Reported" })
+    expectDecodeFailure(AgentUsage, { _tag: "Reported", inputTokens: -1 })
+    expectDecodeFailure(AgentUsage, { _tag: "Reported", totalCostUsd: -0.5 })
+    expectDecodeFailure(AgentUsage, { _tag: "Unknown" })
 
     const minimalBrief = expectDecodeSuccess(UnitBrief, {
       unitId: "unit-a",
@@ -330,7 +353,6 @@ describe("@harness/contract workflow-runners schemas & helpers (SPEC-0036)", () 
       runner: "antigravity",
       binary: "agy",
       permissionRules: ["Read"],
-      disallowedTools: [],
       maxConcurrency: 1,
       timeoutMillis: 600_000,
       model: "gemini-2.5-pro",
@@ -354,7 +376,6 @@ describe("@harness/contract workflow-runners schemas & helpers (SPEC-0036)", () 
       runner: "antigravity",
       binary: "claude",
       permissionRules: [],
-      disallowedTools: [],
       maxConcurrency: 1,
       timeoutMillis: 60_000,
     })
@@ -369,11 +390,19 @@ describe("@harness/contract workflow-runners schemas & helpers (SPEC-0036)", () 
     })
 
     const minimalRequest = expectDecodeSuccess(AgentRunRequest, {
+      runId: "wf5-run-000",
       runner: "claude-code",
       brief: minimalBrief,
       cwd: "/repo/worktrees/wf5",
     })
-    expect(minimalRequest.runId).toBeUndefined()
+    expect(minimalRequest.runId).toBe("wf5-run-000")
+
+    // runId is required on AgentRunRequest
+    expectDecodeFailure(AgentRunRequest, {
+      runner: "claude-code",
+      brief: minimalBrief,
+      cwd: "/repo/worktrees/wf5",
+    })
 
     const fullRequest = expectDecodeSuccess(AgentRunRequest, {
       runId: "wf5-run-001",
@@ -387,6 +416,7 @@ describe("@harness/contract workflow-runners schemas & helpers (SPEC-0036)", () 
       Schema.decodeSync(AgentRunRequest)(Schema.encodeSync(AgentRunRequest)(fullRequest)),
     ).toEqual(fullRequest)
     expectDecodeFailure(AgentRunRequest, {
+      runId: "wf5-run-001",
       runner: "claude-code",
       brief: minimalBrief,
       cwd: "relative/worktree",
@@ -401,6 +431,12 @@ describe("@harness/contract workflow-runners schemas & helpers (SPEC-0036)", () 
     expect(Schema.decodeSync(AgentRunResult)(Schema.encodeSync(AgentRunResult)(runResult))).toEqual(
       runResult,
     )
+    expectDecodeFailure(AgentRunResult, {
+      runner: "claude-code",
+      exit: 1,
+      resultText: "Non-zero result exit",
+      usage: unavailableUsage,
+    })
     expectDecodeFailure(AgentRunResult, {
       runner: "claude-code",
       exit: 256,
@@ -492,16 +528,18 @@ describe("@harness/contract workflow-runners schemas & helpers (SPEC-0036)", () 
 
     const exitNoDetailErr = new AgentExitError({
       runner: claude,
-      exit: AgentExitCode.make(1),
+      exit: AgentNonZeroExitCode.make(1),
     })
     expect(exitNoDetailErr.message).toBe("Runner 'claude-code' exited with code 1")
 
     const exitWithDetailErr = new AgentExitError({
       runner: claude,
-      exit: AgentExitCode.make(2),
+      exit: AgentNonZeroExitCode.make(2),
+      kind: "spawn-failed",
       detail: AgentDiagnosticDetail.make("crash"),
     })
     expect(exitWithDetailErr.message).toBe("Runner 'claude-code' exited with code 2: crash")
+    expect(exitWithDetailErr.kind).toBe("spawn-failed")
 
     const parseNoDetailErr = new AgentOutputParseError({ runner: claude })
     expect(parseNoDetailErr.message).toBe("Runner 'claude-code' produced invalid JSON output")
@@ -555,6 +593,11 @@ describe("@harness/contract workflow-runners schemas & helpers (SPEC-0036)", () 
     expectDecodeFailure(AgentRunnerError, {
       _tag: "AgentExitError",
       runner: "claude-code",
+      exit: 0,
+    })
+    expectDecodeFailure(AgentRunnerError, {
+      _tag: "AgentExitError",
+      runner: "claude-code",
       exit: 256,
     })
   })
@@ -595,6 +638,7 @@ describe("@harness/contract workflow-runners schemas & helpers (SPEC-0036)", () 
       UnitRejection.cases.StampMissing.make({}),
       UnitRejection.cases.AgentFailed.make({
         reason: AgentFailureReason.make("Runner timed out"),
+        escalationKind: "AuthRequired",
       }),
     ]
 
@@ -606,6 +650,8 @@ describe("@harness/contract workflow-runners schemas & helpers (SPEC-0036)", () 
         runner: RunnerId.make("antigravity"),
         cwd: AbsoluteRepoRoot.make("/repo/worktrees/wf5"),
         priorRejection,
+        mcpIsolation: "hard",
+        hardMcpFallback: "fallback-claude",
       })
       expect(requestWithPrior.priorRejection).toEqual(priorRejection)
       expect(

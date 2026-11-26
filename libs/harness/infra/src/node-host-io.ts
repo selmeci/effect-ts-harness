@@ -1,4 +1,4 @@
-import { execFile, spawn, spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import {
   accessSync,
   appendFileSync,
@@ -41,6 +41,7 @@ import type {
   SyncHostSpawnDetachedOptions,
   SyncHostSpawnDetachedResult,
 } from "@harness/service/host-io"
+import { spawnSupervisedProcessGroup } from "./workflow/verify-child-process.js"
 
 const validateSyncCommandInput = (
   trimmedCommand: string,
@@ -487,72 +488,8 @@ export const nodeSyncHostIo: ExtendedHostIo = {
   },
 }
 
-const mapAsyncExecCompletion = (
-  err: unknown,
-  stdout: string,
-  stderr: string,
-  hasTimeout: boolean,
-): SyncHostExecResult => {
-  if (err === null || err === undefined) {
-    return { _tag: "Exited", exitCode: 0, stdout, stderr }
-  }
-  const errObj = typeof err === "object" ? err : {}
-  const killed = "killed" in errObj && errObj.killed === true
-  const rawCode = "code" in errObj ? errObj.code : undefined
-  const rawSignal = "signal" in errObj && typeof errObj.signal === "string" ? errObj.signal : null
-  const errMessage =
-    err instanceof Error
-      ? err.message
-      : typeof err === "string"
-        ? err
-        : "Subprocess execution failed"
-  const errCode = typeof rawCode === "string" ? rawCode : undefined
-
-  if (errCode === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
-    return {
-      _tag: "SpawnFailed",
-      spawnError: errMessage,
-      errorCode: errCode,
-      stdout,
-      stderr,
-    }
-  }
-  if (
-    errCode === "ETIMEDOUT" ||
-    (killed && hasTimeout && (rawSignal !== null || errCode === undefined))
-  ) {
-    return {
-      _tag: "TimedOut",
-      stdout,
-      stderr,
-      ...(rawSignal !== null ? { signal: rawSignal } : {}),
-      spawnError: errMessage,
-    }
-  }
-  if (typeof rawCode === "number") {
-    return {
-      _tag: "Exited",
-      exitCode: rawCode,
-      stdout,
-      stderr,
-    }
-  }
-  if (rawSignal !== null) {
-    return {
-      _tag: "Signaled",
-      signal: rawSignal,
-      stdout,
-      stderr,
-    }
-  }
-  return {
-    _tag: "SpawnFailed",
-    spawnError: errMessage,
-    ...(errCode !== undefined ? { errorCode: errCode } : {}),
-    stdout,
-    stderr,
-  }
-}
+const DEFAULT_ASYNC_EXEC_MAX_BUFFER_BYTES = 1024 * 1024
+const ASYNC_EXEC_KILL_GRACE_MS = 250
 
 export const execFileAsyncEffect = Effect.fn("NodeHostIo.execFileAsync")(function* (
   command: string,
@@ -570,34 +507,13 @@ export const execFileAsyncEffect = Effect.fn("NodeHostIo.execFileAsync")(functio
       stderr: invalidReason,
     }
   }
-  return yield* Effect.callback<SyncHostExecResult>((resume) => {
-    const child = execFile(
-      trimmedCommand,
-      [...args],
-      {
-        cwd: normalizedCwd,
-        encoding: "utf8",
-        timeout: options?.timeoutMs,
-        maxBuffer: options?.maxBufferBytes,
-        env: options?.env,
-        windowsHide: true,
-      },
-      (err, stdout, stderr) => {
-        resume(
-          Effect.succeed(
-            mapAsyncExecCompletion(
-              err,
-              stdout ?? "",
-              stderr ?? "",
-              options?.timeoutMs !== undefined,
-            ),
-          ),
-        )
-      },
-    )
-    return Effect.sync(() => {
-      child.kill()
-    })
+  return yield* spawnSupervisedProcessGroup<never>(trimmedCommand, [...args], {
+    ...(normalizedCwd !== undefined ? { cwd: normalizedCwd } : {}),
+    ...(options?.env !== undefined ? { env: options.env } : {}),
+    timeoutMs: options?.timeoutMs ?? 0,
+    killGraceMs: ASYNC_EXEC_KILL_GRACE_MS,
+    stdoutCaptureMode: "bounded-async",
+    maxBufferBytes: options?.maxBufferBytes ?? DEFAULT_ASYNC_EXEC_MAX_BUFFER_BYTES,
   })
 })
 

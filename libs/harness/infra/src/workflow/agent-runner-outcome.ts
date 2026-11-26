@@ -2,19 +2,22 @@ import {
   AgentAuthRequiredError,
   AgentCostUsd,
   AgentDurationMillis,
-  AgentExitCode,
   AgentExitError,
+  AgentNonZeroExitCode,
   AgentOutputParseError,
   AgentResultText,
   type AgentRunResult,
   type AgentRunnerError,
   AgentSessionId,
+  AgentSuccessExitCode,
   AgentTokenCount,
   AgentToolDeniedError,
   AgentTurnCount,
   type AgentUsage,
   type AttemptNumber,
+  ReportedAgentUsage,
   type RunnerId,
+  UnavailableAgentUsage,
   UnitAgentDispatchResult,
   UnitOutcome,
   type WorkUnitId,
@@ -29,7 +32,7 @@ const MAX_RESULT_TEXT_CHARS = 262_144
 const MAX_SESSION_ID_CHARS = 256
 
 const AUTH_PROMPT_RE =
-  /\b(?:not logged in|please (?:run \/login|log in|login|authenticate)|invalid api key|authentication (?:failed|required|error)|auth(?:entication)? expired|oauth token.*expired|unauthenticated|unauthorized)\b|\/login\b/i
+  /(?<![/-]|\w\.)(?:\b(?:not logged in|please (?:run \/login|log in|login|authenticate)|run \/login|invalid api key|authentication (?:failed|required|error)|auth(?:entication)? expired|oauth token.*expired|unauthenticated|unauthorized)\b)(?![/-]|[._]\w)/i
 
 const SOFT_DENIAL_RE =
   /\b(?:permission denied|tool(?: call)? (?:was )?denied|soft[- ]denial|denied by (?:policy|hook|user)|tool permission denied|blocked by (?:guard|policy|hook))\b/i
@@ -42,6 +45,8 @@ const ClaudeUsageEnvelope = Schema.Struct({
 })
 
 const ClaudeOutputEnvelope = Schema.Struct({
+  type: Schema.optional(Schema.String),
+  subtype: Schema.optional(Schema.String),
   result: Schema.optional(Schema.String),
   is_error: Schema.optional(Schema.Boolean),
   num_turns: Schema.optional(Schema.Finite),
@@ -73,8 +78,8 @@ const decodeAntigravityEnvelope = Schema.decodeUnknownResult(
   Schema.fromJsonString(AntigravityOutputEnvelope),
 )
 
-const toClampedExitCode = (exitCode: number): AgentExitCode =>
-  AgentExitCode.make(Math.min(255, Math.max(1, Math.trunc(exitCode))))
+const toClampedExitCode = (exitCode: number): AgentNonZeroExitCode =>
+  AgentNonZeroExitCode.make(Math.min(255, Math.max(1, Math.trunc(exitCode))))
 
 const toBoundedResultText = (raw: string): AgentResultText =>
   AgentResultText.make(
@@ -82,14 +87,21 @@ const toBoundedResultText = (raw: string): AgentResultText =>
   )
 
 const toOptionalTokenCount = (value: number | undefined): AgentTokenCount | undefined =>
-  value !== undefined ? AgentTokenCount.make(Math.max(0, Math.trunc(value))) : undefined
+  value !== undefined && Number.isInteger(value) && value >= 0
+    ? AgentTokenCount.make(value)
+    : undefined
 
 const toOptionalTurnCount = (value: number | undefined): AgentTurnCount | undefined =>
-  value !== undefined ? AgentTurnCount.make(Math.max(0, Math.trunc(value))) : undefined
+  value !== undefined && Number.isInteger(value) && value >= 0
+    ? AgentTurnCount.make(value)
+    : undefined
+
+const toOptionalCostUsd = (value: number | undefined): AgentCostUsd | undefined =>
+  value !== undefined && Number.isFinite(value) && value >= 0 ? AgentCostUsd.make(value) : undefined
 
 const toOptionalDurationMillis = (value: number | undefined): AgentDurationMillis | undefined =>
-  value !== undefined && Number.isFinite(value)
-    ? AgentDurationMillis.make(Math.max(0, Math.round(value)))
+  value !== undefined && Number.isFinite(value) && value >= 0
+    ? AgentDurationMillis.make(Math.round(value))
     : undefined
 
 const toOptionalSessionId = (value: string | undefined): AgentSessionId | undefined => {
@@ -126,11 +138,10 @@ const finalizeAgentUsage = (fields: {
     fields.sessionId !== undefined
 
   if (!hasTelemetry) {
-    return { status: "unavailable" }
+    return UnavailableAgentUsage.make({})
   }
 
-  return {
-    status: "reported",
+  return ReportedAgentUsage.make({
     ...(fields.inputTokens !== undefined ? { inputTokens: fields.inputTokens } : {}),
     ...(fields.outputTokens !== undefined ? { outputTokens: fields.outputTokens } : {}),
     ...(fields.thinkingTokens !== undefined ? { thinkingTokens: fields.thinkingTokens } : {}),
@@ -139,7 +150,7 @@ const finalizeAgentUsage = (fields: {
     ...(fields.totalCostUsd !== undefined ? { totalCostUsd: fields.totalCostUsd } : {}),
     ...(fields.durationMillis !== undefined ? { durationMillis: fields.durationMillis } : {}),
     ...(fields.sessionId !== undefined ? { sessionId: fields.sessionId } : {}),
-  }
+  })
 }
 
 const firstNonEmpty = (...candidates: ReadonlyArray<string | undefined>): string | undefined => {
@@ -167,6 +178,20 @@ const classifyRawFailure = (
       runner,
       detail: toAgentDiagnosticDetail(authText),
     })
+  }
+  const softDenial = match(runner)
+    .with("antigravity", () =>
+      SOFT_DENIAL_RE.test(stderr)
+        ? new AgentToolDeniedError({
+            runner,
+            notice: toDenialNotice(stderr),
+          })
+        : undefined,
+    )
+    .with("claude-code", () => undefined)
+    .exhaustive()
+  if (softDenial !== undefined) {
+    return softDenial
   }
   if (exitCode !== 0) {
     const detailText = firstNonEmpty(stderr, stdout)
@@ -207,30 +232,22 @@ const buildClaudeUsage = (envelope: typeof ClaudeOutputEnvelope.Type): AgentUsag
   const usage = envelope.usage
   const inputTokens = toOptionalTokenCount(usage?.input_tokens)
   const outputTokens = toOptionalTokenCount(usage?.output_tokens)
-  const hasAnyClaudeTokens =
-    usage !== undefined &&
-    (usage.input_tokens !== undefined ||
-      usage.output_tokens !== undefined ||
-      usage.cache_read_input_tokens !== undefined ||
-      usage.cache_creation_input_tokens !== undefined)
-  const totalTokens = hasAnyClaudeTokens
-    ? toOptionalTokenCount(
-        (usage.input_tokens ?? 0) +
-          (usage.output_tokens ?? 0) +
-          (usage.cache_read_input_tokens ?? 0) +
-          (usage.cache_creation_input_tokens ?? 0),
-      )
-    : undefined
+  const cacheReadTokens = toOptionalTokenCount(usage?.cache_read_input_tokens)
+  const cacheCreationTokens = toOptionalTokenCount(usage?.cache_creation_input_tokens)
+  const validTokenParts = [inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens].filter(
+    (count): count is AgentTokenCount => count !== undefined,
+  )
+  const totalTokens =
+    validTokenParts.length > 0
+      ? toOptionalTokenCount(validTokenParts.reduce((sum, count) => sum + count, 0))
+      : undefined
 
   return finalizeAgentUsage({
     inputTokens,
     outputTokens,
     totalTokens,
     numTurns: toOptionalTurnCount(envelope.num_turns),
-    totalCostUsd:
-      envelope.total_cost_usd !== undefined
-        ? AgentCostUsd.make(Math.max(0, envelope.total_cost_usd))
-        : undefined,
+    totalCostUsd: toOptionalCostUsd(envelope.total_cost_usd),
     durationMillis: toOptionalDurationMillis(envelope.duration_ms),
     sessionId: toOptionalSessionId(envelope.session_id),
   })
@@ -288,6 +305,11 @@ const toUnitAgentDispatchResult = (error: AgentRunnerError): UnitAgentDispatchRe
     .with({ _tag: "AgentAuthRequiredError" }, (e) =>
       UnitAgentDispatchResult.cases.AuthRequired.make({ runner: e.runner }),
     )
+    .with({ _tag: "AgentExitError", kind: "spawn-failed" }, (e) =>
+      UnitAgentDispatchResult.cases.FatalFailed.make({
+        reason: toAgentFailureReason(e._tag, e.message),
+      }),
+    )
     .with(
       { _tag: "AgentTimeoutError" },
       { _tag: "AgentToolDeniedError" },
@@ -319,16 +341,39 @@ const parseClaudeCodeOutput = (
       Result.fail(classifyRawFailure("claude-code", exitCode, stdout, stderr, String(failure))),
     )
     .with({ _tag: "Success" }, ({ success: envelope }) => {
-      const resultText = envelope.result ?? ""
-      const isFailure = envelope.is_error === true || exitCode !== 0
-      if (AUTH_PROMPT_RE.test(stderr) || (isFailure && AUTH_PROMPT_RE.test(resultText))) {
-        const authDetail = AUTH_PROMPT_RE.test(stderr) ? stderr : resultText
+      if (envelope.type !== undefined && envelope.type !== "result") {
+        const detail = `Unexpected Claude envelope type '${envelope.type}'`
+        if (exitCode !== 0) {
+          return Result.fail(classifyRawFailure("claude-code", exitCode, stdout, stderr, detail))
+        }
         return Result.fail(
-          new AgentAuthRequiredError({
+          new AgentOutputParseError({
             runner: "claude-code",
-            detail: toAgentDiagnosticDetail(authDetail),
+            detail: toAgentDiagnosticDetail(detail),
           }),
         )
+      }
+
+      const resultText = envelope.result ?? ""
+      const isFailure =
+        envelope.is_error === true ||
+        exitCode !== 0 ||
+        (envelope.subtype !== undefined && envelope.subtype !== "success")
+
+      if (isFailure) {
+        const authDetail = AUTH_PROMPT_RE.test(stderr)
+          ? stderr
+          : AUTH_PROMPT_RE.test(resultText)
+            ? resultText
+            : undefined
+        if (authDetail !== undefined) {
+          return Result.fail(
+            new AgentAuthRequiredError({
+              runner: "claude-code",
+              detail: toAgentDiagnosticDetail(authDetail),
+            }),
+          )
+        }
       }
 
       if (envelope.permission_denials !== undefined && envelope.permission_denials.length > 0) {
@@ -344,7 +389,9 @@ const parseClaudeCodeOutput = (
       }
 
       if (isFailure) {
-        const detailText = firstNonEmpty(resultText, stderr)
+        const subtypeFallback =
+          envelope.subtype !== undefined ? `Claude subtype: ${envelope.subtype}` : undefined
+        const detailText = firstNonEmpty(resultText, stderr, subtypeFallback)
         return Result.fail(
           new AgentExitError({
             runner: "claude-code",
@@ -354,10 +401,22 @@ const parseClaudeCodeOutput = (
         )
       }
 
+      if (typeof envelope.result !== "string") {
+        const parseDetail =
+          firstNonEmpty(stderr, "Missing result field in claude JSON output") ??
+          "Missing result field in claude JSON output"
+        return Result.fail(
+          new AgentOutputParseError({
+            runner: "claude-code",
+            detail: toAgentDiagnosticDetail(parseDetail),
+          }),
+        )
+      }
+
       return Result.succeed({
         runner: "claude-code" as const,
-        exit: AgentExitCode.make(0),
-        resultText: toBoundedResultText(resultText),
+        exit: AgentSuccessExitCode.make(0),
+        resultText: toBoundedResultText(envelope.result),
         usage: buildClaudeUsage(envelope),
       })
     })
@@ -370,24 +429,6 @@ const parseAntigravityOutput = (
   stdout: string,
   stderr: string,
 ): Result.Result<AgentRunResult, AgentRunnerError> => {
-  if (AUTH_PROMPT_RE.test(stderr)) {
-    return Result.fail(
-      new AgentAuthRequiredError({
-        runner: "antigravity",
-        detail: toAgentDiagnosticDetail(stderr),
-      }),
-    )
-  }
-
-  if (SOFT_DENIAL_RE.test(stderr)) {
-    return Result.fail(
-      new AgentToolDeniedError({
-        runner: "antigravity",
-        notice: toDenialNotice(stderr),
-      }),
-    )
-  }
-
   const trimmed = stdout.trim()
   if (trimmed.length === 0) {
     return Result.fail(
@@ -400,20 +441,48 @@ const parseAntigravityOutput = (
       Result.fail(classifyRawFailure("antigravity", exitCode, stdout, stderr, String(failure))),
     )
     .with({ _tag: "Success" }, ({ success: envelope }) => {
-      const responseText = envelope.response ?? ""
-      const failedStatus = envelope.status !== undefined && envelope.status !== "SUCCESS"
-      if ((exitCode !== 0 || failedStatus) && AUTH_PROMPT_RE.test(responseText)) {
+      const hasStatus = typeof envelope.status === "string" && envelope.status.trim().length > 0
+      if (!hasStatus) {
+        const detail = "Missing status field in agy JSON output"
+        if (exitCode !== 0) {
+          return Result.fail(classifyRawFailure("antigravity", exitCode, stdout, stderr, detail))
+        }
+        const parseDetail = firstNonEmpty(stderr, detail) ?? detail
         return Result.fail(
-          new AgentAuthRequiredError({
+          new AgentOutputParseError({
             runner: "antigravity",
-            detail: toAgentDiagnosticDetail(responseText),
+            detail: toAgentDiagnosticDetail(parseDetail),
           }),
         )
       }
 
-      if (exitCode !== 0 || failedStatus) {
-        const statusFallback =
-          envelope.status !== undefined ? `Antigravity status: ${envelope.status}` : undefined
+      const responseText = envelope.response ?? ""
+      const failedStatus = envelope.status !== "SUCCESS"
+      const isFailure = exitCode !== 0 || failedStatus
+
+      if (isFailure) {
+        const authDetail = AUTH_PROMPT_RE.test(stderr)
+          ? stderr
+          : AUTH_PROMPT_RE.test(responseText)
+            ? responseText
+            : undefined
+        if (authDetail !== undefined) {
+          return Result.fail(
+            new AgentAuthRequiredError({
+              runner: "antigravity",
+              detail: toAgentDiagnosticDetail(authDetail),
+            }),
+          )
+        }
+        if (SOFT_DENIAL_RE.test(stderr)) {
+          return Result.fail(
+            new AgentToolDeniedError({
+              runner: "antigravity",
+              notice: toDenialNotice(stderr),
+            }),
+          )
+        }
+        const statusFallback = `Antigravity status: ${envelope.status}`
         const detailText = firstNonEmpty(responseText, stderr, statusFallback)
         return Result.fail(
           new AgentExitError({
@@ -424,10 +493,22 @@ const parseAntigravityOutput = (
         )
       }
 
+      if (typeof envelope.response !== "string") {
+        const parseDetail =
+          firstNonEmpty(stderr, "Missing response field in agy JSON output") ??
+          "Missing response field in agy JSON output"
+        return Result.fail(
+          new AgentOutputParseError({
+            runner: "antigravity",
+            detail: toAgentDiagnosticDetail(parseDetail),
+          }),
+        )
+      }
+
       return Result.succeed({
         runner: "antigravity" as const,
-        exit: AgentExitCode.make(0),
-        resultText: toBoundedResultText(responseText),
+        exit: AgentSuccessExitCode.make(0),
+        resultText: toBoundedResultText(envelope.response),
         usage: buildAntigravityUsage(envelope),
       })
     })

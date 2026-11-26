@@ -1,10 +1,12 @@
-import { Result, Schema } from "effect"
+import { Match, Result, Schema } from "effect"
 import { SHIP_STAGES } from "./workflow.js"
 import { ErrorReasonMessage } from "./workspace-and-process.js"
 
-/** Branded positive integer duration in milliseconds used across workflow IPC, verification, and lease timeouts. */
+const MAX_SETTLE_TIMEOUT_MS = 2_147_483_647
+
+/** Branded positive 32-bit signed integer duration in milliseconds (`1..2_147_483_647`) safe for Node timers across workflow IPC, verification, and lease timeouts. */
 export const WorkflowTimeoutMs = Schema.Int.pipe(
-  Schema.check(Schema.isGreaterThanOrEqualTo(1)),
+  Schema.check(Schema.isBetween({ minimum: 1, maximum: MAX_SETTLE_TIMEOUT_MS })),
   Schema.brand("WorkflowTimeoutMs"),
 )
 export type WorkflowTimeoutMs = typeof WorkflowTimeoutMs.Type
@@ -62,8 +64,7 @@ export const validateMultiStageTimeoutBudget = (
   return Result.succeed(input.settleMs)
 }
 
-/** Canonical hierarchy of workflow daemon, socket, verifier, store HTTP, settle, and lease timeouts. */
-export const WorkflowTimeoutBudgets = Schema.Struct({
+const RawWorkflowTimeoutBudgets = Schema.Struct({
   defaultSocketMs: WorkflowTimeoutMs,
   defaultServerSocketMs: WorkflowTimeoutMs,
   workflowIpcMs: WorkflowTimeoutMs,
@@ -87,9 +88,19 @@ export const WorkflowTimeoutBudgets = Schema.Struct({
   agentStartupRetryMaxAttempts: WorkflowPollAttempts,
   agentStartupRetryBackoffMs: WorkflowTimeoutMs,
 })
-export type WorkflowTimeoutBudgets = typeof WorkflowTimeoutBudgets.Type
+type RawWorkflowTimeoutBudgets = typeof RawWorkflowTimeoutBudgets.Type
 
-const RAW_WORKFLOW_TIMEOUT_BUDGETS: WorkflowTimeoutBudgets = {
+const SHIP_GATE_COMMAND_MS = WorkflowTimeoutMs.make(300_000)
+const SHIP_SETTLE_OVERHEAD_MS = 60_000
+const SHIP_IPC_OVERHEAD_MS = 30_000
+const SHIP_SOCKET_OVERHEAD_MS = 30_000
+const SHIP_WORKFLOW_SETTLE_MS = WorkflowTimeoutMs.make(
+  SHIP_STAGES.length * SHIP_GATE_COMMAND_MS + SHIP_SETTLE_OVERHEAD_MS,
+)
+const SHIP_WORKFLOW_IPC_MS = WorkflowTimeoutMs.make(SHIP_WORKFLOW_SETTLE_MS + SHIP_IPC_OVERHEAD_MS)
+const SHIP_SERVER_SOCKET_MS = WorkflowTimeoutMs.make(SHIP_WORKFLOW_IPC_MS + SHIP_SOCKET_OVERHEAD_MS)
+
+const RAW_WORKFLOW_TIMEOUT_BUDGETS: RawWorkflowTimeoutBudgets = {
   defaultSocketMs: WorkflowTimeoutMs.make(5_000),
   defaultServerSocketMs: WorkflowTimeoutMs.make(35_000),
   workflowIpcMs: WorkflowTimeoutMs.make(30_000),
@@ -100,10 +111,10 @@ const RAW_WORKFLOW_TIMEOUT_BUDGETS: WorkflowTimeoutBudgets = {
   abortSettleIntervalMs: WorkflowTimeoutMs.make(50),
   workflowCompleteIpcMs: WorkflowTimeoutMs.make(150_000),
   workflowServerSocketMs: WorkflowTimeoutMs.make(160_000),
-  shipGateCommandMs: WorkflowTimeoutMs.make(300_000),
-  shipWorkflowSettleMs: WorkflowTimeoutMs.make(SHIP_STAGES.length * 300_000 + 60_000),
-  shipWorkflowIpcMs: WorkflowTimeoutMs.make(1_890_000),
-  shipServerSocketMs: WorkflowTimeoutMs.make(1_920_000),
+  shipGateCommandMs: SHIP_GATE_COMMAND_MS,
+  shipWorkflowSettleMs: SHIP_WORKFLOW_SETTLE_MS,
+  shipWorkflowIpcMs: SHIP_WORKFLOW_IPC_MS,
+  shipServerSocketMs: SHIP_SERVER_SOCKET_MS,
   httpRequestTimeoutMs: WorkflowTimeoutMs.make(15_000),
   claimTimeoutMs: WorkflowTimeoutMs.make(6 * 60 * 60 * 1_000),
   writerLeaseHeartbeatTtlMs: WorkflowTimeoutMs.make(45_000),
@@ -114,54 +125,29 @@ const RAW_WORKFLOW_TIMEOUT_BUDGETS: WorkflowTimeoutBudgets = {
   agentStartupRetryBackoffMs: WorkflowTimeoutMs.make(1_000),
 }
 
-/** Validates strict monotonicity invariants across nested workflow timeout and settle-loop layers (`SPEC-0027 REQ-2.2`). */
-export const validateWorkflowTimeoutBudgets = (
-  budgets: WorkflowTimeoutBudgets,
-): Result.Result<WorkflowTimeoutBudgets, ErrorReasonMessage> => {
+const findWorkflowTimeoutBudgetViolation = (
+  budgets: RawWorkflowTimeoutBudgets,
+): string | undefined => {
   const pollSettleBudgetMs = budgets.pollSettleMaxAttempts * budgets.pollSettleIntervalMs
   const abortSettleBudgetMs = budgets.abortSettleMaxAttempts * budgets.abortSettleIntervalMs
 
   if (budgets.workflowServerSocketMs <= budgets.workflowCompleteIpcMs) {
-    return Result.fail(
-      ErrorReasonMessage.make(
-        `workflowServerSocketMs (${budgets.workflowServerSocketMs}) must exceed workflowCompleteIpcMs (${budgets.workflowCompleteIpcMs})`,
-      ),
-    )
+    return `workflowServerSocketMs (${budgets.workflowServerSocketMs}) must exceed workflowCompleteIpcMs (${budgets.workflowCompleteIpcMs})`
   }
   if (budgets.workflowCompleteIpcMs <= budgets.unitVerifyMs + pollSettleBudgetMs) {
-    return Result.fail(
-      ErrorReasonMessage.make(
-        `workflowCompleteIpcMs (${budgets.workflowCompleteIpcMs}) must exceed unitVerifyMs + pollSettleBudgetMs (${budgets.unitVerifyMs + pollSettleBudgetMs})`,
-      ),
-    )
+    return `workflowCompleteIpcMs (${budgets.workflowCompleteIpcMs}) must exceed unitVerifyMs + pollSettleBudgetMs (${budgets.unitVerifyMs + pollSettleBudgetMs})`
   }
   if (budgets.defaultServerSocketMs <= budgets.workflowIpcMs) {
-    return Result.fail(
-      ErrorReasonMessage.make(
-        `defaultServerSocketMs (${budgets.defaultServerSocketMs}) must exceed workflowIpcMs (${budgets.workflowIpcMs})`,
-      ),
-    )
+    return `defaultServerSocketMs (${budgets.defaultServerSocketMs}) must exceed workflowIpcMs (${budgets.workflowIpcMs})`
   }
   if (budgets.workflowIpcMs <= abortSettleBudgetMs) {
-    return Result.fail(
-      ErrorReasonMessage.make(
-        `workflowIpcMs (${budgets.workflowIpcMs}) must exceed abortSettleBudgetMs (${abortSettleBudgetMs})`,
-      ),
-    )
+    return `workflowIpcMs (${budgets.workflowIpcMs}) must exceed abortSettleBudgetMs (${abortSettleBudgetMs})`
   }
   if (budgets.shipServerSocketMs <= budgets.shipWorkflowIpcMs) {
-    return Result.fail(
-      ErrorReasonMessage.make(
-        `shipServerSocketMs (${budgets.shipServerSocketMs}) must exceed shipWorkflowIpcMs (${budgets.shipWorkflowIpcMs})`,
-      ),
-    )
+    return `shipServerSocketMs (${budgets.shipServerSocketMs}) must exceed shipWorkflowIpcMs (${budgets.shipWorkflowIpcMs})`
   }
   if (budgets.shipWorkflowIpcMs <= budgets.shipWorkflowSettleMs) {
-    return Result.fail(
-      ErrorReasonMessage.make(
-        `shipWorkflowIpcMs (${budgets.shipWorkflowIpcMs}) must exceed shipWorkflowSettleMs (${budgets.shipWorkflowSettleMs})`,
-      ),
-    )
+    return `shipWorkflowIpcMs (${budgets.shipWorkflowIpcMs}) must exceed shipWorkflowSettleMs (${budgets.shipWorkflowSettleMs})`
   }
   const shipStageBudget = validateMultiStageTimeoutBudget(
     MultiStageTimeoutBudgetInput.make({
@@ -171,61 +157,64 @@ export const validateWorkflowTimeoutBudgets = (
       workflowLabel: WorkflowStageLabel.make("ShipWorkflow"),
     }),
   )
-  return Result.flatMap(shipStageBudget, () => {
-    if (budgets.shipGateCommandMs <= budgets.workflowServerSocketMs) {
-      return Result.fail(
-        ErrorReasonMessage.make(
-          `shipGateCommandMs (${budgets.shipGateCommandMs}) must exceed workflowServerSocketMs (${budgets.workflowServerSocketMs})`,
-        ),
-      )
-    }
-    if (budgets.agentRunClaudeMs <= budgets.agentKillGraceMs) {
-      return Result.fail(
-        ErrorReasonMessage.make(
-          `agentRunClaudeMs (${budgets.agentRunClaudeMs}) must exceed agentKillGraceMs (${budgets.agentKillGraceMs})`,
-        ),
-      )
-    }
-    if (budgets.agentRunAntigravityMs <= budgets.agentKillGraceMs) {
-      return Result.fail(
-        ErrorReasonMessage.make(
-          `agentRunAntigravityMs (${budgets.agentRunAntigravityMs}) must exceed agentKillGraceMs (${budgets.agentKillGraceMs})`,
-        ),
-      )
-    }
-    const startupRetryBudgetMs =
-      budgets.agentStartupRetryMaxAttempts * budgets.agentStartupRetryBackoffMs
-    if (budgets.agentRunAntigravityMs <= startupRetryBudgetMs) {
-      return Result.fail(
-        ErrorReasonMessage.make(
-          `agentRunAntigravityMs (${budgets.agentRunAntigravityMs}) must exceed agentStartupRetryMaxAttempts * agentStartupRetryBackoffMs (${startupRetryBudgetMs})`,
-        ),
-      )
-    }
-    if (budgets.claimTimeoutMs <= budgets.agentRunClaudeMs + budgets.agentKillGraceMs) {
-      return Result.fail(
-        ErrorReasonMessage.make(
-          `claimTimeoutMs (${budgets.claimTimeoutMs}) must exceed agentRunClaudeMs + agentKillGraceMs (${budgets.agentRunClaudeMs + budgets.agentKillGraceMs})`,
-        ),
-      )
-    }
-    const maxAntigravityCycleMs =
-      budgets.agentStartupRetryMaxAttempts *
-        (budgets.agentRunAntigravityMs + budgets.agentKillGraceMs) +
-      Math.max(0, budgets.agentStartupRetryMaxAttempts - 1) * budgets.agentStartupRetryBackoffMs
-    if (budgets.claimTimeoutMs <= maxAntigravityCycleMs) {
-      return Result.fail(
-        ErrorReasonMessage.make(
-          `claimTimeoutMs (${budgets.claimTimeoutMs}) must exceed worst-case antigravity retry budget (${maxAntigravityCycleMs})`,
-        ),
-      )
-    }
-
-    return Result.succeed(budgets)
-  })
+  const shipStageError = Match.value(shipStageBudget).pipe(
+    Match.tag("Failure", ({ failure }) => failure),
+    Match.tag("Success", () => undefined),
+    Match.exhaustive,
+  )
+  if (shipStageError !== undefined) {
+    return shipStageError
+  }
+  if (budgets.shipGateCommandMs <= budgets.workflowServerSocketMs) {
+    return `shipGateCommandMs (${budgets.shipGateCommandMs}) must exceed workflowServerSocketMs (${budgets.workflowServerSocketMs})`
+  }
+  if (budgets.agentRunClaudeMs <= budgets.agentKillGraceMs) {
+    return `agentRunClaudeMs (${budgets.agentRunClaudeMs}) must exceed agentKillGraceMs (${budgets.agentKillGraceMs})`
+  }
+  if (budgets.agentRunAntigravityMs <= budgets.agentKillGraceMs) {
+    return `agentRunAntigravityMs (${budgets.agentRunAntigravityMs}) must exceed agentKillGraceMs (${budgets.agentKillGraceMs})`
+  }
+  const startupRetryBudgetMs =
+    budgets.agentStartupRetryMaxAttempts * budgets.agentStartupRetryBackoffMs
+  if (budgets.agentRunAntigravityMs <= startupRetryBudgetMs) {
+    return `agentRunAntigravityMs (${budgets.agentRunAntigravityMs}) must exceed agentStartupRetryMaxAttempts * agentStartupRetryBackoffMs (${startupRetryBudgetMs})`
+  }
+  if (budgets.claimTimeoutMs <= budgets.agentRunClaudeMs + budgets.agentKillGraceMs) {
+    return `claimTimeoutMs (${budgets.claimTimeoutMs}) must exceed agentRunClaudeMs + agentKillGraceMs (${budgets.agentRunClaudeMs + budgets.agentKillGraceMs})`
+  }
+  const maxAntigravityCycleMs =
+    budgets.agentStartupRetryMaxAttempts *
+      (budgets.agentRunAntigravityMs + budgets.agentKillGraceMs) +
+    Math.max(0, budgets.agentStartupRetryMaxAttempts - 1) * budgets.agentStartupRetryBackoffMs
+  if (budgets.claimTimeoutMs <= maxAntigravityCycleMs) {
+    return `claimTimeoutMs (${budgets.claimTimeoutMs}) must exceed worst-case antigravity retry budget (${maxAntigravityCycleMs})`
+  }
+  return undefined
 }
 
-/** Single-source canonical timeout budgets consumed across daemon, verifier, store, and MCP RPC layers, validated at module initialization (`SPEC-0027 REQ-2.2`). */
+/**
+ * Canonical hierarchy of workflow daemon, socket, verifier, store HTTP, settle, lease, and
+ * agent runner execution/kill-grace/startup-retry timeouts, with monotonicity validated at decode (`SPEC-0027 REQ-2.2`, `SPEC-0036 REQ-1.1`).
+ */
+export const WorkflowTimeoutBudgets = RawWorkflowTimeoutBudgets.pipe(
+  Schema.check(
+    Schema.makeFilter((budgets) => findWorkflowTimeoutBudgetViolation(budgets), {
+      message: "WorkflowTimeoutBudgets violates strict monotonicity invariants",
+    }),
+  ),
+)
+export type WorkflowTimeoutBudgets = typeof WorkflowTimeoutBudgets.Type
+
+/** Validates strict monotonicity invariants across nested workflow timeout and settle-loop layers (`SPEC-0027 REQ-2.2`). */
+export const validateWorkflowTimeoutBudgets = (
+  budgets: WorkflowTimeoutBudgets,
+): Result.Result<WorkflowTimeoutBudgets, ErrorReasonMessage> =>
+  Match.value(findWorkflowTimeoutBudgetViolation(budgets)).pipe(
+    Match.when(undefined, () => Result.succeed(budgets)),
+    Match.orElse((violation) => Result.fail(ErrorReasonMessage.make(violation))),
+  )
+
+/** Single-source canonical timeout budgets consumed across daemon, verifier, store, runner, and MCP RPC layers, validated at module initialization (`SPEC-0027 REQ-2.2`). */
 export const WORKFLOW_TIMEOUT_BUDGETS: WorkflowTimeoutBudgets = Result.getOrThrowWith(
   validateWorkflowTimeoutBudgets(RAW_WORKFLOW_TIMEOUT_BUDGETS),
   (reason) => new Error(`Invalid WORKFLOW_TIMEOUT_BUDGETS: ${reason}`),

@@ -810,4 +810,119 @@ describe("HarnessTaskWorkflow execution, waves & merges", () => {
       }),
     20_000,
   )
+
+  it.live(
+    "forwards Automatic mcpIsolation/hardMcpFallback and escalates immediately on FatalFailed without burning retry attempts",
+    () =>
+      Effect.gen(function* () {
+        const unitId = WorkUnitId.make("auto-fatal-unit")
+        const plan: CompiledPlan = {
+          runId: WorkflowRunIdSchema.make("run-auto-fatal-010"),
+          level: "slice",
+          planSha: PLAN_SHA,
+          baseSha: BASE_SHA,
+          mode: {
+            _tag: "Automatic",
+            runner: "antigravity",
+            maxConcurrency: MaxConcurrency.make(1),
+            mcpIsolation: "hard",
+            hardMcpFallback: "reject",
+          },
+          units: [makePackageUnit(unitId, "@harness/auto", ["libs/auto/src/index.ts"], 0)],
+          sharedStepPaths: [],
+        }
+
+        const fatalReason = AgentFailureReason.make("Failed to spawn 'agy': ENOENT")
+        const dispatchCalls: Array<UnitAgentRequest> = []
+        const escalatedDeferred = yield* Deferred.make<void>()
+
+        const portsLayer = Layer.mergeAll(
+          Layer.succeed(WorkflowWorktreePort, {
+            provisionWorktrees: (p) =>
+              Effect.succeed({
+                runId: p.runId,
+                canonicalRepoRoot: CANONICAL_ROOT,
+                entries: p.units.map((u) => ({
+                  unitId: u.unitId,
+                  cwd: CANONICAL_ROOT,
+                  worktreeKind: "canonical" as const,
+                })),
+              }),
+            removeWorktreeCheckouts: () => Effect.void,
+            mergeSliceWave: (input) =>
+              Effect.succeed({ _tag: "Merged" as const, mergedBranches: input.branches }),
+          }),
+          Layer.succeed(UnitAgentDispatcher, {
+            runnerKind: "live" as const,
+            dispatchUnit: (request) =>
+              Effect.sync(() => {
+                dispatchCalls.push(request)
+                return { _tag: "FatalFailed" as const, reason: fatalReason }
+              }),
+          }),
+          Layer.succeed(UnitVerifier, {
+            completeUnit: (input) =>
+              Effect.succeed(
+                makeCompletedOutcome(input.unit.unitId, input.attempt, input.unit.ownedRelPaths),
+              ),
+            completeSharedStep: (input) =>
+              Effect.succeed(
+                makeCompletedOutcome(SHARED_STEP_UNIT_ID, input.attempt, input.sharedStepPaths),
+              ),
+          }),
+          Layer.succeed(WorkflowReviewRouter, {
+            routeReview: () => Effect.succeed(makeReviewPlan()),
+          }),
+          Layer.succeed(WorkflowProjectionWriter, {
+            upsertRun: () => Effect.void,
+            upsertUnit: (u) =>
+              match(u.status)
+                .with("escalated", () =>
+                  Deferred.succeed(escalatedDeferred, void 0).pipe(Effect.asVoid),
+                )
+                .with("pending", "dispatched", "completed", () => Effect.void)
+                .exhaustive(),
+            upsertAttempt: () => Effect.void,
+          }),
+        )
+        const layer = HarnessTaskWorkflowLayer.pipe(
+          Layer.provide(portsLayer),
+          Layer.provideMerge(WorkflowEngine.layerMemory),
+        )
+
+        yield* Effect.gen(function* () {
+          const executionId = yield* HarnessTaskWorkflow.execute({ plan }, { discard: true })
+          yield* Deferred.await(escalatedDeferred)
+          expect(dispatchCalls).toHaveLength(1)
+          expect(dispatchCalls[0]?.mcpIsolation).toBe("hard")
+          expect(dispatchCalls[0]?.hardMcpFallback).toBe("reject")
+
+          const escDef = makeUnitEscalationDeferred(unitId, EscalationOrdinal.make(1))
+          yield* DurableDeferred.succeed(escDef, {
+            token: DurableDeferred.tokenFromExecutionId(escDef, {
+              workflow: HarnessTaskWorkflow,
+              executionId,
+            }),
+            value: { decision: "abort" },
+          })
+
+          const abortedErr = yield* Effect.flip(HarnessTaskWorkflow.execute({ plan }))
+          match(abortedErr)
+            .with({ _tag: "TaskRunAbortedError" }, (e) => {
+              expect(e.escalation).toEqual({
+                _tag: "RetryBudgetExhausted",
+                lastRejection: { _tag: "AgentFailed", reason: fatalReason },
+              })
+            })
+            .with(
+              { _tag: "WorkspaceFsError" },
+              { _tag: "WorkflowStoreUnavailableError" },
+              { _tag: "WriterLeaseHeldError" },
+              (e) => expect.unreachable(`Expected TaskRunAbortedError, got ${e._tag}`),
+            )
+            .exhaustive()
+        }).pipe(Effect.provide(layer))
+      }),
+    20_000,
+  )
 })

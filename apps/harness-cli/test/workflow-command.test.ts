@@ -184,6 +184,10 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
       runnerKind: "placeholder" as const,
       dispatchUnit: () => Effect.succeed(UnitAgentDispatchResult.cases.Completed.make({})),
     }
+    const liveDispatcher = {
+      runnerKind: "live" as const,
+      dispatchUnit: () => Effect.succeed(UnitAgentDispatchResult.cases.Completed.make({})),
+    }
 
     const autoDefaultCompile = await Effect.runPromise(
       runDeclarativeCli(
@@ -261,7 +265,7 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
     const fromInputJson = await Effect.runPromise(
       handleWorkflow(["workflow", "compile", "--input", inputWithLevelAndMode], {
         repoRoot: dir,
-      }),
+      }).pipe(Effect.provideService(UnitAgentDispatcher, liveDispatcher)),
     )
     expect(fromInputJson.exitCode).toBe(0)
     const inputDefaultsPlan = Schema.decodeSync(Schema.fromJsonString(CompiledPlan))(
@@ -371,6 +375,10 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
     const epicPlan = Schema.decodeSync(Schema.fromJsonString(CompiledPlan))(compileRes.stdout)
     const autoPlanJson = JSON.stringify(Schema.encodeSync(CompiledPlan)(epicPlan))
 
+    const liveDispatcher = {
+      runnerKind: "live" as const,
+      dispatchUnit: () => Effect.succeed(UnitAgentDispatchResult.cases.Completed.make({})),
+    }
     const startedAutoPlans: Array<CompiledPlan> = []
     const autoStartLive = await Effect.runPromise(
       handleWorkflow(
@@ -386,7 +394,7 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
             })
           },
         },
-      ),
+      ).pipe(Effect.provideService(UnitAgentDispatcher, liveDispatcher)),
     )
     expect(autoStartLive.exitCode).toBe(0)
     expect(startedAutoPlans).toHaveLength(1)
@@ -407,6 +415,101 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
     )
     expect(autoStartPlaceholder.exitCode).toBe(1)
     expect(autoStartPlaceholder.stderr).toContain("placeholder")
+  })
+
+  it("F-4.1: fails closed on automatic compile and start when UnitAgentDispatcher is omitted from context, and succeeds when provided", async () => {
+    const { dir } = createTempGitRepo("harness-wf-f41-omitted-")
+    const inputPath = join(dir, "plan-input.json")
+    writeFileSync(
+      inputPath,
+      JSON.stringify({
+        runId: "wf-f41-test-01",
+        units: [
+          {
+            _tag: "SliceUnit",
+            unitId: "slice-a",
+            branch: "slice/alpha-unit",
+            ownedRelPaths: ["libs/alpha"],
+            earsKeys: [],
+          },
+        ],
+      }),
+      "utf8",
+    )
+
+    const omittedCompile = await Effect.runPromise(
+      handleWorkflow(
+        [
+          "compile",
+          "--level",
+          "epic",
+          "--mode",
+          "automatic",
+          "--runner",
+          "claude-code",
+          "--input",
+          inputPath,
+        ],
+        { repoRoot: dir },
+      ),
+    )
+    expect(omittedCompile.exitCode).toBe(1)
+    expect(omittedCompile.stderr).toContain(
+      "Automatic workflow mode is unavailable: active UnitAgentDispatcher has runnerKind 'placeholder'",
+    )
+
+    const liveDispatcher = {
+      runnerKind: "live" as const,
+      dispatchUnit: () => Effect.succeed(UnitAgentDispatchResult.cases.Completed.make({})),
+    }
+    const liveCompile = await Effect.runPromise(
+      handleWorkflow(
+        [
+          "compile",
+          "--level",
+          "epic",
+          "--mode",
+          "automatic",
+          "--runner",
+          "claude-code",
+          "--input",
+          inputPath,
+        ],
+        { repoRoot: dir },
+      ).pipe(Effect.provideService(UnitAgentDispatcher, liveDispatcher)),
+    )
+    expect(liveCompile.exitCode).toBe(0)
+
+    const startCalls: Array<CompiledPlan> = []
+    const startDeps: WorkflowCliDeps = {
+      startWorkflow: ({ plan }) => {
+        startCalls.push(plan)
+        return Effect.succeed({
+          runId: plan.runId,
+          executionId: WorkflowExecutionId.make("exec-f41-01"),
+          outcome: "started" as const,
+        })
+      },
+    }
+
+    const omittedStart = await Effect.runPromise(
+      handleWorkflow(["start", "--json"], { repoRoot: dir, stdin: liveCompile.stdout }, startDeps),
+    )
+    expect(omittedStart.exitCode).toBe(1)
+    expect(omittedStart.stderr).toContain(
+      "Automatic workflow mode is unavailable: active UnitAgentDispatcher has runnerKind 'placeholder'",
+    )
+    expect(startCalls).toHaveLength(0)
+
+    const liveStart = await Effect.runPromise(
+      handleWorkflow(
+        ["start", "--json"],
+        { repoRoot: dir, stdin: liveCompile.stdout },
+        startDeps,
+      ).pipe(Effect.provideService(UnitAgentDispatcher, liveDispatcher)),
+    )
+    expect(liveStart.exitCode).toBe(0)
+    expect(startCalls).toHaveLength(1)
   })
 
   it("complete enforces explicit absolute --repo-root, unambiguous --unit/--phase, rejection exit codes, and cleared friction log", async () => {

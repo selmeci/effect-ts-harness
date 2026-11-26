@@ -2,12 +2,15 @@ import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import {
   AgentMaxTurns,
-  ExecutableName,
+  AntigravityRunnerProfile,
+  type BriefPrompt,
+  ClaudeCodeRunnerProfile,
   MaxConcurrency,
   ModelName,
   PermissionRule,
+  type RunnerConfigFilePath,
   type RunnerId,
-  RunnerProfile,
+  type RunnerProfile,
   TimeoutMillis,
   WORKFLOW_TIMEOUT_BUDGETS,
 } from "@harness/contract"
@@ -17,9 +20,9 @@ import { match } from "ts-pattern"
  * Human-reviewed TCB runner profiles (`SPEC-0036` / `RFC-0013 REQ-4.1`).
  * Defines the closed capability boundaries and argv builders for `claude-code` and `antigravity`.
  */
-export const CLAUDE_CODE_RUNNER_PROFILE: RunnerProfile = RunnerProfile.make({
+export const CLAUDE_CODE_RUNNER_PROFILE: ClaudeCodeRunnerProfile = ClaudeCodeRunnerProfile.make({
   runner: "claude-code",
-  binary: ExecutableName.make("claude"),
+  binary: "claude",
   permissionRules: [
     PermissionRule.make("Read"),
     PermissionRule.make("Edit"),
@@ -46,11 +49,10 @@ export const CLAUDE_CODE_RUNNER_PROFILE: RunnerProfile = RunnerProfile.make({
   model: ModelName.make("claude-sonnet-4-6"),
 })
 
-export const ANTIGRAVITY_RUNNER_PROFILE: RunnerProfile = RunnerProfile.make({
+export const ANTIGRAVITY_RUNNER_PROFILE: AntigravityRunnerProfile = AntigravityRunnerProfile.make({
   runner: "antigravity",
-  binary: ExecutableName.make("agy"),
+  binary: "agy",
   permissionRules: [PermissionRule.make("accept-edits")],
-  disallowedTools: [],
   maxConcurrency: MaxConcurrency.make(2),
   timeoutMillis: TimeoutMillis.make(WORKFLOW_TIMEOUT_BUDGETS.agentRunAntigravityMs),
   model: ModelName.make("gemini-4-hydrogen-high"),
@@ -64,16 +66,17 @@ export const RUNNER_PROFILES: Record<RunnerId, RunnerProfile> = {
 
 /** Input for building total, `--dangerously-skip-permissions`-free `claude -p` argv. */
 export interface BuildClaudeCodeArgvInput {
-  readonly profile: RunnerProfile
-  readonly promptText: string
-  readonly mcpConfigPath: string
-  readonly hooksSettingsPath: string
+  readonly profile: ClaudeCodeRunnerProfile
+  readonly promptText: BriefPrompt
+  readonly mcpConfigPath: RunnerConfigFilePath
+  readonly hooksSettingsPath: RunnerConfigFilePath
 }
 
 /** Input for building total, `--dangerously-skip-permissions`-free `agy -p` argv. */
 export interface BuildAntigravityArgvInput {
-  readonly profile: RunnerProfile
-  readonly promptText: string
+  readonly profile: AntigravityRunnerProfile
+  readonly promptText: BriefPrompt
+  readonly killGraceMs?: number | undefined
 }
 
 const CLAUDE_PRE_TOOL_USE_HOOK_TIMEOUT_SECONDS = 15
@@ -109,12 +112,38 @@ const BASE_RUNNER_ENV_ALLOWLIST: ReadonlyArray<string> = [
   "GIT_COMMITTER_EMAIL",
   "NO_COLOR",
   "CI",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
 ]
 
 const CLAUDE_CODE_ENV_ALLOWLIST: ReadonlyArray<string> = [
   "ANTHROPIC_API_KEY",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_AUTH_TOKEN",
   "CLAUDE_CODE_USE_BEDROCK",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "AWS_REGION",
+  "AWS_DEFAULT_REGION",
+  "AWS_PROFILE",
+  "AWS_CONFIG_FILE",
+  "AWS_SHARED_CREDENTIALS_FILE",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "AWS_ROLE_ARN",
   "CLAUDE_CODE_USE_VERTEX",
+  "ANTHROPIC_VERTEX_PROJECT_ID",
+  "CLOUD_ML_REGION",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "GOOGLE_CLOUD_PROJECT",
 ]
 
 /** Resolves the static TCB `RunnerProfile` for a closed `RunnerId`. */
@@ -124,7 +153,7 @@ const getRunnerProfile = (runner: RunnerId): RunnerProfile =>
     .with("antigravity", () => ANTIGRAVITY_RUNNER_PROFILE)
     .exhaustive()
 
-/** Pure total argv builder for `claude -p` (`REQ-4.1`, `REQ-4.2`). */
+/** Pure total argv builder for `claude -p` (`SPEC-0036 REQ-1.2`, `REQ-2.1` / `RFC-0013 REQ-4.1`, `REQ-4.2`). */
 const buildClaudeCodeArgv = (input: BuildClaudeCodeArgvInput): ReadonlyArray<string> => {
   const argv: Array<string> = [
     "-p",
@@ -155,16 +184,20 @@ const buildClaudeCodeArgv = (input: BuildClaudeCodeArgvInput): ReadonlyArray<str
   return argv
 }
 
-/** Pure total argv builder for `agy -p` (`REQ-4.1`, `REQ-4.3`). */
+/** Pure total argv builder for `agy -p` (`SPEC-0036 REQ-1.2`, `REQ-3.1` / `RFC-0013 REQ-4.1`, `REQ-4.3`). */
 const buildAntigravityArgv = (input: BuildAntigravityArgvInput): ReadonlyArray<string> => {
-  const timeoutSeconds = Math.max(1, Math.ceil(input.profile.timeoutMillis / 1000))
+  const killGraceMs = input.killGraceMs ?? WORKFLOW_TIMEOUT_BUDGETS.agentKillGraceMs
+  const printTimeoutSeconds = Math.max(
+    1,
+    Math.ceil((input.profile.timeoutMillis + killGraceMs) / 1000),
+  )
   const argv: Array<string> = [
     "-p",
     input.promptText,
     "--output-format",
     "json",
     "--print-timeout",
-    `${timeoutSeconds}s`,
+    `${printTimeoutSeconds}s`,
   ]
   if (input.profile.model !== undefined) {
     argv.push("--model", input.profile.model)

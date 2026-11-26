@@ -1,4 +1,4 @@
-import { Arbitrary, Effect, Result, Schema } from "effect"
+import { Arbitrary, Cause, Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import { describe, expect, it } from "vitest"
 import {
@@ -949,6 +949,26 @@ describe("workflow-protocol & workflow-timeouts", () => {
         }),
       ),
     ).toBe(true)
+
+    // Schema-level WorkflowTimeoutBudgets enforcement + 32-bit timer cap (2_147_483_647 ms)
+    const maxSafeTimeout = Schema.decodeSync(WorkflowTimeoutMs)(2_147_483_647)
+    expect(maxSafeTimeout).toBe(2_147_483_647)
+    const overflowExit = Schema.decodeExit(WorkflowTimeoutMs)(2_147_483_648)
+    match(overflowExit)
+      .with({ _tag: "Failure" }, ({ cause }) => expect(Cause.hasFails(cause)).toBe(true))
+      .with({ _tag: "Success" }, () => expect.unreachable("Expected 2_147_483_648 to fail"))
+      .exhaustive()
+    expect(Schema.decodeSync(WorkflowTimeoutBudgets)(WORKFLOW_TIMEOUT_BUDGETS)).toEqual(
+      WORKFLOW_TIMEOUT_BUDGETS,
+    )
+    const badBudgetsExit = Schema.decodeExit(WorkflowTimeoutBudgets)({
+      ...WORKFLOW_TIMEOUT_BUDGETS,
+      agentRunClaudeMs: WORKFLOW_TIMEOUT_BUDGETS.agentKillGraceMs,
+    })
+    match(badBudgetsExit)
+      .with({ _tag: "Failure" }, ({ cause }) => expect(Cause.hasFails(cause)).toBe(true))
+      .with({ _tag: "Success" }, () => expect.unreachable("Expected monotonic budget failure"))
+      .exhaustive()
   })
 
   it("encodes, decodes, and validates ShipAttemptKey round-trips and malformed rejections", () => {

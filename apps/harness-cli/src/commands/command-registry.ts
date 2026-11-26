@@ -322,7 +322,7 @@ export const makeLiveCliCommandDescriptors = (
       lazyImportCliHandler(
         "workflow",
         () => import("./workflow.command.js"),
-        (m) => m.handleWorkflow(args, options),
+        (m) => m.handleWorkflow(args, options).pipe(Effect.provide(m.UnitAgentDispatcherLive)),
       ),
   },
   {

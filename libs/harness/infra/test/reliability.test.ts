@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
@@ -24,6 +24,7 @@ import {
   startScopedUnixSocketDaemon,
   UnixSocketDaemonLive,
 } from "../src/index.js"
+import { isProcessGroupAlive } from "../src/workflow/verify-child-process.js"
 
 const withTempDir = <A, E, R>(
   use: (dir: string) => Effect.Effect<A, E, R>,
@@ -210,5 +211,60 @@ describe("@harness/infra reliability", () => {
           })
           .exhaustive()
       }),
+  )
+
+  it.live(
+    "execFileAsyncEffect reaps SIGTERM-ignoring grandchild processes on timeout and interruption",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const timeoutPidFile = join(dir, "timeout-grandchild.pid")
+          const interruptPidFile = join(dir, "interrupt-grandchild.pid")
+          const parentScript = `
+            const fs = require("node:fs");
+            const { spawn } = require("node:child_process");
+            const pidFile = process.argv[1];
+            const grandchild = spawn(process.execPath, [
+              "-e",
+              "process.on('SIGTERM', () => {}); fs.writeFileSync(" + JSON.stringify(pidFile) + ", String(process.pid), 'utf8'); setTimeout(() => {}, 30000);"
+            ], { stdio: ["ignore", "pipe", "pipe"] });
+            grandchild.on("exit", () => process.exit(0));
+            setTimeout(() => {}, 30000);
+          `
+          const timeoutStartMs = Date.now()
+          const timeoutRes = yield* execFileAsyncEffect(
+            process.execPath,
+            ["-e", parentScript, timeoutPidFile],
+            { timeoutMs: 150 },
+          )
+          expect(timeoutRes._tag).toBe("TimedOut")
+          expect(Date.now() - timeoutStartMs).toBeLessThan(5000)
+          if (existsSync(timeoutPidFile)) {
+            const grandchildPid = Number(readFileSync(timeoutPidFile, "utf8").trim())
+            expect(Number.isInteger(grandchildPid) && grandchildPid > 0).toBe(true)
+            expect(isProcessGroupAlive(grandchildPid)).toBe(false)
+          }
+
+          const fiber = yield* execFileAsyncEffect(process.execPath, [
+            "-e",
+            parentScript,
+            interruptPidFile,
+          ]).pipe(Effect.forkChild)
+          const waitUntilStarted = Effect.gen(function* () {
+            for (let i = 0; i < 40; i += 1) {
+              if (existsSync(interruptPidFile)) {
+                return
+              }
+              yield* Effect.sleep("25 millis")
+            }
+          })
+          yield* waitUntilStarted
+          expect(existsSync(interruptPidFile)).toBe(true)
+          const interruptPid = Number(readFileSync(interruptPidFile, "utf8").trim())
+          expect(Number.isInteger(interruptPid) && interruptPid > 0).toBe(true)
+          yield* Fiber.interrupt(fiber)
+          expect(isProcessGroupAlive(interruptPid)).toBe(false)
+        }),
+      ),
   )
 })

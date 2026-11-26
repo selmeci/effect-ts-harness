@@ -1,10 +1,15 @@
-import { Match, Schema } from "effect"
+import { Schema } from "effect"
 import { AbsoluteRepoRoot } from "./repo-identity.js"
 import {
   AgentFailureReason,
   AttemptNumber,
+  MCP_FALLBACK_POLICIES,
+  MCP_ISOLATION_LEVELS,
   MaxConcurrency,
+  McpFallbackPolicy,
+  McpIsolationLevel,
   OwnedRelPath,
+  RunnerConfigFilePath,
   RunnerId,
   WorkUnitId,
   WorkflowRunId,
@@ -12,19 +17,18 @@ import {
 import { PackageVerifyCommand } from "./workflow-verify-command.js"
 import { formatBoundedErrorMessage } from "./workspace-and-process.js"
 
-const hasNoControlChars = (value: string): boolean => {
-  for (let i = 0; i < value.length; i += 1) {
-    const code = value.charCodeAt(i)
-    if (code <= 0x1f || code === 0x7f) {
-      return false
-    }
-  }
-  return true
-}
-
 const MAX_DENIAL_NOTICE_CHARS = 1024
 const MAX_DIAGNOSTIC_DETAIL_CHARS = 1024
 const MAX_AGENT_FAILURE_REASON_CHARS = 2048
+const MAX_SETTLE_TIMEOUT_MS = 2_147_483_647
+
+export {
+  MCP_FALLBACK_POLICIES,
+  MCP_ISOLATION_LEVELS,
+  McpFallbackPolicy,
+  McpIsolationLevel,
+  RunnerConfigFilePath,
+}
 
 /** Closed CLI binary executable names allowed for WF-5 workflow agent runners. */
 export const EXECUTABLE_NAMES = ["claude", "agy"] as const
@@ -33,7 +37,7 @@ export const EXECUTABLE_NAMES = ["claude", "agy"] as const
 export const ExecutableName = Schema.Literals(EXECUTABLE_NAMES).pipe(Schema.brand("ExecutableName"))
 export type ExecutableName = typeof ExecutableName.Type
 
-/** Branded CLI permission/tool rule; forbids `--dangerously-skip-permissions` at schema level (`REQ-4.1`). */
+/** Branded CLI permission/tool rule; forbids `--dangerously-skip-permissions` at schema level (`RFC-0013 REQ-4.1`). */
 export const PermissionRule = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),
   Schema.check(Schema.isMaxLength(256)),
@@ -54,9 +58,9 @@ export const ModelName = Schema.NonEmptyString.pipe(
 )
 export type ModelName = typeof ModelName.Type
 
-/** Positive integer runner timeout budget in milliseconds. */
+/** Positive 32-bit signed integer runner timeout budget in milliseconds (`1..2_147_483_647`). */
 export const TimeoutMillis = Schema.Int.pipe(
-  Schema.check(Schema.isGreaterThanOrEqualTo(1)),
+  Schema.check(Schema.isBetween({ minimum: 1, maximum: MAX_SETTLE_TIMEOUT_MS })),
   Schema.brand("TimeoutMillis"),
 )
 export type TimeoutMillis = typeof TimeoutMillis.Type
@@ -69,12 +73,21 @@ export const DenialNotice = Schema.NonEmptyString.pipe(
 )
 export type DenialNotice = typeof DenialNotice.Type
 
-/** Bounded POSIX exit code (`0..255`) reported by an agent runner subprocess. */
-export const AgentExitCode = Schema.Int.pipe(
-  Schema.check(Schema.isBetween({ minimum: 0, maximum: 255 })),
-  Schema.brand("AgentExitCode"),
+/** Branded zero POSIX exit code (`0`) returned on successful agent runner completion. */
+export const AgentSuccessExitCode = Schema.Literal(0).pipe(Schema.brand("AgentSuccessExitCode"))
+export type AgentSuccessExitCode = typeof AgentSuccessExitCode.Type
+
+/** Branded non-zero POSIX exit code (`1..255`) reported in `AgentExitError`. */
+export const AgentNonZeroExitCode = Schema.Int.pipe(
+  Schema.check(Schema.isBetween({ minimum: 1, maximum: 255 })),
+  Schema.brand("AgentNonZeroExitCode"),
 )
-export type AgentExitCode = typeof AgentExitCode.Type
+export type AgentNonZeroExitCode = typeof AgentNonZeroExitCode.Type
+
+/** Subprocess termination category recorded on `AgentExitError`. */
+export const AGENT_EXIT_FAILURE_KINDS = ["exit", "signal", "spawn-failed"] as const
+export const AgentExitFailureKind = Schema.Literals(AGENT_EXIT_FAILURE_KINDS)
+export type AgentExitFailureKind = typeof AgentExitFailureKind.Type
 
 /** Bounded textual output extracted from a runner JSON envelope. */
 export const AgentResultText = Schema.String.pipe(
@@ -95,20 +108,6 @@ export const BriefPrompt = Schema.NonEmptyString.pipe(
   Schema.brand("BriefPrompt"),
 )
 export type BriefPrompt = typeof BriefPrompt.Type
-
-/** Validated POSIX absolute path to a generated or scoped runner configuration file. */
-export const RunnerConfigFilePath = Schema.String.pipe(
-  Schema.check(Schema.isMaxLength(1024)),
-  Schema.check(Schema.isTrimmed()),
-  Schema.check(Schema.isPattern(/^(?:\/(?!\.\.?(?:\/|$))[^\\/]+)+$/)),
-  Schema.check(
-    Schema.makeFilter(hasNoControlChars, {
-      message: "RunnerConfigFilePath must not contain ASCII control characters",
-    }),
-  ),
-  Schema.brand("RunnerConfigFilePath"),
-)
-export type RunnerConfigFilePath = typeof RunnerConfigFilePath.Type
 
 /** Bounded diagnostic detail attached to runner failure errors. */
 export const AgentDiagnosticDetail = Schema.NonEmptyString.pipe(
@@ -161,29 +160,32 @@ export const AgentSessionId = Schema.NonEmptyString.pipe(
 )
 export type AgentSessionId = typeof AgentSessionId.Type
 
-/** Supported Antigravity `--mode` values (`agy 1.5.10`). */
+/** Supported Antigravity `--mode` values. */
 export const ANTIGRAVITY_MODES = ["accept-edits", "auto", "plan"] as const
 export const AntigravityMode = Schema.Literals(ANTIGRAVITY_MODES)
 export type AntigravityMode = typeof AntigravityMode.Type
 
-/** MCP isolation strength requested for an agent run (`"standard" | "hard"`). */
-export const MCP_ISOLATION_LEVELS = ["standard", "hard"] as const
-export const McpIsolationLevel = Schema.Literals(MCP_ISOLATION_LEVELS)
-export type McpIsolationLevel = typeof McpIsolationLevel.Type
+const hasReportedTelemetry = (usage: {
+  readonly inputTokens?: AgentTokenCount | undefined
+  readonly outputTokens?: AgentTokenCount | undefined
+  readonly thinkingTokens?: AgentTokenCount | undefined
+  readonly totalTokens?: AgentTokenCount | undefined
+  readonly numTurns?: AgentTurnCount | undefined
+  readonly totalCostUsd?: AgentCostUsd | undefined
+  readonly durationMillis?: AgentDurationMillis | undefined
+  readonly sessionId?: AgentSessionId | undefined
+}): boolean =>
+  usage.inputTokens !== undefined ||
+  usage.outputTokens !== undefined ||
+  usage.thinkingTokens !== undefined ||
+  usage.totalTokens !== undefined ||
+  usage.numTurns !== undefined ||
+  usage.totalCostUsd !== undefined ||
+  usage.durationMillis !== undefined ||
+  usage.sessionId !== undefined
 
-/** Policy applied when `antigravity` receives a request requiring `"hard"` MCP isolation. */
-export const MCP_FALLBACK_POLICIES = ["reject", "fallback-claude"] as const
-export const McpFallbackPolicy = Schema.Literals(MCP_FALLBACK_POLICIES)
-export type McpFallbackPolicy = typeof McpFallbackPolicy.Type
-
-/** Closed indicator of whether CLI usage telemetry was present in the runner envelope. */
-export const AGENT_USAGE_STATUSES = ["reported", "unavailable"] as const
-export const AgentUsageStatus = Schema.Literals(AGENT_USAGE_STATUSES)
-export type AgentUsageStatus = typeof AgentUsageStatus.Type
-
-/** Normalized token/turn/cost usage telemetry extracted from a runner JSON envelope. */
-export const AgentUsage = Schema.Struct({
-  status: AgentUsageStatus,
+/** Reported CLI usage telemetry containing at least one metric field. */
+export const ReportedAgentUsage = Schema.TaggedStruct("Reported", {
   inputTokens: Schema.optional(AgentTokenCount),
   outputTokens: Schema.optional(AgentTokenCount),
   thinkingTokens: Schema.optional(AgentTokenCount),
@@ -192,7 +194,21 @@ export const AgentUsage = Schema.Struct({
   totalCostUsd: Schema.optional(AgentCostUsd),
   durationMillis: Schema.optional(AgentDurationMillis),
   sessionId: Schema.optional(AgentSessionId),
-})
+}).pipe(
+  Schema.check(
+    Schema.makeFilter(hasReportedTelemetry, {
+      message: "Reported AgentUsage must contain at least one telemetry field",
+    }),
+  ),
+)
+export type ReportedAgentUsage = typeof ReportedAgentUsage.Type
+
+/** Telemetry marker indicating the CLI envelope omitted usage/session metrics. */
+export const UnavailableAgentUsage = Schema.TaggedStruct("Unavailable", {})
+export type UnavailableAgentUsage = typeof UnavailableAgentUsage.Type
+
+/** Closed tagged union representing normalized runner usage telemetry. */
+export const AgentUsage = Schema.Union([ReportedAgentUsage, UnavailableAgentUsage])
 export type AgentUsage = typeof AgentUsage.Type
 
 /** Deterministic unit prompt & execution constraints passed to `AgentRunnerPort.run`. */
@@ -206,49 +222,63 @@ export const UnitBrief = Schema.Struct({
 })
 export type UnitBrief = typeof UnitBrief.Type
 
-const matchesRunnerBinary = (runner: RunnerId, binary: ExecutableName): boolean =>
-  Match.value(runner).pipe(
-    Match.when("claude-code", () => binary === "claude"),
-    Match.when("antigravity", () => binary === "agy"),
-    Match.exhaustive,
-  )
-
-/** Typed constant runner capability profile (`libs/harness/infra/src/workflow/runner-profiles.ts`). */
-export const RunnerProfile = Schema.Struct({
-  runner: RunnerId,
-  binary: ExecutableName,
+/** Typed capability profile for the Claude Code runner (`claude`). */
+export const ClaudeCodeRunnerProfile = Schema.Struct({
+  runner: Schema.Literal("claude-code"),
+  binary: Schema.Literal("claude"),
   permissionRules: Schema.Array(PermissionRule),
   disallowedTools: Schema.Array(PermissionRule),
   maxConcurrency: MaxConcurrency,
   timeoutMillis: TimeoutMillis,
   maxTurns: Schema.optional(AgentMaxTurns),
   model: Schema.optional(ModelName),
+})
+export type ClaudeCodeRunnerProfile = typeof ClaudeCodeRunnerProfile.Type
+
+/** Typed capability profile for the Antigravity runner (`agy`). */
+export const AntigravityRunnerProfile = Schema.Struct({
+  runner: Schema.Literal("antigravity"),
+  binary: Schema.Literal("agy"),
+  permissionRules: Schema.Array(PermissionRule),
+  maxConcurrency: MaxConcurrency,
+  timeoutMillis: TimeoutMillis,
+  model: Schema.optional(ModelName),
   antigravityMode: Schema.optional(AntigravityMode),
-}).pipe(
-  Schema.check(
-    Schema.makeFilter((profile) => matchesRunnerBinary(profile.runner, profile.binary), {
-      message:
-        "RunnerProfile binary must match runner ('claude-code' -> 'claude', 'antigravity' -> 'agy')",
-    }),
-  ),
-)
+})
+export type AntigravityRunnerProfile = typeof AntigravityRunnerProfile.Type
+
+/** Closed union of runner capability profiles (`libs/harness/infra/src/workflow/runner-profiles.ts`). */
+export const RunnerProfile = Schema.Union([ClaudeCodeRunnerProfile, AntigravityRunnerProfile])
 export type RunnerProfile = typeof RunnerProfile.Type
 
-/** Execution request dispatched to `AgentRunnerPort.run`. */
-export const AgentRunRequest = Schema.Struct({
-  runId: Schema.optional(WorkflowRunId),
-  runner: RunnerId,
+/** Execution request dispatched to `ClaudeCodeRunner.run`. */
+export const ClaudeCodeRunRequest = Schema.Struct({
+  runId: WorkflowRunId,
+  runner: Schema.Literal("claude-code"),
+  brief: UnitBrief,
+  cwd: AbsoluteRepoRoot,
+})
+export type ClaudeCodeRunRequest = typeof ClaudeCodeRunRequest.Type
+
+/** Execution request dispatched to `AntigravityRunner.run` (carries optional MCP isolation policy). */
+export const AntigravityRunRequest = Schema.Struct({
+  runId: WorkflowRunId,
+  runner: Schema.Literal("antigravity"),
   brief: UnitBrief,
   cwd: AbsoluteRepoRoot,
   mcpIsolation: Schema.optional(McpIsolationLevel),
   hardMcpFallback: Schema.optional(McpFallbackPolicy),
 })
+export type AntigravityRunRequest = typeof AntigravityRunRequest.Type
+
+/** Closed execution request dispatched to `AgentRunnerPort.run`. */
+export const AgentRunRequest = Schema.Union([ClaudeCodeRunRequest, AntigravityRunRequest])
 export type AgentRunRequest = typeof AgentRunRequest.Type
 
-/** Normalized success outcome returned by `AgentRunnerPort.run`. */
+/** Normalized success outcome returned by `AgentRunnerPort.run` (always zero exit code). */
 export const AgentRunResult = Schema.Struct({
   runner: RunnerId,
-  exit: AgentExitCode,
+  exit: AgentSuccessExitCode,
   resultText: AgentResultText,
   usage: AgentUsage,
 })
@@ -340,7 +370,8 @@ export class AgentAuthRequiredError extends Schema.TaggedError<AgentAuthRequired
 /** Failure raised when a runner exits non-zero, terminates by signal, or fails to spawn. */
 export class AgentExitError extends Schema.TaggedError<AgentExitError>()("AgentExitError", {
   runner: RunnerId,
-  exit: AgentExitCode,
+  exit: AgentNonZeroExitCode,
+  kind: Schema.optional(AgentExitFailureKind),
   detail: Schema.optional(AgentDiagnosticDetail),
 }) {
   override get message(): string {

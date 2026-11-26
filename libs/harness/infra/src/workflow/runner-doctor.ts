@@ -2,6 +2,7 @@ import { delimiter, join } from "node:path"
 import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
+  ExecutableName,
   WorkflowDoctorCheckItem,
   WorkflowDoctorCheckName,
   toBoundedReason,
@@ -22,7 +23,7 @@ const AntigravitySettingsJsonSchema = Schema.fromJsonString(
 const decodeAntigravitySettingsResult = Schema.decodeUnknownResult(AntigravitySettingsJsonSchema)
 
 const findExecutableOnPath = (
-  binary: string,
+  binary: ExecutableName,
   pathEnv: string | undefined,
   hostIo: ExtendedHostIo,
 ): string | undefined => {
@@ -129,7 +130,7 @@ const inspectWorkflowRunnerDoctorChecks = (
       )
       .exhaustive()
 
-    const claudePath = findExecutableOnPath("claude", pathEnv, io)
+    const claudePath = findExecutableOnPath(ExecutableName.make("claude"), pathEnv, io)
     const claudeCheck = WorkflowDoctorCheckItem.make({
       name: WorkflowDoctorCheckName.make("runner-claude-code"),
       status: claudePath !== undefined ? "ok" : "warn",
@@ -140,7 +141,7 @@ const inspectWorkflowRunnerDoctorChecks = (
       ),
     })
 
-    const agyPath = findExecutableOnPath("agy", pathEnv, io)
+    const agyPath = findExecutableOnPath(ExecutableName.make("agy"), pathEnv, io)
     const settingsInspection = inspectAntigravitySettings(env["HOME"], io)
     const agyReady = agyPath !== undefined && settingsInspection.valid
     const agyDetail =

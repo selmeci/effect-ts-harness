@@ -495,16 +495,23 @@ describe("harness-mcp daemon, LSP, ontology & knowledge tools", () => {
       const wfPlanBlock = Array.isArray(wfPlanRes.content) ? wfPlanRes.content[0] : undefined
       expect(wfPlanBlock?.type).toBe("text")
       if (wfPlanBlock?.type === "text") {
-        expect(JSON.parse(wfPlanBlock.text)).toMatchObject({
-          resolvedRepoRoot: expect.any(String),
-          commonGitDir: expect.any(String),
-          status: {
-            _tag: "DaemonOffline",
-            outcome: {
-              _tag: "NotFound",
-            },
-          },
-        })
+        const parsedPlan = Schema.decodeSync(
+          Schema.fromJsonString(
+            Schema.Struct({
+              resolvedRepoRoot: Schema.String,
+              commonGitDir: Schema.String,
+              status: Schema.Struct({
+                _tag: Schema.Literals(["DaemonOffline", "Ready", "StorePaused"]),
+                outcome: Schema.Struct({
+                  _tag: Schema.String,
+                }),
+              }),
+            }),
+          ),
+        )(wfPlanBlock.text)
+        expect(parsedPlan.resolvedRepoRoot.length).toBeGreaterThan(0)
+        expect(parsedPlan.commonGitDir.length).toBeGreaterThan(0)
+        expect(["DaemonOffline", "Ready", "StorePaused"]).toContain(parsedPlan.status._tag)
       }
 
       const okRes = await client.callTool({

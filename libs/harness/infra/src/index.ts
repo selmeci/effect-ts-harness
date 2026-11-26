@@ -211,6 +211,9 @@ export {
   UnitAgentDispatcherLive,
   UnitAgentDispatcherLiveFromPort,
   dispatchUnitImpl,
+  makeUnitAgentDispatcherLayer,
+  makeUnitAgentDispatcherLayerFromPort,
+  type UnitAgentDispatcherOptions,
 } from "./workflow/agent-dispatcher-live.js"
 export {
   isRetryableAntigravityStartupFailure,
@@ -226,6 +229,7 @@ export {
   makeAgentRunnerPortLayer,
   makeAntigravityRunnerLayer,
   makeClaudeCodeRunnerLayer,
+  makeRunnerPgidRecordPath,
   runAgentRunnerImpl,
   runAntigravityImpl,
   runClaudeCodeImpl,
@@ -240,6 +244,7 @@ export {
 export {
   reapOrphanAttemptProcessGroup,
   spawnSupervisedAgentProcess,
+  writePgidRecordAtomic,
   type SupervisedAgentExecOptions,
 } from "./workflow/runner-process-supervision.js"
 export {

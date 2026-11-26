@@ -20,6 +20,7 @@ import {
   TaskRunReceipt,
   UnitAgentDispatchResult,
   type UnitEscalation,
+  UnitMode,
   UnitOutcome,
   type UnitRejection,
   WaveIndex,
@@ -152,6 +153,8 @@ const dispatchAutomaticUnit = Effect.fnUntraced(function* (
   runner: RunnerId,
   escalationOrdinal: EscalationOrdinal,
   priorRejection: UnitRejection | undefined,
+  mcpIsolation?: (typeof UnitMode.cases.Automatic.Type)["mcpIsolation"],
+  hardMcpFallback?: (typeof UnitMode.cases.Automatic.Type)["hardMcpFallback"],
 ): Effect.fn.Return<
   UnitOutcome,
   WorkspaceFsError,
@@ -179,6 +182,8 @@ const dispatchAutomaticUnit = Effect.fnUntraced(function* (
         runner,
         cwd,
         ...(priorRejection !== undefined ? { priorRejection } : {}),
+        ...(mcpIsolation !== undefined ? { mcpIsolation } : {}),
+        ...(hardMcpFallback !== undefined ? { hardMcpFallback } : {}),
       })
     }),
   })
@@ -190,6 +195,16 @@ const dispatchAutomaticUnit = Effect.fnUntraced(function* (
         unitId: descriptor.unitId,
         attempt,
         rejection: { _tag: "AgentFailed", reason: failed.reason },
+      }),
+    )
+    .with({ _tag: "FatalFailed" }, (failed): Effect.Effect<UnitOutcome> =>
+      Effect.succeed({
+        _tag: "Escalated",
+        unitId: descriptor.unitId,
+        escalation: {
+          _tag: "RetryBudgetExhausted",
+          lastRejection: { _tag: "AgentFailed", reason: failed.reason },
+        },
       }),
     )
     .with({ _tag: "AuthRequired" }, (auth): Effect.Effect<UnitOutcome> =>
@@ -240,6 +255,8 @@ const runAttemptCycle = Effect.fnUntraced(function* (
           automatic.runner,
           escalationOrdinal,
           lastRejection,
+          automatic.mcpIsolation,
+          automatic.hardMcpFallback,
         ),
       )
       .exhaustive()
