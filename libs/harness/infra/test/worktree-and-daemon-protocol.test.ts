@@ -764,10 +764,10 @@ describe("WF-2 Worktree Validation & Daemon Protocol", () => {
       ),
   )
 
-  it.effect("F-17.1: UnitAgentDispatcherLive exposes runnerKind === 'placeholder'", () =>
+  it.effect("F-17.1: UnitAgentDispatcherLive exposes runnerKind === 'live'", () =>
     Effect.gen(function* () {
       const dispatcher = yield* UnitAgentDispatcher
-      expect(dispatcher.runnerKind).toBe("placeholder")
+      expect(dispatcher.runnerKind).toBe("live")
     }).pipe(Effect.provide(UnitAgentDispatcherLive)),
   )
 
@@ -784,6 +784,13 @@ describe("WF-2 Worktree Validation & Daemon Protocol", () => {
     expect(WORKFLOW_COMPLETE_IPC_TIMEOUT_MS).toBe(parsedBudgets.workflowCompleteIpcMs)
     expect(DEFAULT_DAEMON_SERVER_SOCKET_TIMEOUT_MS).toBe(parsedBudgets.defaultServerSocketMs)
     expect(WORKFLOW_DAEMON_SERVER_SOCKET_TIMEOUT_MS).toBe(parsedBudgets.workflowServerSocketMs)
+    expect(parsedBudgets.agentRunClaudeMs).toBeGreaterThan(parsedBudgets.agentKillGraceMs)
+    expect(parsedBudgets.agentRunAntigravityMs).toBeGreaterThan(
+      parsedBudgets.agentStartupRetryMaxAttempts * parsedBudgets.agentStartupRetryBackoffMs,
+    )
+    expect(parsedBudgets.claimTimeoutMs).toBeGreaterThan(
+      parsedBudgets.agentRunClaudeMs + parsedBudgets.agentKillGraceMs,
+    )
   })
 
   it.live(

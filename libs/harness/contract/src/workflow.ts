@@ -523,6 +523,7 @@ export const UnitAgentRequest = Schema.Struct({
   attempt: AttemptNumber,
   runner: RunnerId,
   cwd: AbsoluteRepoRoot,
+  priorRejection: Schema.optional(UnitRejection),
 })
 export type UnitAgentRequest = typeof UnitAgentRequest.Type
 
@@ -543,6 +544,7 @@ export const CompleteUnitInput = Schema.Struct({
   attempt: AttemptNumber,
   cwd: AbsoluteRepoRoot,
   siblingInFlightOwnedPaths: Schema.Array(OwnedRelPath),
+  runner: Schema.optional(RunnerId),
 })
 export type CompleteUnitInput = typeof CompleteUnitInput.Type
 

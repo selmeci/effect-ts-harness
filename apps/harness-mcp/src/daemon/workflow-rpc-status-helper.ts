@@ -102,19 +102,51 @@ const resolveFallbackEscalation = (params: {
   if (params.completedPriorToEscalation && params.branch !== undefined) {
     return Effect.succeed({ _tag: "MergeConflict", branch: params.branch })
   }
-  const rejectedInCycle = params.attempts.filter(
-    (a) =>
+  const cycleRejectedAttempts = params.attempts.filter(
+    (a): a is Extract<WorkflowAttemptRecord, { readonly verdict: "rejected" }> =>
       a.unitId === params.unitId &&
       hasAttemptVerdict(a, "rejected") &&
       attemptBelongsToCycle(a, params.escalationOrdinal),
-  ).length
-  if (params.allThreeRejected || rejectedInCycle >= 3) {
+  )
+  const rejectedInCycle = cycleRejectedAttempts.length
+  if (params.allThreeRejected) {
     return extractLastRejection(params.attemptOutcomes, params.attempts, params.unitId).pipe(
       Effect.map((lastRejection) => ({
         _tag: "RetryBudgetExhausted" as const,
         lastRejection,
       })),
     )
+  }
+  if (rejectedInCycle >= 3) {
+    return match(params.plan.mode)
+      .with({ _tag: "Automatic" }, (auto) =>
+        extractLastRejection([], cycleRejectedAttempts, params.unitId).pipe(
+          Effect.map((lastRejection): UnitEscalation =>
+            match(lastRejection)
+              .with({ _tag: "AgentFailed" }, ({ reason }): UnitEscalation =>
+                reason.startsWith("Authentication required for runner ")
+                  ? { _tag: "AuthRequired", runner: auto.runner }
+                  : { _tag: "RetryBudgetExhausted", lastRejection },
+              )
+              .with(
+                { _tag: "WriteSetViolation" },
+                { _tag: "PackageVerifyFailed" },
+                { _tag: "StampMissing" },
+                (): UnitEscalation => ({ _tag: "RetryBudgetExhausted", lastRejection }),
+              )
+              .exhaustive(),
+          ),
+        ),
+      )
+      .with({ _tag: "Manual" }, () =>
+        extractLastRejection(params.attemptOutcomes, cycleRejectedAttempts, params.unitId).pipe(
+          Effect.map((lastRejection): UnitEscalation => ({
+            _tag: "RetryBudgetExhausted",
+            lastRejection,
+          })),
+        ),
+      )
+      .exhaustive()
   }
   return match(params.plan.mode)
     .with({ _tag: "Automatic" }, (auto) =>

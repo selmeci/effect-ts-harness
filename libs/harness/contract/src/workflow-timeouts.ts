@@ -81,6 +81,11 @@ export const WorkflowTimeoutBudgets = Schema.Struct({
   httpRequestTimeoutMs: WorkflowTimeoutMs,
   claimTimeoutMs: WorkflowTimeoutMs,
   writerLeaseHeartbeatTtlMs: WorkflowTimeoutMs,
+  agentRunClaudeMs: WorkflowTimeoutMs,
+  agentRunAntigravityMs: WorkflowTimeoutMs,
+  agentKillGraceMs: WorkflowTimeoutMs,
+  agentStartupRetryMaxAttempts: WorkflowPollAttempts,
+  agentStartupRetryBackoffMs: WorkflowTimeoutMs,
 })
 export type WorkflowTimeoutBudgets = typeof WorkflowTimeoutBudgets.Type
 
@@ -102,6 +107,11 @@ const RAW_WORKFLOW_TIMEOUT_BUDGETS: WorkflowTimeoutBudgets = {
   httpRequestTimeoutMs: WorkflowTimeoutMs.make(15_000),
   claimTimeoutMs: WorkflowTimeoutMs.make(6 * 60 * 60 * 1_000),
   writerLeaseHeartbeatTtlMs: WorkflowTimeoutMs.make(45_000),
+  agentRunClaudeMs: WorkflowTimeoutMs.make(600_000),
+  agentRunAntigravityMs: WorkflowTimeoutMs.make(600_000),
+  agentKillGraceMs: WorkflowTimeoutMs.make(5_000),
+  agentStartupRetryMaxAttempts: WorkflowPollAttempts.make(3),
+  agentStartupRetryBackoffMs: WorkflowTimeoutMs.make(1_000),
 }
 
 /** Validates strict monotonicity invariants across nested workflow timeout and settle-loop layers (`SPEC-0027 REQ-2.2`). */
@@ -166,6 +176,47 @@ export const validateWorkflowTimeoutBudgets = (
       return Result.fail(
         ErrorReasonMessage.make(
           `shipGateCommandMs (${budgets.shipGateCommandMs}) must exceed workflowServerSocketMs (${budgets.workflowServerSocketMs})`,
+        ),
+      )
+    }
+    if (budgets.agentRunClaudeMs <= budgets.agentKillGraceMs) {
+      return Result.fail(
+        ErrorReasonMessage.make(
+          `agentRunClaudeMs (${budgets.agentRunClaudeMs}) must exceed agentKillGraceMs (${budgets.agentKillGraceMs})`,
+        ),
+      )
+    }
+    if (budgets.agentRunAntigravityMs <= budgets.agentKillGraceMs) {
+      return Result.fail(
+        ErrorReasonMessage.make(
+          `agentRunAntigravityMs (${budgets.agentRunAntigravityMs}) must exceed agentKillGraceMs (${budgets.agentKillGraceMs})`,
+        ),
+      )
+    }
+    const startupRetryBudgetMs =
+      budgets.agentStartupRetryMaxAttempts * budgets.agentStartupRetryBackoffMs
+    if (budgets.agentRunAntigravityMs <= startupRetryBudgetMs) {
+      return Result.fail(
+        ErrorReasonMessage.make(
+          `agentRunAntigravityMs (${budgets.agentRunAntigravityMs}) must exceed agentStartupRetryMaxAttempts * agentStartupRetryBackoffMs (${startupRetryBudgetMs})`,
+        ),
+      )
+    }
+    if (budgets.claimTimeoutMs <= budgets.agentRunClaudeMs + budgets.agentKillGraceMs) {
+      return Result.fail(
+        ErrorReasonMessage.make(
+          `claimTimeoutMs (${budgets.claimTimeoutMs}) must exceed agentRunClaudeMs + agentKillGraceMs (${budgets.agentRunClaudeMs + budgets.agentKillGraceMs})`,
+        ),
+      )
+    }
+    const maxAntigravityCycleMs =
+      budgets.agentStartupRetryMaxAttempts *
+        (budgets.agentRunAntigravityMs + budgets.agentKillGraceMs) +
+      Math.max(0, budgets.agentStartupRetryMaxAttempts - 1) * budgets.agentStartupRetryBackoffMs
+    if (budgets.claimTimeoutMs <= maxAntigravityCycleMs) {
+      return Result.fail(
+        ErrorReasonMessage.make(
+          `claimTimeoutMs (${budgets.claimTimeoutMs}) must exceed worst-case antigravity retry budget (${maxAntigravityCycleMs})`,
         ),
       )
     }

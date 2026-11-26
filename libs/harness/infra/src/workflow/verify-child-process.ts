@@ -499,4 +499,15 @@ const spawnVerifyCommand = (
     })
   })
 
-export { signalChildProcessGroup, spawnVerifyCommand }
+export {
+  appendBoundedTailChunk,
+  createBoundedTailBuffer,
+  isProcessGroupAlive,
+  killProcessGroupPosix,
+  readBoundedTailText,
+  reapProcessGroup,
+  signalChildProcessGroup,
+  spawnVerifyCommand,
+  type BoundedTailBuffer,
+  type ReapProcessGroupOptions,
+}

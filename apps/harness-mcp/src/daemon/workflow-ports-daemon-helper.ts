@@ -10,6 +10,7 @@ import type {
 import type { OmnigraphClient } from "@harness/graph"
 import {
   type ShipActiveGateController,
+  makeAgentRunnerPortLayer,
   makeShipAttemptStoreLayer,
   makeShipGateRunnerLayer,
   makeUnitVerifierLayer,
@@ -19,10 +20,12 @@ import {
   makeWorkflowWorktreePortLayer,
   type ShipGateRunnerOptions,
   UnitAgentDispatcherLive,
+  UnitAgentDispatcherLiveFromPort,
   type WorkflowReadModelLeaseFence,
   type WorkflowReadModelOptions,
 } from "@harness/infra"
 import type {
+  AgentRunnerPort,
   ShipAttemptStore,
   ShipGateRunner,
   UnitAgentDispatcher,
@@ -72,6 +75,7 @@ export interface WorkflowEngineDaemonOptions {
   readonly unitVerifierLayer?: Layer.Layer<UnitVerifier> | undefined
   readonly worktreePortLayer?: Layer.Layer<WorkflowWorktreePort> | undefined
   readonly agentDispatcherLayer?: Layer.Layer<UnitAgentDispatcher> | undefined
+  readonly agentRunnerLayer?: Layer.Layer<AgentRunnerPort> | undefined
   readonly reviewRouterLayer?: Layer.Layer<WorkflowReviewRouter> | undefined
   readonly projectionWriterLayer?: Layer.Layer<WorkflowProjectionWriter> | undefined
   readonly readModelQueryLayer?: Layer.Layer<WorkflowReadModelQuery> | undefined
@@ -122,6 +126,21 @@ export const buildWorkflowPortsLayer = (
     ...(options.env !== undefined ? { env: options.env } : {}),
     ...(options.nowMs !== undefined ? { nowMs: options.nowMs } : {}),
   }
+  const runnerDispatcherLayer =
+    options.agentRunnerLayer !== undefined
+      ? UnitAgentDispatcherLiveFromPort.pipe(Layer.provide(options.agentRunnerLayer))
+      : undefined
+  const defaultRunnerDispatcherLayer =
+    options.hostIo !== undefined || options.env !== undefined
+      ? UnitAgentDispatcherLiveFromPort.pipe(
+          Layer.provide(
+            makeAgentRunnerPortLayer({
+              ...(options.hostIo !== undefined ? { hostIo: options.hostIo } : {}),
+              ...(options.env !== undefined ? { env: options.env } : {}),
+            }),
+          ),
+        )
+      : UnitAgentDispatcherLive
   let resolved: Layer.Layer<WorkflowPortsServices> =
     options.workflowPortsLayer ??
     Layer.mergeAll(
@@ -134,7 +153,7 @@ export const buildWorkflowPortsLayer = (
         repoRoot,
         ...(options.hostIo !== undefined ? { hostIo: options.hostIo } : {}),
       }),
-      UnitAgentDispatcherLive,
+      runnerDispatcherLayer ?? defaultRunnerDispatcherLayer,
       makeWorkflowReviewRouterLayer(
         options.hostIo !== undefined ? { hostIo: options.hostIo } : undefined,
       ),
@@ -161,6 +180,9 @@ export const buildWorkflowPortsLayer = (
   }
   if (options.worktreePortLayer !== undefined) {
     resolved = Layer.merge(resolved, options.worktreePortLayer)
+  }
+  if (options.workflowPortsLayer !== undefined && runnerDispatcherLayer !== undefined) {
+    resolved = Layer.merge(resolved, runnerDispatcherLayer)
   }
   if (options.agentDispatcherLayer !== undefined) {
     resolved = Layer.merge(resolved, options.agentDispatcherLayer)

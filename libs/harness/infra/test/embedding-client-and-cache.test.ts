@@ -41,10 +41,21 @@ const withTempDir = <A, E, R>(
   use: (dir: string) => Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E, R> =>
   Effect.acquireUseRelease(
-    Effect.sync(() => mkdtempSync(join(tmpdir(), "harness-embed-infra-"))),
-    use,
-    (dir) =>
+    Effect.sync(() => {
+      const prevStateDir = process.env["HARNESS_STATE_DIR"]
+      const prevWorktreeId = process.env["HARNESS_WORKTREE_ID"]
+      Reflect.deleteProperty(process.env, "HARNESS_STATE_DIR")
+      Reflect.deleteProperty(process.env, "HARNESS_WORKTREE_ID")
+      const dir = mkdtempSync(join(tmpdir(), "harness-embed-infra-"))
+      return { dir, prevStateDir, prevWorktreeId }
+    }),
+    ({ dir }) => use(dir),
+    ({ dir, prevStateDir, prevWorktreeId }) =>
       Effect.sync(() => {
+        if (prevStateDir === undefined) Reflect.deleteProperty(process.env, "HARNESS_STATE_DIR")
+        else process.env["HARNESS_STATE_DIR"] = prevStateDir
+        if (prevWorktreeId === undefined) Reflect.deleteProperty(process.env, "HARNESS_WORKTREE_ID")
+        else process.env["HARNESS_WORKTREE_ID"] = prevWorktreeId
         rmSync(dir, { recursive: true, force: true })
       }),
   )

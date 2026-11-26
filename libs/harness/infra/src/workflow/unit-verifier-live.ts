@@ -4,6 +4,7 @@ import { Effect, Layer, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   AgentFailureReason,
+  AgentNoChangeError,
   type CompleteSharedStepInput,
   type CompleteUnitInput,
   GateExitCode,
@@ -27,6 +28,7 @@ import { checkVerifyStamp, computeWorkspaceTreeHashChecked } from "@harness/gate
 import { UnitVerifier, type UnitVerifierShape } from "@harness/service"
 import type { ExtendedHostIo, SyncHostExecResult, SyncHostIo } from "@harness/service/host-io"
 import { nodeSyncHostIo } from "../node-host-io.js"
+import { toOutcome } from "./agent-runner-outcome.js"
 import { spawnVerifyCommand } from "./verify-child-process.js"
 
 /** Optional host/command overrides injected into `UnitVerifierLive` for tests. */
@@ -54,6 +56,9 @@ const HARNESS_STAMP_ARTIFACTS: ReadonlySet<string> = new Set([
   ".harness/verify-stamp.json",
   ".harness/mutate-stamp.json",
 ])
+
+const isHarnessInternalArtifact = (rel: string): boolean =>
+  HARNESS_STAMP_ARTIFACTS.has(rel) || rel.startsWith(".harness/runner-pgids/")
 
 const decodeOwnedRelPathOption = Schema.decodeOption(OwnedRelPath)
 
@@ -185,12 +190,12 @@ const gatherChangedPaths = Effect.fnUntraced(function* (
   const uniqueAll = new Set<string>()
   const uniqueDirty = new Set<string>()
   for (const rel of committed) {
-    if (!HARNESS_STAMP_ARTIFACTS.has(rel)) {
+    if (!isHarnessInternalArtifact(rel)) {
       uniqueAll.add(rel)
     }
   }
   for (const rel of [...unstaged, ...staged, ...untracked]) {
-    if (!HARNESS_STAMP_ARTIFACTS.has(rel)) {
+    if (!isHarnessInternalArtifact(rel)) {
       uniqueAll.add(rel)
       uniqueDirty.add(rel)
     }
@@ -292,6 +297,13 @@ export const completeUnitImpl = Effect.fn("Harness.completeUnit")(function* (
       : gathered.all
 
   if (filteredRaw.length === 0) {
+    if (input.runner !== undefined) {
+      return toOutcome(
+        input.unit.unitId,
+        input.attempt,
+        new AgentNoChangeError({ runner: input.runner }),
+      )
+    }
     return UnitOutcome.cases.Rejected.make({
       unitId: input.unit.unitId,
       attempt: input.attempt,

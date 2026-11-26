@@ -207,7 +207,55 @@ export {
   type WorkflowDaemonHandshakeInput,
   type WorkflowDaemonRpcOptions,
 } from "./workflow/daemon-client.js"
-export { UnitAgentDispatcherLive } from "./workflow/agent-dispatcher-live.js"
+export {
+  UnitAgentDispatcherLive,
+  UnitAgentDispatcherLiveFromPort,
+  dispatchUnitImpl,
+} from "./workflow/agent-dispatcher-live.js"
+export {
+  isRetryableAntigravityStartupFailure,
+  parseAntigravityOutput,
+  parseClaudeCodeOutput,
+  toOutcome,
+  toUnitAgentDispatchResult,
+} from "./workflow/agent-runner-outcome.js"
+export {
+  AgentRunnerPortLive,
+  AntigravityRunnerLive,
+  ClaudeCodeRunnerLive,
+  makeAgentRunnerPortLayer,
+  makeAntigravityRunnerLayer,
+  makeClaudeCodeRunnerLayer,
+  runAgentRunnerImpl,
+  runAntigravityImpl,
+  runClaudeCodeImpl,
+  type AgentRunnerPortOptions,
+  type AntigravityRunnerOptions,
+  type ClaudeCodeRunnerOptions,
+} from "./workflow/agent-runners-live.js"
+export {
+  inspectWorkflowRunnerDoctorChecks,
+  type WorkflowRunnerDoctorOptions,
+} from "./workflow/runner-doctor.js"
+export {
+  reapOrphanAttemptProcessGroup,
+  spawnSupervisedAgentProcess,
+  type SupervisedAgentExecOptions,
+} from "./workflow/runner-process-supervision.js"
+export {
+  ANTIGRAVITY_RUNNER_PROFILE,
+  CLAUDE_CODE_RUNNER_PROFILE,
+  RUNNER_PROFILES,
+  buildAntigravityArgv,
+  buildClaudeCodeArgv,
+  buildClaudeHooksSettingsJson,
+  buildClaudeMcpConfigJson,
+  buildRunnerEnv,
+  getRunnerProfile,
+  type BuildAntigravityArgvInput,
+  type BuildClaudeCodeArgvInput,
+} from "./workflow/runner-profiles.js"
+export { buildUnitBrief, type BuildUnitBriefInput } from "./workflow/unit-brief-builder.js"
 export {
   compileWorkflowPlanFromRepo,
   type CompileWorkflowPlanError,

@@ -151,6 +151,7 @@ const dispatchAutomaticUnit = Effect.fnUntraced(function* (
   attempt: AttemptNumber,
   runner: RunnerId,
   escalationOrdinal: EscalationOrdinal,
+  priorRejection: UnitRejection | undefined,
 ): Effect.fn.Return<
   UnitOutcome,
   WorkspaceFsError,
@@ -177,6 +178,7 @@ const dispatchAutomaticUnit = Effect.fnUntraced(function* (
         attempt,
         runner,
         cwd,
+        ...(priorRejection !== undefined ? { priorRejection } : {}),
       })
     }),
   })
@@ -230,7 +232,15 @@ const runAttemptCycle = Effect.fnUntraced(function* (
         ),
       )
       .with({ _tag: "Automatic" }, (automatic) =>
-        dispatchAutomaticUnit(plan, descriptor, cwd, attempt, automatic.runner, escalationOrdinal),
+        dispatchAutomaticUnit(
+          plan,
+          descriptor,
+          cwd,
+          attempt,
+          automatic.runner,
+          escalationOrdinal,
+          lastRejection,
+        ),
       )
       .exhaustive()
 
@@ -383,6 +393,10 @@ const makeUnitCycleDescriptor = (
   cwd: AbsoluteRepoRoot,
 ): UnitCycleDescriptor => {
   const siblingPaths = siblingOwnedPathsForUnit(plan, unit)
+  const runner = match(plan.mode)
+    .with({ _tag: "Automatic" }, (a) => a.runner)
+    .with({ _tag: "Manual" }, () => undefined)
+    .exhaustive()
   return {
     unitId: unit.unitId,
     kind: unitKindOf(unit),
@@ -410,6 +424,7 @@ const makeUnitCycleDescriptor = (
             attempt,
             cwd,
             siblingInFlightOwnedPaths: siblingPaths,
+            ...(runner !== undefined ? { runner } : {}),
           })
         }),
       }),

@@ -16,7 +16,6 @@ import {
 } from "@harness/contract"
 import { readFrictionEvents, resolveHarnessStateDir } from "@harness/gates"
 import {
-  UnitAgentDispatcherLive,
   abortWorkflowViaDaemon,
   compileWorkflowPlanFromRepo,
   completeWorkflowViaDaemon,
@@ -78,15 +77,10 @@ type ResolvedWorkflowCliDeps = typeof DEFAULT_WORKFLOW_DEPS & {
 
 const resolveActiveRunnerKind = (): Effect.Effect<"live" | "placeholder"> =>
   Effect.serviceOption(UnitAgentDispatcher).pipe(
-    Effect.flatMap((opt) =>
+    Effect.map((opt) =>
       match(opt)
-        .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value.runnerKind))
-        .with({ _tag: "None" }, () =>
-          UnitAgentDispatcher.pipe(
-            Effect.map((d) => d.runnerKind),
-            Effect.provide(UnitAgentDispatcherLive),
-          ),
-        )
+        .with({ _tag: "Some" }, ({ value }) => value.runnerKind)
+        .with({ _tag: "None" }, () => "live" as const)
         .exhaustive(),
     ),
   )

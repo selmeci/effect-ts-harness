@@ -1,23 +1,35 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Deferred, Effect, Fiber } from "effect"
-import { DurableDeferred } from "effect/workflow"
+import { Cause, Deferred, Effect, Fiber, Layer } from "effect"
+import { DurableDeferred, WorkflowEngine } from "effect/workflow"
 import { match } from "ts-pattern"
 import {
   AgentFailureReason,
   AttemptNumber,
   type CompiledPlan,
+  type CompleteUnitInput,
   EscalationOrdinal,
   GateExitCode,
   MaxConcurrency,
   OwnedRelPath,
+  PackageVerifyFailureDetail,
   SHARED_STEP_UNIT_ID,
   SliceBranchName,
   TaskRunAbortedError,
+  type UnitAgentRequest,
+  UnitOutcome,
   WorkUnitId,
   WorkflowRunId as WorkflowRunIdSchema,
 } from "@harness/contract"
 import {
+  UnitAgentDispatcher,
+  UnitVerifier,
+  WorkflowProjectionWriter,
+  WorkflowReviewRouter,
+  WorkflowWorktreePort,
+} from "@harness/service"
+import {
   HarnessTaskWorkflow,
+  HarnessTaskWorkflowLayer,
   LlmPhaseDone,
   makeUnitCompletionDeferred,
   makeUnitEscalationDeferred,
@@ -29,6 +41,7 @@ import {
   makeSliceUnit,
   makePackageUnit,
   makeLlmReceipt,
+  makeReviewPlan,
   makeCompletedOutcome,
   makeSpyState,
   makeWorkflowTestLayer,
@@ -661,6 +674,139 @@ describe("HarnessTaskWorkflow execution, waves & merges", () => {
             "completed",
           )
         }).pipe(Effect.provide(manLayer))
+      }),
+    20_000,
+  )
+
+  it.live(
+    "passes priorRejection into subsequent Automatic UnitAgentRequest attempts and forwards runner into UnitVerifier.completeUnit",
+    () =>
+      Effect.gen(function* () {
+        const waitLlm = yield* Deferred.make<void>()
+
+        const unitId = WorkUnitId.make("auto-retry-unit")
+        const plan: CompiledPlan = {
+          runId: WorkflowRunIdSchema.make("run-auto-prior-rejection-009"),
+          level: "slice",
+          planSha: PLAN_SHA,
+          baseSha: BASE_SHA,
+          mode: {
+            _tag: "Automatic",
+            runner: "claude-code",
+            maxConcurrency: MaxConcurrency.make(1),
+          },
+          units: [makePackageUnit(unitId, "@harness/auto", ["libs/auto/src/index.ts"], 0)],
+          sharedStepPaths: [],
+        }
+
+        const attempt2Reason = AgentFailureReason.make("Runner exited 1 on attempt 2")
+        const dispatchCalls: Array<UnitAgentRequest> = []
+        const recordedCompleteInputs: Array<CompleteUnitInput> = []
+        const portsLayer = Layer.mergeAll(
+          Layer.succeed(WorkflowWorktreePort, {
+            provisionWorktrees: (p) =>
+              Effect.succeed({
+                runId: p.runId,
+                canonicalRepoRoot: CANONICAL_ROOT,
+                entries: p.units.map((u) => ({
+                  unitId: u.unitId,
+                  cwd: CANONICAL_ROOT,
+                  worktreeKind: "canonical" as const,
+                })),
+              }),
+            removeWorktreeCheckouts: () => Effect.void,
+            mergeSliceWave: (input) =>
+              Effect.succeed({ _tag: "Merged" as const, mergedBranches: input.branches }),
+          }),
+          Layer.succeed(UnitAgentDispatcher, {
+            runnerKind: "live" as const,
+            dispatchUnit: (request) =>
+              Effect.sync(() => {
+                dispatchCalls.push(request)
+                if (request.attempt === 2) {
+                  return { _tag: "Failed" as const, reason: attempt2Reason }
+                }
+                return { _tag: "Completed" as const }
+              }),
+          }),
+          Layer.succeed(UnitVerifier, {
+            completeUnit: (input) =>
+              Effect.sync(() => {
+                recordedCompleteInputs.push(input)
+                if (input.attempt === 1) {
+                  return UnitOutcome.cases.Rejected.make({
+                    unitId: input.unit.unitId,
+                    attempt: input.attempt,
+                    rejection: {
+                      _tag: "PackageVerifyFailed",
+                      exitCode: GateExitCode.make(1),
+                      failureKind: "non-zero-exit",
+                      detail: PackageVerifyFailureDetail.make("attempt 1 verify failed"),
+                    },
+                  })
+                }
+                return makeCompletedOutcome(
+                  input.unit.unitId,
+                  input.attempt,
+                  input.unit.ownedRelPaths,
+                )
+              }),
+            completeSharedStep: (input) =>
+              Effect.succeed(
+                makeCompletedOutcome(SHARED_STEP_UNIT_ID, input.attempt, input.sharedStepPaths),
+              ),
+          }),
+          Layer.succeed(WorkflowReviewRouter, {
+            routeReview: () => Effect.succeed(makeReviewPlan()),
+          }),
+          Layer.succeed(WorkflowProjectionWriter, {
+            upsertRun: (run) =>
+              match(run.state)
+                .with("waiting", () => Deferred.succeed(waitLlm, void 0).pipe(Effect.asVoid))
+                .with("running", "completed", "aborted", () => Effect.void)
+                .exhaustive(),
+            upsertUnit: () => Effect.void,
+            upsertAttempt: () => Effect.void,
+          }),
+        )
+        const layer = HarnessTaskWorkflowLayer.pipe(
+          Layer.provide(portsLayer),
+          Layer.provideMerge(WorkflowEngine.layerMemory),
+        )
+
+        yield* Effect.gen(function* () {
+          const executionId = yield* HarnessTaskWorkflow.execute({ plan }, { discard: true })
+          yield* Deferred.await(waitLlm)
+          yield* DurableDeferred.succeed(LlmPhaseDone, {
+            token: DurableDeferred.tokenFromExecutionId(LlmPhaseDone, {
+              workflow: HarnessTaskWorkflow,
+              executionId,
+            }),
+            value: makeLlmReceipt(),
+          })
+          const receipt = yield* HarnessTaskWorkflow.execute({ plan })
+          expect(receipt.completedUnits).toEqual([unitId])
+          expect(dispatchCalls).toHaveLength(3)
+          expect(dispatchCalls[0]?.attempt).toBe(1)
+          expect(dispatchCalls[0]?.priorRejection).toBeUndefined()
+          expect(dispatchCalls[1]?.attempt).toBe(2)
+          expect(dispatchCalls[1]?.priorRejection).toEqual({
+            _tag: "PackageVerifyFailed",
+            exitCode: GateExitCode.make(1),
+            failureKind: "non-zero-exit",
+            detail: PackageVerifyFailureDetail.make("attempt 1 verify failed"),
+          })
+          expect(dispatchCalls[2]?.attempt).toBe(3)
+          expect(dispatchCalls[2]?.priorRejection).toEqual({
+            _tag: "AgentFailed",
+            reason: attempt2Reason,
+          })
+          expect(recordedCompleteInputs).toHaveLength(2)
+          expect(recordedCompleteInputs[0]?.attempt).toBe(1)
+          expect(recordedCompleteInputs[0]?.runner).toBe("claude-code")
+          expect(recordedCompleteInputs[1]?.attempt).toBe(3)
+          expect(recordedCompleteInputs[1]?.runner).toBe("claude-code")
+        }).pipe(Effect.provide(layer))
       }),
     20_000,
   )

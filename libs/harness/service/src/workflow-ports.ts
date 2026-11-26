@@ -1,5 +1,8 @@
 import { Context, type Effect, type Option } from "effect"
 import type {
+  AgentRunRequest,
+  AgentRunResult,
+  AgentRunnerError,
   AllocateShipAttemptInput,
   BackupDirPath,
   CompiledPlan,
@@ -62,7 +65,16 @@ export class UnitVerifier extends Context.Service<UnitVerifier, UnitVerifierShap
   "@harness/service/UnitVerifier",
 ) {}
 
-/** Dispatches an automatic work unit against a pluggable agent runner boundary (live runners land in WF-5). */
+/** Executes an automatic work unit through an isolated CLI agent runner (`claude-code` | `antigravity`). */
+export interface AgentRunnerPortShape {
+  readonly run: (request: AgentRunRequest) => Effect.Effect<AgentRunResult, AgentRunnerError>
+}
+
+export class AgentRunnerPort extends Context.Service<AgentRunnerPort, AgentRunnerPortShape>()(
+  "@harness/service/AgentRunnerPort",
+) {}
+
+/** Dispatches an automatic work unit against a pluggable agent runner boundary (`UnitAgentDispatcherLive` uses `AgentRunnerPort`). */
 export interface UnitAgentDispatcherShape {
   readonly runnerKind: "live" | "placeholder"
   readonly dispatchUnit: (
