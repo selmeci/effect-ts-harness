@@ -3,7 +3,12 @@ import { Cause, Effect, Fiber, Layer, Logger, Option, Schema, Tracer } from "eff
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { TestClock } from "effect/testing"
 import { match } from "ts-pattern"
-import { DEFAULT_DECISION_MODEL_TIMEOUT_MS } from "@harness/contract"
+import {
+  DEFAULT_DECISION_MODEL_TIMEOUT_MS,
+  GuardModelErrorDetail,
+  GuardRiskProbability,
+  ShellCommandText,
+} from "@harness/contract"
 import { SpanBudget, type SpanSample } from "@harness/gates"
 import { SKIP_NX_CACHE_BANNED_REASON } from "@harness/gates/hook-fastpath"
 import {
@@ -492,7 +497,7 @@ describe("Harness guard & triage decision definitions", () => {
         expect(budgetViolations).toEqual([])
 
         const notEvaluated = yield* GuardDecision.decide({
-          command: "curl https://unknown.example",
+          command: ShellCommandText.make("curl https://unknown.example"),
           fastPath: "escalate",
           modelOutcome: { _tag: "NotEvaluated" },
         })
@@ -537,29 +542,32 @@ describe("Harness guard & triage decision definitions", () => {
         const modelOutcome: GuardModelOutcome = match(outcomeKind)
           .with("NotEvaluated", () => ({ _tag: "NotEvaluated" as const }))
           .with("TimedOut", () => ({ _tag: "TimedOut" as const }))
-          .with("ModelError", () => ({ _tag: "ModelError" as const, detail: "offline" }))
+          .with("ModelError", () => ({
+            _tag: "ModelError" as const,
+            detail: GuardModelErrorDetail.make("offline"),
+          }))
           .with("HighRisk", () => ({
             _tag: "Scored" as const,
-            destructive: 0.7,
-            secretAccess: 0.1,
-            exfiltration: 0.1,
+            destructive: GuardRiskProbability.make(0.7),
+            secretAccess: GuardRiskProbability.make(0.1),
+            exfiltration: GuardRiskProbability.make(0.1),
           }))
           .with("LowRisk", () => ({
             _tag: "Scored" as const,
-            destructive: 0.1,
-            secretAccess: 0.1,
-            exfiltration: 0.1,
+            destructive: GuardRiskProbability.make(0.1),
+            secretAccess: GuardRiskProbability.make(0.1),
+            exfiltration: GuardRiskProbability.make(0.1),
           }))
           .with("Ambiguous", () => ({
             _tag: "Scored" as const,
-            destructive: 0.4,
-            secretAccess: 0.1,
-            exfiltration: 0.1,
+            destructive: GuardRiskProbability.make(0.4),
+            secretAccess: GuardRiskProbability.make(0.1),
+            exfiltration: GuardRiskProbability.make(0.1),
           }))
           .exhaustive()
 
         const res = yield* GuardDecision.decide({
-          command: "curl https://unknown.example",
+          command: ShellCommandText.make("curl https://unknown.example"),
           fastPath,
           unitWorkerMode,
           modelOutcome,

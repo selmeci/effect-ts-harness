@@ -37,6 +37,7 @@ const makeMockEmbeddingLayer = (options?: {
   readonly onEmbedBatch?: (texts: ReadonlyArray<EmbeddingSourceText>) => void
   readonly failWith?: string | undefined
   readonly hang?: boolean | undefined
+  readonly returnVectors?: ReadonlyArray<EmbeddingVector> | undefined
 }): Layer.Layer<EmbeddingClient> =>
   Layer.succeed(
     EmbeddingClient,
@@ -59,6 +60,9 @@ const makeMockEmbeddingLayer = (options?: {
               reason: ErrorReasonMessage.make(options.failWith),
             }),
           )
+        }
+        if (options?.returnVectors !== undefined) {
+          return Effect.succeed(options.returnVectors)
         }
         const vector: EmbeddingVector = {
           components: [EmbeddingComponent.make(1)],
@@ -409,18 +413,18 @@ describe("OllamaReadinessLive (SPEC-0037 REQ-2.1, REQ-2.2, REQ-2.3)", () => {
         ).pipe(Effect.map((r) => r.result))
         expectOllamaWarmupError(nonLoopbackExit, "server-start", "non-loopback")
 
-        for (const badUrl of [
-          "ftp://127.0.0.1:11434",
-          "http://user:pass@127.0.0.1:11434",
-          "http://127.0.0.1:11434?x=1",
-          "http://127.0.0.1:11434#frag",
-        ]) {
+        for (const [badUrl, expectedSubstr] of [
+          ["ftp://127.0.0.1:11434", "Unsupported Ollama protocol"],
+          ["http://user:pass@127.0.0.1:11434", "must not embed credentials"],
+          ["http://127.0.0.1:11434?x=1", "query parameters or fragments"],
+          ["http://127.0.0.1:11434#frag", "query parameters or fragments"],
+        ] as const) {
           const badExit = yield* Effect.exit(
             ensureOllamaWarm({ baseUrl: badUrl, state }).pipe(
               Effect.provide(makeMockEmbeddingLayer()),
             ),
           )
-          expectOllamaWarmupError(badExit, "server-start")
+          expectOllamaWarmupError(badExit, "server-start", expectedSubstr)
         }
 
         // SpawnFailed error maps to OllamaWarmupError
@@ -540,6 +544,9 @@ describe("OllamaReadinessLive (SPEC-0037 REQ-2.1, REQ-2.2, REQ-2.3)", () => {
       Effect.gen(function* () {
         const nonLoopback = yield* checkOllamaServerReadyDetailed("http://evil.example:11434")
         expect(nonLoopback.ready).toBe(false)
+        if (!nonLoopback.ready) {
+          expect(nonLoopback.reason).toContain("non-loopback")
+        }
 
         const readyProbe = yield* checkOllamaServerReadyDetailed("http://127.0.0.1:11434", () =>
           Promise.resolve(
@@ -558,11 +565,297 @@ describe("OllamaReadinessLive (SPEC-0037 REQ-2.1, REQ-2.2, REQ-2.3)", () => {
           ),
         )
         expect(missingModel.ready).toBe(false)
+        if (!missingModel.ready) {
+          expect(missingModel.reason).toContain("clef-flash")
+        }
 
         const httpErr = yield* checkOllamaServerReadyDetailed("http://localhost:11434", () =>
           Promise.resolve(new Response("down", { status: 503 })),
         )
         expect(httpErr.ready).toBe(false)
+        if (!httpErr.ready) {
+          expect(httpErr.reason).toContain("HTTP 503")
+        }
+      }),
+  )
+
+  it.effect(
+    "F-3.1: includeEmbeddings=false skips embedBatch, returns embeddingsWarm=false, and does not poison full warmup cache",
+    () =>
+      Effect.gen(function* () {
+        const state = createOllamaWarmupState()
+        let systemOneCalls = 0
+        let embedCalls = 0
+
+        const okFetch: typeof globalThis.fetch = (input) => {
+          const url =
+            typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+          if (url.endsWith("/api/tags")) {
+            return Promise.resolve(
+              new Response(JSON.stringify({ models: [{ name: "clef-flash" }] }), { status: 200 }),
+            )
+          }
+          systemOneCalls += 1
+          return Promise.resolve(new Response(JSON.stringify({ ready: true }), { status: 200 }))
+        }
+
+        const embedLayer = makeMockEmbeddingLayer({
+          onEmbedBatch: () => {
+            embedCalls += 1
+          },
+        })
+
+        const noEmbed1 = yield* ensureOllamaWarm({
+          fetch: okFetch,
+          state,
+          includeEmbeddings: false,
+        }).pipe(Effect.provide(embedLayer))
+        expect(noEmbed1.clefWarm).toBe(true)
+        expect(noEmbed1.embeddingsWarm).toBe(false)
+        expect(noEmbed1.cached).toBe(false)
+        expect(systemOneCalls).toBe(1)
+        expect(embedCalls).toBe(0)
+
+        const noEmbedCached = yield* ensureOllamaWarm({
+          fetch: okFetch,
+          state,
+          includeEmbeddings: false,
+        }).pipe(Effect.provide(embedLayer))
+        expect(noEmbedCached.clefWarm).toBe(true)
+        expect(noEmbedCached.embeddingsWarm).toBe(false)
+        expect(noEmbedCached.cached).toBe(true)
+        expect(systemOneCalls).toBe(1)
+        expect(embedCalls).toBe(0)
+
+        const fullWarm = yield* ensureOllamaWarm({
+          fetch: okFetch,
+          state,
+        }).pipe(Effect.provide(embedLayer))
+        expect(fullWarm.clefWarm).toBe(true)
+        expect(fullWarm.embeddingsWarm).toBe(true)
+        expect(fullWarm.cached).toBe(false)
+        expect(systemOneCalls).toBe(2)
+        expect(embedCalls).toBe(1)
+      }),
+  )
+
+  it.effect(
+    "F-10.1 & F-10.2: rejects HTTP 200 HTML/error SystemOne payloads and empty/zero-component embedding vectors",
+    () =>
+      Effect.gen(function* () {
+        const state = createOllamaWarmupState()
+
+        const htmlSystemOneFetch: typeof globalThis.fetch = (input) => {
+          const url =
+            typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+          if (url.endsWith("/api/tags")) {
+            return Promise.resolve(new Response(JSON.stringify({ models: [] }), { status: 200 }))
+          }
+          return Promise.resolve(new Response("<html>502 Bad Gateway</html>", { status: 200 }))
+        }
+        const htmlExit = yield* Effect.exit(
+          ensureOllamaWarm({ fetch: htmlSystemOneFetch, state }).pipe(
+            Effect.provide(makeMockEmbeddingLayer()),
+          ),
+        )
+        expectOllamaWarmupError(htmlExit, "systemone-probe", "non-JSON")
+
+        const errorJsonFetch: typeof globalThis.fetch = (input) => {
+          const url =
+            typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+          if (url.endsWith("/api/tags")) {
+            return Promise.resolve(new Response(JSON.stringify({ models: [] }), { status: 200 }))
+          }
+          return Promise.resolve(
+            new Response(JSON.stringify({ error: "model not loaded" }), { status: 200 }),
+          )
+        }
+        const errorPayloadExit = yield* Effect.exit(
+          ensureOllamaWarm({ fetch: errorJsonFetch, state }).pipe(
+            Effect.provide(makeMockEmbeddingLayer()),
+          ),
+        )
+        expectOllamaWarmupError(errorPayloadExit, "systemone-probe", "model not loaded")
+
+        const okFetch: typeof globalThis.fetch = (input) => {
+          const url =
+            typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+          if (url.endsWith("/api/tags")) {
+            return Promise.resolve(new Response(JSON.stringify({ models: [] }), { status: 200 }))
+          }
+          return Promise.resolve(new Response(JSON.stringify({ ready: true }), { status: 200 }))
+        }
+
+        const emptyBatchExit = yield* Effect.exit(
+          ensureOllamaWarm({ fetch: okFetch, state }).pipe(
+            Effect.provide(makeMockEmbeddingLayer({ returnVectors: [] })),
+          ),
+        )
+        expectOllamaWarmupError(emptyBatchExit, "embeddings-probe", "vector count")
+
+        const emptyComponentsExit = yield* Effect.exit(
+          ensureOllamaWarm({ fetch: okFetch, state }).pipe(
+            Effect.provide(makeMockEmbeddingLayer({ returnVectors: [{ components: [] }] })),
+          ),
+        )
+        expectOllamaWarmupError(emptyComponentsExit, "embeddings-probe", "vector count")
+      }),
+  )
+
+  it.effect(
+    "F-10.3: warmCacheTtlMs expires cached receipts strictly at TTL and treats <=0 TTL as uncached",
+    () =>
+      Effect.gen(function* () {
+        const state = createOllamaWarmupState()
+        let systemOneCalls = 0
+        const okFetch: typeof globalThis.fetch = (input) => {
+          const url =
+            typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+          if (url.endsWith("/api/tags")) {
+            return Promise.resolve(new Response(JSON.stringify({ models: [] }), { status: 200 }))
+          }
+          systemOneCalls += 1
+          return Promise.resolve(new Response(JSON.stringify({ ready: true }), { status: 200 }))
+        }
+        const embedLayer = makeMockEmbeddingLayer()
+
+        const first = yield* ensureOllamaWarm({
+          fetch: okFetch,
+          state,
+          warmCacheTtlMs: 1_000,
+        }).pipe(Effect.provide(embedLayer))
+        expect(first.cached).toBe(false)
+        expect(systemOneCalls).toBe(1)
+
+        yield* TestClock.adjust("999 millis")
+        const stillFresh = yield* ensureOllamaWarm({
+          fetch: okFetch,
+          state,
+          warmCacheTtlMs: 1_000,
+        }).pipe(Effect.provide(embedLayer))
+        expect(stillFresh.cached).toBe(true)
+        expect(systemOneCalls).toBe(1)
+
+        yield* TestClock.adjust("1 millis")
+        const expired = yield* ensureOllamaWarm({
+          fetch: okFetch,
+          state,
+          warmCacheTtlMs: 1_000,
+        }).pipe(Effect.provide(embedLayer))
+        expect(expired.cached).toBe(false)
+        expect(systemOneCalls).toBe(2)
+
+        const zeroTtl = yield* ensureOllamaWarm({
+          fetch: okFetch,
+          state,
+          warmCacheTtlMs: 0,
+        }).pipe(Effect.provide(embedLayer))
+        expect(zeroTtl.cached).toBe(false)
+        expect(systemOneCalls).toBe(3)
+      }),
+  )
+
+  it.effect(
+    "F-10.4 & S-1.3: GET /api/tags HTTP 500 fails at server-start without spawning ollama serve, and invalid probeBudgetMs fails explicitly",
+    () =>
+      Effect.gen(function* () {
+        const state = createOllamaWarmupState()
+        let spawnCalls = 0
+
+        const http500Exit = yield* Effect.exit(
+          ensureOllamaWarm({
+            fetch: () => Promise.resolve(new Response("internal server error", { status: 500 })),
+            spawnOllama: () => {
+              spawnCalls += 1
+              return { _tag: "Spawned", pid: 123 }
+            },
+            state,
+          }).pipe(Effect.provide(makeMockEmbeddingLayer())),
+        )
+        expect(spawnCalls).toBe(0)
+        expectOllamaWarmupError(http500Exit, "server-start", "HTTP 500")
+
+        for (const invalidBudget of [0, -10, Number.NaN]) {
+          const invalidBudgetExit = yield* Effect.exit(
+            ensureOllamaWarm({
+              probeBudgetMs: invalidBudget,
+              state,
+            }).pipe(Effect.provide(makeMockEmbeddingLayer())),
+          )
+          expectOllamaWarmupError(
+            invalidBudgetExit,
+            "server-start",
+            "Invalid positive finite timeoutMs",
+          )
+        }
+      }),
+  )
+
+  it.effect(
+    "S-1.2: state.clear() during in-flight warm-up delivers outcome to existing waiters without post-clear cache pollution",
+    () =>
+      Effect.gen(function* () {
+        const state = createOllamaWarmupState()
+        let systemOneCalls = 0
+        let markInFlight!: () => void
+        let releaseInFlight!: () => void
+        const inFlightStarted = new Promise<void>((resolve) => {
+          markInFlight = resolve
+        })
+        const inFlightReleased = new Promise<void>((resolve) => {
+          releaseInFlight = resolve
+        })
+
+        const gatedFetch: typeof globalThis.fetch = (input) => {
+          const url =
+            typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+          if (url.endsWith("/api/tags")) {
+            return Promise.resolve(new Response(JSON.stringify({ models: [] }), { status: 200 }))
+          }
+          systemOneCalls += 1
+          if (systemOneCalls === 1) {
+            markInFlight()
+            return inFlightReleased.then(
+              () => new Response(JSON.stringify({ ready: true }), { status: 200 }),
+            )
+          }
+          return Promise.resolve(new Response(JSON.stringify({ ready: true }), { status: 200 }))
+        }
+
+        const embedLayer = makeMockEmbeddingLayer()
+        const leaderFiber = yield* ensureOllamaWarm({ fetch: gatedFetch, state }).pipe(
+          Effect.provide(embedLayer),
+          Effect.forkChild,
+        )
+        yield* Effect.promise(() => inFlightStarted)
+
+        const waiterFiber = yield* ensureOllamaWarm({ fetch: gatedFetch, state }).pipe(
+          Effect.provide(embedLayer),
+          Effect.forkChild,
+        )
+        yield* Effect.yieldNow
+
+        // Clear state while leader & waiter are in flight
+        const genBeforeClear = state.getGeneration()
+        state.clear()
+        expect(state.getGeneration()).toBe(genBeforeClear + 1)
+
+        releaseInFlight()
+        const leaderReceipt = yield* Fiber.join(leaderFiber)
+        const waiterReceipt = yield* Fiber.join(waiterFiber)
+
+        expect(leaderReceipt.clefWarm).toBe(true)
+        expect(leaderReceipt.embeddingsWarm).toBe(true)
+        expect(waiterReceipt.clefWarm).toBe(true)
+        expect(waiterReceipt.embeddingsWarm).toBe(true)
+        expect(systemOneCalls).toBe(1)
+
+        // Post-clear call must NOT see a stale cached entry from the pre-clear leader
+        const afterClear = yield* ensureOllamaWarm({ fetch: gatedFetch, state }).pipe(
+          Effect.provide(embedLayer),
+        )
+        expect(afterClear.cached).toBe(false)
+        expect(systemOneCalls).toBe(2)
       }),
   )
 })

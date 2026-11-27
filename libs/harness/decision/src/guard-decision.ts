@@ -3,11 +3,30 @@ import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import {
   DEFAULT_DECISION_MODEL_TIMEOUT_MS,
+  GuardDecisionInput,
+  GuardDecisionResult,
+  GuardFastPathVerdict,
+  GuardModelErrorDetail,
+  GuardModelOutcome,
+  GuardReasonText,
+  GuardRiskProbability,
+  ShellCommandText,
   WORKFLOW_TIMEOUT_BUDGETS,
   isPureInterruptCause,
 } from "@harness/contract"
 import { match } from "ts-pattern"
 import { classifyCommand, explainCommandDenyReason } from "@harness/gates/hook-fastpath"
+
+export {
+  GuardDecisionInput,
+  GuardDecisionResult,
+  GuardFastPathVerdict,
+  GuardModelErrorDetail,
+  GuardModelOutcome,
+  GuardReasonText,
+  GuardRiskProbability,
+  ShellCommandText,
+}
 
 export const GuardV1 = Decision.make({
   input: Schema.Struct({ command: Schema.String }),
@@ -35,41 +54,44 @@ export interface GuardCommandInput {
   readonly unitWorkerMode?: boolean | undefined
 }
 
-export interface GuardDecisionResult {
-  readonly verdict: "allow" | "deny" | "ask"
-  readonly reason: string
-}
-
-export type GuardFastPathVerdict = "allow" | "deny" | "ask" | "escalate"
-
-export type GuardModelOutcome =
-  | { readonly _tag: "NotEvaluated" }
-  | { readonly _tag: "TimedOut" }
-  | { readonly _tag: "ModelError"; readonly detail: string }
-  | {
-      readonly _tag: "Scored"
-      readonly destructive: number
-      readonly secretAccess: number
-      readonly exfiltration: number
-    }
-
-export interface GuardDecisionInput {
-  readonly command: string
-  readonly fastPath: GuardFastPathVerdict
-  readonly unitWorkerMode?: boolean | undefined
-  readonly modelOutcome: GuardModelOutcome
-}
-
 export const GUARD_DECISION_TIMEOUT_MS: typeof DEFAULT_DECISION_MODEL_TIMEOUT_MS =
   WORKFLOW_TIMEOUT_BUDGETS.decisionModelTimeoutMs
 
 const WORKER_SENSITIVE_FALLBACK_PATTERN =
   /\bharness(?:-cli)?\b|auth-tokens|daemon\.soc|\.harness\/omnigraph-cluster/i
 
+const MAX_SHELL_COMMAND_LENGTH = 32_768
+const MAX_GUARD_REASON_LENGTH = 1_024
+const MAX_MODEL_ERROR_DETAIL_LENGTH = 256
+
+const toGuardReasonText = (raw: string, fallback: string): GuardReasonText => {
+  const trimmed = raw.trim()
+  const normalized = trimmed.length > 0 ? trimmed : fallback
+  const bounded =
+    normalized.length > MAX_GUARD_REASON_LENGTH
+      ? `${normalized.slice(0, MAX_GUARD_REASON_LENGTH - 3)}...`
+      : normalized
+  return GuardReasonText.make(bounded)
+}
+
+const toGuardModelErrorDetail = (raw: string): GuardModelErrorDetail => {
+  const collapsed = raw.replace(/\s+/g, " ").trim()
+  const normalized = collapsed.length > 0 ? collapsed : "unknown error"
+  const bounded =
+    normalized.length > MAX_MODEL_ERROR_DETAIL_LENGTH
+      ? `${normalized.slice(0, MAX_MODEL_ERROR_DETAIL_LENGTH - 3)}...`
+      : normalized
+  return GuardModelErrorDetail.make(bounded)
+}
+
+const toGuardRiskProbability = (value: number): GuardRiskProbability =>
+  GuardRiskProbability.make(Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 1)
+
 /**
- * Pure domain decider (`R = never`) mapping deterministic fast-path verdicts and
- * optional `GuardV1` `DecisionModel` scores into a fail-closed `GuardDecisionResult`
- * using the unified `GUARD_DECISION_TIMEOUT_MS` (`5000 ms`) budget (`SPEC-0037 REQ-2.4`).
+ * Effect-based (`R = never`) domain decider (logs structured warning on `TimedOut`)
+ * mapping deterministic fast-path verdicts and optional `GuardV1` `DecisionModel` scores
+ * into a fail-closed `GuardDecisionResult` using the unified `GUARD_DECISION_TIMEOUT_MS`
+ * (`5000 ms`) budget (`SPEC-0037 REQ-2.4`).
  */
 export const decideGuardVerdict = Effect.fn("GuardDecision.decide")(function* (
   input: GuardDecisionInput,
@@ -81,21 +103,23 @@ export const decideGuardVerdict = Effect.fn("GuardDecision.decide")(function* (
     .with("deny", () =>
       Effect.succeed({
         verdict: "deny" as const,
-        reason:
+        reason: toGuardReasonText(
           explainCommandDenyReason(input.command, policyOptions) ??
+            "Matched deterministic denylist.",
           "Matched deterministic denylist.",
+        ),
       }),
     )
     .with("allow", () =>
       Effect.succeed({
         verdict: "allow" as const,
-        reason: "Matched deterministic allowlist.",
+        reason: GuardReasonText.make("Matched deterministic allowlist."),
       }),
     )
     .with("ask", () =>
       Effect.succeed({
         verdict: "ask" as const,
-        reason: "Matched deterministic asklist; requires human confirmation.",
+        reason: GuardReasonText.make("Matched deterministic asklist; requires human confirmation."),
       }),
     )
     .with("escalate", () =>
@@ -103,7 +127,9 @@ export const decideGuardVerdict = Effect.fn("GuardDecision.decide")(function* (
         .with({ _tag: "NotEvaluated" }, () =>
           Effect.succeed({
             verdict: "ask" as const,
-            reason: "DecisionModel was not evaluated; requires human confirmation.",
+            reason: GuardReasonText.make(
+              "DecisionModel was not evaluated; requires human confirmation.",
+            ),
           }),
         )
         .with({ _tag: "TimedOut" }, () =>
@@ -112,14 +138,19 @@ export const decideGuardVerdict = Effect.fn("GuardDecision.decide")(function* (
           ).pipe(
             Effect.as({
               verdict: "ask" as const,
-              reason: `DecisionModel timed out after ${GUARD_DECISION_TIMEOUT_MS}ms; requires human confirmation.`,
+              reason: GuardReasonText.make(
+                `DecisionModel timed out after ${GUARD_DECISION_TIMEOUT_MS}ms; requires human confirmation.`,
+              ),
             }),
           ),
         )
         .with({ _tag: "ModelError" }, ({ detail }) =>
           Effect.succeed({
             verdict: "ask" as const,
-            reason: `DecisionModel unavailable (${detail}); requires human confirmation.`,
+            reason: toGuardReasonText(
+              `DecisionModel unavailable (${detail}); requires human confirmation.`,
+              "DecisionModel unavailable; requires human confirmation.",
+            ),
           }),
         )
         .with({ _tag: "Scored" }, ({ destructive, secretAccess, exfiltration }) =>
@@ -134,7 +165,10 @@ export const decideGuardVerdict = Effect.fn("GuardDecision.decide")(function* (
             if (destructive >= 0.7 || secretAccess >= 0.7 || exfiltration >= 0.7) {
               return {
                 verdict: "deny" as const,
-                reason: `High risk command detected (destructive=${destructive}, secretAccess=${secretAccess}, exfiltration=${exfiltration}).`,
+                reason: toGuardReasonText(
+                  `High risk command detected (destructive=${destructive}, secretAccess=${secretAccess}, exfiltration=${exfiltration}).`,
+                  "High risk command detected.",
+                ),
               }
             }
 
@@ -146,26 +180,27 @@ export const decideGuardVerdict = Effect.fn("GuardDecision.decide")(function* (
                 if (workerDenyReason !== undefined) {
                   return {
                     verdict: "deny" as const,
-                    reason: workerDenyReason,
+                    reason: toGuardReasonText(workerDenyReason, "Matched worker denylist."),
                   }
                 }
                 if (WORKER_SENSITIVE_FALLBACK_PATTERN.test(input.command.replace(/\\/g, "/"))) {
                   return {
                     verdict: "ask" as const,
-                    reason:
+                    reason: GuardReasonText.make(
                       "Worker isolation mode (HARNESS_UNIT_WORKER=1) refuses DecisionModel auto-allow for unallowlisted harness or credential-referencing commands; requires human confirmation.",
+                    ),
                   }
                 }
               }
               return {
                 verdict: "allow" as const,
-                reason: "Command deemed safe by decision model.",
+                reason: GuardReasonText.make("Command deemed safe by decision model."),
               }
             }
 
             return {
               verdict: "ask" as const,
-              reason: "Ambiguous risk; requires human confirmation.",
+              reason: GuardReasonText.make("Ambiguous risk; requires human confirmation."),
             }
           }),
         )
@@ -177,14 +212,14 @@ export const decideGuardVerdict = Effect.fn("GuardDecision.decide")(function* (
 export const decideGuardCommand = Effect.fn("Harness.decideGuardCommand")(function* (
   input: string | GuardCommandInput,
   options?: GuardCommandOptions,
-) {
+): Effect.fn.Return<GuardDecisionResult, never, DecisionModel.DecisionModel> {
   const command = typeof input === "string" ? input : input.command
   const unitWorkerMode =
     typeof input === "string"
       ? options?.unitWorkerMode
       : (input.unitWorkerMode ?? options?.unitWorkerMode)
   const policyOptions = unitWorkerMode === undefined ? undefined : { unitWorkerMode }
-  const fastPath = classifyCommand(command, policyOptions)
+  const fastPath = GuardFastPathVerdict.make(classifyCommand(command, policyOptions))
 
   const modelOutcome: GuardModelOutcome = yield* match(fastPath)
     .with("deny", "allow", "ask", () =>
@@ -194,23 +229,25 @@ export const decideGuardCommand = Effect.fn("Harness.decideGuardCommand")(functi
       DecisionModel.decide(GuardV1, { input: { command } }).pipe(
         Effect.map(({ answers }): GuardModelOutcome => ({
           _tag: "Scored",
-          destructive: answers.destructive.probability,
-          secretAccess: answers.secretAccess.probability,
-          exfiltration: answers.exfiltration.probability,
+          destructive: toGuardRiskProbability(answers.destructive.probability),
+          secretAccess: toGuardRiskProbability(answers.secretAccess.probability),
+          exfiltration: toGuardRiskProbability(answers.exfiltration.probability),
         })),
         Effect.catchCauseIf(
           (cause) => !isPureInterruptCause(cause),
           (cause) => {
-            const collapsed = Cause.pretty(cause).replace(/\s+/g, " ").trim()
-            const truncated = collapsed.length > 160 ? `${collapsed.slice(0, 157)}...` : collapsed
-            const detail = truncated.length > 0 ? truncated : "unknown error"
+            const detail = toGuardModelErrorDetail(Cause.pretty(cause))
             return Effect.logWarning(`Decision model fallback: ${Cause.pretty(cause)}`).pipe(
               Effect.as({ _tag: "ModelError", detail } satisfies GuardModelOutcome),
             )
           },
         ),
         Effect.orElseSucceed(
-          () => ({ _tag: "ModelError", detail: "unknown error" }) satisfies GuardModelOutcome,
+          () =>
+            ({
+              _tag: "ModelError",
+              detail: GuardModelErrorDetail.make("unknown error"),
+            }) satisfies GuardModelOutcome,
         ),
         Effect.timeoutOption(`${DEFAULT_DECISION_MODEL_TIMEOUT_MS} millis`),
         Effect.map((timed) =>
@@ -227,7 +264,7 @@ export const decideGuardCommand = Effect.fn("Harness.decideGuardCommand")(functi
     .exhaustive()
 
   return yield* decideGuardVerdict({
-    command,
+    command: ShellCommandText.make(command.slice(0, MAX_SHELL_COMMAND_LENGTH)),
     fastPath,
     unitWorkerMode,
     modelOutcome,
@@ -238,7 +275,7 @@ export const decideGuardCommand = Effect.fn("Harness.decideGuardCommand")(functi
 export const decideGuard = Effect.fn("GuardDecision.evaluate")(function* (
   input: string | GuardCommandInput,
   options?: GuardCommandOptions,
-) {
+): Effect.fn.Return<GuardDecisionResult, never, DecisionModel.DecisionModel> {
   return yield* decideGuardCommand(input, options)
 })
 

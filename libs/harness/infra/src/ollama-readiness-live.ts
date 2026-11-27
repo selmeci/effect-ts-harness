@@ -1,125 +1,58 @@
-import { Cause, Clock, Deferred, Effect, Exit, Result, Schema } from "effect"
+import { Clock, Deferred, Effect, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
+  DEFAULT_MAX_INTERRUPT_RETRIES,
   EmbeddingSourceText,
   OllamaWarmupError,
   OllamaWarmupStage,
   WORKFLOW_TIMEOUT_BUDGETS,
-  toErrorReasonMessage,
 } from "@harness/contract"
 import { EmbeddingClient } from "@harness/service"
-import type { SyncHostSpawnDetachedResult } from "@harness/service/host-io"
-import { nodeSyncHostIo } from "./node-host-io.js"
 import {
   DEFAULT_CLEF_MODEL,
-  DEFAULT_MAX_INTERRUPT_RETRIES,
   DEFAULT_OLLAMA_BASE_URL,
   DEFAULT_POLL_INTERVAL_MS,
   OllamaTagsResponseSchema,
   TAGS_PROBE_TIMEOUT_MS,
-  buildSanitizedOllamaServeEnv,
+  buildWarmupCacheKey,
+  cancelResponseBodyQuietly,
+  createOllamaWarmupState,
+  exitToWarmupOutcome,
+  isWarmReceiptFresh,
   makeWarmupError,
+  probeSystemOneReady,
+  probeTagsServerReachable,
   resolveConfiguredBaseUrl,
+  spawnDetachedOllamaServer,
   toWorkflowTimeoutMs,
   validateLoopbackBaseUrl,
+  type OllamaProbeNotReady,
+  type OllamaProbeReady,
+  type OllamaProbeResult,
+  type OllamaWarmupOptions,
+  type OllamaWarmupOutcome,
+  type OllamaWarmupOutcomeFailure,
+  type OllamaWarmupOutcomeInterrupted,
+  type OllamaWarmupOutcomeSuccess,
+  type OllamaWarmupReceipt,
+  type OllamaWarmupStateHandle,
 } from "./ollama-readiness-helpers.js"
-import { isPureInterruptCause } from "@harness/contract"
-
-export interface OllamaProbeReady {
-  readonly ready: true
-}
-
-export interface OllamaProbeNotReady {
-  readonly ready: false
-  readonly reason: string
-}
-
-export type OllamaProbeResult = OllamaProbeReady | OllamaProbeNotReady
-
-export interface OllamaWarmupReceipt {
-  readonly warmedAtMs: number
-  readonly clefWarm: boolean
-  readonly embeddingsWarm: boolean
-  readonly cached: boolean
-}
-
-export interface OllamaWarmupOutcomeSuccess {
-  readonly _tag: "Success"
-  readonly receipt: OllamaWarmupReceipt
-}
-
-export interface OllamaWarmupOutcomeFailure {
-  readonly _tag: "Failure"
-  readonly error: OllamaWarmupError
-}
-
-export interface OllamaWarmupOutcomeInterrupted {
-  readonly _tag: "Interrupted"
-}
-
-export type OllamaWarmupOutcome =
-  | OllamaWarmupOutcomeSuccess
-  | OllamaWarmupOutcomeFailure
-  | OllamaWarmupOutcomeInterrupted
-
-export interface OllamaWarmupStateHandle {
-  readonly _tag: "OllamaWarmupStateHandle"
-  readonly getWarmEntry: (key: string) => OllamaWarmupReceipt | undefined
-  readonly setWarmEntry: (key: string, receipt: OllamaWarmupReceipt) => void
-  readonly getInFlight: (key: string) => Deferred.Deferred<OllamaWarmupOutcome, never> | undefined
-  readonly setInFlight: (
-    key: string,
-    deferred: Deferred.Deferred<OllamaWarmupOutcome, never>,
-  ) => void
-  readonly deleteInFlight: (key: string) => void
-  readonly clear: () => void
-}
-
-export interface OllamaWarmupOptions {
-  readonly baseUrl?: string | undefined
-  readonly clefModel?: string | undefined
-  readonly embeddingModel?: string | undefined
-  readonly probeBudgetMs?: number | undefined
-  readonly pollIntervalMs?: number | undefined
-  readonly force?: boolean | undefined
-  readonly fetch?: typeof globalThis.fetch | undefined
-  readonly spawnOllama?: (() => SyncHostSpawnDetachedResult | void) | undefined
-  readonly state?: OllamaWarmupStateHandle | undefined
-}
-
-/** Creates an isolated process-local warm-state and single-flight coordinator for `OllamaReadiness.ensureWarm`. */
-const createOllamaWarmupState = (): OllamaWarmupStateHandle => {
-  const warmEntries = new Map<string, OllamaWarmupReceipt>()
-  const inFlight = new Map<string, Deferred.Deferred<OllamaWarmupOutcome, never>>()
-  return {
-    _tag: "OllamaWarmupStateHandle",
-    getWarmEntry: (key) => warmEntries.get(key),
-    setWarmEntry: (key, receipt) => {
-      warmEntries.set(key, receipt)
-    },
-    getInFlight: (key) => inFlight.get(key),
-    setInFlight: (key, deferred) => {
-      inFlight.set(key, deferred)
-    },
-    deleteInFlight: (key) => {
-      inFlight.delete(key)
-    },
-    clear: () => {
-      warmEntries.clear()
-      inFlight.clear()
-    },
-  }
-}
 
 export { createOllamaWarmupState }
+export type {
+  OllamaProbeNotReady,
+  OllamaProbeReady,
+  OllamaProbeResult,
+  OllamaWarmupOptions,
+  OllamaWarmupOutcome,
+  OllamaWarmupOutcomeFailure,
+  OllamaWarmupOutcomeInterrupted,
+  OllamaWarmupOutcomeSuccess,
+  OllamaWarmupReceipt,
+  OllamaWarmupStateHandle,
+}
 
 const DEFAULT_OLLAMA_WARMUP_STATE: OllamaWarmupStateHandle = createOllamaWarmupState()
-
-const cancelResponseBodyQuietly = (response: Response): Effect.Effect<void> =>
-  Effect.tryPromise({
-    try: () => (response.body !== null ? response.body.cancel() : Promise.resolve()),
-    catch: (cause) => toErrorReasonMessage(cause, "Failed to cancel Ollama response body"),
-  }).pipe(Effect.catch((err) => Effect.logDebug("Failed to cancel Ollama response body", err)))
 
 /**
  * Probes an Ollama loopback endpoint's `/api/tags` catalog and verifies whether `clef-flash`
@@ -229,209 +162,12 @@ export const checkOllamaServerReadyDetailed = Effect.fn("OllamaReadiness.checkSe
   },
 )
 
-const probeTagsServerReachable = (
-  tagsUrl: string,
-  fetchFn: typeof globalThis.fetch,
-  timeoutMs: number,
-): Effect.Effect<Result.Result<void, string>> =>
-  Effect.gen(function* () {
-    const boundedTimeoutMs = Math.max(1, Math.min(TAGS_PROBE_TIMEOUT_MS, Math.floor(timeoutMs)))
-    const timed = yield* Effect.result(
-      Effect.tryPromise({
-        try: (signal) =>
-          fetchFn(tagsUrl, {
-            method: "GET",
-            redirect: "error",
-            signal: AbortSignal.any([signal, AbortSignal.timeout(boundedTimeoutMs)]),
-          }),
-        catch: (err) =>
-          `Ollama ${tagsUrl} unreachable: ${toErrorReasonMessage(err, "Network error")}`,
-      }),
-    ).pipe(Effect.timeoutOption(`${boundedTimeoutMs} millis`))
-
-    return yield* match(timed)
-      .with({ _tag: "None" }, () =>
-        Effect.succeed(
-          Result.fail(`Ollama ${tagsUrl} probe timed out after ${boundedTimeoutMs}ms`),
-        ),
-      )
-      .with({ _tag: "Some", value: { _tag: "Failure" } }, ({ value: { failure } }) =>
-        Effect.succeed(Result.fail(failure)),
-      )
-      .with({ _tag: "Some", value: { _tag: "Success" } }, ({ value: { success: response } }) =>
-        cancelResponseBodyQuietly(response).pipe(
-          Effect.as(
-            response.ok
-              ? Result.succeed(undefined)
-              : Result.fail(`Ollama ${tagsUrl} returned HTTP ${response.status}`),
-          ),
-        ),
-      )
-      .exhaustive()
-  })
-
-const probeSystemOneReady = (params: {
-  readonly systemOneUrl: string
-  readonly clefModel: string
-  readonly fetchFn: typeof globalThis.fetch
-  readonly remainingMs: number
-  readonly totalBudgetMs: number
-}): Effect.Effect<void, OllamaWarmupError> =>
-  Effect.gen(function* () {
-    const boundedMs = Math.max(1, Math.floor(params.remainingMs))
-    const timed = yield* Effect.result(
-      Effect.tryPromise({
-        try: (signal) =>
-          params.fetchFn(params.systemOneUrl, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              model: params.clefModel,
-              state: { readiness: "warmup" },
-              questions: {
-                ready: {
-                  type: "noul",
-                  instructions: "Is the decision model warm?",
-                },
-              },
-            }),
-            redirect: "error",
-            signal: AbortSignal.any([signal, AbortSignal.timeout(boundedMs)]),
-          }),
-        catch: (err) =>
-          makeWarmupError({
-            stage: OllamaWarmupStage.make("systemone-probe"),
-            model: params.clefModel,
-            endpoint: params.systemOneUrl,
-            timeoutMs: params.totalBudgetMs,
-            reason: err,
-            fallback: `Failed probing ${params.systemOneUrl}`,
-          }),
-      }),
-    ).pipe(Effect.timeoutOption(`${boundedMs} millis`))
-
-    return yield* match(timed)
-      .with({ _tag: "None" }, () =>
-        Effect.fail(
-          makeWarmupError({
-            stage: OllamaWarmupStage.make("systemone-probe"),
-            model: params.clefModel,
-            endpoint: params.systemOneUrl,
-            timeoutMs: params.totalBudgetMs,
-            reason: `SystemOne warm-up probe timed out after ${boundedMs}ms`,
-            fallback: "SystemOne warm-up probe timed out",
-          }),
-        ),
-      )
-      .with({ _tag: "Some", value: { _tag: "Failure" } }, ({ value: { failure } }) =>
-        Effect.fail(failure),
-      )
-      .with({ _tag: "Some", value: { _tag: "Success" } }, ({ value: { success: response } }) =>
-        cancelResponseBodyQuietly(response).pipe(
-          Effect.flatMap(() =>
-            response.ok
-              ? Effect.void
-              : Effect.fail(
-                  makeWarmupError({
-                    stage: OllamaWarmupStage.make("systemone-probe"),
-                    model: params.clefModel,
-                    endpoint: params.systemOneUrl,
-                    timeoutMs: params.totalBudgetMs,
-                    reason: `POST ${params.systemOneUrl} returned HTTP ${response.status}`,
-                    fallback: "SystemOne probe returned non-OK status",
-                  }),
-                ),
-          ),
-        ),
-      )
-      .exhaustive()
-  })
-
-const spawnDetachedOllamaServer = (params: {
-  readonly spawnOllama: (() => SyncHostSpawnDetachedResult | void) | undefined
-  readonly customUrl: string | undefined
-  readonly clefModel: string
-  readonly tagsUrl: string
-  readonly probeBudgetMs: number
-}): Effect.Effect<void, OllamaWarmupError> => {
-  if (params.customUrl !== undefined) {
-    return Effect.fail(
-      makeWarmupError({
-        stage: OllamaWarmupStage.make("server-start"),
-        model: params.clefModel,
-        endpoint: params.tagsUrl,
-        timeoutMs: params.probeBudgetMs,
-        reason: `Ollama at ${params.tagsUrl} is unreachable and custom HARNESS_OLLAMA_URL is configured`,
-        fallback: "Ollama server unreachable",
-      }),
-    )
-  }
-
-  if (params.spawnOllama !== undefined) {
-    const customRes = Result.try({
-      try: () => params.spawnOllama?.(),
-      catch: (err) => toErrorReasonMessage(err, "Custom spawnOllama callback failed"),
-    })
-    return match(customRes)
-      .with({ _tag: "Failure" }, ({ failure }) =>
-        Effect.fail(
-          makeWarmupError({
-            stage: OllamaWarmupStage.make("server-start"),
-            model: params.clefModel,
-            endpoint: params.tagsUrl,
-            timeoutMs: params.probeBudgetMs,
-            reason: failure,
-            fallback: "Failed spawning ollama serve",
-          }),
-        ),
-      )
-      .with({ _tag: "Success" }, ({ success }) =>
-        success === undefined
-          ? Effect.void
-          : match(success)
-              .with({ _tag: "Spawned" }, () => Effect.void)
-              .with({ _tag: "SpawnFailed" }, ({ spawnError }) =>
-                Effect.fail(
-                  makeWarmupError({
-                    stage: OllamaWarmupStage.make("server-start"),
-                    model: params.clefModel,
-                    endpoint: params.tagsUrl,
-                    timeoutMs: params.probeBudgetMs,
-                    reason: spawnError,
-                    fallback: "Failed spawning ollama serve",
-                  }),
-                ),
-              )
-              .exhaustive(),
-      )
-      .exhaustive()
-  }
-
-  const spawnResult = nodeSyncHostIo.spawnDetached("ollama", ["serve"], {
-    env: buildSanitizedOllamaServeEnv(),
-  })
-  return match(spawnResult)
-    .with({ _tag: "Spawned" }, () => Effect.void)
-    .with({ _tag: "SpawnFailed" }, ({ spawnError }) =>
-      Effect.fail(
-        makeWarmupError({
-          stage: OllamaWarmupStage.make("server-start"),
-          model: params.clefModel,
-          endpoint: params.tagsUrl,
-          timeoutMs: params.probeBudgetMs,
-          reason: `Failed to spawn 'ollama serve': ${spawnError}`,
-          fallback: "Failed to spawn ollama serve",
-        }),
-      ),
-    )
-    .exhaustive()
-}
-
 /**
- * Ensures local Ollama (`ollama serve` with `OLLAMA_KEEP_ALIVE=-1`), `clef-flash` via
- * `POST /v1/systemone`, and `@harness/service/EmbeddingClient` are warm and resident,
- * coalescing concurrent callers via single-flight `Deferred` and caching process-local warm
- * state (`SPEC-0037 REQ-2.1`, `REQ-2.2`, `REQ-2.3`).
+ * Ensures local Ollama (`ollama serve` with `OLLAMA_KEEP_ALIVE=-1` guaranteed only for
+ * processes spawned by `OllamaReadiness.ensureWarm`; externally started servers keep their own
+ * environment), `clef-flash` via `POST /v1/systemone`, and `@harness/service/EmbeddingClient`
+ * (when `includeEmbeddings !== false`) are warm and resident, coalescing concurrent callers via
+ * single-flight `Deferred` and caching process-local warm state (`SPEC-0037 REQ-2.1`, `REQ-2.2`, `REQ-2.3`).
  */
 export const ensureOllamaWarm = Effect.fn("OllamaReadiness.ensureWarm")(function* (
   options?: OllamaWarmupOptions,
@@ -447,15 +183,45 @@ export const ensureOllamaWarm = Effect.fn("OllamaReadiness.ensureWarm")(function
   const clefModel =
     options?.clefModel?.trim() || process.env.HARNESS_CLEF_MODEL?.trim() || DEFAULT_CLEF_MODEL
   const embeddingModel = options?.embeddingModel?.trim() || embeddingClient.config.model
-  const probeBudgetMs = toWorkflowTimeoutMs(
-    options?.probeBudgetMs ?? WORKFLOW_TIMEOUT_BUDGETS.ollamaWarmupProbeMs,
-  )
-  const pollIntervalMs = Math.max(
-    1,
-    Math.floor(options?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS),
-  )
+  const includeEmbeddings = options?.includeEmbeddings ?? true
   const fetchFn = options?.fetch ?? globalThis.fetch
   const state = options?.state ?? DEFAULT_OLLAMA_WARMUP_STATE
+
+  const probeBudgetMs = yield* match(
+    toWorkflowTimeoutMs(options?.probeBudgetMs ?? WORKFLOW_TIMEOUT_BUDGETS.ollamaWarmupProbeMs),
+  )
+    .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))
+    .with({ _tag: "Failure" }, ({ failure }) =>
+      Effect.fail(
+        makeWarmupError({
+          stage: OllamaWarmupStage.make("server-start"),
+          model: clefModel,
+          endpoint: rawBaseUrl,
+          timeoutMs: WORKFLOW_TIMEOUT_BUDGETS.ollamaWarmupProbeMs,
+          reason: failure,
+          fallback: "Invalid Ollama probeBudgetMs",
+        }),
+      ),
+    )
+    .exhaustive()
+
+  const pollIntervalMs = yield* match(
+    toWorkflowTimeoutMs(options?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS),
+  )
+    .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))
+    .with({ _tag: "Failure" }, ({ failure }) =>
+      Effect.fail(
+        makeWarmupError({
+          stage: OllamaWarmupStage.make("server-start"),
+          model: clefModel,
+          endpoint: rawBaseUrl,
+          timeoutMs: probeBudgetMs,
+          reason: failure,
+          fallback: "Invalid Ollama pollIntervalMs",
+        }),
+      ),
+    )
+    .exhaustive()
 
   const parsedUrl = yield* match(validateLoopbackBaseUrl(rawBaseUrl))
     .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))
@@ -477,45 +243,22 @@ export const ensureOllamaWarm = Effect.fn("OllamaReadiness.ensureWarm")(function
   const tagsUrl = `${origin}/api/tags`
   const systemOneUrl = `${origin}/v1/systemone`
   const embeddingsEndpoint = `${origin}/v1/embeddings`
-  const cacheKey = `${origin}|${clefModel}|${embeddingModel}`
+  const cacheKey = buildWarmupCacheKey(origin, clefModel, embeddingModel, includeEmbeddings)
 
   if (options?.force !== true) {
     const existingWarm = state.getWarmEntry(cacheKey)
     if (existingWarm !== undefined) {
-      return {
-        warmedAtMs: existingWarm.warmedAtMs,
-        clefWarm: existingWarm.clefWarm,
-        embeddingsWarm: existingWarm.embeddingsWarm,
-        cached: true,
+      const nowMs = yield* Clock.currentTimeMillis
+      if (isWarmReceiptFresh(existingWarm, nowMs, options?.warmCacheTtlMs)) {
+        return {
+          warmedAtMs: existingWarm.warmedAtMs,
+          clefWarm: existingWarm.clefWarm,
+          embeddingsWarm: existingWarm.embeddingsWarm,
+          cached: true,
+        }
       }
     }
   }
-
-  const exitToOutcome = (
-    exit: Exit.Exit<OllamaWarmupReceipt, OllamaWarmupError>,
-  ): OllamaWarmupOutcome =>
-    Exit.match(exit, {
-      onSuccess: (receipt) => ({ _tag: "Success" as const, receipt }),
-      onFailure: (cause) =>
-        match(Cause.findErrorOption(cause))
-          .with({ _tag: "Some" }, ({ value: error }) => ({ _tag: "Failure" as const, error }))
-          .with({ _tag: "None" }, () =>
-            isPureInterruptCause(cause)
-              ? ({ _tag: "Interrupted" as const } satisfies OllamaWarmupOutcome)
-              : ({
-                  _tag: "Failure" as const,
-                  error: makeWarmupError({
-                    stage: OllamaWarmupStage.make("server-start"),
-                    model: clefModel,
-                    endpoint: tagsUrl,
-                    timeoutMs: probeBudgetMs,
-                    reason: Cause.squash(cause),
-                    fallback: "Ollama warm-up failed unexpectedly",
-                  }),
-                } satisfies OllamaWarmupOutcome),
-          )
-          .exhaustive(),
-    })
 
   const runAttempt = (
     remainingInterruptRetries: number,
@@ -525,11 +268,14 @@ export const ensureOllamaWarm = Effect.fn("OllamaReadiness.ensureWarm")(function
         if (options?.force !== true) {
           const doubleCheckedWarm = state.getWarmEntry(cacheKey)
           if (doubleCheckedWarm !== undefined) {
-            return {
-              warmedAtMs: doubleCheckedWarm.warmedAtMs,
-              clefWarm: doubleCheckedWarm.clefWarm,
-              embeddingsWarm: doubleCheckedWarm.embeddingsWarm,
-              cached: true,
+            const nowMs = yield* Clock.currentTimeMillis
+            if (isWarmReceiptFresh(doubleCheckedWarm, nowMs, options?.warmCacheTtlMs)) {
+              return {
+                warmedAtMs: doubleCheckedWarm.warmedAtMs,
+                clefWarm: doubleCheckedWarm.clefWarm,
+                embeddingsWarm: doubleCheckedWarm.embeddingsWarm,
+                cached: true,
+              }
             }
           }
         }
@@ -566,6 +312,7 @@ export const ensureOllamaWarm = Effect.fn("OllamaReadiness.ensureWarm")(function
         }
 
         const deferred = yield* Deferred.make<OllamaWarmupOutcome, never>()
+        const startGen = state.getGeneration()
         state.setInFlight(cacheKey, deferred)
 
         const runWarmup = Effect.gen(function* () {
@@ -576,57 +323,84 @@ export const ensureOllamaWarm = Effect.fn("OllamaReadiness.ensureWarm")(function
             )
 
           const initialReachable = yield* probeTagsServerReachable(tagsUrl, fetchFn, probeBudgetMs)
-          const initialReason = match(initialReachable)
-            .with({ _tag: "Success" }, () => undefined)
-            .with({ _tag: "Failure" }, ({ failure }) => failure)
+          yield* match(initialReachable)
+            .with({ _tag: "Reachable" }, () => Effect.void)
+            .with({ _tag: "HttpError" }, ({ status, body }) =>
+              Effect.fail(
+                makeWarmupError({
+                  stage: OllamaWarmupStage.make("server-start"),
+                  model: clefModel,
+                  endpoint: tagsUrl,
+                  timeoutMs: probeBudgetMs,
+                  reason: `Ollama ${tagsUrl} returned HTTP ${status}${body.length > 0 ? `: ${body}` : ""}`,
+                  fallback: `Ollama ${tagsUrl} returned HTTP ${status}`,
+                }),
+              ),
+            )
+            .with({ _tag: "Unreachable" }, ({ reason: initialReason }) =>
+              Effect.gen(function* () {
+                yield* spawnDetachedOllamaServer({
+                  spawnOllama: options?.spawnOllama,
+                  customUrl: options?.baseUrl !== undefined ? undefined : envCustomUrl,
+                  clefModel,
+                  tagsUrl,
+                  probeBudgetMs,
+                })
+
+                let lastReason = initialReason
+                let serverReady = false
+                while (!serverReady) {
+                  const remMs = yield* remainingBudget()
+                  if (remMs <= 0) {
+                    break
+                  }
+                  const sleepMs = Math.min(pollIntervalMs, remMs)
+                  yield* Effect.sleep(`${sleepMs} millis`)
+                  const afterSleepRem = yield* remainingBudget()
+                  const probeRes = yield* probeTagsServerReachable(
+                    tagsUrl,
+                    fetchFn,
+                    Math.max(1, afterSleepRem),
+                  )
+                  yield* match(probeRes)
+                    .with({ _tag: "Reachable" }, () =>
+                      Effect.sync(() => {
+                        serverReady = true
+                      }),
+                    )
+                    .with({ _tag: "HttpError" }, ({ status, body }) =>
+                      Effect.fail(
+                        makeWarmupError({
+                          stage: OllamaWarmupStage.make("server-start"),
+                          model: clefModel,
+                          endpoint: tagsUrl,
+                          timeoutMs: probeBudgetMs,
+                          reason: `Ollama ${tagsUrl} returned HTTP ${status}${body.length > 0 ? `: ${body}` : ""}`,
+                          fallback: `Ollama ${tagsUrl} returned HTTP ${status}`,
+                        }),
+                      ),
+                    )
+                    .with({ _tag: "Unreachable" }, ({ reason }) =>
+                      Effect.sync(() => {
+                        lastReason = reason
+                      }),
+                    )
+                    .exhaustive()
+                }
+
+                if (!serverReady) {
+                  return yield* makeWarmupError({
+                    stage: OllamaWarmupStage.make("server-start"),
+                    model: clefModel,
+                    endpoint: tagsUrl,
+                    timeoutMs: probeBudgetMs,
+                    reason: lastReason,
+                    fallback: `Ollama server at ${tagsUrl} did not become reachable within ${probeBudgetMs}ms`,
+                  })
+                }
+              }),
+            )
             .exhaustive()
-
-          if (initialReason !== undefined) {
-            yield* spawnDetachedOllamaServer({
-              spawnOllama: options?.spawnOllama,
-              customUrl: options?.baseUrl !== undefined ? undefined : envCustomUrl,
-              clefModel,
-              tagsUrl,
-              probeBudgetMs,
-            })
-
-            let lastReason = initialReason
-            let serverReady = false
-            while (!serverReady) {
-              const remMs = yield* remainingBudget()
-              if (remMs <= 0) {
-                break
-              }
-              const sleepMs = Math.min(pollIntervalMs, remMs)
-              yield* Effect.sleep(`${sleepMs} millis`)
-              const afterSleepRem = yield* remainingBudget()
-              const probeRes = yield* probeTagsServerReachable(
-                tagsUrl,
-                fetchFn,
-                Math.max(1, afterSleepRem),
-              )
-              const nextReason = match(probeRes)
-                .with({ _tag: "Success" }, () => undefined)
-                .with({ _tag: "Failure" }, ({ failure }) => failure)
-                .exhaustive()
-              if (nextReason === undefined) {
-                serverReady = true
-              } else {
-                lastReason = nextReason
-              }
-            }
-
-            if (!serverReady) {
-              return yield* makeWarmupError({
-                stage: OllamaWarmupStage.make("server-start"),
-                model: clefModel,
-                endpoint: tagsUrl,
-                timeoutMs: probeBudgetMs,
-                reason: lastReason,
-                fallback: `Ollama server at ${tagsUrl} did not become reachable within ${probeBudgetMs}ms`,
-              })
-            }
-          }
 
           const remBeforeSystemOne = yield* remainingBudget()
           if (remBeforeSystemOne <= 0) {
@@ -648,72 +422,98 @@ export const ensureOllamaWarm = Effect.fn("OllamaReadiness.ensureWarm")(function
             totalBudgetMs: probeBudgetMs,
           })
 
-          const remBeforeEmbeddings = yield* remainingBudget()
-          if (remBeforeEmbeddings <= 0) {
-            return yield* makeWarmupError({
-              stage: OllamaWarmupStage.make("embeddings-probe"),
-              model: embeddingModel,
-              endpoint: embeddingsEndpoint,
-              timeoutMs: probeBudgetMs,
-              reason: `Probe budget (${probeBudgetMs}ms) exhausted before embeddings warm-up`,
-              fallback: "Embeddings warm-up probe budget exhausted",
-            })
+          if (includeEmbeddings) {
+            const remBeforeEmbeddings = yield* remainingBudget()
+            if (remBeforeEmbeddings <= 0) {
+              return yield* makeWarmupError({
+                stage: OllamaWarmupStage.make("embeddings-probe"),
+                model: embeddingModel,
+                endpoint: embeddingsEndpoint,
+                timeoutMs: probeBudgetMs,
+                reason: `Probe budget (${probeBudgetMs}ms) exhausted before embeddings warm-up`,
+                fallback: "Embeddings warm-up probe budget exhausted",
+              })
+            }
+
+            const embedOutcome = yield* embeddingClient
+              .embedBatch([EmbeddingSourceText.make("warmup")])
+              .pipe(
+                Effect.map((vectors) => ({ _tag: "Ok" as const, vectors })),
+                Effect.catch((err) => Effect.succeed({ _tag: "Err" as const, reason: err.reason })),
+                Effect.timeoutOption(`${remBeforeEmbeddings} millis`),
+              )
+
+            yield* match(embedOutcome)
+              .with({ _tag: "None" }, () =>
+                Effect.fail(
+                  makeWarmupError({
+                    stage: OllamaWarmupStage.make("embeddings-probe"),
+                    model: embeddingModel,
+                    endpoint: embeddingsEndpoint,
+                    timeoutMs: probeBudgetMs,
+                    reason: `Embedding warm-up timed out after ${remBeforeEmbeddings}ms`,
+                    fallback: "Embedding warm-up timed out",
+                  }),
+                ),
+              )
+              .with({ _tag: "Some", value: { _tag: "Err" } }, ({ value: { reason } }) =>
+                Effect.fail(
+                  makeWarmupError({
+                    stage: OllamaWarmupStage.make("embeddings-probe"),
+                    model: embeddingModel,
+                    endpoint: embeddingsEndpoint,
+                    timeoutMs: probeBudgetMs,
+                    reason,
+                    fallback: "Embedding warm-up request failed",
+                  }),
+                ),
+              )
+              .with({ _tag: "Some", value: { _tag: "Ok" } }, ({ value: { vectors } }) =>
+                vectors.length === 1 && (vectors[0]?.components.length ?? 0) > 0
+                  ? Effect.void
+                  : Effect.fail(
+                      makeWarmupError({
+                        stage: OllamaWarmupStage.make("embeddings-probe"),
+                        model: embeddingModel,
+                        endpoint: embeddingsEndpoint,
+                        timeoutMs: probeBudgetMs,
+                        reason: `Embedding warm-up returned invalid/empty embedding vector count (vectors=${vectors.length}, components=${vectors[0]?.components.length ?? 0})`,
+                        fallback: "Embedding warm-up returned empty vectors",
+                      }),
+                    ),
+              )
+              .exhaustive()
           }
-
-          const embedOutcome = yield* embeddingClient
-            .embedBatch([EmbeddingSourceText.make("warmup")])
-            .pipe(
-              Effect.map((vectors) => ({ _tag: "Ok" as const, vectors })),
-              Effect.catch((err) => Effect.succeed({ _tag: "Err" as const, reason: err.reason })),
-              Effect.timeoutOption(`${remBeforeEmbeddings} millis`),
-            )
-
-          yield* match(embedOutcome)
-            .with({ _tag: "None" }, () =>
-              Effect.fail(
-                makeWarmupError({
-                  stage: OllamaWarmupStage.make("embeddings-probe"),
-                  model: embeddingModel,
-                  endpoint: embeddingsEndpoint,
-                  timeoutMs: probeBudgetMs,
-                  reason: `Embedding warm-up timed out after ${remBeforeEmbeddings}ms`,
-                  fallback: "Embedding warm-up timed out",
-                }),
-              ),
-            )
-            .with({ _tag: "Some", value: { _tag: "Err" } }, ({ value: { reason } }) =>
-              Effect.fail(
-                makeWarmupError({
-                  stage: OllamaWarmupStage.make("embeddings-probe"),
-                  model: embeddingModel,
-                  endpoint: embeddingsEndpoint,
-                  timeoutMs: probeBudgetMs,
-                  reason,
-                  fallback: "Embedding warm-up request failed",
-                }),
-              ),
-            )
-            .with({ _tag: "Some", value: { _tag: "Ok" } }, () => Effect.void)
-            .exhaustive()
 
           const warmedAtMs = yield* Clock.currentTimeMillis
           const receipt: OllamaWarmupReceipt = {
             warmedAtMs,
             clefWarm: true,
-            embeddingsWarm: true,
+            embeddingsWarm: includeEmbeddings,
             cached: false,
           }
-          state.setWarmEntry(cacheKey, receipt)
+          if (state.getGeneration() === startGen) {
+            state.setWarmEntry(cacheKey, receipt)
+          }
           return receipt
         })
 
         return yield* restore(runWarmup).pipe(
           Effect.onExit((exit) =>
             Effect.sync(() => {
-              if (state.getInFlight(cacheKey) === deferred) {
+              if (state.getGeneration() === startGen && state.getInFlight(cacheKey) === deferred) {
                 state.deleteInFlight(cacheKey)
               }
-            }).pipe(Effect.andThen(Effect.asVoid(Deferred.succeed(deferred, exitToOutcome(exit))))),
+            }).pipe(
+              Effect.andThen(
+                Effect.asVoid(
+                  Deferred.succeed(
+                    deferred,
+                    exitToWarmupOutcome({ exit, clefModel, tagsUrl, probeBudgetMs }),
+                  ),
+                ),
+              ),
+            ),
           ),
         )
       }),
