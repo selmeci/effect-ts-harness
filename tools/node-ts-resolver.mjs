@@ -5,11 +5,18 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   statSync,
 } from "node:fs"
 import { constants as moduleConstants, enableCompileCache, register } from "node:module"
 import { tmpdir } from "node:os"
-import { dirname, join, resolve as resolvePath } from "node:path"
+import {
+  dirname,
+  isAbsolute as isAbsolutePath,
+  join,
+  relative as relativePath,
+  resolve as resolvePath,
+} from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
 export const resolveDefaultCompileCacheDir = (
@@ -134,6 +141,112 @@ initCompileCache()
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..")
 const ensureTrailingSlash = (href) => (href.endsWith("/") ? href : `${href}/`)
 const repoRootUrl = ensureTrailingSlash(pathToFileURL(repoRoot).href)
+
+const HOOK_ENTRY_POSIX_SUFFIX = "/apps/harness-cli/src/hook-entry.ts"
+let initializedArgv1 = typeof process.argv[1] === "string" ? process.argv[1] : undefined
+
+export function initialize(data) {
+  if (data && typeof data === "object" && typeof data.argv1 === "string") {
+    initializedArgv1 = data.argv1
+  }
+}
+
+const isContainedNonSymlink = (rootReal, targetPath) => {
+  try {
+    const st = lstatOrUndefined(targetPath)
+    if (st === undefined || st.isSymbolicLink()) return false
+    const targetReal = realpathSync(targetPath)
+    const rel = relativePath(rootReal, targetReal)
+    return rel === "" || (!rel.startsWith("..") && !isAbsolutePath(rel))
+  } catch {
+    return false
+  }
+}
+
+const resolveEntryHookDetails = () => {
+  const rawArgv1 =
+    initializedArgv1 ?? (typeof process.argv[1] === "string" ? process.argv[1] : undefined)
+  if (!rawArgv1) return null
+  const normalizedArgv1 = rawArgv1.replace(/\\/g, "/")
+  if (!normalizedArgv1.endsWith(HOOK_ENTRY_POSIX_SUFFIX)) return null
+  const resolvedEntryPath = resolvePath(rawArgv1)
+  const resolvedEntryPosix = resolvedEntryPath.replace(/\\/g, "/")
+  if (!resolvedEntryPosix.endsWith(HOOK_ENTRY_POSIX_SUFFIX)) return null
+  const entryRepoRoot = resolvedEntryPath.slice(
+    0,
+    resolvedEntryPath.length - HOOK_ENTRY_POSIX_SUFFIX.length,
+  )
+  return {
+    entryRepoRoot: entryRepoRoot.length > 0 ? entryRepoRoot : "/",
+    resolvedEntryPath,
+  }
+}
+
+const loadHookSnapshotForEntry = (entryRepoRoot) => {
+  try {
+    const repoReal = realpathSync(entryRepoRoot)
+    const harnessDir = join(repoReal, ".harness")
+    const runtimeDir = join(harnessDir, "hook-runtime")
+    const currentDir = join(runtimeDir, "current")
+    const manifestPath = join(currentDir, "manifest.json")
+    if (
+      !isContainedNonSymlink(repoReal, harnessDir) ||
+      !isContainedNonSymlink(repoReal, runtimeDir) ||
+      !isContainedNonSymlink(repoReal, currentDir) ||
+      !isContainedNonSymlink(repoReal, manifestPath)
+    ) {
+      return null
+    }
+    const currentReal = realpathSync(currentDir)
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+    if (
+      !manifest ||
+      typeof manifest !== "object" ||
+      manifest.version !== 1 ||
+      typeof manifest.entryRel !== "string" ||
+      !manifest.packageMap ||
+      typeof manifest.packageMap !== "object"
+    ) {
+      return null
+    }
+    const entryAbsPath = resolvePath(currentReal, manifest.entryRel)
+    const policyAbsPath = resolvePath(currentReal, "libs/harness/gates/src/policy.js")
+    if (
+      !isContainedNonSymlink(currentReal, entryAbsPath) ||
+      !isContainedNonSymlink(currentReal, policyAbsPath)
+    ) {
+      return null
+    }
+    return {
+      entryRepoRoot: repoReal,
+      entryRepoRootUrl: ensureTrailingSlash(pathToFileURL(repoReal).href),
+      currentDir: currentReal,
+      currentDirUrl: ensureTrailingSlash(pathToFileURL(currentReal).href),
+      entryAbsPath,
+      packageMap: manifest.packageMap,
+    }
+  } catch {
+    return null
+  }
+}
+
+const cachedSnapshotsByEntry = new Map()
+const getActiveHookSnapshot = () => {
+  if (process.env.HARNESS_HOOK_RUNTIME_SOURCE === "1") {
+    return null
+  }
+  const entryInfo = resolveEntryHookDetails()
+  if (entryInfo === null) return null
+  let cached = cachedSnapshotsByEntry.get(entryInfo.resolvedEntryPath)
+  if (cached === undefined) {
+    cached = {
+      resolvedEntryPath: entryInfo.resolvedEntryPath,
+      snapshot: loadHookSnapshotForEntry(entryInfo.entryRepoRoot),
+    }
+    cachedSnapshotsByEntry.set(entryInfo.resolvedEntryPath, cached)
+  }
+  return cached.snapshot === null ? null : cached
+}
 
 const resolveMainRepoRoot = (root) => {
   try {
@@ -313,8 +426,49 @@ const logResolverFallback = (specifier, error, stage) => {
 }
 
 export async function resolve(specifier, context, nextResolve) {
+  const activeHook = getActiveHookSnapshot()
+  if (activeHook !== null) {
+    const { resolvedEntryPath, snapshot } = activeHook
+    const specFilePath = specifier.startsWith("file://")
+      ? resolvePath(fileURLToPath(specifier))
+      : !specifier.startsWith(".") && !specifier.startsWith("@")
+        ? resolvePath(specifier)
+        : null
+    if (specFilePath !== null && specFilePath === resolvedEntryPath) {
+      return nextResolve(pathToFileURL(snapshot.entryAbsPath).href, context)
+    }
+
+    const snapPkgRel = snapshot.packageMap[specifier]
+    if (typeof snapPkgRel === "string") {
+      const snapTarget = resolvePath(snapshot.currentDir, snapPkgRel)
+      if (isContainedNonSymlink(snapshot.currentDir, snapTarget)) {
+        return nextResolve(pathToFileURL(snapTarget).href, context)
+      }
+    }
+
+    if (
+      (specifier.startsWith("./") || specifier.startsWith("../")) &&
+      context.parentURL?.startsWith(snapshot.currentDirUrl)
+    ) {
+      const literalUrl = new URL(specifier, context.parentURL)
+      if (literalUrl.protocol === "file:") {
+        const targetPath = fileURLToPath(literalUrl)
+        if (isContainedNonSymlink(snapshot.currentDir, targetPath)) {
+          return nextResolve(literalUrl.href, context)
+        }
+      }
+    }
+  }
+
+  const entryInfo = resolveEntryHookDetails()
   const workspaceRel = resolveDynamicExport(specifier)
   if (workspaceRel !== undefined) {
+    if (entryInfo !== null) {
+      const entryTarget = join(entryInfo.entryRepoRoot, workspaceRel)
+      if (existsSync(entryTarget)) {
+        return nextResolve(pathToFileURL(entryTarget).href, context)
+      }
+    }
     const targetPath = join(repoRoot, workspaceRel)
     if (existsSync(targetPath)) {
       return nextResolve(pathToFileURL(targetPath).href, context)
@@ -337,6 +491,31 @@ export async function resolve(specifier, context, nextResolve) {
     return await nextResolve(specifier, context)
   } catch (error) {
     logResolverFallback(specifier, error, "primary")
+    if (
+      activeHook !== null &&
+      typeof context.parentURL === "string" &&
+      context.parentURL.startsWith(activeHook.snapshot.currentDirUrl)
+    ) {
+      const relFromSnap = context.parentURL.slice(activeHook.snapshot.currentDirUrl.length)
+      for (const baseParentUrl of [activeHook.snapshot.entryRepoRootUrl, repoRootUrl]) {
+        try {
+          return await nextResolve(specifier, {
+            ...context,
+            parentURL: baseParentUrl + relFromSnap,
+          })
+        } catch {
+          // Try next workspace root candidate for pnpm package-local node_modules
+        }
+      }
+      try {
+        return await nextResolve(specifier, {
+          ...context,
+          parentURL: pathToFileURL(join(repoRoot, "apps/harness-cli/package.json")).href,
+        })
+      } catch {
+        // Fall through to standard resolver fallbacks
+      }
+    }
     if (
       (specifier.startsWith("./") || specifier.startsWith("../")) &&
       context.parentURL?.startsWith("file://")
@@ -382,5 +561,10 @@ export async function resolve(specifier, context, nextResolve) {
 const currentPid = String(process.pid)
 if (process.env.__HARNESS_TS_RESOLVER_REGISTERED !== currentPid) {
   process.env.__HARNESS_TS_RESOLVER_REGISTERED = currentPid
-  register(pathToFileURL(fileURLToPath(import.meta.url)))
+  register(pathToFileURL(fileURLToPath(import.meta.url)), {
+    parentURL: import.meta.url,
+    data: {
+      argv1: typeof process.argv[1] === "string" ? process.argv[1] : undefined,
+    },
+  })
 }

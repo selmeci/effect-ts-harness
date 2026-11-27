@@ -170,7 +170,9 @@ export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.E
       noCache: mutateBool("no-cache", "Bypass mutation witness cache"),
       failFast: mutateBool("fail-fast", "Stop on first confirmed survivor"),
       stageAOnly: mutateBool("stage-a-only", "Run Stage-A primary tests only"),
+      survivorsOnly: mutateBool("survivors-only", "Evaluate only previously surviving mutants"),
       file: scalarOnce("file", "Comma-separated target files to mutate"),
+      files: scalarOnce("files", "Comma-separated target files to mutate (alias for --file)"),
       base: scalarOnce("base", "Stacked parent git ref for diff and ancestor proof"),
       maxSurvivors: scalarOnce("max-survivors", "Stop early after N confirmed survivors"),
     },
@@ -183,7 +185,9 @@ export const makeHarnessRootCommand = (onResult: (result: CliResult) => Effect.E
       appendBoolFlag(raw, "no-cache", flags.noCache)
       appendBoolFlag(raw, "fail-fast", flags.failFast)
       appendBoolFlag(raw, "stage-a-only", flags.stageAOnly)
+      appendBoolFlag(raw, "survivors-only", flags.survivorsOnly)
       appendStringFlag(raw, "file", flags.file)
+      appendStringFlag(raw, "files", flags.files)
       appendStringFlag(raw, "base", flags.base)
       appendStringFlag(raw, "max-survivors", flags.maxSurvivors)
       return runSubcommand("mutate", raw)
@@ -460,7 +464,7 @@ export const runDeclarativeCli = Effect.fn("HarnessCli.runDeclarativeCli")(funct
       exitCode: 0,
       stdout:
         requested === "mutate"
-          ? "harness help\nusage: harness mutate [--strict] [--all] [--diff] [--no-cache] [--fail-fast] [--max-survivors <n>] [--stage-a-only] [--scope <pkg>] [--file <csv>] [--base <ref>]"
+          ? "harness help\nusage: harness mutate [--strict] [--all] [--diff] [--no-cache] [--fail-fast] [--max-survivors <n>] [--stage-a-only] [--survivors-only] [--scope <pkg>] [--file|--files <csv>] [--base <ref>]"
           : `harness help\nusage: harness <${COMMANDS.join("|")}>`,
       stderr: "",
     }

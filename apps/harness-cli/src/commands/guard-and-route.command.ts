@@ -1,7 +1,7 @@
 import { Cause, Effect, Layer } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
-import { isPureInterruptCause } from "@harness/contract"
+import { isPureInterruptCause, WORKFLOW_TIMEOUT_BUDGETS } from "@harness/contract"
 import { decideGuardCommand, routeStepWithStatus } from "@harness/decision/hook-fastpath"
 import {
   classifyCommand,
@@ -104,10 +104,14 @@ const evaluateCommandDecision = (
     }
 
     if (options?.decisionLayer === undefined && options?.skipBackgroundDaemons !== true) {
-      const ollamaProbe = yield* ensureLocalOllamaReady().pipe(Effect.timeoutOption("1000 millis"))
+      const ollamaProbe = yield* ensureLocalOllamaReady({
+        probeBudgetMs: WORKFLOW_TIMEOUT_BUDGETS.decisionModelTimeoutMs,
+      }).pipe(Effect.timeoutOption(`${WORKFLOW_TIMEOUT_BUDGETS.decisionModelTimeoutMs} millis`))
       const isOllamaReady = match(ollamaProbe)
         .with({ _tag: "None" }, () => {
-          process.stderr.write("[harness:guard] Ollama readiness probe timed out after 1000ms.\n")
+          process.stderr.write(
+            `[harness:guard] Ollama readiness probe timed out after ${WORKFLOW_TIMEOUT_BUDGETS.decisionModelTimeoutMs}ms.\n`,
+          )
           return false
         })
         .with({ _tag: "Some" }, ({ value: ready }) => {
