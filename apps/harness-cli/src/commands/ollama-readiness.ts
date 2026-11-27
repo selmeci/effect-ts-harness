@@ -28,9 +28,20 @@ export interface OllamaReadinessOptions {
   readonly force?: boolean | undefined
   readonly clefModel?: string | undefined
   readonly embeddingModel?: string | undefined
+  readonly includeEmbeddings?: boolean | undefined
   readonly fetch?: typeof globalThis.fetch | undefined
   readonly state?: OllamaWarmupStateHandle | undefined
 }
+
+export type LocalOllamaReadinessResult =
+  | { readonly ready: true }
+  | {
+      readonly ready: false
+      readonly reason: string
+      readonly stage: string
+      readonly model: string
+      readonly endpoint: string
+    }
 
 const toWarmupOptions = (opts?: OllamaReadinessOptions): OllamaWarmupOptions | undefined => {
   if (opts === undefined) {
@@ -49,6 +60,7 @@ const toWarmupOptions = (opts?: OllamaReadinessOptions): OllamaWarmupOptions | u
     ...(opts.baseUrl !== undefined ? { baseUrl: opts.baseUrl } : {}),
     ...(opts.clefModel !== undefined ? { clefModel: opts.clefModel } : {}),
     ...(opts.embeddingModel !== undefined ? { embeddingModel: opts.embeddingModel } : {}),
+    ...(opts.includeEmbeddings !== undefined ? { includeEmbeddings: opts.includeEmbeddings } : {}),
     probeBudgetMs: derivedBudgetMs,
     ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
     ...(opts.force !== undefined ? { force: opts.force } : {}),
@@ -80,18 +92,30 @@ export const ensureOllamaWarmWithResult = (
 ): Effect.Effect<OllamaWarmupReceipt, OllamaWarmupError> =>
   OllamaReadiness.ensureWarm(toWarmupOptions(opts)).pipe(Effect.provide(OllamaEmbeddingClientLive))
 
-export function ensureLocalOllamaReady(opts?: OllamaReadinessOptions): Effect.Effect<boolean> {
+export function ensureLocalOllamaReadyDetailed(
+  opts?: OllamaReadinessOptions,
+): Effect.Effect<LocalOllamaReadinessResult> {
   return Effect.result(ensureOllamaWarmWithResult(opts)).pipe(
     Effect.map((res) =>
       match(res)
-        .with({ _tag: "Success" }, () => true)
+        .with({ _tag: "Success" }, () => ({ ready: true as const }))
         .with({ _tag: "Failure" }, ({ failure }) => {
           process.stderr.write(
             `[harness:ollama] ${failure.reason} (stage=${failure.stage}, model=${failure.model}, endpoint=${failure.endpoint})\n`,
           )
-          return false
+          return {
+            ready: false as const,
+            reason: failure.reason,
+            stage: failure.stage,
+            model: failure.model,
+            endpoint: failure.endpoint,
+          }
         })
         .exhaustive(),
     ),
   )
+}
+
+export function ensureLocalOllamaReady(opts?: OllamaReadinessOptions): Effect.Effect<boolean> {
+  return ensureLocalOllamaReadyDetailed(opts).pipe(Effect.map((r) => r.ready))
 }

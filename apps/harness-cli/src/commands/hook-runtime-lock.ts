@@ -5,9 +5,13 @@ import { match } from "ts-pattern"
 import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
 
 const BUILD_LOCK_FILENAME = ".build.lock"
-const BUILD_LOCK_STALE_MS = 60_000
 const BUILD_LOCK_MAX_WAIT_MS = 5_000
 const BUILD_LOCK_POLL_MS = 40
+
+export interface HookRuntimeBuildLockOptions {
+  readonly maxWaitMs?: number | undefined
+  readonly pollMs?: number | undefined
+}
 
 const BuildLockPayloadSchema = Schema.Struct({
   pid: Schema.Int,
@@ -45,11 +49,15 @@ const syncSleepMs = (ms: number): void => {
 export const withHookRuntimeBuildLock = <T>(
   runtimeRootReal: string,
   fn: () => Result.Result<T, string>,
+  options?: HookRuntimeBuildLockOptions,
 ): Result.Result<T, string> => {
   const lockPath = join(runtimeRootReal, BUILD_LOCK_FILENAME)
   const ownerNonce = randomBytes(12).toString("hex")
-  const deadlineMs = Date.now() + BUILD_LOCK_MAX_WAIT_MS
+  const maxWaitMs = options?.maxWaitMs ?? BUILD_LOCK_MAX_WAIT_MS
+  const pollMs = options?.pollMs ?? BUILD_LOCK_POLL_MS
+  const deadlineMs = Date.now() + maxWaitMs
   let acquired = false
+  let lastUnlinkErr: string | undefined
 
   while (!acquired) {
     const payload = JSON.stringify({ pid: process.pid, createdAtMs: Date.now(), nonce: ownerNonce })
@@ -73,11 +81,7 @@ export const withHookRuntimeBuildLock = <T>(
               const mtime = nodeSyncHostIo.statMtimeMsSync(lockPath)
               return mtime !== undefined && Date.now() - mtime > 500
             })
-            .with(
-              { _tag: "Some" },
-              ({ value }) =>
-                Date.now() - value.createdAtMs > BUILD_LOCK_STALE_MS || !isPidAlive(value.pid),
-            )
+            .with({ _tag: "Some" }, ({ value }) => !isPidAlive(value.pid))
             .exhaustive()
         if (isStale) {
           const reRead = Result.try(() => nodeSyncHostIo.readTextSync(lockPath))
@@ -91,13 +95,30 @@ export const withHookRuntimeBuildLock = <T>(
             .with({ _tag: "Failure" }, () => false)
             .exhaustive()
           if (stillSame) {
-            Result.try(() => nodeSyncHostIo.unlinkSync(lockPath))
+            const unlinkRes = Result.try({
+              try: () => {
+                nodeSyncHostIo.unlinkSync(lockPath)
+              },
+              catch: (err) => (err instanceof Error ? err.message : String(err)),
+            })
+            match(unlinkRes)
+              .with({ _tag: "Success" }, () => {
+                lastUnlinkErr = undefined
+              })
+              .with({ _tag: "Failure" }, ({ failure }) => {
+                lastUnlinkErr = failure
+              })
+              .exhaustive()
           }
         }
         if (Date.now() >= deadlineMs) {
-          return Result.fail(`Timed out waiting for hook-runtime build lock at '${lockPath}'`)
+          const unlinkNote =
+            lastUnlinkErr !== undefined ? ` (last stale unlink error: ${lastUnlinkErr})` : ""
+          return Result.fail(
+            `Timed out waiting for hook-runtime build lock at '${lockPath}'${unlinkNote}`,
+          )
         }
-        syncSleepMs(BUILD_LOCK_POLL_MS)
+        syncSleepMs(pollMs)
         return undefined
       })
       .exhaustive()
@@ -112,12 +133,25 @@ export const withHookRuntimeBuildLock = <T>(
         .with({ _tag: "Some" }, ({ value }) => {
           if (value.nonce === ownerNonce) {
             Result.try(() => nodeSyncHostIo.unlinkSync(lockPath))
+          } else {
+            process.stderr.write(
+              `[harness:hook-runtime-lock] Warning: lock at '${lockPath}' was overwritten (nonce mismatch: expected '${ownerNonce}', found '${value.nonce}'); skipping unlink.\n`,
+            )
           }
         })
-        .with({ _tag: "None" }, () => {})
+        .with({ _tag: "None" }, () => {
+          process.stderr.write(
+            `[harness:hook-runtime-lock] Warning: lock at '${lockPath}' was overwritten with invalid payload (nonce mismatch); skipping unlink.\n`,
+          )
+        })
         .exhaustive(),
     )
-    .with({ _tag: "Failure" }, () => {})
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      const msg = failure instanceof Error ? failure.message : String(failure)
+      process.stderr.write(
+        `[harness:hook-runtime-lock] Warning: lock at '${lockPath}' missing or unreadable during release (${msg}).\n`,
+      )
+    })
     .exhaustive()
   return match(outcome)
     .with({ _tag: "Success" }, ({ success }) => success)

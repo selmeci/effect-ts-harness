@@ -26,7 +26,6 @@ import { buildWorkspaceFnIndex } from "@harness/ingest"
 import {
   type CliEnv,
   type CliResult,
-  ensureLocalOllamaReady,
   findWorkspaceRoot,
   formatSubprocessError,
   isIsolatedExternalWorkspace,
@@ -38,6 +37,7 @@ import {
   resolveNxAffectedArgs,
   tryQueryWarmDaemonSocket,
 } from "./daemon-and-omnigraph.service.js"
+import { ensureLocalOllamaReadyDetailed } from "./ollama-readiness.js"
 import {
   appendTranscriptNote,
   executeDoneGraphAndStepChecks,
@@ -86,13 +86,17 @@ export const handleVerify = Effect.fn("HarnessVerify.run")(function* (
     (!isIsolatedExternalWorkspace(repoRoot) &&
       options?.decisionLayer === undefined &&
       options?.skipBackgroundDaemons !== true)
-  if (requireOllama && !(yield* ensureLocalOllamaReady())) {
-    return {
-      exitCode: 1,
-      stdout: "",
-      stderr:
-        "[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is not running and could not be started automatically. Halting execution.",
-    }
+  if (requireOllama) {
+    const ollamaStatus = yield* ensureLocalOllamaReadyDetailed({ includeEmbeddings: false })
+    const ollamaBlocker = match(ollamaStatus)
+      .with({ ready: true }, () => undefined)
+      .with({ ready: false }, ({ stage, reason }) => ({
+        exitCode: 1,
+        stdout: "",
+        stderr: `[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is not running and could not be started automatically. Halting execution. (stage=${stage}: ${reason})`,
+      }))
+      .exhaustive()
+    if (ollamaBlocker !== undefined) return ollamaBlocker
   }
 
   // 1. Active stub absence

@@ -11,11 +11,11 @@ import {
 import {
   type CliEnv,
   type CliResult,
-  ensureLocalOllamaReady,
   makeReadStdinEffect,
   recordFriction,
   resolveDecisionModelLayer,
 } from "./daemon-and-omnigraph.service.js"
+import { ensureLocalOllamaReadyDetailed } from "./ollama-readiness.js"
 import {
   detectAntigravityHookPayload,
   hasAntigravityFormat,
@@ -104,34 +104,37 @@ const evaluateCommandDecision = (
     }
 
     if (options?.decisionLayer === undefined && options?.skipBackgroundDaemons !== true) {
-      const ollamaProbe = yield* ensureLocalOllamaReady({
+      const ollamaProbe = yield* ensureLocalOllamaReadyDetailed({
         probeBudgetMs: WORKFLOW_TIMEOUT_BUDGETS.decisionModelTimeoutMs,
+        includeEmbeddings: false,
       }).pipe(Effect.timeoutOption(`${WORKFLOW_TIMEOUT_BUDGETS.decisionModelTimeoutMs} millis`))
-      const isOllamaReady = match(ollamaProbe)
+      const ollamaFailureReason = match(ollamaProbe)
         .with({ _tag: "None" }, () => {
           process.stderr.write(
             `[harness:guard] Ollama readiness probe timed out after ${WORKFLOW_TIMEOUT_BUDGETS.decisionModelTimeoutMs}ms.\n`,
           )
-          return false
+          return "DecisionModel unavailable (Ollama readiness probe failed)"
         })
-        .with({ _tag: "Some" }, ({ value: ready }) => {
-          if (!ready) {
-            process.stderr.write(
-              "[harness:guard] Ollama server is not ready; escalating without DecisionModel.\n",
-            )
-          }
-          return ready
-        })
+        .with({ _tag: "Some" }, ({ value }) =>
+          match(value)
+            .with({ ready: true }, () => undefined)
+            .with({ ready: false }, ({ stage, reason }) => {
+              process.stderr.write(
+                `[harness:guard] Ollama server is not ready (stage=${stage}: ${reason}); escalating without DecisionModel.\n`,
+              )
+              return `DecisionModel unavailable (Ollama readiness probe failed) [stage=${stage}: ${reason}]`
+            })
+            .exhaustive(),
+        )
         .exhaustive()
-      if (!isOllamaReady) {
-        const reason = "DecisionModel unavailable (Ollama readiness probe failed)"
+      if (ollamaFailureReason !== undefined) {
         recordFriction(options, {
           kind: "guard_escalation",
           summary: command,
-          detail: `verdict=ask; reason=${reason}`,
+          detail: `verdict=ask; reason=${ollamaFailureReason}`,
         })
         return {
-          decision: { verdict: "ask" as const, reason },
+          decision: { verdict: "ask" as const, reason: ollamaFailureReason },
           source: "escalated" as const,
         }
       }

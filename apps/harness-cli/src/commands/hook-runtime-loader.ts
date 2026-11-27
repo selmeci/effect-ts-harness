@@ -257,7 +257,7 @@ const transpileStageFiles = (
     catch: toErrMessage,
   }).pipe(Result.flatMap((res) => (res.ok ? Result.succeed(res.value) : Result.fail(res.reason))))
 
-const swapStagedDirectoryAtomic = (
+export const swapStagedDirectoryAtomic = (
   runtimeRootReal: string,
   stagingDir: string,
 ): Result.Result<string, string> => {
@@ -295,7 +295,20 @@ const swapStagedDirectoryAtomic = (
             nodeSyncHostIo.existsSync(backupDir) &&
             !nodeSyncHostIo.existsSync(currentDir)
           ) {
-            Result.try(() => nodeSyncHostIo.renameSync(backupDir, currentDir))
+            const rollbackRes = Result.try({
+              try: () => {
+                nodeSyncHostIo.renameSync(backupDir, currentDir)
+              },
+              catch: toErrMessage,
+            })
+            return match(rollbackRes)
+              .with({ _tag: "Success" }, () => Result.fail(failure))
+              .with({ _tag: "Failure" }, ({ failure: rollbackErr }) =>
+                Result.fail(
+                  `${failure}; rollback of '${backupDir}' -> '${currentDir}' also failed: ${rollbackErr}`,
+                ),
+              )
+              .exhaustive()
           }
           return Result.fail(failure)
         })
@@ -312,7 +325,9 @@ const swapStagedDirectoryAtomic = (
 
 /**
  * Transpiles harness hook/runtime TypeScript packages to `.js` in a staged directory
- * and atomically swaps `.harness/hook-runtime/current` (`SPEC-0037 REQ-4.3`).
+ * and promotes it to `.harness/hook-runtime/current` via a staged two-rename swap
+ * (`current` -> `.prev-*`, `staging` -> `current`) serialized under `.build.lock`
+ * with rollback on failure (`SPEC-0037 REQ-4.3`).
  */
 export const buildHookRuntimeSnapshot = (repoRoot: string): BuildHookRuntimeSnapshotResult => {
   const repoRealRes = Result.try({
@@ -452,7 +467,8 @@ const loadHookRuntimeSync = (
     !isNonSymlinkContained(repoReal, harnessDir) ||
     !isNonSymlinkContained(repoReal, runtimeDir) ||
     !isNonSymlinkContained(repoReal, currentDir) ||
-    !isNonSymlinkContained(repoReal, manifestPath)
+    !isNonSymlinkContained(repoReal, manifestPath) ||
+    !nodeSyncHostIo.isFileSync(manifestPath)
   ) {
     return { _tag: "SourceFallback" as const, reason: "snapshot-absent-or-unsafe" }
   }

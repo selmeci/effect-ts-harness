@@ -1,7 +1,7 @@
 import { join } from "node:path"
 import { Cause, Effect, Option } from "effect"
 import * as Graph from "effect/Graph"
-import { match, P } from "ts-pattern"
+import { match } from "ts-pattern"
 import { isPureInterruptCause } from "@harness/contract"
 import { type GovernanceDocRef, IGNORED_ERRORS, loadGovernanceDocsChecked } from "@harness/gates"
 import {
@@ -23,7 +23,6 @@ import { buildWorkspaceFnIndex } from "@harness/ingest"
 import {
   type CliEnv,
   type CliResult,
-  ensureLocalOllamaReady,
   ensureLocalOmnigraphReady,
   findWorkspaceRoot,
   formatSubprocessError,
@@ -32,6 +31,7 @@ import {
   resolveClusterRepoRoot,
   resolveNxAffectedArgs,
 } from "./daemon-and-omnigraph.service.js"
+import { ensureLocalOllamaReadyDetailed } from "./ollama-readiness.js"
 import { formatPlanCheckCompactSummary } from "./declarative-cli-extra.js"
 import { runOfflineOmnigraphLintGate } from "./omnigraph-auth-and-drift.js"
 import {
@@ -54,37 +54,16 @@ const checkDeadTaggedErrors = (
   governanceDocs: ReadonlyArray<GovernanceDocRef>,
 ): CliResult | undefined => {
   let hasEffectFnNodes = false
-  for (const [, node] of Graph.nodes(graph.graph)) {
-    const isEffectFn = match(node)
-      .with({ _tag: "EffectFn" }, () => true)
-      .with(
-        { _tag: "ServiceTag" },
-        { _tag: "ServiceLayer" },
-        { _tag: "TaggedError" },
-        { _tag: "SchemaDef" },
-        { _tag: "VitestCase" },
-        { _tag: "PatternDoc" },
-        { _tag: "AdrDoc" },
-        { _tag: "EarsSpec" },
-        { _tag: "EarsRequirement" },
-        { _tag: "EffectSignature" },
-        { _tag: "LayerFlow" },
-        { _tag: "TraceabilityTuple" },
-        { _tag: "HttpEndpointTuple" },
-        { _tag: "MigrationTuple" },
-        () => false,
-      )
-      .exhaustive()
-    if (isEffectFn) {
-      hasEffectFnNodes = true
-      break
-    }
-  }
-  if (!hasEffectFnNodes) return undefined
-
   const failsWithErrorTags = new Set<string>()
-  for (const [, node] of Graph.nodes(graph.graph)) {
+  const taggedErrorsByNodeId = new Map<Graph.NodeIndex, string>()
+  for (const [nodeId, node] of Graph.nodes(graph.graph)) {
     match(node)
+      .with({ _tag: "EffectFn" }, () => {
+        hasEffectFnNodes = true
+      })
+      .with({ _tag: "TaggedError" }, (errNode) => {
+        taggedErrorsByNodeId.set(nodeId, errNode.errorTag)
+      })
       .with({ _tag: "EffectSignature" }, { _tag: "LayerFlow" }, (n) => {
         for (const errTag of n.emittedErrors ?? []) failsWithErrorTags.add(errTag)
       })
@@ -92,10 +71,8 @@ const checkDeadTaggedErrors = (
         for (const errTag of n.errorTags) failsWithErrorTags.add(errTag)
       })
       .with(
-        { _tag: "EffectFn" },
         { _tag: "ServiceTag" },
         { _tag: "ServiceLayer" },
-        { _tag: "TaggedError" },
         { _tag: "SchemaDef" },
         { _tag: "VitestCase" },
         { _tag: "PatternDoc" },
@@ -108,37 +85,13 @@ const checkDeadTaggedErrors = (
       )
       .exhaustive()
   }
+  if (!hasEffectFnNodes) return undefined
+
   for (const [, edge] of Graph.edges(graph.graph)) {
     match<string>(edge.data.role)
       .with("fails-with", "endpoint-error", () => {
-        const targetOpt = Graph.getNode(graph.graph, edge.target)
-        match(targetOpt)
-          .with({ _tag: "Some" }, ({ value }) => {
-            match(value)
-              .with({ _tag: "TaggedError" }, (errNode) => {
-                failsWithErrorTags.add(errNode.errorTag)
-              })
-              .with(
-                { _tag: "EffectFn" },
-                { _tag: "ServiceTag" },
-                { _tag: "ServiceLayer" },
-                { _tag: "SchemaDef" },
-                { _tag: "VitestCase" },
-                { _tag: "PatternDoc" },
-                { _tag: "AdrDoc" },
-                { _tag: "EarsSpec" },
-                { _tag: "EarsRequirement" },
-                { _tag: "EffectSignature" },
-                { _tag: "LayerFlow" },
-                { _tag: "TraceabilityTuple" },
-                { _tag: "HttpEndpointTuple" },
-                { _tag: "MigrationTuple" },
-                () => undefined,
-              )
-              .exhaustive()
-          })
-          .with({ _tag: "None" }, () => undefined)
-          .exhaustive()
+        const errTag = taggedErrorsByNodeId.get(edge.target)
+        if (errTag !== undefined) failsWithErrorTags.add(errTag)
       })
       .otherwise(() => undefined)
   }
@@ -148,25 +101,74 @@ const checkDeadTaggedErrors = (
       .with("accepted", "proposed", () => true)
       .with("draft", "deprecated", "superseded", () => false)
       .exhaustive()
-    if (isActive) {
-      for (const errName of doc.referencedErrors ?? []) {
-        if (!failsWithErrorTags.has(errName) && !IGNORED_ERRORS.has(errName)) {
-          violations.push(
-            `[dead-tagged-error] Governance doc '${doc.id}' declares TaggedError '${errName}', which has 0 FailsWith edges in the plan graph`,
-          )
-        }
+    if (!isActive) continue
+    for (const errName of doc.referencedErrors ?? []) {
+      if (!failsWithErrorTags.has(errName) && !IGNORED_ERRORS.has(errName)) {
+        violations.push(
+          `[dead-tagged-error] Governance doc '${doc.id}' declares TaggedError '${errName}', which has 0 FailsWith edges in the plan graph`,
+        )
       }
     }
   }
-  if (violations.length > 0) {
-    return {
-      exitCode: 1,
-      stdout: JSON.stringify({ step: "type-graph-policy", valid: false, violations }, null, 2),
-      stderr: "",
-    }
-  }
-  return undefined
+  return violations.length > 0
+    ? {
+        exitCode: 1,
+        stdout: JSON.stringify({ step: "type-graph-policy", valid: false, violations }, null, 2),
+        stderr: "",
+      }
+    : undefined
 }
+
+const makeEmptyProjectionPayload = () => ({
+  operations: [],
+  overlays: [],
+  verificationStatus: VerificationStatus.make("Unverified"),
+  roundTripVerified: false,
+  compilerDiagnostics: [],
+  bisectionProbes: BisectionProbeCount.make(0),
+  skippedRuleIds: [],
+})
+
+const makeZeroPatchFailureResult = (
+  extraFields: Readonly<Record<string, unknown>>,
+  msg: string,
+): CliResult => ({
+  exitCode: 1,
+  stdout: JSON.stringify({
+    ...extraFields,
+    error: msg,
+    patchCount: 0,
+    operationCount: 0,
+    overlayCount: 0,
+    ...makeEmptyProjectionPayload(),
+    written: false,
+    writtenFiles: [],
+  }),
+  stderr: msg,
+})
+
+const recordPlanGraphTelemetry = (
+  options: CliEnv | undefined,
+  startedAtMs: number,
+  toolName: string,
+  outcome: "ok" | "fail",
+  engineSource: "local" | "omnigraph" | "memory-fallback",
+  detail?: string,
+): void => {
+  recordTelemetry(options, {
+    surface: "cli",
+    category: "graph_query",
+    toolName,
+    outcome,
+    durationMs: Math.max(0, Date.now() - startedAtMs),
+    engineSource,
+    ...(detail !== undefined ? { detail } : {}),
+  })
+}
+
+const catchProjectionCliError = Effect.catch((err: unknown) =>
+  Effect.succeed<CliResult>({ exitCode: 1, stdout: "", stderr: formatProjectionError(err) }),
+)
 
 export const handlePlanCheck = (
   argv: ReadonlyArray<string>,
@@ -197,13 +199,17 @@ export const handlePlanCheck = (
         !isIsolatedExternalWorkspace(repoRoot) &&
         options?.decisionLayer === undefined &&
         options?.skipBackgroundDaemons !== true)
-    if (requireOllama && !(yield* ensureLocalOllamaReady())) {
-      return {
-        exitCode: 1,
-        stdout: "",
-        stderr:
-          "[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is not running and could not be started automatically. Halting execution.",
-      }
+    if (requireOllama) {
+      const ollamaStatus = yield* ensureLocalOllamaReadyDetailed({ includeEmbeddings: false })
+      const ollamaBlocker = match(ollamaStatus)
+        .with({ ready: true }, () => undefined)
+        .with({ ready: false }, ({ stage, reason }) => ({
+          exitCode: 1,
+          stdout: "",
+          stderr: `[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is not running and could not be started automatically. Halting execution. (stage=${stage}: ${reason})`,
+        }))
+        .exhaustive()
+      if (ollamaBlocker !== undefined) return ollamaBlocker
     }
 
     const fnIndex = yield* buildWorkspaceFnIndex(repoRoot, nodeSyncHostIo)
@@ -327,30 +333,28 @@ export const handlePlanCheck = (
                       .exhaustive()
                     if (persistErr !== undefined) return persistErr
                   }
-                  recordTelemetry(options, {
-                    surface: "cli",
-                    category: "graph_query",
-                    toolName: "omnigraph:sync-plan",
-                    outcome: "ok",
-                    durationMs: Math.max(0, Date.now() - omnigraphStartedAtMs),
-                    engineSource: "local",
-                    detail: "reused-verified-snapshot",
-                  })
+                  recordPlanGraphTelemetry(
+                    options,
+                    omnigraphStartedAtMs,
+                    "omnigraph:sync-plan",
+                    "ok",
+                    "local",
+                    "reused-verified-snapshot",
+                  )
                   return undefined
                 }),
               )
               .with("isolated", () =>
                 Effect.sync((): CliResult | undefined => {
                   saveGraphSnapshot(graph, snapshotPath, nodeSyncHostIo)
-                  recordTelemetry(options, {
-                    surface: "cli",
-                    category: "graph_query",
-                    toolName: "graph:snapshot-local",
-                    outcome: "ok",
-                    durationMs: Math.max(0, Date.now() - omnigraphStartedAtMs),
-                    engineSource: "local",
-                    detail: "skipped-isolated-workspace",
-                  })
+                  recordPlanGraphTelemetry(
+                    options,
+                    omnigraphStartedAtMs,
+                    "graph:snapshot-local",
+                    "ok",
+                    "local",
+                    "skipped-isolated-workspace",
+                  )
                   return undefined
                 }),
               )
@@ -398,14 +402,13 @@ export const handlePlanCheck = (
                       })
                     }),
                   )
-                  recordTelemetry(options, {
-                    surface: "cli",
-                    category: "graph_query",
-                    toolName: "omnigraph:sync-plan",
-                    outcome: syncRes.syncedToOmnigraph ? "ok" : "fail",
-                    durationMs: Math.max(0, Date.now() - omnigraphStartedAtMs),
-                    engineSource: syncRes.syncedToOmnigraph ? "omnigraph" : "memory-fallback",
-                  })
+                  recordPlanGraphTelemetry(
+                    options,
+                    omnigraphStartedAtMs,
+                    "omnigraph:sync-plan",
+                    syncRes.syncedToOmnigraph ? "ok" : "fail",
+                    syncRes.syncedToOmnigraph ? "omnigraph" : "memory-fallback",
+                  )
                   if (!syncRes.syncedToOmnigraph) {
                     return {
                       exitCode: 1,
@@ -484,28 +487,10 @@ export const handlePlanSynth = (
         : []
 
     if (filteredPatches.length === 0) {
-      const msg = `No plan-synth patches matched specification '${specId}'.`
-      return {
-        exitCode: 1,
-        stdout: JSON.stringify({
-          specId,
-          mode: "auto-plan",
-          error: msg,
-          patchCount: 0,
-          operationCount: 0,
-          overlayCount: 0,
-          overlays: [],
-          operations: [],
-          verificationStatus: VerificationStatus.make("Unverified"),
-          roundTripVerified: false,
-          compilerDiagnostics: [],
-          bisectionProbes: BisectionProbeCount.make(0),
-          skippedRuleIds: [],
-          written: false,
-          writtenFiles: [],
-        }),
-        stderr: msg,
-      }
+      return makeZeroPatchFailureResult(
+        { specId, mode: "auto-plan" },
+        `No plan-synth patches matched specification '${specId}'.`,
+      )
     }
 
     const projection = yield* decideGraphProjection({
@@ -525,15 +510,7 @@ export const handlePlanSynth = (
       extraFields: { specId, mode: "auto-plan" },
       projection,
     })
-  }).pipe(
-    Effect.catch((err: unknown) =>
-      Effect.succeed<CliResult>({
-        exitCode: 1,
-        stdout: "",
-        stderr: formatProjectionError(err),
-      }),
-    ),
-  )
+  }).pipe(catchProjectionCliError)
 
 export const handleRepair = (
   argv: ReadonlyArray<string>,
@@ -546,22 +523,11 @@ export const handleRepair = (
     let ruleFilter: string | undefined = undefined
     for (let i = 1; i < argv.length; i++) {
       const arg = argv[i]!
-      const nextArg = argv[i + 1]
-      const parsed = match(arg)
-        .with(P.string.startsWith("--rule="), (a) => ({
-          filter: a.slice("--rule=".length),
-          advance: 0,
-        }))
-        .with("--rule", () =>
-          nextArg !== undefined
-            ? { filter: nextArg, advance: 1 }
-            : { filter: undefined, advance: 0 },
-        )
-        .otherwise(() => ({ filter: undefined, advance: 0 }))
-      if (parsed.filter !== undefined) {
-        ruleFilter = parsed.filter
-        i += parsed.advance
+      if (arg.startsWith("--rule=")) {
+        ruleFilter = arg.slice("--rule=".length)
+        continue
       }
+      if (arg === "--rule" && argv[i + 1] !== undefined) ruleFilter = argv[++i]
     }
 
     const graph =
@@ -578,28 +544,10 @@ export const handleRepair = (
         : []
 
     if (ruleFilter !== undefined && ruleFilter.length > 0 && filteredPatches.length === 0) {
-      const msg = `No repair patches matched rule filter '${ruleFilter}'.`
-      return {
-        exitCode: 1,
-        stdout: JSON.stringify({
-          mode: "auto-repair",
-          ruleFilter,
-          error: msg,
-          patchCount: 0,
-          operationCount: 0,
-          overlayCount: 0,
-          overlays: [],
-          operations: [],
-          verificationStatus: VerificationStatus.make("Unverified"),
-          roundTripVerified: false,
-          compilerDiagnostics: [],
-          bisectionProbes: BisectionProbeCount.make(0),
-          skippedRuleIds: [],
-          written: false,
-          writtenFiles: [],
-        }),
-        stderr: msg,
-      }
+      return makeZeroPatchFailureResult(
+        { mode: "auto-repair", ruleFilter },
+        `No repair patches matched rule filter '${ruleFilter}'.`,
+      )
     }
 
     const projection =
@@ -612,15 +560,7 @@ export const handleRepair = (
             verifyRoundTrip,
             hostIo: nodeSyncHostIo,
           })
-        : {
-            operations: [],
-            overlays: [],
-            verificationStatus: VerificationStatus.make("Unverified"),
-            roundTripVerified: false,
-            compilerDiagnostics: [],
-            bisectionProbes: BisectionProbeCount.make(0),
-            skippedRuleIds: [],
-          }
+        : makeEmptyProjectionPayload()
 
     return yield* finalizeProjectionCliResult({
       repoRoot,
@@ -630,12 +570,4 @@ export const handleRepair = (
       extraFields: { mode: "auto-repair", ruleFilter: ruleFilter ?? null },
       projection,
     })
-  }).pipe(
-    Effect.catch((err: unknown) =>
-      Effect.succeed<CliResult>({
-        exitCode: 1,
-        stdout: "",
-        stderr: formatProjectionError(err),
-      }),
-    ),
-  )
+  }).pipe(catchProjectionCliError)

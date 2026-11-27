@@ -28,12 +28,14 @@ import {
 } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
 import { hasAntigravityFormat } from "./hook-format.js"
+import { HarnessHookRuntime } from "./hook-runtime-loader.js"
 import {
   handleLearn,
   handleReport,
   readFrictionEventsSafe,
   readTelemetryEventsSafe,
 } from "./learn-and-report.command.js"
+import { ensureLocalOllamaReadyDetailed } from "./ollama-readiness.js"
 import {
   ensureHarnessDirSafe,
   resolveHarnessStateDirSafe,
@@ -46,7 +48,6 @@ import { tryFastPathIngest } from "./ingest-fastpath.js"
 import {
   type CliEnv,
   type CliResult,
-  ensureLocalOllamaReady,
   ensureLocalOmnigraphReady,
   findWorkspaceRoot,
   isIsolatedExternalWorkspace,
@@ -83,7 +84,14 @@ export const handleDoctorOrSession = (
     let reconcileError: string | undefined
 
     const requireLiveOllama = shouldRequireLiveOllama(options, nodeSyncHostIo)
-    const ollamaReady = requireLiveOllama ? yield* ensureLocalOllamaReady() : true
+    const ollamaResult = requireLiveOllama
+      ? yield* ensureLocalOllamaReadyDetailed({ includeEmbeddings: true })
+      : ({ ready: true } as const)
+    const ollamaReady = ollamaResult.ready
+    const ollamaFailure = match(ollamaResult)
+      .with({ ready: true }, () => undefined)
+      .with({ ready: false }, ({ stage, reason }) => ({ stage, reason }))
+      .exhaustive()
     const ollamaProbed = requireLiveOllama
 
     const planPath =
@@ -315,8 +323,11 @@ export const handleDoctorOrSession = (
         stderrWarnings.push(msg)
       }
       if (!ollamaReady) {
-        const msg =
-          "[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is offline and could not be started automatically. Stop all implementation immediately and inform the user."
+        const detail =
+          ollamaFailure !== undefined
+            ? ` (stage=${ollamaFailure.stage}: ${ollamaFailure.reason})`
+            : ""
+        const msg = `[CRITICAL HARNESS BLOCKER] Key component Ollama (clef-flash DecisionModel) is offline and could not be started automatically. Stop all implementation immediately and inform the user.${detail}`
         injected.push(msg)
         stderrWarnings.push(msg)
       }
@@ -364,6 +375,19 @@ export const handleDoctorOrSession = (
       }
     }
 
+    const hookRuntime = match(yield* HarnessHookRuntime.load(repoRoot))
+      .with({ _tag: "Snapshot" }, ({ snapshotDir, entryPath, packageMap }) => ({
+        mode: "Snapshot" as const,
+        snapshotDir,
+        entryPath,
+        packageCount: Object.keys(packageMap).length,
+      }))
+      .with({ _tag: "SourceFallback" }, ({ reason }) => ({
+        mode: "SourceFallback" as const,
+        reason,
+      }))
+      .exhaustive()
+
     const telemetryReport = buildSessionReport({
       events: telemetryEvents,
       frictionEvents: rawFrictionEvents,
@@ -381,7 +405,9 @@ export const handleDoctorOrSession = (
         omnigraphInitialized,
         ollamaReady,
         modelWarm,
+        hookRuntime,
         handoff,
+        ...(ollamaFailure !== undefined ? { ollamaError: ollamaFailure } : {}),
         ...(reconcileError !== undefined ? { reconcileError } : {}),
         telemetry: {
           totalEvents: telemetryReport.totalEvents,
@@ -391,7 +417,7 @@ export const handleDoctorOrSession = (
       }),
       stderr: ok
         ? ""
-        : `Doctor check failed: nodeOk=${nodeOk}, snapshotDirOk=${snapshotDirOk}, snapshotOk=${snapshotOk}, effectLspOk=${effectLspOk}, omnigraphInitialized=${omnigraphInitialized}, ollamaReady=${ollamaReady}${reconcileError !== undefined ? `, reconcileError=${reconcileError}` : ""}`,
+        : `Doctor check failed: nodeOk=${nodeOk}, snapshotDirOk=${snapshotDirOk}, snapshotOk=${snapshotOk}, effectLspOk=${effectLspOk}, omnigraphInitialized=${omnigraphInitialized}, ollamaReady=${ollamaReady}${ollamaFailure !== undefined ? `, ollamaStage=${ollamaFailure.stage}, ollamaReason=${ollamaFailure.reason}` : ""}${reconcileError !== undefined ? `, reconcileError=${reconcileError}` : ""}`,
     }
   })
 

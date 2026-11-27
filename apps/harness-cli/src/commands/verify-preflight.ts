@@ -58,7 +58,12 @@ export const runVerifyFormatPreFlight = (
   }
   const oxfmtBin = resolveOxfmtBinaryPath(repoRoot)
   if (oxfmtBin === undefined) {
-    return Option.none()
+    return Option.some<CliResult>({
+      exitCode: 1,
+      stdout: "",
+      stderr:
+        "[GATE FAILURE] verify:format\noxfmt binary not found in repo or workspace node_modules/.bin/oxfmt.",
+    })
   }
 
   const configArgs =
@@ -153,6 +158,7 @@ export const finalizeVerifyPostChecks = (input: {
                     Effect.gen(function* () {
                       const spanBudgetsResult = yield* decideSpanBudgets({
                         spans: recordedSpans,
+                        // Empty causalityRules preserves pre-existing default span-budget behavior from main.
                         causalityRules: [],
                         failOnViolation: true,
                       }).pipe(

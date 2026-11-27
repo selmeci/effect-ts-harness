@@ -18,15 +18,21 @@ import { makeMockDecisionModelLayer } from "@harness/decision"
 import { buildHarnessGraph } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra"
 import { runWithTestTracer } from "@harness/ingest"
+import { handleGuard } from "../src/commands/guard-and-route.command.js"
 import {
   buildHookRuntimeSnapshot,
   HarnessHookRuntime,
 } from "../src/commands/hook-runtime-loader.js"
 import { handleMutate } from "../src/commands/mutate-and-bench.command.js"
 import { parseMutateCliFlags } from "../src/commands/mutate-flags.js"
-import { ensureOllamaWarmWithResult } from "../src/commands/ollama-readiness.js"
+import * as ollamaReadiness from "../src/commands/ollama-readiness.js"
+import { handlePlanCheck } from "../src/commands/plan-and-repair.command.js"
+import { handleDoctor } from "../src/commands/session-learn-report.command.js"
 import { handleVerify } from "../src/commands/verify-and-done.command.js"
-import { finalizeVerifyPostChecks } from "../src/commands/verify-preflight.js"
+import {
+  finalizeVerifyPostChecks,
+  runVerifyFormatPreFlight,
+} from "../src/commands/verify-preflight.js"
 
 const REAL_REPO_ROOT = resolve(import.meta.dirname, "../../..")
 const RESOLVER_PATH = join(REAL_REPO_ROOT, "tools", "node-ts-resolver.mjs")
@@ -34,6 +40,7 @@ const RESOLVER_PATH = join(REAL_REPO_ROOT, "tools", "node-ts-resolver.mjs")
 const tempDirs: Array<string> = []
 
 afterEach(() => {
+  vi.restoreAllMocks()
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop()
     if (dir !== undefined) rmSync(dir, { recursive: true, force: true })
@@ -236,7 +243,9 @@ describe("SPEC-0037 W3A: fail-fast verify, hook runtime isolation, and targeted 
             decisionLayer: makeMockDecisionModelLayer(),
           })
           expect(stubOutcome.exitCode).toBe(1)
-          expect(stubOutcome.stderr).toContain("stub")
+          expect(stubOutcome.stderr).toContain(
+            "Verification failed: active stub() found in Demo.stubbed",
+          )
           expect(nxCalls).toBe(0)
 
           // 3) AST line-count ceiling before Nx
@@ -288,7 +297,10 @@ describe("SPEC-0037 W3A: fail-fast verify, hook runtime isolation, and targeted 
           HarnessHookRuntime.load(dir),
           new Map(),
         )
-        expect(initialLoad.result._tag).toBe("SourceFallback")
+        expect(initialLoad.result).toEqual({
+          _tag: "SourceFallback",
+          reason: "snapshot-absent-or-unsafe",
+        })
         expect(initialLoad.spans.some((s) => s.name === "HarnessHookRuntime.load")).toBe(true)
 
         // 2. Build snapshot (also via finalizeVerifyPostChecks path)
@@ -317,7 +329,16 @@ describe("SPEC-0037 W3A: fail-fast verify, hook runtime isolation, and targeted 
           .exhaustive()
 
         const loadedSnap = yield* HarnessHookRuntime.load(dir)
-        expect(loadedSnap._tag).toBe("Snapshot")
+        match(loadedSnap)
+          .with({ _tag: "Snapshot" }, ({ snapshotDir, entryPath, packageMap }) => {
+            expect(snapshotDir).toContain(join(".harness", "hook-runtime", "current"))
+            expect(entryPath).toContain("hook-entry.js")
+            expect(Object.keys(packageMap).length).toBeGreaterThan(0)
+          })
+          .with({ _tag: "SourceFallback" }, ({ reason }) =>
+            expect.unreachable(`Expected Snapshot, got SourceFallback: ${reason}`),
+          )
+          .exhaustive()
 
         const overrideLoad = yield* HarnessHookRuntime.load(dir, { forceSource: true })
         expect(overrideLoad).toEqual({ _tag: "SourceFallback", reason: "force-source-override" })
@@ -398,7 +419,8 @@ describe("SPEC-0037 W3A: fail-fast verify, hook runtime isolation, and targeted 
             },
           },
         )
-        expect(liveRun.status).not.toBe(0)
+        expect(liveRun.status).toBe(1)
+        expect(liveRun.stderr).toMatch(/SyntaxError|Unexpected token/)
 
         // 6. Tamper a snapshot .js file -> integrity hash mismatch triggers SourceFallback
         const policySnapPath = join(
@@ -475,7 +497,7 @@ describe("SPEC-0037 W3A: fail-fast verify, hook runtime isolation, and targeted 
         expect(existsSync(stampPath)).toBe(false)
 
         const warmupExit = yield* Effect.exit(
-          ensureOllamaWarmWithResult({
+          ollamaReadiness.ensureOllamaWarmWithResult({
             maxRetries: 0,
             retryDelayMs: 10,
             fetch: () => Promise.reject(new Error("ECONNREFUSED")),
@@ -499,6 +521,246 @@ describe("SPEC-0037 W3A: fail-fast verify, hook runtime isolation, and targeted 
           )
           .with({ _tag: "Success" }, () => expect.unreachable("Expected warmup error"))
           .exhaustive()
+      }),
+  )
+
+  it.effect(
+    "F-13.1: HarnessVerify.run invokes pnpm nx when pre-flight checks pass and skipSubprocessVerify is omitted",
+    () =>
+      Effect.gen(function* () {
+        const dir = initTempGitRepo("spec0037-verify-nx-positive-")
+        git(dir, ["checkout", "-b", "feat/positive-nx"])
+        writeFormattedDemoPkg(
+          dir,
+          "export const isPositive = (n: number): boolean => n >= 1\n",
+          [
+            'import { expect, it } from "vitest"',
+            'import { isPositive } from "../src/engine.js"',
+            "",
+            'it("kills >=", () => {',
+            "  expect(isPositive(1)).toBe(true)",
+            "  expect(isPositive(0)).toBe(false)",
+            "})",
+            "",
+          ].join("\n"),
+        )
+        gitCommitAll(dir, "add formatted pkg")
+
+        const mutateRes = yield* handleMutate(["mutate", "--strict"], { repoRoot: dir })
+        expect(mutateRes.exitCode).toBe(0)
+        expect(existsSync(join(dir, ".harness", "mutate-stamp.json"))).toBe(true)
+
+        const origExec = nodeSyncHostIo.execFileSync.bind(nodeSyncHostIo)
+        let nxCalls = 0
+        vi.spyOn(nodeSyncHostIo, "execFileSync").mockImplementation((cmd, args, opts) => {
+          if (cmd === "pnpm" && args.includes("nx")) {
+            nxCalls += 1
+            return { _tag: "Exited", exitCode: 0, stdout: "", stderr: "" }
+          }
+          return origExec(cmd, args, opts)
+        })
+
+        const verifyRes = yield* handleVerify({
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+          skipAutoSessionReport: true,
+          mutateStampPolicy: "enforce",
+          governanceDocs: [],
+          decisionLayer: makeMockDecisionModelLayer(),
+        })
+        expect(verifyRes.exitCode).toBe(0)
+        expect(nxCalls).toBe(1)
+      }),
+  )
+
+  it.effect(
+    "F-6.1: runVerifyFormatPreFlight and handleVerify fail closed with exitCode 1 when oxfmt binary is missing",
+    () =>
+      Effect.gen(function* () {
+        const dir = initTempGitRepo("spec0037-missing-oxfmt-")
+        git(dir, ["checkout", "-b", "feat/missing-oxfmt"])
+        writeFormattedDemoPkg(
+          dir,
+          "export const isPositive = (n: number): boolean => n >= 1\n",
+          'import { expect, it } from "vitest"\nimport { isPositive } from "../src/engine.js"\nit("ok", () => expect(isPositive(1)).toBe(true))\n',
+        )
+        gitCommitAll(dir, "add formatted pkg")
+
+        const origExists = nodeSyncHostIo.existsSync.bind(nodeSyncHostIo)
+        vi.spyOn(nodeSyncHostIo, "existsSync").mockImplementation((targetPath) => {
+          if (targetPath.endsWith("oxfmt")) {
+            return false
+          }
+          return origExists(targetPath)
+        })
+
+        const preflightOpt = runVerifyFormatPreFlight(
+          dir,
+          ["libs/demo/gates/src/engine.ts"],
+          undefined,
+        )
+        match(preflightOpt)
+          .with({ _tag: "Some" }, ({ value }) => {
+            expect(value.exitCode).toBe(1)
+            expect(value.stderr).toContain("[GATE FAILURE] verify:format")
+            expect(value.stderr).toContain("oxfmt binary not found")
+          })
+          .with({ _tag: "None" }, () => expect.unreachable("Expected fail-closed format gate"))
+          .exhaustive()
+
+        const verifyRes = yield* handleVerify({
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+          skipAutoSessionReport: true,
+          mutateStampPolicy: "skip",
+          decisionLayer: makeMockDecisionModelLayer(),
+        })
+        expect(verifyRes.exitCode).toBe(1)
+        expect(verifyRes.stderr).toContain("verify:format")
+        expect(verifyRes.stderr).toContain("oxfmt binary not found")
+      }),
+  )
+
+  it.effect(
+    "F-3.1, F-10.5 & F-14.3: ensureLocalOllamaReadyDetailed preserves stage/reason, CLI callers set includeEmbeddings appropriately, and doctor reports hookRuntime",
+    () =>
+      Effect.gen(function* () {
+        const requestedPaths: Array<string> = []
+        const mockFetch = ((input: Parameters<typeof globalThis.fetch>[0]) => {
+          const url =
+            typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+          requestedPaths.push(new URL(url).pathname)
+          if (url.endsWith("/api/tags")) {
+            return Promise.resolve(
+              new Response(JSON.stringify({ models: [{ name: "clef-flash:latest" }] }), {
+                status: 200,
+              }),
+            )
+          }
+          if (url.endsWith("/v1/systemone")) {
+            return Promise.resolve(new Response(JSON.stringify({ choices: [] }), { status: 200 }))
+          }
+          return Promise.resolve(new Response("unexpected embeddings call", { status: 500 }))
+        }) as typeof globalThis.fetch
+
+        const readyNoEmbed = yield* ollamaReadiness.ensureLocalOllamaReadyDetailed({
+          baseUrl: "http://127.0.0.1:11434",
+          includeEmbeddings: false,
+          force: true,
+          fetch: mockFetch,
+        })
+        expect(readyNoEmbed).toEqual({ ready: true })
+        expect(requestedPaths).toContain("/api/tags")
+        expect(requestedPaths).toContain("/v1/systemone")
+        expect(requestedPaths).not.toContain("/v1/embeddings")
+
+        const detailedFail = yield* ollamaReadiness.ensureLocalOllamaReadyDetailed({
+          maxRetries: 0,
+          retryDelayMs: 10,
+          includeEmbeddings: false,
+          force: true,
+          fetch: () => Promise.reject(new Error("ECONNREFUSED")),
+          spawnOllama: () => {
+            throw new Error("spawn disabled in detailed test")
+          },
+        })
+        expect(detailedFail).toMatchObject({
+          ready: false,
+          stage: "server-start",
+          reason: expect.stringContaining("spawn disabled in detailed test"),
+        })
+
+        const dir = initTempGitRepo("spec0037-ollama-cli-callers-")
+        const recordedOpts: Array<ollamaReadiness.OllamaReadinessOptions | undefined> = []
+        vi.spyOn(ollamaReadiness, "ensureLocalOllamaReadyDetailed").mockImplementation((opts) => {
+          recordedOpts.push(opts)
+          return Effect.succeed({
+            ready: false,
+            stage: "systemone-probe",
+            reason: "clef-flash probe failed (HTTP 503)",
+            model: "clef-flash",
+            endpoint: "http://127.0.0.1:11434",
+          })
+        })
+
+        const guardRes = yield* handleGuard(["guard", "--format=antigravity"], {
+          repoRoot: dir,
+          stdin: JSON.stringify({
+            toolCall: {
+              name: "run_command",
+              args: { CommandLine: "npm run custom-unknown-script" },
+            },
+          }),
+        })
+        expect(guardRes.exitCode).toBe(0)
+        expect(guardRes.stdout).toContain("stage=systemone-probe")
+        expect(guardRes.stdout).toContain("clef-flash probe failed (HTTP 503)")
+
+        const prevRequireOllama = process.env["HARNESS_REQUIRE_OLLAMA"]
+        process.env["HARNESS_REQUIRE_OLLAMA"] = "1"
+        try {
+          const verifyFail = yield* handleVerify({
+            repoRoot: dir,
+            skipBackgroundDaemons: true,
+            skipAutoSessionReport: true,
+          })
+          expect(verifyFail.exitCode).toBe(1)
+          expect(verifyFail.stderr).toContain("[CRITICAL HARNESS BLOCKER]")
+          expect(verifyFail.stderr).toContain("stage=systemone-probe")
+          expect(verifyFail.stderr).toContain("clef-flash probe failed (HTTP 503)")
+
+          const planFail = yield* handlePlanCheck(["plan-check"], {
+            repoRoot: dir,
+            governanceDocs: [],
+            skipBackgroundDaemons: true,
+          })
+          expect(planFail.exitCode).toBe(1)
+          expect(planFail.stderr).toContain("[CRITICAL HARNESS BLOCKER]")
+          expect(planFail.stderr).toContain("stage=systemone-probe")
+          expect(planFail.stderr).toContain("clef-flash probe failed (HTTP 503)")
+
+          const doctorFail = yield* handleDoctor(["doctor"], {
+            repoRoot: dir,
+            skipBackgroundDaemons: true,
+          })
+          expect(doctorFail.exitCode).toBe(1)
+          const doctorFailJson = JSON.parse(doctorFail.stdout) as {
+            readonly ollamaReady: boolean
+            readonly ollamaError?: { readonly stage: string; readonly reason: string }
+            readonly hookRuntime?: { readonly mode: string; readonly reason?: string }
+          }
+          expect(doctorFailJson.ollamaReady).toBe(false)
+          expect(doctorFailJson.ollamaError).toEqual({
+            stage: "systemone-probe",
+            reason: "clef-flash probe failed (HTTP 503)",
+          })
+          expect(doctorFailJson.hookRuntime).toEqual({
+            mode: "SourceFallback",
+            reason: "snapshot-absent-or-unsafe",
+          })
+          expect(doctorFail.stderr).toContain("ollamaStage=systemone-probe")
+          expect(doctorFail.stderr).toContain("clef-flash probe failed (HTTP 503)")
+        } finally {
+          if (prevRequireOllama === undefined) {
+            Reflect.deleteProperty(process.env, "HARNESS_REQUIRE_OLLAMA")
+          } else {
+            process.env["HARNESS_REQUIRE_OLLAMA"] = prevRequireOllama
+          }
+        }
+
+        expect(recordedOpts.map((o) => o?.includeEmbeddings)).toEqual([false, false, false, true])
+
+        // Positive doctor hookRuntime check on fresh checkout (SourceFallback without failing doctor)
+        const doctorFresh = yield* handleDoctor(["doctor"], {
+          repoRoot: dir,
+          skipBackgroundDaemons: true,
+          decisionLayer: makeMockDecisionModelLayer(),
+        })
+        expect(doctorFresh.exitCode).toBe(0)
+        expect(JSON.parse(doctorFresh.stdout).hookRuntime).toEqual({
+          mode: "SourceFallback",
+          reason: "snapshot-absent-or-unsafe",
+        })
       }),
   )
 })
