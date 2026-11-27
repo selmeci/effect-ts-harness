@@ -1,6 +1,8 @@
 import { Match, Result, Schema } from "effect"
-import { SHIP_STAGES } from "./workflow.js"
 import { ErrorReasonMessage } from "./workspace-and-process.js"
+
+/** Canonical stage count matching `SHIP_STAGE_COUNT` in `./workflow.js` (kept local to avoid a circular ESM import via `workflow -> review-routing -> workflow-timeouts`). */
+const SHIP_STAGE_COUNT = 6
 
 const MAX_SETTLE_TIMEOUT_MS = 2_147_483_647
 
@@ -87,6 +89,9 @@ const RawWorkflowTimeoutBudgets = Schema.Struct({
   agentKillGraceMs: WorkflowTimeoutMs,
   agentStartupRetryMaxAttempts: WorkflowPollAttempts,
   agentStartupRetryBackoffMs: WorkflowTimeoutMs,
+  decisionModelTimeoutMs: WorkflowTimeoutMs,
+  lspDiagnosticsWatchdogMs: WorkflowTimeoutMs,
+  ollamaWarmupProbeMs: WorkflowTimeoutMs,
 })
 type RawWorkflowTimeoutBudgets = typeof RawWorkflowTimeoutBudgets.Type
 
@@ -95,7 +100,7 @@ const SHIP_SETTLE_OVERHEAD_MS = 60_000
 const SHIP_IPC_OVERHEAD_MS = 30_000
 const SHIP_SOCKET_OVERHEAD_MS = 30_000
 const SHIP_WORKFLOW_SETTLE_MS = WorkflowTimeoutMs.make(
-  SHIP_STAGES.length * SHIP_GATE_COMMAND_MS + SHIP_SETTLE_OVERHEAD_MS,
+  SHIP_STAGE_COUNT * SHIP_GATE_COMMAND_MS + SHIP_SETTLE_OVERHEAD_MS,
 )
 const SHIP_WORKFLOW_IPC_MS = WorkflowTimeoutMs.make(SHIP_WORKFLOW_SETTLE_MS + SHIP_IPC_OVERHEAD_MS)
 const SHIP_SERVER_SOCKET_MS = WorkflowTimeoutMs.make(SHIP_WORKFLOW_IPC_MS + SHIP_SOCKET_OVERHEAD_MS)
@@ -123,6 +128,9 @@ const RAW_WORKFLOW_TIMEOUT_BUDGETS: RawWorkflowTimeoutBudgets = {
   agentKillGraceMs: WorkflowTimeoutMs.make(5_000),
   agentStartupRetryMaxAttempts: WorkflowPollAttempts.make(3),
   agentStartupRetryBackoffMs: WorkflowTimeoutMs.make(1_000),
+  decisionModelTimeoutMs: WorkflowTimeoutMs.make(5_000),
+  lspDiagnosticsWatchdogMs: WorkflowTimeoutMs.make(45_000),
+  ollamaWarmupProbeMs: WorkflowTimeoutMs.make(10_000),
 }
 
 const findWorkflowTimeoutBudgetViolation = (
@@ -151,7 +159,7 @@ const findWorkflowTimeoutBudgetViolation = (
   }
   const shipStageBudget = validateMultiStageTimeoutBudget(
     MultiStageTimeoutBudgetInput.make({
-      stageCount: WorkflowStageCount.make(SHIP_STAGES.length),
+      stageCount: WorkflowStageCount.make(SHIP_STAGE_COUNT),
       perStageCommandMs: budgets.shipGateCommandMs,
       settleMs: budgets.shipWorkflowSettleMs,
       workflowLabel: WorkflowStageLabel.make("ShipWorkflow"),
@@ -189,6 +197,15 @@ const findWorkflowTimeoutBudgetViolation = (
   if (budgets.claimTimeoutMs <= maxAntigravityCycleMs) {
     return `claimTimeoutMs (${budgets.claimTimeoutMs}) must exceed worst-case antigravity retry budget (${maxAntigravityCycleMs})`
   }
+  if (budgets.ollamaWarmupProbeMs < budgets.decisionModelTimeoutMs) {
+    return `ollamaWarmupProbeMs (${budgets.ollamaWarmupProbeMs}) must be >= decisionModelTimeoutMs (${budgets.decisionModelTimeoutMs})`
+  }
+  if (budgets.lspDiagnosticsWatchdogMs <= budgets.decisionModelTimeoutMs) {
+    return `lspDiagnosticsWatchdogMs (${budgets.lspDiagnosticsWatchdogMs}) must exceed decisionModelTimeoutMs (${budgets.decisionModelTimeoutMs})`
+  }
+  if (budgets.workflowIpcMs <= budgets.decisionModelTimeoutMs) {
+    return `workflowIpcMs (${budgets.workflowIpcMs}) must exceed decisionModelTimeoutMs (${budgets.decisionModelTimeoutMs})`
+  }
   return undefined
 }
 
@@ -219,3 +236,11 @@ export const WORKFLOW_TIMEOUT_BUDGETS: WorkflowTimeoutBudgets = Result.getOrThro
   validateWorkflowTimeoutBudgets(RAW_WORKFLOW_TIMEOUT_BUDGETS),
   (reason) => new Error(`Invalid WORKFLOW_TIMEOUT_BUDGETS: ${reason}`),
 )
+
+/** Unified `5000 ms` DecisionModel timeout budget shared across guard, triage, and review routing (`SPEC-0037 REQ-2.4`). */
+export const DEFAULT_DECISION_MODEL_TIMEOUT_MS: WorkflowTimeoutMs =
+  WORKFLOW_TIMEOUT_BUDGETS.decisionModelTimeoutMs
+
+/** Default `45000 ms` watchdog timeout for `LspDiagnostics.run` subprocess supervision (`SPEC-0037 REQ-1.1`). */
+export const DEFAULT_LSP_WATCHDOG_TIMEOUT_MS: WorkflowTimeoutMs =
+  WORKFLOW_TIMEOUT_BUDGETS.lspDiagnosticsWatchdogMs

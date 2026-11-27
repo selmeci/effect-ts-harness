@@ -38,7 +38,7 @@ enforced_by:
   - apps/harness-mcp/src/tools/ontology-and-gq.tools.ts
   - apps/harness-mcp/src/tools/review-route-helpers.ts
   - adapters/antigravity/plugins/effect-harness/skills/resolving-effect-review-feedback/SKILL.md
-  - adapters/claude-code/plugins/effect-harness/skills/resolving-effect-review-feedback/SKILL.md
+  - adapters/claude-code/skills/resolving-effect-review-feedback/SKILL.md
 spans:
   - LspDiagnostics.run
   - OllamaReadiness.ensureWarm
@@ -134,7 +134,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ### 6 · Review Skill Loop Efficiency & Ceiling Headroom Discipline
 
-**Source (`adapters/antigravity/plugins/effect-harness/skills/resolving-effect-review-feedback/SKILL.md`, `adapters/claude-code/plugins/effect-harness/skills/resolving-effect-review-feedback/SKILL.md`):** Running `mutate --strict` and `verify` before second-pass re-audits, overloading `libs/harness/infra` workers, overlapping `6`-reviewer file lists, and pushing test files to `1499/1500` lines doubled remediation cycles.
+**Source (`adapters/antigravity/plugins/effect-harness/skills/resolving-effect-review-feedback/SKILL.md`, `adapters/claude-code/skills/resolving-effect-review-feedback/SKILL.md`):** Running `mutate --strict` and `verify` before second-pass re-audits, overloading `libs/harness/infra` workers, overlapping `6`-reviewer file lists, and pushing test files to `1499/1500` lines doubled remediation cycles.
 
 | ID      | Pattern      | Requirement                                                                                                                                                                                                                                                                                                                | Effect Symbol | Verification |
 | ------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- | ------------ |
