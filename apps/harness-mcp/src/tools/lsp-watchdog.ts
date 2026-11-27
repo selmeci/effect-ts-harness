@@ -1,3 +1,8 @@
+/**
+ * @module lsp-watchdog
+ * Watchdog-bounded Effect Language Service (`effect-tsgo` / `tsgolint`) subprocess runner
+ * with TS2484 cycle extraction, process-failure safety invariants, and ShadowFileOverlay fusion.
+ */
 import * as path from "node:path"
 import { Data, Effect, Option, Schema } from "effect"
 import { match } from "ts-pattern"
@@ -17,7 +22,12 @@ import type { SyncHostExecResult } from "@harness/service/host-io"
 import {
   findRepoRoot,
   isPathInsideRoot,
+  type LspCleanDiagnosticsReport,
   type LspDiagnosticsReport,
+  type LspDiagnosticsSummary,
+  type LspFindingsDiagnosticsReport,
+  type LspTimeoutDiagnosticsReport,
+  type LspToolErrorDiagnosticsReport,
   normalizeProjectPathEffect,
   ProjectPathEscapeError,
 } from "./mcp-helpers.js"
@@ -31,13 +41,14 @@ import {
   tryCanonicalizeExistingRoot,
 } from "./lsp-session-cache.js"
 
-export type LspCommandKind = "effect-tsgo" | "tsgolint"
+const DEFAULT_LSP_COMMAND = LspCommandName.make("effect-tsgo")
 
+/** Execution options for {@link runLspDiagnosticsWithWatchdog}. */
 export interface LspDiagnosticsExecutionOptions {
   readonly cache?: LspSessionCache | undefined
   readonly execTsgo?: LspTsgoExecutor | undefined
   readonly watchdogTimeoutMs?: number | undefined
-  readonly commandName?: LspCommandKind | undefined
+  readonly commandName?: LspCommandName | undefined
 }
 
 const LspDiagnosticsSummarySchema = Schema.Struct({
@@ -64,6 +75,7 @@ const TS2484_CYCLE_PATTERN =
 const DEFAULT_LSP_TIMEOUT_REASON_HINT =
   "Watchdog timeout reached before LSP diagnostics completed (possible circular re-export cycle or unbounded type recursion)"
 
+/** Extracts a single-line `TS2484` circular re-export hint from LSP stdout/stderr if present. */
 export const extractTs2484CycleHint = (
   stdout: string,
   stderr: string,
@@ -83,6 +95,7 @@ export const extractTs2484CycleHint = (
   return Schema.decodeOption(LspDiagnosticHint)(bounded)
 }
 
+/** Resolves the effective LSP watchdog timeout from explicit option, `HARNESS_LSP_WATCHDOG_MS`, or default. */
 export const resolveLspWatchdogTimeoutMs = (
   explicitTimeoutMs?: number,
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -119,37 +132,88 @@ class LspExecutionError extends Data.TaggedError("LspExecutionError")<{
   readonly message: string
 }> {}
 
+/** Wraps an arbitrary LSP runner exception into a tagged {@link LspExecutionError}. */
 export const toLspExecutionError = (cause: unknown): LspExecutionError =>
   new LspExecutionError({
     cause,
     message: cause instanceof Error ? cause.message : String(cause),
   })
 
-export const makeLspExceptionReport = (cause: unknown): LspDiagnosticsReport => ({
+/**
+ * Invariant-enforcing constructor for non-error diagnostic reports.
+ * Only constructs `clean: true` when `errors === 0 && warnings === 0 && filesWithoutPlugin === 0`.
+ */
+export const makeLspDiagnosticsReport = (input: {
+  readonly diagnostics: ReadonlyArray<unknown>
+  readonly summary: LspDiagnosticsSummary
+}): LspCleanDiagnosticsReport | LspFindingsDiagnosticsReport => {
+  const isClean =
+    input.summary.errors === 0 &&
+    input.summary.warnings === 0 &&
+    input.summary.filesWithoutPlugin === 0
+  if (isClean) {
+    return {
+      clean: true,
+      diagnostics: input.diagnostics,
+      summary: input.summary,
+    }
+  }
+  return {
+    clean: false,
+    diagnostics: input.diagnostics,
+    summary: input.summary,
+  }
+}
+
+/**
+ * Invariant-enforcing constructor for LSP tool/process failures.
+ * Guarantees `clean: false`, `toolError: true`, and `errors >= 1`.
+ */
+export const makeLspToolErrorReport = (input: {
+  readonly diagnostics: ReadonlyArray<unknown>
+  readonly filesChecked: number
+  readonly filesWithoutPlugin: number
+  readonly totalFiles: number
+  readonly errors: number
+  readonly warnings: number
+}): LspToolErrorDiagnosticsReport => ({
   clean: false,
   toolError: true,
-  diagnostics: [`[lsp-exception] ${cause instanceof Error ? cause.message : String(cause)}`],
+  diagnostics: input.diagnostics,
   summary: {
+    filesChecked: input.filesChecked,
+    filesWithoutPlugin: input.filesWithoutPlugin,
+    totalFiles: input.totalFiles,
+    errors: Math.max(1, input.errors),
+    warnings: input.warnings,
+    messages: input.diagnostics.length,
+  },
+})
+
+/** Constructs a structured `toolError: true` report from an unexpected LSP exception or defect. */
+export const makeLspExceptionReport = (cause: unknown): LspToolErrorDiagnosticsReport =>
+  makeLspToolErrorReport({
+    diagnostics: [`[lsp-exception] ${cause instanceof Error ? cause.message : String(cause)}`],
     filesChecked: 0,
     filesWithoutPlugin: 0,
     totalFiles: 0,
     errors: 1,
     warnings: 0,
-    messages: 1,
-  },
-})
+  })
 
-export const handleLspFailure = (err: unknown): Effect.Effect<LspDiagnosticsReport> =>
+/** Logs an LSP execution failure to `stderr` and maps it into a {@link LspToolErrorDiagnosticsReport}. */
+export const handleLspFailure = (err: unknown): Effect.Effect<LspToolErrorDiagnosticsReport> =>
   Effect.sync(() => {
     const message = err instanceof Error ? err.message : String(err)
     process.stderr.write(`[harness-mcp] LSP diagnostics error: ${message}\n`)
     return makeLspExceptionReport(err)
   })
 
+/** Maps a {@link LspDiagnosticsTimeoutError} into a structured `timedOut: true` MCP diagnostics report. */
 export const toLspTimeoutDiagnosticsReport = (
   err: LspDiagnosticsTimeoutError,
   fallbackTargetPath: string,
-): LspDiagnosticsReport => ({
+): LspTimeoutDiagnosticsReport => ({
   clean: false,
   timedOut: true,
   errorTag: "LspDiagnosticsTimeoutError",
@@ -192,6 +256,10 @@ const formatDiagKey = (d: unknown): string => {
   return typeof d === "string" ? d : JSON.stringify(d)
 }
 
+/**
+ * Runs `effect-tsgo` / `tsgolint` diagnostics under a watchdog timeout, merges TypeScript
+ * ShadowFileOverlay diagnostics, and converts non-zero/signaled/spawn failures into `toolError` reports.
+ */
 export const runLspDiagnosticsWithWatchdog = Effect.fn("LspDiagnostics.run")(function* (
   repoRoot: string,
   input: {
@@ -208,7 +276,7 @@ export const runLspDiagnosticsWithWatchdog = Effect.fn("LspDiagnostics.run")(fun
       .with({ _tag: "Success" }, ({ success }) => Effect.succeed(success))
       .with({ _tag: "Failure" }, ({ failure }) => Effect.fail(toLspExecutionError(failure)))
       .exhaustive()
-    const commandName: LspCommandKind = execOptions?.commandName ?? "effect-tsgo"
+    const commandName: LspCommandName = execOptions?.commandName ?? DEFAULT_LSP_COMMAND
     const watchdogTimeoutMs = resolveLspWatchdogTimeoutMs(
       input.watchdogTimeoutMs ?? execOptions?.watchdogTimeoutMs,
     )
@@ -463,19 +531,77 @@ export const runLspDiagnosticsWithWatchdog = Effect.fn("LspDiagnostics.run")(fun
     return match(decoded)
       .with({ _tag: "Some" }, ({ value }) => {
         const baseSummary = value.summary
-        const summary = {
-          filesChecked: Math.max(baseSummary.filesChecked, Object.keys(overlays).length),
-          filesWithoutPlugin: baseSummary.filesWithoutPlugin,
-          totalFiles: Math.max(baseSummary.totalFiles, Object.keys(overlays).length),
-          errors: errorCount,
-          warnings: warningCount,
-          messages: mergedDiags.length,
-        }
-        return {
-          clean: summary.errors === 0 && summary.warnings === 0 && summary.filesWithoutPlugin === 0,
-          diagnostics: mergedDiags,
-          summary,
-        } satisfies LspDiagnosticsReport
+        const filesChecked = Math.max(baseSummary.filesChecked, Object.keys(overlays).length)
+        const totalFiles = Math.max(baseSummary.totalFiles, Object.keys(overlays).length)
+        const processFailureDetail: Option.Option<{
+          readonly code: string
+          readonly message: string
+        }> = match(activeProc)
+          .with({ _tag: "Signaled" }, (p) =>
+            Option.some({
+              code: `LSP_SIGNAL_${p.signal}`,
+              message: `[lsp-signal-${p.signal}] ${commandName} terminated by signal ${p.signal}`,
+            }),
+          )
+          .with({ _tag: "SpawnFailed" }, (p) =>
+            Option.some({
+              code: "LSP_SPAWN_ERROR",
+              message: `[lsp-spawn-error] ${commandName} failed to spawn: ${p.spawnError}`,
+            }),
+          )
+          .with({ _tag: "Exited" }, (p) =>
+            p.exitCode !== 0 &&
+            errorCount === 0 &&
+            warningCount === 0 &&
+            baseSummary.filesWithoutPlugin === 0
+              ? Option.some({
+                  code: `LSP_EXIT_${p.exitCode}`,
+                  message: `[lsp-exit-${p.exitCode}] ${commandName} exited with status ${p.exitCode} without reporting diagnostics`,
+                })
+              : Option.none(),
+          )
+          .exhaustive()
+
+        return match(processFailureDetail)
+          .with({ _tag: "Some" }, ({ value: failure }) => {
+            process.stderr.write(
+              `[harness-mcp] ${commandName} diagnostic process failure: ${failure.message}\n`,
+            )
+            const diagnosticsWithFailure: Array<unknown> = [
+              ...mergedDiags,
+              {
+                file: resolvedFile ?? projectTsconfigPath ?? canonicalRoot,
+                line: 1,
+                column: 1,
+                code: failure.code,
+                severity: "error",
+                message: failure.message,
+                rule: "lsp-process-failure",
+              },
+            ]
+            return makeLspToolErrorReport({
+              diagnostics: diagnosticsWithFailure,
+              filesChecked,
+              filesWithoutPlugin: baseSummary.filesWithoutPlugin,
+              totalFiles,
+              errors: errorCount + 1,
+              warnings: warningCount,
+            })
+          })
+          .with({ _tag: "None" }, () =>
+            makeLspDiagnosticsReport({
+              diagnostics: mergedDiags,
+              summary: {
+                filesChecked,
+                filesWithoutPlugin: baseSummary.filesWithoutPlugin,
+                totalFiles,
+                errors: errorCount,
+                warnings: warningCount,
+                messages: mergedDiags.length,
+              },
+            }),
+          )
+          .exhaustive()
       })
       .with({ _tag: "None" }, () => {
         const failureDetails: Array<string> = []
@@ -511,19 +637,14 @@ export const runLspDiagnosticsWithWatchdog = Effect.fn("LspDiagnostics.run")(fun
 
         const combinedDiagnostics: Array<unknown> =
           tsDiags.length > 0 ? [...failureDetails, ...mergedDiags] : failureDetails
-        return {
-          clean: false,
-          toolError: true,
+        return makeLspToolErrorReport({
           diagnostics: combinedDiagnostics,
-          summary: {
-            filesChecked: tsDiags.length > 0 ? Object.keys(overlays).length : 0,
-            filesWithoutPlugin: 0,
-            totalFiles: tsDiags.length > 0 ? Object.keys(overlays).length : 0,
-            errors: Math.max(1, errorCount),
-            warnings: warningCount,
-            messages: combinedDiagnostics.length,
-          },
-        } satisfies LspDiagnosticsReport
+          filesChecked: tsDiags.length > 0 ? Object.keys(overlays).length : 0,
+          filesWithoutPlugin: 0,
+          totalFiles: tsDiags.length > 0 ? Object.keys(overlays).length : 0,
+          errors: Math.max(1, errorCount),
+          warnings: tsDiags.length > 0 ? warningCount : 0,
+        })
       })
       .exhaustive()
   }).pipe(
@@ -540,6 +661,7 @@ export const runLspDiagnosticsWithWatchdog = Effect.fn("LspDiagnostics.run")(fun
   )
 })
 
+/** Namespace entrypoint for watchdog-bounded LSP diagnostics execution. */
 export const LspDiagnostics = {
   run: runLspDiagnosticsWithWatchdog,
 } as const

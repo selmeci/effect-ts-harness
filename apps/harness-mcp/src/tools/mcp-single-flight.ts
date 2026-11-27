@@ -1,19 +1,33 @@
+/**
+ * @module mcp-single-flight
+ * Concurrency-clamped (`<= 2`) single-flight coalescer and content-hashed digest cache
+ * for expensive read-only MCP governance tools (`harness_ontology_check`, `harness_review_route`).
+ */
 import * as path from "node:path"
-import { Cause, Deferred, Effect, Result, Semaphore } from "effect"
-import { match } from "ts-pattern"
-import { compareCodeUnits, computeContentSha256, isPureInterruptCause } from "@harness/contract"
+import { Cause, Clock, Deferred, Effect, Result, Semaphore } from "effect"
+import { match, P } from "ts-pattern"
+import {
+  compareCodeUnits,
+  computeContentSha256,
+  DEFAULT_MAX_INTERRUPT_RETRIES,
+  isPureInterruptCause,
+} from "@harness/contract"
 import { execFileAsyncEffect, nodeSyncHostIo } from "@harness/infra"
 import type { ExtendedHostIo } from "@harness/service/host-io"
+import { isPathInsideRoot } from "./mcp-repo-root.js"
 
 const DEFAULT_MAX_CONCURRENCY = 2
 const DEFAULT_MAX_ENTRIES = 32
-const DEFAULT_MAX_INTERRUPT_RETRIES = 4
+const DEFAULT_CACHE_TTL_MS = 60_000
 const GIT_DIGEST_TIMEOUT_MS = 5_000
+const UNCACHEABLE_KEY_PREFIX = "uncacheable:"
 const VOLATILE_ARG_KEYS = new Set(["repoRoot", "timeoutMs", "requestId", "timestamp"])
 
+/** Configuration options for {@link createMcpSingleFlightController}. */
 export interface McpSingleFlightControllerOptions {
   readonly maxConcurrency?: number | undefined
   readonly maxEntries?: number | undefined
+  readonly cacheTtlMs?: number | undefined
   readonly hostIo?: ExtendedHostIo | undefined
 }
 
@@ -22,12 +36,23 @@ type SingleFlightOutcome<A, E> =
   | { readonly _tag: "Failure"; readonly cause: Cause.Cause<E> }
   | { readonly _tag: "Interrupted" }
 
+type GitReadResult =
+  | { readonly _tag: "Ok"; readonly value: string }
+  | { readonly _tag: "Uncacheable"; readonly reason: string }
+
+interface CachedSingleFlightEntry {
+  readonly value: unknown
+  readonly cachedAtMs: number
+}
+
+/** Live runtime statistics for an {@link McpSingleFlightController} instance. */
 export interface McpSingleFlightStats {
   readonly maxConcurrency: number
   readonly cacheSize: number
   readonly inFlightCount: number
 }
 
+/** Coalescing, bounded-concurrency, TTL-cached execution controller for MCP read tools. */
 export interface McpSingleFlightController {
   readonly execute: <A, E, R>(key: string, effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
   readonly computeDigestKey: (input: {
@@ -40,6 +65,11 @@ export interface McpSingleFlightController {
   readonly clear: () => void
 }
 
+/** Returns true when a key carries the uncacheable sentinel prefix and must bypass memory caching. */
+export const isUncacheableSingleFlightKey = (key: string): boolean =>
+  key.startsWith(UNCACHEABLE_KEY_PREFIX)
+
+/** Returns true when a tool payload represents a degraded fallback that must never be cached. */
 export const isDegradedSingleFlightResult = (result: unknown): boolean => {
   if (typeof result !== "object" || result === null) {
     return false
@@ -77,6 +107,7 @@ const canonicalizeValue = (value: unknown): unknown => {
   return sorted
 }
 
+/** Produces a deterministic JSON representation of tool arguments excluding volatile keys. */
 export const canonicalizeSingleFlightArgs = (args: Readonly<Record<string, unknown>>): string => {
   const filtered: Record<string, unknown> = {}
   const keys = Object.keys(args).sort(compareCodeUnits)
@@ -185,24 +216,145 @@ const collectGovernanceDocMetadata = (
   return collected.sort((a, b) => compareCodeUnits(a[0], b[0]))
 }
 
-const runGitReadOnly = (repoRoot: string, gitArgs: ReadonlyArray<string>): Effect.Effect<string> =>
+const logGitDigestWarning = (
+  repoRoot: string,
+  gitArgs: ReadonlyArray<string>,
+  reason: string,
+): void => {
+  const subcommand = gitArgs[0] ?? "git"
+  process.stderr.write(
+    `[harness-mcp] single-flight git '${subcommand}' failed in '${repoRoot}' (${reason}); bypassing cache\n`,
+  )
+}
+
+const runGitReadOnly = (
+  repoRoot: string,
+  gitArgs: ReadonlyArray<string>,
+  trimTrailing = true,
+): Effect.Effect<GitReadResult> =>
   execFileAsyncEffect("git", ["--no-optional-locks", "--literal-pathspecs", ...gitArgs], {
     cwd: repoRoot,
     timeoutMs: GIT_DIGEST_TIMEOUT_MS,
   }).pipe(
-    Effect.map((proc) =>
+    Effect.map((proc): GitReadResult =>
       match(proc)
-        .with({ _tag: "Exited" }, (p) =>
-          p.exitCode === 0 ? p.stdout.trimEnd() : `exit:${p.exitCode}`,
-        )
-        .with({ _tag: "TimedOut" }, () => "git-timeout")
-        .with({ _tag: "Signaled" }, (p) => `git-signal:${p.signal}`)
-        .with({ _tag: "SpawnFailed" }, () => "git-unavailable")
+        .with({ _tag: "Exited" }, (p) => {
+          if (p.exitCode === 0) {
+            return { _tag: "Ok" as const, value: trimTrailing ? p.stdout.trimEnd() : p.stdout }
+          }
+          const stderr = p.stderr.trim()
+          const reason = stderr.length > 0 ? `exit:${p.exitCode}:${stderr}` : `exit:${p.exitCode}`
+          logGitDigestWarning(repoRoot, gitArgs, reason)
+          return { _tag: "Uncacheable" as const, reason: `exit:${p.exitCode}` }
+        })
+        .with({ _tag: "TimedOut" }, () => {
+          logGitDigestWarning(repoRoot, gitArgs, "git-timeout")
+          return { _tag: "Uncacheable" as const, reason: "git-timeout" }
+        })
+        .with({ _tag: "Signaled" }, (p) => {
+          const reason = `git-signal:${p.signal}`
+          logGitDigestWarning(repoRoot, gitArgs, reason)
+          return { _tag: "Uncacheable" as const, reason }
+        })
+        .with({ _tag: "SpawnFailed" }, (p) => {
+          logGitDigestWarning(repoRoot, gitArgs, `git-spawn-failed:${p.spawnError}`)
+          return { _tag: "Uncacheable" as const, reason: "git-unavailable" }
+        })
         .exhaustive(),
     ),
-    Effect.orElseSucceed(() => "git-unavailable"),
+    Effect.catchDefect((err) => {
+      const reason = err instanceof Error ? err.message : String(err)
+      process.stderr.write(
+        `[harness-mcp] single-flight git '${gitArgs[0] ?? "git"}' defect in '${repoRoot}' (${reason}); bypassing cache\n`,
+      )
+      return Effect.succeed<GitReadResult>({
+        _tag: "Uncacheable",
+        reason: "git-unavailable",
+      })
+    }),
   )
 
+const extractUntrackedPathsFromPorcelainZ = (porcelainZ: string): ReadonlyArray<string> => {
+  if (porcelainZ.length === 0) {
+    return []
+  }
+  const tokens = porcelainZ.split("\0")
+  const untracked: Array<string> = []
+  for (let i = 0; i < tokens.length; i += 1) {
+    const entry = tokens[i]
+    if (entry === undefined || entry.length < 4) {
+      continue
+    }
+    const statusCode = entry.slice(0, 2)
+    const filePath = entry.slice(3)
+    if (statusCode.startsWith("R") || statusCode.startsWith("C")) {
+      i += 1
+      continue
+    }
+    if (statusCode === "??" && filePath.length > 0) {
+      untracked.push(filePath)
+    }
+  }
+  return untracked.sort(compareCodeUnits)
+}
+
+const hashUntrackedFiles = (
+  canonicalRoot: string,
+  porcelainZ: string,
+  hostIo: ExtendedHostIo,
+): Result.Result<ReadonlyArray<readonly [path: string, digest: string]>, string> => {
+  const untrackedPaths = extractUntrackedPathsFromPorcelainZ(porcelainZ)
+  const hashes: Array<readonly [path: string, digest: string]> = []
+  for (const relPath of untrackedPaths) {
+    const absPath = path.resolve(canonicalRoot, relPath)
+    if (!isPathInsideRoot(canonicalRoot, absPath)) {
+      return Result.fail(`untracked-escape:${relPath}`)
+    }
+    const readRes = Result.try({
+      try: () => {
+        if (!hostIo.existsSync(absPath)) {
+          return { _tag: "Missing" as const }
+        }
+        if (hostIo.isSymbolicLinkSync(absPath)) {
+          return { _tag: "Hash" as const, digest: "symlink" }
+        }
+        if (hostIo.isDirectorySync(absPath)) {
+          return { _tag: "Hash" as const, digest: "dir" }
+        }
+        const bytes = hostIo.readBytesSync(absPath)
+        return {
+          _tag: "Hash" as const,
+          digest: computeContentSha256(Buffer.from(bytes).toString("base64")),
+        }
+      },
+      catch: (err) => (err instanceof Error ? err.message : String(err)),
+    })
+    const resolved = match(readRes)
+      .with({ _tag: "Success" }, ({ success }) => success)
+      .with({ _tag: "Failure" }, ({ failure }) => ({
+        _tag: "Error" as const,
+        message: failure,
+      }))
+      .exhaustive()
+    const untrackedFailure = match(resolved)
+      .with({ _tag: "Missing" }, () => `untracked-missing:${relPath}`)
+      .with({ _tag: "Error" }, ({ message }) => `untracked-read-failed:${relPath}:${message}`)
+      .with({ _tag: "Hash" }, ({ digest }) => {
+        hashes.push([relPath, digest])
+        return undefined
+      })
+      .exhaustive()
+    if (untrackedFailure !== undefined) {
+      return Result.fail(untrackedFailure)
+    }
+  }
+  return Result.succeed(hashes)
+}
+
+/**
+ * Creates a bounded-concurrency single-flight controller with TTL cache eviction,
+ * content-aware git/workspace digest invalidation, and generation-guarded `clear()`.
+ */
 export const createMcpSingleFlightController = (
   options?: McpSingleFlightControllerOptions,
 ): McpSingleFlightController => {
@@ -216,14 +368,29 @@ export const createMcpSingleFlightController = (
     1,
     Math.floor(Number.isFinite(rawMaxEntries) ? rawMaxEntries : DEFAULT_MAX_ENTRIES),
   )
+  const rawCacheTtlMs = options?.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS
+  const cacheTtlMs = Math.max(
+    0,
+    Math.floor(Number.isFinite(rawCacheTtlMs) ? rawCacheTtlMs : DEFAULT_CACHE_TTL_MS),
+  )
   const hostIo = options?.hostIo ?? nodeSyncHostIo
   const semaphore = Semaphore.makeUnsafe(maxConcurrency)
-  const cache = new Map<string, unknown>()
+  const cache = new Map<string, CachedSingleFlightEntry>()
   const inFlight = new Map<string, Deferred.Deferred<SingleFlightOutcome<unknown, unknown>>>()
+  let generation = 0
+  let uncacheableSeq = 0
 
-  const setCacheEntry = (key: string, value: unknown): void => {
+  const makeUncacheableKey = (reason: string): string => {
+    uncacheableSeq += 1
+    return `${UNCACHEABLE_KEY_PREFIX}${uncacheableSeq}:${reason}`
+  }
+
+  const setCacheEntry = (key: string, value: unknown, cachedAtMs: number): void => {
+    if (isUncacheableSingleFlightKey(key) || cacheTtlMs === 0) {
+      return
+    }
     cache.delete(key)
-    cache.set(key, value)
+    cache.set(key, { value, cachedAtMs })
     while (cache.size > maxEntries) {
       const oldestKey = cache.keys().next().value
       if (oldestKey === undefined) break
@@ -231,28 +398,34 @@ export const createMcpSingleFlightController = (
     }
   }
 
-  const getCachedEntry = <A>(key: string): A | undefined => {
-    if (!cache.has(key)) return undefined
+  const getCachedEntry = <A>(key: string, nowMs: number): A | undefined => {
+    if (isUncacheableSingleFlightKey(key)) {
+      return undefined
+    }
     const cached = cache.get(key)
+    if (cached === undefined) {
+      return undefined
+    }
+    if (nowMs - cached.cachedAtMs >= cacheTtlMs) {
+      cache.delete(key)
+      return undefined
+    }
     cache.delete(key)
     cache.set(key, cached)
-    return cached as A
+    return cached.value as A
   }
 
   const executeInternal = <A, E, R>(
     key: string,
     effect: Effect.Effect<A, E, R>,
     remainingInterruptRetries: number,
-  ): Effect.Effect<A, E, R> => {
-    const fastHit = getCachedEntry<A>(key)
-    if (fastHit !== undefined) {
-      return Effect.succeed(fastHit)
-    }
-    return Effect.uninterruptibleMask((restore) =>
+  ): Effect.Effect<A, E, R> =>
+    Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* () {
-        const recheckedHit = getCachedEntry<A>(key)
-        if (recheckedHit !== undefined) {
-          return recheckedHit
+        const nowMs = yield* Clock.currentTimeMillis
+        const cachedHit = getCachedEntry<A>(key, nowMs)
+        if (cachedHit !== undefined) {
+          return cachedHit
         }
         const existing = inFlight.get(key)
         if (existing !== undefined) {
@@ -268,6 +441,7 @@ export const createMcpSingleFlightController = (
             .exhaustive()
         }
 
+        const leaderGeneration = generation
         const deferred = Deferred.makeUnsafe<SingleFlightOutcome<unknown, unknown>>()
         inFlight.set(key, deferred)
 
@@ -277,10 +451,15 @@ export const createMcpSingleFlightController = (
               if (inFlight.get(key) === deferred) {
                 inFlight.delete(key)
               }
+              const completedAtMs = yield* Clock.currentTimeMillis
               const outcome: SingleFlightOutcome<unknown, unknown> = match(exit)
                 .with({ _tag: "Success" }, ({ value }) => {
-                  if (!isDegradedSingleFlightResult(value)) {
-                    setCacheEntry(key, value)
+                  if (
+                    !isUncacheableSingleFlightKey(key) &&
+                    leaderGeneration === generation &&
+                    !isDegradedSingleFlightResult(value)
+                  ) {
+                    setCacheEntry(key, value, completedAtMs)
                   }
                   return { _tag: "Success" as const, value }
                 })
@@ -296,7 +475,6 @@ export const createMcpSingleFlightController = (
         )
       }),
     )
-  }
 
   return {
     execute: (key, effect) => executeInternal(key, effect, DEFAULT_MAX_INTERRUPT_RETRIES),
@@ -306,25 +484,63 @@ export const createMcpSingleFlightController = (
           Result.try(() => hostIo.realpathSync(path.resolve(repoRoot))),
           () => path.resolve(repoRoot),
         )
-        const [gitHead, gitStatus, docMetadata] = yield* Effect.all(
+        const [gitHead, gitStatus, gitDiffHead, gitDiffCached, docMetadata] = yield* Effect.all(
           [
             runGitReadOnly(canonicalRoot, ["rev-parse", "HEAD"]),
-            runGitReadOnly(canonicalRoot, ["status", "--porcelain"]),
+            runGitReadOnly(canonicalRoot, ["status", "--porcelain", "-uall", "-z"], false),
+            runGitReadOnly(canonicalRoot, ["diff", "HEAD"], false),
+            runGitReadOnly(canonicalRoot, ["diff", "--cached"], false),
             Effect.sync(() => collectGovernanceDocMetadata(canonicalRoot, hostIo)),
           ],
           { concurrency: 2 },
         )
-        const canonicalArgs = canonicalizeSingleFlightArgs(args)
-        const payload = JSON.stringify({
-          toolName,
-          canonicalRoot,
-          gitHead,
-          gitStatus,
-          docMetadata,
-          canonicalArgs,
-          extraDigestParts: extraDigestParts ?? [],
-        })
-        return computeContentSha256(payload)
+
+        const gitCombined = match([gitHead, gitStatus, gitDiffHead, gitDiffCached] as const)
+          .with(
+            [{ _tag: "Ok" }, { _tag: "Ok" }, { _tag: "Ok" }, { _tag: "Ok" }],
+            ([head, status, diffHead, diffCached]) => ({
+              _tag: "Ok" as const,
+              head: head.value,
+              status: status.value,
+              diffHead: diffHead.value,
+              diffCached: diffCached.value,
+            }),
+          )
+          .with([{ _tag: "Uncacheable" }, P._, P._, P._], ([failed]) => failed)
+          .with([P._, { _tag: "Uncacheable" }, P._, P._], ([, failed]) => failed)
+          .with([P._, P._, { _tag: "Uncacheable" }, P._], ([, , failed]) => failed)
+          .with([P._, P._, P._, { _tag: "Uncacheable" }], ([, , , failed]) => failed)
+          .exhaustive()
+
+        return match(gitCombined)
+          .with({ _tag: "Uncacheable" }, ({ reason }) => makeUncacheableKey(reason))
+          .with({ _tag: "Ok" }, ({ head, status, diffHead, diffCached }) =>
+            match(hashUntrackedFiles(canonicalRoot, status, hostIo))
+              .with({ _tag: "Failure" }, ({ failure }) => {
+                process.stderr.write(
+                  `[harness-mcp] single-flight untracked file hash failed in '${canonicalRoot}' (${failure}); bypassing cache\n`,
+                )
+                return makeUncacheableKey(failure)
+              })
+              .with({ _tag: "Success" }, ({ success: untrackedHashes }) => {
+                const canonicalArgs = canonicalizeSingleFlightArgs(args)
+                const payload = JSON.stringify({
+                  toolName,
+                  canonicalRoot,
+                  gitHead: head,
+                  gitStatus: status,
+                  gitDiffHead: diffHead,
+                  gitDiffCached: diffCached,
+                  untrackedHashes,
+                  docMetadata,
+                  canonicalArgs,
+                  extraDigestParts: extraDigestParts ?? [],
+                })
+                return computeContentSha256(payload)
+              })
+              .exhaustive(),
+          )
+          .exhaustive()
       }),
     getStats: () => ({
       maxConcurrency,
@@ -332,12 +548,14 @@ export const createMcpSingleFlightController = (
       inFlightCount: inFlight.size,
     }),
     clear: () => {
+      generation += 1
       cache.clear()
       inFlight.clear()
     },
   }
 }
 
+/** Input parameters for {@link runMcpSingleFlight}. */
 export interface McpSingleFlightRunInput<A, E, R> {
   readonly controller: McpSingleFlightController
   readonly repoRoot: string
@@ -347,6 +565,7 @@ export interface McpSingleFlightRunInput<A, E, R> {
   readonly effect: Effect.Effect<A, E, R>
 }
 
+/** Computes a content-hashed digest key and runs `input.effect` through the single-flight controller. */
 export const runMcpSingleFlight = Effect.fn("McpSingleFlight.run")(function* <A, E, R>(
   input: McpSingleFlightRunInput<A, E, R>,
 ): Effect.fn.Return<A, E, R> {
@@ -359,6 +578,7 @@ export const runMcpSingleFlight = Effect.fn("McpSingleFlight.run")(function* <A,
   return yield* input.controller.execute(digestKey, input.effect)
 })
 
+/** Namespace entrypoint for single-flight MCP tool execution. */
 export const McpSingleFlight = {
   run: runMcpSingleFlight,
 } as const

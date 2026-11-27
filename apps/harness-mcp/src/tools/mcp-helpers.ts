@@ -109,23 +109,55 @@ export interface McpToolPluginDescriptor {
   ) => Effect.Effect<unknown, McpToolExecutionError>
 }
 
-export interface LspDiagnosticsReport {
-  readonly clean: boolean
-  readonly diagnostics: ReadonlyArray<unknown>
-  readonly summary: {
-    readonly filesChecked: number
-    readonly filesWithoutPlugin: number
-    readonly totalFiles: number
-    readonly errors: number
-    readonly warnings: number
-    readonly messages: number
-  }
-  readonly timedOut?: boolean | undefined
-  readonly toolError?: boolean | undefined
-  readonly errorTag?: "LspDiagnosticsTimeoutError" | undefined
-  readonly timeoutMs?: number | undefined
-  readonly cycleHint?: string | undefined
+export interface LspDiagnosticsSummary {
+  readonly filesChecked: number
+  readonly filesWithoutPlugin: number
+  readonly totalFiles: number
+  readonly errors: number
+  readonly warnings: number
+  readonly messages: number
 }
+
+export interface LspCleanDiagnosticsReport {
+  readonly clean: true
+  readonly diagnostics: ReadonlyArray<unknown>
+  readonly summary: LspDiagnosticsSummary
+  readonly timedOut?: false | undefined
+  readonly toolError?: false | undefined
+}
+
+export interface LspFindingsDiagnosticsReport {
+  readonly clean: false
+  readonly diagnostics: ReadonlyArray<unknown>
+  readonly summary: LspDiagnosticsSummary
+  readonly timedOut?: false | undefined
+  readonly toolError?: false | undefined
+}
+
+export interface LspTimeoutDiagnosticsReport {
+  readonly clean: false
+  readonly timedOut: true
+  readonly errorTag: "LspDiagnosticsTimeoutError"
+  readonly timeoutMs: number
+  readonly cycleHint?: string | undefined
+  readonly diagnostics: ReadonlyArray<unknown>
+  readonly summary: LspDiagnosticsSummary
+  readonly toolError?: false | undefined
+}
+
+export interface LspToolErrorDiagnosticsReport {
+  readonly clean: false
+  readonly toolError: true
+  readonly diagnostics: ReadonlyArray<unknown>
+  readonly summary: LspDiagnosticsSummary
+  readonly timedOut?: false | undefined
+}
+
+export type LspDiagnosticsReport =
+  | LspCleanDiagnosticsReport
+  | LspFindingsDiagnosticsReport
+  | LspTimeoutDiagnosticsReport
+  | LspToolErrorDiagnosticsReport
 
 export interface ServerOptions {
   readonly graph?: HarnessGraph

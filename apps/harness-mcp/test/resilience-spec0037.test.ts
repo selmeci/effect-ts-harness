@@ -8,6 +8,7 @@ import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import {
   DEFAULT_LSP_WATCHDOG_TIMEOUT_MS,
+  LspCommandName,
   LspDiagnosticsTimeoutError,
   ReviewDepth,
   ReviewRouteToolOutput,
@@ -182,8 +183,9 @@ describe("SPEC-0037 WF-3B: LSP Watchdog, Telemetry Classification & MCP Single-F
                 if (value instanceof LspDiagnosticsTimeoutError) {
                   expect(value.command).toBe("effect-tsgo")
                   expect(value.timeoutMs).toBe(750)
-                  expect(value.cycleHint).toContain("TS2484")
-                  expect(value.reason).toContain("750ms")
+                  expect(value.targetPath).toBe(path.join(repo, "libs/pkg/src/index.ts"))
+                  expect(value.cycleHint).toContain("TS2484: Export declaration conflicts")
+                  expect(value.reason).toContain("effect-tsgo timed out after 750ms (SIGTERM)")
                 }
               })
               .with({ _tag: "None" }, () =>
@@ -203,7 +205,7 @@ describe("SPEC-0037 WF-3B: LSP Watchdog, Telemetry Classification & MCP Single-F
             repo,
             { file: "libs/pkg/src/index.ts" },
             {
-              commandName: "tsgolint",
+              commandName: LspCommandName.make("tsgolint"),
               execTsgo: () =>
                 Effect.succeed({
                   _tag: "TimedOut",
@@ -223,8 +225,18 @@ describe("SPEC-0037 WF-3B: LSP Watchdog, Telemetry Classification & MCP Single-F
                 if (value instanceof LspDiagnosticsTimeoutError) {
                   expect(value.command).toBe("tsgolint")
                   expect(value.cycleHint).toBeUndefined()
+                  expect(value.reason).toContain("tsgolint timed out after 45000ms (SIGKILL)")
                   const report = toLspTimeoutDiagnosticsReport(value, "libs/pkg/src/index.ts")
-                  expect(report.diagnostics[0]).toMatchObject({ code: "LSP_TIMEOUT" })
+                  expect(report.clean).toBe(false)
+                  expect(report.timedOut).toBe(true)
+                  expect(report.toolError).toBeUndefined()
+                  expect(report.errorTag).toBe("LspDiagnosticsTimeoutError")
+                  expect(report.summary.errors).toBe(1)
+                  expect(report.diagnostics[0]).toMatchObject({
+                    code: "LSP_TIMEOUT",
+                    severity: "error",
+                    rule: "lsp-watchdog-timeout",
+                  })
                 }
               })
               .with({ _tag: "None" }, () =>
@@ -267,8 +279,9 @@ describe("SPEC-0037 WF-3B: LSP Watchdog, Telemetry Classification & MCP Single-F
         expect(timeoutToolResult.timedOut).toBe(true)
         expect(timeoutToolResult.errorTag).toBe("LspDiagnosticsTimeoutError")
         expect(timeoutToolResult.timeoutMs).toBe(500)
-        expect(timeoutToolResult.cycleHint).toContain("TS2484")
+        expect(timeoutToolResult.cycleHint).toContain("TS2484: circular re-export detected")
         expect(timeoutToolResult.summary.errors).toBe(1)
+        expect(Reflect.get(timeoutToolResult, "toolError")).toBeUndefined()
 
         recordMcpToolTelemetry(
           "harness_lsp_diagnostics",
@@ -338,7 +351,153 @@ describe("SPEC-0037 WF-3B: LSP Watchdog, Telemetry Classification & MCP Single-F
           events: [events[1]!],
           frictionEvents: [],
         })
+        expect(diagOnlyReport.totalEvents).toBe(1)
+        expect(diagOnlyReport.grade).toBe("A")
         expect(diagOnlyReport.healthScore).toBe(100)
+      }),
+  )
+
+  it.effect(
+    "F-8.1: Signaled, SpawnFailed, or silent non-zero Exited with 0-error JSON returns clean:false and toolError:true",
+    () =>
+      Effect.gen(function* () {
+        const repo = makeTempWorkspace(
+          {
+            "tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
+            "libs/pkg/src/index.ts": "export const x: number = 1\n",
+          },
+          false,
+        )
+        const zeroErrorPayload = JSON.stringify({
+          diagnostics: [],
+          summary: {
+            filesChecked: 1,
+            filesWithoutPlugin: 0,
+            totalFiles: 1,
+            errors: 0,
+            warnings: 0,
+            messages: 0,
+          },
+        })
+
+        const stderrChunks: Array<string> = []
+        const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+          stderrChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+          return true
+        })
+
+        try {
+          const signaledReport = yield* LspDiagnostics.run(
+            repo,
+            { file: "libs/pkg/src/index.ts" },
+            {
+              execTsgo: () =>
+                Effect.succeed({
+                  _tag: "Signaled",
+                  signal: "SIGKILL",
+                  stdout: zeroErrorPayload,
+                  stderr: "",
+                } satisfies SyncHostExecResult),
+            },
+          )
+          expect(signaledReport.clean).toBe(false)
+          expect(signaledReport.toolError).toBe(true)
+          expect(signaledReport.summary.errors).toBe(1)
+          expect(signaledReport.summary.messages).toBe(1)
+          expect(signaledReport.diagnostics[0]).toMatchObject({
+            code: "LSP_SIGNAL_SIGKILL",
+            severity: "error",
+            rule: "lsp-process-failure",
+          })
+
+          const spawnFailedReport = yield* LspDiagnostics.run(
+            repo,
+            { file: "libs/pkg/src/index.ts" },
+            {
+              execTsgo: () =>
+                Effect.succeed({
+                  _tag: "SpawnFailed",
+                  spawnError: "ENOENT",
+                  stdout: zeroErrorPayload,
+                  stderr: "",
+                } satisfies SyncHostExecResult),
+            },
+          )
+          expect(spawnFailedReport.clean).toBe(false)
+          expect(spawnFailedReport.toolError).toBe(true)
+          expect(spawnFailedReport.summary.errors).toBe(1)
+          expect(spawnFailedReport.diagnostics[0]).toMatchObject({
+            code: "LSP_SPAWN_ERROR",
+            severity: "error",
+            rule: "lsp-process-failure",
+          })
+
+          const nonZeroSilentReport = yield* LspDiagnostics.run(
+            repo,
+            { file: "libs/pkg/src/index.ts" },
+            {
+              execTsgo: () =>
+                Effect.succeed({
+                  _tag: "Exited",
+                  exitCode: 137,
+                  stdout: zeroErrorPayload,
+                  stderr: "",
+                } satisfies SyncHostExecResult),
+            },
+          )
+          expect(nonZeroSilentReport.clean).toBe(false)
+          expect(nonZeroSilentReport.toolError).toBe(true)
+          expect(nonZeroSilentReport.summary.errors).toBe(1)
+          expect(nonZeroSilentReport.diagnostics[0]).toMatchObject({
+            code: "LSP_EXIT_137",
+            severity: "error",
+            rule: "lsp-process-failure",
+          })
+
+          // Non-zero exit WITH reported diagnostics remains a regular findings report (toolError undefined)
+          const findingsReport = yield* LspDiagnostics.run(
+            repo,
+            { file: "libs/pkg/src/index.ts" },
+            {
+              execTsgo: () =>
+                Effect.succeed({
+                  _tag: "Exited",
+                  exitCode: 1,
+                  stdout: JSON.stringify({
+                    diagnostics: [
+                      {
+                        file: "libs/pkg/src/index.ts",
+                        line: 1,
+                        column: 14,
+                        code: "TS2322",
+                        severity: "error",
+                        message: "Type 'string' is not assignable to type 'number'.",
+                      },
+                    ],
+                    summary: {
+                      filesChecked: 1,
+                      filesWithoutPlugin: 0,
+                      totalFiles: 1,
+                      errors: 1,
+                      warnings: 0,
+                      messages: 1,
+                    },
+                  }),
+                  stderr: "",
+                } satisfies SyncHostExecResult),
+            },
+          )
+          expect(findingsReport.clean).toBe(false)
+          expect(findingsReport.toolError).toBeUndefined()
+          expect(findingsReport.summary.errors).toBe(1)
+
+          const stderrText = stderrChunks.join("")
+          expect(stderrText).toContain("[lsp-signal-SIGKILL]")
+          expect(stderrText).toContain("[lsp-spawn-error]")
+          expect(stderrText).toContain("[lsp-exit-137]")
+        } finally {
+          stderrSpy.mockRestore()
+        }
       }),
   )
 
@@ -353,6 +512,7 @@ describe("SPEC-0037 WF-3B: LSP Watchdog, Telemetry Classification & MCP Single-F
         expect(controller.getStats().maxConcurrency).toBe(2)
 
         const gate = yield* Deferred.make<void>()
+        const twoStarted = yield* Deferred.make<void>()
         let inFlightNow = 0
         let peakInFlight = 0
         let distinctExecs = 0
@@ -367,6 +527,9 @@ describe("SPEC-0037 WF-3B: LSP Watchdog, Telemetry Classification & MCP Single-F
               distinctExecs += 1
               inFlightNow += 1
               peakInFlight = Math.max(peakInFlight, inFlightNow)
+              if (inFlightNow === 2) {
+                yield* Deferred.succeed(twoStarted, undefined)
+              }
               yield* Deferred.await(gate)
               inFlightNow -= 1
               return { idx, degraded: false }
@@ -381,10 +544,8 @@ describe("SPEC-0037 WF-3B: LSP Watchdog, Telemetry Classification & MCP Single-F
             },
           ),
         )
-        // Allow queued fibers to hit the semaphore
-        yield* Effect.yieldNow
-        yield* Effect.yieldNow
-        yield* Effect.yieldNow
+        // Wait deterministically until 2 fibers are holding the semaphore
+        yield* Deferred.await(twoStarted)
         expect(peakInFlight).toBeLessThanOrEqual(2)
         yield* Deferred.succeed(gate, undefined)
         const results = yield* Fiber.join(fiber)

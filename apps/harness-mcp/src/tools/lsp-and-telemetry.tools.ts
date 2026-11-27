@@ -197,17 +197,25 @@ const evaluateOverlaysDiagnostics = (
     targetRelFile !== undefined ? diags.filter((d) => matchesTargetFile(d.file)) : diags
   const errors = filteredDiags.filter((d) => d.severity === "error").length
   const warnings = filteredDiags.filter((d) => d.severity === "warning").length
+  const summary = {
+    filesChecked: matchedKeys.length,
+    filesWithoutPlugin: 0,
+    totalFiles: Object.keys(overlays).length,
+    errors,
+    warnings,
+    messages: filteredDiags.length,
+  }
+  if (matchedKeys.length > 0 && errors === 0 && warnings === 0) {
+    return {
+      clean: true,
+      diagnostics: filteredDiags,
+      summary,
+    }
+  }
   return {
-    clean: matchedKeys.length > 0 && errors === 0 && warnings === 0,
+    clean: false,
     diagnostics: filteredDiags,
-    summary: {
-      filesChecked: matchedKeys.length,
-      filesWithoutPlugin: 0,
-      totalFiles: Object.keys(overlays).length,
-      errors,
-      warnings,
-      messages: filteredDiags.length,
-    },
+    summary,
   }
 }
 
