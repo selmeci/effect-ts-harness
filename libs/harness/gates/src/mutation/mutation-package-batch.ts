@@ -18,6 +18,7 @@ import {
 } from "../mutation-subprocess-helpers.js"
 import type { CodeMutant, MutantOutcome } from "./mutant-ast-generator.js"
 import { recoverStartupBackup } from "./mutation-backup.js"
+import { isMutatedModuleInitFailure } from "./mutation-init-classifier.js"
 import {
   type PackageBatchFileInput,
   type PackageBatchFileOutput,
@@ -28,6 +29,7 @@ import {
   readStreamedPackageBatchReports,
   recordBatchFileProgress,
   recordStageOutcomes,
+  runSingleFileFallbackStage,
   shouldRecordOutcome,
   writePackageBatchPlan,
 } from "./mutation-batch-stream.js"
@@ -90,7 +92,7 @@ const applyBatchPassOutcomes = (input: {
       return `[mutation-check] Package batch runner missing result for mutant '${mutant.id}'`
     }
     const mapped = toBatchHostExecResult(entryRes)
-    if (needsSoloColdRecheck(mapped)) {
+    if (needsSoloColdRecheck(mapped, { baselineImportClean: true })) {
       const soloRes = runVitestTargetList(
         input.repoRoot,
         input.fileEntry.file,
@@ -130,7 +132,9 @@ const applyBatchPassOutcomes = (input: {
       continue
     }
 
-    const classified = classifyMutantSubprocessResult(mutant.id, Result.succeed(mapped))
+    const classified = classifyMutantSubprocessResult(mutant.id, Result.succeed(mapped), {
+      baselineImportClean: true,
+    })
     const abortDiag = match(classified)
       .with({ kind: "abort" }, ({ diagnostic }) => diagnostic)
       .with({ kind: "outcome" }, ({ status }) => {
@@ -139,7 +143,17 @@ const applyBatchPassOutcomes = (input: {
             input.fileNonCacheableIds.add(mutant.id)
           })
           .with({ _tag: "Exited" }, (r) => {
-            if (r.exitCode === 1 && !hasClearFailureEvidence(r.stdout, r.stderr)) {
+            const isModuleInitKill = isMutatedModuleInitFailure({
+              exitCode: r.exitCode,
+              stdout: r.stdout,
+              stderr: r.stderr,
+              baselineImportClean: true,
+            })
+            if (
+              r.exitCode === 1 &&
+              !hasClearFailureEvidence(r.stdout, r.stderr) &&
+              !isModuleInitKill
+            ) {
               input.fileNonCacheableIds.add(mutant.id)
             }
           })
@@ -488,58 +502,6 @@ export type RunSingleFilePassResult =
       readonly partialResult: PackageBatchFileResult
       readonly diagnostic: string
     }
-
-const runSingleFileFallbackStage = (input: {
-  readonly repoRoot: string
-  readonly backupPath: string
-  readonly hostIo: SyncHostIo
-  readonly baseSubprocessEnv: Readonly<Record<string, string | undefined>>
-  readonly file: DomainFile
-  readonly originalContent: string
-  readonly schemaSource: string
-  readonly stageTests: ReadonlyArray<string>
-  readonly fileOutcomes: Map<string, MutantOutcome>
-  readonly fileNonCacheableIds: Set<string>
-  readonly witnessByMutantId: Map<string, AstSourceFilePath>
-  readonly observedDurationsMs: Map<string, number>
-}): string | undefined => {
-  const surviving = collectSurvivingMutants(
-    Array.from(input.fileOutcomes.values()).map((o) => o.mutant),
-    input.fileOutcomes,
-  )
-  if (surviving.length === 0 || input.stageTests.length === 0) return undefined
-  const fallbackRes = runVitestTargetList(
-    input.repoRoot,
-    input.file,
-    input.hostIo,
-    input.baseSubprocessEnv,
-    input.stageTests,
-    input.originalContent,
-    input.schemaSource,
-    input.backupPath,
-    surviving,
-    { skipBaselineCheck: false },
-  )
-  return match(fallbackRes)
-    .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
-    .with(
-      { _tag: "Ok" },
-      ({ outcomes: fbOutcomes, nonCacheableIds, witnessByMutantId, observedDurationsMs }) => {
-        mergeObservedDurationsIntoMap(input.observedDurationsMs, observedDurationsMs)
-        recordStageOutcomes(
-          fbOutcomes,
-          nonCacheableIds,
-          witnessByMutantId,
-          input.fileOutcomes,
-          input.fileNonCacheableIds,
-          input.witnessByMutantId,
-          true,
-        )
-        return undefined
-      },
-    )
-    .exhaustive()
-}
 
 /** Runs primary and conditional two-stage fallback Vitest passes for a single domain file. */
 export function runSingleFileVitestPass(input: {

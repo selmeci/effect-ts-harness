@@ -2,7 +2,7 @@
  * @fileoverview Mutation verification gate, mutant discovery, test execution, and span saturation analysis.
  */
 import { join, resolve } from "node:path"
-import { Result } from "effect"
+import { Effect } from "effect"
 import { match } from "ts-pattern"
 import {
   type ContentSha256,
@@ -28,7 +28,6 @@ import {
   MutantSourceText,
   type MutantSchemaModule,
   parseGitDiffModifiedLines,
-  verifyMutantSchemaSyntax,
 } from "./mutation/mutant-ast-generator.js"
 import {
   extractGitDiffModifiedLines,
@@ -44,6 +43,14 @@ import {
   preparePackageBaselines,
   resolveTargetsForSuite,
 } from "./mutation/mutation-suite-helpers.js"
+import {
+  type PreparedMutationTarget,
+  buildMutationSubprocessEnv,
+  readAndCompileTargetMutants,
+  readLastSurvivorIds,
+  toQueuedMutationBatchEntry,
+  writeLastSurvivorIds,
+} from "./mutation/mutation-two-tier-cache.js"
 import {
   applyStackedBaseOutcomes,
   formatStackedBaseReportFields,
@@ -144,6 +151,7 @@ export interface RunMutationOptions {
   readonly maxSurvivors?: number | undefined
   readonly suppressSurvivorStderr?: boolean | undefined
   readonly stageAOnly?: boolean | undefined
+  readonly survivorsOnly?: boolean | undefined
   readonly disableMutantCache?: boolean | undefined
   readonly enableMutantCache?: boolean | undefined
   readonly cacheAuth?: MutationCacheAuth | undefined
@@ -302,6 +310,9 @@ export const runDomainMutationSuite = (
     if (flushMutationCache(repoRoot, hostIo, enabledCacheAuth, cacheEntries)) cacheDirty = false
   }
   const witnessClosureMemo = new Map<string, ContentSha256 | null>()
+  const sourceClosureMemo = new Map<string, ContentSha256 | null>()
+  const priorSurvivorIds =
+    options?.survivorsOnly === true ? readLastSurvivorIds(repoRoot, hostIo) : undefined
   const reachabilityCache = new Map<string, PackageReachabilityIndex>()
   const precomputedPartitions = new Map<
     string,
@@ -347,17 +358,7 @@ export const runDomainMutationSuite = (
   }
   if (diffPrep.abortDiagnostic !== undefined) return abortWith(outcomes, diffPrep.abortDiagnostic)
 
-  const baseSubprocessEnv: Record<string, string | undefined> = {
-    ...hostIo.getEnv(),
-    NO_COLOR: "1",
-    FORCE_COLOR: "0",
-    HARNESS_ACTIVE_BACKUP_PATH: resolvedBackupPath,
-  }
-  delete baseSubprocessEnv["HARNESS_ACTIVE_MUTANT_ID"]
-  delete baseSubprocessEnv["HARNESS_STATE_DIR"]
-  delete baseSubprocessEnv["HARNESS_MUTATE_WARM_ISOLATE"]
-  delete baseSubprocessEnv["HARNESS_WARM_ISOLATE"]
-  delete baseSubprocessEnv["HARNESS_COVERAGE_OUT_DIR"]
+  const baseSubprocessEnv = buildMutationSubprocessEnv(hostIo, resolvedBackupPath)
 
   const globalBypassDiffFilter =
     options?.includeAllLines === true || (isExplicitTarget && options?.diffOnly !== true)
@@ -384,9 +385,7 @@ export const runDomainMutationSuite = (
     if (!earlyTerminated) {
       earlyTerminated = true
       if (options?.suppressSurvivorStderr !== true) {
-        for (const o of confirmed) {
-          process.stderr.write(`${formatSurvivorLine(o.mutant)}\n`)
-        }
+        for (const o of confirmed) process.stderr.write(`${formatSurvivorLine(o.mutant)}\n`)
       }
       flushCacheIfDirty()
       timingsTracker.flushIfDirty()
@@ -398,7 +397,6 @@ export const runDomainMutationSuite = (
     }
     return earlyReport
   }
-
   const recordOutcomesForFile = (
     mutants: ReadonlyArray<CodeMutant>,
     uncachedMutants: ReadonlyArray<CodeMutant>,
@@ -429,84 +427,47 @@ export const runDomainMutationSuite = (
       requireAllOutcomes,
     })
 
-  interface PreparedTarget {
-    readonly file: DomainFile
-    readonly pkgKey: string
-    readonly originalContent: string
-    readonly schemaSource: string
-    readonly mutants: ReadonlyArray<CodeMutant>
-    readonly uncachedMutants: ReadonlyArray<CodeMutant>
-    readonly mutantKeys: ReadonlyMap<string, ContentSha256>
-    readonly primaryTests: ReadonlyArray<string>
-    readonly scopedFallbackTests: ReadonlyArray<string>
-    readonly packageFallbackTests: ReadonlyArray<string>
-    readonly cachedHitIds: ReadonlySet<string>
-  }
-
   const uncachedFilesSet = new Set<string>()
   const pkgEvalFileCounts = new Map<string, number>()
-  const preparedTargets: Array<PreparedTarget> = []
+  const preparedTargets: Array<PreparedMutationTarget> = []
 
   for (const file of targets) {
     const overlaySource = normalizedOverlays.get(file.relFile)
     const inMainDiff = (allMainDiffLines ?? diffLinesMap)?.has(file.relFile) === true
     const inEvalDiff = diffLinesMap !== undefined && diffLinesMap.has(file.relFile)
-    if (inMainDiff || inEvalDiff) {
-      diffMatchedFiles.push(file.relFile)
-    }
+    if (inMainDiff || inEvalDiff) diffMatchedFiles.push(file.relFile)
     const bypassDiffFilter = overlaySource !== undefined || globalBypassDiffFilter
     if (!bypassDiffFilter && diffLinesMap !== undefined && !inEvalDiff) {
       if (inMainDiff) scannedFiles.push(file.relFile)
       continue
     }
-
     scannedFiles.push(file.relFile)
     const modifiedLines = bypassDiffFilter ? undefined : diffLinesMap?.get(file.relFile)
-    const originalContent = match(
-      overlaySource !== undefined
-        ? Result.succeed(overlaySource)
-        : Result.try({
-            try: () => hostIo.readTextSync(file.fullPath),
-            catch: (err) => (err instanceof Error ? err.message : String(err)),
-          }),
-    )
-      .with({ _tag: "Success" }, ({ success }) => success)
-      .with({ _tag: "Failure" }, ({ failure }) => ({ readErr: failure }))
+    const compiledTarget = readAndCompileTargetMutants({
+      file,
+      overlaySource,
+      modifiedLines,
+      priorSurvivorIds,
+      hostIo,
+    })
+    const compiledRes = match(compiledTarget)
+      .with({ _tag: "Skip" }, () => "skip" as const)
+      .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
+      .with({ _tag: "Ok" }, (ok) => ok)
       .exhaustive()
-    if (typeof originalContent !== "string") {
-      return abortWith(
-        outcomes,
-        `[mutation-check] Failed to read source file '${file.relFile}': ${originalContent.readErr}`,
-      )
-    }
-
-    const mutants = discoverDomainMutants(
-      file.relFile,
-      originalContent,
-      modifiedLines !== undefined && modifiedLines.size > 0 ? { modifiedLines } : undefined,
-    )
-    if (mutants.length === 0) continue
-
+    if (compiledRes === "skip") continue
+    if (typeof compiledRes === "string") return abortWith(outcomes, compiledRes)
+    const { originalContent, mutants, schemaBundle } = compiledRes
     if (!evaluatedFilesSet.has(file.relFile)) {
       evaluatedFilesSet.add(file.relFile)
       evaluatedFiles.push(file.relFile)
     }
-    const schemaBundle = compileMutantSchemaModule(file.relFile, originalContent, mutants)
-    const syntaxErrors = verifyMutantSchemaSyntax(file.relFile, schemaBundle.schemaSource)
-    if (syntaxErrors.length > 0) {
-      return abortWith(
-        outcomes,
-        `[mutation-check] Compiled mutant schema for '${file.relFile}' failed syntax verification: ${syntaxErrors.join("; ")}`,
-      )
-    }
-
     if (overlaySource !== undefined && options?.testRunner === undefined) {
       for (const mutant of mutants) outcomes.push({ mutant, status: "survived" })
       const early = checkSurvivorLimit()
       if (early !== undefined) return early
       continue
     }
-
     if (options?.testRunner !== undefined) {
       const reachingTestFiles = match(findReachingTestFilesChecked(repoRoot, file, hostIo))
         .with({ _tag: "Ok" }, ({ files }) => files)
@@ -536,7 +497,6 @@ export const runDomainMutationSuite = (
       if (early !== undefined) return early
       continue
     }
-
     const partRes = partitionTargetTestsWithTimings({
       repoRoot,
       file,
@@ -562,7 +522,6 @@ export const runDomainMutationSuite = (
       })
       continue
     }
-
     const { mutantKeys, cachedHitIds, dirtiedCache } = hydrateFileMutantCacheHits({
       repoRoot,
       file,
@@ -578,9 +537,9 @@ export const runDomainMutationSuite = (
       loadedCacheStore,
       cacheEntries,
       witnessClosureMemo,
+      sourceClosureMemo,
     })
     if (dirtiedCache) cacheDirty = true
-
     const uncachedMutants = mutants.filter((m) => !cachedHitIds.has(m.id))
     cachedKilledCount += mutants.length - uncachedMutants.length
     if (uncachedMutants.length > 0) uncachedFilesSet.add(file.relFile)
@@ -628,6 +587,12 @@ export const runDomainMutationSuite = (
           .exhaustive()
   if (typeof baselinePrep === "string") return abortWith(outcomes, baselinePrep)
 
+  const queueBatchEntry = (prep: PreparedMutationTarget) => {
+    const list = queuedByPkg.get(prep.pkgKey) ?? []
+    list.push(toQueuedMutationBatchEntry(prep))
+    queuedByPkg.set(prep.pkgKey, list)
+  }
+
   for (const prep of preparedTargets) {
     if (earlyTerminated) break
     const pkgBaselinePassed = baselinePrep?.passedPackageBaselines.has(prep.pkgKey) === true
@@ -652,27 +617,9 @@ export const runDomainMutationSuite = (
       continue
     }
     if (hasPackageBatchInfra && pkgBaselinePassed && prep.uncachedMutants.length > 0) {
-      const list = queuedByPkg.get(prep.pkgKey) ?? []
-      list.push({
-        pkgKey: prep.pkgKey,
-        mutantKeys: prep.mutantKeys,
-        input: {
-          file: prep.file,
-          originalContent: prep.originalContent,
-          schemaSource: prep.schemaSource,
-          mutants: prep.mutants,
-          uncachedMutants: prep.uncachedMutants,
-          primaryTests: prep.primaryTests,
-          scopedFallbackTests: prep.scopedFallbackTests,
-          packageFallbackTests: prep.packageFallbackTests,
-          fallbackTests: [...prep.scopedFallbackTests, ...prep.packageFallbackTests],
-          cachedHitIds: prep.cachedHitIds,
-        },
-      })
-      queuedByPkg.set(prep.pkgKey, list)
+      queueBatchEntry(prep)
       continue
     }
-
     const singlePass = runSingleFileVitestPass({
       repoRoot,
       backupPath,
@@ -773,6 +720,13 @@ export const runDomainMutationSuite = (
 
   flushCacheIfDirty()
   timingsTracker.flushIfDirty()
+  if (!hasOverlays && options?.testRunner === undefined) {
+    writeLastSurvivorIds(
+      repoRoot,
+      getConfirmedSurvivors().map((o) => o.mutant.id),
+      hostIo,
+    )
+  }
 
   if (isStrictMode && untestedFiles.length > 0) {
     return abortWith(
@@ -780,7 +734,7 @@ export const runDomainMutationSuite = (
       `[mutation-check] Untested modified file(s) in strict mode (0 reaching tests): ${untestedFiles.map((u) => u.file).join(", ")}`,
     )
   }
-  if (isStrictMode && outcomes.length === 0) {
+  if (isStrictMode && options?.survivorsOnly !== true && outcomes.length === 0) {
     return abortWith(
       outcomes,
       "[mutation-check] Zero mutants evaluated in strict mode (SPEC-0018 REQ-2.2).",
@@ -790,9 +744,19 @@ export const runDomainMutationSuite = (
   return makeReport(outcomes, {})
 }
 
+/** Effect-traced `MutationCheck.run` wrapper delegating to `runDomainMutationSuite` (`SPEC-0037 REQ-3.1..REQ-3.4`). */
+export const runMutationCheck = Effect.fn("MutationCheck.run")(function* (
+  repoRoot: string,
+  hostIo: SyncHostIo,
+  options?: RunMutationOptions,
+) {
+  return yield* Effect.succeed(runDomainMutationSuite(repoRoot, hostIo, options))
+})
+
 export const MutationCheck = {
   decide: decideMutationCheck,
   evaluateReport: evaluateMutationOutcomes,
+  run: runMutationCheck,
   runSuite: runDomainMutationSuite,
   withActiveMutant: withActiveMutantEffect,
 } as const

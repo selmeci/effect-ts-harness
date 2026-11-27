@@ -6,6 +6,7 @@
 import {
   ALLOWLIST,
   ASKLIST,
+  CASE_INSENSITIVE_GLOB_FLAG_PATTERN,
   CD_COMMAND_BANNED_REASON,
   DENYLIST,
   DESTRUCTIVE_ARGUMENT_PATTERNS,
@@ -20,16 +21,24 @@ import {
   SECRET_FILE_PATTERN,
   SHELL_OPERATORS,
   SKIP_NX_CACHE_BANNED_REASON,
+  UNQUOTED_BRACE_EXPANSION_PATTERN,
   containsToken,
   hasUnquotedAdjacentBracketGlob,
+  isAllowedPipedSegment,
   isCommandAllowed,
-  isSafeReadOnlyXargsSegment,
+  isHandledByUnquotedEscalate,
   matchesAny,
   splitByUnquotedOperator,
+  splitUnquotedPipeParts,
   stripSafeLeadingEnvVars,
+  stripSafeLeadingEnvVarsDetailed,
   type GuardPatternRule,
   type GuardVerdict,
 } from "./policy-command-rules.js"
+import {
+  isSafeSemicolonReadOnlyChain,
+  isSafeVariableExpandedReadOnlyCommand,
+} from "./policy-fastpath-rules.js"
 import {
   isAllowableStrippedHeredocCommand,
   isGuardSelfInvocationCommand,
@@ -225,35 +234,6 @@ const extractEchoInlineCommand = (snippet: string): string | undefined => {
   }
   const rest = seg.commandWords.slice(i).join(" ").trim()
   return rest.length > 0 ? rest : undefined
-}
-
-const CASE_INSENSITIVE_GLOB_FLAG_PATTERN = /(?:^|\s)(?:-iname|-ipath|-iwholename|--iglob)(?:=|\s|$)/
-const UNQUOTED_BRACE_EXPANSION_PATTERN = /\{[^}\s]*(?:,|\.\.)[^}\s]*\}/
-
-const isHandledByUnquotedEscalate = (
-  tok: string,
-  rawCommand: string,
-  unquoted: string,
-): boolean => {
-  if (/[*?]/.test(tok)) return false
-  const bracketGroups = tok.match(/\[[^\]\s]+\]/g) ?? []
-  const braceGroups = (tok.match(/\{[^}\s]+\}/g) ?? []).filter((g) => /(?:,|\.\.)/.test(g))
-  if (bracketGroups.length === 0 && braceGroups.length === 0) return false
-  if (
-    bracketGroups.length > 0 &&
-    (!bracketGroups.every((g) => unquoted.includes(g)) ||
-      !hasUnquotedAdjacentBracketGlob(rawCommand, unquoted))
-  ) {
-    return false
-  }
-  if (
-    braceGroups.length > 0 &&
-    (!braceGroups.every((g) => unquoted.includes(g)) ||
-      !UNQUOTED_BRACE_EXPANSION_PATTERN.test(unquoted))
-  ) {
-    return false
-  }
-  return true
 }
 
 const extractCommandGlobSubTokens = (
@@ -487,37 +467,6 @@ export const explainCommandDenyReason = (
   options?: PolicyGuardOptions,
 ): string | undefined => explainCommandDenyRule(command, options)?.reason
 
-const SIMPLE_PIPE_FILTER_BINS: ReadonlySet<string> = new Set([
-  "grep",
-  "head",
-  "tail",
-  "wc",
-  "cat",
-  "cut",
-])
-
-const isAllowedPipeFilter = (p: string): boolean => {
-  if (isSafeReadOnlyXargsSegment(p)) return true
-  const argv = toCommandView(p).argv
-  const head = argv.split(" ", 1)[0] ?? ""
-  if (SIMPLE_PIPE_FILTER_BINS.has(head)) return true
-  if (head === "rg") return !/(?:^|\s)--(?:pre|pre-glob|hostname-bin)(?:=|\s|$)/.test(argv)
-  if (head === "sort") return !/(?:^|\s)(?:-[^\s-]*o|--output(?:=|\s|$))/.test(argv)
-  return false
-}
-
-const isAllowedPipedSegment = (segCmd: string, segUnquoted: string): boolean => {
-  if (!segUnquoted.includes("|") || segUnquoted.includes("||")) {
-    return false
-  }
-  const parts = splitByUnquotedOperator(segCmd, segUnquoted, "|")
-  return (
-    parts.length >= 2 &&
-    isCommandAllowed(parts[0]!.cmd) &&
-    parts.slice(1).every((p) => isAllowedPipeFilter(p.cmd))
-  )
-}
-
 /** Rule order is load-bearing (harness:ADR-0003): deny → ask → escalate → allow.
  * Every rule that removes the automatic `allow` must run before the prefix allowlist. */
 export const classifyCommand = (command: string, options?: PolicyGuardOptions): GuardVerdict => {
@@ -537,7 +486,7 @@ export const classifyCommand = (command: string, options?: PolicyGuardOptions): 
   }
   const view = toCommandView(norm)
   const hasBgOp = hasUnquotedBackgroundOperator(view.unquoted)
-  const hasUnquotedBraceExpansion = /\{[^}\s]*(?:,|\.\.)[^}\s]*\}/.test(view.unquoted)
+  const hasUnquotedBraceExpansion = UNQUOTED_BRACE_EXPANSION_PATTERN.test(view.unquoted)
   if (
     ASKLIST.some((token) => containsToken(view.argv, token)) ||
     matchesAny(view.argv, GIT_DISCARD_PATTERNS)
@@ -597,6 +546,19 @@ export const classifyCommand = (command: string, options?: PolicyGuardOptions): 
       ) {
         return "allow"
       }
+    }
+    if (
+      isSafeSemicolonReadOnlyChain(
+        norm,
+        view.unquoted,
+        stripSafeLeadingEnvVarsDetailed,
+        splitUnquotedPipeParts,
+      )
+    ) {
+      return "allow"
+    }
+    if (isSafeVariableExpandedReadOnlyCommand(norm, view.unquoted)) {
+      return "allow"
     }
     return "escalate"
   }

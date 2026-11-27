@@ -44,6 +44,11 @@ export {
   type WorkerFileAccessResult,
 } from "./policy.js"
 export {
+  PolicyFastPath,
+  type PolicyFastPathInput,
+  decidePolicyFastPath,
+} from "./policy-fastpath-decide.js"
+export {
   DstSeedsRunCount,
   MutantCount,
   MutateDiffMode,
@@ -227,6 +232,7 @@ export {
   parseGitDiffModifiedLines,
   partitionReachingTestFiles,
   runDomainMutationSuite,
+  runMutationCheck,
   setActiveMutantId,
   stripAnsi,
   type MutantSchemaModule,
@@ -392,11 +398,13 @@ export {
   TelemetryEngineSource,
   TelemetryEvent,
   TelemetryOutcome,
+  TelemetryReport,
   TelemetrySurface,
   appendTelemetryEvent,
   buildSessionReport,
   clearTelemetryEvents,
   decideSessionReport,
+  decideTelemetryReport,
   readTelemetryEvents,
   renderSessionReportMarkdown,
   scopeSessionReportInput,
@@ -649,3 +657,18 @@ export {
   isPureReExportBarrel,
   resolveBarrelClosureStep,
 } from "./mutation/mutation-barrel-closure.js"
+export {
+  isMutatedModuleInitFailure,
+  type MutatedModuleInitFailureInput,
+} from "./mutation/mutation-init-classifier.js"
+export {
+  computeSourceOnlyClosureDigest,
+  extractWitnessTestBlockDigests,
+  isAppendOnlyWitnessPreserved,
+  readLastSurvivorIds,
+  writeLastSurvivorIds,
+} from "./mutation/mutation-two-tier-cache.js"
+export {
+  collectTopGuardCommandPrefixes,
+  detectHangOutlierRecommendations,
+} from "./telemetry-recommendations.js"
