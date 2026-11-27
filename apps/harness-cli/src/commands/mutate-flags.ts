@@ -8,6 +8,7 @@ export interface ParsedMutateFlags {
   readonly disableMutantCache: boolean
   readonly failFast: boolean
   readonly stageAOnly: boolean
+  readonly survivorsOnly: boolean
   readonly scope: string | undefined
   readonly targetFiles: ReadonlyArray<string> | undefined
   readonly baseRef: string | undefined
@@ -26,11 +27,12 @@ const BOOLEAN_FLAGS = [
   "--no-cache",
   "--fail-fast",
   "--stage-a-only",
+  "--survivors-only",
 ] as const
 
 type BooleanFlagName = (typeof BOOLEAN_FLAGS)[number]
 
-const SCALAR_FLAGS = ["--scope", "--file", "--base", "--max-survivors"] as const
+const SCALAR_FLAGS = ["--scope", "--file", "--files", "--base", "--max-survivors"] as const
 
 type ScalarFlagName = (typeof SCALAR_FLAGS)[number]
 
@@ -84,6 +86,7 @@ export const parseMutateCliFlags = (argv: ReadonlyArray<string>): ParseMutateFla
     "--no-cache": false,
     "--fail-fast": false,
     "--stage-a-only": false,
+    "--survivors-only": false,
   }
   const scalarValues: Partial<Record<ScalarFlagName, string>> = {}
 
@@ -143,8 +146,16 @@ export const parseMutateCliFlags = (argv: ReadonlyArray<string>): ParseMutateFla
   }
 
   const scope = scalarValues["--scope"]
-  const fileCsv = scalarValues["--file"]
+  const rawFileCsv = scalarValues["--file"]
+  const rawFilesCsv = scalarValues["--files"]
   const baseRef = scalarValues["--base"]
+
+  if (rawFileCsv !== undefined && rawFilesCsv !== undefined) {
+    return {
+      _tag: "Invalid",
+      reason: "Cannot specify both --file and --files for 'harness mutate'.",
+    }
+  }
 
   if (baseRef !== undefined && baseRef.startsWith("-")) {
     return {
@@ -153,6 +164,8 @@ export const parseMutateCliFlags = (argv: ReadonlyArray<string>): ParseMutateFla
     }
   }
 
+  const fileCsv = rawFileCsv ?? rawFilesCsv
+  const fileFlagName = rawFilesCsv !== undefined ? "--files" : "--file"
   const targetFiles =
     fileCsv !== undefined
       ? fileCsv
@@ -164,7 +177,7 @@ export const parseMutateCliFlags = (argv: ReadonlyArray<string>): ParseMutateFla
   if (targetFiles !== undefined && targetFiles.length === 0) {
     return {
       _tag: "Invalid",
-      reason: "Empty --file target list; refusing to run mutation suite.",
+      reason: `Empty ${fileFlagName} target list; refusing to run mutation suite.`,
     }
   }
 
@@ -180,6 +193,7 @@ export const parseMutateCliFlags = (argv: ReadonlyArray<string>): ParseMutateFla
         disableMutantCache: boolValues["--no-cache"],
         failFast,
         stageAOnly: boolValues["--stage-a-only"],
+        survivorsOnly: boolValues["--survivors-only"],
         scope,
         targetFiles,
         baseRef,

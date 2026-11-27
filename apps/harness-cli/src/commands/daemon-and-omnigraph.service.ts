@@ -452,6 +452,9 @@ export {
   checkOllamaServerReady,
   checkOllamaServerReadyDetailed,
   ensureLocalOllamaReady,
+  ensureOllamaWarmWithResult,
+  OllamaReadiness,
   type OllamaProbeResult,
   type OllamaReadinessOptions,
+  type OllamaWarmupReceipt,
 } from "./ollama-readiness.js"
