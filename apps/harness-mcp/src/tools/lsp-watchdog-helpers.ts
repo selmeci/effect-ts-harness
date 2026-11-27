@@ -97,11 +97,14 @@ export const resolveLspWatchdogTimeoutMs = (
   return DEFAULT_LSP_WATCHDOG_TIMEOUT_MS
 }
 
-/** Tagged internal execution error raised when LSP process preconditions or overlays throw. */
-export class LspExecutionError extends Data.TaggedError("LspExecutionError")<{
+class LspExecutionError extends Data.TaggedError("LspExecutionError")<{
   readonly cause: unknown
   readonly message: string
 }> {}
+
+/** Predicate matching catchable internal LSP execution failures (preserving `ProjectPathEscapeError` and `LspDiagnosticsTimeoutError`). */
+export const isLspExecutionFailure = (err: unknown): err is LspExecutionError | string =>
+  err instanceof LspExecutionError || typeof err === "string"
 
 /** Wraps an arbitrary LSP runner exception into a tagged {@link LspExecutionError}. */
 export const toLspExecutionError = (cause: unknown): LspExecutionError =>

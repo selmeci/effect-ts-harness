@@ -38,7 +38,7 @@ import {
   extractTs2484CycleHint,
   formatDiagKey,
   handleLspFailure,
-  LspExecutionError,
+  isLspExecutionFailure,
   makeLspDiagnosticsReport,
   makeLspExceptionReport,
   makeLspToolErrorReport,
@@ -460,11 +460,7 @@ export const runLspDiagnosticsWithWatchdog = Effect.fn("LspDiagnostics.run")(fun
       })
       .exhaustive()
   }).pipe(
-    Effect.catchIf(
-      (err): err is LspExecutionError | string =>
-        !(err instanceof ProjectPathEscapeError) && !(err instanceof LspDiagnosticsTimeoutError),
-      handleLspFailure,
-    ),
+    Effect.catchIf(isLspExecutionFailure, handleLspFailure),
     Effect.catchDefect((defect) => {
       const message = defect instanceof Error ? defect.message : String(defect)
       process.stderr.write(`[harness-mcp] LSP diagnostics defect: ${message}\n`)
