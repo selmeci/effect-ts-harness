@@ -3,7 +3,6 @@
 import * as path from "node:path"
 import { match } from "ts-pattern"
 import {
-  FILE_REDIRECTION_PATTERN,
   PNPM_VALUE_FLAGS,
   SECRET_FILE_PATTERN,
   WORKTREE_ID_BLOCKED_HARNESS_PATTERN,
@@ -202,11 +201,52 @@ export const isSafeFastpathToken = (raw: string): boolean => {
   return true
 }
 
-const scanDelimitedSection = (expr: string, startIdx: number, delim: string): number => {
+const isSafeRepoScopedFastpathToken = (raw: string): boolean => {
+  if (!isSafeFastpathToken(raw)) return false
+  const slashNorm = raw.replace(/\\/g, "/")
+  return !slashNorm.startsWith("/") && !slashNorm.startsWith("~") && !/^[A-Za-z]:\//.test(slashNorm)
+}
+
+const skipPosixBracketClass = (expr: string, startIdx: number): number => {
+  const kind = expr[startIdx + 1]
+  if (kind !== ":" && kind !== "=" && kind !== ".") return -1
+  const closeSeq = `${kind}]`
+  const closeIdx = expr.indexOf(closeSeq, startIdx + 2)
+  return closeIdx === -1 ? -1 : closeIdx + 1
+}
+
+const scanDelimitedSection = (
+  expr: string,
+  startIdx: number,
+  delim: string,
+  isRegex: boolean,
+): number => {
+  let inBracket = false
+  let bracketStart = -1
   for (let i = startIdx; i < expr.length; i++) {
     const ch = expr[i]!
-    if (ch === "\\") {
+    if (!inBracket && ch === "\\") {
       i++
+      continue
+    }
+    if (isRegex && !inBracket && ch === "[") {
+      inBracket = true
+      bracketStart = i
+      if (expr[i + 1] === "^") i++
+      if (expr[i + 1] === "]") i++
+      continue
+    }
+    if (isRegex && inBracket) {
+      if (ch === "[") {
+        const classEnd = skipPosixBracketClass(expr, i)
+        if (classEnd !== -1) {
+          i = classEnd
+          continue
+        }
+      }
+      if (ch === "]" && i > bracketStart) {
+        inBracket = false
+      }
       continue
     }
     if (ch === delim) return i
@@ -219,8 +259,9 @@ const isSafeReadOnlySedExpression = (expr: string): boolean => {
   for (let i = 0; i < expr.length; i++) {
     const ch = expr[i]!
     if (/[\s\d,$+~!;{}]/.test(ch)) continue
+    if (ch === "#") return false
     if (ch === "/") {
-      const close = scanDelimitedSection(expr, i + 1, "/")
+      const close = scanDelimitedSection(expr, i + 1, "/", true)
       if (close === -1) return false
       i = Math.max(i, close)
       continue
@@ -228,7 +269,7 @@ const isSafeReadOnlySedExpression = (expr: string): boolean => {
     if (ch === "\\") {
       const delim = expr[i + 1]
       if (delim === undefined) return false
-      const close = scanDelimitedSection(expr, i + 2, delim)
+      const close = scanDelimitedSection(expr, i + 2, delim, true)
       if (close === -1) return false
       i = Math.max(i, close)
       continue
@@ -236,9 +277,9 @@ const isSafeReadOnlySedExpression = (expr: string): boolean => {
     if (ch === "s" || ch === "y") {
       const delim = expr[i + 1]
       if (delim === undefined || /\s/.test(delim)) return false
-      const mid = scanDelimitedSection(expr, i + 2, delim)
+      const mid = scanDelimitedSection(expr, i + 2, delim, ch === "s")
       if (mid === -1) return false
-      const end = scanDelimitedSection(expr, mid + 1, delim)
+      const end = scanDelimitedSection(expr, mid + 1, delim, false)
       if (end === -1) return false
       let j = end + 1
       if (ch === "s") {
@@ -319,8 +360,52 @@ export const isSafeSedReadOnlyCommand = (tokens: ReadonlyArray<string>): boolean
     sawQuiet &&
     expressions.length >= 1 &&
     expressions.every(isSafeReadOnlySedExpression) &&
-    fileArgs.every(isSafeFastpathToken)
+    fileArgs.every(isSafeRepoScopedFastpathToken)
   )
+}
+
+const BANNED_PNPM_DIR_PRE_FLAGS_RE =
+  /^(?:-c|--config|--userconfig|--globalconfig|--cwd|--prefix|--store-dir|--modules-dir|--script-shell)(?:=|$)/
+const BANNED_PNPM_TRAILING_ARG_RE =
+  /^(?:-c|--config|--root|-r|--require|--import|--loader|--experimental-loader|--script-shell)(?:=|$)|--skip-?nx-?cache/i
+
+export const isSafeVitestExecTokens = (tokens: ReadonlyArray<string>): boolean =>
+  tokens.slice(1).every((arg) => {
+    if (arg.includes("..") || BANNED_PNPM_TRAILING_ARG_RE.test(arg)) return false
+    if (!arg.startsWith("-")) return isSafeRepoScopedFastpathToken(arg)
+    return true
+  })
+
+export const hasUnsafePnpmDirOrConfigFlags = (tokens: ReadonlyArray<string>): boolean => {
+  for (let i = 1; i < tokens.length; i++) {
+    const tok = tokens[i]!
+    if (tok === "--") break
+    if (BANNED_PNPM_DIR_PRE_FLAGS_RE.test(tok)) return true
+    if (tok === "--dir" || tok === "-C") {
+      const dirVal = tokens[i + 1]
+      if (dirVal === undefined || !isSafeRepoScopedFastpathToken(dirVal)) return true
+      i++
+      continue
+    }
+    if (tok.startsWith("--dir=")) {
+      if (!isSafeRepoScopedFastpathToken(tok.slice("--dir=".length))) return true
+      continue
+    }
+    if (tok.startsWith("-C=")) {
+      if (!isSafeRepoScopedFastpathToken(tok.slice("-C=".length))) return true
+      continue
+    }
+    if (tok.startsWith("-C") && tok.length > 2) {
+      if (!isSafeRepoScopedFastpathToken(tok.slice(2))) return true
+      continue
+    }
+    if (PNPM_VALUE_FLAGS.has(tok)) {
+      i++
+      continue
+    }
+    if (!tok.startsWith("-")) break
+  }
+  return false
 }
 
 /** Validates `pnpm --dir <safe>` / `-C <safe>` commands scoped strictly to `typecheck`, `lint`, `vitest`, or `test`. */
@@ -364,7 +449,7 @@ export const isSafePnpmDirScopedCommand = (trimmed: string, sawWorktreeId: boole
       i++
       continue
     }
-    if (tok === "--script-shell" || tok.startsWith("--script-shell=")) return false
+    if (BANNED_PNPM_DIR_PRE_FLAGS_RE.test(tok)) return false
     if (PNPM_VALUE_FLAGS.has(tok)) {
       i += 2
       continue
@@ -375,15 +460,17 @@ export const isSafePnpmDirScopedCommand = (trimmed: string, sawWorktreeId: boole
     }
     break
   }
-  if (dirPaths.length === 0 || !dirPaths.every(isSafeFastpathToken)) return false
+  if (dirPaths.length === 0 || !dirPaths.every(isSafeRepoScopedFastpathToken)) return false
   const targetIdx = match(tokens[i])
     .with("run", "run-script", "exec", () => (tokens[i + 1] === "--" ? i + 2 : i + 1))
     .otherwise(() => i)
   const target = tokens[targetIdx]
   if (target === undefined || !SAFE_PNPM_DIR_TARGETS.has(target)) return false
-  return tokens
-    .slice(targetIdx)
-    .every((arg) => !arg.includes("..") && !/--skip-?nx-?cache/i.test(arg))
+  return tokens.slice(targetIdx).every((arg) => {
+    if (arg.includes("..") || BANNED_PNPM_TRAILING_ARG_RE.test(arg)) return false
+    if (!arg.startsWith("-")) return isSafeRepoScopedFastpathToken(arg)
+    return true
+  })
 }
 
 /** Returns true when `tokens` represents a `pnpm oxfmt` or `pnpm exec [--] oxfmt` invocation. */
@@ -422,7 +509,45 @@ export const isSafePnpmOxfmtExplicitCommand = (trimmed: string): boolean => {
     }
     paths.push(arg)
   }
-  return sawMode && paths.length >= 1 && paths.every(isSafeFastpathToken)
+  return sawMode && paths.length >= 1 && paths.every(isSafeRepoScopedFastpathToken)
+}
+
+const SAFE_GIT_BRANCH_FLAGS: ReadonlySet<string> = new Set([
+  "--show-current",
+  "-a",
+  "--all",
+  "-r",
+  "--remotes",
+  "-v",
+  "-vv",
+  "--verbose",
+  "-l",
+  "--list",
+  "--no-abbrev",
+  "--color",
+  "--no-color",
+  "--no-column",
+])
+const SAFE_GIT_BRANCH_VALUE_FLAGS_RE =
+  /^--(?:contains|no-contains|merged|no-merged|points-at|sort|format|abbrev|color|column)(?:=(.+))?$/
+
+const isSafeGitBranchInspection = (args: ReadonlyArray<string>): boolean => {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!
+    if (SAFE_GIT_BRANCH_FLAGS.has(a)) continue
+    const valMatch = SAFE_GIT_BRANCH_VALUE_FLAGS_RE.exec(a)
+    if (valMatch !== null) {
+      if (valMatch[1] !== undefined) {
+        if (!isSafeFastpathToken(valMatch[1])) return false
+        continue
+      }
+      const nextVal = args[++i]
+      if (nextVal === undefined || !isSafeFastpathToken(nextVal)) return false
+      continue
+    }
+    return false
+  }
+  return true
 }
 
 const isSafeGitInspectionTokens = (
@@ -433,15 +558,7 @@ const isSafeGitInspectionTokens = (
   if (sub === undefined || !allowedSubcommands.has(sub)) return false
   const args = tokens.slice(2)
   if (args.some((a) => /^--output(?:=|$)/.test(a))) return false
-  if (sub === "branch") {
-    if (
-      args.some((a) =>
-        /^(?:-[dDmMcC]|--delete|--move|--copy|--set-upstream-to|--unset-upstream)(?:=|$)/.test(a),
-      )
-    ) {
-      return false
-    }
-  }
+  if (sub === "branch") return isSafeGitBranchInspection(args)
   if (sub === "remote") {
     const pos = args.filter((a) => !a.startsWith("-"))
     if (pos.length > 0 && pos[0] !== "show" && pos[0] !== "get-url") return false
@@ -449,7 +566,7 @@ const isSafeGitInspectionTokens = (
   return args.every((tok) => tok.startsWith("-") || isSafeFastpathToken(tok))
 }
 
-const isSafeInspectionTokens = (
+export const isSafeInspectionTokens = (
   tokens: ReadonlyArray<string>,
   sawWorktreeId: boolean,
   strictVarConsumerOnly: boolean,
@@ -458,7 +575,9 @@ const isSafeInspectionTokens = (
   if (head === "sed") return isSafeSedReadOnlyCommand(tokens)
   if (head === "rg") {
     if (tokens.some((t) => /^--(?:pre|pre-glob|hostname-bin)(?:=|$)/.test(t))) return false
-    return tokens.slice(1).every((t) => !SECRET_FILE_PATTERN.test(t) && !t.includes(".."))
+    return tokens
+      .slice(1)
+      .every((t) => (t.startsWith("-") ? !t.includes("..") : isSafeFastpathToken(t)))
   }
   if (head === "git") {
     return isSafeGitInspectionTokens(
@@ -560,201 +679,4 @@ export const isSafeSemicolonReadOnlyChain = (
         p.cmd.length > 0 && isSafeReadOnlyInspectionSegment(p.cmd, stripEnv, splitUnquotedPipe),
     )
   )
-}
-
-interface RawShellWord {
-  readonly raw: string
-  readonly unquoted: string
-}
-
-const splitRawWordsPreservingQuotes = (
-  segment: string,
-): ReadonlyArray<RawShellWord> | undefined => {
-  const out: Array<RawShellWord> = []
-  let quote: "'" | '"' | undefined
-  let start = -1
-  let unquotedPart = ""
-  for (let i = 0; i < segment.length; i++) {
-    const ch = segment[i]!
-    if (quote !== undefined) {
-      if (ch === quote) {
-        quote = undefined
-        continue
-      }
-      const skipEscape = match(quote)
-        .with('"', () => ch === "\\" && segment.length - i > 1)
-        .with("'", () => false)
-        .exhaustive()
-      if (skipEscape) {
-        i++
-      }
-      continue
-    }
-    if (/\s/.test(ch)) {
-      if (start !== -1) {
-        out.push({ raw: segment.slice(start, i), unquoted: unquotedPart })
-        start = -1
-        unquotedPart = ""
-      }
-      continue
-    }
-    if (start === -1) start = i
-    if (ch === "'" || ch === '"') {
-      quote = ch
-      continue
-    }
-    if (ch === "\\" && segment.length - i > 1) {
-      unquotedPart += segment[++i]!
-      continue
-    }
-    unquotedPart += ch
-  }
-  if (quote !== undefined) return undefined
-  if (start !== -1) out.push({ raw: segment.slice(start), unquoted: unquotedPart })
-  return out
-}
-
-const expandWordWithVars = (
-  rawWord: string,
-  vars: ReadonlyMap<string, string>,
-): { readonly expanded: string; readonly usedVar: boolean } | undefined => {
-  let out = ""
-  let usedVar = false
-  let quote: "'" | '"' | undefined
-
-  const consumeDollarOrLiteral = (idx: number, ch: string): number => {
-    if (ch !== "$") {
-      out += ch
-      return idx
-    }
-    if (rawWord[idx + 1] === "{") {
-      const close = rawWord.indexOf("}", idx + 2)
-      if (close === -1) return -1
-      const varName = rawWord.slice(idx + 2, close)
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(varName)) return -1
-      const val = vars.get(varName)
-      if (val === undefined) return -1
-      out += val
-      usedVar = true
-      return close
-    }
-    const m = /^([A-Za-z_][A-Za-z0-9_]*)/.exec(rawWord.slice(idx + 1))
-    if (m !== null) {
-      const val = vars.get(m[1]!)
-      if (val === undefined) return -1
-      out += val
-      usedVar = true
-      return idx + m[1]!.length
-    }
-    if (rawWord[idx + 1] !== undefined && SHELL_VAR_START_PATTERN.test(rawWord[idx + 1]!)) {
-      return -1
-    }
-    out += ch
-    return idx
-  }
-
-  for (let i = 0; i < rawWord.length; i++) {
-    const ch = rawWord[i]!
-    const nextIdx = match(quote)
-      .with("'", () => {
-        if (ch === "'") quote = undefined
-        else out += ch
-        return i
-      })
-      .with('"', () => {
-        if (ch === "\\" && rawWord.length - i > 1) {
-          out += rawWord[++i]!
-          return i
-        }
-        if (ch === '"') {
-          quote = undefined
-          return i
-        }
-        return consumeDollarOrLiteral(i, ch)
-      })
-      .with(undefined, () => {
-        if (ch === "\\" && rawWord.length - i > 1) {
-          out += rawWord[++i]!
-          return i
-        }
-        if (ch === "'" || ch === '"') {
-          quote = ch
-          return i
-        }
-        return consumeDollarOrLiteral(i, ch)
-      })
-      .exhaustive()
-    if (nextIdx < 0) return undefined
-    i = Math.max(i, nextIdx)
-  }
-  return { expanded: out, usedVar }
-}
-
-/**
- * Approves simple `VAR=safe_literal; <readonly-consumer>` commands (where consumer is strictly
- * `wc`, `rg`, `sed -n`, `df`, or `git status`/`diff`/`rev-parse`) without command substitution,
- * redirection, obfuscation, or secret/protected paths.
- */
-export const isSafeVariableExpandedReadOnlyCommand = (
-  command: string,
-  unquoted: string,
-): boolean => {
-  if (
-    /\$\(|`|<\(|>\(/.test(command) ||
-    /(?<![>&])&(?![>&])/.test(unquoted) ||
-    unquoted.includes("||") ||
-    FILE_REDIRECTION_PATTERN.test(unquoted)
-  ) {
-    return false
-  }
-  const sepRe = /&&|[;\n]/g
-  const segments: Array<string> = []
-  let start = 0
-  let m = sepRe.exec(unquoted)
-  while (m !== null) {
-    const part = command.slice(start, m.index).trim()
-    if (part.length === 0) return false
-    segments.push(part)
-    start = m.index + m[0].length
-    m = sepRe.exec(unquoted)
-  }
-  const tail = command.slice(start).trim()
-  if (tail.length === 0) return false
-  segments.push(tail)
-  if (segments.length < 2) return false
-
-  const vars = new Map<string, string>()
-  let sawAssignment = false
-  let sawConsumer = false
-
-  for (const seg of segments) {
-    const rawWords = splitRawWordsPreservingQuotes(seg)
-    if (rawWords === undefined || rawWords.length === 0) return false
-    const allAssignments = rawWords.every((w) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(w.raw))
-    if (allAssignments) {
-      for (const w of rawWords) {
-        const eqIdx = w.raw.indexOf("=")
-        const varName = w.raw.slice(0, eqIdx)
-        const rawVal = w.raw.slice(eqIdx + 1)
-        if (hasExpandableShellVariable(rawVal)) return false
-        const decoded = splitCommandTokens(rawVal)[0] ?? ""
-        if (!isSafeFastpathToken(decoded)) return false
-        vars.set(varName, decoded)
-        sawAssignment = true
-      }
-      continue
-    }
-    if (!sawAssignment) return false
-    const expandedTokens: Array<string> = []
-    for (let idx = 0; idx < rawWords.length; idx++) {
-      const exp = expandWordWithVars(rawWords[idx]!.raw, vars)
-      if (exp === undefined) return false
-      if (idx === 0 && exp.usedVar) return false
-      if (idx === 1 && expandedTokens[0] === "git" && exp.usedVar) return false
-      expandedTokens.push(exp.expanded)
-    }
-    if (!isSafeInspectionTokens(expandedTokens, false, true)) return false
-    sawConsumer = true
-  }
-  return sawAssignment && sawConsumer
 }

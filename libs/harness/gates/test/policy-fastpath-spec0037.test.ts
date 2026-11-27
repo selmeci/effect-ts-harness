@@ -4,19 +4,22 @@ import { match } from "ts-pattern"
 import {
   PolicyFastPath,
   classifyCommand,
+  classifyFileWrite,
   explainCommandDenyRule,
   isCommandAllowed,
 } from "../src/index.js"
 import {
+  hasUnsafePnpmDirOrConfigFlags,
   isSafeFastpathToken,
   isSafePnpmDirScopedCommand,
   isSafePnpmOxfmtExplicitCommand,
   isSafeReadOnlyInspectionSegment,
   isSafeSedReadOnlyCommand,
   isSafeSemicolonReadOnlyChain,
-  isSafeVariableExpandedReadOnlyCommand,
+  isSafeVitestExecTokens,
   splitCommandTokens,
 } from "../src/policy-fastpath-rules.js"
+import { isSafeVariableExpandedReadOnlyCommand } from "../src/policy-fastpath-var-rules.js"
 import {
   splitUnquotedPipeParts,
   stripSafeLeadingEnvVarsDetailed,
@@ -224,6 +227,22 @@ describe("SPEC-0037 REQ-4.4: Guard Fast-Path Expansion & PolicyFastPath.decide",
       }),
   )
 
+  it.effect("forwards unitWorkerMode to classifyCommand via PolicyFastPath.decide", () =>
+    Effect.gen(function* () {
+      const denyInWorker = yield* PolicyFastPath.decide({
+        command: "pnpm harness done --cli",
+        unitWorkerMode: true,
+      })
+      expect(denyInWorker).toBe("deny")
+
+      const notWorkerBlocked = yield* PolicyFastPath.decide({
+        command: "pnpm harness done --cli",
+        unitWorkerMode: false,
+      })
+      expect(notWorkerBlocked).not.toBe("deny")
+    }),
+  )
+
   it("kills fast-path edge-case mutants across token, sed, pnpm, semicolon, and var-expansion helpers", () => {
     expect(splitCommandTokens("cat foo\\ bar.txt")).toEqual(["cat", "foo bar.txt"])
     expect(splitCommandTokens("cat foo\\")).toEqual(["cat", "foo\\"])
@@ -335,5 +354,72 @@ describe("SPEC-0037 REQ-4.4: Guard Fast-Path Expansion & PolicyFastPath.decide",
       const view = toCommandView(cmd)
       expect(isSafeVariableExpandedReadOnlyCommand(cmd, view.unquoted), cmd).toBe(expected)
     }
+
+    for (const bypassCmd of [
+      "X='foo --pre=sh'; rg $X libs/",
+      "X='HEAD --output=evil.ts'; git diff $X",
+      "X='foo server.key'; wc -l $X",
+      "X=libs/harness/gates/src/policy.ts; wc -l $X",
+      "echo 'id #a' | sed -n 's/[a/b]/;/e;#/'",
+      "pnpm --dir /tmp/evil test",
+      "pnpm --config=/tmp/evil.npmrc --dir libs/harness/gates test",
+      "pnpm --dir libs/harness/gates exec vitest --config /tmp/evil.config.ts",
+      "pnpm oxfmt --write /tmp/outside.ts",
+      "sed -n '1p' /etc/passwd",
+      "git branch -f main HEAD~1; pwd",
+      "git branch rogue-branch; pwd",
+      'P=libs/harness/gates/src/policy.ts; wc -l "$P" | bash',
+      'P=libs/harness/gates/src/policy.ts; wc -l "$P" < /etc/passwd',
+      "vitest --config /tmp/evil.config.ts",
+      "pnpm vitest --config /tmp/evil.config.ts",
+      "pnpm -C libs/harness/gates exec oxfmt --write /tmp/outside.ts",
+      "pnpm --filter @harness/gates exec oxfmt --write /tmp/outside.ts",
+    ]) {
+      expect(classifyCommand(bypassCmd), bypassCmd).not.toBe("allow")
+    }
+    expect(classifyCommand("sed -n 's/[a/b]/;/e;#/' libs/a.ts")).not.toBe("allow")
+    expect(isSafeSedReadOnlyCommand(splitCommandTokens("sed -n '#' libs/a.ts"))).toBe(false)
+    for (const safeSed of [
+      "sed -n 's/[[:alpha:]\\/]/x/' libs/a.ts",
+      "sed -n 's/[[:alpha:]/]/x/' libs/a.ts",
+      "sed -n 's/[[=a=]/]/x/' libs/a.ts",
+      "sed -n 's/[[.a.]/]/x/' libs/a.ts",
+      "sed -n 's/[[:a]/x/' libs/a.ts",
+      "sed -n 's/[]/]/x/' libs/a.ts",
+    ]) {
+      expect(classifyCommand(safeSed), safeSed).toBe("allow")
+    }
+    expect(isSafeSedReadOnlyCommand(splitCommandTokens("sed -n 's/[^]/]/x/' libs/a.ts"))).toBe(true)
+    expect(isSafeSedReadOnlyCommand(splitCommandTokens("sed -n 's/[^]/]/x/;e' libs/a.ts"))).toBe(
+      false,
+    )
+    expect(classifyCommand("git branch --contains=HEAD; pwd")).toBe("allow")
+    expect(classifyCommand("git branch --contains=.env; pwd")).not.toBe("allow")
+    expect(
+      isSafeReadOnlyInspectionSegment(
+        "git branch --contains=.env",
+        stripSafeLeadingEnvVarsDetailed,
+        splitUnquotedPipeParts,
+      ),
+    ).toBe(false)
+    expect(classifyCommand("git branch --contains HEAD; pwd")).toBe("allow")
+    expect(classifyCommand("git branch --contains; pwd")).not.toBe("allow")
+    expect(classifyCommand("git branch --contains .env; pwd")).not.toBe("allow")
+    expect(isSafeVitestExecTokens(["vitest", "run", "--run"])).toBe(true)
+    expect(isSafeVitestExecTokens(["vitest", "--config", "libs/evil.config.ts"])).toBe(false)
+
+    expect(hasUnsafePnpmDirOrConfigFlags(["pnpm", "--", "--config=/tmp/x"])).toBe(false)
+    expect(hasUnsafePnpmDirOrConfigFlags(["pnpm", "--config=/tmp/x", "test"])).toBe(true)
+    expect(hasUnsafePnpmDirOrConfigFlags(["pnpm", "--dir", "libs/a", "test"])).toBe(false)
+    expect(hasUnsafePnpmDirOrConfigFlags(["pnpm", "--dir", "/tmp/evil", "test"])).toBe(true)
+    expect(hasUnsafePnpmDirOrConfigFlags(["pnpm", "--dir=/tmp/evil", "test"])).toBe(true)
+    expect(hasUnsafePnpmDirOrConfigFlags(["pnpm", "-C=/tmp/evil", "test"])).toBe(true)
+    expect(hasUnsafePnpmDirOrConfigFlags(["pnpm", "-C=libs/a", "test"])).toBe(false)
+    expect(hasUnsafePnpmDirOrConfigFlags(["pnpm", "-C/tmp/evil", "test"])).toBe(true)
+    expect(hasUnsafePnpmDirOrConfigFlags(["pnpm", "-Clibs/a", "test"])).toBe(false)
+    expect(isSafePnpmDirScopedCommand("pnpm --dir /tmp/evil test", false)).toBe(false)
+
+    expect(classifyFileWrite(".harness/hook-runtime/current/manifest.json").verdict).toBe("deny")
+    expect(classifyCommand("rm -rf .harness/hook-runtime/current")).toBe("deny")
   })
 })

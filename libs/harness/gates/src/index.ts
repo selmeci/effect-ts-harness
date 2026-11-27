@@ -400,21 +400,23 @@ export {
   TelemetryOutcome,
   TelemetryReport,
   TelemetrySurface,
-  appendTelemetryEvent,
   buildSessionReport,
-  clearTelemetryEvents,
   decideSessionReport,
   decideTelemetryReport,
-  readTelemetryEvents,
-  renderSessionReportMarkdown,
   scopeSessionReportInput,
   type HealthGrade,
   type SessionKpis,
   type SessionReport,
   type SessionReportInput,
   type ToolUsageMetric,
-  writeSessionReportFiles,
 } from "./telemetry.js"
+export {
+  appendTelemetryEvent,
+  clearTelemetryEvents,
+  readTelemetryEvents,
+  renderSessionReportMarkdown,
+  writeSessionReportFiles,
+} from "./telemetry-io.js"
 export {
   AST_GATE_RULE_SOURCE_FILES,
   AST_GATE_TYPESCRIPT_VERSION,

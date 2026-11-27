@@ -2,8 +2,8 @@ import { execFileSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
-import { afterEach, describe, expect, it } from "@effect/vitest"
-import { Cause, Deferred, Effect, Fiber, Layer, Option, Schema } from "effect"
+import { afterEach, describe, expect, it, vi } from "@effect/vitest"
+import { Cause, Deferred, Effect, Fiber, Layer, ManagedRuntime, Option, Schema } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { match } from "ts-pattern"
 import {
@@ -28,7 +28,20 @@ import {
   recordMcpToolTelemetry,
   resolveLspWatchdogTimeoutMs,
 } from "../src/server.js"
+import { launchBackgroundOllamaWarmup } from "../src/managed-runtime.js"
+import { toLspTimeoutDiagnosticsReport } from "../src/tools/lsp-watchdog.js"
 import type { LspTsgoExecutor } from "../src/tools/lsp-session-cache.js"
+
+const LspTimeoutToolResultSchema = Schema.Struct({
+  clean: Schema.Boolean,
+  timedOut: Schema.optional(Schema.Boolean),
+  errorTag: Schema.optional(Schema.String),
+  timeoutMs: Schema.optional(Schema.Finite),
+  cycleHint: Schema.optional(Schema.String),
+  summary: Schema.Struct({
+    errors: Schema.Finite,
+  }),
+})
 
 const tempDirs: Array<string> = []
 
@@ -148,13 +161,18 @@ describe("SPEC-0037 WF-3B: LSP Watchdog, Telemetry Classification & MCP Single-F
             stderr: "",
           } satisfies SyncHostExecResult)
 
-        const timeoutExit = yield* Effect.exit(
-          LspDiagnostics.run(
-            repo,
-            { file: "libs/pkg/src/index.ts", watchdogTimeoutMs: 750 },
-            { execTsgo: timedOutExec },
+        const { result: timeoutExit, spans } = yield* runWithTestTracer(
+          "lsp-timeout-span",
+          Effect.exit(
+            LspDiagnostics.run(
+              repo,
+              { file: "libs/pkg/src/index.ts", watchdogTimeoutMs: 750 },
+              { execTsgo: timedOutExec },
+            ),
           ),
+          emptyIndex,
         )
+        expect(spans.some((s) => s.name === "LspDiagnostics.run")).toBe(true)
         match(timeoutExit)
           .with({ _tag: "Failure" }, ({ cause }) => {
             const errOpt = Cause.findErrorOption(cause)
@@ -178,7 +196,7 @@ describe("SPEC-0037 WF-3B: LSP Watchdog, Telemetry Classification & MCP Single-F
           )
           .exhaustive()
 
-        // Deterministic TS2484 cycle hint fallback when TimedOut produces empty stdout/stderr
+        // Silent TimedOut leaves cycleHint undefined and emits LSP_TIMEOUT code rather than TS2484
         expect(Option.isNone(extractTs2484CycleHint("", ""))).toBe(true)
         const silentTimeoutExit = yield* Effect.exit(
           LspDiagnostics.run(
@@ -204,7 +222,9 @@ describe("SPEC-0037 WF-3B: LSP Watchdog, Telemetry Classification & MCP Single-F
                 expect(value).toBeInstanceOf(LspDiagnosticsTimeoutError)
                 if (value instanceof LspDiagnosticsTimeoutError) {
                   expect(value.command).toBe("tsgolint")
-                  expect(value.cycleHint).toContain("TS2484")
+                  expect(value.cycleHint).toBeUndefined()
+                  const report = toLspTimeoutDiagnosticsReport(value, "libs/pkg/src/index.ts")
+                  expect(report.diagnostics[0]).toMatchObject({ code: "LSP_TIMEOUT" })
                 }
               })
               .with({ _tag: "None" }, () =>
@@ -226,7 +246,7 @@ describe("SPEC-0037 WF-3B: LSP Watchdog, Telemetry Classification & MCP Single-F
           "libs/pkg/src/index.ts": "export const x: number = 1\n",
         })
 
-        const timeoutToolResult = (yield* executeToolEffect(
+        const rawTimeoutResult = yield* executeToolEffect(
           "harness_lsp_diagnostics",
           { repoRoot: repo, file: "libs/pkg/src/index.ts", watchdogTimeoutMs: 500 },
           {
@@ -239,14 +259,10 @@ describe("SPEC-0037 WF-3B: LSP Watchdog, Telemetry Classification & MCP Single-F
                 stderr: "circular re-export detected in index.ts",
               } satisfies SyncHostExecResult),
           },
-        )) as {
-          readonly clean: boolean
-          readonly timedOut?: boolean
-          readonly errorTag?: string
-          readonly timeoutMs?: number
-          readonly cycleHint?: string
-          readonly summary: { readonly errors: number }
-        }
+        )
+        const timeoutToolResult = yield* Schema.decodeUnknownEffect(LspTimeoutToolResultSchema)(
+          rawTimeoutResult,
+        )
         expect(timeoutToolResult.clean).toBe(false)
         expect(timeoutToolResult.timedOut).toBe(true)
         expect(timeoutToolResult.errorTag).toBe("LspDiagnosticsTimeoutError")
@@ -465,11 +481,9 @@ describe("SPEC-0037 WF-3B: LSP Watchdog, Telemetry Classification & MCP Single-F
           emptyIndex,
         )
         expect(ontDecisionCalls).toBe(1)
-        expect(
-          parallelOnt.result.every(
-            (r) => JSON.stringify(r) === JSON.stringify(parallelOnt.result[0]),
-          ),
-        ).toBe(true)
+        for (const r of parallelOnt.result) {
+          expect(r).toEqual(parallelOnt.result[0])
+        }
         expect(
           parallelOnt.spans.some(
             (s) => s.name === "McpSingleFlight.run" && s.exitTag === "Success",
@@ -578,5 +592,36 @@ describe("SPEC-0037 WF-3B: LSP Watchdog, Telemetry Classification & MCP Single-F
           .with({ _tag: "SkipReviewPlan" }, () => expect.unreachable("Expected ActiveReviewPlan"))
           .exhaustive()
       }),
+  )
+
+  it.effect(
+    "REQ-2.1: launchBackgroundOllamaWarmup honors HARNESS_SKIP_OLLAMA_WARMUP=1 without running runtime",
+    () =>
+      Effect.acquireUseRelease(
+        Effect.sync(() => {
+          const prevSkip = process.env["HARNESS_SKIP_OLLAMA_WARMUP"]
+          const externalDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-skip-warmup-"))
+          tempDirs.push(externalDir)
+          const runtime = ManagedRuntime.make(Layer.empty)
+          const spy = vi.spyOn(runtime, "runPromiseExit")
+          process.env["HARNESS_SKIP_OLLAMA_WARMUP"] = "1"
+          return { prevSkip, externalDir, runtime, spy }
+        }),
+        ({ externalDir, runtime, spy }) =>
+          Effect.sync(() => {
+            launchBackgroundOllamaWarmup(runtime, externalDir)
+            expect(spy).not.toHaveBeenCalled()
+          }),
+        ({ prevSkip, runtime, spy }) =>
+          Effect.promise(async () => {
+            spy.mockRestore()
+            if (prevSkip === undefined) {
+              Reflect.deleteProperty(process.env, "HARNESS_SKIP_OLLAMA_WARMUP")
+            } else {
+              process.env["HARNESS_SKIP_OLLAMA_WARMUP"] = prevSkip
+            }
+            await runtime.dispose()
+          }),
+      ),
   )
 })

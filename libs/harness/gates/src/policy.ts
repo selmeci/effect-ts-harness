@@ -35,10 +35,8 @@ import {
   type GuardPatternRule,
   type GuardVerdict,
 } from "./policy-command-rules.js"
-import {
-  isSafeSemicolonReadOnlyChain,
-  isSafeVariableExpandedReadOnlyCommand,
-} from "./policy-fastpath-rules.js"
+import { isSafeSemicolonReadOnlyChain } from "./policy-fastpath-rules.js"
+import { isSafeVariableExpandedReadOnlyCommand } from "./policy-fastpath-var-rules.js"
 import {
   isAllowableStrippedHeredocCommand,
   isGuardSelfInvocationCommand,
@@ -700,7 +698,7 @@ export const classifyFileWrite = (
 
   if (
     candidates.some((p) =>
-      /(^|\/)\.harness\/(worktrees\/[^/]+\/)?(cache\/mutation-(?:cache|test-timings)-v(?:\d+|[^/*?[\]{}]*[*?[\]{}][^/]*)\.(?:json(?:\.corrupt)?|corrupt)|session-preinvocation-cache\.json|last-done\.json|graph-snapshot\.json|graph-head\.json)$/.test(
+      /(^|\/)\.harness\/(worktrees\/[^/]+\/)?(?:hook-runtime(?:\/.*)?|(?:cache\/mutation-(?:cache|test-timings)-v(?:\d+|[^/*?[\]{}]*[*?[\]{}][^/]*)\.(?:json(?:\.corrupt)?|corrupt)|session-preinvocation-cache\.json|last-done\.json|graph-snapshot\.json|graph-head\.json))$/.test(
         p,
       ),
     )
@@ -708,7 +706,7 @@ export const classifyFileWrite = (
     return {
       verdict: "deny",
       ruleId: "harness-cache",
-      reason: `Direct modification of harness cache file is forbidden: ${filePath}`,
+      reason: `Direct modification of harness cache or runtime state is forbidden: ${filePath}`,
     }
   }
 

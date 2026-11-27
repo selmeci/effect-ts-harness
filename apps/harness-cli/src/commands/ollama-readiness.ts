@@ -1,15 +1,15 @@
 import { Effect } from "effect"
 import { match } from "ts-pattern"
 import { WORKFLOW_TIMEOUT_BUDGETS, type OllamaWarmupError } from "@harness/contract"
+import { OllamaEmbeddingClientLive } from "@harness/infra/embedding-client"
 import {
   checkOllamaServerReadyDetailed as infraCheckOllamaServerReadyDetailed,
-  OllamaEmbeddingClientLive,
   OllamaReadiness,
   type OllamaProbeResult,
   type OllamaWarmupOptions,
   type OllamaWarmupReceipt,
   type OllamaWarmupStateHandle,
-} from "@harness/infra"
+} from "@harness/infra/ollama-readiness"
 
 export {
   OllamaReadiness,

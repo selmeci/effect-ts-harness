@@ -51,6 +51,7 @@ export interface ComputeFileMutationClosureDigestInput {
   readonly allReachingTests: ReadonlyArray<string>
   readonly digests: MutationContextDigests
   readonly hostIo: SyncHostIo
+  readonly excludeEntryRelFileDigest?: boolean | undefined
 }
 
 export type FileMutationClosureDigestResult =
@@ -611,7 +612,8 @@ export const computeFileMutationClosureDigest = (
     enqueue(relPath)
   }
 
-  enqueueSeed(normalizeRepoRelPath(input.repoRoot, input.relFile))
+  const entryRelPath = normalizeRepoRelPath(input.repoRoot, input.relFile)
+  enqueueSeed(entryRelPath)
   for (const testFile of input.allReachingTests) {
     enqueueSeed(normalizeRepoRelPath(input.repoRoot, testFile))
   }
@@ -689,7 +691,9 @@ export const computeFileMutationClosureDigest = (
       return { _tag: "Disabled", reason: `unreadable file '${fullPath}'` }
     }
     const fileSha = input.digests.fileDigests.get(relPath) ?? computeContentSha256(content)
-    filePairs.push([relPath, fileSha])
+    if (input.excludeEntryRelFileDigest !== true || relPath !== entryRelPath) {
+      filePairs.push([relPath, fileSha])
+    }
 
     const isTestFile = /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(relPath)
     const scan = scanSourceAst(content, isTestFile, relPath, debugEnabled)

@@ -5,8 +5,10 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./embedding-client": "./src/embedding-client-live.ts",
     "./hook-fastpath": "./src/hook-fastpath.ts",
     "./hook-io": "./src/hook-io.ts",
+    "./ollama-readiness": "./src/ollama-readiness-live.ts",
     "./omnigraph-session": "./src/omnigraph-session.ts"
   },
   "scripts": {

@@ -1,14 +1,21 @@
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
 import {
   TelemetryReport,
+  appendTelemetryEvent,
+  buildSessionReport,
   collectTopGuardCommandPrefixes,
   decideTelemetryReport,
   detectHangOutlierRecommendations,
+  readTelemetryEvents,
+  renderSessionReportMarkdown,
   type FrictionEvent,
   type TelemetryEvent,
   type ToolUsageMetric,
 } from "../src/index.js"
+import { isolatedTestHostIo } from "./helpers/test-host-io.js"
 
 const mkEvent = (
   overrides: Partial<TelemetryEvent> & Pick<TelemetryEvent, "toolName" | "outcome">,
@@ -129,6 +136,51 @@ describe("SPEC-0037 REQ-5.1..REQ-5.4: TelemetryReport.decide accuracy & actionab
         }
         const uniformSlow = detectHangOutlierRecommendations([uniformMetric])
         expect(uniformSlow).toEqual([])
+
+        // Boundary tests: exact 30_000ms and 5 * p95 thresholds + N <= 20 p50 baseline
+        expect(
+          detectHangOutlierRecommendations([
+            {
+              toolName: "t-eq-min",
+              calls: 30,
+              p50DurationMs: 100,
+              p95DurationMs: 100,
+              maxDurationMs: 30_000,
+            },
+            {
+              toolName: "t-eq-mult",
+              calls: 30,
+              p50DurationMs: 100,
+              p95DurationMs: 10_000,
+              maxDurationMs: 50_000,
+            },
+          ]),
+        ).toEqual([])
+        const boundaryHits = detectHangOutlierRecommendations([
+          {
+            toolName: "t-over-min",
+            calls: 30,
+            p50DurationMs: 100,
+            p95DurationMs: 100,
+            maxDurationMs: 30_001,
+          },
+          {
+            toolName: "t-over-mult",
+            calls: 30,
+            p50DurationMs: 100,
+            p95DurationMs: 10_000,
+            maxDurationMs: 50_001,
+          },
+          {
+            toolName: "t-small-n",
+            calls: 5,
+            p50DurationMs: 100,
+            p95DurationMs: 120_000,
+            maxDurationMs: 120_000,
+          },
+        ])
+        expect(boundaryHits).toHaveLength(3)
+        expect(boundaryHits[2]).toContain("t-small-n")
       }),
   )
 
@@ -199,6 +251,71 @@ describe("SPEC-0037 REQ-5.1..REQ-5.4: TelemetryReport.decide accuracy & actionab
         const prefixRec = report.recommendations.find((r) => r.includes("sed -n"))
         expect(prefixRec).toBeDefined()
         expect(report.healthScore).toBeLessThan(100)
+
+        // Duration threshold (2449 vs 2450) and limit=5 top-prefix truncation
+        const truncatedPrefixes = collectTopGuardCommandPrefixes(
+          [
+            mkEvent({
+              toolName: "guard",
+              surface: "hook",
+              category: "guard",
+              outcome: "ask",
+              durationMs: 2449,
+              detail: "cmd=ignored fastcmd",
+            }),
+            mkEvent({
+              toolName: "guard",
+              surface: "hook",
+              category: "guard",
+              outcome: "ask",
+              durationMs: 2450,
+              detail: "cmd=git status",
+            }),
+            mkEvent({
+              toolName: "guard",
+              surface: "hook",
+              category: "guard",
+              outcome: "timeout",
+              durationMs: 5000,
+              detail: "cmd=wc -l a",
+            }),
+            mkEvent({
+              toolName: "guard",
+              surface: "hook",
+              category: "guard",
+              outcome: "timeout",
+              durationMs: 5000,
+              detail: "cmd=rg foo a",
+            }),
+            mkEvent({
+              toolName: "guard",
+              surface: "hook",
+              category: "guard",
+              outcome: "timeout",
+              durationMs: 5000,
+              detail: "cmd=sed -n a",
+            }),
+            mkEvent({
+              toolName: "guard",
+              surface: "hook",
+              category: "guard",
+              outcome: "timeout",
+              durationMs: 5000,
+              detail: "cmd=pnpm --dir a",
+            }),
+            mkEvent({
+              toolName: "guard",
+              surface: "hook",
+              category: "guard",
+              outcome: "timeout",
+              durationMs: 5000,
+              detail: "cmd=df -ih",
+            }),
+          ],
+          [],
+        )
+        expect(truncatedPrefixes).toHaveLength(5)
+        expect(truncatedPrefixes.some((p) => p.prefix === "ignored fastcmd")).toBe(false)
       }),
   )
 
@@ -235,6 +352,19 @@ describe("SPEC-0037 REQ-5.1..REQ-5.4: TelemetryReport.decide accuracy & actionab
         expect(failThenGreen.kpis.verifyAttempts).toBe(2)
         expect(failThenGreen.kpis.fixUpIterations).toBe(1)
         expect(failThenGreen.kpis.firstPassVerify).toBe(false)
+
+        // Two consecutive clean CLI verify -> done tasks must scope to the latest task window
+        const twoCleanTasks = yield* TelemetryReport.decide({
+          events: [
+            mkEvent({ surface: "cli", toolName: "verify", outcome: "ok" }),
+            mkEvent({ surface: "cli", toolName: "done", category: "lifecycle", outcome: "ok" }),
+            mkEvent({ surface: "mcp", toolName: "harness_lsp_diagnostics", outcome: "ok" }),
+            mkEvent({ surface: "cli", toolName: "verify", outcome: "ok" }),
+            mkEvent({ surface: "cli", toolName: "done", category: "lifecycle", outcome: "ok" }),
+          ],
+        })
+        expect(twoCleanTasks.kpis.verifyAttempts).toBe(1)
+        expect(twoCleanTasks.kpis.firstPassVerify).toBe(true)
       }),
   )
 
@@ -258,11 +388,24 @@ describe("SPEC-0037 REQ-5.1..REQ-5.4: TelemetryReport.decide accuracy & actionab
         expect(report.kpis.firstPassVerify).toBe(expectedFirstPass)
 
         for (const m of report.toolMetrics) {
-          const isOutlier = m.maxDurationMs > 30_000 && m.maxDurationMs > 5 * m.p95DurationMs
+          const baseline = m.calls <= 20 ? m.p50DurationMs : m.p95DurationMs
+          const isAnySurfaceOutlier = report.toolMetrics.some((other) => {
+            const otherBaseline = other.calls <= 20 ? other.p50DurationMs : other.p95DurationMs
+            return (
+              other.toolName === m.toolName &&
+              other.maxDurationMs === m.maxDurationMs &&
+              other.maxDurationMs > 30_000 &&
+              other.maxDurationMs > 5 * otherBaseline
+            )
+          })
           const hasOutlierRec = report.recommendations.some(
-            (r) => r.includes(m.toolName) && r.includes(String(m.maxDurationMs)),
+            (r) =>
+              r.startsWith(`Hang outlier detected on '${m.toolName}'`) &&
+              r.includes(`maxDurationMs=${m.maxDurationMs} ms`),
           )
-          expect(hasOutlierRec).toBe(isOutlier)
+          expect(hasOutlierRec).toBe(
+            isAnySurfaceOutlier || (m.maxDurationMs > 30_000 && m.maxDurationMs > 5 * baseline),
+          )
         }
 
         if (events.every((e) => e.outcome === "diagnostics_found")) {
@@ -273,4 +416,71 @@ describe("SPEC-0037 REQ-5.1..REQ-5.4: TelemetryReport.decide accuracy & actionab
         }
       }),
   )
+
+  it("REQ-5.2 & REQ-5.1: uses p50 baseline at calls === 20 boundary and persists optional engineSource/detail fields accurately", () => {
+    const exactBoundaryOutliers = detectHangOutlierRecommendations([
+      {
+        toolName: "t20",
+        calls: 20,
+        p50DurationMs: 100,
+        p95DurationMs: 60_000,
+        maxDurationMs: 60_000,
+      },
+    ])
+    expect(exactBoundaryOutliers).toHaveLength(1)
+    expect(exactBoundaryOutliers[0]).toContain("p50=100 ms")
+
+    const dir = mkdtempSync(`${tmpdir()}/spec0037-telemetry-io-`)
+    try {
+      const withOptional = appendTelemetryEvent(
+        dir,
+        {
+          surface: "cli",
+          category: "gate",
+          toolName: "verify",
+          outcome: "ok",
+          durationMs: 12,
+          engineSource: "local",
+          detail: "clean",
+        },
+        isolatedTestHostIo,
+      )
+      expect(withOptional.engineSource).toBe("local")
+      expect(withOptional.detail).toBe("clean")
+
+      const withoutOptional = appendTelemetryEvent(
+        dir,
+        {
+          surface: "cli",
+          category: "gate",
+          toolName: "gc",
+          outcome: "ok",
+          durationMs: 5,
+        },
+        isolatedTestHostIo,
+      )
+      expect("engineSource" in withoutOptional).toBe(false)
+      expect("detail" in withoutOptional).toBe(false)
+
+      const loaded = readTelemetryEvents(dir, isolatedTestHostIo)
+      expect(loaded).toHaveLength(2)
+      expect(loaded[0]?.engineSource).toBe("local")
+      expect(loaded[0]?.detail).toBe("clean")
+      expect("engineSource" in (loaded[1] ?? {})).toBe(false)
+      expect("detail" in (loaded[1] ?? {})).toBe(false)
+
+      const emptyReport = buildSessionReport({ events: [] })
+      expect(renderSessionReportMarkdown(emptyReport)).toContain(
+        "- No recommendations — session executed cleanly.",
+      )
+      const nonEmptyMd = renderSessionReportMarkdown({
+        ...emptyReport,
+        recommendations: ["Check watchdog timeout"],
+      })
+      expect(nonEmptyMd).toContain("- Check watchdog timeout")
+      expect(nonEmptyMd).not.toContain("No recommendations — session executed cleanly.")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

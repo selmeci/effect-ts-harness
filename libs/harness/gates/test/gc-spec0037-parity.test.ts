@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it } from "@effect/vitest"
 import { WORKFLOW_TIMEOUT_BUDGETS } from "@harness/contract"
 import { buildHarnessGraph } from "@harness/graph"
 import {
@@ -72,6 +72,48 @@ describe("SPEC-0037 REQ-2.4 & REQ-6.1..REQ-6.4: Hook Timeout Parity & Skill Loop
             "adapters/antigravity/plugins/effect-harness/hooks.json:PreToolUse:decision-model-budget",
       )
       expect(agyTimeoutFinding).toBeUndefined()
+
+      writeFileSync(
+        claudeHooks,
+        JSON.stringify({
+          hooks: {
+            Stop: [{ hooks: [{ type: "command", command: "echo ok" }] }],
+          },
+        }),
+      )
+      writeFileSync(
+        agyHooks,
+        JSON.stringify({
+          "effect-harness": {
+            Stop: [
+              {
+                hooks: [
+                  { type: "command", command: "echo ok", timeout: 0 },
+                  { type: "command", command: "echo ok", timeout: 1 },
+                ],
+              },
+            ],
+          },
+        }),
+      )
+      const zeroOrMissingFindings = evaluateDocTruthPlugin({
+        graph: buildHarnessGraph({}),
+        workspaceRoot: tmpDir,
+        hostIo: testHostIo,
+      })
+      expect(
+        zeroOrMissingFindings.filter(
+          (f) =>
+            f.kind === "hook-timeout-parity" && f.nodeId === "adapters/claude-code/hooks.json:Stop",
+        ),
+      ).toHaveLength(1)
+      expect(
+        zeroOrMissingFindings.filter(
+          (f) =>
+            f.kind === "hook-timeout-parity" &&
+            f.nodeId === "adapters/antigravity/plugins/effect-harness/hooks.json:Stop",
+        ),
+      ).toHaveLength(1)
     } finally {
       rmSync(tmpDir, { recursive: true, force: true })
     }

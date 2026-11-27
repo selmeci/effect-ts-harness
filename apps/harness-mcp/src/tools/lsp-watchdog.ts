@@ -61,9 +61,8 @@ const decodeLspDiagnosticsPayload = Schema.decodeOption(
 const TS2484_CYCLE_PATTERN =
   /\bTS2484\b|Export declaration conflicts with exported declaration|circular(?:ly)?\s+(?:re-?export|references)/i
 
-const DEFAULT_TS2484_TIMEOUT_HINT: LspDiagnosticHint = LspDiagnosticHint.make(
-  "Watchdog timeout may indicate a TS2484 circular re-export cycle or unbounded type recursion",
-)
+const DEFAULT_LSP_TIMEOUT_REASON_HINT =
+  "Watchdog timeout reached before LSP diagnostics completed (possible circular re-export cycle or unbounded type recursion)"
 
 export const extractTs2484CycleHint = (
   stdout: string,
@@ -303,9 +302,8 @@ export const runLspDiagnosticsWithWatchdog = Effect.fn("LspDiagnostics.run")(fun
 
     const activeProc = yield* match(proc)
       .with({ _tag: "TimedOut" }, (timedOut) => {
-        const cycleHint = Option.getOrElse(
+        const cycleHint = Option.getOrUndefined(
           extractTs2484CycleHint(timedOut.stdout, timedOut.stderr),
-          () => DEFAULT_TS2484_TIMEOUT_HINT,
         )
         const targetCandidate = (resolvedFile ?? projectTsconfigPath ?? canonicalRoot).trim()
         const targetPath = match(Schema.decodeOption(WorkspaceFilePath)(targetCandidate))
@@ -317,9 +315,9 @@ export const runLspDiagnosticsWithWatchdog = Effect.fn("LspDiagnostics.run")(fun
             command: LspCommandName.make(commandName),
             timeoutMs: watchdogTimeoutMs,
             ...(targetPath !== undefined ? { targetPath } : {}),
-            cycleHint,
+            ...(cycleHint !== undefined ? { cycleHint } : {}),
             reason: toErrorReasonMessage(
-              `${commandName} timed out after ${watchdogTimeoutMs}ms${timedOut.signal ? ` (${timedOut.signal})` : ""}: ${cycleHint}`,
+              `${commandName} timed out after ${watchdogTimeoutMs}ms${timedOut.signal ? ` (${timedOut.signal})` : ""}: ${cycleHint ?? DEFAULT_LSP_TIMEOUT_REASON_HINT}`,
             ),
           }),
         )

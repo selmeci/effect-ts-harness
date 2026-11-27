@@ -123,6 +123,7 @@ export const MutationCacheEntry = Schema.Struct({
   witnessTestFile: AstSourceFilePath,
   witnessClosureSha256: ContentSha256,
   sourceClosureSha256: Schema.optional(ContentSha256),
+  witnessSupportSha256: Schema.optional(ContentSha256),
   witnessTestAstDigests: Schema.optional(Schema.Array(ContentSha256)),
   mac: MutationCacheMac,
 })
@@ -153,6 +154,7 @@ export const MutationCacheLookupInput = Schema.Struct({
   reachingTests: Schema.Array(AstSourceFilePath),
   witnessClosureDigests: Schema.Record(AstSourceFilePath, ContentSha256),
   sourceClosureDigests: Schema.optional(Schema.Record(AstSourceFilePath, ContentSha256)),
+  witnessSupportDigests: Schema.optional(Schema.Record(AstSourceFilePath, ContentSha256)),
   witnessTestAstDigests: Schema.optional(
     Schema.Record(AstSourceFilePath, Schema.Array(ContentSha256)),
   ),

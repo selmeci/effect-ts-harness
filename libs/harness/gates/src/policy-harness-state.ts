@@ -15,7 +15,7 @@ const PROTECTED_HARNESS_SHELL_PATH_PATTERN: RegExp =
   /(?:^|[\s=:/<>|('"`,({[])(?:[^\s;|&)<>'"`,)}\]]*(?:\.git|common-dir)\/harne(?:ss|[^\s;|&)<>'"`,)}\]*?]*[*?[\]{}][^\s;|&)<>'"`,)}\]]*)(?:\/[^\s;|&)<>'"`,)}\]]*)?|(?:[^\s;|&)<>'"`,)}\]]*\/)?(?:harness\/)?workflow-backups(?:\/[^\s;|&)<>'"`,)}\]]*)?|(?:[^\s;|&)<>'"`,)}\]]*\/)?(?:auth-tokens?(?:[*?[\]{}][^\s;|&)<>'"`,)}\]]*)?\.json|daemon\.(?:sock|lock)|pending-workflow-restore\.json))(?=$|[\s/;|&)<>'"`,)}\]])/
 
 const PROTECTED_MUTATION_ONLY_SHELL_PATH_PATTERN: RegExp =
-  /(?:^|[\s=:/<>|('"`,({[])(?:[^\s;|&)<>'"`,)}\]]*\.harness\/(?:worktrees\/[^\s/;|&)<>'"`,)}\]]+\/)?(?:(?:verify|mutate)-stamp\.json|cache\/mutation-(?:cache|test-timings)-v(?:\d+|[^\s/;|&)<>'"`,)}\]*?[\]{}]*[*?[\]{}][^\s/;|&)<>'"`()]*)\.(?:json(?:\.corrupt)?|corrupt))|(?:[^\s;|&)<>'"`,)}\]]*\/)?repos\/(?:effect|alchemy)(?:\/[^\s;|&)<>'"`,)}\]]*)?|(?:[^\s;|&)<>'"`,)}\]]*\/)?\.oxlintrc\.json|(?:[^\s;|&)<>'"`,)}\]]*\/)?tools\/oxlint(?:\/[^\s;|&)<>'"`,)}\]]*)?)(?=$|[\s/;|&)<>'"`,)}\]])/
+  /(?:^|[\s=:/<>|('"`,({[])(?:[^\s;|&)<>'"`,)}\]]*\.harness\/(?:worktrees\/[^\s/;|&)<>'"`,)}\]]+\/)?(?:hook-runtime(?:\/[^\s;|&)<>'"`,)}\]]*)?|(?:verify|mutate)-stamp\.json|cache\/mutation-(?:cache|test-timings)-v(?:\d+|[^\s/;|&)<>'"`,)}\]*?[\]{}]*[*?[\]{}][^\s/;|&)<>'"`()]*)\.(?:json(?:\.corrupt)?|corrupt))|(?:[^\s;|&)<>'"`,)}\]]*\/)?repos\/(?:effect|alchemy)(?:\/[^\s;|&)<>'"`,)}\]]*)?|(?:[^\s;|&)<>'"`,)}\]]*\/)?\.oxlintrc\.json|(?:[^\s;|&)<>'"`,)}\]]*\/)?tools\/oxlint(?:\/[^\s;|&)<>'"`,)}\]]*)?)(?=$|[\s/;|&)<>'"`,)}\]])/
 
 const HARNESS_CMD_SUBST_PATTERN: RegExp =
   /(?:\$\([^)]*--git-(?:common-)?dir[^)]*\)|`[^`]*--git-(?:common-)?dir[^`]*`)["']?(?:\/+(?:\.\/)*harness)(?=$|[\s/;|&)<>'"`,)}\]])/

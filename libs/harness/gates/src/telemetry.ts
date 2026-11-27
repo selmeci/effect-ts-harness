@@ -1,13 +1,10 @@
-import { join } from "node:path"
-import { Effect, Result, Schema } from "effect"
-import type { SyncHostIo } from "@harness/service/host-io"
+import { Effect, Schema } from "effect"
 import { match } from "ts-pattern"
 import type { FrictionEvent } from "./friction-log.js"
 import {
   collectTopGuardCommandPrefixes,
   detectHangOutlierRecommendations,
 } from "./telemetry-recommendations.js"
-import { resolveHarnessStateDir } from "./worktree.js"
 
 export const TelemetrySurface = Schema.Literals(["cli", "mcp", "hook"])
 export type TelemetrySurface = typeof TelemetrySurface.Type
@@ -135,9 +132,9 @@ export const scopeSessionReportInput = (
         const isTaskInitOrEdit =
           TASK_INIT_OR_EDIT_TOOLS.has(later.toolName) &&
           (later.toolName !== "ingest" || later.surface !== "hook")
-        const isFailedVerify = later.toolName === "verify" && later.outcome !== "ok"
+        const isSubsequentVerify = later.toolName === "verify"
 
-        return isHookMergeMainBoundary || isTaskInitOrEdit || isFailedVerify
+        return isHookMergeMainBoundary || isTaskInitOrEdit || isSubsequentVerify
       })
       if (hasSubsequentTaskWork) {
         boundaryIdx = i
@@ -285,11 +282,21 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
     return a.toolName < b.toolName ? -1 : a.toolName > b.toolName ? 1 : 0
   })
 
+  const isVerifyFailureOutcome = (outcome: TelemetryEvent["outcome"]): boolean =>
+    match(outcome)
+      .with("fail", "timeout", "tool_error", () => true)
+      .with("ok", "deny", "ask", "fallback", "diagnostics_found", () => false)
+      .exhaustive()
+
+  const isToolRuntimeFailureOutcome = (outcome: TelemetryEvent["outcome"]): boolean =>
+    match(outcome)
+      .with("timeout", "tool_error", () => true)
+      .with("ok", "fail", "deny", "ask", "fallback", "diagnostics_found", () => false)
+      .exhaustive()
+
   const verifyEvents = input.events.filter((e) => e.toolName === "verify")
   const verifyAttempts = verifyEvents.length
-  const fixUpIterations = verifyEvents.filter(
-    (e) => e.outcome === "fail" || e.outcome === "timeout" || e.outcome === "tool_error",
-  ).length
+  const fixUpIterations = verifyEvents.filter((e) => isVerifyFailureOutcome(e.outcome)).length
   const firstPassVerify =
     verifyAttempts === 0
       ? null
@@ -318,7 +325,10 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
     (e) =>
       e.toolName === "done" &&
       e.surface !== "hook" &&
-      (e.outcome === "fail" || e.outcome === "deny"),
+      match(e.outcome)
+        .with("fail", "deny", () => true)
+        .with("ok", "ask", "fallback", "timeout", "tool_error", "diagnostics_found", () => false)
+        .exhaustive(),
   ).length
 
   const graphDiscoveryCalls = input.events.filter(
@@ -339,27 +349,38 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
       : Number((omnigraphCalls / (omnigraphCalls + fallbackCalls)).toFixed(2))
 
   const guardInterventions = input.events.filter(
-    (e) => e.category === "guard" && (e.outcome === "deny" || e.outcome === "ask"),
+    (e) =>
+      e.category === "guard" &&
+      match(e.outcome)
+        .with("deny", "ask", () => true)
+        .with("ok", "fail", "fallback", "timeout", "tool_error", "diagnostics_found", () => false)
+        .exhaustive(),
   ).length
   const otherGateFailures = input.events.filter(
     (e) => e.category === "gate" && e.toolName !== "verify" && e.outcome === "fail",
   ).length
   const toolErrorOrTimeoutFailures = input.events.filter(
     (e) =>
-      e.toolName !== "verify" &&
-      e.category !== "guard" &&
-      (e.outcome === "tool_error" || e.outcome === "timeout"),
+      e.toolName !== "verify" && e.category !== "guard" && isToolRuntimeFailureOutcome(e.outcome),
   ).length
   const guardTimeouts = input.events.filter(
     (e) =>
       e.category === "guard" &&
-      (e.outcome === "timeout" ||
-        /timed out|timeout/i.test(e.detail ?? "") ||
-        (e.outcome === "ask" &&
-          e.durationMs >= 2450 &&
-          !/fastpath=hit|Ambiguous risk|DecisionModel unavailable|Worker isolation mode|requires human confirmation/i.test(
-            e.detail ?? "",
-          ))),
+      match(e.outcome)
+        .with("timeout", () => true)
+        .with(
+          "ask",
+          () =>
+            /timed out|timeout/i.test(e.detail ?? "") ||
+            (e.durationMs >= 2450 &&
+              !/fastpath=hit|Ambiguous risk|DecisionModel unavailable|Worker isolation mode|requires human confirmation/i.test(
+                e.detail ?? "",
+              )),
+        )
+        .with("ok", "fail", "deny", "fallback", "tool_error", "diagnostics_found", () =>
+          /timed out|timeout/i.test(e.detail ?? ""),
+        )
+        .exhaustive(),
   ).length
   const degradedMcpCalls = input.events.filter(
     (e) =>
@@ -558,177 +579,3 @@ export const decideTelemetryReport = Effect.fn("TelemetryReport.decide")(functio
 export const TelemetryReport = {
   decide: decideTelemetryReport,
 } as const
-
-export const renderSessionReportMarkdown = (report: SessionReport): string => {
-  const lines: Array<string> = []
-  lines.push("# Harness Session Observability Report")
-  lines.push("")
-  lines.push(`**Health Score:** ${report.healthScore}/100 (Grade: ${report.grade})`)
-  lines.push(
-    `**Total Events:** ${report.totalEvents} | **Total Duration:** ${report.totalDurationMs} ms`,
-  )
-  lines.push("")
-  lines.push("## Key Performance Indicators (KPIs)")
-  lines.push("")
-  lines.push("| KPI | Value | Description |")
-  lines.push("|---|---|---|")
-  lines.push(
-    `| First-Pass Verification | ${report.kpis.firstPassVerify === null ? "N/A" : report.kpis.firstPassVerify ? "Passed" : "Failed"} | Green on first attempt |`,
-  )
-  lines.push(`| Verify Attempts | ${report.kpis.verifyAttempts} | Total verify runs |`)
-  lines.push(`| Fix-Up Iterations | ${report.kpis.fixUpIterations} | Verify runs with failures |`)
-  lines.push(
-    `| Plan Before Verify | ${report.kpis.planBeforeVerify ? "Yes" : "No"} | Route/plan-check/graph queried first |`,
-  )
-  lines.push(
-    `| Premature Done Attempts | ${report.kpis.prematureDoneAttempts} | Done invoked without valid stamp |`,
-  )
-  lines.push(
-    `| Graph Discovery Calls | ${report.kpis.graphDiscoveryCalls} | Ontology & graph queries |`,
-  )
-  lines.push(
-    `| Graph Discovery Ratio | ${report.kpis.graphDiscoveryRatio} | Discovery / non-hook calls |`,
-  )
-  lines.push(
-    `| Omnigraph Live Ratio | ${report.kpis.omnigraphLiveRatio === null ? "N/A" : report.kpis.omnigraphLiveRatio} | Omnigraph vs fallback queries |`,
-  )
-  lines.push(
-    `| Guard Interventions | ${report.kpis.guardInterventions} | Denied or asked actions |`,
-  )
-  lines.push(`| Friction Count | ${report.kpis.frictionCount} | Logged friction events |`)
-  lines.push("")
-  lines.push("## Tool Usage & Latency")
-  lines.push("")
-  if (report.toolMetrics.length === 0) {
-    lines.push("*No tools recorded.*")
-  } else {
-    lines.push(
-      "| Tool | Surface | Category | Calls | Success | Fail | Deny/Ask | Fallback | Success Rate | Mean (ms) | p50 (ms) | p95 (ms) | Max (ms) |",
-    )
-    lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
-    for (const m of report.toolMetrics) {
-      lines.push(
-        `| ${m.toolName} | ${m.surface} | ${m.category} | ${m.calls} | ${m.successCount} | ${m.failCount} | ${m.denyOrAskCount} | ${m.fallbackCount} | ${m.successRate} | ${m.meanDurationMs} | ${m.p50DurationMs} | ${m.p95DurationMs} | ${m.maxDurationMs} |`,
-      )
-    }
-  }
-  lines.push("")
-  lines.push("## Recommendations")
-  lines.push("")
-  if (report.recommendations.length === 0) {
-    lines.push("- No recommendations — session executed cleanly.")
-  } else {
-    for (const r of report.recommendations) {
-      lines.push(`- ${r}`)
-    }
-  }
-  lines.push("")
-  return lines.join("\n")
-}
-
-const decodeTelemetryEvent = Schema.decodeOption(Schema.fromJsonString(TelemetryEvent))
-
-export const appendTelemetryEvent = (
-  repoRoot: string,
-  input: {
-    readonly surface: TelemetrySurface
-    readonly category: TelemetryCategory
-    readonly toolName: string
-    readonly outcome: TelemetryOutcome
-    readonly durationMs: number
-    readonly engineSource?: TelemetryEngineSource | undefined
-    readonly detail?: string | undefined
-    readonly timestamp?: string | undefined
-  },
-  hostIo: SyncHostIo,
-): TelemetryEvent => {
-  const record: TelemetryEvent = {
-    timestamp: input.timestamp ?? new Date().toISOString(),
-    surface: input.surface,
-    category: input.category,
-    toolName: input.toolName,
-    outcome: input.outcome,
-    durationMs: input.durationMs,
-    ...(input.engineSource !== undefined ? { engineSource: input.engineSource } : {}),
-    ...(input.detail !== undefined ? { detail: input.detail } : {}),
-  }
-  const harnessDir = resolveHarnessStateDir(repoRoot, hostIo.getEnv())
-  const filePath = join(harnessDir, "telemetry-log.jsonl")
-  Result.getOrElse(
-    Result.try(() => {
-      if (!hostIo.existsSync(harnessDir)) {
-        hostIo.mkdirRecursiveSync(harnessDir)
-      }
-      hostIo.appendTextSync(filePath, JSON.stringify(record) + "\n")
-    }),
-    () => undefined,
-  )
-  return record
-}
-
-export const readTelemetryEvents = (
-  repoRoot: string,
-  hostIo: SyncHostIo,
-): ReadonlyArray<TelemetryEvent> => {
-  const harnessDir = resolveHarnessStateDir(repoRoot, hostIo.getEnv())
-  const filePath = join(harnessDir, "telemetry-log.jsonl")
-  if (!hostIo.existsSync(filePath)) {
-    return []
-  }
-  const content = Result.getOrElse(
-    Result.try(() => hostIo.readTextSync(filePath)),
-    () => null,
-  )
-  if (content === null) {
-    return []
-  }
-  const lines = content.split("\n")
-  const events: Array<TelemetryEvent> = []
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (trimmed.length === 0) continue
-    const decoded = decodeTelemetryEvent(trimmed)
-    match(decoded)
-      .with({ _tag: "Some" }, ({ value }) => {
-        events.push(value)
-      })
-      .with({ _tag: "None" }, () => {})
-      .exhaustive()
-  }
-  return events
-}
-
-export const clearTelemetryEvents = (repoRoot: string, hostIo: SyncHostIo): void => {
-  const harnessDir = resolveHarnessStateDir(repoRoot, hostIo.getEnv())
-  const filePath = join(harnessDir, "telemetry-log.jsonl")
-  Result.getOrElse(
-    Result.try(() => {
-      if (!hostIo.existsSync(harnessDir)) {
-        hostIo.mkdirRecursiveSync(harnessDir)
-      }
-      hostIo.writeTextSync(filePath, "")
-    }),
-    () => undefined,
-  )
-}
-
-export const writeSessionReportFiles = (
-  repoRoot: string,
-  report: SessionReport,
-  hostIo: SyncHostIo,
-): { readonly jsonPath: string; readonly markdownPath: string } => {
-  const harnessDir = resolveHarnessStateDir(repoRoot, hostIo.getEnv())
-  const jsonPath = join(harnessDir, "session-report.json")
-  const markdownPath = join(harnessDir, "session-report.md")
-  Result.getOrElse(
-    Result.try(() => {
-      if (!hostIo.existsSync(harnessDir)) {
-        hostIo.mkdirRecursiveSync(harnessDir)
-      }
-      hostIo.writeTextSync(jsonPath, JSON.stringify(report, null, 2))
-      hostIo.writeTextSync(markdownPath, renderSessionReportMarkdown(report))
-    }),
-    () => undefined,
-  )
-  return { jsonPath, markdownPath }
-}

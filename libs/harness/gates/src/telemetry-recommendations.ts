@@ -4,22 +4,34 @@ import type { FrictionEvent } from "./friction-log.js"
 
 export interface ToolDurationMetricInput {
   readonly toolName: string
-  readonly maxDurationMs: number
+  readonly calls?: number | undefined
+  readonly p50DurationMs?: number | undefined
   readonly p95DurationMs: number
+  readonly maxDurationMs: number
 }
 
 export interface GuardTelemetryEventInput {
   readonly category: string
-  readonly outcome: string
+  readonly outcome:
+    | "ok"
+    | "fail"
+    | "deny"
+    | "ask"
+    | "fallback"
+    | "timeout"
+    | "tool_error"
+    | "diagnostics_found"
   readonly durationMs: number
   readonly detail?: string | undefined
 }
 
 const HANG_OUTLIER_MIN_MS = 30_000
 const HANG_OUTLIER_P95_MULTIPLIER = 5
+const MIN_P95_DISTINGUISHABLE_CALLS = 20
 
 /**
- * Flags tools whose maximum duration exceeds both `30_000 ms` and `5 * p95DurationMs`
+ * Flags tools whose maximum duration exceeds `30_000 ms` and `5 * p95DurationMs`
+ * (using `p50DurationMs` as reference when `calls <= 20`, where nearest-rank `p95 === max`)
  * (`SPEC-0037 REQ-5.2`).
  */
 export const detectHangOutlierRecommendations = (
@@ -27,12 +39,18 @@ export const detectHangOutlierRecommendations = (
 ): ReadonlyArray<string> => {
   const recommendations: Array<string> = []
   for (const metric of toolMetrics) {
+    const useMedianBaseline =
+      metric.calls !== undefined &&
+      metric.calls <= MIN_P95_DISTINGUISHABLE_CALLS &&
+      metric.p50DurationMs !== undefined
+    const baselineMs = useMedianBaseline ? metric.p50DurationMs! : metric.p95DurationMs
+    const baselineLabel = useMedianBaseline ? "p50" : "p95"
     if (
       metric.maxDurationMs > HANG_OUTLIER_MIN_MS &&
-      metric.maxDurationMs > HANG_OUTLIER_P95_MULTIPLIER * metric.p95DurationMs
+      metric.maxDurationMs > HANG_OUTLIER_P95_MULTIPLIER * baselineMs
     ) {
       recommendations.push(
-        `Hang outlier detected on '${metric.toolName}' (maxDurationMs=${metric.maxDurationMs} ms vs p95=${metric.p95DurationMs} ms); check watchdog timeouts and unbounded subprocesses.`,
+        `Hang outlier detected on '${metric.toolName}' (maxDurationMs=${metric.maxDurationMs} ms vs ${baselineLabel}=${baselineMs} ms, p95=${metric.p95DurationMs} ms); check watchdog timeouts and unbounded subprocesses.`,
       )
     }
   }
@@ -52,13 +70,21 @@ const normalizeTwoTokenPrefix = (rawCommand: string): string | undefined => {
 
 const isGuardTimeoutOrAmbiguousEvent = (e: GuardTelemetryEventInput): boolean =>
   e.category === "guard" &&
-  (e.outcome === "timeout" ||
-    /timed out|timeout|ambiguous/i.test(e.detail ?? "") ||
-    (e.outcome === "ask" &&
-      e.durationMs >= 2450 &&
-      !/fastpath=hit|DecisionModel unavailable|Worker isolation mode|requires human confirmation/i.test(
-        e.detail ?? "",
-      )))
+  match(e.outcome)
+    .with("timeout", () => true)
+    .with(
+      "ask",
+      () =>
+        /timed out|timeout|ambiguous/i.test(e.detail ?? "") ||
+        (e.durationMs >= 2450 &&
+          !/fastpath=hit|DecisionModel unavailable|Worker isolation mode|requires human confirmation/i.test(
+            e.detail ?? "",
+          )),
+    )
+    .with("ok", "fail", "deny", "fallback", "tool_error", "diagnostics_found", () =>
+      /timed out|timeout|ambiguous/i.test(e.detail ?? ""),
+    )
+    .exhaustive()
 
 /**
  * Groups `guard` timeout/ambiguous escalation events and `guard_escalation` friction events

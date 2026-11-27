@@ -62,24 +62,39 @@ export interface MutatedModuleInitFailureInput {
 }
 
 const HARD_INFRA_OR_SYNTAX_RE =
-  /\bERR_PNPM_|Command\s+["']?vitest["']?\s+not found|Failed to load config|Failed to resolve import|Cannot find (?:module|package)|\bERR_MODULE_NOT_FOUND\b|\bSyntaxError:|Transform failed/i
+  /\bERR_PNPM_|Command\s+["']?vitest["']?\s+not found|Failed to load config|Failed to resolve import|Cannot find (?:module|package)|\bERR_MODULE_NOT_FOUND\b|\bSyntaxError:|Transform failed|Worker exited unexpectedly|Reached heap limit|Allocation failed|Channel closed|\b(?:EMFILE|ENOMEM|EPIPE)\b|Timeout starting/i
 
 const MODULE_INIT_THROW_RE =
-  /\b(?:SchemaError|ParseError|TypeError|RangeError|ReferenceError|Invalid WORKFLOW_TIMEOUT_BUDGETS)\b/
+  /(?:^|\r?\n)\s*(?:(?:SchemaError|ParseError|TypeError|RangeError|ReferenceError):\s+|Error:\s+Invalid WORKFLOW_TIMEOUT_BUDGETS\b)/
 
 const STACK_ERROR_THROW_RE =
   /(?:^|\r?\n)\s*(?:[A-Za-z_][A-Za-z0-9_]*Error|Error):\s+[^\r\n]+[\s\S]*?\r?\n\s+at\s+/
 
+const STACK_FRAME_RE = /^\s+at\s+.*$/gm
+const RUNNER_INTERNAL_FRAME_RE = /node_modules\/(?:vitest|@vitest|tinypool|birpc)\b/
+const WORKSPACE_FRAME_RE = /(?:^|[\s(/])(?:libs|apps|src|test)\//
+
+const hasOnlyRunnerInternalFrames = (text: string): boolean => {
+  const frames = text.match(STACK_FRAME_RE) ?? []
+  if (frames.length === 0) return false
+  return (
+    frames.some((frame) => RUNNER_INTERNAL_FRAME_RE.test(frame)) &&
+    !frames.some((frame) => WORKSPACE_FRAME_RE.test(frame))
+  )
+}
+
 /**
  * Returns `true` ONLY when an unmutated baseline imported cleanly (`baselineImportClean === true`),
- * the mutant exited with code `1`, no runner/resolution/syntax error is present, and output shows a
- * runtime/schema module initialization throw (even if Vitest reports `Tests no tests`).
+ * the mutant exited with code `1`, no runner/resolution/syntax/OOM/worker crash error is present,
+ * and output shows a runtime/schema module initialization throw (even if Vitest reports `Tests no tests`).
  */
 export const isMutatedModuleInitFailure = (input: MutatedModuleInitFailureInput): boolean => {
   if (!input.baselineImportClean || input.exitCode !== 1) return false
   const cleanStdout = stripAnsi(input.stdout)
   const cleanStderr = stripAnsi(input.stderr).replace(/^\[mutation-check\].*$/gm, "")
   const combined = `${cleanStdout}\n${cleanStderr}`
-  if (HARD_INFRA_OR_SYNTAX_RE.test(combined)) return false
+  if (HARD_INFRA_OR_SYNTAX_RE.test(combined) || hasOnlyRunnerInternalFrames(combined)) {
+    return false
+  }
   return MODULE_INIT_THROW_RE.test(combined) || STACK_ERROR_THROW_RE.test(combined)
 }

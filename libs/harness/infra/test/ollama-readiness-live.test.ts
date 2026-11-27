@@ -22,6 +22,7 @@ import {
   checkOllamaServerReadyDetailed,
   createOllamaWarmupState,
   ensureOllamaWarm,
+  makeOllamaEmbeddingClientLayer,
   nodeSyncHostIo,
 } from "../src/index.js"
 import { runWithTestTracer } from "./helpers/workflow-verifier-fixture.js"
@@ -223,9 +224,27 @@ describe("OllamaReadinessLive (SPEC-0037 REQ-2.1, REQ-2.2, REQ-2.3)", () => {
           expect(systemOneCall?.method).toBe("POST")
           expect(systemOneCall?.body).toContain('"model":"clef-flash"')
           expect(systemOneCall?.body).toContain('"questions"')
+          expect(systemOneCall?.body).toContain('"type":"noul"')
 
           expect(embedBatchCalls).toEqual([["warmup"]])
           expect(spans.some((s) => s.name === "OllamaReadiness.ensureWarm")).toBe(true)
+
+          // force: true re-probes live endpoints instead of short-circuiting to cached entry
+          const forced = yield* ensureOllamaWarm({
+            fetch: mockFetch,
+            state,
+            force: true,
+          }).pipe(
+            Effect.provide(
+              makeMockEmbeddingLayer({
+                onEmbedBatch: (texts) => {
+                  embedBatchCalls.push(texts)
+                },
+              }),
+            ),
+          )
+          expect(forced.cached).toBe(false)
+          expect(embedBatchCalls).toEqual([["warmup"], ["warmup"]])
         }),
       ),
   )
@@ -277,9 +296,98 @@ describe("OllamaReadinessLive (SPEC-0037 REQ-2.1, REQ-2.2, REQ-2.3)", () => {
         const third = yield* ensureOllamaWarm({ fetch: mockFetch, state }).pipe(
           Effect.provide(embedLayer),
         )
+        expect(second.cached).toBe(true)
         expect(third.cached).toBe(true)
         expect(systemOneCount).toBe(1)
         expect(embedCount).toBe(1)
+
+        // Real OllamaEmbeddingClientLive executes POST /v1/embeddings on ensureWarm
+        const realEmbedUrls: Array<string> = []
+        const fullFetch: typeof globalThis.fetch = (input) => {
+          const url =
+            typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+          realEmbedUrls.push(url)
+          if (url.endsWith("/api/tags")) {
+            return Promise.resolve(
+              new Response(JSON.stringify({ models: [{ name: "clef-flash" }] }), { status: 200 }),
+            )
+          }
+          if (url.endsWith("/v1/systemone")) {
+            return Promise.resolve(new Response(JSON.stringify({ ready: true }), { status: 200 }))
+          }
+          if (url.endsWith("/v1/embeddings")) {
+            return Promise.resolve(
+              new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2], index: 0 }] }), {
+                status: 200,
+              }),
+            )
+          }
+          return Promise.reject(new Error(`Unexpected ${url}`))
+        }
+        const liveState = createOllamaWarmupState()
+        const liveReceipt = yield* ensureOllamaWarm({
+          fetch: fullFetch,
+          state: liveState,
+        }).pipe(
+          Effect.provide(
+            makeOllamaEmbeddingClientLayer({
+              fetch: fullFetch,
+              dimensions: EmbeddingDimensionCount.make(2),
+            }),
+          ),
+        )
+        expect(liveReceipt.embeddingsWarm).toBe(true)
+        expect(realEmbedUrls.some((u) => u.endsWith("/v1/embeddings"))).toBe(true)
+      }),
+  )
+
+  it.effect(
+    "REQ-2.2: leader interruption during single-flight warm-up does not kill coalesced waiter",
+    () =>
+      Effect.gen(function* () {
+        const state = createOllamaWarmupState()
+        let markTagsStarted!: () => void
+        const tagsStarted = new Promise<void>((resolve) => {
+          markTagsStarted = resolve
+        })
+        let tagsAttempts = 0
+
+        const raceFetch: typeof globalThis.fetch = (input, init) => {
+          const url =
+            typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+          if (url.endsWith("/api/tags")) {
+            tagsAttempts += 1
+            if (tagsAttempts === 1) {
+              markTagsStarted()
+              return new Promise<Response>((_resolve, reject) => {
+                init?.signal?.addEventListener("abort", () => reject(new Error("aborted")))
+              })
+            }
+            return Promise.resolve(
+              new Response(JSON.stringify({ models: [{ name: "clef-flash" }] }), { status: 200 }),
+            )
+          }
+          return Promise.resolve(new Response(JSON.stringify({ ready: true }), { status: 200 }))
+        }
+
+        const embedLayer = makeMockEmbeddingLayer()
+        const leaderFiber = yield* ensureOllamaWarm({ fetch: raceFetch, state }).pipe(
+          Effect.provide(embedLayer),
+          Effect.forkChild,
+        )
+        yield* Effect.promise(() => tagsStarted)
+
+        const waiterFiber = yield* ensureOllamaWarm({ fetch: raceFetch, state }).pipe(
+          Effect.provide(embedLayer),
+          Effect.forkChild,
+        )
+        yield* Effect.yieldNow
+        expect(tagsAttempts).toBe(1)
+        yield* Fiber.interrupt(leaderFiber)
+        const waiterReceipt = yield* Fiber.join(waiterFiber)
+        expect(tagsAttempts).toBe(2)
+        expect(waiterReceipt.clefWarm).toBe(true)
+        expect(waiterReceipt.embeddingsWarm).toBe(true)
       }),
   )
 
@@ -290,13 +398,60 @@ describe("OllamaReadinessLive (SPEC-0037 REQ-2.1, REQ-2.2, REQ-2.3)", () => {
         const state = createOllamaWarmupState()
 
         // 1) Non-loopback host rejected at server-start
-        const nonLoopbackExit = yield* Effect.exit(
+        const nonLoopbackExit = yield* runWithTestTracer(
+          "ollama-warmup-nonloopback",
+          Effect.exit(
+            ensureOllamaWarm({
+              baseUrl: "http://evil.example:11434",
+              state,
+            }).pipe(Effect.provide(makeMockEmbeddingLayer())),
+          ),
+        ).pipe(Effect.map((r) => r.result))
+        expectOllamaWarmupError(nonLoopbackExit, "server-start", "non-loopback")
+
+        for (const badUrl of [
+          "ftp://127.0.0.1:11434",
+          "http://user:pass@127.0.0.1:11434",
+          "http://127.0.0.1:11434?x=1",
+          "http://127.0.0.1:11434#frag",
+        ]) {
+          const badExit = yield* Effect.exit(
+            ensureOllamaWarm({ baseUrl: badUrl, state }).pipe(
+              Effect.provide(makeMockEmbeddingLayer()),
+            ),
+          )
+          expectOllamaWarmupError(badExit, "server-start")
+        }
+
+        // SpawnFailed error maps to OllamaWarmupError
+        const spawnFailExit = yield* Effect.exit(
           ensureOllamaWarm({
-            baseUrl: "http://evil.example:11434",
+            fetch: () => Promise.reject(new Error("ECONNREFUSED")),
+            spawnOllama: () => ({ _tag: "SpawnFailed", spawnError: "ENOENT" }),
             state,
           }).pipe(Effect.provide(makeMockEmbeddingLayer())),
         )
-        expectOllamaWarmupError(nonLoopbackExit, "server-start", "non-loopback")
+        expectOllamaWarmupError(spawnFailExit, "server-start", "ENOENT")
+
+        // Custom HARNESS_OLLAMA_URL unreachable fails without spawning ollama serve
+        yield* withCleanOllamaEnv(
+          Effect.gen(function* () {
+            process.env.HARNESS_OLLAMA_URL = "http://127.0.0.1:11999"
+            let spawnedCustom = false
+            const customExit = yield* Effect.exit(
+              ensureOllamaWarm({
+                fetch: () => Promise.reject(new Error("ECONNREFUSED")),
+                spawnOllama: () => {
+                  spawnedCustom = true
+                  return { _tag: "Spawned", pid: 1 }
+                },
+                state,
+              }).pipe(Effect.provide(makeMockEmbeddingLayer())),
+            )
+            expectOllamaWarmupError(customExit, "server-start", "HARNESS_OLLAMA_URL")
+            expect(spawnedCustom).toBe(false)
+          }),
+        )
 
         // 2) Server unreachable within probeBudgetMs
         const unreachableFetch: typeof globalThis.fetch = () =>
@@ -348,6 +503,34 @@ describe("OllamaReadinessLive (SPEC-0037 REQ-2.1, REQ-2.2, REQ-2.3)", () => {
           }).pipe(Effect.provide(makeMockEmbeddingLayer({ failWith: "qwen3-embedding offline" }))),
         )
         expectOllamaWarmupError(embedFailExit, "embeddings-probe", "qwen3-embedding offline")
+
+        // 5) embeddings-probe hang hits TestClock probeBudgetMs timeout cleanly
+        let markHangStarted!: () => void
+        const hangStarted = new Promise<void>((resolve) => {
+          markHangStarted = resolve
+        })
+        const embedHangFiber = yield* Effect.exit(
+          ensureOllamaWarm({
+            fetch: okSystemOneFetch,
+            probeBudgetMs: 300,
+            state,
+          }).pipe(
+            Effect.provide(
+              makeMockEmbeddingLayer({
+                hang: true,
+                onEmbedBatch: () => {
+                  markHangStarted()
+                },
+              }),
+            ),
+          ),
+        ).pipe(Effect.forkChild)
+        yield* Effect.promise(() => hangStarted)
+        yield* Effect.yieldNow
+        yield* TestClock.adjust("300 millis")
+        yield* TestClock.adjust("50 millis")
+        const embedHangExit = yield* Fiber.join(embedHangFiber)
+        expectOllamaWarmupError(embedHangExit, "embeddings-probe", "timed out")
       }),
   )
 

@@ -1,7 +1,7 @@
 import { Match, Result, Schema } from "effect"
 import { ErrorReasonMessage } from "./workspace-and-process.js"
 
-/** Canonical stage count matching `SHIP_STAGE_COUNT` in `./workflow.js` (kept local to avoid a circular ESM import via `workflow -> review-routing -> workflow-timeouts`). */
+/** Canonical stage count matching `SHIP_STAGES.length` in `./workflow.js` (kept local to avoid a circular ESM import via `workflow -> review-routing -> workflow-timeouts`). */
 const SHIP_STAGE_COUNT = 6
 
 const MAX_SETTLE_TIMEOUT_MS = 2_147_483_647

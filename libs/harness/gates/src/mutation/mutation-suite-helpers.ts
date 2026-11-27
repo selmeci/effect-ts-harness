@@ -34,6 +34,7 @@ import {
   saveMutationCacheAtomic,
 } from "./mutation-cache.js"
 import {
+  computeWitnessSupportClosureDigest,
   computeWitnessTestAstDigestsForPath,
   prepareTwoTierLookupInputs,
   resolveMemoizedSourceOnlyClosureDigest,
@@ -586,11 +587,21 @@ export const recordKilledMutantsToCache = (input: {
               digests: input.digests!,
               hostIo: input.hostIo,
             })
+            const witnessSupportSha256 = computeWitnessSupportClosureDigest({
+              repoRoot: input.repoRoot,
+              witnessTestFile,
+              digests: input.digests!,
+              hostIo: input.hostIo,
+            })
             const witnessTestAstDigests = computeWitnessTestAstDigestsForPath(
               input.repoRoot,
               witnessTestFile,
               input.hostIo,
             )
+            const hasAllTwoTierFields =
+              sourceClosureSha256 !== undefined &&
+              witnessSupportSha256 !== undefined &&
+              witnessTestAstDigests !== undefined
             const mutantCacheId = MutantCacheId.make(mutant.id)
             const entryBase = {
               key,
@@ -600,8 +611,13 @@ export const recordKilledMutantsToCache = (input: {
               recordedAt,
               witnessTestFile,
               witnessClosureSha256,
-              ...(sourceClosureSha256 !== undefined ? { sourceClosureSha256 } : {}),
-              ...(witnessTestAstDigests !== undefined ? { witnessTestAstDigests } : {}),
+              ...(hasAllTwoTierFields
+                ? {
+                    sourceClosureSha256,
+                    witnessSupportSha256,
+                    witnessTestAstDigests,
+                  }
+                : {}),
             }
             const mac = computeMutationEntryMac(hmacSecret, entryBase)
             input.cacheEntries[key] = { ...entryBase, mac }

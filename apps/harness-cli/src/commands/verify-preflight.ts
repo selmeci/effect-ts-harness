@@ -69,7 +69,7 @@ export const runVerifyFormatPreFlight = (
 
   const res = nodeSyncHostIo.execFileSync(
     oxfmtBin,
-    [...configArgs, "--check", "--no-error-on-unmatched-pattern", ...existingFiles],
+    [...configArgs, "--check", "--no-error-on-unmatched-pattern", "--", ...existingFiles],
     { cwd: repoRoot },
   )
   return match(res)

@@ -14,6 +14,7 @@ import {
   type MutationCacheStore,
   MutationCacheTimestamp,
   MutationEpochMillis,
+  PackageRelKey,
   SourceLineNumber,
   computeContentSha256,
 } from "@harness/contract"
@@ -26,6 +27,7 @@ import {
   MutantSourceText,
   MutationCache,
   MutationCheck,
+  computeMutantCacheKey,
   computeMutationContextDigestsChecked,
   computeMutationEntryMac,
   computeSourceOnlyClosureDigest,
@@ -35,12 +37,21 @@ import {
   readLastSurvivorIds,
   writeLastSurvivorIds,
 } from "../src/index.js"
-import { classifyMutantSubprocessResult } from "../src/mutation-subprocess-helpers.js"
-import { recordKilledMutantsToCache } from "../src/mutation/mutation-suite-helpers.js"
 import {
+  classifyMutantSubprocessResult,
+  needsSoloColdRecheck,
+} from "../src/mutation-subprocess-helpers.js"
+import {
+  hydrateFileMutantCacheHits,
+  recordKilledMutantsToCache,
+} from "../src/mutation/mutation-suite-helpers.js"
+import {
+  analyzeWitnessTestBlocks,
+  computeWitnessSupportClosureDigest,
   computeWitnessTestAstDigestsForPath,
   prepareTwoTierLookupInputs,
 } from "../src/mutation/mutation-two-tier-cache.js"
+import type { DomainFile } from "../src/mutation/mutation-target-discovery.js"
 import { isolatedTestHostIo, testHostIo } from "./helpers/test-host-io.js"
 
 const mkMutant = (id: string): CodeMutant => ({
@@ -161,6 +172,7 @@ describe("SPEC-0037 REQ-3.1..REQ-3.4: Two-Tier Mutation Cache, Module-Init Class
           const recordedAt = MutationCacheTimestamp.make("2026-11-27T10:00:00.000Z")
           const nowMs = MutationEpochMillis.make(Date.parse("2026-11-27T10:05:00.000Z"))
           const oldWitnessDigest = computeContentSha256("old-witness-closure")
+          const witnessSupportDigest = computeContentSha256("witness-support-1")
           const baseAstDigests = [...extractWitnessTestBlockDigests(baseTestSrc)]
 
           const entryWithoutMac = {
@@ -172,6 +184,7 @@ describe("SPEC-0037 REQ-3.1..REQ-3.4: Two-Tier Mutation Cache, Module-Init Class
             witnessTestFile: witnessRel,
             witnessClosureSha256: oldWitnessDigest,
             sourceClosureSha256: srcClosureRes.closureDigest,
+            witnessSupportSha256: witnessSupportDigest,
             witnessTestAstDigests: baseAstDigests,
           }
           const mac = computeMutationEntryMac(TEST_SECRET, entryWithoutMac)
@@ -190,6 +203,7 @@ describe("SPEC-0037 REQ-3.1..REQ-3.4: Two-Tier Mutation Cache, Module-Init Class
             reachingTests: [witnessRel],
             witnessClosureDigests: { [witnessRel]: computeContentSha256("new-witness-closure") },
             sourceClosureDigests: { [srcRel]: srcClosureRes.closureDigest },
+            witnessSupportDigests: { [witnessRel]: witnessSupportDigest },
             witnessTestAstDigests: {
               [witnessRel]: [...extractWitnessTestBlockDigests(appendedSrc)],
             },
@@ -208,10 +222,27 @@ describe("SPEC-0037 REQ-3.1..REQ-3.4: Two-Tier Mutation Cache, Module-Init Class
             reachingTests: [witnessRel],
             witnessClosureDigests: { [witnessRel]: computeContentSha256("new-witness-closure") },
             sourceClosureDigests: { [srcRel]: srcClosureRes.closureDigest },
+            witnessSupportDigests: { [witnessRel]: witnessSupportDigest },
             witnessTestAstDigests: { [witnessRel]: [...extractWitnessTestBlockDigests(editedSrc)] },
           })
           expect(missDecision.hitKeys).toEqual([])
           expect(missDecision.missKeys).toEqual([key])
+
+          // Missing sourceClosureDigests map fails closed instead of hitting two-tier match
+          const missingSourceDigestsDecision = yield* MutationCache.decide({
+            candidateKeys: [key],
+            store,
+            auth: TEST_AUTH,
+            nowMs,
+            reachingTests: [witnessRel],
+            witnessClosureDigests: { [witnessRel]: computeContentSha256("new-witness-closure") },
+            witnessSupportDigests: { [witnessRel]: witnessSupportDigest },
+            witnessTestAstDigests: {
+              [witnessRel]: [...extractWitnessTestBlockDigests(appendedSrc)],
+            },
+          })
+          expect(missingSourceDigestsDecision.hitKeys).toEqual([])
+          expect(missingSourceDigestsDecision.missKeys).toEqual([key])
 
           // Tampering with sourceClosureSha256 invalidates MAC
           const tamperedMacDecision = yield* MutationCache.decide({
@@ -288,6 +319,10 @@ describe("SPEC-0037 REQ-3.1..REQ-3.4: Two-Tier Mutation Cache, Module-Init Class
       "Failed to resolve import './missing.js'\nError: boom\n    at a.ts:1:1",
       "SyntaxError: Unexpected token\n    at a.ts:1:1",
       "Transform failed with 1 error\nError: esbuild",
+      "Worker exited unexpectedly\nTypeError: noise",
+      "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory",
+      "Error: EMFILE: too many open files\n    at fs.open",
+      "TypeError: runner crash\n    at node_modules/vitest/dist/worker.js:12:4",
     ]) {
       expect(
         isMutatedModuleInitFailure({
@@ -306,6 +341,29 @@ describe("SPEC-0037 REQ-3.1..REQ-3.4: Two-Tier Mutation Cache, Module-Init Class
         ).kind,
       ).toBe("abort")
     }
+
+    expect(
+      needsSoloColdRecheck(
+        {
+          _tag: "Exited",
+          exitCode: 1,
+          stdout: "",
+          stderr: "SchemaError: Invalid configuration\n",
+        },
+        { baselineImportClean: true },
+      ),
+    ).toBe(false)
+    expect(
+      needsSoloColdRecheck(
+        {
+          _tag: "Exited",
+          exitCode: 1,
+          stdout: "",
+          stderr: "SchemaError: Invalid configuration\n",
+        },
+        { baselineImportClean: false },
+      ),
+    ).toBe(true)
   })
 
   it.effect(
@@ -400,112 +458,334 @@ describe("SPEC-0037 REQ-3.1..REQ-3.4: Two-Tier Mutation Cache, Module-Init Class
       }),
   )
 
+  const setupDemoTwoTierFixture = () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "harness-two-tier-helpers-"))
+    mkdirSync(join(tmpDir, "libs/demo/domain/src"), { recursive: true })
+    mkdirSync(join(tmpDir, "libs/demo/domain/test"), { recursive: true })
+    writeFileSync(join(tmpDir, "package.json"), JSON.stringify({ name: "tmp-ws", private: true }))
+    writeFileSync(
+      join(tmpDir, "libs/demo/domain/package.json"),
+      JSON.stringify({ name: "@demo/domain", nx: { tags: ["type:domain"] } }),
+    )
+    const srcRel = AstSourceFilePath.make("libs/demo/domain/src/logic.ts")
+    const helperRel = AstSourceFilePath.make("libs/demo/domain/test/helper.ts")
+    const witnessRel = AstSourceFilePath.make("libs/demo/domain/test/logic.test.ts")
+    const missingRel = AstSourceFilePath.make("libs/demo/domain/test/missing.test.ts")
+    const srcContent =
+      "export const checkA = (x: number): boolean => x >= 0\nexport const checkB = (y: number): boolean => y <= 0\n"
+    const originalWitnessText =
+      'import { it, expect } from "vitest"\nimport { checkA } from "../src/logic.js"\nimport { assertEq } from "./helper.js"\nit("a", () => { expect(assertEq(checkA(0), true)).toBe(true) })\n'
+    writeFileSync(join(tmpDir, srcRel), srcContent)
+    writeFileSync(
+      join(tmpDir, helperRel),
+      "export const assertEq = (a: boolean, b: boolean): boolean => a === b\n",
+    )
+    writeFileSync(join(tmpDir, witnessRel), originalWitnessText)
+
+    const digestsRes = match(computeMutationContextDigestsChecked(tmpDir, isolatedTestHostIo))
+      .with({ _tag: "Ok" }, (ok) => ok)
+      .with({ _tag: "Disabled" }, ({ reason }) => {
+        throw new Error(`digests disabled: ${reason}`)
+      })
+      .exhaustive()
+    const expectedSupport = computeWitnessSupportClosureDigest({
+      repoRoot: tmpDir,
+      witnessTestFile: witnessRel,
+      digests: digestsRes.digests,
+      hostIo: isolatedTestHostIo,
+    })
+    const demoDomainFile: DomainFile = {
+      scope: "demo",
+      pkgDir: "domain",
+      pkgName: "@demo/domain",
+      tier: "domain",
+      relFile: srcRel,
+      fullPath: join(tmpDir, srcRel),
+    }
+    const mutant = {
+      ...mkMutant("libs/demo/domain/src/logic.ts:1:>=->"),
+      file: srcRel,
+    }
+    const key1 = computeMutantCacheKey({
+      pkgKey: PackageRelKey.make("demo/domain"),
+      relFile: srcRel,
+      originalContentSha256: computeContentSha256(srcContent),
+      compiledSchemaSha256: computeContentSha256("export const __mutant = 0"),
+      mutant,
+      digests: digestsRes.digests,
+    })
+    const key2 = computeContentSha256("k2")
+    const cacheEntries: Record<ContentSha256, MutationCacheEntry> = {}
+    const nowMs = MutationEpochMillis.make(Date.parse("2026-11-27T10:05:00.000Z"))
+    const dirtied = recordKilledMutantsToCache({
+      relFile: srcRel,
+      uncachedMutants: [mutant],
+      fileOutcomes: new Map<string, MutantOutcome>([[mutant.id, { mutant, status: "killed" }]]),
+      mutantKeys: new Map([[mutant.id, key1]]),
+      fileNonCacheableIds: new Set(),
+      witnessByMutantId: new Map([[mutant.id, witnessRel]]),
+      repoRoot: tmpDir,
+      digests: digestsRes.digests,
+      hostIo: isolatedTestHostIo,
+      cacheAuth: TEST_AUTH,
+      nowMs,
+      cacheEntries,
+    })
+    const legacyEntryBase = {
+      key: key2,
+      file: srcRel,
+      mutantId: cacheEntries[key1]!.mutantId,
+      status: "killed" as const,
+      recordedAt: cacheEntries[key1]!.recordedAt,
+      witnessTestFile: witnessRel,
+      witnessClosureSha256: cacheEntries[key1]!.witnessClosureSha256,
+      sourceClosureSha256: cacheEntries[key1]!.sourceClosureSha256,
+      witnessTestAstDigests: cacheEntries[key1]!.witnessTestAstDigests,
+    }
+    const twoTierStore: MutationCacheStore = {
+      version: "mutation-cache-v3",
+      entries: {
+        [key1]: cacheEntries[key1]!,
+        [key2]: {
+          ...legacyEntryBase,
+          mac: computeMutationEntryMac(TEST_SECRET, legacyEntryBase),
+        },
+      },
+    }
+    return {
+      tmpDir,
+      srcRel,
+      helperRel,
+      witnessRel,
+      missingRel,
+      srcContent,
+      originalWitnessText,
+      digests: digestsRes.digests,
+      expectedSupport,
+      demoDomainFile,
+      mutant,
+      key1,
+      key2,
+      cacheEntries,
+      nowMs,
+      dirtied,
+      twoTierStore,
+    }
+  }
+
   it.effect(
-    "records and prepares two-tier cache inputs and persists survivors on real non-runner MutationCheck.run",
+    "records two-tier cache inputs and rejects unsafe append-only tests/hooks/options",
     () =>
       Effect.gen(function* () {
-        const tmpDir = mkdtempSync(join(tmpdir(), "harness-two-tier-helpers-"))
+        const ctx = setupDemoTwoTierFixture()
         try {
-          mkdirSync(join(tmpDir, "libs/demo/domain/src"), { recursive: true })
-          mkdirSync(join(tmpDir, "libs/demo/domain/test"), { recursive: true })
-          writeFileSync(
-            join(tmpDir, "package.json"),
-            JSON.stringify({ name: "tmp-ws", private: true }),
-          )
-          writeFileSync(
-            join(tmpDir, "libs/demo/domain/package.json"),
-            JSON.stringify({ name: "@demo/domain", nx: { tags: ["type:domain"] } }),
-          )
-          const srcRel = AstSourceFilePath.make("libs/demo/domain/src/logic.ts")
-          const witnessRel = AstSourceFilePath.make("libs/demo/domain/test/logic.test.ts")
-          const missingRel = AstSourceFilePath.make("libs/demo/domain/test/missing.test.ts")
-          writeFileSync(
-            join(tmpDir, srcRel),
-            [
-              "export const checkA = (x: number): boolean => x >= 0",
-              "export const checkB = (y: number): boolean => y <= 0",
-            ].join("\n") + "\n",
-          )
-          writeFileSync(
-            join(tmpDir, witnessRel),
-            'import { it, expect } from "vitest"\nimport { checkA } from "../src/logic.js"\nit("a", () => { expect(checkA(0)).toBe(true) })\n',
-          )
-
           expect(
-            computeWitnessTestAstDigestsForPath(tmpDir, missingRel, isolatedTestHostIo),
+            computeWitnessTestAstDigestsForPath(ctx.tmpDir, ctx.missingRel, isolatedTestHostIo),
           ).toBeUndefined()
           const presentAst = computeWitnessTestAstDigestsForPath(
-            tmpDir,
-            witnessRel,
+            ctx.tmpDir,
+            ctx.witnessRel,
             isolatedTestHostIo,
           )
           expect(presentAst?.length).toBeGreaterThan(0)
+          expect(ctx.expectedSupport).toMatch(/^[0-9a-f]{64}$/)
+          expect(ctx.dirtied).toBe(true)
+          expect(ctx.cacheEntries[ctx.key1]?.sourceClosureSha256).toMatch(/^[0-9a-f]{64}$/)
+          expect(ctx.cacheEntries[ctx.key1]?.witnessSupportSha256).toBe(ctx.expectedSupport)
+          expect(ctx.cacheEntries[ctx.key1]?.witnessTestAstDigests).toEqual(presentAst)
 
-          const digestsRes = match(computeMutationContextDigestsChecked(tmpDir, isolatedTestHostIo))
+          const withTwoTier = prepareTwoTierLookupInputs({
+            repoRoot: ctx.tmpDir,
+            relFile: ctx.srcRel,
+            candidateKeys: [ctx.key1],
+            loadedCacheStore: ctx.twoTierStore,
+            reachingSet: new Set([ctx.witnessRel]),
+            digests: ctx.digests,
+            hostIo: isolatedTestHostIo,
+          })
+          expect(withTwoTier.sourceClosureDigests[ctx.srcRel]).toBe(
+            ctx.cacheEntries[ctx.key1]?.sourceClosureSha256,
+          )
+          expect(withTwoTier.witnessSupportDigests[ctx.witnessRel]).toBe(ctx.expectedSupport)
+          expect(withTwoTier.witnessTestAstDigests[ctx.witnessRel]).toEqual(presentAst)
+          expect(withTwoTier.witnessClosureDigests[ctx.witnessRel]).toBe(
+            ctx.cacheEntries[ctx.key1]?.witnessClosureSha256,
+          )
+
+          writeFileSync(
+            join(ctx.tmpDir, ctx.witnessRel),
+            `${ctx.originalWitnessText}it("b", () => { expect(checkA(1)).toBe(true) })\n`,
+          )
+          const updatedDigestsRes = match(
+            computeMutationContextDigestsChecked(ctx.tmpDir, isolatedTestHostIo),
+          )
             .with({ _tag: "Ok" }, (ok) => ok)
             .with({ _tag: "Disabled" }, ({ reason }) => {
               throw new Error(`digests disabled: ${reason}`)
             })
             .exhaustive()
+          const matchingKey = yield* Effect.sync(() =>
+            hydrateFileMutantCacheHits({
+              repoRoot: ctx.tmpDir,
+              file: ctx.demoDomainFile,
+              originalContent: ctx.srcContent,
+              schemaSource: "export const __mutant = 0",
+              mutants: [ctx.mutant],
+              allReachingTests: [ctx.witnessRel],
+              hostIo: isolatedTestHostIo,
+              cacheEnabled: true,
+              cacheAuth: TEST_AUTH,
+              nowMs: ctx.nowMs,
+              contextDigests: updatedDigestsRes.digests,
+              loadedCacheStore: ctx.twoTierStore,
+              cacheEntries: {},
+            }),
+          )
+          expect(matchingKey.mutantKeys.get(ctx.mutant.id)).toBe(ctx.key1)
+          expect([...matchingKey.cachedHitIds]).toEqual([ctx.mutant.id])
+          expect(matchingKey.dirtiedCache).toBe(true)
 
-          const mutant = mkMutant("libs/demo/domain/src/logic.ts:1:>=->")
-          const key1 = computeContentSha256("k1")
-          const key2 = computeContentSha256("k2")
-          const cacheEntries: Record<ContentSha256, MutationCacheEntry> = {}
-          const nowMs = MutationEpochMillis.make(Date.parse("2026-11-27T10:05:00.000Z"))
-          const dirtied = recordKilledMutantsToCache({
-            relFile: srcRel,
-            uncachedMutants: [mutant],
-            fileOutcomes: new Map<string, MutantOutcome>([
-              [mutant.id, { mutant, status: "killed" }],
-            ]),
-            mutantKeys: new Map([[mutant.id, key1]]),
-            fileNonCacheableIds: new Set(),
-            witnessByMutantId: new Map([[mutant.id, witnessRel]]),
-            repoRoot: tmpDir,
-            digests: digestsRes.digests,
-            hostIo: isolatedTestHostIo,
-            cacheAuth: TEST_AUTH,
-            nowMs,
-            cacheEntries,
-          })
-          expect(dirtied).toBe(true)
-          expect(cacheEntries[key1]?.sourceClosureSha256).toBeDefined()
-          expect(cacheEntries[key1]?.witnessTestAstDigests).toBeDefined()
+          const optionOnlyAnalysis = analyzeWitnessTestBlocks(
+            `${ctx.originalWitnessText}it("opt", { only: true }, () => { expect(true).toBe(true) })\n`,
+          )
+          expect(optionOnlyAnalysis.unsafeBlockDigests.size).toBeGreaterThan(0)
 
-          const twoTierStore: MutationCacheStore = {
-            version: "mutation-cache-v3",
-            entries: {
-              [key1]: cacheEntries[key1]!,
-              [key2]: {
-                ...cacheEntries[key1]!,
-                key: key2,
-                witnessTestFile: missingRel,
-                sourceClosureSha256: undefined,
-                witnessTestAstDigests: undefined,
-              },
-            },
-          }
-          const withTwoTier = prepareTwoTierLookupInputs({
-            repoRoot: tmpDir,
-            relFile: srcRel,
-            candidateKeys: [key1],
-            loadedCacheStore: twoTierStore,
-            reachingSet: new Set([witnessRel]),
-            digests: digestsRes.digests,
+          writeFileSync(
+            join(ctx.tmpDir, ctx.witnessRel),
+            `${ctx.originalWitnessText}it.only("focus", () => { expect(true).toBe(true) })\n`,
+          )
+          const unsafeOnlyInputs = prepareTwoTierLookupInputs({
+            repoRoot: ctx.tmpDir,
+            relFile: ctx.srcRel,
+            candidateKeys: [ctx.key1],
+            loadedCacheStore: ctx.twoTierStore,
+            reachingSet: new Set([ctx.witnessRel]),
+            digests: updatedDigestsRes.digests,
             hostIo: isolatedTestHostIo,
           })
-          expect(withTwoTier.sourceClosureDigests[srcRel]).toBeDefined()
-          expect(withTwoTier.witnessTestAstDigests[witnessRel]).toBeDefined()
-          expect(withTwoTier.witnessClosureDigests[witnessRel]).toBeDefined()
+          expect(unsafeOnlyInputs.witnessTestAstDigests[ctx.witnessRel]).toBeUndefined()
+
+          writeFileSync(
+            join(ctx.tmpDir, ctx.witnessRel),
+            `${ctx.originalWitnessText}describe("added", () => { beforeEach(() => {}); it("nested", () => {}) })\n`,
+          )
+          const unsafeDescribeInputs = prepareTwoTierLookupInputs({
+            repoRoot: ctx.tmpDir,
+            relFile: ctx.srcRel,
+            candidateKeys: [ctx.key1],
+            loadedCacheStore: ctx.twoTierStore,
+            reachingSet: new Set([ctx.witnessRel]),
+            digests: updatedDigestsRes.digests,
+            hostIo: isolatedTestHostIo,
+          })
+          expect(unsafeDescribeInputs.witnessTestAstDigests[ctx.witnessRel]).toBeUndefined()
+        } finally {
+          rmSync(ctx.tmpDir, { recursive: true, force: true })
+        }
+      }),
+  )
+
+  it.effect(
+    "invalidates two-tier hits on legacy missing support, config/helper edits, and persists survivors on real MutationCheck.run",
+    () =>
+      Effect.gen(function* () {
+        const ctx = setupDemoTwoTierFixture()
+        try {
+          writeFileSync(
+            join(ctx.tmpDir, ctx.witnessRel),
+            `${ctx.originalWitnessText}it("b", () => { expect(checkA(1)).toBe(true) })\n`,
+          )
+          const updatedDigestsRes = match(
+            computeMutationContextDigestsChecked(ctx.tmpDir, isolatedTestHostIo),
+          )
+            .with({ _tag: "Ok" }, (ok) => ok)
+            .with({ _tag: "Disabled" }, ({ reason }) => {
+              throw new Error(`digests disabled: ${reason}`)
+            })
+            .exhaustive()
+          const missingSupportInputs = prepareTwoTierLookupInputs({
+            repoRoot: ctx.tmpDir,
+            relFile: ctx.srcRel,
+            candidateKeys: [ctx.key2],
+            loadedCacheStore: ctx.twoTierStore,
+            reachingSet: new Set([ctx.witnessRel]),
+            digests: updatedDigestsRes.digests,
+            hostIo: isolatedTestHostIo,
+          })
+          const missingSupportLookup = yield* MutationCache.decide({
+            candidateKeys: [ctx.key2],
+            store: ctx.twoTierStore,
+            auth: TEST_AUTH,
+            nowMs: ctx.nowMs,
+            reachingTests: [ctx.witnessRel],
+            ...missingSupportInputs,
+          })
+          expect(missingSupportLookup.hitKeys).toEqual([])
+          expect(missingSupportLookup.missKeys).toEqual([ctx.key2])
+
+          writeFileSync(
+            join(ctx.tmpDir, "libs/demo/domain/vitest.config.ts"),
+            "export default { test: { globals: true } }\n",
+          )
+          const cfgChangedDigests = match(
+            computeMutationContextDigestsChecked(ctx.tmpDir, isolatedTestHostIo),
+          )
+            .with({ _tag: "Ok" }, (ok) => ok)
+            .with({ _tag: "Disabled" }, ({ reason }) => {
+              throw new Error(`digests disabled: ${reason}`)
+            })
+            .exhaustive()
+          const afterCfgSupport = computeWitnessSupportClosureDigest({
+            repoRoot: ctx.tmpDir,
+            witnessTestFile: ctx.witnessRel,
+            digests: cfgChangedDigests.digests,
+            hostIo: isolatedTestHostIo,
+          })
+          expect(afterCfgSupport).not.toBe(ctx.expectedSupport)
+
+          writeFileSync(join(ctx.tmpDir, ctx.witnessRel), ctx.originalWitnessText)
+          writeFileSync(
+            join(ctx.tmpDir, ctx.helperRel),
+            "export const assertEq = (): boolean => true\n",
+          )
+          const helperChangedDigests = match(
+            computeMutationContextDigestsChecked(ctx.tmpDir, isolatedTestHostIo),
+          )
+            .with({ _tag: "Ok" }, (ok) => ok)
+            .with({ _tag: "Disabled" }, ({ reason }) => {
+              throw new Error(`digests disabled: ${reason}`)
+            })
+            .exhaustive()
+          const afterHelperInputs = prepareTwoTierLookupInputs({
+            repoRoot: ctx.tmpDir,
+            relFile: ctx.srcRel,
+            candidateKeys: [ctx.key1],
+            loadedCacheStore: ctx.twoTierStore,
+            reachingSet: new Set([ctx.witnessRel]),
+            digests: helperChangedDigests.digests,
+            hostIo: isolatedTestHostIo,
+          })
+          expect(afterHelperInputs.witnessSupportDigests[ctx.witnessRel]).not.toBe(
+            ctx.expectedSupport,
+          )
+          const afterHelperLookup = yield* MutationCache.decide({
+            candidateKeys: [ctx.key1],
+            store: ctx.twoTierStore,
+            auth: TEST_AUTH,
+            nowMs: ctx.nowMs,
+            reachingTests: [ctx.witnessRel],
+            ...afterHelperInputs,
+          })
+          expect(afterHelperLookup.hitKeys).toEqual([])
+          expect(afterHelperLookup.missKeys).toEqual([ctx.key1])
 
           const withoutTwoTier = prepareTwoTierLookupInputs({
-            repoRoot: tmpDir,
-            relFile: srcRel,
-            candidateKeys: [key2],
-            loadedCacheStore: twoTierStore,
-            reachingSet: new Set([missingRel]),
-            digests: digestsRes.digests,
+            repoRoot: ctx.tmpDir,
+            relFile: ctx.srcRel,
+            candidateKeys: [ctx.key2],
+            loadedCacheStore: ctx.twoTierStore,
+            reachingSet: new Set([ctx.missingRel]),
+            digests: ctx.digests,
             hostIo: isolatedTestHostIo,
           })
           expect(withoutTwoTier.sourceClosureDigests).toEqual({})
@@ -529,17 +809,17 @@ describe("SPEC-0037 REQ-3.1..REQ-3.4: Two-Tier Mutation Cache, Module-Init Class
               return { _tag: "Exited", exitCode: 0, stdout: "Tests  1 passed (1)\n", stderr: "" }
             },
           }
-          const execReport = yield* MutationCheck.run(tmpDir, execHostIo, {
+          const execReport = yield* MutationCheck.run(ctx.tmpDir, execHostIo, {
             includeAllLines: true,
             disableMutantCache: true,
           })
           expect(execReport.killedCount).toBeGreaterThan(0)
           expect(execReport.survivedCount).toBeGreaterThan(0)
-          expect([...readLastSurvivorIds(tmpDir, isolatedTestHostIo)]).toEqual(
+          expect([...readLastSurvivorIds(ctx.tmpDir, isolatedTestHostIo)]).toEqual(
             execReport.survivedMutants.map((m) => m.id).sort(),
           )
         } finally {
-          rmSync(tmpDir, { recursive: true, force: true })
+          rmSync(ctx.tmpDir, { recursive: true, force: true })
         }
       }),
   )

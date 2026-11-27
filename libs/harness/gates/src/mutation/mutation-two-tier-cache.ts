@@ -43,6 +43,26 @@ const SurvivorsStoreSchema = Schema.fromJsonString(
 
 const TEST_CALL_NAMES: ReadonlySet<string> = new Set(["it", "test"])
 const DESCRIBE_CALL_NAMES: ReadonlySet<string> = new Set(["describe", "suite"])
+const UNSAFE_WITNESS_CALLEE_NAMES: ReadonlySet<string> = new Set([
+  "beforeEach",
+  "afterEach",
+  "beforeAll",
+  "afterAll",
+])
+const UNSAFE_WITNESS_PROP_NAMES: ReadonlySet<string> = new Set([
+  "only",
+  "skip",
+  "todo",
+  "concurrent",
+])
+const UNSAFE_VI_METHODS: ReadonlySet<string> = new Set([
+  "mock",
+  "doMock",
+  "unmock",
+  "stubGlobal",
+  "unstubAllGlobals",
+  "spyOn",
+])
 
 const getRootCalleeIdentifier = (expr: ts.Expression): string | undefined => {
   let curr: ts.Expression = expr
@@ -52,11 +72,56 @@ const getRootCalleeIdentifier = (expr: ts.Expression): string | undefined => {
   return ts.isIdentifier(curr) ? curr.text : undefined
 }
 
+const hasUnsafeWitnessConstruct = (node: ts.Node): boolean => {
+  let unsafe = false
+  const visit = (n: ts.Node): void => {
+    if (unsafe) return
+    if (ts.isPropertyAccessExpression(n)) {
+      if (UNSAFE_WITNESS_PROP_NAMES.has(n.name.text)) {
+        unsafe = true
+        return
+      }
+      if (
+        ts.isIdentifier(n.expression) &&
+        n.expression.text === "vi" &&
+        UNSAFE_VI_METHODS.has(n.name.text)
+      ) {
+        unsafe = true
+        return
+      }
+    }
+    if (
+      (ts.isPropertyAssignment(n) || ts.isShorthandPropertyAssignment(n)) &&
+      ts.isIdentifier(n.name) &&
+      UNSAFE_WITNESS_PROP_NAMES.has(n.name.text)
+    ) {
+      unsafe = true
+      return
+    }
+    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression)) {
+      if (UNSAFE_WITNESS_CALLEE_NAMES.has(n.expression.text)) {
+        unsafe = true
+        return
+      }
+    }
+    ts.forEachChild(n, visit)
+  }
+  visit(node)
+  return unsafe
+}
+
 const getBlockKindFromStatement = (
   stmt: ts.Statement,
-): { readonly kind: "describe" | "test"; readonly callbackBody: ts.Block } | undefined => {
+):
+  | {
+      readonly kind: "describe" | "test"
+      readonly callExpr: ts.CallExpression
+      readonly callbackBody: ts.Block
+    }
+  | undefined => {
   if (!ts.isExpressionStatement(stmt) || !ts.isCallExpression(stmt.expression)) return undefined
-  const rootName = getRootCalleeIdentifier(stmt.expression.expression)
+  const callExpr = stmt.expression
+  const rootName = getRootCalleeIdentifier(callExpr.expression)
   if (rootName === undefined) return undefined
   const kind = DESCRIBE_CALL_NAMES.has(rootName)
     ? ("describe" as const)
@@ -64,7 +129,7 @@ const getBlockKindFromStatement = (
       ? ("test" as const)
       : undefined
   if (kind === undefined) return undefined
-  const fnArg = [...stmt.expression.arguments]
+  const fnArg = [...callExpr.arguments]
     .reverse()
     .find((a) => ts.isArrowFunction(a) || ts.isFunctionExpression(a))
   if (
@@ -74,23 +139,28 @@ const getBlockKindFromStatement = (
   ) {
     return undefined
   }
-  return { kind, callbackBody: fnArg.body }
+  return { kind, callExpr, callbackBody: fnArg.body }
 }
 
 const collectBlockDigestsFromStatements = (
   sf: ts.SourceFile,
   statements: ReadonlyArray<ts.Statement>,
   digests: Set<ContentSha256>,
+  unsafeDigests: Set<ContentSha256>,
 ): void => {
-  const addRawStatementDigest = (stmt: ts.Statement): void => {
+  const addRawStatementDigest = (stmt: ts.Statement, forceUnsafe: boolean): void => {
     const text = stmt.getText(sf).trim()
     if (text.length > 0) {
-      digests.add(computeContentSha256(text))
+      const digest = computeContentSha256(text)
+      digests.add(digest)
+      if (forceUnsafe || hasUnsafeWitnessConstruct(stmt)) {
+        unsafeDigests.add(digest)
+      }
     }
   }
   for (const stmt of statements) {
     match(getBlockKindFromStatement(stmt))
-      .with({ kind: "describe" }, ({ callbackBody }) => {
+      .with({ kind: "describe" }, ({ callExpr, callbackBody }) => {
         const nonChildStatements: Array<string> = []
         const childBlocks: Array<ts.Statement> = []
         for (const inner of callbackBody.statements) {
@@ -100,23 +170,46 @@ const collectBlockDigestsFromStatements = (
             nonChildStatements.push(inner.getText(sf).trim())
           }
         }
-        const callExpr = (stmt as ts.ExpressionStatement).expression as ts.CallExpression
         const headerText = callExpr.arguments
           .filter((a) => !ts.isArrowFunction(a) && !ts.isFunctionExpression(a))
           .map((a) => a.getText(sf).trim())
           .join(",")
-        digests.add(
-          computeContentSha256(`describe:${headerText}\0${nonChildStatements.join("\n")}`),
+        const describeDigest = computeContentSha256(
+          `describe:${headerText}\0${nonChildStatements.join("\n")}`,
         )
-        collectBlockDigestsFromStatements(sf, childBlocks, digests)
+        digests.add(describeDigest)
+        if (nonChildStatements.length > 0 || hasUnsafeWitnessConstruct(callExpr.expression)) {
+          unsafeDigests.add(describeDigest)
+        }
+        collectBlockDigestsFromStatements(sf, childBlocks, digests, unsafeDigests)
       })
-      .with({ kind: "test" }, () => {
-        addRawStatementDigest(stmt)
+      .with({ kind: "test" }, ({ callExpr }) => {
+        addRawStatementDigest(stmt, hasUnsafeWitnessConstruct(callExpr))
       })
       .with(undefined, () => {
-        addRawStatementDigest(stmt)
+        addRawStatementDigest(stmt, true)
       })
       .exhaustive()
+  }
+}
+
+export interface WitnessTestBlockAnalysis {
+  readonly digests: ReadonlyArray<ContentSha256>
+  readonly unsafeBlockDigests: ReadonlySet<ContentSha256>
+}
+
+/**
+ * Analyzes `testSource` into AST statements / `describe` / `it` / `test` block digests
+ * alongside the subset of digests representing `.only`/`.skip`/mock/hook/setup blocks (`SPEC-0037 REQ-3.1`).
+ */
+export const analyzeWitnessTestBlocks = (testSource: string): WitnessTestBlockAnalysis => {
+  const sf = ts.createSourceFile("witness.test.ts", testSource, ts.ScriptTarget.Latest, true)
+  const digests = new Set<ContentSha256>()
+  const unsafeBlockDigests = new Set<ContentSha256>()
+  collectBlockDigestsFromStatements(sf, sf.statements, digests, unsafeBlockDigests)
+  return {
+    digests: [...digests].sort(compareCodeUnits),
+    unsafeBlockDigests,
   }
 }
 
@@ -142,14 +235,33 @@ export const computeSourceOnlyClosureDigest = (input: {
  * Parses `testSource` into AST statements / `describe` / `it` / `test` blocks and returns
  * deterministically sorted `ContentSha256` block digests (`SPEC-0037 REQ-3.1`).
  */
-export const extractWitnessTestBlockDigests = (
-  testSource: string,
-): ReadonlyArray<ContentSha256> => {
-  const sf = ts.createSourceFile("witness.test.ts", testSource, ts.ScriptTarget.Latest, true)
-  const digests = new Set<ContentSha256>()
-  collectBlockDigestsFromStatements(sf, sf.statements, digests)
-  return [...digests].sort(compareCodeUnits)
-}
+export const extractWitnessTestBlockDigests = (testSource: string): ReadonlyArray<ContentSha256> =>
+  analyzeWitnessTestBlocks(testSource).digests
+
+/**
+ * Computes a deterministic SHA-256 closure digest over all transitive helper, workspace,
+ * package-support, and test-support dependencies reachable from `witnessTestFile` while
+ * excluding `witnessTestFile`'s own source bytes (`SPEC-0037 REQ-3.1`).
+ */
+export const computeWitnessSupportClosureDigest = (input: {
+  readonly repoRoot: string
+  readonly witnessTestFile: AstSourceFilePath
+  readonly digests: MutationContextDigests
+  readonly hostIo: SyncHostIo
+}): ContentSha256 | undefined =>
+  match(
+    computeFileMutationClosureDigest({
+      repoRoot: input.repoRoot,
+      relFile: input.witnessTestFile,
+      allReachingTests: [],
+      digests: input.digests,
+      hostIo: input.hostIo,
+      excludeEntryRelFileDigest: true,
+    }),
+  )
+    .with({ _tag: "Ok" }, ({ closureDigest }) => closureDigest)
+    .with({ _tag: "Disabled" }, () => undefined)
+    .exhaustive()
 
 export const isAppendOnlyWitnessPreserved = isAppendOnlyWitnessDigestsPreserved
 
@@ -203,9 +315,11 @@ export const prepareTwoTierLookupInputs = (input: {
 }): {
   readonly witnessClosureDigests: Record<AstSourceFilePath, ContentSha256>
   readonly sourceClosureDigests: Record<AstSourceFilePath, ContentSha256>
+  readonly witnessSupportDigests: Record<AstSourceFilePath, ContentSha256>
   readonly witnessTestAstDigests: Record<AstSourceFilePath, ReadonlyArray<ContentSha256>>
 } => {
   const distinctWitnessFiles = new Set<AstSourceFilePath>()
+  const twoTierEntriesByWitness = new Map<AstSourceFilePath, Array<readonly ContentSha256[]>>()
   let needsSourceClosure = false
   for (const candidateKey of input.candidateKeys) {
     const entry = Object.hasOwn(input.loadedCacheStore.entries, candidateKey)
@@ -215,10 +329,14 @@ export const prepareTwoTierLookupInputs = (input: {
       distinctWitnessFiles.add(entry.witnessTestFile)
       if (entry.sourceClosureSha256 !== undefined && entry.witnessTestAstDigests !== undefined) {
         needsSourceClosure = true
+        const list = twoTierEntriesByWitness.get(entry.witnessTestFile) ?? []
+        list.push(entry.witnessTestAstDigests)
+        twoTierEntriesByWitness.set(entry.witnessTestFile, list)
       }
     }
   }
   const witnessClosureDigests: Record<AstSourceFilePath, ContentSha256> = {}
+  const witnessSupportDigests: Record<AstSourceFilePath, ContentSha256> = {}
   const witnessTestAstDigests: Record<AstSourceFilePath, ReadonlyArray<ContentSha256>> = {}
   for (const witnessTestFile of distinctWitnessFiles) {
     const digest = resolveMemoizedWitnessClosureDigest({
@@ -231,12 +349,29 @@ export const prepareTwoTierLookupInputs = (input: {
     })
     if (digest !== undefined) witnessClosureDigests[witnessTestFile] = digest
     if (needsSourceClosure) {
-      const astDigests = computeWitnessTestAstDigestsForPath(
-        input.repoRoot,
-        witnessTestFile,
-        input.hostIo,
+      const content = unwrapOption(
+        readSafeText(join(input.repoRoot, witnessTestFile), input.hostIo),
       )
-      if (astDigests !== undefined) witnessTestAstDigests[witnessTestFile] = astDigests
+      if (content !== undefined) {
+        const analysis = analyzeWitnessTestBlocks(content)
+        const recordedLists = twoTierEntriesByWitness.get(witnessTestFile) ?? []
+        const hasUnsafeNewBlock = recordedLists.some((recorded) => {
+          const recordedSet = new Set(recorded)
+          return analysis.digests.some(
+            (d) => !recordedSet.has(d) && analysis.unsafeBlockDigests.has(d),
+          )
+        })
+        if (!hasUnsafeNewBlock) {
+          witnessTestAstDigests[witnessTestFile] = analysis.digests
+        }
+      }
+      const supportDigest = computeWitnessSupportClosureDigest({
+        repoRoot: input.repoRoot,
+        witnessTestFile,
+        digests: input.digests,
+        hostIo: input.hostIo,
+      })
+      if (supportDigest !== undefined) witnessSupportDigests[witnessTestFile] = supportDigest
     }
   }
   const sourceClosureDigests: Record<AstSourceFilePath, ContentSha256> = {}
@@ -250,7 +385,12 @@ export const prepareTwoTierLookupInputs = (input: {
     })
     if (srcDigest !== undefined) sourceClosureDigests[input.relFile] = srcDigest
   }
-  return { witnessClosureDigests, sourceClosureDigests, witnessTestAstDigests }
+  return {
+    witnessClosureDigests,
+    sourceClosureDigests,
+    witnessSupportDigests,
+    witnessTestAstDigests,
+  }
 }
 
 /** Reads target file (or overlay), discovers/filters mutants, and compiles + syntax-verifies the mutant schema module. */

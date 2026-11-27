@@ -1,7 +1,7 @@
 ---
 id: harness:SPEC-0037
 title: Review-Loop Resilience, LSP Watchdog, Mutation Efficiency, Ollama Warm-Up (5000ms Budget), Guard Fast-Path, and Telemetry Accuracy
-status: draft
+status: accepted
 archetype: framework
 date: 2026-11-27
 owners:
@@ -16,29 +16,69 @@ informed_by:
   - harness:ADR-0025
   - harness:ADR-0027
   - harness:ADR-0028
+  - harness:ADR-0029
 enforced_by:
+  - libs/harness/contract/src/index.ts
+  - libs/harness/contract/src/mutation-cache.ts
+  - libs/harness/contract/src/review-resilience.ts
   - libs/harness/contract/src/review-routing.ts
   - libs/harness/contract/src/workflow-timeouts.ts
-  - libs/harness/contract/src/index.ts
   - libs/harness/decision/src/guard-decision.ts
+  - libs/harness/decision/src/index.ts
   - libs/harness/decision/src/review-router-decision.ts
   - libs/harness/decision/src/triage-decision.ts
+  - libs/harness/gates/src/index.ts
+  - libs/harness/gates/src/mutation-check.ts
+  - libs/harness/gates/src/mutation-subprocess-helpers.ts
+  - libs/harness/gates/src/mutation/mutation-batch-stream.ts
+  - libs/harness/gates/src/mutation/mutation-cache.ts
+  - libs/harness/gates/src/mutation/mutation-closure.ts
+  - libs/harness/gates/src/mutation/mutation-init-classifier.ts
+  - libs/harness/gates/src/mutation/mutation-outcomes.ts
+  - libs/harness/gates/src/mutation/mutation-package-batch.ts
+  - libs/harness/gates/src/mutation/mutation-suite-helpers.ts
+  - libs/harness/gates/src/mutation/mutation-two-tier-cache.ts
+  - libs/harness/gates/src/plugins/gc/gc-adapter-skill-parity.ts
+  - libs/harness/gates/src/plugins/gc/gc-doc-truth.plugin.ts
   - libs/harness/gates/src/policy.ts
   - libs/harness/gates/src/policy-command-rules.ts
-  - libs/harness/gates/src/mutation-check.ts
-  - libs/harness/gates/src/mutation/mutation-suite-helpers.ts
-  - libs/harness/gates/src/mutation/mutation-package-batch.ts
+  - libs/harness/gates/src/policy-fastpath-decide.ts
+  - libs/harness/gates/src/policy-fastpath-rules.ts
+  - libs/harness/gates/src/policy-fastpath-var-rules.ts
+  - libs/harness/gates/src/policy-harness-state.ts
   - libs/harness/gates/src/telemetry.ts
+  - libs/harness/gates/src/telemetry-io.ts
+  - libs/harness/gates/src/telemetry-recommendations.ts
   - libs/harness/infra/src/embedding-client-live.ts
+  - libs/harness/infra/src/index.ts
   - libs/harness/infra/src/local-decision-model-live.ts
+  - libs/harness/infra/src/ollama-readiness-helpers.ts
+  - libs/harness/infra/src/ollama-readiness-live.ts
+  - apps/harness-cli/src/commands/daemon-and-omnigraph.service.ts
+  - apps/harness-cli/src/commands/declarative-cli.ts
+  - apps/harness-cli/src/commands/guard-and-route.command.ts
+  - apps/harness-cli/src/commands/hook-runtime-loader.ts
+  - apps/harness-cli/src/commands/hook-runtime-lock.ts
+  - apps/harness-cli/src/commands/mutate-and-bench.command.ts
+  - apps/harness-cli/src/commands/mutate-flags.ts
   - apps/harness-cli/src/commands/ollama-readiness.ts
   - apps/harness-cli/src/commands/verify-and-done.command.ts
-  - apps/harness-cli/src/commands/mutate-and-bench.command.ts
+  - apps/harness-cli/src/commands/verify-preflight.ts
+  - apps/harness-mcp/src/managed-runtime.ts
+  - apps/harness-mcp/src/server.ts
+  - apps/harness-mcp/src/stdio-entrypoint.ts
+  - apps/harness-mcp/src/tools/graph-navigation-schemas.ts
+  - apps/harness-mcp/src/tools/graph-navigation.tools.ts
   - apps/harness-mcp/src/tools/lsp-and-telemetry.tools.ts
+  - apps/harness-mcp/src/tools/lsp-watchdog.ts
+  - apps/harness-mcp/src/tools/mcp-helpers.ts
+  - apps/harness-mcp/src/tools/mcp-single-flight.ts
   - apps/harness-mcp/src/tools/ontology-and-gq.tools.ts
   - apps/harness-mcp/src/tools/review-route-helpers.ts
+  - apps/harness-mcp/src/tools/tool-registry.ts
   - adapters/antigravity/plugins/effect-harness/skills/resolving-effect-review-feedback/SKILL.md
   - adapters/claude-code/skills/resolving-effect-review-feedback/SKILL.md
+  - tools/node-ts-resolver.mjs
 spans:
   - LspDiagnostics.run
   - OllamaReadiness.ensureWarm
@@ -166,3 +206,178 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 - All requirement rows (`REQ-1.1`..`REQ-6.4`) pass their declared `Verification` methods (`UnitTest`, `GraphCheck`, `AstGate`) when promoted to `status: proposed` / `status: accepted`.
 - Affected 5-tier hexagonal Nx packages respect `HarnessTierTopology.decide` and `SelfDogfooding.decide`, and both Antigravity and Claude Code `resolving-effect-review-feedback` skills pass `adapter-skill-parity`.
 - Frontmatter `status` is updated to `accepted` upon implementation and verified end-to-end by `pnpm harness gc --strict`, `pnpm harness ontology check --strict`, `pnpm harness mutate --strict`, `CI=true pnpm harness verify`, and `CI=true pnpm harness done --cli`.
+
+## Verified Plan Topology (`harness plan-check`)
+
+```mermaid
+flowchart TD
+  5["HarnessHookRuntime.load #91;app#93;"]
+  14["HarnessVerify.run #91;app#93;"]
+  38["LspDiagnostics.run #91;app#93;"]
+  40["McpSingleFlight.run #91;app#93;"]
+  81["GuardDecision.decide #91;domain#93;"]
+  124["MutationCheck.run #91;domain#93;"]
+  126["MutationCheck.decide #91;domain#93;"]
+  137["PolicyFastPath.decide #91;domain#93;"]
+  149["TelemetryReport.decide #91;domain#93;"]
+  185["OllamaReadiness.ensureWarm #91;infra#93;"]
+  254["Service: EmbeddingClient"]
+  339["Error: LspDiagnosticsTimeoutError"]
+  340["Error: OllamaWarmupError"]
+  4031["Spec:harness:SPEC-0037 #40;Review-Loop Resilience, LSP Watchdog, Mutation Efficiency, Ollama Warm-Up #40;5000ms Budget#41;, Guard Fast-Path, and Telemetry Accuracy#41;"]
+  4032["Trace: TraceabilityTuple:specifies:harness:SPEC-0037-#gt;EffectFn:apps/harness-mcp/src/tools/lsp-watchdog.ts#35;runLspDiagnosticsWithWatchdog"]
+  4033["Trace: TraceabilityTuple:specifies:harness:SPEC-0037-#gt;EffectFn:libs/harness/infra/src/ollama-readiness-live.ts#35;ensureOllamaWarm"]
+  4034["Trace: TraceabilityTuple:specifies:harness:SPEC-0037-#gt;EffectFn:libs/harness/decision/src/guard-decision.ts#35;decideGuardVerdict"]
+  4035["Trace: TraceabilityTuple:specifies:harness:SPEC-0037-#gt;EffectFn:apps/harness-mcp/src/tools/mcp-single-flight.ts#35;runMcpSingleFlight"]
+  4036["Trace: TraceabilityTuple:specifies:harness:SPEC-0037-#gt;EffectFn:libs/harness/gates/src/mutation-check.ts#35;runMutationCheck"]
+  4037["Trace: TraceabilityTuple:specifies:harness:SPEC-0037-#gt;EffectFn:libs/harness/gates/src/mutation/mutation-outcomes.ts#35;decideMutationReport"]
+  4038["Trace: TraceabilityTuple:specifies:harness:SPEC-0037-#gt;EffectFn:apps/harness-cli/src/commands/verify-and-done.command.ts#35;handleVerify"]
+  4039["Trace: TraceabilityTuple:specifies:harness:SPEC-0037-#gt;EffectFn:apps/harness-cli/src/commands/hook-runtime-loader.ts#35;loadHookRuntime"]
+  4040["Trace: TraceabilityTuple:specifies:harness:SPEC-0037-#gt;EffectFn:libs/harness/gates/src/policy-fastpath-decide.ts#35;decidePolicyFastPath"]
+  4041["Trace: TraceabilityTuple:specifies:harness:SPEC-0037-#gt;EffectFn:libs/harness/gates/src/telemetry.ts#35;decideTelemetryReport"]
+  4042["Trace: TraceabilityTuple:specifies:harness:SPEC-0037-#gt;ServiceTag:@harness/service/EmbeddingClient"]
+  4043["Trace: TraceabilityTuple:specifies:harness:SPEC-0037-#gt;TaggedError:LspDiagnosticsTimeoutError"]
+  4044["Trace: TraceabilityTuple:specifies:harness:SPEC-0037-#gt;TaggedError:OllamaWarmupError"]
+  4045["Req:harness:SPEC-0037#35;REQ-1.1"]
+  4046["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-1.1"]
+  4047["Req:harness:SPEC-0037#35;REQ-1.2"]
+  4048["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-1.2"]
+  4049["Req:harness:SPEC-0037#35;REQ-1.3"]
+  4050["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-1.3"]
+  4051["Req:harness:SPEC-0037#35;REQ-2.1"]
+  4052["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-2.1"]
+  4053["Req:harness:SPEC-0037#35;REQ-2.2"]
+  4054["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-2.2"]
+  4055["Req:harness:SPEC-0037#35;REQ-2.3"]
+  4056["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-2.3"]
+  4057["Req:harness:SPEC-0037#35;REQ-2.4"]
+  4058["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-2.4"]
+  4059["Req:harness:SPEC-0037#35;REQ-2.5"]
+  4060["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-2.5"]
+  4061["Req:harness:SPEC-0037#35;REQ-3.1"]
+  4062["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-3.1"]
+  4063["Req:harness:SPEC-0037#35;REQ-3.2"]
+  4064["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-3.2"]
+  4065["Req:harness:SPEC-0037#35;REQ-3.3"]
+  4066["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-3.3"]
+  4067["Req:harness:SPEC-0037#35;REQ-3.4"]
+  4068["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-3.4"]
+  4069["Req:harness:SPEC-0037#35;REQ-4.1"]
+  4070["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-4.1"]
+  4071["Req:harness:SPEC-0037#35;REQ-4.2"]
+  4072["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-4.2"]
+  4073["Req:harness:SPEC-0037#35;REQ-4.3"]
+  4074["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-4.3"]
+  4075["Req:harness:SPEC-0037#35;REQ-4.4"]
+  4076["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-4.4"]
+  4077["Req:harness:SPEC-0037#35;REQ-5.1"]
+  4078["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-5.1"]
+  4079["Req:harness:SPEC-0037#35;REQ-5.2"]
+  4080["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-5.2"]
+  4081["Req:harness:SPEC-0037#35;REQ-5.3"]
+  4082["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-5.3"]
+  4083["Req:harness:SPEC-0037#35;REQ-5.4"]
+  4084["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-5.4"]
+  4085["Req:harness:SPEC-0037#35;REQ-6.1"]
+  4086["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-6.1"]
+  4087["Req:harness:SPEC-0037#35;REQ-6.2"]
+  4088["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-6.2"]
+  4089["Req:harness:SPEC-0037#35;REQ-6.3"]
+  4090["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-6.3"]
+  4091["Req:harness:SPEC-0037#35;REQ-6.4"]
+  4092["Trace: TraceabilityTuple:req:harness:SPEC-0037#35;REQ-6.4"]
+  4032 -->|"PlaysRole:specifying-ears"| 4031
+  4032 -->|"PlaysRole:realizing-symbol"| 38
+  4033 -->|"PlaysRole:specifying-ears"| 4031
+  4033 -->|"PlaysRole:realizing-symbol"| 185
+  4034 -->|"PlaysRole:specifying-ears"| 4031
+  4034 -->|"PlaysRole:realizing-symbol"| 81
+  4035 -->|"PlaysRole:specifying-ears"| 4031
+  4035 -->|"PlaysRole:realizing-symbol"| 40
+  4036 -->|"PlaysRole:specifying-ears"| 4031
+  4036 -->|"PlaysRole:realizing-symbol"| 124
+  4037 -->|"PlaysRole:specifying-ears"| 4031
+  4037 -->|"PlaysRole:realizing-symbol"| 126
+  4038 -->|"PlaysRole:specifying-ears"| 4031
+  4038 -->|"PlaysRole:realizing-symbol"| 14
+  4039 -->|"PlaysRole:specifying-ears"| 4031
+  4039 -->|"PlaysRole:realizing-symbol"| 5
+  4040 -->|"PlaysRole:specifying-ears"| 4031
+  4040 -->|"PlaysRole:realizing-symbol"| 137
+  4041 -->|"PlaysRole:specifying-ears"| 4031
+  4041 -->|"PlaysRole:realizing-symbol"| 149
+  4042 -->|"PlaysRole:specifying-ears"| 4031
+  4042 -->|"PlaysRole:realizing-symbol"| 254
+  4043 -->|"PlaysRole:specifying-ears"| 4031
+  4043 -->|"PlaysRole:realizing-symbol"| 339
+  4044 -->|"PlaysRole:specifying-ears"| 4031
+  4044 -->|"PlaysRole:realizing-symbol"| 340
+  4046 -->|"PlaysRole:specifying-ears"| 4031
+  4046 -->|"PlaysRole:specified-requirement"| 4045
+  4046 -->|"PlaysRole:specified-target"| 38
+  4048 -->|"PlaysRole:specifying-ears"| 4031
+  4048 -->|"PlaysRole:specified-requirement"| 4047
+  4048 -->|"PlaysRole:specified-target"| 339
+  4050 -->|"PlaysRole:specifying-ears"| 4031
+  4050 -->|"PlaysRole:specified-requirement"| 4049
+  4050 -->|"PlaysRole:specified-target"| 38
+  4052 -->|"PlaysRole:specifying-ears"| 4031
+  4052 -->|"PlaysRole:specified-requirement"| 4051
+  4052 -->|"PlaysRole:specified-target"| 185
+  4054 -->|"PlaysRole:specifying-ears"| 4031
+  4054 -->|"PlaysRole:specified-requirement"| 4053
+  4054 -->|"PlaysRole:specified-target"| 254
+  4056 -->|"PlaysRole:specifying-ears"| 4031
+  4056 -->|"PlaysRole:specified-requirement"| 4055
+  4056 -->|"PlaysRole:specified-target"| 340
+  4058 -->|"PlaysRole:specifying-ears"| 4031
+  4058 -->|"PlaysRole:specified-requirement"| 4057
+  4058 -->|"PlaysRole:specified-target"| 81
+  4060 -->|"PlaysRole:specifying-ears"| 4031
+  4060 -->|"PlaysRole:specified-requirement"| 4059
+  4060 -->|"PlaysRole:specified-target"| 40
+  4062 -->|"PlaysRole:specifying-ears"| 4031
+  4062 -->|"PlaysRole:specified-requirement"| 4061
+  4062 -->|"PlaysRole:specified-target"| 124
+  4064 -->|"PlaysRole:specifying-ears"| 4031
+  4064 -->|"PlaysRole:specified-requirement"| 4063
+  4064 -->|"PlaysRole:specified-target"| 126
+  4066 -->|"PlaysRole:specifying-ears"| 4031
+  4066 -->|"PlaysRole:specified-requirement"| 4065
+  4066 -->|"PlaysRole:specified-target"| 124
+  4068 -->|"PlaysRole:specifying-ears"| 4031
+  4068 -->|"PlaysRole:specified-requirement"| 4067
+  4068 -->|"PlaysRole:specified-target"| 124
+  4070 -->|"PlaysRole:specifying-ears"| 4031
+  4070 -->|"PlaysRole:specified-requirement"| 4069
+  4070 -->|"PlaysRole:specified-target"| 14
+  4072 -->|"PlaysRole:specifying-ears"| 4031
+  4072 -->|"PlaysRole:specified-requirement"| 4071
+  4072 -->|"PlaysRole:specified-target"| 14
+  4074 -->|"PlaysRole:specifying-ears"| 4031
+  4074 -->|"PlaysRole:specified-requirement"| 4073
+  4074 -->|"PlaysRole:specified-target"| 5
+  4076 -->|"PlaysRole:specifying-ears"| 4031
+  4076 -->|"PlaysRole:specified-requirement"| 4075
+  4076 -->|"PlaysRole:specified-target"| 137
+  4078 -->|"PlaysRole:specifying-ears"| 4031
+  4078 -->|"PlaysRole:specified-requirement"| 4077
+  4078 -->|"PlaysRole:specified-target"| 149
+  4080 -->|"PlaysRole:specifying-ears"| 4031
+  4080 -->|"PlaysRole:specified-requirement"| 4079
+  4080 -->|"PlaysRole:specified-target"| 149
+  4082 -->|"PlaysRole:specifying-ears"| 4031
+  4082 -->|"PlaysRole:specified-requirement"| 4081
+  4082 -->|"PlaysRole:specified-target"| 149
+  4084 -->|"PlaysRole:specifying-ears"| 4031
+  4084 -->|"PlaysRole:specified-requirement"| 4083
+  4084 -->|"PlaysRole:specified-target"| 149
+  4086 -->|"PlaysRole:specifying-ears"| 4031
+  4086 -->|"PlaysRole:specified-requirement"| 4085
+  4088 -->|"PlaysRole:specifying-ears"| 4031
+  4088 -->|"PlaysRole:specified-requirement"| 4087
+  4090 -->|"PlaysRole:specifying-ears"| 4031
+  4090 -->|"PlaysRole:specified-requirement"| 4089
+  4092 -->|"PlaysRole:specifying-ears"| 4031
+  4092 -->|"PlaysRole:specified-requirement"| 4091
+```

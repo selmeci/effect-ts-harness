@@ -1,25 +1,15 @@
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   CallToolRequestSchema,
   ErrorCode,
   ListToolsRequestSchema,
   McpError,
 } from "@modelcontextprotocol/sdk/types.js"
-import { NodeServices } from "@effect/platform-node"
-import { Cause, Effect, Exit, Logger, ManagedRuntime, Schema } from "effect"
-import { isPureInterruptCause } from "@harness/contract"
-import {
-  type HarnessDaemonServerHandle,
-  startHarnessDaemonServer,
-} from "./daemon/unix-socket-daemon.js"
-import {
-  executeManagedMcpTool,
-  launchBackgroundOllamaWarmup,
-  makeMcpManagedRuntime,
-} from "./managed-runtime.js"
+import { Effect, Logger, Schema } from "effect"
+import { executeManagedMcpTool, makeMcpManagedRuntime } from "./managed-runtime.js"
+import { runMcpStdioMain } from "./stdio-entrypoint.js"
 import {
   attachServerCloseRuntimeDisposal,
   formatMcpToolExit,
@@ -27,7 +17,6 @@ import {
   type ServerOptions,
   toMcpToolInputJsonSchema,
 } from "./tools/mcp-helpers.js"
-import { resolveDaemonStartupRepoRoot } from "./tools/mcp-repo-root.js"
 import {
   buildLiveMcpToolDescriptors,
   dispatchMcpTool,
@@ -137,7 +126,7 @@ export const createServer = (options?: ServerOptions): McpServer => {
     })),
   }))
 
-  server.server.setRequestHandler(CallToolRequestSchema, (request) => {
+  server.server.setRequestHandler(CallToolRequestSchema, (request, extra) => {
     const toolName = request.params.name
     const descriptor = descriptorsByName.get(toolName)
     if (descriptor === undefined) {
@@ -151,6 +140,7 @@ export const createServer = (options?: ServerOptions): McpServer => {
             executeManagedMcpTool({ toolName, args: decodedArgs }, options),
           ),
         ),
+        { signal: extra.signal },
       )
       .then((exit) => formatMcpToolExit(toolName, exit))
   })
@@ -161,87 +151,5 @@ export const createServer = (options?: ServerOptions): McpServer => {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  const server = createServer()
-  const transport = new StdioServerTransport()
-  const cliRuntime = ManagedRuntime.make(NodeServices.layer)
-  const startupRepoRoot = resolveDaemonStartupRepoRoot(process.cwd())
-  let daemonHandle: HarnessDaemonServerHandle | undefined = undefined
-  let shuttingDown = false
-  launchBackgroundOllamaWarmup(cliRuntime, startupRepoRoot)
-  const daemonStartupPromise: Promise<HarnessDaemonServerHandle | undefined> =
-    process.env.HARNESS_DAEMON_SOCK !== "0"
-      ? startHarnessDaemonServer(startupRepoRoot, {
-          workflowEngine: { mode: "auto" },
-        })
-          .then((handle) => {
-            daemonHandle = handle
-            return handle
-          })
-          .catch((err: unknown) => {
-            process.stderr.write(
-              `[harness-mcp] Daemon server warning: ${err instanceof Error ? err.message : String(err)}\n`,
-            )
-            return undefined
-          })
-      : Promise.resolve(undefined)
-  const shutdown = (initialExitCode = 0) => {
-    if (shuttingDown) {
-      return
-    }
-    shuttingDown = true
-    let exitCode = initialExitCode
-    void daemonStartupPromise
-      .then((startedHandle) => {
-        const handleToClose = daemonHandle ?? startedHandle
-        if (handleToClose === undefined) {
-          return Promise.resolve()
-        }
-        return handleToClose.close().catch((err: unknown) => {
-          exitCode = 1
-          process.stderr.write(
-            `[harness-mcp] Daemon close error: ${err instanceof Error ? err.message : String(err)}\n`,
-          )
-        })
-      })
-      .then(() =>
-        server.close().catch((err: unknown) => {
-          exitCode = 1
-          process.stderr.write(
-            `[harness-mcp] Server close error: ${err instanceof Error ? err.message : String(err)}\n`,
-          )
-        }),
-      )
-      .then(() =>
-        cliRuntime.dispose().catch((err: unknown) => {
-          exitCode = 1
-          process.stderr.write(
-            `[harness-mcp] CLI runtime dispose error: ${err instanceof Error ? err.message : String(err)}\n`,
-          )
-        }),
-      )
-      .finally(() => process.exit(exitCode))
-  }
-  process.once("SIGINT", () => shutdown(0))
-  process.once("SIGTERM", () => shutdown(0))
-  process.stdin.once("end", () => shutdown(0))
-  process.stdin.once("close", () => shutdown(0))
-  void cliRuntime.runPromiseExit(Effect.tryPromise(() => server.connect(transport))).then((exit) =>
-    Exit.match(exit, {
-      onFailure: (cause) => {
-        if (isPureInterruptCause(cause)) return
-        const squashed = Cause.squash(cause)
-        process.stderr.write(
-          `[harness-mcp] Fatal error: ${squashed instanceof Error ? squashed.message : String(squashed)}\n`,
-        )
-        shutdown(1)
-      },
-      onSuccess: () => {
-        const previousTransportOnClose = transport.onclose
-        transport.onclose = () => {
-          previousTransportOnClose?.()
-          shutdown(0)
-        }
-      },
-    }),
-  )
+  runMcpStdioMain(createServer())
 }

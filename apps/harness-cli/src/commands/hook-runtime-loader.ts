@@ -1,9 +1,10 @@
-import { randomBytes } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import { ts } from "@harness/graph"
 import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
+import { withHookRuntimeBuildLock } from "./hook-runtime-lock.js"
 import { isInsideRoot } from "./repo-path.js"
 
 const SNAPSHOT_PACKAGE_DIRS: ReadonlyArray<string> = [
@@ -24,9 +25,10 @@ const REQUIRED_ENTRYPOINT_RELS: ReadonlyArray<string> = [
 
 const HookRuntimeManifestSchema = Schema.Struct({
   version: Schema.Literal(1),
-  builtAt: Schema.String,
-  entryRel: Schema.String,
-  packageMap: Schema.Record(Schema.String, Schema.String),
+  builtAt: Schema.NonEmptyString,
+  entryRel: Schema.NonEmptyString,
+  packageMap: Schema.Record(Schema.NonEmptyString, Schema.NonEmptyString),
+  fileHashes: Schema.Record(Schema.NonEmptyString, Schema.NonEmptyString),
 })
 export type HookRuntimeManifest = typeof HookRuntimeManifestSchema.Type
 
@@ -213,14 +215,20 @@ const TRANSPILE_COMPILER_OPTIONS: ts.CompilerOptions = {
   inlineSourceMap: false,
 }
 
+interface TranspileStageOutput {
+  readonly emittedJsRels: Set<string>
+  readonly fileHashes: Record<string, string>
+}
+
 const transpileStageFiles = (
   repoReal: string,
   stagingDir: string,
   tsRelFiles: ReadonlyArray<string>,
-): Result.Result<Set<string>, string> =>
+): Result.Result<TranspileStageOutput, string> =>
   Result.try({
     try: () => {
       const emittedJsRels = new Set<string>()
+      const fileHashes: Record<string, string> = {}
       for (const relTsPath of tsRelFiles) {
         const absTsPath = join(repoReal, relTsPath)
         if (!isNonSymlinkContained(repoReal, absTsPath)) continue
@@ -242,13 +250,12 @@ const transpileStageFiles = (
         nodeSyncHostIo.mkdirRecursiveSync(dirname(outAbsPath))
         nodeSyncHostIo.writeTextSync(outAbsPath, result.outputText)
         emittedJsRels.add(relJsPath)
+        fileHashes[relJsPath] = createHash("sha256").update(result.outputText, "utf8").digest("hex")
       }
-      return { ok: true as const, emittedJsRels }
+      return { ok: true as const, value: { emittedJsRels, fileHashes } }
     },
     catch: toErrMessage,
-  }).pipe(
-    Result.flatMap((res) => (res.ok ? Result.succeed(res.emittedJsRels) : Result.fail(res.reason))),
-  )
+  }).pipe(Result.flatMap((res) => (res.ok ? Result.succeed(res.value) : Result.fail(res.reason))))
 
 const swapStagedDirectoryAtomic = (
   runtimeRootReal: string,
@@ -348,7 +355,7 @@ export const buildHookRuntimeSnapshot = (repoRoot: string): BuildHookRuntimeSnap
           }
 
           const buildRes = transpileStageFiles(repoReal, stagingDir, tsRelFiles).pipe(
-            Result.flatMap((emittedJsRels) =>
+            Result.flatMap(({ emittedJsRels, fileHashes }) =>
               Result.try({
                 try: () => {
                   nodeSyncHostIo.writeTextSync(
@@ -361,6 +368,7 @@ export const buildHookRuntimeSnapshot = (repoRoot: string): BuildHookRuntimeSnap
                     builtAt: new Date().toISOString(),
                     entryRel: "apps/harness-cli/src/hook-entry.js",
                     packageMap,
+                    fileHashes,
                   }
                   const stagingManifestPath = join(stagingDir, "manifest.json")
                   nodeSyncHostIo.writeTextSync(
@@ -382,7 +390,9 @@ export const buildHookRuntimeSnapshot = (repoRoot: string): BuildHookRuntimeSnap
               }).pipe(Result.flatMap((r) => (r.ok ? Result.succeed(r) : Result.fail(r.reason)))),
             ),
             Result.flatMap((stageMeta) =>
-              swapStagedDirectoryAtomic(runtimeRootReal, stagingDir).pipe(
+              withHookRuntimeBuildLock(runtimeRootReal, () =>
+                swapStagedDirectoryAtomic(runtimeRootReal, stagingDir),
+              ).pipe(
                 Result.map((currentDir) => ({
                   _tag: "Built" as const,
                   snapshotDir: currentDir,
@@ -447,7 +457,14 @@ const loadHookRuntimeSync = (
     return { _tag: "SourceFallback" as const, reason: "snapshot-absent-or-unsafe" }
   }
 
-  const currentReal = nodeSyncHostIo.realpathSync(currentDir)
+  const currentRealRes = Result.try(() => nodeSyncHostIo.realpathSync(currentDir))
+  const currentReal = match(currentRealRes)
+    .with({ _tag: "Success" }, ({ success }) => success)
+    .with({ _tag: "Failure" }, () => undefined)
+    .exhaustive()
+  if (currentReal === undefined || !isInsideRoot(repoReal, currentReal)) {
+    return { _tag: "SourceFallback" as const, reason: "snapshot-absent-or-unsafe" }
+  }
   const rawManifestRes = Result.try(() => nodeSyncHostIo.readTextSync(manifestPath))
   const rawManifest = match(rawManifestRes)
     .with({ _tag: "Success" }, ({ success }) => success)
@@ -463,17 +480,42 @@ const loadHookRuntimeSync = (
       reason: "manifest-corrupt",
     }))
     .with({ _tag: "Some" }, ({ value: manifest }) => {
-      if (!isSafeRelativeSnapshotTarget(currentReal, manifest.entryRel)) {
+      const verifyTargetHashed = (relTarget: string): boolean => {
+        if (!isSafeRelativeSnapshotTarget(currentReal, relTarget)) return false
+        const expectedHash = Object.hasOwn(manifest.fileHashes, relTarget)
+          ? manifest.fileHashes[relTarget]
+          : undefined
+        return expectedHash !== undefined
+      }
+      if (!verifyTargetHashed(manifest.entryRel)) {
         return { _tag: "SourceFallback" as const, reason: "missing-entrypoint" }
       }
       for (const reqRel of REQUIRED_ENTRYPOINT_RELS) {
-        if (!isSafeRelativeSnapshotTarget(currentReal, reqRel)) {
+        if (!verifyTargetHashed(reqRel)) {
           return { _tag: "SourceFallback" as const, reason: `missing-required:${reqRel}` }
         }
       }
       for (const [spec, relTarget] of Object.entries(manifest.packageMap)) {
-        if (!isSafeRelativeSnapshotTarget(currentReal, relTarget)) {
+        if (!verifyTargetHashed(relTarget)) {
           return { _tag: "SourceFallback" as const, reason: `invalid-package-target:${spec}` }
+        }
+      }
+      for (const [relPath, expectedHash] of Object.entries(manifest.fileHashes)) {
+        if (!isSafeRelativeSnapshotTarget(currentReal, relPath)) {
+          return { _tag: "SourceFallback" as const, reason: `unsafe-hashed-file:${relPath}` }
+        }
+        const hashMatchRes = Result.try(() => {
+          const actual = createHash("sha256")
+            .update(nodeSyncHostIo.readBytesSync(resolve(currentReal, relPath)))
+            .digest("hex")
+          return actual === expectedHash
+        })
+        const ok = match(hashMatchRes)
+          .with({ _tag: "Success" }, ({ success }) => success)
+          .with({ _tag: "Failure" }, () => false)
+          .exhaustive()
+        if (!ok) {
+          return { _tag: "SourceFallback" as const, reason: `integrity-mismatch:${relPath}` }
         }
       }
       return {

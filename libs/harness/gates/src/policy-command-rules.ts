@@ -4,9 +4,11 @@ import { match } from "ts-pattern"
 import {
   extractPnpmOxfmtArgs,
   hasExpandableShellVariable,
+  hasUnsafePnpmDirOrConfigFlags,
   isSafePnpmDirScopedCommand,
   isSafePnpmOxfmtExplicitCommand,
   isSafeSedReadOnlyCommand,
+  isSafeVitestExecTokens,
   splitCommandTokens,
 } from "./policy-fastpath-rules.js"
 
@@ -407,6 +409,12 @@ const isSafePnpmExecTarget = (rawTarget: string | undefined, sawWorktreeId = fal
   if (stripped === "") return false
   const effectiveSawWorktreeId = sawWorktreeId || innerSawWorktreeId
   const targetTokens = splitCommandTokens(stripped)
+  if (targetTokens[0] === "vitest" && !isSafeVitestExecTokens(targetTokens)) {
+    return false
+  }
+  if (targetTokens[0] === "oxfmt") {
+    return isSafePnpmOxfmtExplicitCommand(`pnpm oxfmt ${targetTokens.slice(1).join(" ")}`)
+  }
   if (targetTokens[0] === "nx") {
     const nxInfo = inspectNxTokens(targetTokens)
     if (nxInfo.subcommand === "exec") return false
@@ -664,6 +672,9 @@ const isSingleCommandAllowed = (command: string): boolean => {
   if (head === "sed") {
     return isSafeSedReadOnlyCommand(tokens)
   }
+  if (head === "vitest") {
+    return isSafeVitestExecTokens(tokens)
+  }
   if (head === "nx") {
     const nxInfo = inspectNxTokens(tokens)
     if (nxInfo.subcommand === "exec") return false
@@ -672,10 +683,19 @@ const isSingleCommandAllowed = (command: string): boolean => {
     }
   }
   if (head === "pnpm") {
+    if (hasUnsafePnpmDirOrConfigFlags(tokens)) return false
     const pnpmInfo = inspectPnpmTokens(tokens)
     if (pnpmInfo.subcommand === "dlx") return false
     if (extractPnpmOxfmtArgs(tokens) !== undefined) {
       return isSafePnpmOxfmtExplicitCommand(trimmed)
+    }
+    if (pnpmInfo.subcommand === "oxfmt") {
+      return isSafePnpmOxfmtExplicitCommand(
+        `pnpm oxfmt ${tokens.slice(pnpmInfo.restStartIdx).join(" ")}`,
+      )
+    }
+    if (pnpmInfo.subcommand === "vitest") {
+      return isSafeVitestExecTokens(["vitest", ...tokens.slice(pnpmInfo.restStartIdx)])
     }
     if (isSafePnpmDirScopedCommand(trimmed, sawWorktreeId)) {
       return true

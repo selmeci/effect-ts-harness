@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import {
   chmodSync,
   existsSync,
@@ -151,10 +152,11 @@ export function initialize(data) {
   }
 }
 
-const isContainedNonSymlink = (rootReal, targetPath) => {
+const isContainedNonSymlink = (rootReal, targetPath, requireFile = false) => {
   try {
     const st = lstatOrUndefined(targetPath)
     if (st === undefined || st.isSymbolicLink()) return false
+    if (requireFile && !st.isFile()) return false
     const targetReal = realpathSync(targetPath)
     const rel = relativePath(rootReal, targetReal)
     return rel === "" || (!rel.startsWith("..") && !isAbsolutePath(rel))
@@ -163,12 +165,18 @@ const isContainedNonSymlink = (rootReal, targetPath) => {
   }
 }
 
+const isSafeSnapshotFileTarget = (currentReal, relTarget, fileHashes) => {
+  if (typeof relTarget !== "string" || relTarget.trim().length === 0) return false
+  if (isAbsolutePath(relTarget) || relTarget.includes("\\")) return false
+  if (!Object.hasOwn(fileHashes, relTarget)) return false
+  const absPath = resolvePath(currentReal, relTarget)
+  return isContainedNonSymlink(currentReal, absPath, true)
+}
+
 const resolveEntryHookDetails = () => {
   const rawArgv1 =
     initializedArgv1 ?? (typeof process.argv[1] === "string" ? process.argv[1] : undefined)
   if (!rawArgv1) return null
-  const normalizedArgv1 = rawArgv1.replace(/\\/g, "/")
-  if (!normalizedArgv1.endsWith(HOOK_ENTRY_POSIX_SUFFIX)) return null
   const resolvedEntryPath = resolvePath(rawArgv1)
   const resolvedEntryPosix = resolvedEntryPath.replace(/\\/g, "/")
   if (!resolvedEntryPosix.endsWith(HOOK_ENTRY_POSIX_SUFFIX)) return null
@@ -182,6 +190,11 @@ const resolveEntryHookDetails = () => {
   }
 }
 
+const REQUIRED_SNAPSHOT_ENTRYPOINTS = [
+  "apps/harness-cli/src/hook-entry.js",
+  "libs/harness/gates/src/policy.js",
+]
+
 const loadHookSnapshotForEntry = (entryRepoRoot) => {
   try {
     const repoReal = realpathSync(entryRepoRoot)
@@ -193,7 +206,7 @@ const loadHookSnapshotForEntry = (entryRepoRoot) => {
       !isContainedNonSymlink(repoReal, harnessDir) ||
       !isContainedNonSymlink(repoReal, runtimeDir) ||
       !isContainedNonSymlink(repoReal, currentDir) ||
-      !isContainedNonSymlink(repoReal, manifestPath)
+      !isContainedNonSymlink(repoReal, manifestPath, true)
     ) {
       return null
     }
@@ -204,19 +217,44 @@ const loadHookSnapshotForEntry = (entryRepoRoot) => {
       typeof manifest !== "object" ||
       manifest.version !== 1 ||
       typeof manifest.entryRel !== "string" ||
+      manifest.entryRel.trim().length === 0 ||
       !manifest.packageMap ||
-      typeof manifest.packageMap !== "object"
+      typeof manifest.packageMap !== "object" ||
+      Array.isArray(manifest.packageMap) ||
+      !manifest.fileHashes ||
+      typeof manifest.fileHashes !== "object" ||
+      Array.isArray(manifest.fileHashes)
     ) {
       return null
+    }
+    const fileHashes = manifest.fileHashes
+    if (!isSafeSnapshotFileTarget(currentReal, manifest.entryRel, fileHashes)) {
+      return null
+    }
+    for (const reqRel of REQUIRED_SNAPSHOT_ENTRYPOINTS) {
+      if (!isSafeSnapshotFileTarget(currentReal, reqRel, fileHashes)) {
+        return null
+      }
+    }
+    for (const relTarget of Object.values(manifest.packageMap)) {
+      if (!isSafeSnapshotFileTarget(currentReal, relTarget, fileHashes)) {
+        return null
+      }
+    }
+    for (const [relPath, expectedHash] of Object.entries(fileHashes)) {
+      if (
+        typeof expectedHash !== "string" ||
+        !isSafeSnapshotFileTarget(currentReal, relPath, fileHashes)
+      ) {
+        return null
+      }
+      const absPath = resolvePath(currentReal, relPath)
+      const actualHash = createHash("sha256").update(readFileSync(absPath)).digest("hex")
+      if (actualHash !== expectedHash) {
+        return null
+      }
     }
     const entryAbsPath = resolvePath(currentReal, manifest.entryRel)
-    const policyAbsPath = resolvePath(currentReal, "libs/harness/gates/src/policy.js")
-    if (
-      !isContainedNonSymlink(currentReal, entryAbsPath) ||
-      !isContainedNonSymlink(currentReal, policyAbsPath)
-    ) {
-      return null
-    }
     return {
       entryRepoRoot: repoReal,
       entryRepoRootUrl: ensureTrailingSlash(pathToFileURL(repoReal).href),
@@ -441,9 +479,12 @@ export async function resolve(specifier, context, nextResolve) {
     const snapPkgRel = snapshot.packageMap[specifier]
     if (typeof snapPkgRel === "string") {
       const snapTarget = resolvePath(snapshot.currentDir, snapPkgRel)
-      if (isContainedNonSymlink(snapshot.currentDir, snapTarget)) {
+      if (isContainedNonSymlink(snapshot.currentDir, snapTarget, true)) {
         return nextResolve(pathToFileURL(snapTarget).href, context)
       }
+      throw new Error(
+        `[node-ts-resolver] Refusing invalid package target '${snapPkgRel}' in hook runtime snapshot`,
+      )
     }
 
     if (
@@ -453,10 +494,13 @@ export async function resolve(specifier, context, nextResolve) {
       const literalUrl = new URL(specifier, context.parentURL)
       if (literalUrl.protocol === "file:") {
         const targetPath = fileURLToPath(literalUrl)
-        if (isContainedNonSymlink(snapshot.currentDir, targetPath)) {
+        if (isContainedNonSymlink(snapshot.currentDir, targetPath, true)) {
           return nextResolve(literalUrl.href, context)
         }
       }
+      throw new Error(
+        `[node-ts-resolver] Refusing uncontained or non-file relative import '${specifier}' inside hook runtime snapshot`,
+      )
     }
   }
 
