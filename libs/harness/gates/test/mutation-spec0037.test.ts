@@ -44,6 +44,7 @@ import {
   needsSoloColdRecheck,
   runVitestTargetList,
 } from "../src/mutation-subprocess-helpers.js"
+import { executeQueuedPackageBatches } from "../src/mutation/mutation-package-batch.js"
 import {
   hydrateFileMutantCacheHits,
   recordKilledMutantsToCache,
@@ -955,6 +956,147 @@ describe("SPEC-0037 REQ-3.1..REQ-3.4: Two-Tier Mutation Cache, Module-Init Class
           expect(outcomes).toEqual([{ mutant, status: "killed" }])
         })
         .exhaustive()
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("F-4.1: executeQueuedPackageBatches requires every queued entry to have baselineVerified === true before killing module-init SchemaError", () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "spec0037-queued-batch-"))
+    try {
+      const vitestCli = join(tmpDir, "node_modules", "vitest", "vitest.mjs")
+      const runnerJs = join(tmpDir, "tools", "package-vitest-batch.mjs")
+      mkdirSync(join(tmpDir, "node_modules", "vitest"), { recursive: true })
+      mkdirSync(join(tmpDir, "tools"), { recursive: true })
+      mkdirSync(join(tmpDir, ".harness"), { recursive: true })
+      writeFileSync(vitestCli, "// stub\n", "utf8")
+      writeFileSync(runnerJs, "// stub\n", "utf8")
+
+      const makeFile = (rel: string): DomainFile => ({
+        scope: "demo",
+        pkgDir: "domain",
+        pkgName: "@demo/domain",
+        tier: "domain",
+        relFile: AstSourceFilePath.make(rel),
+        fullPath: join(tmpDir, rel),
+      })
+      const f1 = makeFile("libs/demo/domain/src/a.ts")
+      const f2 = makeFile("libs/demo/domain/src/b.ts")
+      mkdirSync(join(tmpDir, "libs", "demo", "domain", "src"), { recursive: true })
+      writeFileSync(f1.fullPath, "export const ok = true\n", "utf8")
+      writeFileSync(f2.fullPath, "export const ok = true\n", "utf8")
+      const m1 = mkMutant("m-a-init")
+      const m2 = mkMutant("m-b-init")
+      const batchHostIo: SyncHostIo = {
+        ...isolatedTestHostIo,
+        execFileSync: (_cmd, args) => {
+          if (args.includes(runnerJs)) {
+            return {
+              _tag: "Exited",
+              exitCode: 0,
+              stdout: JSON.stringify([
+                {
+                  schemaVersion: 1,
+                  relFile: f1.relFile,
+                  primaryResults: [
+                    {
+                      id: m1.id,
+                      result: {
+                        _tag: "Exited",
+                        exitCode: 1,
+                        stdout: "",
+                        stderr: "SchemaError: Invalid configuration\nTests  no tests\n",
+                      },
+                    },
+                  ],
+                  scopedFallbackResults: [],
+                  packageFallbackResults: [],
+                },
+                {
+                  schemaVersion: 1,
+                  relFile: f2.relFile,
+                  primaryResults: [
+                    {
+                      id: m2.id,
+                      result: {
+                        _tag: "Exited",
+                        exitCode: 1,
+                        stdout: "",
+                        stderr: "SchemaError: Invalid configuration\nTests  no tests\n",
+                      },
+                    },
+                  ],
+                  scopedFallbackResults: [],
+                  packageFallbackResults: [],
+                },
+              ]),
+              stderr: "",
+            }
+          }
+          return {
+            _tag: "Exited",
+            exitCode: 1,
+            stdout: "",
+            stderr: "SchemaError: Invalid configuration\nTests  no tests\n",
+          }
+        },
+      }
+      const makeEntry = (file: DomainFile, mutant: CodeMutant, baselineVerified: boolean) => ({
+        pkgKey: "libs/demo/domain",
+        input: {
+          file,
+          originalContent: "export const ok = true\n",
+          schemaSource: "export const ok = false\n",
+          mutants: [mutant],
+          uncachedMutants: [mutant],
+          primaryTests: ["libs/demo/domain/test/a.test.ts"],
+          fallbackTests: [],
+          scopedFallbackTests: [],
+          packageFallbackTests: [],
+          cachedHitIds: new Set<string>(),
+        },
+        mutantKeys: new Map<string, ContentSha256>(),
+        baselineVerified,
+      })
+
+      const bothVerifiedErr = executeQueuedPackageBatches({
+        repoRoot: tmpDir,
+        backupPath: join(tmpDir, ".harness", "mutation-backup.json"),
+        hostIo: batchHostIo,
+        baseSubprocessEnv: {},
+        queuedByPkg: new Map([
+          ["libs/demo/domain", [makeEntry(f1, m1, true), makeEntry(f2, m2, true)]],
+        ]),
+        finalizeEntry: () => undefined,
+        recordPartialOnAbort: () => {},
+      })
+      expect(bothVerifiedErr).toBeUndefined()
+
+      const mixedVerifiedErr = executeQueuedPackageBatches({
+        repoRoot: tmpDir,
+        backupPath: join(tmpDir, ".harness", "mutation-backup.json"),
+        hostIo: batchHostIo,
+        baseSubprocessEnv: {},
+        queuedByPkg: new Map([
+          ["libs/demo/domain", [makeEntry(f1, m1, true), makeEntry(f2, m2, false)]],
+        ]),
+        finalizeEntry: () => undefined,
+        recordPartialOnAbort: () => {},
+      })
+      expect(mixedVerifiedErr).toContain("[mutation-check] Baseline test suite failed")
+
+      const neitherVerifiedErr = executeQueuedPackageBatches({
+        repoRoot: tmpDir,
+        backupPath: join(tmpDir, ".harness", "mutation-backup.json"),
+        hostIo: batchHostIo,
+        baseSubprocessEnv: {},
+        queuedByPkg: new Map([
+          ["libs/demo/domain", [makeEntry(f1, m1, false), makeEntry(f2, m2, false)]],
+        ]),
+        finalizeEntry: () => undefined,
+        recordPartialOnAbort: () => {},
+      })
+      expect(neitherVerifiedErr).toContain("[mutation-check] Baseline test suite failed")
     } finally {
       rmSync(tmpDir, { recursive: true, force: true })
     }

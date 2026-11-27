@@ -168,8 +168,8 @@ export const DESTRUCTIVE_ARGUMENT_PATTERNS: ReadonlyArray<GuardPatternRule> = [
     reason: "sort writing output to file",
   },
   {
-    pattern: /\bgit\s+(?:diff|log|show)\b.*\s--output(?:=|\s|$)/s,
-    reason: "git output flag writing to file",
+    pattern: /\bgit\s+(?:diff|log|show)\b.*\s--(?:output|ext-diff|textconv)(?:=|\s|$)/s,
+    reason: "git diff/log/show output or external diff/textconv execution flag",
   },
   {
     pattern: /\brg\b.*\s--(?:pre|pre-glob|hostname-bin)(?:=|\s|$)/s,

@@ -163,13 +163,12 @@ export const isSafeVariableExpandedReadOnlyCommand = (
   }
   const segments: Array<string> = []
   let start = 0
-  let idx = unquoted.indexOf(";", start)
-  while (idx !== -1) {
-    const part = command.slice(start, idx).trim()
+  for (let i = 0; i < unquoted.length; i++) {
+    if (unquoted[i] !== ";") continue
+    const part = command.slice(start, i).trim()
     if (part.length === 0) return false
     segments.push(part)
-    start = idx + 1
-    idx = unquoted.indexOf(";", start)
+    start = i + 1
   }
   const tail = command.slice(start).trim()
   if (tail.length === 0) return false

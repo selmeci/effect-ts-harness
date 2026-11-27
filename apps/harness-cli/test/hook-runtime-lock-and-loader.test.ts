@@ -234,7 +234,12 @@ describe("SPEC-0037 hook-runtime-lock (F-9.1, F-9.2, F-9.3, F-11.1)", () => {
       { maxWaitMs: 120, pollMs: 20 },
     )
     expect(fnCalled).toBe(false)
-    expect(Result.isFailure(freshRes)).toBe(true)
+    match(freshRes)
+      .with({ _tag: "Failure" }, ({ failure }) => {
+        expect(failure).toContain("Timed out waiting for hook-runtime build lock")
+      })
+      .with({ _tag: "Success" }, () => expect.unreachable("Expected corrupt-lock grace timeout"))
+      .exhaustive()
 
     // Backdated corrupt lock (> 500ms) is treated as stale and reclaimed
     const past = new Date(Date.now() - 2_000)

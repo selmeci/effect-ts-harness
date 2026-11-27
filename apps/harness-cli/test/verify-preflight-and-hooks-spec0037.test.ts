@@ -440,7 +440,7 @@ describe("SPEC-0037 W3A: fail-fast verify, hook runtime isolation, and targeted 
   )
 
   it.effect(
-    "REQ-3.3, REQ-3.4 & REQ-2.1: harness mutate --survivors-only/--files omit mutate-stamp.json and ensureOllamaWarmWithResult surfaces OllamaWarmupError",
+    "REQ-3.3 & REQ-3.4: harness mutate --survivors-only/--files omit mutate-stamp.json",
     () =>
       Effect.gen(function* () {
         expect(parseMutateCliFlags(["mutate", "--file=a.ts", "--files=b.ts"])._tag).toBe("Invalid")

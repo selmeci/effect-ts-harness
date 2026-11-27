@@ -474,6 +474,10 @@ describe("SPEC-0037 REQ-4.4: Guard Fast-Path Expansion & PolicyFastPath.decide",
       "git status --upload-pack=/tmp/evil; pwd",
       'file=libs/harness/gates/src/policy.ts; git diff --ext-diff "$file"',
       'file=libs/harness/gates/src/policy.ts; git diff -c core.pager=sh "$file"',
+      "git diff --ext-diff",
+      "git diff --textconv",
+      "git show --ext-diff HEAD",
+      "git log --textconv -n 1",
     ]) {
       expect(classifyCommand(unsafeGitCmd), unsafeGitCmd).not.toBe("allow")
     }
