@@ -1,82 +1,82 @@
 import { Effect } from "effect"
 import { match } from "ts-pattern"
-import { nodeSyncHostIo } from "@harness/infra/hook-fastpath"
+import { WORKFLOW_TIMEOUT_BUDGETS, type OllamaWarmupError } from "@harness/contract"
+import { OllamaEmbeddingClientLive } from "@harness/infra/embedding-client"
+import {
+  checkOllamaServerReadyDetailed as infraCheckOllamaServerReadyDetailed,
+  OllamaReadiness,
+  type OllamaProbeResult,
+  type OllamaWarmupOptions,
+  type OllamaWarmupReceipt,
+  type OllamaWarmupStateHandle,
+} from "@harness/infra/ollama-readiness"
+
+export {
+  OllamaReadiness,
+  type OllamaProbeResult,
+  type OllamaWarmupReceipt,
+  type OllamaWarmupStateHandle,
+}
 
 export interface OllamaReadinessOptions {
   readonly baseUrl?: string | undefined
   readonly spawnOllama?: (() => void) | undefined
   readonly maxRetries?: number | undefined
   readonly retryDelayMs?: number | undefined
+  readonly probeBudgetMs?: number | undefined
+  readonly pollIntervalMs?: number | undefined
+  readonly force?: boolean | undefined
+  readonly clefModel?: string | undefined
+  readonly embeddingModel?: string | undefined
+  readonly includeEmbeddings?: boolean | undefined
+  readonly fetch?: typeof globalThis.fetch | undefined
+  readonly state?: OllamaWarmupStateHandle | undefined
 }
 
-export type OllamaProbeResult =
+export type LocalOllamaReadinessResult =
   | { readonly ready: true }
-  | { readonly ready: false; readonly reason: string }
+  | {
+      readonly ready: false
+      readonly reason: string
+      readonly stage: string
+      readonly model: string
+      readonly endpoint: string
+    }
+
+const toWarmupOptions = (opts?: OllamaReadinessOptions): OllamaWarmupOptions | undefined => {
+  if (opts === undefined) {
+    return undefined
+  }
+  const derivedBudgetMs =
+    opts.probeBudgetMs !== undefined
+      ? opts.probeBudgetMs
+      : opts.maxRetries !== undefined || opts.retryDelayMs !== undefined
+        ? opts.maxRetries === 0
+          ? 1
+          : Math.max(1, (opts.maxRetries ?? 25) * (opts.retryDelayMs ?? 200))
+        : WORKFLOW_TIMEOUT_BUDGETS.ollamaWarmupProbeMs
+  const pollIntervalMs = opts.pollIntervalMs ?? opts.retryDelayMs
+  return {
+    ...(opts.baseUrl !== undefined ? { baseUrl: opts.baseUrl } : {}),
+    ...(opts.clefModel !== undefined ? { clefModel: opts.clefModel } : {}),
+    ...(opts.embeddingModel !== undefined ? { embeddingModel: opts.embeddingModel } : {}),
+    ...(opts.includeEmbeddings !== undefined ? { includeEmbeddings: opts.includeEmbeddings } : {}),
+    probeBudgetMs: derivedBudgetMs,
+    ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
+    ...(opts.force !== undefined ? { force: opts.force } : {}),
+    ...(opts.fetch !== undefined ? { fetch: opts.fetch } : {}),
+    ...(opts.spawnOllama !== undefined ? { spawnOllama: opts.spawnOllama } : {}),
+    ...(opts.state !== undefined ? { state: opts.state } : {}),
+  }
+}
 
 export function checkOllamaServerReadyDetailed(
   baseUrl: string = process.env.HARNESS_OLLAMA_URL ??
     process.env.OLLAMA_HOST ??
     "http://127.0.0.1:11434",
+  fetchFn: typeof globalThis.fetch = globalThis.fetch,
 ): Effect.Effect<OllamaProbeResult> {
-  const normalizedUrl = baseUrl.startsWith("http") ? baseUrl : `http://${baseUrl}`
-  const targetUrl = `${normalizedUrl.replace(/\/$/, "")}/api/tags`
-  return Effect.tryPromise({
-    try: (signal) =>
-      globalThis
-        .fetch(targetUrl, {
-          method: "GET",
-          signal: AbortSignal.any([signal, AbortSignal.timeout(2000)]),
-        })
-        .then((r): Promise<OllamaProbeResult> =>
-          match(r.status)
-            .with(200, () =>
-              r.json().then((rawBody: unknown): OllamaProbeResult => {
-                if (typeof rawBody !== "object" || rawBody === null) {
-                  return { ready: false, reason: `Ollama ${targetUrl} returned non-object JSON` }
-                }
-                const body = rawBody as {
-                  readonly models?: ReadonlyArray<{
-                    readonly name?: string
-                    readonly model?: string
-                  }>
-                }
-                if (!Array.isArray(body.models)) {
-                  return {
-                    ready: false,
-                    reason: `Ollama ${targetUrl} response missing models array`,
-                  }
-                }
-                const hasClef = body.models.some(
-                  (m) =>
-                    (typeof m.name === "string" && m.name.startsWith("clef-flash")) ||
-                    (typeof m.model === "string" && m.model.startsWith("clef-flash")),
-                )
-                return hasClef
-                  ? { ready: true }
-                  : { ready: false, reason: `Ollama ${targetUrl} has no clef-flash model loaded` }
-              }),
-            )
-            .otherwise((status) =>
-              Promise.resolve({
-                ready: false,
-                reason: `Ollama ${targetUrl} returned HTTP ${status}`,
-              }),
-            ),
-        )
-        .catch((err: unknown): OllamaProbeResult => ({
-          ready: false,
-          reason: `Ollama ${targetUrl} probe failed: ${err instanceof Error ? err.message : String(err)}`,
-        })),
-    catch: (err): OllamaProbeResult => ({
-      ready: false,
-      reason: `Ollama ${targetUrl} probe failed: ${err instanceof Error ? err.message : String(err)}`,
-    }),
-  }).pipe(
-    Effect.orElseSucceed((): OllamaProbeResult => ({
-      ready: false,
-      reason: `Ollama ${targetUrl} probe failed unexpectedly`,
-    })),
-  )
+  return infraCheckOllamaServerReadyDetailed(baseUrl, fetchFn)
 }
 
 export function checkOllamaServerReady(
@@ -87,52 +87,35 @@ export function checkOllamaServerReady(
   return checkOllamaServerReadyDetailed(baseUrl).pipe(Effect.map((r) => r.ready))
 }
 
+export const ensureOllamaWarmWithResult = (
+  opts?: OllamaReadinessOptions,
+): Effect.Effect<OllamaWarmupReceipt, OllamaWarmupError> =>
+  OllamaReadiness.ensureWarm(toWarmupOptions(opts)).pipe(Effect.provide(OllamaEmbeddingClientLive))
+
+export function ensureLocalOllamaReadyDetailed(
+  opts?: OllamaReadinessOptions,
+): Effect.Effect<LocalOllamaReadinessResult> {
+  return Effect.result(ensureOllamaWarmWithResult(opts)).pipe(
+    Effect.map((res) =>
+      match(res)
+        .with({ _tag: "Success" }, () => ({ ready: true as const }))
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          process.stderr.write(
+            `[harness:ollama] ${failure.reason} (stage=${failure.stage}, model=${failure.model}, endpoint=${failure.endpoint})\n`,
+          )
+          return {
+            ready: false as const,
+            reason: failure.reason,
+            stage: failure.stage,
+            model: failure.model,
+            endpoint: failure.endpoint,
+          }
+        })
+        .exhaustive(),
+    ),
+  )
+}
+
 export function ensureLocalOllamaReady(opts?: OllamaReadinessOptions): Effect.Effect<boolean> {
-  return Effect.gen(function* () {
-    const customUrl = process.env.HARNESS_OLLAMA_URL
-    const baseUrl =
-      opts?.baseUrl ?? customUrl ?? process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434"
-    const initialProbe = yield* checkOllamaServerReadyDetailed(baseUrl)
-    if (initialProbe.ready) {
-      return true
-    }
-
-    yield* Effect.try({
-      try: () => {
-        if (opts?.spawnOllama !== undefined) {
-          opts.spawnOllama()
-          return
-        }
-        if (customUrl === undefined) {
-          const spawnRes = nodeSyncHostIo.spawnDetached("ollama", ["serve"], {
-            env: {
-              ...process.env,
-              OLLAMA_KEEP_ALIVE: process.env.OLLAMA_KEEP_ALIVE ?? "-1",
-            },
-          })
-          match(spawnRes)
-            .with({ _tag: "Spawned" }, () => undefined)
-            .with({ _tag: "SpawnFailed" }, ({ spawnError }) => {
-              process.stderr.write(`[harness:ollama] Failed to spawn ollama serve: ${spawnError}\n`)
-            })
-            .exhaustive()
-        }
-      },
-      catch: () => undefined,
-    }).pipe(Effect.orElseSucceed(() => undefined))
-
-    let lastReason = initialProbe.reason
-    const maxRetries = opts?.maxRetries ?? (customUrl !== undefined ? 2 : 25)
-    const retryDelayMs = opts?.retryDelayMs ?? (customUrl !== undefined ? 10 : 200)
-    for (let i = 0; i < maxRetries; i++) {
-      yield* Effect.sleep(`${retryDelayMs} millis`)
-      const probe = yield* checkOllamaServerReadyDetailed(baseUrl)
-      if (probe.ready) {
-        return true
-      }
-      lastReason = probe.reason
-    }
-    process.stderr.write(`[harness:ollama] ${lastReason}\n`)
-    return false
-  })
+  return ensureLocalOllamaReadyDetailed(opts).pipe(Effect.map((r) => r.ready))
 }

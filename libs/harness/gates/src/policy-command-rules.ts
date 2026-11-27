@@ -1,6 +1,16 @@
 /** Zero-dependency static guard rules, allowlists, denylists, and leading-env strippers
  * shared by `policy.ts` under the `policy-zero-dep` closure profile. */
 import { match } from "ts-pattern"
+import {
+  extractPnpmOxfmtArgs,
+  hasExpandableShellVariable,
+  hasUnsafePnpmDirOrConfigFlags,
+  isSafePnpmDirScopedCommand,
+  isSafePnpmOxfmtExplicitCommand,
+  isSafeSedReadOnlyCommand,
+  isSafeVitestExecTokens,
+  splitCommandTokens,
+} from "./policy-fastpath-rules.js"
 
 import {
   ALLOWLIST,
@@ -15,6 +25,8 @@ import {
   WORKTREE_ID_BLOCKED_HARNESS_PATTERN,
   type GuardPatternRule,
 } from "./policy-command-lists.js"
+
+export { hasExpandableShellVariable, splitCommandTokens }
 
 export {
   ALLOWLIST,
@@ -90,6 +102,36 @@ export const splitByUnquotedOperator = (
 
 export const containsToken = (command: string, token: string): boolean =>
   command.toLowerCase().includes(token.toLowerCase())
+
+export const CASE_INSENSITIVE_GLOB_FLAG_PATTERN =
+  /(?:^|\s)(?:-iname|-ipath|-iwholename|--iglob)(?:=|\s|$)/
+export const UNQUOTED_BRACE_EXPANSION_PATTERN = /\{[^}\s]*(?:,|\.\.)[^}\s]*\}/
+
+export const isHandledByUnquotedEscalate = (
+  tok: string,
+  rawCommand: string,
+  unquoted: string,
+): boolean => {
+  if (/[*?]/.test(tok)) return false
+  const bracketGroups = tok.match(/\[[^\]\s]+\]/g) ?? []
+  const braceGroups = (tok.match(/\{[^}\s]+\}/g) ?? []).filter((g) => /(?:,|\.\.)/.test(g))
+  if (bracketGroups.length === 0 && braceGroups.length === 0) return false
+  if (
+    bracketGroups.length > 0 &&
+    (!bracketGroups.every((g) => unquoted.includes(g)) ||
+      !hasUnquotedAdjacentBracketGlob(rawCommand, unquoted))
+  ) {
+    return false
+  }
+  if (
+    braceGroups.length > 0 &&
+    (!braceGroups.every((g) => unquoted.includes(g)) ||
+      !UNQUOTED_BRACE_EXPANSION_PATTERN.test(unquoted))
+  ) {
+    return false
+  }
+  return true
+}
 
 export const matchesAny = (command: string, rules: ReadonlyArray<GuardPatternRule>): boolean =>
   rules.some((rule) => rule.pattern.test(command))
@@ -250,59 +292,6 @@ export const stripSafeLeadingEnvVarsDetailed = (command: string): StripLeadingEn
 export const stripSafeLeadingEnvVars = (command: string): string =>
   stripSafeLeadingEnvVarsDetailed(command).rest
 
-export const splitCommandTokens = (command: string): ReadonlyArray<string> => {
-  const tokens: Array<string> = []
-  let current = ""
-  let inToken = false
-  let quote: "'" | '"' | undefined
-  for (let i = 0; i < command.length; i++) {
-    const ch = command[i]!
-    if (quote !== undefined) {
-      if (ch === quote) {
-        quote = undefined
-        continue
-      }
-      const escaped = match(quote)
-        .with('"', () => {
-          if (ch === "\\" && i + 1 < command.length) {
-            current += command[++i]!
-            return true
-          }
-          return false
-        })
-        .with("'", () => false)
-        .exhaustive()
-      if (escaped) continue
-      current += ch
-      continue
-    }
-    if (/\s/.test(ch)) {
-      if (inToken) {
-        tokens.push(current)
-        current = ""
-        inToken = false
-      }
-      continue
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch
-      inToken = true
-      continue
-    }
-    if (ch === "\\" && i + 1 < command.length) {
-      current += command[++i]!
-      inToken = true
-      continue
-    }
-    current += ch
-    inToken = true
-  }
-  if (inToken) {
-    tokens.push(current)
-  }
-  return tokens
-}
-
 const inspectPnpmTokens = (
   tokens: ReadonlyArray<string>,
 ): { readonly subcommand: string | undefined; readonly restStartIdx: number } => {
@@ -420,6 +409,12 @@ const isSafePnpmExecTarget = (rawTarget: string | undefined, sawWorktreeId = fal
   if (stripped === "") return false
   const effectiveSawWorktreeId = sawWorktreeId || innerSawWorktreeId
   const targetTokens = splitCommandTokens(stripped)
+  if (targetTokens[0] === "vitest" && !isSafeVitestExecTokens(targetTokens)) {
+    return false
+  }
+  if (targetTokens[0] === "oxfmt") {
+    return isSafePnpmOxfmtExplicitCommand(`pnpm oxfmt ${targetTokens.slice(1).join(" ")}`)
+  }
   if (targetTokens[0] === "nx") {
     const nxInfo = inspectNxTokens(targetTokens)
     if (nxInfo.subcommand === "exec") return false
@@ -432,53 +427,6 @@ const isSafePnpmExecTarget = (rawTarget: string | undefined, sawWorktreeId = fal
       ? stripped.startsWith(prefix)
       : stripped === prefix || stripped.startsWith(prefix + " "),
   )
-}
-
-const SHELL_VAR_START_PATTERN = /[A-Za-z_@*#?$!0-9{]/
-
-export const hasExpandableShellVariable = (rawSegment: string): boolean => {
-  let quote: "'" | '"' | undefined
-  for (let i = 0; i < rawSegment.length; i++) {
-    const ch = rawSegment[i]!
-    const handled = match(quote)
-      .with("'", () => {
-        if (ch === "'") quote = undefined
-        return "continue" as const
-      })
-      .with('"', () => {
-        if (ch === "\\") {
-          i++
-          return "continue" as const
-        }
-        if (ch === '"') {
-          quote = undefined
-          return "continue" as const
-        }
-        const next = rawSegment[i + 1]
-        if (ch === "$" && next !== undefined && SHELL_VAR_START_PATTERN.test(next)) {
-          return "true" as const
-        }
-        return "continue" as const
-      })
-      .with(undefined, () => {
-        if (ch === "\\") {
-          i++
-          return "continue" as const
-        }
-        if (ch === "'" || ch === '"') {
-          quote = ch
-          return "continue" as const
-        }
-        const next = rawSegment[i + 1]
-        if (ch === "$" && next !== undefined && SHELL_VAR_START_PATTERN.test(next)) {
-          return "true" as const
-        }
-        return "continue" as const
-      })
-      .exhaustive()
-    if (handled === "true") return true
-  }
-  return false
 }
 
 const isSafeGitSymbolicRefCommand = (tokens: ReadonlyArray<string>): boolean => {
@@ -635,21 +583,22 @@ export const isSafeReadOnlyXargsSegment = (command: string): boolean => {
   return false
 }
 
+const SIMPLE_PIPE_FILTER_BINS: ReadonlySet<string> = new Set([
+  "grep",
+  "head",
+  "tail",
+  "wc",
+  "cat",
+  "cut",
+])
+
 const isSimpleSafePipeFilter = (segment: string): boolean => {
   const tokens = splitCommandTokens(segment.trim())
   const head = tokens[0]
   if (head === undefined) return false
   const joined = tokens.join(" ")
-  if (
-    head === "grep" ||
-    head === "head" ||
-    head === "tail" ||
-    head === "wc" ||
-    head === "cat" ||
-    head === "cut"
-  ) {
-    return true
-  }
+  if (SIMPLE_PIPE_FILTER_BINS.has(head)) return true
+  if (head === "sed") return isSafeSedReadOnlyCommand(tokens)
   if (head === "rg") {
     return !/(?:^|\s)--(?:pre|pre-glob|hostname-bin)(?:=|\s|$)/.test(joined)
   }
@@ -659,7 +608,7 @@ const isSimpleSafePipeFilter = (segment: string): boolean => {
   return false
 }
 
-const splitUnquotedPipeParts = (command: string): ReadonlyArray<string> | undefined => {
+export const splitUnquotedPipeParts = (command: string): ReadonlyArray<string> | undefined => {
   const parts: Array<string> = []
   let quote: "'" | '"' | undefined
   let start = 0
@@ -701,6 +650,10 @@ const splitUnquotedPipeParts = (command: string): ReadonlyArray<string> | undefi
   return parts
 }
 
+const EXPANDABLE_VAR_REJECTED_HEADS: ReadonlySet<string> = new Set(
+  "echo wc cat head tail ls cut grep rg sed sort df".split(" "),
+)
+
 const isSingleCommandAllowed = (command: string): boolean => {
   const { rest: trimmed, sawWorktreeId } = stripSafeLeadingEnvVarsDetailed(command)
   if (trimmed === "") return false
@@ -709,8 +662,18 @@ const isSingleCommandAllowed = (command: string): boolean => {
   }
   const tokens = splitCommandTokens(trimmed)
   const head = tokens[0]
-  if (head === "echo" && hasExpandableShellVariable(trimmed)) {
+  if (
+    head !== undefined &&
+    EXPANDABLE_VAR_REJECTED_HEADS.has(head) &&
+    hasExpandableShellVariable(trimmed)
+  ) {
     return false
+  }
+  if (head === "sed") {
+    return isSafeSedReadOnlyCommand(tokens)
+  }
+  if (head === "vitest") {
+    return isSafeVitestExecTokens(tokens)
   }
   if (head === "nx") {
     const nxInfo = inspectNxTokens(tokens)
@@ -720,8 +683,23 @@ const isSingleCommandAllowed = (command: string): boolean => {
     }
   }
   if (head === "pnpm") {
+    if (hasUnsafePnpmDirOrConfigFlags(tokens)) return false
     const pnpmInfo = inspectPnpmTokens(tokens)
     if (pnpmInfo.subcommand === "dlx") return false
+    if (extractPnpmOxfmtArgs(tokens) !== undefined) {
+      return isSafePnpmOxfmtExplicitCommand(trimmed)
+    }
+    if (pnpmInfo.subcommand === "oxfmt") {
+      return isSafePnpmOxfmtExplicitCommand(
+        `pnpm oxfmt ${tokens.slice(pnpmInfo.restStartIdx).join(" ")}`,
+      )
+    }
+    if (pnpmInfo.subcommand === "vitest") {
+      return isSafeVitestExecTokens(["vitest", ...tokens.slice(pnpmInfo.restStartIdx)])
+    }
+    if (isSafePnpmDirScopedCommand(trimmed, sawWorktreeId)) {
+      return true
+    }
     const pnpmDashDashIdx = tokens.indexOf("--")
     const pnpmPreDash = pnpmDashDashIdx === -1 ? tokens.slice(1) : tokens.slice(1, pnpmDashDashIdx)
     const runScript =
@@ -772,6 +750,18 @@ const isSingleCommandAllowed = (command: string): boolean => {
     if (prefix.endsWith(" ") || prefix.endsWith("/")) return trimmed.startsWith(prefix)
     return trimmed.startsWith(prefix + " ")
   })
+}
+
+export const isAllowedPipedSegment = (segCmd: string, segUnquoted: string): boolean => {
+  if (!segUnquoted.includes("|") || segUnquoted.includes("||")) {
+    return false
+  }
+  const parts = splitByUnquotedOperator(segCmd, segUnquoted, "|")
+  return (
+    parts.length >= 2 &&
+    isCommandAllowed(parts[0]!.cmd) &&
+    parts.slice(1).every((p) => isSafeReadOnlyXargsSegment(p.cmd) || isSimpleSafePipeFilter(p.cmd))
+  )
 }
 
 export const isCommandAllowed = (command: string): boolean => {

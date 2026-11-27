@@ -2,6 +2,7 @@ import { Match, Option, Schema } from "effect"
 import { compareCodeUnits } from "./ast-and-gate-primitives.js"
 import { AbsoluteRepoRoot, GitCommitSha } from "./repo-identity.js"
 import { ReviewRoutingPlan } from "./review-routing.js"
+import { SHIP_STAGES, ShipStage } from "./workflow-timeouts.js"
 import {
   NxAffectedTargetFlag,
   NxProjectName,
@@ -22,6 +23,8 @@ export {
   PackageVerifyExecutable,
   PackageVerifyTarget,
   ParsedPackageVerifyCommand,
+  SHIP_STAGES,
+  ShipStage,
   parsePackageVerifyCommand,
   toPackageVerifyCommandArgv,
 }
@@ -222,18 +225,6 @@ export type SliceBranchName = typeof SliceBranchName.Type
 
 export const WorkflowLevel = Schema.Literals(["epic", "slice"])
 export type WorkflowLevel = typeof WorkflowLevel.Type
-
-export const SHIP_STAGES = [
-  "format-check",
-  "gc-strict",
-  "ontology-check-strict",
-  "mutate-strict",
-  "verify",
-  "done",
-] as const
-
-export const ShipStage = Schema.Literals(SHIP_STAGES)
-export type ShipStage = typeof ShipStage.Type
 
 export const RUNNER_IDS = ["claude-code", "antigravity"] as const
 

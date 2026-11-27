@@ -1161,6 +1161,7 @@ describe("mutation-speedup: Wave 2 persistent package pool & config resolution",
             {
               pkgKey: "harness/domain",
               mutantKeys: new Map([[mut.id, computeContentSha256("k")]]),
+              baselineVerified: true,
               input: makeBatchFile(
                 dir,
                 relA,

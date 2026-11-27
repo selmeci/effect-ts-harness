@@ -82,6 +82,7 @@ const buildChildEnv = (extra?: Readonly<Record<string, string | undefined>>): No
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     HARNESS_TEST_ISOLATION: "1",
+    HARNESS_HOOK_RUNTIME_SOURCE: "1",
     ...extra,
   }
   for (const key of Object.keys(env)) {

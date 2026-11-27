@@ -418,10 +418,10 @@ status: accepted
       )
 
       const events = readTelemetryEvents(tmpDir, nodeSyncHostIo)
-      const failEvent = events.find(
-        (e) => e.toolName === "harness_lsp_diagnostics" && e.outcome === "fail",
+      const diagEvent = events.find(
+        (e) => e.toolName === "harness_lsp_diagnostics" && e.outcome === "diagnostics_found",
       )
-      expect(failEvent?.detail).toBe("errors=2;warnings=1")
+      expect(diagEvent?.detail).toBe("errors=2;warnings=1")
 
       const repoRoot = join(import.meta.dirname, "../../..")
       expect(shouldSuppressLiveMcpTestSideEffects(repoRoot, { VITEST: "true" })).toBe(true)

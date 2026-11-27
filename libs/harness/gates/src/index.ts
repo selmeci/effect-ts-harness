@@ -44,6 +44,11 @@ export {
   type WorkerFileAccessResult,
 } from "./policy.js"
 export {
+  PolicyFastPath,
+  type PolicyFastPathInput,
+  decidePolicyFastPath,
+} from "./policy-fastpath-decide.js"
+export {
   DstSeedsRunCount,
   MutantCount,
   MutateDiffMode,
@@ -227,6 +232,7 @@ export {
   parseGitDiffModifiedLines,
   partitionReachingTestFiles,
   runDomainMutationSuite,
+  runMutationCheck,
   setActiveMutantId,
   stripAnsi,
   type MutantSchemaModule,
@@ -392,21 +398,25 @@ export {
   TelemetryEngineSource,
   TelemetryEvent,
   TelemetryOutcome,
+  TelemetryReport,
   TelemetrySurface,
-  appendTelemetryEvent,
   buildSessionReport,
-  clearTelemetryEvents,
   decideSessionReport,
-  readTelemetryEvents,
-  renderSessionReportMarkdown,
+  decideTelemetryReport,
   scopeSessionReportInput,
   type HealthGrade,
   type SessionKpis,
   type SessionReport,
   type SessionReportInput,
   type ToolUsageMetric,
-  writeSessionReportFiles,
 } from "./telemetry.js"
+export {
+  appendTelemetryEvent,
+  clearTelemetryEvents,
+  readTelemetryEvents,
+  renderSessionReportMarkdown,
+  writeSessionReportFiles,
+} from "./telemetry-io.js"
 export {
   AST_GATE_RULE_SOURCE_FILES,
   AST_GATE_TYPESCRIPT_VERSION,
@@ -588,8 +598,10 @@ export {
   computeMutationEntryMac,
   decideMutationCacheLookup,
   emptyMutationCacheStore,
+  isAppendOnlyWitnessDigestsPreserved,
   loadMutationCache,
   loadMutationCacheWithStatus,
+  partitionMutationCacheLookup,
   saveMutationCacheAtomic,
   validateHarnessCacheFileSafety,
   verifyMutationEntryMac,
@@ -649,3 +661,17 @@ export {
   isPureReExportBarrel,
   resolveBarrelClosureStep,
 } from "./mutation/mutation-barrel-closure.js"
+export {
+  isMutatedModuleInitFailure,
+  type MutatedModuleInitFailureInput,
+} from "./mutation/mutation-init-classifier.js"
+export {
+  computeSourceOnlyClosureDigest,
+  extractWitnessTestBlockDigests,
+  readLastSurvivorIds,
+  writeLastSurvivorIds,
+} from "./mutation/mutation-two-tier-cache.js"
+export {
+  collectTopGuardCommandPrefixes,
+  detectHangOutlierRecommendations,
+} from "./telemetry-recommendations.js"

@@ -722,8 +722,18 @@ describe("CLI handleMutate, handleVerify (mutate-stamp), handleBench, and handle
         [
           'import { expect, it } from "vitest"',
           'import { isEven } from "../src/engine.js"',
-          'it("kills %", () => { expect(isEven(2)).toBe(true); expect(isEven(3)).toBe(false) })',
+          "",
+          'it("kills %", () => {',
+          "  expect(isEven(2)).toBe(true)",
+          "  expect(isEven(3)).toBe(false)",
+          "})",
+          "",
         ].join("\n"),
+      )
+      writeFileSync(
+        join(dir, "libs", "demo", "gates", "package.json"),
+        `${JSON.stringify({ name: "@demo/gates", nx: { tags: ["type:core"] } }, null, 2)}\n`,
+        "utf8",
       )
       mkdirSync(join(dir, "docs"), { recursive: true })
       writeFileSync(join(dir, "docs", "guide.md"), "# initial guide\n", "utf8")
@@ -877,8 +887,18 @@ describe("CLI handleMutate, handleVerify (mutate-stamp), handleBench, and handle
         [
           'import { expect, it } from "vitest"',
           'import { isEven } from "../src/engine.js"',
-          'it("kills %", () => { expect(isEven(2)).toBe(true); expect(isEven(3)).toBe(false) })',
+          "",
+          'it("kills %", () => {',
+          "  expect(isEven(2)).toBe(true)",
+          "  expect(isEven(3)).toBe(false)",
+          "})",
+          "",
         ].join("\n"),
+      )
+      writeFileSync(
+        join(dir, "libs", "demo", "gates", "package.json"),
+        `${JSON.stringify({ name: "@demo/gates", nx: { tags: ["type:core"] } }, null, 2)}\n`,
+        "utf8",
       )
       mkdirSync(join(dir, "agent-patterns"), { recursive: true })
       mkdirSync(join(dir, "docs"), { recursive: true })

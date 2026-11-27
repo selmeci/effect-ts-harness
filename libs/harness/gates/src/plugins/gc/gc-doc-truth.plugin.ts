@@ -1,7 +1,7 @@
 import { join, relative } from "node:path"
 import { Schema } from "effect"
 import { match } from "ts-pattern"
-import { SelfDogfoodingRuleId } from "@harness/contract"
+import { SelfDogfoodingRuleId, WORKFLOW_TIMEOUT_BUDGETS } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
 import {
   type GcFinding,
@@ -256,14 +256,30 @@ const checkHookTimeouts = (
         for (const entry of entries) {
           const leafHooks = entry.hooks ?? [entry]
           for (const h of leafHooks) {
-            if (h.type === "command" && (h.timeout === undefined || h.timeout <= 0)) {
-              findings.push({
-                kind: "hook-timeout-parity",
-                nodeId: `${relPath}:${hookEvent}`,
-                location: relPath,
-                message: `Hook command in "${relPath}" (${hookEvent}) is missing a positive numeric "timeout" — all PreToolUse and Stop hooks require explicit timeouts.`,
-                action: `Add a positive numeric "timeout" (e.g. 15 or 30) to the ${hookEvent} command hook in "${relPath}".`,
-              })
+            if (h.type === "command") {
+              if (h.timeout === undefined || h.timeout <= 0) {
+                findings.push({
+                  kind: "hook-timeout-parity",
+                  nodeId: `${relPath}:${hookEvent}`,
+                  location: relPath,
+                  message: `Hook command in "${relPath}" (${hookEvent}) is missing a positive numeric "timeout" — all PreToolUse and Stop hooks require explicit timeouts.`,
+                  action: `Add a positive numeric "timeout" (e.g. 15 or 30) to the ${hookEvent} command hook in "${relPath}".`,
+                })
+              }
+              if (
+                hookEvent === "PreToolUse" &&
+                h.timeout !== undefined &&
+                h.timeout > 0 &&
+                h.timeout * 1000 <= WORKFLOW_TIMEOUT_BUDGETS.decisionModelTimeoutMs
+              ) {
+                findings.push({
+                  kind: "hook-timeout-parity",
+                  nodeId: `${relPath}:${hookEvent}:decision-model-budget`,
+                  location: relPath,
+                  message: `Hook command in "${relPath}" (PreToolUse) has timeout ${h.timeout}s (${h.timeout * 1000}ms), which must be strictly greater than WORKFLOW_TIMEOUT_BUDGETS.decisionModelTimeoutMs (${WORKFLOW_TIMEOUT_BUDGETS.decisionModelTimeoutMs}ms).`,
+                  action: `Raise PreToolUse hook "timeout" in "${relPath}" strictly above ${WORKFLOW_TIMEOUT_BUDGETS.decisionModelTimeoutMs / 1000}s (e.g. 15).`,
+                })
+              }
             }
             if (h.type === "command" && h.command !== undefined) {
               const cmdMatch = /(?:index|hook-entry)\.ts\b[\s\S]*?\b(guard|done)\b/.exec(h.command)

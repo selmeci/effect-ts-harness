@@ -1,7 +1,12 @@
 import * as path from "node:path"
 import { Cause, Deferred, Effect, Result } from "effect"
 import { match } from "ts-pattern"
-import { compareCodeUnits, computeContentSha256, isPureInterruptCause } from "@harness/contract"
+import {
+  compareCodeUnits,
+  computeContentSha256,
+  DEFAULT_MAX_INTERRUPT_RETRIES,
+  isPureInterruptCause,
+} from "@harness/contract"
 import {
   createTypeScriptProgramSession,
   type OverlayDiagnosticItem,
@@ -90,7 +95,6 @@ export interface LspSessionCache {
 
 const DEFAULT_MAX_ENTRIES = 4
 const DEFAULT_MAX_OVERLAY_ENTRIES = 64
-const DEFAULT_MAX_INTERRUPT_RETRIES = 4
 
 export const safeStatMtimeMs = (filePath: string, hostIo: ExtendedHostIo): number | undefined =>
   Result.getOrElse(

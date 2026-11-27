@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import {
   chmodSync,
   existsSync,
@@ -5,11 +6,18 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   statSync,
 } from "node:fs"
 import { constants as moduleConstants, enableCompileCache, register } from "node:module"
 import { tmpdir } from "node:os"
-import { dirname, join, resolve as resolvePath } from "node:path"
+import {
+  dirname,
+  isAbsolute as isAbsolutePath,
+  join,
+  relative as relativePath,
+  resolve as resolvePath,
+} from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
 export const resolveDefaultCompileCacheDir = (
@@ -134,6 +142,149 @@ initCompileCache()
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..")
 const ensureTrailingSlash = (href) => (href.endsWith("/") ? href : `${href}/`)
 const repoRootUrl = ensureTrailingSlash(pathToFileURL(repoRoot).href)
+
+const HOOK_ENTRY_POSIX_SUFFIX = "/apps/harness-cli/src/hook-entry.ts"
+let initializedArgv1 = typeof process.argv[1] === "string" ? process.argv[1] : undefined
+
+export function initialize(data) {
+  if (data && typeof data === "object" && typeof data.argv1 === "string") {
+    initializedArgv1 = data.argv1
+  }
+}
+
+const isContainedNonSymlink = (rootReal, targetPath, requireFile = false) => {
+  try {
+    const st = lstatOrUndefined(targetPath)
+    if (st === undefined || st.isSymbolicLink()) return false
+    if (requireFile && !st.isFile()) return false
+    const targetReal = realpathSync(targetPath)
+    const rel = relativePath(rootReal, targetReal)
+    return rel === "" || (!rel.startsWith("..") && !isAbsolutePath(rel))
+  } catch {
+    return false
+  }
+}
+
+const isSafeSnapshotFileTarget = (currentReal, relTarget, fileHashes) => {
+  if (typeof relTarget !== "string" || relTarget.trim().length === 0) return false
+  if (isAbsolutePath(relTarget) || relTarget.includes("\\")) return false
+  if (!Object.hasOwn(fileHashes, relTarget)) return false
+  const absPath = resolvePath(currentReal, relTarget)
+  return isContainedNonSymlink(currentReal, absPath, true)
+}
+
+const resolveEntryHookDetails = () => {
+  const rawArgv1 =
+    initializedArgv1 ?? (typeof process.argv[1] === "string" ? process.argv[1] : undefined)
+  if (!rawArgv1) return null
+  const resolvedEntryPath = resolvePath(rawArgv1)
+  const resolvedEntryPosix = resolvedEntryPath.replace(/\\/g, "/")
+  if (!resolvedEntryPosix.endsWith(HOOK_ENTRY_POSIX_SUFFIX)) return null
+  const entryRepoRoot = resolvedEntryPath.slice(
+    0,
+    resolvedEntryPath.length - HOOK_ENTRY_POSIX_SUFFIX.length,
+  )
+  return {
+    entryRepoRoot: entryRepoRoot.length > 0 ? entryRepoRoot : "/",
+    resolvedEntryPath,
+  }
+}
+
+const REQUIRED_SNAPSHOT_ENTRYPOINTS = [
+  "apps/harness-cli/src/hook-entry.js",
+  "libs/harness/gates/src/policy.js",
+]
+
+const loadHookSnapshotForEntry = (entryRepoRoot) => {
+  try {
+    const repoReal = realpathSync(entryRepoRoot)
+    const harnessDir = join(repoReal, ".harness")
+    const runtimeDir = join(harnessDir, "hook-runtime")
+    const currentDir = join(runtimeDir, "current")
+    const manifestPath = join(currentDir, "manifest.json")
+    if (
+      !isContainedNonSymlink(repoReal, harnessDir) ||
+      !isContainedNonSymlink(repoReal, runtimeDir) ||
+      !isContainedNonSymlink(repoReal, currentDir) ||
+      !isContainedNonSymlink(repoReal, manifestPath, true)
+    ) {
+      return null
+    }
+    const currentReal = realpathSync(currentDir)
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+    if (
+      !manifest ||
+      typeof manifest !== "object" ||
+      manifest.version !== 1 ||
+      typeof manifest.entryRel !== "string" ||
+      manifest.entryRel.trim().length === 0 ||
+      !manifest.packageMap ||
+      typeof manifest.packageMap !== "object" ||
+      Array.isArray(manifest.packageMap) ||
+      !manifest.fileHashes ||
+      typeof manifest.fileHashes !== "object" ||
+      Array.isArray(manifest.fileHashes)
+    ) {
+      return null
+    }
+    const fileHashes = manifest.fileHashes
+    if (!isSafeSnapshotFileTarget(currentReal, manifest.entryRel, fileHashes)) {
+      return null
+    }
+    for (const reqRel of REQUIRED_SNAPSHOT_ENTRYPOINTS) {
+      if (!isSafeSnapshotFileTarget(currentReal, reqRel, fileHashes)) {
+        return null
+      }
+    }
+    for (const relTarget of Object.values(manifest.packageMap)) {
+      if (!isSafeSnapshotFileTarget(currentReal, relTarget, fileHashes)) {
+        return null
+      }
+    }
+    for (const [relPath, expectedHash] of Object.entries(fileHashes)) {
+      if (
+        typeof expectedHash !== "string" ||
+        !isSafeSnapshotFileTarget(currentReal, relPath, fileHashes)
+      ) {
+        return null
+      }
+      const absPath = resolvePath(currentReal, relPath)
+      const actualHash = createHash("sha256").update(readFileSync(absPath)).digest("hex")
+      if (actualHash !== expectedHash) {
+        return null
+      }
+    }
+    const entryAbsPath = resolvePath(currentReal, manifest.entryRel)
+    return {
+      entryRepoRoot: repoReal,
+      entryRepoRootUrl: ensureTrailingSlash(pathToFileURL(repoReal).href),
+      currentDir: currentReal,
+      currentDirUrl: ensureTrailingSlash(pathToFileURL(currentReal).href),
+      entryAbsPath,
+      packageMap: manifest.packageMap,
+    }
+  } catch {
+    return null
+  }
+}
+
+const cachedSnapshotsByEntry = new Map()
+const getActiveHookSnapshot = () => {
+  if (process.env.HARNESS_HOOK_RUNTIME_SOURCE === "1") {
+    return null
+  }
+  const entryInfo = resolveEntryHookDetails()
+  if (entryInfo === null) return null
+  let cached = cachedSnapshotsByEntry.get(entryInfo.resolvedEntryPath)
+  if (cached === undefined) {
+    cached = {
+      resolvedEntryPath: entryInfo.resolvedEntryPath,
+      snapshot: loadHookSnapshotForEntry(entryInfo.entryRepoRoot),
+    }
+    cachedSnapshotsByEntry.set(entryInfo.resolvedEntryPath, cached)
+  }
+  return cached.snapshot === null ? null : cached
+}
 
 const resolveMainRepoRoot = (root) => {
   try {
@@ -313,8 +464,55 @@ const logResolverFallback = (specifier, error, stage) => {
 }
 
 export async function resolve(specifier, context, nextResolve) {
+  const activeHook = getActiveHookSnapshot()
+  if (activeHook !== null) {
+    const { resolvedEntryPath, snapshot } = activeHook
+    const specFilePath = specifier.startsWith("file://")
+      ? resolvePath(fileURLToPath(specifier))
+      : !specifier.startsWith(".") && !specifier.startsWith("@")
+        ? resolvePath(specifier)
+        : null
+    if (specFilePath !== null && specFilePath === resolvedEntryPath) {
+      return nextResolve(pathToFileURL(snapshot.entryAbsPath).href, context)
+    }
+
+    const snapPkgRel = snapshot.packageMap[specifier]
+    if (typeof snapPkgRel === "string") {
+      const snapTarget = resolvePath(snapshot.currentDir, snapPkgRel)
+      if (isContainedNonSymlink(snapshot.currentDir, snapTarget, true)) {
+        return nextResolve(pathToFileURL(snapTarget).href, context)
+      }
+      throw new Error(
+        `[node-ts-resolver] Refusing invalid package target '${snapPkgRel}' in hook runtime snapshot`,
+      )
+    }
+
+    if (
+      (specifier.startsWith("./") || specifier.startsWith("../")) &&
+      context.parentURL?.startsWith(snapshot.currentDirUrl)
+    ) {
+      const literalUrl = new URL(specifier, context.parentURL)
+      if (literalUrl.protocol === "file:") {
+        const targetPath = fileURLToPath(literalUrl)
+        if (isContainedNonSymlink(snapshot.currentDir, targetPath, true)) {
+          return nextResolve(literalUrl.href, context)
+        }
+      }
+      throw new Error(
+        `[node-ts-resolver] Refusing uncontained or non-file relative import '${specifier}' inside hook runtime snapshot`,
+      )
+    }
+  }
+
+  const entryInfo = resolveEntryHookDetails()
   const workspaceRel = resolveDynamicExport(specifier)
   if (workspaceRel !== undefined) {
+    if (entryInfo !== null) {
+      const entryTarget = join(entryInfo.entryRepoRoot, workspaceRel)
+      if (existsSync(entryTarget)) {
+        return nextResolve(pathToFileURL(entryTarget).href, context)
+      }
+    }
     const targetPath = join(repoRoot, workspaceRel)
     if (existsSync(targetPath)) {
       return nextResolve(pathToFileURL(targetPath).href, context)
@@ -337,6 +535,31 @@ export async function resolve(specifier, context, nextResolve) {
     return await nextResolve(specifier, context)
   } catch (error) {
     logResolverFallback(specifier, error, "primary")
+    if (
+      activeHook !== null &&
+      typeof context.parentURL === "string" &&
+      context.parentURL.startsWith(activeHook.snapshot.currentDirUrl)
+    ) {
+      const relFromSnap = context.parentURL.slice(activeHook.snapshot.currentDirUrl.length)
+      for (const baseParentUrl of [activeHook.snapshot.entryRepoRootUrl, repoRootUrl]) {
+        try {
+          return await nextResolve(specifier, {
+            ...context,
+            parentURL: baseParentUrl + relFromSnap,
+          })
+        } catch {
+          // Try next workspace root candidate for pnpm package-local node_modules
+        }
+      }
+      try {
+        return await nextResolve(specifier, {
+          ...context,
+          parentURL: pathToFileURL(join(repoRoot, "apps/harness-cli/package.json")).href,
+        })
+      } catch {
+        // Fall through to standard resolver fallbacks
+      }
+    }
     if (
       (specifier.startsWith("./") || specifier.startsWith("../")) &&
       context.parentURL?.startsWith("file://")
@@ -382,5 +605,10 @@ export async function resolve(specifier, context, nextResolve) {
 const currentPid = String(process.pid)
 if (process.env.__HARNESS_TS_RESOLVER_REGISTERED !== currentPid) {
   process.env.__HARNESS_TS_RESOLVER_REGISTERED = currentPid
-  register(pathToFileURL(fileURLToPath(import.meta.url)))
+  register(pathToFileURL(fileURLToPath(import.meta.url)), {
+    parentURL: import.meta.url,
+    data: {
+      argv1: typeof process.argv[1] === "string" ? process.argv[1] : undefined,
+    },
+  })
 }

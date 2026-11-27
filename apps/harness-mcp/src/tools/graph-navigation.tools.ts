@@ -62,102 +62,26 @@ import {
   ReviewRouteInputSchema,
   type ReviewRouteToolInput,
 } from "./review-route-helpers.js"
+import {
+  CalleesInputSchema,
+  CallersInputSchema,
+  decodeResolveInput,
+  decodeRouteInput,
+  decodeStructuralSearchInput,
+  ResolveInputSchema,
+  RouteInputSchema,
+  StructuralSearchInputSchema,
+  TestsReachingInputSchema,
+} from "./graph-navigation-schemas.js"
+import {
+  createMcpSingleFlightController,
+  McpSingleFlight,
+  type McpSingleFlightController,
+} from "./mcp-single-flight.js"
 import { graphHasNodesForKind } from "./retrieval-search-helpers.js"
 
 export { isPathInsideRoot, normalizeProjectPath, resolveDefaultRepoRoot }
 export type { ReviewRouteExecutionContext }
-
-const BoundedSymbolOrSpan = Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 512)))
-const BoundedRepoRoot = Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 1024)))
-
-const ResolveInputSchema = Schema.Struct({
-  symbolOrSpan: BoundedSymbolOrSpan.annotate({
-    description: "Symbol or span name to resolve",
-  }),
-  repoRoot: Schema.optional(
-    BoundedRepoRoot.annotate({
-      description: "Optional repository root path",
-    }),
-  ),
-})
-
-const CallersInputSchema = Schema.Struct({
-  symbolOrSpan: BoundedSymbolOrSpan.annotate({
-    description: "Symbol or span name to query callers for",
-  }),
-  repoRoot: Schema.optional(
-    BoundedRepoRoot.annotate({
-      description: "Optional repository root path",
-    }),
-  ),
-})
-
-const CalleesInputSchema = Schema.Struct({
-  symbolOrSpan: BoundedSymbolOrSpan.annotate({
-    description: "Symbol or span name to query callees for",
-  }),
-  repoRoot: Schema.optional(
-    BoundedRepoRoot.annotate({
-      description: "Optional repository root path",
-    }),
-  ),
-})
-
-const TestsReachingInputSchema = Schema.Struct({
-  symbolOrSpan: BoundedSymbolOrSpan.annotate({
-    description: "Symbol or span name to find reaching tests for",
-  }),
-  repoRoot: Schema.optional(
-    BoundedRepoRoot.annotate({
-      description: "Optional repository root path",
-    }),
-  ),
-})
-
-const StructuralSearchInputSchema = Schema.Struct({
-  pattern: Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 2048))).annotate({
-    description: "ast-grep pattern to search for across workspace TypeScript files",
-  }),
-  filePath: Schema.optional(
-    Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 512))).annotate({
-      description: "Optional relative or absolute file path to scope search to a single file",
-    }),
-  ),
-  paths: Schema.optional(
-    Schema.Array(Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 512))))
-      .pipe(Schema.check(Schema.isMaxLength(100)))
-      .annotate({
-        description: "Optional list of file or directory paths to scope search",
-      }),
-  ),
-  subDirs: Schema.optional(
-    Schema.Array(Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 256))))
-      .pipe(Schema.check(Schema.isMaxLength(50)))
-      .annotate({
-        description: "Optional workspace subdirectories to search (defaults to ['libs', 'apps'])",
-      }),
-  ),
-  repoRoot: Schema.optional(
-    Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 1024))).annotate({
-      description: "Optional repository or worktree root directory",
-    }),
-  ),
-})
-
-const RouteInputSchema = Schema.Struct({
-  planStep: Schema.String.pipe(Schema.check(Schema.isBetweenLength(1, 4096))).annotate({
-    description: "Implementation plan step text to route to an Effect idiom block",
-  }),
-  repoRoot: Schema.optional(
-    BoundedRepoRoot.annotate({
-      description: "Optional repository root path",
-    }),
-  ),
-})
-
-const decodeResolveInput = Schema.decodeUnknownEffect(ResolveInputSchema)
-const decodeStructuralSearchInput = Schema.decodeUnknownEffect(StructuralSearchInputSchema)
-const decodeRouteInput = Schema.decodeUnknownEffect(RouteInputSchema)
 
 export const executeReviewRouteTool = Effect.fn("HarnessMcp.routeReview")(function* (
   input: ReviewRouteToolInput,
@@ -304,340 +228,368 @@ export const executeReviewRouteTool = Effect.fn("HarnessMcp.routeReview")(functi
 
 export const buildGraphNavigationToolDescriptors = (
   options?: ServerOptions,
-): ReadonlyArray<McpToolPluginDescriptor> => [
-  {
-    name: McpToolName.make("harness_resolve"),
-    description: "Resolve a symbol or span name to its node in the Effect graph",
-    inputSchema: ResolveInputSchema,
-    execute: (args) =>
-      Effect.gen(function* () {
-        const { symbolOrSpan, repoRoot } = yield* decodeResolveInput(args)
-        const root = yield* resolveContainedRepoRoot(repoRoot, options)
-        const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
-        const node = resolveNode(graphStatus.graph, symbolOrSpan) ?? null
-        const suggestions =
-          node === null
-            ? executeNamedGqQueryInMemory(graphStatus.graph, "resolve_effect_fn_fuzzy", {
-                query: symbolOrSpan,
-              }).slice(0, 5)
-            : undefined
-        return {
-          node,
-          ...(suggestions !== undefined ? { suggestions } : {}),
-          ...graphStatusMeta(graphStatus),
-        }
-      }),
-  },
-  {
-    name: McpToolName.make("harness_callers"),
-    description: "Find callers of an Effect function, service, or layer",
-    inputSchema: CallersInputSchema,
-    execute: (args) =>
-      Effect.gen(function* () {
-        const { symbolOrSpan, repoRoot } = yield* decodeResolveInput(args)
-        const root = yield* resolveContainedRepoRoot(repoRoot, options)
-        const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
-        return {
-          callers: findCallers(graphStatus.graph, symbolOrSpan),
-          ...graphStatusMeta(graphStatus),
-        }
-      }),
-  },
-  {
-    name: McpToolName.make("harness_callees"),
-    description: "Find callees of an Effect function, service, or layer",
-    inputSchema: CalleesInputSchema,
-    execute: (args) =>
-      Effect.gen(function* () {
-        const { symbolOrSpan, repoRoot } = yield* decodeResolveInput(args)
-        const root = yield* resolveContainedRepoRoot(repoRoot, options)
-        const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
-        return {
-          callees: findCallees(graphStatus.graph, symbolOrSpan),
-          ...graphStatusMeta(graphStatus),
-        }
-      }),
-  },
-  {
-    name: McpToolName.make("harness_tests_reaching"),
-    description: "Find all Vitest test cases reaching a given symbol or span",
-    inputSchema: TestsReachingInputSchema,
-    execute: (args) =>
-      Effect.gen(function* () {
-        const { symbolOrSpan, repoRoot } = yield* decodeResolveInput(args)
-        const root = yield* resolveContainedRepoRoot(repoRoot, options)
-        const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
-        return {
-          tests: findTestsReaching(graphStatus.graph, symbolOrSpan),
-          ...graphStatusMeta(graphStatus),
-        }
-      }),
-  },
-  {
-    name: McpToolName.make("harness_structural_search"),
-    description: "Perform structural AST search using ast-grep across workspace TypeScript code",
-    inputSchema: StructuralSearchInputSchema,
-    execute: (args) =>
-      Effect.gen(function* () {
-        const input = yield* decodeStructuralSearchInput(args)
-        const root = yield* resolveContainedRepoRoot(input.repoRoot, options)
-        return yield* decideStructuralSearch({
-          pattern: input.pattern,
-          repoRoot: root,
-          filePath: input.filePath,
-          paths: input.paths,
-          subDirs: input.subDirs,
-          hostIo: nodeSyncHostIo,
-        })
-      }),
-  },
-  {
-    name: McpToolName.make("harness_route"),
-    description:
-      "Route an implementation plan step to an Effect idiom building block using hybrid Omnigraph pattern retrieval and local decision model",
-    inputSchema: RouteInputSchema,
-    execute: (args) =>
-      Effect.gen(function* () {
-        const { planStep, repoRoot } = yield* decodeRouteInput(args)
-        const root = yield* resolveContainedRepoRoot(repoRoot, options)
-        const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
-        const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
-        const routedOpt = yield* routeStepWithStatus(planStep).pipe(
-          Effect.provide(decisionLayer),
-          Effect.timeoutOption("1500 millis"),
-          Effect.catchCause((cause) => {
-            if (isPureInterruptCause(cause)) {
-              return Effect.interrupt
-            }
-            process.stderr.write(`[harness-mcp] decision fallback: ${Cause.pretty(cause)}\n`)
-            return Effect.succeedNone
-          }),
-        )
-        const baseRoute = Option.getOrElse(routedOpt, () => ({
-          block: "review" as const,
-          source: "degraded-fallback" as const,
-        }))
-
-        const syncLayer = options?.omnigraphSyncLayer ?? makeOmnigraphSyncLayer(nodeSyncHostIo)
-        const embeddingLayer = options?.embeddingClientLayer ?? OllamaEmbeddingClientLive
-        const skipOmnigraph =
-          (options?.skipOmnigraphSpawn === true ||
-            (options?.graph !== undefined && options?.skipOmnigraphSpawn !== false)) &&
-          !process.env["OMNIGRAPH_URL"] &&
-          options?.omnigraphSyncLayer === undefined
-
-        const trimmedStep = planStep.trim()
-        const shouldProbeEmbeddings =
-          trimmedStep.length > 0 && (!skipOmnigraph || options?.embeddingClientLayer !== undefined)
-        const queryVectorOpt: Option.Option<ReadonlyArray<number>> = shouldProbeEmbeddings
-          ? yield* Effect.gen(function* () {
-              const client = yield* EmbeddingClient
-              const avail = yield* client.checkAvailability
-              return yield* match(avail)
-                .with({ _tag: "Available" }, () =>
-                  client.embedQuery(KnowledgeQueryText.make(trimmedStep)).pipe(
-                    Effect.map((vec): ReadonlyArray<number> => vec.components),
-                    Effect.asSome,
-                  ),
-                )
-                .with({ _tag: "Unavailable" }, () => Effect.succeedNone)
-                .exhaustive()
-            }).pipe(
-              Effect.provide(embeddingLayer),
-              Effect.orElseSucceed(() => Option.none<ReadonlyArray<number>>()),
-            )
-          : Option.none<ReadonlyArray<number>>()
-
-        const runRoutePatternQuery = (
-          queryName: "rank_patterns_vector_hybrid" | "rank_patterns_bm25",
-          queryParams: Readonly<Record<string, unknown>>,
-        ) =>
-          invokeOmnigraphNamedQuery({
+  singleFlightController?: McpSingleFlightController,
+): ReadonlyArray<McpToolPluginDescriptor> => {
+  const effectiveSingleFlight =
+    singleFlightController ?? options?.singleFlightController ?? createMcpSingleFlightController()
+  return [
+    {
+      name: McpToolName.make("harness_resolve"),
+      description: "Resolve a symbol or span name to its node in the Effect graph",
+      inputSchema: ResolveInputSchema,
+      execute: (args) =>
+        Effect.gen(function* () {
+          const { symbolOrSpan, repoRoot } = yield* decodeResolveInput(args)
+          const root = yield* resolveContainedRepoRoot(repoRoot, options)
+          const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
+          const node = resolveNode(graphStatus.graph, symbolOrSpan) ?? null
+          const suggestions =
+            node === null
+              ? executeNamedGqQueryInMemory(graphStatus.graph, "resolve_effect_fn_fuzzy", {
+                  query: symbolOrSpan,
+                }).slice(0, 5)
+              : undefined
+          return {
+            node,
+            ...(suggestions !== undefined ? { suggestions } : {}),
+            ...graphStatusMeta(graphStatus),
+          }
+        }),
+    },
+    {
+      name: McpToolName.make("harness_callers"),
+      description: "Find callers of an Effect function, service, or layer",
+      inputSchema: CallersInputSchema,
+      execute: (args) =>
+        Effect.gen(function* () {
+          const { symbolOrSpan, repoRoot } = yield* decodeResolveInput(args)
+          const root = yield* resolveContainedRepoRoot(repoRoot, options)
+          const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
+          return {
+            callers: findCallers(graphStatus.graph, symbolOrSpan),
+            ...graphStatusMeta(graphStatus),
+          }
+        }),
+    },
+    {
+      name: McpToolName.make("harness_callees"),
+      description: "Find callees of an Effect function, service, or layer",
+      inputSchema: CalleesInputSchema,
+      execute: (args) =>
+        Effect.gen(function* () {
+          const { symbolOrSpan, repoRoot } = yield* decodeResolveInput(args)
+          const root = yield* resolveContainedRepoRoot(repoRoot, options)
+          const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
+          return {
+            callees: findCallees(graphStatus.graph, symbolOrSpan),
+            ...graphStatusMeta(graphStatus),
+          }
+        }),
+    },
+    {
+      name: McpToolName.make("harness_tests_reaching"),
+      description: "Find all Vitest test cases reaching a given symbol or span",
+      inputSchema: TestsReachingInputSchema,
+      execute: (args) =>
+        Effect.gen(function* () {
+          const { symbolOrSpan, repoRoot } = yield* decodeResolveInput(args)
+          const root = yield* resolveContainedRepoRoot(repoRoot, options)
+          const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
+          return {
+            tests: findTestsReaching(graphStatus.graph, symbolOrSpan),
+            ...graphStatusMeta(graphStatus),
+          }
+        }),
+    },
+    {
+      name: McpToolName.make("harness_structural_search"),
+      description: "Perform structural AST search using ast-grep across workspace TypeScript code",
+      inputSchema: StructuralSearchInputSchema,
+      execute: (args) =>
+        Effect.gen(function* () {
+          const input = yield* decodeStructuralSearchInput(args)
+          const root = yield* resolveContainedRepoRoot(input.repoRoot, options)
+          return yield* decideStructuralSearch({
+            pattern: input.pattern,
             repoRoot: root,
-            actor: "agent-mcp",
-            name: queryName,
-            params: queryParams,
-            fallbackGraph: graphStatus.graph,
-            ...(skipOmnigraph ? { baseUrl: "http://127.0.0.1:1" } : {}),
-          }).pipe(
-            Effect.provide(syncLayer),
-            Effect.catch((err) =>
-              Effect.succeed({
-                source: "memory-fallback" as const,
-                rows: executeNamedGqQueryInMemory(graphStatus.graph, queryName, queryParams),
-                degraded: true as const,
-                fallbackError: toErrorReasonMessage(err, "fallback"),
-              }),
-            ),
-          )
-
-        interface RouteCandidateQueryOutcome {
-          readonly rows: ReadonlyArray<Record<string, unknown>>
-          readonly usedLiveVectorHybrid: boolean
-        }
-
-        const runBm25FallbackRows = (): Effect.Effect<RouteCandidateQueryOutcome> =>
-          runRoutePatternQuery("rank_patterns_bm25", {
-            query: trimmedStep,
-            targetLayer: "*",
-          }).pipe(Effect.map((res) => ({ rows: res.rows, usedLiveVectorHybrid: false })))
-
-        const candidateQueryOutcome: RouteCandidateQueryOutcome = yield* match(queryVectorOpt)
-          .with({ _tag: "Some" }, ({ value: vectorQuery }) =>
-            runRoutePatternQuery("rank_patterns_vector_hybrid", {
-              vectorQuery: [...vectorQuery],
-              textQuery: trimmedStep,
-              targetLayer: "*",
-            }).pipe(
-              Effect.flatMap((res) =>
-                match(res)
-                  .with({ source: "omnigraph" }, ({ rows }) => {
-                    if (rows.length > 0) {
-                      return Effect.succeed<RouteCandidateQueryOutcome>({
-                        rows,
-                        usedLiveVectorHybrid: true,
-                      })
-                    }
-                    if (graphHasNodesForKind(graphStatus.graph, "PatternDoc", "*")) {
-                      return runBm25FallbackRows()
-                    }
-                    return Effect.succeed<RouteCandidateQueryOutcome>({
-                      rows: [],
-                      usedLiveVectorHybrid: false,
-                    })
-                  })
-                  .with({ source: "memory-fallback" }, () => runBm25FallbackRows())
-                  .exhaustive(),
-              ),
-            ),
-          )
-          .with({ _tag: "None" }, () => runBm25FallbackRows())
-          .exhaustive()
-
-        const hasMeaningfulTokens = tokenizeRetrievalText(trimmedStep).length > 0
-        const candidatePatterns = candidateQueryOutcome.rows
-          .filter((row) => typeof row["slug"] === "string")
-          .map((row, idx) => {
-            const slug = String(row["slug"])
-            const titleStr = typeof row["title"] === "string" ? row["title"] : ""
-            const summaryStr = typeof row["summary"] === "string" ? row["summary"] : ""
-            const rowScore =
-              typeof row["score"] === "number" && Number.isFinite(row["score"])
-                ? row["score"]
-                : undefined
-            const computedScore = candidateQueryOutcome.usedLiveVectorHybrid
-              ? (rowScore ?? (hasMeaningfulTokens ? 1 / (60 + idx) : 0))
-              : (rowScore ??
-                scoreLexicalBm25Lite(
-                  `${slug} ${titleStr} ${summaryStr}`,
-                  `${slug} ${titleStr}`,
-                  trimmedStep,
-                ))
-            return {
-              slug,
-              path: typeof row["path"] === "string" ? row["path"] : undefined,
-              score: computedScore,
-              scoreKind: candidateQueryOutcome.usedLiveVectorHybrid
-                ? ("rrf" as const)
-                : ("bm25" as const),
-            }
+            filePath: input.filePath,
+            paths: input.paths,
+            subDirs: input.subDirs,
+            hostIo: nodeSyncHostIo,
           })
+        }),
+    },
+    {
+      name: McpToolName.make("harness_route"),
+      description:
+        "Route an implementation plan step to an Effect idiom building block using hybrid Omnigraph pattern retrieval and local decision model",
+      inputSchema: RouteInputSchema,
+      execute: (args) =>
+        Effect.gen(function* () {
+          const { planStep, repoRoot } = yield* decodeRouteInput(args)
+          const root = yield* resolveContainedRepoRoot(repoRoot, options)
+          const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
+          const graphStatus = yield* resolveGraphWithStatus({ ...options, repoRoot: root }, args)
+          const routedOpt = yield* routeStepWithStatus(planStep).pipe(
+            Effect.provide(decisionLayer),
+            Effect.timeoutOption("1500 millis"),
+            Effect.catchCause((cause) => {
+              if (isPureInterruptCause(cause)) {
+                return Effect.interrupt
+              }
+              process.stderr.write(`[harness-mcp] decision fallback: ${Cause.pretty(cause)}\n`)
+              return Effect.succeedNone
+            }),
+          )
+          const baseRoute = Option.getOrElse(routedOpt, () => ({
+            block: "review" as const,
+            source: "degraded-fallback" as const,
+          }))
 
-        const combined = selectRouteWithHybridCandidates(baseRoute, candidatePatterns)
-        let block: string = combined.block
-        if (block === "review") {
-          const patternsDir = path.join(root, "agent-patterns")
-          if (nodeSyncHostIo.existsSync(patternsDir)) {
-            const files = nodeSyncHostIo.readdirSync(patternsDir).map((entry) => entry.name)
-            const stepLower = planStep.toLowerCase()
-            const candidates = files
-              .filter((f: string) => f.endsWith(".md") && f.toLowerCase() !== "readme.md")
-              .map((f: string) => f.replace(/\.md$/, ""))
-              .sort((a: string, b: string) => b.length - a.length)
-            for (const slug of candidates) {
-              const words = slug.split("-").filter((w: string) => w.length > 0)
-              if (words.length > 0 && words.every((w: string) => stepLower.includes(w))) {
-                block = slug
-                break
+          const syncLayer = options?.omnigraphSyncLayer ?? makeOmnigraphSyncLayer(nodeSyncHostIo)
+          const embeddingLayer = options?.embeddingClientLayer ?? OllamaEmbeddingClientLive
+          const skipOmnigraph =
+            (options?.skipOmnigraphSpawn === true ||
+              (options?.graph !== undefined && options?.skipOmnigraphSpawn !== false)) &&
+            !process.env["OMNIGRAPH_URL"] &&
+            options?.omnigraphSyncLayer === undefined
+
+          const trimmedStep = planStep.trim()
+          const shouldProbeEmbeddings =
+            trimmedStep.length > 0 &&
+            (!skipOmnigraph || options?.embeddingClientLayer !== undefined)
+          const queryVectorOpt: Option.Option<ReadonlyArray<number>> = shouldProbeEmbeddings
+            ? yield* Effect.gen(function* () {
+                const client = yield* EmbeddingClient
+                const avail = yield* client.checkAvailability
+                return yield* match(avail)
+                  .with({ _tag: "Available" }, () =>
+                    client.embedQuery(KnowledgeQueryText.make(trimmedStep)).pipe(
+                      Effect.map((vec): ReadonlyArray<number> => vec.components),
+                      Effect.asSome,
+                    ),
+                  )
+                  .with({ _tag: "Unavailable" }, () => Effect.succeedNone)
+                  .exhaustive()
+              }).pipe(
+                Effect.provide(embeddingLayer),
+                Effect.orElseSucceed(() => Option.none<ReadonlyArray<number>>()),
+              )
+            : Option.none<ReadonlyArray<number>>()
+
+          const runRoutePatternQuery = (
+            queryName: "rank_patterns_vector_hybrid" | "rank_patterns_bm25",
+            queryParams: Readonly<Record<string, unknown>>,
+          ) =>
+            invokeOmnigraphNamedQuery({
+              repoRoot: root,
+              actor: "agent-mcp",
+              name: queryName,
+              params: queryParams,
+              fallbackGraph: graphStatus.graph,
+              ...(skipOmnigraph ? { baseUrl: "http://127.0.0.1:1" } : {}),
+            }).pipe(
+              Effect.provide(syncLayer),
+              Effect.catch((err) =>
+                Effect.succeed({
+                  source: "memory-fallback" as const,
+                  rows: executeNamedGqQueryInMemory(graphStatus.graph, queryName, queryParams),
+                  degraded: true as const,
+                  fallbackError: toErrorReasonMessage(err, "fallback"),
+                }),
+              ),
+            )
+
+          interface RouteCandidateQueryOutcome {
+            readonly rows: ReadonlyArray<Record<string, unknown>>
+            readonly usedLiveVectorHybrid: boolean
+          }
+
+          const runBm25FallbackRows = (): Effect.Effect<RouteCandidateQueryOutcome> =>
+            runRoutePatternQuery("rank_patterns_bm25", {
+              query: trimmedStep,
+              targetLayer: "*",
+            }).pipe(Effect.map((res) => ({ rows: res.rows, usedLiveVectorHybrid: false })))
+
+          const candidateQueryOutcome: RouteCandidateQueryOutcome = yield* match(queryVectorOpt)
+            .with({ _tag: "Some" }, ({ value: vectorQuery }) =>
+              runRoutePatternQuery("rank_patterns_vector_hybrid", {
+                vectorQuery: [...vectorQuery],
+                textQuery: trimmedStep,
+                targetLayer: "*",
+              }).pipe(
+                Effect.flatMap((res) =>
+                  match(res)
+                    .with({ source: "omnigraph" }, ({ rows }) => {
+                      if (rows.length > 0) {
+                        return Effect.succeed<RouteCandidateQueryOutcome>({
+                          rows,
+                          usedLiveVectorHybrid: true,
+                        })
+                      }
+                      if (graphHasNodesForKind(graphStatus.graph, "PatternDoc", "*")) {
+                        return runBm25FallbackRows()
+                      }
+                      return Effect.succeed<RouteCandidateQueryOutcome>({
+                        rows: [],
+                        usedLiveVectorHybrid: false,
+                      })
+                    })
+                    .with({ source: "memory-fallback" }, () => runBm25FallbackRows())
+                    .exhaustive(),
+                ),
+              ),
+            )
+            .with({ _tag: "None" }, () => runBm25FallbackRows())
+            .exhaustive()
+
+          const hasMeaningfulTokens = tokenizeRetrievalText(trimmedStep).length > 0
+          const candidatePatterns = candidateQueryOutcome.rows
+            .filter((row) => typeof row["slug"] === "string")
+            .map((row, idx) => {
+              const slug = String(row["slug"])
+              const titleStr = typeof row["title"] === "string" ? row["title"] : ""
+              const summaryStr = typeof row["summary"] === "string" ? row["summary"] : ""
+              const rowScore =
+                typeof row["score"] === "number" && Number.isFinite(row["score"])
+                  ? row["score"]
+                  : undefined
+              const computedScore = candidateQueryOutcome.usedLiveVectorHybrid
+                ? (rowScore ?? (hasMeaningfulTokens ? 1 / (60 + idx) : 0))
+                : (rowScore ??
+                  scoreLexicalBm25Lite(
+                    `${slug} ${titleStr} ${summaryStr}`,
+                    `${slug} ${titleStr}`,
+                    trimmedStep,
+                  ))
+              return {
+                slug,
+                path: typeof row["path"] === "string" ? row["path"] : undefined,
+                score: computedScore,
+                scoreKind: candidateQueryOutcome.usedLiveVectorHybrid
+                  ? ("rrf" as const)
+                  : ("bm25" as const),
+              }
+            })
+
+          const combined = selectRouteWithHybridCandidates(baseRoute, candidatePatterns)
+          let block: string = combined.block
+          if (block === "review") {
+            const patternsDir = path.join(root, "agent-patterns")
+            if (nodeSyncHostIo.existsSync(patternsDir)) {
+              const files = nodeSyncHostIo.readdirSync(patternsDir).map((entry) => entry.name)
+              const stepLower = planStep.toLowerCase()
+              const candidates = files
+                .filter((f: string) => f.endsWith(".md") && f.toLowerCase() !== "readme.md")
+                .map((f: string) => f.replace(/\.md$/, ""))
+                .sort((a: string, b: string) => b.length - a.length)
+              for (const slug of candidates) {
+                const words = slug.split("-").filter((w: string) => w.length > 0)
+                if (words.length > 0 && words.every((w: string) => stepLower.includes(w))) {
+                  block = slug
+                  break
+                }
               }
             }
           }
-        }
-        const patternFile =
-          block === "review" || block === "effect" ? null : `agent-patterns/${block}.md`
-        const isDecisionModelFallback = match(baseRoute.source)
-          .with("degraded-fallback", () => true)
-          .with("deterministic", () => false)
-          .with("hybrid-retrieval", () => false)
-          .with("model", () => false)
-          .exhaustive()
-        const routeDegraded = graphStatus.degraded || isDecisionModelFallback
-        const routeDegradedReason = [
-          graphStatus.degradedReason,
-          isDecisionModelFallback ? "decision-model-fallback" : undefined,
-        ]
-          .filter((v): v is string => v !== undefined && v.length > 0)
-          .join("; ")
-        return {
-          block,
-          patternFile,
-          source: combined.source,
-          candidatePatterns: candidatePatterns.slice(0, 5).map((c) => c.slug),
-          degraded: routeDegraded,
-          ...(routeDegraded && routeDegradedReason.length > 0
-            ? { degradedReason: routeDegradedReason }
-            : {}),
-          ...(graphStatus.evaluationError !== undefined
-            ? { evaluationError: graphStatus.evaluationError }
-            : {}),
-        }
-      }),
-  },
-  {
-    name: McpToolName.make("harness_review_route"),
-    description:
-      "Route a code diff to required review depth, specialist reviewers, and Effect graph context",
-    inputSchema: ReviewRouteInputSchema,
-    execute: (args) =>
-      Effect.gen(function* () {
-        const parsed = yield* decodeReviewRouteInput(args)
-        const boundaryRoot = options?.repoRoot ?? resolveDefaultRepoRoot(undefined, options)
-        const candidateRoot = yield* resolveContainedRepoRoot(parsed.repoRoot, options)
-        const resolvedBoundary = path.resolve(boundaryRoot)
-        const isStrictSubdirWithoutWorkspaceMarker =
-          isPathInsideRoot(resolvedBoundary, candidateRoot) &&
-          candidateRoot !== resolvedBoundary &&
-          nodeSyncHostIo.existsSync(candidateRoot) &&
-          nodeSyncHostIo.isDirectorySync(candidateRoot) &&
-          !hasIntermediateRepoBoundary(resolvedBoundary, candidateRoot)
-        let effectiveRoot = candidateRoot
-        let effectiveChangedFiles: ReadonlyArray<string> = parsed.changedFiles
-        if (isStrictSubdirWithoutWorkspaceMarker) {
-          const relSubdir = path.relative(resolvedBoundary, candidateRoot).replaceAll("\\", "/")
-          const validatedRelPaths = yield* normalizeReviewFilePaths(
-            parsed.changedFiles.map((f) => ReviewRawFileInput.make(f)),
-          )
-          effectiveRoot = resolvedBoundary
-          effectiveChangedFiles = validatedRelPaths.map((relPath) =>
-            relPath.startsWith(`${relSubdir}/`) ? relPath : `${relSubdir}/${relPath}`,
-          )
-        }
-        const effectiveTimeoutMs = resolveReviewRouteTimeoutMs(parsed.timeoutMs, options)
-        const toolInput: ReviewRouteToolInput = {
-          ...parsed,
-          changedFiles: effectiveChangedFiles,
-          ...(effectiveTimeoutMs !== undefined ? { timeoutMs: effectiveTimeoutMs } : {}),
-        }
-        const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
-        const graphStatus = yield* resolveGraphWithStatus(
-          { ...options, repoRoot: effectiveRoot },
-          args,
-        )
-        return yield* executeReviewRouteTool(toolInput, {
-          repoRoot: effectiveRoot,
-          graph: graphStatus.graph,
-          graphStatus,
-        }).pipe(Effect.provide(decisionLayer))
-      }),
-  },
-]
+          const patternFile =
+            block === "review" || block === "effect" ? null : `agent-patterns/${block}.md`
+          const isDecisionModelFallback = match(baseRoute.source)
+            .with("degraded-fallback", () => true)
+            .with("deterministic", () => false)
+            .with("hybrid-retrieval", () => false)
+            .with("model", () => false)
+            .exhaustive()
+          const routeDegraded = graphStatus.degraded || isDecisionModelFallback
+          const routeDegradedReason = [
+            graphStatus.degradedReason,
+            isDecisionModelFallback ? "decision-model-fallback" : undefined,
+          ]
+            .filter((v): v is string => v !== undefined && v.length > 0)
+            .join("; ")
+          return {
+            block,
+            patternFile,
+            source: combined.source,
+            candidatePatterns: candidatePatterns.slice(0, 5).map((c) => c.slug),
+            degraded: routeDegraded,
+            ...(routeDegraded && routeDegradedReason.length > 0
+              ? { degradedReason: routeDegradedReason }
+              : {}),
+            ...(graphStatus.evaluationError !== undefined
+              ? { evaluationError: graphStatus.evaluationError }
+              : {}),
+          }
+        }),
+    },
+    {
+      name: McpToolName.make("harness_review_route"),
+      description:
+        "Route a code diff to required review depth, specialist reviewers, and Effect graph context",
+      inputSchema: ReviewRouteInputSchema,
+      execute: (args) =>
+        Effect.gen(function* () {
+          const parsed = yield* decodeReviewRouteInput(args)
+          const boundaryRoot = options?.repoRoot ?? resolveDefaultRepoRoot(undefined, options)
+          const candidateRoot = yield* resolveContainedRepoRoot(parsed.repoRoot, options)
+          const resolvedBoundary = path.resolve(boundaryRoot)
+          const isStrictSubdirWithoutWorkspaceMarker =
+            isPathInsideRoot(resolvedBoundary, candidateRoot) &&
+            candidateRoot !== resolvedBoundary &&
+            nodeSyncHostIo.existsSync(candidateRoot) &&
+            nodeSyncHostIo.isDirectorySync(candidateRoot) &&
+            !hasIntermediateRepoBoundary(resolvedBoundary, candidateRoot)
+          let effectiveRoot = candidateRoot
+          let effectiveChangedFiles: ReadonlyArray<string> = parsed.changedFiles
+          if (isStrictSubdirWithoutWorkspaceMarker) {
+            const relSubdir = path.relative(resolvedBoundary, candidateRoot).replaceAll("\\", "/")
+            const validatedRelPaths = yield* normalizeReviewFilePaths(
+              parsed.changedFiles.map((f) => ReviewRawFileInput.make(f)),
+            )
+            effectiveRoot = resolvedBoundary
+            effectiveChangedFiles = validatedRelPaths.map((relPath) =>
+              relPath.startsWith(`${relSubdir}/`) ? relPath : `${relSubdir}/${relPath}`,
+            )
+          }
+          const effectiveTimeoutMs = resolveReviewRouteTimeoutMs(parsed.timeoutMs, options)
+          const toolInput: ReviewRouteToolInput = {
+            ...parsed,
+            changedFiles: effectiveChangedFiles,
+            ...(effectiveTimeoutMs !== undefined ? { timeoutMs: effectiveTimeoutMs } : {}),
+          }
+          const decisionLayer = options?.decisionLayer ?? LocalDecisionModel
+          return yield* McpSingleFlight.run({
+            controller: effectiveSingleFlight,
+            repoRoot: effectiveRoot,
+            toolName: "harness_review_route",
+            args: {
+              changedFiles: effectiveChangedFiles,
+              ...(parsed.diffSummary !== undefined ? { diffSummary: parsed.diffSummary } : {}),
+              ...(parsed.changedLineCount !== undefined
+                ? { changedLineCount: parsed.changedLineCount }
+                : {}),
+              ...(parsed.baseRef !== undefined ? { baseRef: parsed.baseRef } : {}),
+              ...(parsed.touchedTiers !== undefined ? { touchedTiers: parsed.touchedTiers } : {}),
+              ...(parsed.touchedScopes !== undefined
+                ? { touchedScopes: parsed.touchedScopes }
+                : {}),
+              ...(parsed.remediationContext !== undefined
+                ? { remediationContext: parsed.remediationContext }
+                : {}),
+            },
+            effect: Effect.gen(function* () {
+              const graphStatus = yield* resolveGraphWithStatus(
+                { ...options, repoRoot: effectiveRoot },
+                args,
+              )
+              return yield* executeReviewRouteTool(toolInput, {
+                repoRoot: effectiveRoot,
+                graph: graphStatus.graph,
+                graphStatus,
+              }).pipe(Effect.provide(decisionLayer))
+            }),
+          })
+        }),
+    },
+  ]
+}

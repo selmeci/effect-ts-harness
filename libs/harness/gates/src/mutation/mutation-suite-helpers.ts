@@ -26,7 +26,6 @@ import {
 } from "./mutant-ast-generator.js"
 import {
   type MutationContextDigests,
-  computeFileMutationClosureDigest,
   computeMutantCacheKey,
   computeMutationContextDigestsChecked,
   computeMutationEntryMac,
@@ -34,6 +33,13 @@ import {
   partitionMutationCacheLookup,
   saveMutationCacheAtomic,
 } from "./mutation-cache.js"
+import {
+  computeWitnessSupportClosureDigest,
+  computeWitnessTestAstDigestsForPath,
+  prepareTwoTierLookupInputs,
+  resolveMemoizedSourceOnlyClosureDigest,
+  resolveMemoizedWitnessClosureDigest,
+} from "./mutation-two-tier-cache.js"
 import {
   type DomainFile,
   findDomainFilesChecked,
@@ -83,41 +89,6 @@ export const partitionTargetTestsWithTimings = (input: {
     })
     .exhaustive()
 
-const resolveMemoizedWitnessClosureDigest = (input: {
-  readonly repoRoot: string
-  readonly relFile: string
-  readonly witnessTestFile: AstSourceFilePath
-  readonly digests: MutationContextDigests
-  readonly hostIo: SyncHostIo
-  readonly witnessClosureMemo?: Map<string, ContentSha256 | null> | undefined
-}): ContentSha256 | undefined => {
-  const memoKey = `${input.relFile}\0${input.witnessTestFile}`
-  if (input.witnessClosureMemo?.has(memoKey) === true) {
-    return input.witnessClosureMemo.get(memoKey) ?? undefined
-  }
-  return match(
-    computeFileMutationClosureDigest({
-      repoRoot: input.repoRoot,
-      relFile: input.relFile,
-      allReachingTests: [input.witnessTestFile],
-      digests: input.digests,
-      hostIo: input.hostIo,
-    }),
-  )
-    .with({ _tag: "Ok" }, ({ closureDigest }) => {
-      input.witnessClosureMemo?.set(memoKey, closureDigest)
-      return closureDigest
-    })
-    .with({ _tag: "Disabled" }, ({ reason }) => {
-      input.witnessClosureMemo?.set(memoKey, null)
-      process.stderr.write(
-        `[mutation-check] Warning: Witness closure disabled for '${input.relFile}' (${reason}).\n`,
-      )
-      return undefined
-    })
-    .exhaustive()
-}
-
 /**
  * Computes candidate witness-independent cache keys for a file's mutants and partitions hits vs misses
  * against witness-scoped closure digests.
@@ -137,6 +108,7 @@ export const hydrateFileMutantCacheHits = (input: {
   readonly loadedCacheStore: MutationCacheStore | undefined
   readonly cacheEntries: Record<ContentSha256, MutationCacheEntry>
   readonly witnessClosureMemo?: Map<string, ContentSha256 | null> | undefined
+  readonly sourceClosureMemo?: Map<string, ContentSha256 | null> | undefined
 }): {
   readonly mutantKeys: ReadonlyMap<string, ContentSha256>
   readonly cachedHitIds: ReadonlySet<string>
@@ -195,36 +167,24 @@ export const hydrateFileMutantCacheHits = (input: {
     else keyToMutantIds.set(key, [mutant.id])
   }
   if (candidateKeys.length > 0) {
-    const distinctWitnessFiles = new Set<AstSourceFilePath>()
-    for (const candidateKey of candidateKeys) {
-      const entry = Object.hasOwn(input.loadedCacheStore.entries, candidateKey)
-        ? input.loadedCacheStore.entries[candidateKey]
-        : undefined
-      if (entry !== undefined && reachingSet.has(entry.witnessTestFile)) {
-        distinctWitnessFiles.add(entry.witnessTestFile)
-      }
-    }
-    const witnessClosureDigests: Record<AstSourceFilePath, ContentSha256> = {}
-    for (const witnessTestFile of distinctWitnessFiles) {
-      const digest = resolveMemoizedWitnessClosureDigest({
-        repoRoot: input.repoRoot,
-        relFile: input.file.relFile,
-        witnessTestFile,
-        digests: input.contextDigests,
-        hostIo: input.hostIo,
-        witnessClosureMemo: input.witnessClosureMemo,
-      })
-      if (digest !== undefined) {
-        witnessClosureDigests[witnessTestFile] = digest
-      }
-    }
+    const twoTierInputs = prepareTwoTierLookupInputs({
+      repoRoot: input.repoRoot,
+      relFile,
+      candidateKeys,
+      loadedCacheStore: input.loadedCacheStore,
+      reachingSet,
+      digests: input.contextDigests,
+      hostIo: input.hostIo,
+      witnessClosureMemo: input.witnessClosureMemo,
+      sourceClosureMemo: input.sourceClosureMemo,
+    })
     const lookupDecision = partitionMutationCacheLookup({
       candidateKeys,
       store: input.loadedCacheStore,
       auth: input.cacheAuth,
       nowMs: input.nowMs,
       reachingTests,
-      witnessClosureDigests,
+      ...twoTierInputs,
     })
     const touchedAt = MutationCacheTimestamp.make(new Date(input.nowMs).toISOString())
     for (const hitKey of lookupDecision.hitKeys) {
@@ -621,26 +581,46 @@ export const recordKilledMutantsToCache = (input: {
             witnessClosureMemo: input.witnessClosureMemo,
           })
           if (witnessClosureSha256 !== undefined) {
-            const mutantCacheId = MutantCacheId.make(mutant.id)
-            const mac = computeMutationEntryMac(hmacSecret, {
-              key,
-              file: fileAstPath,
-              mutantId: mutantCacheId,
-              status: "killed",
-              recordedAt,
-              witnessTestFile,
-              witnessClosureSha256,
+            const sourceClosureSha256 = resolveMemoizedSourceOnlyClosureDigest({
+              repoRoot: input.repoRoot,
+              relFile: input.relFile,
+              digests: input.digests!,
+              hostIo: input.hostIo,
             })
-            input.cacheEntries[key] = {
+            const witnessSupportSha256 = computeWitnessSupportClosureDigest({
+              repoRoot: input.repoRoot,
+              witnessTestFile,
+              digests: input.digests!,
+              hostIo: input.hostIo,
+            })
+            const witnessTestAstDigests = computeWitnessTestAstDigestsForPath(
+              input.repoRoot,
+              witnessTestFile,
+              input.hostIo,
+            )
+            const twoTierWitness =
+              sourceClosureSha256 !== undefined &&
+              witnessSupportSha256 !== undefined &&
+              witnessTestAstDigests !== undefined
+                ? {
+                    sourceClosureSha256,
+                    witnessSupportSha256,
+                    witnessTestAstDigests,
+                  }
+                : undefined
+            const mutantCacheId = MutantCacheId.make(mutant.id)
+            const entryBase = {
               key,
               file: fileAstPath,
               mutantId: mutantCacheId,
-              status: "killed",
+              status: "killed" as const,
               recordedAt,
               witnessTestFile,
               witnessClosureSha256,
-              mac,
+              ...(twoTierWitness !== undefined ? { twoTierWitness } : {}),
             }
+            const mac = computeMutationEntryMac(hmacSecret, entryBase)
+            input.cacheEntries[key] = { ...entryBase, mac }
             dirtied = true
           }
         }

@@ -34,6 +34,12 @@ export interface SaturationViolation {
 
 export type SpanSaturationObservation = TraceSpanObservation
 
+export interface ModuleInitFailureClassification {
+  readonly mutant: CodeMutant
+  readonly baselineImportClean: boolean
+  readonly isModuleInitThrow: boolean
+}
+
 export interface MutationEvaluationInput {
   readonly outcomes: ReadonlyArray<MutantOutcome>
   readonly minScore?: number | undefined
@@ -43,6 +49,7 @@ export interface MutationEvaluationInput {
   readonly spanObservations?: ReadonlyArray<SpanSaturationObservation> | undefined
   readonly earlyTerminated?: boolean | undefined
   readonly maxSurvivors?: number | undefined
+  readonly moduleInitFailures?: ReadonlyArray<ModuleInitFailureClassification> | undefined
 }
 
 export interface UntestedMutationFile {
@@ -60,6 +67,7 @@ export interface MutationOutcomesSummary {
   readonly survivedMutants: ReadonlyArray<CodeMutant>
   readonly equivalentMutants?: ReadonlyArray<CodeMutant> | undefined
   readonly saturationViolations?: ReadonlyArray<SaturationViolation> | undefined
+  readonly infraFailureCount?: number | undefined
 }
 
 export interface MutationSuiteReport extends MutationOutcomesSummary {
@@ -258,16 +266,32 @@ export const evaluateMutationOutcomes = (
 export const decideMutationReport = Effect.fn("MutationCheck.decide")(function* (
   input: MutationEvaluationInput,
 ) {
+  let effectiveOutcomes: ReadonlyArray<MutantOutcome> = input.outcomes
+  let infraFailureCount = 0
+  if (input.moduleInitFailures !== undefined && input.moduleInitFailures.length > 0) {
+    const killedInitOutcomes: Array<MutantOutcome> = []
+    for (const item of input.moduleInitFailures) {
+      if (item.baselineImportClean && item.isModuleInitThrow) {
+        killedInitOutcomes.push({ mutant: item.mutant, status: "killed" })
+      } else {
+        infraFailureCount += 1
+      }
+    }
+    if (killedInitOutcomes.length > 0) {
+      effectiveOutcomes = [...input.outcomes, ...killedInitOutcomes]
+    }
+  }
+  const summary = evaluateMutationOutcomes(
+    effectiveOutcomes,
+    input.minScore,
+    input.equivalencePriors,
+    input.saturationSpecs,
+    input.spanObservations ?? input.traceObservations,
+    input.earlyTerminated,
+    input.maxSurvivors,
+  )
   return yield* Effect.succeed(
-    evaluateMutationOutcomes(
-      input.outcomes,
-      input.minScore,
-      input.equivalencePriors,
-      input.saturationSpecs,
-      input.spanObservations ?? input.traceObservations,
-      input.earlyTerminated,
-      input.maxSurvivors,
-    ),
+    infraFailureCount > 0 ? { ...summary, passed: false, infraFailureCount } : summary,
   )
 })
 

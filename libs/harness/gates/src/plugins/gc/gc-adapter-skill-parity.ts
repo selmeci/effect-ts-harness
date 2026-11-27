@@ -27,6 +27,14 @@ const REMEDIATION_AUDIT_MARKERS: ReadonlyArray<string> = [
   "REVIEW_SLICE_FILE_THRESHOLD",
 ]
 
+const REVIEW_LOOP_EFFICIENCY_HEADING = "### Review Loop Efficiency & Ceiling Headroom Discipline"
+const REVIEW_LOOP_EFFICIENCY_MARKERS: ReadonlyArray<string> = [
+  "gc --strict",
+  "second-pass specialist re-audit",
+  "90%",
+  "harness_ontology_check",
+]
+
 export const ADAPTER_SKILL_PARITY_CLAUSES: ReadonlyArray<AdapterSkillParityClause> = [
   { skillName: "effect-lfg", heading: SWARM_SEAM_HEADING, requiredMarkers: SWARM_SEAM_MARKERS },
   {
@@ -43,6 +51,11 @@ export const ADAPTER_SKILL_PARITY_CLAUSES: ReadonlyArray<AdapterSkillParityClaus
     skillName: "resolving-effect-review-feedback",
     heading: REMEDIATION_AUDIT_HEADING,
     requiredMarkers: REMEDIATION_AUDIT_MARKERS,
+  },
+  {
+    skillName: "resolving-effect-review-feedback",
+    heading: REVIEW_LOOP_EFFICIENCY_HEADING,
+    requiredMarkers: REVIEW_LOOP_EFFICIENCY_MARKERS,
   },
 ]
 

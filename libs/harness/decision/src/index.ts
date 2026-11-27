@@ -18,9 +18,21 @@ export {
 } from "./idiom-router.js"
 export {
   GUARD_DECISION_TIMEOUT_MS,
+  GuardDecision,
+  GuardDecisionInput,
+  GuardDecisionResult,
+  GuardFastPathVerdict,
+  GuardModelErrorDetail,
+  GuardModelOutcome,
+  GuardReasonText,
+  GuardRiskProbability,
   GuardV1,
-  type GuardDecisionResult,
+  ShellCommandText,
+  type GuardCommandInput,
+  type GuardCommandOptions,
+  decideGuard,
   decideGuardCommand,
+  decideGuardVerdict,
 } from "./guard-decision.js"
 export {
   TriageV1,

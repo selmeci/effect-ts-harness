@@ -37,7 +37,7 @@ import {
 
 describe("ReviewRouterV1 slice partitioner, fallback & properties", () => {
   it.effect(
-    "S-5.2 / F-9.1b: times out hanging DecisionModel at 1500ms (none at 1499ms) and supports custom timeoutMs",
+    "S-5.2 / F-9.1b: times out hanging DecisionModel at 5000ms (none at 4999ms) and supports custom timeoutMs",
     () =>
       Effect.gen(function* () {
         const hangingLayer = Layer.effect(
@@ -58,7 +58,7 @@ describe("ReviewRouterV1 slice partitioner, fallback & properties", () => {
           Effect.provide(hangingLayer),
           Effect.forkChild,
         )
-        yield* TestClock.adjust("1499 millis")
+        yield* TestClock.adjust("4999 millis")
         expect(fiber.pollUnsafe()).toBeUndefined()
 
         yield* TestClock.adjust("1 millis")
@@ -66,7 +66,7 @@ describe("ReviewRouterV1 slice partitioner, fallback & properties", () => {
 
         expect(plan._tag).toBe("ActiveReviewPlan")
         expect(plan.source).toBe("degraded-fallback")
-        expect(plan.degradedReason).toContain("1500ms")
+        expect(plan.degradedReason).toContain("5000ms")
 
         const customInput = ReviewRawDiffInput.make({
           changedFiles: [ReviewRawFileInput.make("docs/notes.md")],

@@ -48,6 +48,7 @@ import type {
   LspSessionCacheOptions,
   LspTsgoExecutor,
 } from "./lsp-session-cache.js"
+import type { McpSingleFlightController } from "./mcp-single-flight.js"
 import {
   findRepoRoot,
   hasIntermediateRepoBoundary,
@@ -108,18 +109,55 @@ export interface McpToolPluginDescriptor {
   ) => Effect.Effect<unknown, McpToolExecutionError>
 }
 
-export interface LspDiagnosticsReport {
-  readonly clean: boolean
-  readonly diagnostics: ReadonlyArray<unknown>
-  readonly summary: {
-    readonly filesChecked: number
-    readonly filesWithoutPlugin: number
-    readonly totalFiles: number
-    readonly errors: number
-    readonly warnings: number
-    readonly messages: number
-  }
+export interface LspDiagnosticsSummary {
+  readonly filesChecked: number
+  readonly filesWithoutPlugin: number
+  readonly totalFiles: number
+  readonly errors: number
+  readonly warnings: number
+  readonly messages: number
 }
+
+export interface LspCleanDiagnosticsReport {
+  readonly clean: true
+  readonly diagnostics: ReadonlyArray<unknown>
+  readonly summary: LspDiagnosticsSummary
+  readonly timedOut?: false | undefined
+  readonly toolError?: false | undefined
+}
+
+export interface LspFindingsDiagnosticsReport {
+  readonly clean: false
+  readonly diagnostics: ReadonlyArray<unknown>
+  readonly summary: LspDiagnosticsSummary
+  readonly timedOut?: false | undefined
+  readonly toolError?: false | undefined
+}
+
+export interface LspTimeoutDiagnosticsReport {
+  readonly clean: false
+  readonly timedOut: true
+  readonly errorTag: "LspDiagnosticsTimeoutError"
+  readonly timeoutMs: number
+  readonly cycleHint?: string | undefined
+  readonly diagnostics: ReadonlyArray<unknown>
+  readonly summary: LspDiagnosticsSummary
+  readonly toolError?: false | undefined
+}
+
+export interface LspToolErrorDiagnosticsReport {
+  readonly clean: false
+  readonly toolError: true
+  readonly diagnostics: ReadonlyArray<unknown>
+  readonly summary: LspDiagnosticsSummary
+  readonly timedOut?: false | undefined
+}
+
+export type LspDiagnosticsReport =
+  | LspCleanDiagnosticsReport
+  | LspFindingsDiagnosticsReport
+  | LspTimeoutDiagnosticsReport
+  | LspToolErrorDiagnosticsReport
 
 export interface ServerOptions {
   readonly graph?: HarnessGraph
@@ -143,6 +181,8 @@ export interface ServerOptions {
   readonly lspSessionCache?: LspSessionCache | undefined
   readonly lspSessionCacheOptions?: LspSessionCacheOptions | undefined
   readonly lspTsgoExecutor?: LspTsgoExecutor | undefined
+  readonly lspWatchdogTimeoutMs?: number | undefined
+  readonly singleFlightController?: McpSingleFlightController | undefined
 }
 
 export const shouldSuppressLiveMcpTestSideEffects = (
@@ -414,7 +454,7 @@ const formatLspFailDetail = (
   result: unknown,
 ): string | undefined => {
   const isFailOutcome = match(outcome)
-    .with("fail", () => true)
+    .with("fail", "diagnostics_found", "timeout", "tool_error", () => true)
     .with("ok", "fallback", "ask", "deny", () => false)
     .exhaustive()
   if (
@@ -499,25 +539,41 @@ export const recordMcpToolTelemetry = (
     .otherwise(() => "local" as const)
 
   const degradedReason = extractDegradedReason(result)
-  const isCleanFalseFail =
-    (toolName === "harness_lsp_diagnostics" || toolName === "harness_ontology_check") &&
+  const isLspTimedOut =
+    toolName === "harness_lsp_diagnostics" &&
     typeof result === "object" &&
     result !== null &&
-    "clean" in result &&
-    result.clean === false
+    Reflect.get(result, "timedOut") === true
+  const isLspToolError =
+    toolName === "harness_lsp_diagnostics" &&
+    typeof result === "object" &&
+    result !== null &&
+    Reflect.get(result, "toolError") === true
+  const isCleanFalse =
+    typeof result === "object" && result !== null && "clean" in result && result.clean === false
   const isMemoryFallback = match(engineSource)
     .with("memory-fallback", () => true)
     .with("omnigraph", "local", "decision-model", () => false)
     .exhaustive()
   const outcome: TelemetryOutcome =
-    degradedReason !== undefined
-      ? "fallback"
-      : (toolName === "harness_gq_query" || toolName === "harness_search_knowledge") &&
-          isMemoryFallback
+    toolName === "harness_lsp_diagnostics"
+      ? isLspTimedOut
+        ? "timeout"
+        : isLspToolError
+          ? "tool_error"
+          : degradedReason !== undefined
+            ? "fallback"
+            : isCleanFalse
+              ? "diagnostics_found"
+              : "ok"
+      : degradedReason !== undefined
         ? "fallback"
-        : isCleanFalseFail
-          ? "fail"
-          : "ok"
+        : (toolName === "harness_gq_query" || toolName === "harness_search_knowledge") &&
+            isMemoryFallback
+          ? "fallback"
+          : toolName === "harness_ontology_check" && isCleanFalse
+            ? "fail"
+            : "ok"
 
   const detail =
     degradedReason !== undefined

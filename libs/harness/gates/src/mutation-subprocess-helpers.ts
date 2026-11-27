@@ -1,4 +1,4 @@
-import { dirname, isAbsolute, join, relative, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { Cause, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
@@ -27,9 +27,13 @@ import {
   toBatchHostExecResult,
 } from "./mutation/mutation-witness.js"
 import { parseVitestBaselineTestDurations } from "./mutation/mutation-test-timings.js"
+import {
+  isMutatedModuleInitFailure,
+  resolveCommonVitestConfigPath,
+} from "./mutation/mutation-init-classifier.js"
 import { getActiveMutantId, setActiveMutantId } from "./services/active-mutant-context.js"
 
-export { stripAnsi }
+export { resolveCommonVitestConfigPath, stripAnsi }
 
 export type MutantSubprocessOutcome =
   | { readonly kind: "abort"; readonly diagnostic: string }
@@ -76,66 +80,31 @@ export const hasClearFailureEvidence = (stdout: string, stderr: string): boolean
 }
 
 /** Returns true when a batch worker outcome is ambiguous (`TimedOut` or `Exited(1)` without clear failure evidence) and requires solo cold recheck. */
-export const needsSoloColdRecheck = (mapped: SyncHostExecResult): boolean =>
+export const needsSoloColdRecheck = (
+  mapped: SyncHostExecResult,
+  options?: { readonly baselineImportClean?: boolean | undefined },
+): boolean =>
   match(mapped)
     .with({ _tag: "TimedOut" }, () => true)
     .with(
       { _tag: "Exited" },
-      (e) => e.exitCode === 1 && !hasClearFailureEvidence(e.stdout, e.stderr),
+      (e) =>
+        e.exitCode === 1 &&
+        !hasClearFailureEvidence(e.stdout, e.stderr) &&
+        !isMutatedModuleInitFailure({
+          exitCode: e.exitCode,
+          stdout: e.stdout,
+          stderr: e.stderr,
+          baselineImportClean: options?.baselineImportClean === true,
+        }),
     )
     .with({ _tag: "Signaled" }, { _tag: "SpawnFailed" }, () => false)
     .exhaustive()
 
-const VITEST_CONFIG_CANDIDATES = [
-  "vitest.config.ts",
-  "vitest.config.mts",
-  "vitest.config.js",
-  "vitest.config.mjs",
-  "vitest.config.cts",
-  "vitest.config.cjs",
-] as const
-
-const isPathContainedStrict = (parentDir: string, childPath: string): boolean => {
-  const rel = relative(parentDir, childPath)
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
-}
-
-export const resolveCommonVitestConfigPath = (
-  repoRoot: string,
-  testFiles: ReadonlyArray<string>,
-  hostIo: SyncHostIo,
-): string | undefined => {
-  if (testFiles.length === 0) return undefined
-  const resolvedRoot = resolve(repoRoot)
-  const dirs = testFiles.map((f) => dirname(resolve(resolvedRoot, f)))
-  let commonDir = dirs[0]!
-  while (!dirs.every((d) => isPathContainedStrict(commonDir, d))) {
-    const parent = dirname(commonDir)
-    if (parent === commonDir) return undefined
-    commonDir = parent
-  }
-  if (!isPathContainedStrict(resolvedRoot, commonDir)) return undefined
-  let cur = commonDir
-  while (isPathContainedStrict(resolvedRoot, cur)) {
-    for (const cfgName of VITEST_CONFIG_CANDIDATES) {
-      const candidate = join(cur, cfgName)
-      const exists = Result.getOrElse(
-        Result.try(() => hostIo.existsSync(candidate) && !hostIo.isSymbolicLinkSync(candidate)),
-        () => false,
-      )
-      if (exists) return candidate
-    }
-    if (cur === resolvedRoot) break
-    const parent = dirname(cur)
-    if (parent === cur) break
-    cur = parent
-  }
-  return undefined
-}
-
 export const classifyMutantSubprocessResult = (
   mutantId: string,
   execRes: Result.Result<SyncHostExecResult, unknown>,
+  options?: { readonly baselineImportClean?: boolean | undefined },
 ): MutantSubprocessOutcome =>
   match(execRes)
     .with({ _tag: "Failure" }, ({ failure }) => ({
@@ -177,6 +146,16 @@ export const classifyMutantSubprocessResult = (
           const hasRunnerSyntaxOrTransformError =
             /\bSyntaxError:|Transform failed with \d+ error/i.test(infraScanOutput)
           if (r.exitCode === 1) {
+            if (
+              isMutatedModuleInitFailure({
+                exitCode: r.exitCode,
+                stdout: r.stdout,
+                stderr: r.stderr,
+                baselineImportClean: options?.baselineImportClean === true,
+              })
+            ) {
+              return { kind: "outcome" as const, status: "killed" as const }
+            }
             if (isInfraMissingRunner) return abortInfra("infraFailure=true")
             if (hasRunnerSyntaxOrTransformError) {
               return abortInfra("runnerSyntaxOrTransformError=true")
@@ -331,8 +310,12 @@ export const runVitestTargetList = (
   mutatedSchemaSource: string,
   backupPath: string,
   mutantsToRun: ReadonlyArray<CodeMutant>,
-  options?: { readonly skipBaselineCheck?: boolean | undefined },
+  options?: {
+    readonly skipBaselineCheck?: boolean | undefined
+    readonly baselineVerified?: boolean | undefined
+  },
 ): MutantBatchRunResult => {
+  const baselineVerified = options?.skipBaselineCheck !== true || options?.baselineVerified === true
   const vitestCliPath = join(repoRoot, "node_modules", "vitest", "vitest.mjs")
   const batchRunnerPath = join(repoRoot, "tools", "parallel-vitest-batch.mjs")
   const useDirectVitest = hostIo.existsSync(vitestCliPath)
@@ -490,7 +473,11 @@ export const runVitestTargetList = (
     execRes: Result.Result<SyncHostExecResult, unknown>,
     explicitKillingTestFile?: AstSourceFilePath,
   ): string | undefined =>
-    match(classifyMutantSubprocessResult(mutant.id, execRes))
+    match(
+      classifyMutantSubprocessResult(mutant.id, execRes, {
+        baselineImportClean: baselineVerified,
+      }),
+    )
       .with({ kind: "abort" }, ({ diagnostic }) => diagnostic)
       .with({ kind: "outcome" }, ({ status }) => {
         match(execRes)
@@ -500,7 +487,17 @@ export const runVitestTargetList = (
                 nonCacheableIds.add(mutant.id)
               })
               .with({ _tag: "Exited" }, (r) => {
-                if (r.exitCode === 1 && !hasClearFailureEvidence(r.stdout, r.stderr)) {
+                const isModuleInitKill = isMutatedModuleInitFailure({
+                  exitCode: r.exitCode,
+                  stdout: r.stdout,
+                  stderr: r.stderr,
+                  baselineImportClean: baselineVerified,
+                })
+                if (
+                  r.exitCode === 1 &&
+                  !hasClearFailureEvidence(r.stdout, r.stderr) &&
+                  !isModuleInitKill
+                ) {
                   nonCacheableIds.add(mutant.id)
                 }
               })
@@ -613,7 +610,9 @@ export const runVitestTargetList = (
                 break
               }
               const mappedExec: SyncHostExecResult = toBatchHostExecResult(entryRes)
-              const needsSoloRecheck = needsSoloColdRecheck(mappedExec)
+              const needsSoloRecheck = needsSoloColdRecheck(mappedExec, {
+                baselineImportClean: baselineVerified,
+              })
               const finalExecRes = needsSoloRecheck
                 ? Result.try(() =>
                     hostIo.execFileSync(execCmd, mutantExecArgs, {

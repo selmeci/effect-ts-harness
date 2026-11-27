@@ -48,15 +48,13 @@ export {
   TelemetryEvent,
   TelemetryOutcome,
   TelemetrySurface,
-  appendTelemetryEvent,
-  clearTelemetryEvents,
-  readTelemetryEvents,
   type HealthGrade,
   type SessionKpis,
   type SessionReport,
   type SessionReportInput,
   type ToolUsageMetric,
 } from "./telemetry.js"
+export { appendTelemetryEvent, clearTelemetryEvents, readTelemetryEvents } from "./telemetry-io.js"
 export {
   FrictionEvent,
   FrictionEventKind,

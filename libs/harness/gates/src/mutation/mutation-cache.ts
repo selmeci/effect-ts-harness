@@ -84,6 +84,15 @@ export const emptyMutationCacheStore = (): MutationCacheStore => ({
   entries: {},
 })
 
+export const isAppendOnlyWitnessDigestsPreserved = (
+  recordedDigests: ReadonlyArray<ContentSha256>,
+  currentDigests: ReadonlyArray<ContentSha256>,
+): boolean => {
+  if (recordedDigests.length === 0) return false
+  const currentSet = new Set<ContentSha256>(currentDigests)
+  return recordedDigests.every((digest) => currentSet.has(digest))
+}
+
 export const computeMutationEntryMac = (
   hmacSecret: RedactedMutationCacheHmacSecret,
   p: ComputeMutationEntryMacInput,
@@ -96,6 +105,13 @@ export const computeMutationEntryMac = (
     p.recordedAt,
     p.witnessTestFile,
     p.witnessClosureSha256,
+    ...(p.twoTierWitness !== undefined
+      ? [
+          `src:${p.twoTierWitness.sourceClosureSha256}`,
+          `sup:${p.twoTierWitness.witnessSupportSha256}`,
+          `ast:${p.twoTierWitness.witnessTestAstDigests.join(",")}`,
+        ]
+      : []),
   ]
   const payload = fields.map((f) => `${Buffer.byteLength(f, "utf8")}:${f}`).join("\0")
   return MutationCacheMac.make(
@@ -110,6 +126,29 @@ export const verifyMutationEntryMac = (
   const expectedBuf = Buffer.from(computeMutationEntryMac(hmacSecret, entry), "utf8")
   const actualBuf = Buffer.from(entry.mac, "utf8")
   return expectedBuf.length === actualBuf.length && timingSafeEqual(expectedBuf, actualBuf)
+}
+
+const matchesEntrySourceClosure = (
+  entry: MutationCacheEntry,
+  sourceClosureDigests: Readonly<Record<AstSourceFilePath, ContentSha256>> | undefined,
+): boolean => {
+  if (entry.twoTierWitness === undefined || sourceClosureDigests === undefined) return false
+  const candidate = Object.hasOwn(sourceClosureDigests, entry.file)
+    ? sourceClosureDigests[entry.file]
+    : Object.hasOwn(sourceClosureDigests, entry.witnessTestFile)
+      ? sourceClosureDigests[entry.witnessTestFile]
+      : undefined
+  return candidate === entry.twoTierWitness.sourceClosureSha256
+}
+
+const matchesEntryWitnessSupport = (
+  entry: MutationCacheEntry,
+  witnessSupportDigests: Readonly<Record<AstSourceFilePath, ContentSha256>> | undefined,
+): boolean => {
+  if (entry.twoTierWitness === undefined || witnessSupportDigests === undefined) return false
+  return Object.hasOwn(witnessSupportDigests, entry.witnessTestFile)
+    ? witnessSupportDigests[entry.witnessTestFile] === entry.twoTierWitness.witnessSupportSha256
+    : false
 }
 
 export const partitionMutationCacheLookup = (
@@ -128,7 +167,7 @@ export const partitionMutationCacheLookup = (
           ? input.store.entries[candidateKey]
           : undefined
         const ageMs = entry !== undefined ? nowMs - Date.parse(entry.recordedAt) : Number.NaN
-        const isHit =
+        const baseValid =
           entry !== undefined &&
           match(entry.status)
             .with("killed", () => entry.key === candidateKey)
@@ -137,10 +176,24 @@ export const partitionMutationCacheLookup = (
           Number.isFinite(ageMs) &&
           ageMs >= 0 &&
           ageMs <= maxAgeMs &&
-          reachingSet.has(entry.witnessTestFile) &&
+          reachingSet.has(entry.witnessTestFile)
+        const exactWitnessMatch =
+          baseValid &&
           Object.hasOwn(input.witnessClosureDigests, entry.witnessTestFile) &&
           input.witnessClosureDigests[entry.witnessTestFile] === entry.witnessClosureSha256
-        if (isHit) hitKeys.push(candidateKey)
+        const twoTierWitnessMatch =
+          baseValid &&
+          !exactWitnessMatch &&
+          entry.twoTierWitness !== undefined &&
+          input.witnessTestAstDigests !== undefined &&
+          Object.hasOwn(input.witnessTestAstDigests, entry.witnessTestFile) &&
+          matchesEntrySourceClosure(entry, input.sourceClosureDigests) &&
+          matchesEntryWitnessSupport(entry, input.witnessSupportDigests) &&
+          isAppendOnlyWitnessDigestsPreserved(
+            entry.twoTierWitness.witnessTestAstDigests,
+            input.witnessTestAstDigests[entry.witnessTestFile]!,
+          )
+        if (exactWitnessMatch || twoTierWitnessMatch) hitKeys.push(candidateKey)
         else missKeys.push(candidateKey)
       }
       return { hitKeys, missKeys }

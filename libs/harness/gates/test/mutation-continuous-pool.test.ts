@@ -517,6 +517,7 @@ describe("mutation-continuous-pool (SPEC-0034 Wave 2 integration)", () => {
         hostIo: makeMockIo("ambiguous"),
         baseSubprocessEnv: {},
         allPackageTests: [testRel],
+        baselineVerified: true,
         files: [
           {
             file: makeDomainFile(dir, relFile),
@@ -716,6 +717,7 @@ describe("mutation-continuous-pool (SPEC-0034 Wave 2 integration)", () => {
         hostIo: recoverFirstIo,
         baseSubprocessEnv: {},
         allPackageTests: [testRel],
+        baselineVerified: true,
         files: [fileInput],
       })
       expect(recoveredRes._tag).toBe("Ok")
