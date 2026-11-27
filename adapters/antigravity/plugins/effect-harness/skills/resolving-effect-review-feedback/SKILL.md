@@ -86,6 +86,7 @@ If any `fix`, `class-fix`, or semantic/prose `doc-sync-fix` (`orchestrator-phase
    ```bash
    node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts plan-check
    ```
+4. Immediately after Phase 3 contract synchronization completes and before Phase 4 dispatch, run `gc --strict` (`node --import ./tools/node-ts-resolver.mjs apps/harness-cli/src/index.ts gc --strict`) to catch structural/parity drift early.
 
 > [!CAUTION]
 > **NO `wc -l` OR METRIC SYNC IN PHASE 2 OR PHASE 3:** Do NOT run `wc -l` on code files for doc-sync purposes or edit LOC/test-count tables before Phase 4 and Phase 5 gate promotions finish. Pre-edit numbers go stale immediately and must not be cached. Handle ALL numeric/LOC sync strictly in Phase 5 Step 0 (`orchestrator-phase5`).
@@ -114,6 +115,13 @@ Whenever resolving `blocker`, `critical`, or `major` findings or reviewing diffs
 1. **Remediation Routing Context (`remediationContext`):** Pass `remediationContext: { priorSpecialists, maxSeverity }` into `harness_review_route` after applying fixes for any `blocker`, `critical`, or `major` finding so deterministic routing retains every cited specialist with `mandatory: true` and enforces depth `>= focused`.
 2. **Cohesive Package Slices (`reviewSlices`):** When `harness_review_route` emits `reviewSlices` (for diffs `>= REVIEW_SLICE_FILE_THRESHOLD`), dispatch specialist subagents per slice with that slice's exact file list and selections while preserving whole-diff cross-package seam inspection.
 3. **Second-Pass Specialist Sign-Off:** Complete a read-only second-pass specialist re-audit covering all modified remediation hunks and callers before entering final `gc --strict`, `ontology check --strict`, `mutate --strict`, `verify`, and `done` gates.
+
+### Review Loop Efficiency & Ceiling Headroom Discipline
+
+- **Pre-Dispatch `gc --strict` Gate (`REQ-6.1`):** Run `gc --strict` immediately after Phase 3 contract synchronization and before Phase 4 fixer dispatch so barrel/tier/parity issues are caught before parallel edits begin.
+- **No Premature `mutate --strict` / `verify` (`REQ-6.2`):** Do NOT run `mutate --strict` or `harness verify` before second-pass specialist re-audit sign-off completes; iterate during remediation with targeted unit tests and `--survivors-only` / `--files`.
+- **90% Ceiling Headroom Routing (`REQ-6.3`):** When touching any source or test file at or above `90%` of its `SelfDogfooding` line-count ceiling (e.g., `>= 720` lines for an `800`-line source file or `>= 1350` lines for a `1500`-line test file), route new functions or tests into a focused companion module rather than trimming margins to the final lines.
+- **Shared Ontology Summary & Disjoint Remediation Hunks (`REQ-6.4`):** Run one orchestrator `harness_ontology_check` before second-pass specialist re-audit dispatch, share that single summary in the re-audit prompts, and scope each specialist strictly to its disjoint P0/P1 remediation hunks rather than re-auditing the entire repo.
 
 ---
 

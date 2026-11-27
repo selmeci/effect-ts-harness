@@ -3,6 +3,10 @@ import { Effect, Result, Schema } from "effect"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { match } from "ts-pattern"
 import type { FrictionEvent } from "./friction-log.js"
+import {
+  collectTopGuardCommandPrefixes,
+  detectHangOutlierRecommendations,
+} from "./telemetry-recommendations.js"
 import { resolveHarnessStateDir } from "./worktree.js"
 
 export const TelemetrySurface = Schema.Literals(["cli", "mcp", "hook"])
@@ -18,7 +22,16 @@ export const TelemetryCategory = Schema.Literals([
 ])
 export type TelemetryCategory = typeof TelemetryCategory.Type
 
-export const TelemetryOutcome = Schema.Literals(["ok", "fail", "deny", "ask", "fallback"])
+export const TelemetryOutcome = Schema.Literals([
+  "ok",
+  "fail",
+  "deny",
+  "ask",
+  "fallback",
+  "diagnostics_found",
+  "timeout",
+  "tool_error",
+])
 export type TelemetryOutcome = typeof TelemetryOutcome.Type
 
 export const TelemetryEngineSource = Schema.Literals([
@@ -217,10 +230,10 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
 
     for (const e of groupEvents) {
       match(e.outcome)
-        .with("ok", () => {
+        .with("ok", "diagnostics_found", () => {
           successCount += 1
         })
-        .with("fail", () => {
+        .with("fail", "tool_error", "timeout", () => {
           failCount += 1
         })
         .with("deny", "ask", () => {
@@ -274,8 +287,13 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
 
   const verifyEvents = input.events.filter((e) => e.toolName === "verify")
   const verifyAttempts = verifyEvents.length
-  const fixUpIterations = verifyEvents.filter((e) => e.outcome === "fail").length
-  const firstPassVerify = verifyEvents.length === 0 ? null : verifyEvents[0]?.outcome === "ok"
+  const fixUpIterations = verifyEvents.filter(
+    (e) => e.outcome === "fail" || e.outcome === "timeout" || e.outcome === "tool_error",
+  ).length
+  const firstPassVerify =
+    verifyAttempts === 0
+      ? null
+      : verifyAttempts === 1 && fixUpIterations === 0 && verifyEvents[0]?.outcome === "ok"
 
   const isInternalOmnigraphSync = (toolName: string): boolean =>
     toolName.startsWith("omnigraph:sync-") || toolName.startsWith("omnigraph:merge-")
@@ -326,10 +344,17 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
   const otherGateFailures = input.events.filter(
     (e) => e.category === "gate" && e.toolName !== "verify" && e.outcome === "fail",
   ).length
+  const toolErrorOrTimeoutFailures = input.events.filter(
+    (e) =>
+      e.toolName !== "verify" &&
+      e.category !== "guard" &&
+      (e.outcome === "tool_error" || e.outcome === "timeout"),
+  ).length
   const guardTimeouts = input.events.filter(
     (e) =>
       e.category === "guard" &&
-      (/timed out|timeout/i.test(e.detail ?? "") ||
+      (e.outcome === "timeout" ||
+        /timed out|timeout/i.test(e.detail ?? "") ||
         (e.outcome === "ask" &&
           e.durationMs >= 2450 &&
           !/fastpath=hit|Ambiguous risk|DecisionModel unavailable|Worker isolation mode|requires human confirmation/i.test(
@@ -362,11 +387,11 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
           allVerifyPreceded = false
         }
         match(e.outcome)
-          .with("fail", () => {
+          .with("fail", "timeout", "tool_error", () => {
             gcFreshOk = false
             ontologyFreshOk = false
           })
-          .with("ok", "deny", "ask", "fallback", () => {})
+          .with("ok", "deny", "ask", "fallback", "diagnostics_found", () => {})
           .exhaustive()
       })
       .otherwise(() => {})
@@ -406,6 +431,7 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
   healthScore -= Math.min(20, prematureDoneAttempts * 10)
   healthScore -= Math.min(20, frictionCount * 5)
   healthScore -= Math.min(15, otherGateFailures * 5)
+  healthScore -= Math.min(15, toolErrorOrTimeoutFailures * 5)
   healthScore -= Math.min(15, guardTimeouts * 5)
   healthScore -= Math.min(15, degradedMcpCalls * 5)
   healthScore -= Math.min(10, sessionHookFails * 5)
@@ -463,6 +489,13 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
       "Guard escalated to DecisionModel and timed out; allowlist safe command patterns or check local Ollama (clef-flash) latency.",
     )
   }
+  const topGuardPrefixes = collectTopGuardCommandPrefixes(input.events, input.frictionEvents ?? [])
+  if (topGuardPrefixes.length > 0) {
+    recommendations.push(
+      `Top recurring guard command prefixes causing escalations/timeouts: ${topGuardPrefixes.map((p) => `'${p.prefix}' (${p.count}x)`).join(", ")} — consider fast-path allowlisting safe read-only patterns.`,
+    )
+  }
+  recommendations.push(...detectHangOutlierRecommendations(toolMetrics))
   if (degradedMcpCalls > 0) {
     recommendations.push(
       "Degraded MCP responses detected (corrupt/missing graph snapshot or stale workspace); refresh snapshot via 'pnpm harness gc --strict' or reload MCP server.",
@@ -515,6 +548,16 @@ export const decideSessionReport = Effect.fn("SessionReport.decide")(function* (
 ) {
   return yield* Effect.succeed(buildSessionReport(rawInput))
 })
+
+export const decideTelemetryReport = Effect.fn("TelemetryReport.decide")(function* (
+  rawInput: SessionReportInput,
+) {
+  return yield* Effect.succeed(buildSessionReport(rawInput))
+})
+
+export const TelemetryReport = {
+  decide: decideTelemetryReport,
+} as const
 
 export const renderSessionReportMarkdown = (report: SessionReport): string => {
   const lines: Array<string> = []

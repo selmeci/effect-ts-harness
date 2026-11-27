@@ -11,7 +11,7 @@ import {
   computeContentSha256,
 } from "@harness/contract"
 import type { SyncHostIo } from "@harness/service/host-io"
-import { needsSoloColdRecheck } from "../mutation-subprocess-helpers.js"
+import { needsSoloColdRecheck, runVitestTargetList } from "../mutation-subprocess-helpers.js"
 import type { CodeMutant, MutantOutcome } from "./mutant-ast-generator.js"
 import { isPathContained, isUnsafeSymlinkPath, realpathOrUndefined } from "./mutation-cache.js"
 import type { DomainFile } from "./mutation-target-discovery.js"
@@ -223,6 +223,59 @@ export const collectSurvivingMutants = (
       .with("killed", "equivalent", undefined, () => false)
       .exhaustive(),
   )
+
+/** Runs one fallback Vitest stage for surviving mutants of a single domain file. */
+export const runSingleFileFallbackStage = (input: {
+  readonly repoRoot: string
+  readonly backupPath: string
+  readonly hostIo: SyncHostIo
+  readonly baseSubprocessEnv: Readonly<Record<string, string | undefined>>
+  readonly file: DomainFile
+  readonly originalContent: string
+  readonly schemaSource: string
+  readonly stageTests: ReadonlyArray<string>
+  readonly fileOutcomes: Map<string, MutantOutcome>
+  readonly fileNonCacheableIds: Set<string>
+  readonly witnessByMutantId: Map<string, AstSourceFilePath>
+  readonly observedDurationsMs: Map<string, number>
+}): string | undefined => {
+  const surviving = collectSurvivingMutants(
+    Array.from(input.fileOutcomes.values()).map((o) => o.mutant),
+    input.fileOutcomes,
+  )
+  if (surviving.length === 0 || input.stageTests.length === 0) return undefined
+  const fallbackRes = runVitestTargetList(
+    input.repoRoot,
+    input.file,
+    input.hostIo,
+    input.baseSubprocessEnv,
+    input.stageTests,
+    input.originalContent,
+    input.schemaSource,
+    input.backupPath,
+    surviving,
+    { skipBaselineCheck: false },
+  )
+  return match(fallbackRes)
+    .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
+    .with(
+      { _tag: "Ok" },
+      ({ outcomes: fbOutcomes, nonCacheableIds, witnessByMutantId, observedDurationsMs }) => {
+        mergeObservedDurationsIntoMap(input.observedDurationsMs, observedDurationsMs)
+        recordStageOutcomes(
+          fbOutcomes,
+          nonCacheableIds,
+          witnessByMutantId,
+          input.fileOutcomes,
+          input.fileNonCacheableIds,
+          input.witnessByMutantId,
+          true,
+        )
+        return undefined
+      },
+    )
+    .exhaustive()
+}
 
 /** Serializes and writes the package batch plan JSON plus temporary NDJSON stream path. */
 export const writePackageBatchPlan = (input: {
