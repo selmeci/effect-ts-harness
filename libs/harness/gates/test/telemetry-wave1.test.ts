@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Schema } from "effect"
 import { decideSessionReport, type TelemetryEvent } from "../src/index.js"
+import { GUARD_TIMEOUT_NEAR_BUDGET_MS } from "../src/telemetry-recommendations.js"
 
 const GC_ONTOLOGY_REC =
   "Run 'harness gc --strict' and 'harness ontology check --strict' before 'harness verify' to reduce fix-up iterations."
@@ -34,7 +35,13 @@ const DomainVocabularyEvent = Schema.Struct({
     "guard",
   ]),
   outcome: Schema.Literals(["ok", "fail", "fallback", "ask", "deny"]),
-  durationMs: Schema.Literals([20, 100, 2449, 2450, 2600]),
+  durationMs: Schema.Literals([
+    20,
+    100,
+    GUARD_TIMEOUT_NEAR_BUDGET_MS - 1,
+    GUARD_TIMEOUT_NEAR_BUDGET_MS,
+    GUARD_TIMEOUT_NEAR_BUDGET_MS + 150,
+  ]),
   detail: Schema.optional(
     Schema.Literals([
       "timeout-contention",
@@ -131,7 +138,7 @@ describe("telemetry Wave 1 (SPEC-0033 REQ-1.4, REQ-1.5, REQ-1.9)", () => {
   )
 
   it.effect(
-    "detects GuardV1 timeouts at 2450ms boundary while excluding non-timeout ask reasons, plus verifyTimeoutFailures and degraded MCP calls",
+    "detects GuardV1 timeouts at GUARD_TIMEOUT_NEAR_BUDGET_MS boundary while excluding non-timeout ask reasons, plus verifyTimeoutFailures and degraded MCP calls",
     () =>
       Effect.gen(function* () {
         const belowThreshold = yield* decideSessionReport({
@@ -141,7 +148,7 @@ describe("telemetry Wave 1 (SPEC-0033 REQ-1.4, REQ-1.5, REQ-1.9)", () => {
               surface: "hook",
               category: "guard",
               outcome: "ask",
-              durationMs: 2449,
+              durationMs: GUARD_TIMEOUT_NEAR_BUDGET_MS - 1,
               detail: "normal-escalation",
             }),
             makeEvent({
@@ -149,7 +156,7 @@ describe("telemetry Wave 1 (SPEC-0033 REQ-1.4, REQ-1.5, REQ-1.9)", () => {
               surface: "hook",
               category: "guard",
               outcome: "ask",
-              durationMs: 2600,
+              durationMs: GUARD_TIMEOUT_NEAR_BUDGET_MS + 150,
               detail: "fastpath=hit; requires human confirmation",
             }),
             makeEvent({
@@ -157,7 +164,7 @@ describe("telemetry Wave 1 (SPEC-0033 REQ-1.4, REQ-1.5, REQ-1.9)", () => {
               surface: "hook",
               category: "guard",
               outcome: "ask",
-              durationMs: 2600,
+              durationMs: GUARD_TIMEOUT_NEAR_BUDGET_MS + 150,
               detail: "Ambiguous risk",
             }),
             makeEvent({
@@ -165,7 +172,7 @@ describe("telemetry Wave 1 (SPEC-0033 REQ-1.4, REQ-1.5, REQ-1.9)", () => {
               surface: "hook",
               category: "guard",
               outcome: "ask",
-              durationMs: 2600,
+              durationMs: GUARD_TIMEOUT_NEAR_BUDGET_MS + 150,
               detail: "DecisionModel unavailable",
             }),
             makeEvent({
@@ -173,7 +180,7 @@ describe("telemetry Wave 1 (SPEC-0033 REQ-1.4, REQ-1.5, REQ-1.9)", () => {
               surface: "hook",
               category: "guard",
               outcome: "ask",
-              durationMs: 2600,
+              durationMs: GUARD_TIMEOUT_NEAR_BUDGET_MS + 150,
               detail: "Worker isolation mode",
             }),
           ],
@@ -188,7 +195,7 @@ describe("telemetry Wave 1 (SPEC-0033 REQ-1.4, REQ-1.5, REQ-1.9)", () => {
               surface: "hook",
               category: "guard",
               outcome: "ask",
-              durationMs: 2450,
+              durationMs: GUARD_TIMEOUT_NEAR_BUDGET_MS,
               detail: "boundary-ask-timeout",
             }),
             makeEvent({

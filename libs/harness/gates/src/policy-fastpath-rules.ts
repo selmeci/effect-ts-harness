@@ -550,6 +550,9 @@ const isSafeGitBranchInspection = (args: ReadonlyArray<string>): boolean => {
   return true
 }
 
+const UNSAFE_GIT_INSPECTION_FLAG_RE =
+  /^(?:-c|--config-env|--ext-diff|--textconv|--exec-path|--git-dir|--work-tree|--upload-pack|--output)(?:=|$)/
+
 const isSafeGitInspectionTokens = (
   tokens: ReadonlyArray<string>,
   allowedSubcommands: ReadonlySet<string>,
@@ -557,7 +560,7 @@ const isSafeGitInspectionTokens = (
   const sub = tokens[1]
   if (sub === undefined || !allowedSubcommands.has(sub)) return false
   const args = tokens.slice(2)
-  if (args.some((a) => /^--output(?:=|$)/.test(a))) return false
+  if (args.some((a) => UNSAFE_GIT_INSPECTION_FLAG_RE.test(a))) return false
   if (sub === "branch") return isSafeGitBranchInspection(args)
   if (sub === "remote") {
     const pos = args.filter((a) => !a.startsWith("-"))

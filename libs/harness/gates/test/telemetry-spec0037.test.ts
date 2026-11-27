@@ -1,21 +1,41 @@
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
+import type { SyncHostIo } from "@harness/service/host-io"
 import { Effect, Schema } from "effect"
 import {
   TelemetryReport,
   appendTelemetryEvent,
   buildSessionReport,
+  clearTelemetryEvents,
   collectTopGuardCommandPrefixes,
   decideTelemetryReport,
   detectHangOutlierRecommendations,
   readTelemetryEvents,
   renderSessionReportMarkdown,
+  writeSessionReportFiles,
   type FrictionEvent,
   type TelemetryEvent,
   type ToolUsageMetric,
 } from "../src/index.js"
+import { GUARD_TIMEOUT_NEAR_BUDGET_MS } from "../src/telemetry-recommendations.js"
 import { isolatedTestHostIo } from "./helpers/test-host-io.js"
+
+const captureStderr = <A>(fn: () => A): { readonly result: A; readonly stderrText: string } => {
+  const chunks: Array<string> = []
+  const origWrite = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+    return true
+  }) as typeof process.stderr.write
+  try {
+    const result = fn()
+    return { result, stderrText: chunks.join("") }
+  } finally {
+    process.stderr.write = origWrite
+  }
+}
 
 const mkEvent = (
   overrides: Partial<TelemetryEvent> & Pick<TelemetryEvent, "toolName" | "outcome">,
@@ -223,7 +243,7 @@ describe("SPEC-0037 REQ-5.1..REQ-5.4: TelemetryReport.decide accuracy & actionab
               surface: "hook",
               category: "guard",
               outcome: "ask",
-              durationMs: 2450,
+              durationMs: GUARD_TIMEOUT_NEAR_BUDGET_MS,
               detail: "cmd=git status --short",
             }),
           ],
@@ -252,7 +272,7 @@ describe("SPEC-0037 REQ-5.1..REQ-5.4: TelemetryReport.decide accuracy & actionab
         expect(prefixRec).toBeDefined()
         expect(report.healthScore).toBeLessThan(100)
 
-        // Duration threshold (2449 vs 2450) and limit=5 top-prefix truncation
+        // Duration threshold (GUARD_TIMEOUT_NEAR_BUDGET_MS - 1 vs GUARD_TIMEOUT_NEAR_BUDGET_MS) and limit=5 top-prefix truncation
         const truncatedPrefixes = collectTopGuardCommandPrefixes(
           [
             mkEvent({
@@ -260,7 +280,7 @@ describe("SPEC-0037 REQ-5.1..REQ-5.4: TelemetryReport.decide accuracy & actionab
               surface: "hook",
               category: "guard",
               outcome: "ask",
-              durationMs: 2449,
+              durationMs: GUARD_TIMEOUT_NEAR_BUDGET_MS - 1,
               detail: "cmd=ignored fastcmd",
             }),
             mkEvent({
@@ -268,7 +288,7 @@ describe("SPEC-0037 REQ-5.1..REQ-5.4: TelemetryReport.decide accuracy & actionab
               surface: "hook",
               category: "guard",
               outcome: "ask",
-              durationMs: 2450,
+              durationMs: GUARD_TIMEOUT_NEAR_BUDGET_MS,
               detail: "cmd=git status",
             }),
             mkEvent({
@@ -369,51 +389,69 @@ describe("SPEC-0037 REQ-5.1..REQ-5.4: TelemetryReport.decide accuracy & actionab
   )
 
   it.effect.prop(
-    "TelemetryReport.decide preserves KPI consistency, hang-outlier detection, and diagnostics_found zero-penalty invariants",
+    "TelemetryReport.decide satisfies algebraic, monotonicity, and structural invariants (S-3.2)",
     {
       events: Schema.Array(TelemetryPropEvent),
     },
     ({ events }) =>
       Effect.gen(function* () {
-        const report = yield* TelemetryReport.decide({ events, cumulative: true })
-        expect(report.healthScore).toBeGreaterThanOrEqual(0)
-        expect(report.healthScore).toBeLessThanOrEqual(100)
+        const base = yield* TelemetryReport.decide({ events, cumulative: true })
+        expect(base.healthScore).toBeGreaterThanOrEqual(0)
+        expect(base.healthScore).toBeLessThanOrEqual(100)
 
-        const expectedFirstPass =
-          report.kpis.verifyAttempts === 0
-            ? null
-            : report.kpis.verifyAttempts === 1 &&
-              report.kpis.fixUpIterations === 0 &&
-              events.find((e) => e.toolName === "verify")?.outcome === "ok"
-        expect(report.kpis.firstPassVerify).toBe(expectedFirstPass)
+        for (const m of base.toolMetrics) {
+          expect(m.successCount + m.failCount + m.denyOrAskCount + m.fallbackCount).toBe(m.calls)
+          expect(m.p50DurationMs).toBeLessThanOrEqual(m.p95DurationMs)
+          expect(m.p95DurationMs).toBeLessThanOrEqual(m.maxDurationMs)
+        }
 
-        for (const m of report.toolMetrics) {
-          const baseline = m.calls <= 20 ? m.p50DurationMs : m.p95DurationMs
-          const isAnySurfaceOutlier = report.toolMetrics.some((other) => {
-            const otherBaseline = other.calls <= 20 ? other.p50DurationMs : other.p95DurationMs
-            return (
-              other.toolName === m.toolName &&
-              other.maxDurationMs === m.maxDurationMs &&
-              other.maxDurationMs > 30_000 &&
-              other.maxDurationMs > 5 * otherBaseline
-            )
-          })
-          const hasOutlierRec = report.recommendations.some(
-            (r) =>
-              r.startsWith(`Hang outlier detected on '${m.toolName}'`) &&
-              r.includes(`maxDurationMs=${m.maxDurationMs} ms`),
-          )
-          expect(hasOutlierRec).toBe(
-            isAnySurfaceOutlier || (m.maxDurationMs > 30_000 && m.maxDurationMs > 5 * baseline),
+        const verifyEvents = events.filter((e) => e.toolName === "verify")
+        if (verifyEvents.length === 0) {
+          expect(base.kpis.firstPassVerify).toBeNull()
+        } else {
+          expect(base.kpis.firstPassVerify).toBe(
+            verifyEvents.length === 1 && verifyEvents[0]?.outcome === "ok",
           )
         }
 
-        if (events.every((e) => e.outcome === "diagnostics_found")) {
-          expect(report.toolMetrics.every((m) => m.failCount === 0)).toBe(true)
-          if (report.kpis.verifyAttempts === 0) {
-            expect(report.healthScore).toBe(100)
-          }
-        }
+        const withDiag = yield* TelemetryReport.decide({
+          events: [
+            ...events,
+            mkEvent({
+              toolName: "harness_lsp_diagnostics",
+              outcome: "diagnostics_found",
+              durationMs: 50,
+            }),
+          ],
+          cumulative: true,
+        })
+        expect(withDiag.healthScore).toBeGreaterThanOrEqual(base.healthScore)
+        const baseLspFails =
+          base.toolMetrics.find(
+            (m) => m.surface === "mcp" && m.toolName === "harness_lsp_diagnostics",
+          )?.failCount ?? 0
+        const withDiagLspFails =
+          withDiag.toolMetrics.find(
+            (m) => m.surface === "mcp" && m.toolName === "harness_lsp_diagnostics",
+          )?.failCount ?? 0
+        expect(withDiagLspFails).toBe(baseLspFails)
+        const sumFails = (metrics: ReadonlyArray<ToolUsageMetric>) =>
+          metrics.reduce((acc, m) => acc + m.failCount, 0)
+        expect(sumFails(withDiag.toolMetrics)).toBe(sumFails(base.toolMetrics))
+
+        const withOutlier = yield* TelemetryReport.decide({
+          events: [
+            ...events,
+            mkEvent({ toolName: "outlier_probe", outcome: "ok", durationMs: 100 }),
+            mkEvent({ toolName: "outlier_probe", outcome: "ok", durationMs: 30_001 }),
+          ],
+          cumulative: true,
+        })
+        expect(
+          withOutlier.recommendations.some(
+            (r) => r.startsWith("Hang outlier detected on 'outlier_probe'") && r.includes("30001"),
+          ),
+        ).toBe(true)
       }),
   )
 
@@ -479,6 +517,72 @@ describe("SPEC-0037 REQ-5.1..REQ-5.4: TelemetryReport.decide accuracy & actionab
       })
       expect(nonEmptyMd).toContain("- Check watchdog timeout")
       expect(nonEmptyMd).not.toContain("No recommendations — session executed cleanly.")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("F-5.1 & F-5.2: logs stderr warnings on I/O failures, returns written=false on report write failure, and warns on corrupt JSONL lines", () => {
+    const dir = mkdtempSync(`${tmpdir()}/spec0037-telemetry-warn-`)
+    try {
+      const emptyReport = buildSessionReport({ events: [] })
+      const okWrite = writeSessionReportFiles(dir, emptyReport, isolatedTestHostIo)
+      expect(okWrite.written).toBe(true)
+      expect(okWrite.error).toBeUndefined()
+
+      const failingHostIo: SyncHostIo = {
+        ...isolatedTestHostIo,
+        appendTextSync: () => {
+          throw new Error("disk full on append")
+        },
+        writeTextSync: () => {
+          throw new Error("read-only filesystem")
+        },
+        readTextSync: () => {
+          throw new Error("permission denied")
+        },
+      }
+
+      const appendCap = captureStderr(() =>
+        appendTelemetryEvent(
+          dir,
+          {
+            surface: "cli",
+            category: "gate",
+            toolName: "verify",
+            outcome: "ok",
+            durationMs: 10,
+          },
+          failingHostIo,
+        ),
+      )
+      expect(appendCap.result.toolName).toBe("verify")
+      expect(appendCap.stderrText).toContain("disk full on append")
+
+      const clearCap = captureStderr(() => clearTelemetryEvents(dir, failingHostIo))
+      expect(clearCap.stderrText).toContain("read-only filesystem")
+
+      const reportCap = captureStderr(() =>
+        writeSessionReportFiles(dir, emptyReport, failingHostIo),
+      )
+      expect(reportCap.result.written).toBe(false)
+      expect(reportCap.result.error).toBe("read-only filesystem")
+      expect(reportCap.stderrText).toContain("read-only filesystem")
+
+      const logPath = join(dir, ".harness", "telemetry-log.jsonl")
+      const validLine = JSON.stringify(mkEvent({ toolName: "gc", outcome: "ok", durationMs: 15 }))
+      writeFileSync(
+        logPath,
+        `${validLine}\n{corrupt json\n\n{"wrong":"shape"}\n${validLine}\n`,
+        "utf8",
+      )
+      const corruptReadCap = captureStderr(() => readTelemetryEvents(dir, isolatedTestHostIo))
+      expect(corruptReadCap.result).toHaveLength(2)
+      expect(corruptReadCap.stderrText).toContain("2 malformed telemetry JSONL line(s)")
+
+      const unreadableCap = captureStderr(() => readTelemetryEvents(dir, failingHostIo))
+      expect(unreadableCap.result).toEqual([])
+      expect(unreadableCap.stderrText).toContain("permission denied")
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

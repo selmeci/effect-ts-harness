@@ -1,11 +1,8 @@
 import { Effect } from "effect"
+import { type PolicyFastPathInput } from "@harness/contract"
 import { classifyCommand, type GuardVerdict } from "./policy.js"
 
-/** Input payload for `PolicyFastPath.decide`. */
-export interface PolicyFastPathInput {
-  readonly command: string
-  readonly unitWorkerMode?: boolean | undefined
-}
+export type { PolicyFastPathInput }
 
 /**
  * Pure Effect wrapper around `classifyCommand` (`R = never`) for fast-path guard evaluation (`SPEC-0037 REQ-4.4`).

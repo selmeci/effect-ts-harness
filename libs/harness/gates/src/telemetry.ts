@@ -2,6 +2,7 @@ import { Effect, Schema } from "effect"
 import { match } from "ts-pattern"
 import type { FrictionEvent } from "./friction-log.js"
 import {
+  GUARD_TIMEOUT_NEAR_BUDGET_MS,
   collectTopGuardCommandPrefixes,
   detectHangOutlierRecommendations,
 } from "./telemetry-recommendations.js"
@@ -372,7 +373,7 @@ export const buildSessionReport = (rawInput: SessionReportInput): SessionReport 
           "ask",
           () =>
             /timed out|timeout/i.test(e.detail ?? "") ||
-            (e.durationMs >= 2450 &&
+            (e.durationMs >= GUARD_TIMEOUT_NEAR_BUDGET_MS &&
               !/fastpath=hit|Ambiguous risk|DecisionModel unavailable|Worker isolation mode|requires human confirmation/i.test(
                 e.detail ?? "",
               )),

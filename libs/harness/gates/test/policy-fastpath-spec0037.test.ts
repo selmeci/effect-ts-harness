@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
+import { ShellCommandText } from "@harness/contract"
 import { Effect, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
@@ -165,11 +166,12 @@ describe("SPEC-0037 REQ-4.4: Guard Fast-Path Expansion & PolicyFastPath.decide",
 
   it("allows simple variable-expanded read-only commands and rejects command substitution or poisoned vars", () => {
     for (const cmd of [
-      'FILE=libs/harness/gates/src/policy.ts; wc -l "$FILE"',
-      'PAT="PolicyFastPath"; rg "$PAT" libs/harness/gates/src',
-      "FILE=libs/harness/gates/src/policy.ts; sed -n '1,20p' \"$FILE\"",
-      'FILE=libs/harness/gates/src/policy.ts; git diff "$FILE"',
-      "DIR=libs/harness/gates; df -ih",
+      'file=libs/harness/gates/src/policy.ts; wc -l "$file"',
+      'pat="PolicyFastPath"; rg "$pat" libs/harness/gates/src',
+      "file=libs/harness/gates/src/policy.ts; sed -n '1,20p' \"$file\"",
+      'file=libs/harness/gates/src/policy.ts; git diff "$file"',
+      "dir=libs/harness/gates; df -ih",
+      'file=libs/harness/gates/src/policy.ts; wc -l "${file}"',
     ]) {
       const view = toCommandView(cmd)
       expect(isSafeVariableExpandedReadOnlyCommand(cmd, view.unquoted), cmd).toBe(true)
@@ -177,20 +179,20 @@ describe("SPEC-0037 REQ-4.4: Guard Fast-Path Expansion & PolicyFastPath.decide",
     }
 
     for (const unsafe of [
-      'X=$(cat .env); wc -l "$X"',
-      'X=`cat .env`; wc -l "$X"',
-      'FILE=.env; wc -l "$FILE"',
-      'FILE=../../etc/passwd; wc -l "$FILE"',
-      'CMD=rm; "$CMD" -rf /tmp/x',
-      'FLAG="--pre=sh"; rg "$FLAG" libs/',
-      'FILE=libs/foo.ts; cat "$FILE" > /tmp/out.txt',
-      'wc -l "$UNKNOWN_VAR"',
+      'x=$(cat .env); wc -l "$x"',
+      'x=`cat .env`; wc -l "$x"',
+      'file=.env; wc -l "$file"',
+      'file=../../etc/passwd; wc -l "$file"',
+      'cmd=rm; "$cmd" -rf /tmp/x',
+      'flag="--pre=sh"; rg "$flag" libs/',
+      'file=libs/foo.ts; cat "$file" > /tmp/out.txt',
+      'wc -l "$unknown_var"',
     ]) {
       const view = toCommandView(unsafe)
       expect(isSafeVariableExpandedReadOnlyCommand(unsafe, view.unquoted), unsafe).toBe(false)
       expect(classifyCommand(unsafe), unsafe).not.toBe("allow")
     }
-    expect(explainCommandDenyRule('X=$(cat .env); wc -l "$X"')?.ruleId).toBe("secret-file-access")
+    expect(explainCommandDenyRule('x=$(cat .env); wc -l "$x"')?.ruleId).toBe("secret-file-access")
   })
 
   it.effect.prop(
@@ -208,11 +210,11 @@ describe("SPEC-0037 REQ-4.4: Guard Fast-Path Expansion & PolicyFastPath.decide",
           .with("pnpm-dir-unsafe", () => "pnpm --dir ../../etc dlx evil")
           .with("semicolon-ro", () => `wc -l ${spec.target}; df -ih`)
           .with("semicolon-unsafe", () => `wc -l ${spec.target}; rm -rf /tmp/x`)
-          .with("var-ro", () => `FILE=${spec.target}; wc -l "$FILE"`)
-          .with("var-subst", () => 'X=$(cat .env); wc -l "$X"')
+          .with("var-ro", () => `file=${spec.target}; wc -l "$file"`)
+          .with("var-subst", () => 'x=$(cat .env); wc -l "$x"')
           .exhaustive()
 
-        const verdict = yield* PolicyFastPath.decide({ command })
+        const verdict = yield* PolicyFastPath.decide({ command: ShellCommandText.make(command) })
         match(spec.kind)
           .with("sed-ro", "pnpm-dir-safe", "semicolon-ro", "var-ro", () => {
             expect(verdict).toBe("allow")
@@ -230,13 +232,13 @@ describe("SPEC-0037 REQ-4.4: Guard Fast-Path Expansion & PolicyFastPath.decide",
   it.effect("forwards unitWorkerMode to classifyCommand via PolicyFastPath.decide", () =>
     Effect.gen(function* () {
       const denyInWorker = yield* PolicyFastPath.decide({
-        command: "pnpm harness done --cli",
+        command: ShellCommandText.make("pnpm harness done --cli"),
         unitWorkerMode: true,
       })
       expect(denyInWorker).toBe("deny")
 
       const notWorkerBlocked = yield* PolicyFastPath.decide({
-        command: "pnpm harness done --cli",
+        command: ShellCommandText.make("pnpm harness done --cli"),
         unitWorkerMode: false,
       })
       expect(notWorkerBlocked).not.toBe("deny")
@@ -330,26 +332,26 @@ describe("SPEC-0037 REQ-4.4: Guard Fast-Path Expansion & PolicyFastPath.decide",
     ).toBe(true)
 
     for (const [cmd, expected] of [
-      ['FILE=libs/a.ts; sort "$FILE"', false],
-      ['FILE=libs/a.ts; wc -l "${FILE}"', true],
-      ['FILE=libs/a.ts; wc -l "${FILE"', false],
-      ['FILE=libs/a.ts; wc -l "${NOPE}"', false],
-      ['FILE=libs/a.ts; wc -l "$1"', false],
-      ["FILE=libs/a.ts; wc -l $1", false],
-      ["FILE=libs/a.ts; wc -l '${UNSET}x'", true],
-      ["FILE=libs/a.ts; wc -l 'x$UNSET'", true],
-      ['FILE=libs/a.ts; rg "a$" "$FILE"', true],
-      ['FILE=libs/a.ts; rg "a\\nb" "$FILE"', true],
-      ['FILE=libs/a.ts; rg "a\\" "$FILE"', false],
-      ['FILE=libs/a.ts; rg a\\ b "$FILE"', true],
-      ['FILE=libs/a.ts; rg foo\\ "$FILE"', true],
-      ["FILE=libs/a.ts; rg foo\\", true],
-      ['FILE=libs/a.ts;; wc -l "$FILE"', false],
-      ["FILE=libs/a.ts; ", false],
-      ["FILE=libs/a.ts\n", false],
-      ['A="$B"; wc -l "$A"', false],
-      ['FILE=libs/a.ts; wc -l "$NOPE"', false],
-      ['SUB=diff; git "$SUB" libs/a.ts', false],
+      ['file=libs/a.ts; sort "$file"', false],
+      ['file=libs/a.ts; wc -l "${file}"', true],
+      ['file=libs/a.ts; wc -l "${file"', false],
+      ['file=libs/a.ts; wc -l "${nope}"', false],
+      ['file=libs/a.ts; wc -l "$1"', false],
+      ["file=libs/a.ts; wc -l $1", false],
+      ["file=libs/a.ts; wc -l '${UNSET}x'", true],
+      ["file=libs/a.ts; wc -l 'x$UNSET'", true],
+      ['file=libs/a.ts; rg "a$" "$file"', true],
+      ['file=libs/a.ts; rg "a\\nb" "$file"', true],
+      ['file=libs/a.ts; rg "a\\" "$file"', false],
+      ['file=libs/a.ts; rg a\\ b "$file"', true],
+      ['file=libs/a.ts; rg foo\\ "$file"', true],
+      ["file=libs/a.ts; rg foo\\", true],
+      ['file=libs/a.ts;; wc -l "$file"', false],
+      ["file=libs/a.ts; ", false],
+      ["file=libs/a.ts\n", false],
+      ['a="$b"; wc -l "$a"', false],
+      ['file=libs/a.ts; wc -l "$nope"', false],
+      ['sub=diff; git "$sub" libs/a.ts', false],
     ] as const) {
       const view = toCommandView(cmd)
       expect(isSafeVariableExpandedReadOnlyCommand(cmd, view.unquoted), cmd).toBe(expected)
@@ -421,5 +423,59 @@ describe("SPEC-0037 REQ-4.4: Guard Fast-Path Expansion & PolicyFastPath.decide",
 
     expect(classifyFileWrite(".harness/hook-runtime/current/manifest.json").verdict).toBe("deny")
     expect(classifyCommand("rm -rf .harness/hook-runtime/current")).toBe("deny")
+  })
+
+  it("rejects env-var overrides, &&/||/newline/multi-consumer chaining, unsafe ${VAR} forms, and dangerous git flags (F-1.1, F-1.2)", () => {
+    for (const unsafeVarCmd of [
+      "HOME=tmp; git status",
+      "PATH=scripts; wc README.md",
+      "IFS=x; wc README.md",
+      "GIT_CONFIG_GLOBAL=tmp; git status",
+      "LD_PRELOAD=tmp/evil.so; wc README.md",
+      "NODE_OPTIONS=--require=x; wc README.md",
+      "XDG_CONFIG_HOME=tmp; git diff",
+      "SHELL=/bin/sh; wc README.md",
+      "ENV=tmp; wc README.md",
+      "BASH_ENV=tmp; wc README.md",
+      "TMPDIR=tmp; wc README.md",
+      'FILE=libs/harness/gates/src/policy.ts; wc -l "$FILE"',
+      'MyVar=libs/harness/gates/src/policy.ts; wc -l "$MyVar"',
+      "HOME=tmp && git diff",
+      'file=libs/harness/gates/src/policy.ts && wc -l "$file"',
+      'file=libs/harness/gates/src/policy.ts || wc -l "$file"',
+      'file=libs/harness/gates/src/policy.ts\nwc -l "$file"',
+      'file=libs/harness/gates/src/policy.ts; wc -l "$file"; rg PolicyFastPath libs/harness/gates/src',
+      "file=libs/harness/gates/src/policy.ts; wc -l ${file}",
+      'file=libs/harness/gates/src/policy.ts; wc -l "${file:-evil}"',
+      'file=libs/harness/gates/src/policy.ts; wc -l "${HOME}"',
+    ]) {
+      const view = toCommandView(unsafeVarCmd)
+      expect(isSafeVariableExpandedReadOnlyCommand(unsafeVarCmd, view.unquoted), unsafeVarCmd).toBe(
+        false,
+      )
+      const verdict = classifyCommand(unsafeVarCmd)
+      expect(verdict, unsafeVarCmd).not.toBe("allow")
+      expect(["escalate", "deny"]).toContain(verdict)
+    }
+
+    for (const unsafeGitCmd of [
+      "git status -c core.fsmonitor=evil; pwd",
+      "git diff -c=core.fsmonitor=evil; pwd",
+      "git diff --config-env=GIT_EXTERNAL_DIFF=evil; pwd",
+      "git diff --config-env GIT_EXTERNAL_DIFF=evil; pwd",
+      "git diff --ext-diff; pwd",
+      "git diff --ext-diff=evil; pwd",
+      "git diff --textconv; pwd",
+      "git show --textconv HEAD; pwd",
+      "git status --exec-path=/tmp/evil; pwd",
+      "git status --exec-path /tmp/evil; pwd",
+      "git status --git-dir=/tmp/evil; pwd",
+      "git status --work-tree=/tmp/evil; pwd",
+      "git status --upload-pack=/tmp/evil; pwd",
+      'file=libs/harness/gates/src/policy.ts; git diff --ext-diff "$file"',
+      'file=libs/harness/gates/src/policy.ts; git diff -c core.pager=sh "$file"',
+    ]) {
+      expect(classifyCommand(unsafeGitCmd), unsafeGitCmd).not.toBe("allow")
+    }
   })
 })

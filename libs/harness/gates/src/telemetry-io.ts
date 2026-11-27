@@ -109,15 +109,22 @@ export const appendTelemetryEvent = (
   }
   const harnessDir = resolveHarnessStateDir(repoRoot, hostIo.getEnv())
   const filePath = join(harnessDir, "telemetry-log.jsonl")
-  Result.getOrElse(
+  match(
     Result.try(() => {
       if (!hostIo.existsSync(harnessDir)) {
         hostIo.mkdirRecursiveSync(harnessDir)
       }
       hostIo.appendTextSync(filePath, JSON.stringify(record) + "\n")
     }),
-    () => undefined,
   )
+    .with({ _tag: "Success" }, () => undefined)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      const msg = failure instanceof Error ? failure.message : String(failure)
+      process.stderr.write(
+        `[harness:telemetry] Warning: failed to append telemetry event to ${filePath} (${msg})\n`,
+      )
+    })
+    .exhaustive()
   return record
 }
 
@@ -131,15 +138,22 @@ export const readTelemetryEvents = (
   if (!hostIo.existsSync(filePath)) {
     return []
   }
-  const content = Result.getOrElse(
-    Result.try(() => hostIo.readTextSync(filePath)),
-    () => null,
-  )
+  const content = match(Result.try(() => hostIo.readTextSync(filePath)))
+    .with({ _tag: "Success" }, ({ success }) => success)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      const msg = failure instanceof Error ? failure.message : String(failure)
+      process.stderr.write(
+        `[harness:telemetry] Warning: failed to read telemetry events from ${filePath} (${msg})\n`,
+      )
+      return null
+    })
+    .exhaustive()
   if (content === null) {
     return []
   }
   const lines = content.split("\n")
   const events: Array<TelemetryEvent> = []
+  let malformedCount = 0
   for (const line of lines) {
     const trimmed = line.trim()
     if (trimmed.length === 0) continue
@@ -148,8 +162,15 @@ export const readTelemetryEvents = (
       .with({ _tag: "Some" }, ({ value }) => {
         events.push(value)
       })
-      .with({ _tag: "None" }, () => {})
+      .with({ _tag: "None" }, () => {
+        malformedCount += 1
+      })
       .exhaustive()
+  }
+  if (malformedCount > 0) {
+    process.stderr.write(
+      `[harness:telemetry] Warning: skipped ${malformedCount} malformed telemetry JSONL line(s) in ${filePath}\n`,
+    )
   }
   return events
 }
@@ -158,15 +179,22 @@ export const readTelemetryEvents = (
 export const clearTelemetryEvents = (repoRoot: string, hostIo: SyncHostIo): void => {
   const harnessDir = resolveHarnessStateDir(repoRoot, hostIo.getEnv())
   const filePath = join(harnessDir, "telemetry-log.jsonl")
-  Result.getOrElse(
+  match(
     Result.try(() => {
       if (!hostIo.existsSync(harnessDir)) {
         hostIo.mkdirRecursiveSync(harnessDir)
       }
       hostIo.writeTextSync(filePath, "")
     }),
-    () => undefined,
   )
+    .with({ _tag: "Success" }, () => undefined)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      const msg = failure instanceof Error ? failure.message : String(failure)
+      process.stderr.write(
+        `[harness:telemetry] Warning: failed to clear telemetry events in ${filePath} (${msg})\n`,
+      )
+    })
+    .exhaustive()
 }
 
 /** Persists `.harness/session-report.json` and `.harness/session-report.md`. */
@@ -174,11 +202,16 @@ export const writeSessionReportFiles = (
   repoRoot: string,
   report: SessionReport,
   hostIo: SyncHostIo,
-): { readonly jsonPath: string; readonly markdownPath: string } => {
+): {
+  readonly jsonPath: string
+  readonly markdownPath: string
+  readonly written: boolean
+  readonly error?: string | undefined
+} => {
   const harnessDir = resolveHarnessStateDir(repoRoot, hostIo.getEnv())
   const jsonPath = join(harnessDir, "session-report.json")
   const markdownPath = join(harnessDir, "session-report.md")
-  Result.getOrElse(
+  return match(
     Result.try(() => {
       if (!hostIo.existsSync(harnessDir)) {
         hostIo.mkdirRecursiveSync(harnessDir)
@@ -186,7 +219,14 @@ export const writeSessionReportFiles = (
       hostIo.writeTextSync(jsonPath, JSON.stringify(report, null, 2))
       hostIo.writeTextSync(markdownPath, renderSessionReportMarkdown(report))
     }),
-    () => undefined,
   )
-  return { jsonPath, markdownPath }
+    .with({ _tag: "Success" }, () => ({ jsonPath, markdownPath, written: true }))
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      const msg = failure instanceof Error ? failure.message : String(failure)
+      process.stderr.write(
+        `[harness:telemetry] Warning: failed to write session report files (${jsonPath}, ${markdownPath}): ${msg}\n`,
+      )
+      return { jsonPath, markdownPath, written: false, error: msg }
+    })
+    .exhaustive()
 }

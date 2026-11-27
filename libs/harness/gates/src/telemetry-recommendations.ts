@@ -1,6 +1,9 @@
 import { match } from "ts-pattern"
-import { compareCodeUnits } from "@harness/contract"
+import { compareCodeUnits, WORKFLOW_TIMEOUT_BUDGETS } from "@harness/contract"
 import type { FrictionEvent } from "./friction-log.js"
+
+/** Duration threshold (ms) at or above which `ask` guard outcomes indicate near-budget timeout. */
+export const GUARD_TIMEOUT_NEAR_BUDGET_MS = WORKFLOW_TIMEOUT_BUDGETS.decisionModelTimeoutMs - 50
 
 export interface ToolDurationMetricInput {
   readonly toolName: string
@@ -30,8 +33,9 @@ const HANG_OUTLIER_P95_MULTIPLIER = 5
 const MIN_P95_DISTINGUISHABLE_CALLS = 20
 
 /**
- * Flags tools whose maximum duration exceeds `30_000 ms` and `5 * p95DurationMs`
- * (using `p50DurationMs` as reference when `calls <= 20`, where nearest-rank `p95 === max`)
+ * Flags tools whose maximum duration exceeds `30_000 ms` and `5 * baseline`
+ * (using `p50DurationMs` baseline when `calls <= 20`, because nearest-rank `p95DurationMs`
+ * is sample-unstable for small `calls <= 20`)
  * (`SPEC-0037 REQ-5.2`).
  */
 export const detectHangOutlierRecommendations = (
@@ -76,7 +80,7 @@ const isGuardTimeoutOrAmbiguousEvent = (e: GuardTelemetryEventInput): boolean =>
       "ask",
       () =>
         /timed out|timeout|ambiguous/i.test(e.detail ?? "") ||
-        (e.durationMs >= 2450 &&
+        (e.durationMs >= GUARD_TIMEOUT_NEAR_BUDGET_MS &&
           !/fastpath=hit|DecisionModel unavailable|Worker isolation mode|requires human confirmation/i.test(
             e.detail ?? "",
           )),

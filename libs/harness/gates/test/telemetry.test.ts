@@ -15,6 +15,7 @@ import {
   TelemetryEvent,
   writeSessionReportFiles,
 } from "../src/index.js"
+import { GUARD_TIMEOUT_NEAR_BUDGET_MS } from "../src/telemetry-recommendations.js"
 import { testHostIo } from "./helpers/test-host-io.js"
 
 describe("telemetry & session observability", () => {
@@ -921,7 +922,7 @@ describe("telemetry & session observability", () => {
               category: "guard",
               toolName: "guard",
               outcome: "ask",
-              durationMs: 2449,
+              durationMs: GUARD_TIMEOUT_NEAR_BUDGET_MS - 1,
             },
             {
               timestamp: "2026-11-20T10:01:01.000Z",
@@ -947,7 +948,7 @@ describe("telemetry & session observability", () => {
               category: "guard",
               toolName: "guard",
               outcome: "ask",
-              durationMs: 2450,
+              durationMs: GUARD_TIMEOUT_NEAR_BUDGET_MS,
             },
             {
               timestamp: "2026-11-20T10:01:01.000Z",
@@ -964,7 +965,7 @@ describe("telemetry & session observability", () => {
               category: "guard",
               toolName: "guard",
               outcome: "ask",
-              durationMs: 2500,
+              durationMs: GUARD_TIMEOUT_NEAR_BUDGET_MS + 50,
             },
             {
               timestamp: "2026-11-20T10:01:03.000Z",
@@ -972,7 +973,7 @@ describe("telemetry & session observability", () => {
               category: "guard",
               toolName: "guard",
               outcome: "ask",
-              durationMs: 2505,
+              durationMs: GUARD_TIMEOUT_NEAR_BUDGET_MS + 55,
             },
           ],
         })
@@ -989,7 +990,7 @@ describe("telemetry & session observability", () => {
               category: "guard",
               toolName: "guard",
               outcome: "ask",
-              durationMs: 2450,
+              durationMs: GUARD_TIMEOUT_NEAR_BUDGET_MS,
             },
           ],
         })

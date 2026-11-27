@@ -8,6 +8,7 @@ import {
 } from "./policy-fastpath-rules.js"
 
 const SHELL_VAR_START_PATTERN = /[A-Za-z_@*#?$!0-9{]/
+const SAFE_LOCAL_VAR_NAME_RE = /^[a-z][a-z0-9_]{0,31}$/
 
 interface RawShellWord {
   readonly raw: string
@@ -79,7 +80,7 @@ const expandWordWithVars = (
       const close = rawWord.indexOf("}", idx + 2)
       if (close === -1) return -1
       const varName = rawWord.slice(idx + 2, close)
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(varName)) return -1
+      if (!SAFE_LOCAL_VAR_NAME_RE.test(varName)) return -1
       const val = vars.get(varName)
       if (val === undefined) return -1
       out += val
@@ -88,7 +89,7 @@ const expandWordWithVars = (
     }
     const m = /^([A-Za-z_][A-Za-z0-9_]*)/.exec(rawWord.slice(idx + 1))
     if (m !== null) {
-      if (!insideDoubleQuote) return -1
+      if (!insideDoubleQuote || !SAFE_LOCAL_VAR_NAME_RE.test(m[1]!)) return -1
       const val = vars.get(m[1]!)
       if (val === undefined) return -1
       out += val
@@ -140,9 +141,10 @@ const expandWordWithVars = (
 }
 
 /**
- * Approves simple `VAR=safe_literal; <readonly-consumer>` commands (where consumer is strictly
- * `wc`, `rg`, `sed -n`, `df`, or `git status`/`diff`/`rev-parse`) without command substitution,
- * unquoted `$VAR` splitting, whitespace-containing values, redirection, or secret/protected paths.
+ * Approves simple `var=safe_literal; <single-readonly-consumer>` commands using lowercase local
+ * identifiers (`/^[a-z][a-z0-9_]{0,31}$/`) where consumer is strictly `wc`, `rg`, `sed -n`, `df`,
+ * or `git status`/`diff`/`rev-parse`, without `&&`/`||`/newlines, multi-consumer chaining,
+ * command substitution, unquoted `$var`, whitespace-containing values, redirection, or secret paths.
  */
 export const isSafeVariableExpandedReadOnlyCommand = (
   command: string,
@@ -151,22 +153,23 @@ export const isSafeVariableExpandedReadOnlyCommand = (
   if (
     /\$\(|`|<\(|>\(/.test(command) ||
     /(?<![>&])&(?![>&])/.test(unquoted) ||
+    unquoted.includes("&&") ||
     unquoted.includes("||") ||
+    /[\r\n]/.test(unquoted) ||
     /[|<>()]/.test(unquoted) ||
     FILE_REDIRECTION_PATTERN.test(unquoted)
   ) {
     return false
   }
-  const sepRe = /&&|[;\n]/g
   const segments: Array<string> = []
   let start = 0
-  let m = sepRe.exec(unquoted)
-  while (m !== null) {
-    const part = command.slice(start, m.index).trim()
+  let idx = unquoted.indexOf(";", start)
+  while (idx !== -1) {
+    const part = command.slice(start, idx).trim()
     if (part.length === 0) return false
     segments.push(part)
-    start = m.index + m[0].length
-    m = sepRe.exec(unquoted)
+    start = idx + 1
+    idx = unquoted.indexOf(";", start)
   }
   const tail = command.slice(start).trim()
   if (tail.length === 0) return false
@@ -178,9 +181,13 @@ export const isSafeVariableExpandedReadOnlyCommand = (
   let sawConsumer = false
 
   for (const seg of segments) {
+    if (sawConsumer) return false
     const rawWords = splitRawWordsPreservingQuotes(seg)
     if (rawWords === undefined || rawWords.length === 0) return false
-    const allAssignments = rawWords.every((w) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(w.raw))
+    const allAssignments = rawWords.every((w) => {
+      const eqIdx = w.raw.indexOf("=")
+      return eqIdx > 0 && SAFE_LOCAL_VAR_NAME_RE.test(w.raw.slice(0, eqIdx))
+    })
     if (allAssignments) {
       for (const w of rawWords) {
         const eqIdx = w.raw.indexOf("=")
@@ -196,11 +203,11 @@ export const isSafeVariableExpandedReadOnlyCommand = (
     }
     if (!sawAssignment) return false
     const expandedTokens: Array<string> = []
-    for (let idx = 0; idx < rawWords.length; idx++) {
-      const exp = expandWordWithVars(rawWords[idx]!.raw, vars)
+    for (let tokIdx = 0; tokIdx < rawWords.length; tokIdx++) {
+      const exp = expandWordWithVars(rawWords[tokIdx]!.raw, vars)
       if (exp === undefined) return false
-      if (idx === 0 && exp.usedVar) return false
-      if (idx === 1 && expandedTokens[0] === "git" && exp.usedVar) return false
+      if (tokIdx === 0 && exp.usedVar) return false
+      if (tokIdx === 1 && expandedTokens[0] === "git" && exp.usedVar) return false
       expandedTokens.push(exp.expanded)
     }
     if (!isSafeInspectionTokens(expandedTokens, false, true)) return false
