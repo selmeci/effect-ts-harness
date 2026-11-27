@@ -1,4 +1,4 @@
-import { Arbitrary, Effect, Result, Schema } from "effect"
+import { Arbitrary, Cause, Effect, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import { describe, expect, it } from "vitest"
 import {
@@ -798,6 +798,177 @@ describe("workflow-protocol & workflow-timeouts", () => {
         }),
       ),
     ).toBe(true)
+  })
+
+  it("rejects inverted runner timeout layers (agentRunClaudeMs, agentRunAntigravityMs, agentKillGraceMs, agentStartupRetryMaxAttempts, agentStartupRetryBackoffMs)", () => {
+    expect(WORKFLOW_TIMEOUT_BUDGETS.agentRunClaudeMs).toBeGreaterThan(
+      WORKFLOW_TIMEOUT_BUDGETS.agentKillGraceMs,
+    )
+    expect(WORKFLOW_TIMEOUT_BUDGETS.agentRunAntigravityMs).toBeGreaterThan(
+      WORKFLOW_TIMEOUT_BUDGETS.agentKillGraceMs,
+    )
+    expect(WORKFLOW_TIMEOUT_BUDGETS.agentRunAntigravityMs).toBeGreaterThan(
+      WORKFLOW_TIMEOUT_BUDGETS.agentStartupRetryMaxAttempts *
+        WORKFLOW_TIMEOUT_BUDGETS.agentStartupRetryBackoffMs,
+    )
+    expect(WORKFLOW_TIMEOUT_BUDGETS.claimTimeoutMs).toBeGreaterThan(
+      WORKFLOW_TIMEOUT_BUDGETS.agentRunClaudeMs + WORKFLOW_TIMEOUT_BUDGETS.agentKillGraceMs,
+    )
+    expect(WORKFLOW_TIMEOUT_BUDGETS.claimTimeoutMs).toBeGreaterThan(
+      WORKFLOW_TIMEOUT_BUDGETS.agentRunAntigravityMs + WORKFLOW_TIMEOUT_BUDGETS.agentKillGraceMs,
+    )
+
+    // Inequality 9: agentRunClaudeMs > agentKillGraceMs
+    const claudeGraceFail = validateWorkflowTimeoutBudgets({
+      ...WORKFLOW_TIMEOUT_BUDGETS,
+      agentRunClaudeMs: WORKFLOW_TIMEOUT_BUDGETS.agentKillGraceMs,
+    })
+    match(claudeGraceFail)
+      .with({ _tag: "Failure" }, ({ failure }) => expect(failure).toContain("agentRunClaudeMs"))
+      .with({ _tag: "Success" }, () =>
+        expect.unreachable("Expected agentRunClaudeMs == agentKillGraceMs to fail"),
+      )
+      .exhaustive()
+    expect(
+      Result.isSuccess(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          agentRunClaudeMs: WorkflowTimeoutMs.make(WORKFLOW_TIMEOUT_BUDGETS.agentKillGraceMs + 1),
+        }),
+      ),
+    ).toBe(true)
+
+    // Inequality 10: agentRunAntigravityMs > agentKillGraceMs
+    const agyGraceFail = validateWorkflowTimeoutBudgets({
+      ...WORKFLOW_TIMEOUT_BUDGETS,
+      agentRunAntigravityMs: WORKFLOW_TIMEOUT_BUDGETS.agentKillGraceMs,
+    })
+    match(agyGraceFail)
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        expect(failure).toContain("agentRunAntigravityMs"),
+      )
+      .with({ _tag: "Success" }, () =>
+        expect.unreachable("Expected agentRunAntigravityMs == agentKillGraceMs to fail"),
+      )
+      .exhaustive()
+    expect(
+      Result.isSuccess(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          agentRunAntigravityMs: WorkflowTimeoutMs.make(
+            WORKFLOW_TIMEOUT_BUDGETS.agentKillGraceMs + 1,
+          ),
+        }),
+      ),
+    ).toBe(true)
+
+    // Inequality 11: agentRunAntigravityMs > agentStartupRetryMaxAttempts * agentStartupRetryBackoffMs
+    const startupRetryFail = validateWorkflowTimeoutBudgets({
+      ...WORKFLOW_TIMEOUT_BUDGETS,
+      agentStartupRetryMaxAttempts: WorkflowPollAttempts.make(6),
+      agentStartupRetryBackoffMs: WorkflowTimeoutMs.make(1_000),
+      agentRunAntigravityMs: WorkflowTimeoutMs.make(6_000),
+    })
+    match(startupRetryFail)
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        expect(failure).toContain("agentStartupRetryMaxAttempts * agentStartupRetryBackoffMs"),
+      )
+      .with({ _tag: "Success" }, () =>
+        expect.unreachable("Expected agentRunAntigravityMs == startupRetryBudgetMs to fail"),
+      )
+      .exhaustive()
+    expect(
+      Result.isSuccess(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          agentStartupRetryMaxAttempts: WorkflowPollAttempts.make(6),
+          agentStartupRetryBackoffMs: WorkflowTimeoutMs.make(1_000),
+          agentRunAntigravityMs: WorkflowTimeoutMs.make(6_001),
+        }),
+      ),
+    ).toBe(true)
+
+    // Inequality 12: claimTimeoutMs > agentRunClaudeMs + agentKillGraceMs
+    const largeClaudeRunMs = WorkflowTimeoutMs.make(
+      WORKFLOW_TIMEOUT_BUDGETS.claimTimeoutMs - WORKFLOW_TIMEOUT_BUDGETS.agentKillGraceMs - 1,
+    )
+    const exactClaudeClaimBudget = largeClaudeRunMs + WORKFLOW_TIMEOUT_BUDGETS.agentKillGraceMs
+    const claudeClaimFail = validateWorkflowTimeoutBudgets({
+      ...WORKFLOW_TIMEOUT_BUDGETS,
+      agentRunClaudeMs: largeClaudeRunMs,
+      claimTimeoutMs: WorkflowTimeoutMs.make(exactClaudeClaimBudget),
+    })
+    match(claudeClaimFail)
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        expect(failure).toContain("agentRunClaudeMs + agentKillGraceMs"),
+      )
+      .with({ _tag: "Success" }, () =>
+        expect.unreachable(
+          "Expected claimTimeoutMs == agentRunClaudeMs + agentKillGraceMs to fail",
+        ),
+      )
+      .exhaustive()
+    expect(
+      Result.isSuccess(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          agentRunClaudeMs: largeClaudeRunMs,
+          claimTimeoutMs: WorkflowTimeoutMs.make(exactClaudeClaimBudget + 1),
+        }),
+      ),
+    ).toBe(true)
+
+    // Inequality 13: claimTimeoutMs > worst-case antigravity startup retry budget
+    const agyRunMs = WorkflowTimeoutMs.make(WORKFLOW_TIMEOUT_BUDGETS.agentRunClaudeMs + 100_000)
+    const exactAgyClaimBudget =
+      WORKFLOW_TIMEOUT_BUDGETS.agentStartupRetryMaxAttempts *
+        (agyRunMs + WORKFLOW_TIMEOUT_BUDGETS.agentKillGraceMs) +
+      Math.max(0, WORKFLOW_TIMEOUT_BUDGETS.agentStartupRetryMaxAttempts - 1) *
+        WORKFLOW_TIMEOUT_BUDGETS.agentStartupRetryBackoffMs
+    const agyClaimFail = validateWorkflowTimeoutBudgets({
+      ...WORKFLOW_TIMEOUT_BUDGETS,
+      agentRunAntigravityMs: agyRunMs,
+      claimTimeoutMs: WorkflowTimeoutMs.make(exactAgyClaimBudget),
+    })
+    match(agyClaimFail)
+      .with({ _tag: "Failure" }, ({ failure }) =>
+        expect(failure).toContain("worst-case antigravity retry budget"),
+      )
+      .with({ _tag: "Success" }, () =>
+        expect.unreachable(
+          "Expected claimTimeoutMs == worst-case antigravity retry budget to fail",
+        ),
+      )
+      .exhaustive()
+    expect(
+      Result.isSuccess(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          agentRunAntigravityMs: agyRunMs,
+          claimTimeoutMs: WorkflowTimeoutMs.make(exactAgyClaimBudget + 1),
+        }),
+      ),
+    ).toBe(true)
+
+    // Schema-level WorkflowTimeoutBudgets enforcement + 32-bit timer cap (2_147_483_647 ms)
+    const maxSafeTimeout = Schema.decodeSync(WorkflowTimeoutMs)(2_147_483_647)
+    expect(maxSafeTimeout).toBe(2_147_483_647)
+    const overflowExit = Schema.decodeExit(WorkflowTimeoutMs)(2_147_483_648)
+    match(overflowExit)
+      .with({ _tag: "Failure" }, ({ cause }) => expect(Cause.hasFails(cause)).toBe(true))
+      .with({ _tag: "Success" }, () => expect.unreachable("Expected 2_147_483_648 to fail"))
+      .exhaustive()
+    expect(Schema.decodeSync(WorkflowTimeoutBudgets)(WORKFLOW_TIMEOUT_BUDGETS)).toEqual(
+      WORKFLOW_TIMEOUT_BUDGETS,
+    )
+    const badBudgetsExit = Schema.decodeExit(WorkflowTimeoutBudgets)({
+      ...WORKFLOW_TIMEOUT_BUDGETS,
+      agentRunClaudeMs: WORKFLOW_TIMEOUT_BUDGETS.agentKillGraceMs,
+    })
+    match(badBudgetsExit)
+      .with({ _tag: "Failure" }, ({ cause }) => expect(Cause.hasFails(cause)).toBe(true))
+      .with({ _tag: "Success" }, () => expect.unreachable("Expected monotonic budget failure"))
+      .exhaustive()
   })
 
   it("encodes, decodes, and validates ShipAttemptKey round-trips and malformed rejections", () => {

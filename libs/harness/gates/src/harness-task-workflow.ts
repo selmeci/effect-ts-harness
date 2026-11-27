@@ -20,6 +20,7 @@ import {
   TaskRunReceipt,
   UnitAgentDispatchResult,
   type UnitEscalation,
+  UnitMode,
   UnitOutcome,
   type UnitRejection,
   WaveIndex,
@@ -151,6 +152,9 @@ const dispatchAutomaticUnit = Effect.fnUntraced(function* (
   attempt: AttemptNumber,
   runner: RunnerId,
   escalationOrdinal: EscalationOrdinal,
+  priorRejection: UnitRejection | undefined,
+  mcpIsolation?: (typeof UnitMode.cases.Automatic.Type)["mcpIsolation"],
+  hardMcpFallback?: (typeof UnitMode.cases.Automatic.Type)["hardMcpFallback"],
 ): Effect.fn.Return<
   UnitOutcome,
   WorkspaceFsError,
@@ -177,6 +181,9 @@ const dispatchAutomaticUnit = Effect.fnUntraced(function* (
         attempt,
         runner,
         cwd,
+        ...(priorRejection !== undefined ? { priorRejection } : {}),
+        ...(mcpIsolation !== undefined ? { mcpIsolation } : {}),
+        ...(hardMcpFallback !== undefined ? { hardMcpFallback } : {}),
       })
     }),
   })
@@ -188,6 +195,16 @@ const dispatchAutomaticUnit = Effect.fnUntraced(function* (
         unitId: descriptor.unitId,
         attempt,
         rejection: { _tag: "AgentFailed", reason: failed.reason },
+      }),
+    )
+    .with({ _tag: "FatalFailed" }, (failed): Effect.Effect<UnitOutcome> =>
+      Effect.succeed({
+        _tag: "Escalated",
+        unitId: descriptor.unitId,
+        escalation: {
+          _tag: "RetryBudgetExhausted",
+          lastRejection: { _tag: "AgentFailed", reason: failed.reason },
+        },
       }),
     )
     .with({ _tag: "AuthRequired" }, (auth): Effect.Effect<UnitOutcome> =>
@@ -230,7 +247,17 @@ const runAttemptCycle = Effect.fnUntraced(function* (
         ),
       )
       .with({ _tag: "Automatic" }, (automatic) =>
-        dispatchAutomaticUnit(plan, descriptor, cwd, attempt, automatic.runner, escalationOrdinal),
+        dispatchAutomaticUnit(
+          plan,
+          descriptor,
+          cwd,
+          attempt,
+          automatic.runner,
+          escalationOrdinal,
+          lastRejection,
+          automatic.mcpIsolation,
+          automatic.hardMcpFallback,
+        ),
       )
       .exhaustive()
 
@@ -383,6 +410,10 @@ const makeUnitCycleDescriptor = (
   cwd: AbsoluteRepoRoot,
 ): UnitCycleDescriptor => {
   const siblingPaths = siblingOwnedPathsForUnit(plan, unit)
+  const runner = match(plan.mode)
+    .with({ _tag: "Automatic" }, (a) => a.runner)
+    .with({ _tag: "Manual" }, () => undefined)
+    .exhaustive()
   return {
     unitId: unit.unitId,
     kind: unitKindOf(unit),
@@ -410,6 +441,7 @@ const makeUnitCycleDescriptor = (
             attempt,
             cwd,
             siblingInFlightOwnedPaths: siblingPaths,
+            ...(runner !== undefined ? { runner } : {}),
           })
         }),
       }),

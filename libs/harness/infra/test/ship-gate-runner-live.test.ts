@@ -81,6 +81,16 @@ const makeRunId = () => WorkflowRunId.make("run-ship-gate-01")
 const makeAttempt = () => ShipAttempt.make(1)
 const makeSampleHash = () => WorkspaceTreeHash.make("a".repeat(64))
 
+const cleanFrictionHostIo: SyncHostIo = {
+  ...nodeSyncHostIo,
+  getEnv: () => {
+    const nextEnv: Record<string, string | undefined> = { ...nodeSyncHostIo.getEnv() }
+    Reflect.deleteProperty(nextEnv, "HARNESS_STATE_DIR")
+    Reflect.deleteProperty(nextEnv, "HARNESS_WORKTREE_ID")
+    return nextEnv
+  },
+}
+
 describe("ShipGateRunnerLive & pure helpers", () => {
   it("resolveShipGateCommand maps all 6 ShipStage variants and skips empty format-check", () => {
     expect(resolveShipGateCommand("format-check", [])).toBeUndefined()
@@ -603,7 +613,7 @@ describe("ShipGateRunnerLive & pure helpers", () => {
                       detail: "unit test failed",
                       timestamp: "2026-11-24T10:00:00.000Z",
                     },
-                    nodeSyncHostIo,
+                    cleanFrictionHostIo,
                   )
                   return Effect.succeed({
                     _tag: "Exited",
@@ -616,7 +626,7 @@ describe("ShipGateRunnerLive & pure helpers", () => {
             ),
           )
           expect(verifyFail.exitCode).toBe(GateExitCode.make(2))
-          const eventsAfterVerify = readFrictionEvents(repoRoot, nodeSyncHostIo)
+          const eventsAfterVerify = readFrictionEvents(repoRoot, cleanFrictionHostIo)
           expect(eventsAfterVerify).toHaveLength(2) // 1 from done + 1 from verify (not 2 from verify!)
 
           // 3. Repeated gc-strict failures trip LoopCircuitBreaker.decide on the 3rd failure
@@ -786,7 +796,7 @@ describe("ShipGateRunnerLive & pure helpers", () => {
                       detail: "d1",
                       timestamp: "2026-11-24T10:00:00.000Z",
                     },
-                    nodeSyncHostIo,
+                    cleanFrictionHostIo,
                   )
                   return Effect.succeed({
                     _tag: "Exited",
@@ -798,7 +808,7 @@ describe("ShipGateRunnerLive & pure helpers", () => {
               },
             ),
           )
-          expect(readFrictionEvents(repoRoot, nodeSyncHostIo)).toHaveLength(2)
+          expect(readFrictionEvents(repoRoot, cleanFrictionHostIo)).toHaveLength(2)
 
           // Neg 2: stage === "verify" when afterFriction.length === beforeFriction.length
           yield* Effect.flip(
@@ -816,7 +826,7 @@ describe("ShipGateRunnerLive & pure helpers", () => {
               },
             ),
           )
-          expect(readFrictionEvents(repoRoot, nodeSyncHostIo)).toHaveLength(3)
+          expect(readFrictionEvents(repoRoot, cleanFrictionHostIo)).toHaveLength(3)
 
           // Neg 3: stage === "verify" when afterFriction grew but last event kind !== "verify_failure"
           yield* Effect.flip(
@@ -838,7 +848,7 @@ describe("ShipGateRunnerLive & pure helpers", () => {
                       detail: "d",
                       timestamp: "2026-11-24T10:01:00.000Z",
                     },
-                    nodeSyncHostIo,
+                    cleanFrictionHostIo,
                   )
                   return Effect.succeed({
                     _tag: "Exited",
@@ -850,7 +860,7 @@ describe("ShipGateRunnerLive & pure helpers", () => {
               },
             ),
           )
-          const events = readFrictionEvents(repoRoot, nodeSyncHostIo)
+          const events = readFrictionEvents(repoRoot, cleanFrictionHostIo)
           expect(events).toHaveLength(5)
           expect(events[4]?.kind).toBe("verify_failure")
         }),

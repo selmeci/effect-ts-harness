@@ -13,6 +13,7 @@ import {
   type TaskRunReceipt,
   type UnitEscalation,
   type UnitOutcome,
+  type UnitRejection,
   WORKFLOW_DAEMON_PROTOCOL_VERSION,
   WaveIndex,
   type WorkUnitId,
@@ -86,6 +87,11 @@ const attemptBelongsToCycle = (
   attempt.attemptKey ===
   makeWorkflowAttemptKey(attempt.runId, attempt.unitId, attempt.attempt, escalationOrdinal)
 
+const retryBudgetExhausted = (lastRejection: UnitRejection): UnitEscalation => ({
+  _tag: "RetryBudgetExhausted",
+  lastRejection,
+})
+
 const resolveFallbackEscalation = (params: {
   readonly plan: CompiledPlan
   readonly unitId: WorkUnitId
@@ -102,33 +108,59 @@ const resolveFallbackEscalation = (params: {
   if (params.completedPriorToEscalation && params.branch !== undefined) {
     return Effect.succeed({ _tag: "MergeConflict", branch: params.branch })
   }
-  const rejectedInCycle = params.attempts.filter(
-    (a) =>
+  const cycleRejectedAttempts = params.attempts.filter(
+    (a): a is Extract<WorkflowAttemptRecord, { readonly verdict: "rejected" }> =>
       a.unitId === params.unitId &&
       hasAttemptVerdict(a, "rejected") &&
       attemptBelongsToCycle(a, params.escalationOrdinal),
-  ).length
-  if (params.allThreeRejected || rejectedInCycle >= 3) {
+  )
+  const rejectedInCycle = cycleRejectedAttempts.length
+  if (params.allThreeRejected) {
     return extractLastRejection(params.attemptOutcomes, params.attempts, params.unitId).pipe(
-      Effect.map((lastRejection) => ({
-        _tag: "RetryBudgetExhausted" as const,
-        lastRejection,
-      })),
+      Effect.map(retryBudgetExhausted),
     )
+  }
+  if (rejectedInCycle > 0) {
+    return match(params.plan.mode)
+      .with({ _tag: "Automatic" }, (auto) =>
+        extractLastRejection([], cycleRejectedAttempts, params.unitId).pipe(
+          Effect.map((lastRejection): UnitEscalation =>
+            match(lastRejection)
+              .with({ _tag: "AgentFailed" }, (r): UnitEscalation =>
+                match(r.escalationKind)
+                  .with("AuthRequired", () => ({
+                    _tag: "AuthRequired" as const,
+                    runner: auto.runner,
+                  }))
+                  .with("MergeConflict", undefined, () => retryBudgetExhausted(r))
+                  .exhaustive(),
+              )
+              .with(
+                { _tag: "WriteSetViolation" },
+                { _tag: "PackageVerifyFailed" },
+                { _tag: "StampMissing" },
+                () => retryBudgetExhausted(lastRejection),
+              )
+              .exhaustive(),
+          ),
+        ),
+      )
+      .with({ _tag: "Manual" }, () =>
+        extractLastRejection(
+          params.attemptOutcomes,
+          rejectedInCycle >= 3 ? cycleRejectedAttempts : params.attempts,
+          params.unitId,
+        ).pipe(Effect.map(retryBudgetExhausted)),
+      )
+      .exhaustive()
   }
   return match(params.plan.mode)
     .with({ _tag: "Automatic" }, (auto) =>
-      Effect.succeed<UnitEscalation>({
-        _tag: "AuthRequired",
-        runner: auto.runner,
-      }),
+      Effect.succeed<UnitEscalation>({ _tag: "AuthRequired", runner: auto.runner }),
     )
     .with({ _tag: "Manual" }, () =>
       extractLastRejection(params.attemptOutcomes, params.attempts, params.unitId).pipe(
-        Effect.map((lastRejection): UnitEscalation => ({
-          _tag: "RetryBudgetExhausted",
-          lastRejection,
-        })),
+        Effect.map(retryBudgetExhausted),
       ),
     )
     .exhaustive()

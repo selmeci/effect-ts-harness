@@ -58,7 +58,7 @@ import {
   validationFail,
 } from "./workflow-command-helpers.js"
 
-export type { WorkflowCliDeps }
+export { UnitAgentDispatcherLive, type WorkflowCliDeps }
 
 const DEFAULT_WORKFLOW_DEPS = {
   compilePlan: compileWorkflowPlanFromRepo,
@@ -78,15 +78,10 @@ type ResolvedWorkflowCliDeps = typeof DEFAULT_WORKFLOW_DEPS & {
 
 const resolveActiveRunnerKind = (): Effect.Effect<"live" | "placeholder"> =>
   Effect.serviceOption(UnitAgentDispatcher).pipe(
-    Effect.flatMap((opt) =>
+    Effect.map((opt) =>
       match(opt)
-        .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value.runnerKind))
-        .with({ _tag: "None" }, () =>
-          UnitAgentDispatcher.pipe(
-            Effect.map((d) => d.runnerKind),
-            Effect.provide(UnitAgentDispatcherLive),
-          ),
-        )
+        .with({ _tag: "Some" }, ({ value }) => value.runnerKind)
+        .with({ _tag: "None" }, () => "placeholder" as const)
         .exhaustive(),
     ),
   )

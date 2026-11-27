@@ -16,6 +16,7 @@ import {
 } from "@harness/contract"
 import {
   WRITER_LEASE_HEARTBEAT_TTL_MS,
+  inspectWorkflowRunnerDoctorChecks,
   invokeWorkflowStoreQueryWithMeta,
   rebuildWorkflowReadModelViews,
   resolveWorkflowRuntimePaths,
@@ -274,6 +275,13 @@ export const handleDaemonWorkflowDoctorRequest = Effect.fn("WorkflowRpcDaemon.ha
               detail: toBoundedReason(`Workflow read-model store status: ${storeAvailability}`),
             }),
           )
+
+          const runnerChecks = yield* inspectWorkflowRunnerDoctorChecks({
+            runnerKind: runtime.unitAgentDispatcher.runnerKind,
+            env: runtime.env,
+            hostIo: runtime.hostIo,
+          })
+          checks.push(...runnerChecks)
 
           const rebuiltRunCount = yield* match(req.mode)
             .with("check-only", () => Effect.succeed(WorkflowRebuiltRunCount.make(0)))

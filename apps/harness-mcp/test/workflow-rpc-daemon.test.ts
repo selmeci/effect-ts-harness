@@ -5,11 +5,19 @@ import { match } from "ts-pattern"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import {
   AbsoluteRepoRoot,
+  AgentAuthRequiredError,
+  AgentExitError,
+  AgentFailureReason,
+  AgentNonZeroExitCode,
+  AgentResultText,
+  AgentSuccessExitCode,
+  AttemptNumber,
   type CompiledPlan,
   type CompleteSharedStepInput,
   type CompleteUnitInput,
   EarsRequirementKey,
   EscalationDecision,
+  EscalationOrdinal,
   GateExitCode,
   MaxConcurrency,
   NxProjectName,
@@ -27,8 +35,14 @@ import {
   UnitRejection,
   WaveIndex,
   WorkUnitId,
+  type WorkflowAttemptRecord,
   WorkflowDoctorMode,
   WorkflowRunId,
+  WorkflowTimestampMs,
+  type WorkflowUnitRecord,
+  makeWorkflowAttemptKey,
+  makeWorkflowUnitKey,
+  toAgentDiagnosticDetail,
 } from "@harness/contract"
 import {
   appendFrictionEvent,
@@ -37,7 +51,6 @@ import {
   resolveHarnessStateDir,
 } from "@harness/gates"
 import {
-  UnitAgentDispatcherLive,
   abortWorkflowViaDaemon,
   completeWorkflowViaDaemon,
   doctorWorkflowViaDaemon,
@@ -49,7 +62,7 @@ import {
   startWorkflowViaDaemon,
   validateWorktreeRepoRoot,
 } from "@harness/infra"
-import { UnitAgentDispatcher, UnitVerifier } from "@harness/service"
+import { AgentRunnerPort, UnitAgentDispatcher, UnitVerifier } from "@harness/service"
 import { startHarnessDaemonServer } from "../src/daemon/unix-socket-daemon.js"
 import { executeWorkflowPlanTool } from "../src/tools/workflow-plan.tools.js"
 import {
@@ -388,7 +401,22 @@ describe("WF-3 Unix-socket daemon workflow RPCs (start, retry, epic & slice isol
         }),
       )
       expect(docCheck.rebuiltRunCount).toBe(0)
-      expect(docCheck.checks.every((c) => c.status === "ok")).toBe(true)
+      expect(docCheck.checks.every((c) => c.status !== "fail")).toBe(true)
+      expect(
+        docCheck.checks
+          .filter((c) =>
+            [
+              "worktree-binding",
+              "writer-lease",
+              "omnigraph-read-model",
+              "agent-dispatcher",
+            ].includes(c.name),
+          )
+          .every((c) => c.status === "ok"),
+      ).toBe(true)
+      expect(docCheck.checks.map((c) => c.name)).toEqual(
+        expect.arrayContaining(["agent-dispatcher", "runner-claude-code", "runner-antigravity"]),
+      )
 
       const docRebuild = await Effect.runPromise(
         doctorWorkflowViaDaemon({
@@ -688,7 +716,7 @@ describe("WF-3 Unix-socket daemon workflow RPCs (start, retry, epic & slice isol
     }
   }, 45_000) // exercises slice siblingInFlightOwnedPaths propagation & TaskRunAbortedError over live daemon IPC
 
-  it("F-17.1: rejects Automatic mode when placeholder dispatcher is active, and runs Automatic mode when runnerKind: 'live'", async () => {
+  it("F-17.1: rejects Automatic mode when placeholder dispatcher is active, runs Automatic mode via UnitAgentDispatcherLive + agentRunnerLayer, and reports runner checks in workflow.doctor", async () => {
     const { canonicalDir, baseSha } = createWorkRepo("auto-gate")
     const validatedCanonical = await Effect.runPromise(
       validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
@@ -719,6 +747,11 @@ describe("WF-3 Unix-socket daemon workflow RPCs (start, retry, epic & slice isol
       sharedStepPaths: [],
     }
 
+    const placeholderDispatcherLayer = Layer.succeed(UnitAgentDispatcher, {
+      runnerKind: "placeholder" as const,
+      dispatchUnit: () => Effect.succeed(UnitAgentDispatchResult.cases.Completed.make({})),
+    })
+
     const placeholderDaemon = await startHarnessDaemonServer(canonicalDir, {
       workflowEngine: {
         mode: "required",
@@ -727,7 +760,7 @@ describe("WF-3 Unix-socket daemon workflow RPCs (start, retry, epic & slice isol
         unitVerifierLayer: makeCompletedVerifierLayer(),
         worktreePortLayer: makeNoopWorktreeLayer(validatedCanonical.worktreeRoot),
         reviewRouterLayer: reviewStubLayer,
-        agentDispatcherLayer: UnitAgentDispatcherLive,
+        agentDispatcherLayer: placeholderDispatcherLayer,
       },
     })
     try {
@@ -737,24 +770,55 @@ describe("WF-3 Unix-socket daemon workflow RPCs (start, retry, epic & slice isol
           plan: autoPlan,
         }).pipe(Effect.flip),
       )
-      expect(placeholderErr.message).toContain("WF-5")
+      expect(placeholderErr.message).toContain("placeholder")
+
+      const placeholderDoctor = await Effect.runPromise(
+        doctorWorkflowViaDaemon({
+          repoRoot: validatedCanonical.worktreeRoot,
+          mode: WorkflowDoctorMode.make("check-only"),
+        }),
+      )
+      expect(placeholderDoctor.checks.find((c) => c.name === "agent-dispatcher")?.status).toBe(
+        "warn",
+      )
+      expect(placeholderDoctor.checks.map((c) => c.name)).toEqual(
+        expect.arrayContaining(["agent-dispatcher", "runner-claude-code", "runner-antigravity"]),
+      )
     } finally {
       await placeholderDaemon.close()
     }
 
-    const liveDispatcherLayer = Layer.succeed(UnitAgentDispatcher, {
-      runnerKind: "live" as const,
-      dispatchUnit: () => Effect.succeed(UnitAgentDispatchResult.cases.Completed.make({})),
+    const recordedRunnerRequests: Array<{
+      readonly unitId: WorkUnitId
+      readonly runner: RunnerId
+    }> = []
+    const recordedCompleteInputs: Array<CompleteUnitInput> = []
+    const mockAgentRunnerLayer = Layer.succeed(AgentRunnerPort, {
+      run: (request) =>
+        Effect.sync(() => {
+          recordedRunnerRequests.push({
+            unitId: request.brief.unitId,
+            runner: request.runner,
+          })
+          return {
+            runner: request.runner,
+            exit: AgentSuccessExitCode.make(0),
+            resultText: AgentResultText.make("unit completed"),
+            usage: { _tag: "Unavailable" as const },
+          }
+        }),
     })
     const liveDaemon = await startHarnessDaemonServer(canonicalDir, {
       workflowEngine: {
         mode: "required",
         client: createClient(),
         entityReplyPollInterval: "50 millis",
-        unitVerifierLayer: makeCompletedVerifierLayer(),
+        unitVerifierLayer: makeCompletedVerifierLayer((input) => {
+          recordedCompleteInputs.push(input)
+        }),
         worktreePortLayer: makeNoopWorktreeLayer(validatedCanonical.worktreeRoot),
         reviewRouterLayer: reviewStubLayer,
-        agentDispatcherLayer: liveDispatcherLayer,
+        agentRunnerLayer: mockAgentRunnerLayer,
       },
     })
     try {
@@ -775,6 +839,21 @@ describe("WF-3 Unix-socket daemon workflow RPCs (start, retry, epic & slice isol
           pendingDeferreds: [{ _tag: "LlmPhase", deferredName: "llm-phase-done" }],
         },
       })
+      expect(recordedRunnerRequests).toEqual([
+        { unitId: WorkUnitId.make("auto-unit"), runner: RunnerId.make("claude-code") },
+      ])
+      expect(recordedCompleteInputs[0]?.runner).toBe(RunnerId.make("claude-code"))
+
+      const liveDoctor = await Effect.runPromise(
+        doctorWorkflowViaDaemon({
+          repoRoot: validatedCanonical.worktreeRoot,
+          mode: WorkflowDoctorMode.make("check-only"),
+        }),
+      )
+      expect(liveDoctor.checks.find((c) => c.name === "agent-dispatcher")?.status).toBe("ok")
+      expect(liveDoctor.checks.map((c) => c.name)).toEqual(
+        expect.arrayContaining(["agent-dispatcher", "runner-claude-code", "runner-antigravity"]),
+      )
     } finally {
       await liveDaemon.close()
     }
@@ -903,4 +982,515 @@ describe("WF-3 Unix-socket daemon workflow RPCs (start, retry, epic & slice isol
       await daemon2.close()
     }
   }, 45_000) // restarts daemon across corrupt/missing planJson cases and validates fail-closed Unix-socket RPC responses
+
+  it("reports attempt-3 AuthRequired escalation after 2 prior verification rejections as AuthRequired (not RetryBudgetExhausted)", async () => {
+    const { canonicalDir, baseSha } = createWorkRepo("auto-auth-attempt3")
+    const validatedCanonical = await Effect.runPromise(
+      validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
+    )
+    const unitId = WorkUnitId.make("auto-auth-unit")
+    const runner = RunnerId.make("claude-code")
+    const autoPlan: CompiledPlan = {
+      runId: WorkflowRunId.make("run-auto-auth-attempt3-08"),
+      level: "slice",
+      planSha: PlanSha256.make("8".repeat(64)),
+      baseSha,
+      mode: {
+        _tag: "Automatic",
+        runner,
+        maxConcurrency: MaxConcurrency.make(2),
+      },
+      units: [
+        {
+          _tag: "PackageUnit",
+          unitId,
+          projectName: NxProjectName.make("@harness/auto-auth"),
+          waveIndex: WaveIndex.make(0),
+          dependsOn: [],
+          ownedRelPaths: [OwnedRelPath.make("libs/auto-auth/src")],
+          stubKeys: [StubSymbolKey.make("AutoAuth.fn")],
+          earsKeys: [EarsRequirementKey.make("REQ-2.5")],
+          packageVerifyCommand: PackageVerifyCommand.make("pnpm nx run @harness/auto-auth:verify"),
+        },
+      ],
+      sharedStepPaths: [],
+    }
+
+    const rejectTwiceVerifierLayer = Layer.succeed(UnitVerifier, {
+      completeUnit: (input) =>
+        Effect.succeed(
+          UnitOutcome.cases.Rejected.make({
+            unitId: input.unit.unitId,
+            attempt: input.attempt,
+            rejection: UnitRejection.cases.PackageVerifyFailed.make({
+              exitCode: GateExitCode.make(1),
+              failureKind: "non-zero-exit",
+              detail: PackageVerifyFailureDetail.make(`verify failed attempt ${input.attempt}`),
+            }),
+          }),
+        ),
+      completeSharedStep: (input) =>
+        Effect.succeed(
+          UnitOutcome.cases.Completed.make({
+            unitId: SHARED_STEP_UNIT_ID,
+            attempt: input.attempt,
+            changedPaths: [...input.sharedStepPaths],
+            packageStampHash: PackageStampHash.make("f".repeat(64)),
+          }),
+        ),
+    })
+
+    const authOnThirdRunnerLayer = Layer.succeed(AgentRunnerPort, {
+      run: (request) =>
+        request.brief.attempt >= 3
+          ? Effect.fail(new AgentAuthRequiredError({ runner: request.runner }))
+          : Effect.succeed({
+              runner: request.runner,
+              exit: AgentSuccessExitCode.make(0),
+              resultText: AgentResultText.make(`completed attempt ${request.brief.attempt}`),
+              usage: { _tag: "Unavailable" as const },
+            }),
+    })
+
+    const daemon = await startHarnessDaemonServer(canonicalDir, {
+      workflowEngine: {
+        mode: "required",
+        client: createClient(),
+        entityReplyPollInterval: "50 millis",
+        unitVerifierLayer: rejectTwiceVerifierLayer,
+        worktreePortLayer: makeNoopWorktreeLayer(validatedCanonical.worktreeRoot),
+        reviewRouterLayer: reviewStubLayer,
+        agentRunnerLayer: authOnThirdRunnerLayer,
+      },
+    })
+
+    try {
+      await Effect.runPromise(
+        startWorkflowViaDaemon({ repoRoot: validatedCanonical.worktreeRoot, plan: autoPlan }),
+      )
+
+      let latestStatus = await Effect.runPromise(
+        getWorkflowStatusViaDaemon({
+          repoRoot: validatedCanonical.worktreeRoot,
+          runId: autoPlan.runId,
+        }),
+      )
+      for (let i = 0; i < 60; i += 1) {
+        const hasEscalation = match(latestStatus)
+          .with({ _tag: "Ready" }, ({ outcome }) =>
+            match(outcome)
+              .with({ _tag: "Active" }, ({ pendingDeferreds }) =>
+                pendingDeferreds.some((d) => d._tag === "Escalation"),
+              )
+              .with({ _tag: "NotFound" }, { _tag: "Completed" }, { _tag: "Failed" }, () => false)
+              .exhaustive(),
+          )
+          .with({ _tag: "DaemonOffline" }, { _tag: "StorePaused" }, () => false)
+          .exhaustive()
+        if (hasEscalation) {
+          break
+        }
+        await Effect.runPromise(Effect.sleep("50 millis"))
+        latestStatus = await Effect.runPromise(
+          getWorkflowStatusViaDaemon({
+            repoRoot: validatedCanonical.worktreeRoot,
+            runId: autoPlan.runId,
+          }),
+        )
+      }
+
+      expect(latestStatus).toMatchObject({
+        _tag: "Ready",
+        outcome: {
+          _tag: "Active",
+          pendingDeferreds: [
+            {
+              _tag: "Escalation",
+              unitId,
+              deferredName: `escalation/${unitId}/1`,
+              escalation: {
+                _tag: "AuthRequired",
+                runner,
+              },
+            },
+          ],
+        },
+      })
+    } finally {
+      await daemon.close()
+    }
+  }, 45_000)
+
+  const makeAutoFallbackPlan = (
+    runId: WorkflowRunId,
+    unitId: WorkUnitId,
+    runner: RunnerId,
+    baseSha: CompiledPlan["baseSha"],
+  ): CompiledPlan => ({
+    runId,
+    level: "slice",
+    planSha: PlanSha256.make("9".repeat(64)),
+    baseSha,
+    mode: { _tag: "Automatic", runner, maxConcurrency: MaxConcurrency.make(2) },
+    units: [
+      {
+        _tag: "PackageUnit",
+        unitId,
+        projectName: NxProjectName.make("@harness/fallback-esc"),
+        waveIndex: WaveIndex.make(0),
+        dependsOn: [],
+        ownedRelPaths: [OwnedRelPath.make("libs/fallback-esc/src")],
+        stubKeys: [StubSymbolKey.make("FallbackEsc.fn")],
+        earsKeys: [EarsRequirementKey.make("REQ-8.1")],
+        packageVerifyCommand: PackageVerifyCommand.make("pnpm nx run @harness/fallback-esc:verify"),
+      },
+    ],
+    sharedStepPaths: [],
+  })
+
+  const pollUntilUnitEscalated = async (worktreeRoot: AbsoluteRepoRoot, runId: WorkflowRunId) => {
+    for (let i = 0; i < 60; i += 1) {
+      const s = await Effect.runPromise(
+        getWorkflowStatusViaDaemon({ repoRoot: worktreeRoot, runId }),
+      )
+      const done = match(s)
+        .with({ _tag: "Ready" }, ({ outcome }) =>
+          match(outcome)
+            .with({ _tag: "Active" }, ({ pendingDeferreds }) =>
+              pendingDeferreds.some((d) => d._tag === "Escalation"),
+            )
+            .with({ _tag: "NotFound" }, { _tag: "Completed" }, { _tag: "Failed" }, () => false)
+            .exhaustive(),
+        )
+        .with({ _tag: "DaemonOffline" }, { _tag: "StorePaused" }, () => false)
+        .exhaustive()
+      if (done) return s
+      await Effect.runPromise(Effect.sleep("50 millis"))
+    }
+    return Effect.runPromise(getWorkflowStatusViaDaemon({ repoRoot: worktreeRoot, runId }))
+  }
+
+  const assertAutoFallbackEscalation = async (params: {
+    readonly canonicalDir: string
+    readonly worktreeRoot: AbsoluteRepoRoot
+    readonly baseSha: CompiledPlan["baseSha"]
+    readonly runId: WorkflowRunId
+    readonly expectedRejectionTag: "AgentFailed" | "PackageVerifyFailed"
+    readonly unitVerifierLayer: Layer.Layer<UnitVerifier>
+    readonly agentRunnerLayer: Layer.Layer<AgentRunnerPort>
+  }) => {
+    const unitId = WorkUnitId.make("fallback-esc-unit")
+    const runner = RunnerId.make("claude-code")
+    const d = await startHarnessDaemonServer(params.canonicalDir, {
+      workflowEngine: {
+        mode: "required",
+        client: createClient(),
+        entityReplyPollInterval: "50 millis",
+        unitVerifierLayer: params.unitVerifierLayer,
+        worktreePortLayer: makeNoopWorktreeLayer(params.worktreeRoot),
+        reviewRouterLayer: reviewStubLayer,
+        agentRunnerLayer: params.agentRunnerLayer,
+      },
+    })
+    try {
+      await Effect.runPromise(
+        startWorkflowViaDaemon({
+          repoRoot: params.worktreeRoot,
+          plan: makeAutoFallbackPlan(params.runId, unitId, runner, params.baseSha),
+        }),
+      )
+      expect(await pollUntilUnitEscalated(params.worktreeRoot, params.runId)).toMatchObject({
+        _tag: "Ready",
+        outcome: {
+          _tag: "Active",
+          pendingDeferreds: [
+            {
+              _tag: "Escalation",
+              unitId,
+              escalation: {
+                _tag: "RetryBudgetExhausted",
+                lastRejection: { _tag: params.expectedRejectionTag },
+              },
+            },
+          ],
+        },
+      })
+    } finally {
+      await d.close()
+    }
+  }
+
+  it("F-8.2 (arms 1 & 2): Automatic rejectedInCycle >= 3 recovers RetryBudgetExhausted for AgentFailed and PackageVerifyFailed", async () => {
+    const { canonicalDir, baseSha } = createWorkRepo("f8-fallback-esc")
+    const val = await Effect.runPromise(
+      validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
+    )
+    await assertAutoFallbackEscalation({
+      canonicalDir,
+      worktreeRoot: val.worktreeRoot,
+      baseSha,
+      runId: WorkflowRunId.make("run-f82-agent-failed-01"),
+      expectedRejectionTag: "AgentFailed",
+      unitVerifierLayer: makeCompletedVerifierLayer(),
+      agentRunnerLayer: Layer.succeed(AgentRunnerPort, {
+        run: (req) =>
+          Effect.fail(
+            new AgentExitError({
+              runner: req.runner,
+              exit: AgentNonZeroExitCode.make(1),
+              detail: toAgentDiagnosticDetail("agent exited non-zero"),
+            }),
+          ),
+      }),
+    })
+    await assertAutoFallbackEscalation({
+      canonicalDir,
+      worktreeRoot: val.worktreeRoot,
+      baseSha,
+      runId: WorkflowRunId.make("run-f82-verify-failed-02"),
+      expectedRejectionTag: "PackageVerifyFailed",
+      unitVerifierLayer: Layer.succeed(UnitVerifier, {
+        completeUnit: (input) =>
+          Effect.succeed(
+            UnitOutcome.cases.Rejected.make({
+              unitId: input.unit.unitId,
+              attempt: input.attempt,
+              rejection: UnitRejection.cases.PackageVerifyFailed.make({
+                exitCode: GateExitCode.make(1),
+                failureKind: "non-zero-exit",
+                detail: PackageVerifyFailureDetail.make(`verify failed #${input.attempt}`),
+              }),
+            }),
+          ),
+        completeSharedStep: (input) =>
+          Effect.succeed(
+            UnitOutcome.cases.Completed.make({
+              unitId: SHARED_STEP_UNIT_ID,
+              attempt: input.attempt,
+              changedPaths: [...input.sharedStepPaths],
+              packageStampHash: PackageStampHash.make("f".repeat(64)),
+            }),
+          ),
+      }),
+      agentRunnerLayer: Layer.succeed(AgentRunnerPort, {
+        run: (req) =>
+          Effect.succeed({
+            runner: req.runner,
+            exit: AgentSuccessExitCode.make(0),
+            resultText: AgentResultText.make("ok"),
+            usage: { _tag: "Unavailable" as const },
+          }),
+      }),
+    })
+  }, 60_000)
+
+  const makeFallbackOverrideClient = (
+    overrides: Map<
+      WorkflowRunId,
+      { readonly unit: WorkflowUnitRecord; readonly attempts: ReadonlyArray<WorkflowAttemptRecord> }
+    >,
+  ) => {
+    const raw = createClient()
+    const origInvoke = raw.queries.invoke.bind(raw.queries)
+    return new Proxy(raw, {
+      get: (target, prop, receiver) =>
+        prop === "queries"
+          ? new Proxy(target.queries, {
+              get: (qt, qp, qr) =>
+                qp === "invoke"
+                  ? (...args: Parameters<typeof origInvoke>) => {
+                      const queryName = args[0]
+                      const rawParams = args[1]?.params
+                      const runIdParam =
+                        typeof rawParams === "object" && rawParams !== null
+                          ? Reflect.get(rawParams, "runId")
+                          : undefined
+                      const ov =
+                        typeof runIdParam === "string"
+                          ? overrides.get(WorkflowRunId.make(runIdParam))
+                          : undefined
+                      if (ov !== undefined && queryName === "wf_units_for_run") {
+                        return Promise.resolve({
+                          queryName,
+                          rowCount: 1,
+                          rows: [{ ...ov.unit, ownedRelPaths: [...ov.unit.ownedRelPaths] }],
+                          graphCommitId: null,
+                          target: { branch: "main" },
+                        })
+                      }
+                      if (ov !== undefined && queryName === "wf_attempts_for_run") {
+                        return Promise.resolve({
+                          queryName,
+                          rowCount: ov.attempts.length,
+                          rows: ov.attempts.map((a) => ({
+                            ...a,
+                            ...match(a)
+                              .with({ verdict: "rejected" }, (r) => ({
+                                rejection: JSON.stringify(r.rejection),
+                              }))
+                              .with({ verdict: "dispatched" }, { verdict: "completed" }, () => ({}))
+                              .exhaustive(),
+                          })),
+                          graphCommitId: null,
+                          target: { branch: "main" },
+                        })
+                      }
+                      return origInvoke(...args)
+                    }
+                  : Reflect.get(qt, qp, qr),
+            })
+          : Reflect.get(target, prop, receiver),
+    })
+  }
+
+  const makeRejectedCycleAttempts = (
+    runId: WorkflowRunId,
+    targetUnitId: WorkUnitId,
+    thirdRejection: UnitRejection,
+    attemptCount = 3,
+  ): ReadonlyArray<WorkflowAttemptRecord> =>
+    ([1, 2, 3] as const).slice(0, attemptCount).map((n) => ({
+      attemptKey: makeWorkflowAttemptKey(
+        runId,
+        targetUnitId,
+        AttemptNumber.make(n),
+        EscalationOrdinal.make(1),
+      ),
+      runId,
+      unitId: targetUnitId,
+      attempt: AttemptNumber.make(n),
+      verdict: "rejected" as const,
+      rejection:
+        n === attemptCount
+          ? thirdRejection
+          : UnitRejection.cases.PackageVerifyFailed.make({
+              exitCode: GateExitCode.make(1),
+              failureKind: "non-zero-exit",
+            }),
+      updatedMs: WorkflowTimestampMs.make(100 + n),
+    }))
+
+  it("F-8.1 & F-8.2 (arms 3 & 4): structured escalationKind recovery without reason prefix, MergeConflict, and Manual rejectedInCycle >= 3", async () => {
+    const { canonicalDir, baseSha } = createWorkRepo("f81-esckind-manual")
+    const val = await Effect.runPromise(
+      validateWorktreeRepoRoot(AbsoluteRepoRoot.make(canonicalDir)),
+    )
+    const unitId = WorkUnitId.make("fallback-esc-unit")
+    const runner = RunnerId.make("claude-code")
+    const overrides = new Map<
+      WorkflowRunId,
+      { readonly unit: WorkflowUnitRecord; readonly attempts: ReadonlyArray<WorkflowAttemptRecord> }
+    >()
+    const d3 = await startHarnessDaemonServer(canonicalDir, {
+      workflowEngine: {
+        mode: "required",
+        client: makeFallbackOverrideClient(overrides),
+        entityReplyPollInterval: "50 millis",
+        unitVerifierLayer: makeCompletedVerifierLayer(),
+        worktreePortLayer: makeNoopWorktreeLayer(val.worktreeRoot),
+        reviewRouterLayer: reviewStubLayer,
+        agentRunnerLayer: Layer.succeed(AgentRunnerPort, { run: () => Effect.never }),
+      },
+    })
+    try {
+      const checkFallback = async (
+        runId: WorkflowRunId,
+        unit: WorkflowUnitRecord,
+        thirdRejection: UnitRejection,
+        expectedEscalation: Readonly<Record<string, unknown>>,
+        attemptCount = 3,
+      ) => {
+        overrides.set(runId, {
+          unit,
+          attempts: makeRejectedCycleAttempts(runId, unit.unitId, thirdRejection, attemptCount),
+        })
+        expect(
+          await Effect.runPromise(
+            getWorkflowStatusViaDaemon({ repoRoot: val.worktreeRoot, runId }),
+          ),
+        ).toMatchObject({
+          _tag: "Ready",
+          outcome: {
+            _tag: "Active",
+            pendingDeferreds: [
+              { _tag: "Escalation", unitId: unit.unitId, escalation: expectedEscalation },
+            ],
+          },
+        })
+      }
+
+      const run3 = WorkflowRunId.make("run-f81-esckind-auto-03")
+      await Effect.runPromise(
+        startWorkflowViaDaemon({
+          repoRoot: val.worktreeRoot,
+          plan: makeAutoFallbackPlan(run3, unitId, runner, baseSha),
+        }),
+      )
+      const autoUnit: WorkflowUnitRecord = {
+        unitKey: makeWorkflowUnitKey(run3, unitId),
+        runId: run3,
+        unitId,
+        kind: "package",
+        waveIndex: WaveIndex.make(0),
+        status: "escalated",
+        ownedRelPaths: [OwnedRelPath.make("libs/fallback-esc/src")],
+        updatedMs: WorkflowTimestampMs.make(200),
+      }
+      await checkFallback(
+        run3,
+        autoUnit,
+        UnitRejection.cases.AgentFailed.make({
+          reason: AgentFailureReason.make("OAuth session expired"),
+          escalationKind: "AuthRequired",
+        }),
+        { _tag: "AuthRequired", runner },
+      )
+      await checkFallback(
+        run3,
+        autoUnit,
+        UnitRejection.cases.AgentFailed.make({ reason: AgentFailureReason.make("fatal 1") }),
+        { _tag: "RetryBudgetExhausted", lastRejection: { _tag: "AgentFailed", reason: "fatal 1" } },
+        1,
+      )
+      await checkFallback(
+        run3,
+        autoUnit,
+        UnitRejection.cases.AgentFailed.make({
+          reason: AgentFailureReason.make("Authentication required for runner claude-code"),
+          escalationKind: "MergeConflict",
+        }),
+        {
+          _tag: "RetryBudgetExhausted",
+          lastRejection: { _tag: "AgentFailed", escalationKind: "MergeConflict" },
+        },
+      )
+
+      const run4 = WorkflowRunId.make("run-f82-manual-cycle3-04")
+      const manualPlan = makeSingleUnitManualPlan(run4, baseSha)
+      const manualUnitId = manualPlan.units[0]!.unitId
+      await Effect.runPromise(
+        startWorkflowViaDaemon({ repoRoot: val.worktreeRoot, plan: manualPlan }),
+      )
+      await checkFallback(
+        run4,
+        {
+          unitKey: makeWorkflowUnitKey(run4, manualUnitId),
+          runId: run4,
+          unitId: manualUnitId,
+          kind: "package",
+          waveIndex: WaveIndex.make(0),
+          status: "escalated",
+          ownedRelPaths: [...manualPlan.units[0]!.ownedRelPaths],
+          updatedMs: WorkflowTimestampMs.make(300),
+        },
+        UnitRejection.cases.AgentFailed.make({
+          reason: AgentFailureReason.make("Manual attempt failed"),
+          escalationKind: "AuthRequired",
+        }),
+        { _tag: "RetryBudgetExhausted", lastRejection: { _tag: "AgentFailed" } },
+      )
+    } finally {
+      await d3.close()
+    }
+  }, 45_000)
 })

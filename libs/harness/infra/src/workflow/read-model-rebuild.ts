@@ -466,12 +466,14 @@ const recordUnitOutcome = (params: {
                         reason: AgentFailureReason.make(
                           `Authentication required for runner '${e.runner}'`,
                         ),
+                        escalationKind: "AuthRequired",
                       }),
                     )
                     .with({ _tag: "RetryBudgetExhausted" }, (e) => e.lastRejection)
                     .with({ _tag: "MergeConflict" }, (e) =>
                       UnitRejection.cases.AgentFailed.make({
                         reason: AgentFailureReason.make(`Merge conflict on branch '${e.branch}'`),
+                        escalationKind: "MergeConflict",
                       }),
                     )
                     .exhaustive()

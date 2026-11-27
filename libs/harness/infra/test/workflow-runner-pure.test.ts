@@ -1,0 +1,1496 @@
+import { describe, expect, it } from "@effect/vitest"
+import { Arbitrary, Effect, Result, Schema } from "effect"
+import { match } from "ts-pattern"
+import {
+  AbsoluteRepoRoot,
+  AgentAuthRequiredError,
+  AgentCostUsd,
+  AgentDurationMillis,
+  AgentExitError,
+  AgentFailureReason,
+  AgentMaxTurns,
+  AgentNoChangeError,
+  AgentNonZeroExitCode,
+  AgentOutputParseError,
+  AgentSessionId,
+  AgentSuccessExitCode,
+  AgentTimeoutError,
+  AgentTokenCount,
+  AgentToolDeniedError,
+  AgentTurnCount,
+  AntigravityRunnerProfile,
+  AttemptNumber,
+  BriefPrompt,
+  ClaudeCodeRunnerProfile,
+  CompiledWorkUnit,
+  EarsRequirementKey,
+  GateExitCode,
+  MaxConcurrency,
+  ModelName,
+  NxProjectName,
+  OwnedRelPath,
+  PackageVerifyCommand,
+  PackageVerifyFailureDetail,
+  PermissionRule,
+  RunnerConfigFilePath,
+  type RunnerId,
+  SliceBranchName,
+  StubSymbolKey,
+  TimeoutMillis,
+  UnitRejection,
+  WORKFLOW_TIMEOUT_BUDGETS,
+  WaveIndex,
+  WorkUnitId,
+  toAgentDiagnosticDetail,
+  toDenialNotice,
+} from "@harness/contract"
+import { NodeKey, PageRankScoreMillis, type TypedHoleContextBundle } from "@harness/graph"
+import {
+  ANTIGRAVITY_RUNNER_PROFILE,
+  CLAUDE_CODE_RUNNER_PROFILE,
+  RUNNER_PROFILES,
+  buildAntigravityArgv,
+  buildClaudeCodeArgv,
+  buildClaudeHooksSettingsJson,
+  buildClaudeMcpConfigJson,
+  buildRunnerEnv,
+  buildUnitBrief,
+  getRunnerProfile,
+  isRetryableAntigravityStartupFailure,
+  parseAntigravityOutput,
+  parseClaudeCodeOutput,
+  toOutcome,
+  toUnitAgentDispatchResult,
+} from "../src/index.js"
+import { resolveHarnessInstallationRoot } from "../src/workflow/runner-profiles.js"
+
+const HooksJsonSchema = Schema.fromJsonString(
+  Schema.Struct({
+    hooks: Schema.Record(
+      Schema.String,
+      Schema.Array(
+        Schema.Struct({
+          matcher: Schema.String,
+          hooks: Schema.Array(
+            Schema.Struct({ type: Schema.String, command: Schema.String, timeout: Schema.Finite }),
+          ),
+        }),
+      ),
+    ),
+  }),
+)
+
+const McpJsonSchema = Schema.fromJsonString(
+  Schema.Struct({
+    mcpServers: Schema.Record(
+      Schema.String,
+      Schema.Struct({ command: Schema.String, args: Schema.Array(Schema.String) }),
+    ),
+  }),
+)
+
+const unwrapSuccess = <A, E>(result: Result.Result<A, E>): A =>
+  match(result)
+    .with({ _tag: "Success" }, ({ success }) => success)
+    .with({ _tag: "Failure" }, ({ failure }) => {
+      throw new Error(`Expected Result.Success, got Failure: ${String(failure)}`)
+    })
+    .exhaustive()
+
+const unwrapFailure = <A, E>(result: Result.Result<A, E>): E =>
+  match(result)
+    .with({ _tag: "Failure" }, ({ failure }) => failure)
+    .with({ _tag: "Success" }, ({ success }) => {
+      throw new Error(`Expected Result.Failure, got Success: ${JSON.stringify(success)}`)
+    })
+    .exhaustive()
+
+const authErr = (runner: RunnerId, detail: string) =>
+  new AgentAuthRequiredError({ runner, detail: toAgentDiagnosticDetail(detail) })
+const exitErr = (
+  runner: RunnerId,
+  exit: number,
+  detail?: string,
+  kind?: "exit" | "signal" | "spawn-failed",
+) =>
+  new AgentExitError({
+    runner,
+    exit: AgentNonZeroExitCode.make(exit),
+    ...(kind !== undefined ? { kind } : {}),
+    ...(detail !== undefined ? { detail: toAgentDiagnosticDetail(detail) } : {}),
+  })
+const parseErr = (runner: RunnerId, detail: string) =>
+  new AgentOutputParseError({ runner, detail: toAgentDiagnosticDetail(detail) })
+const deniedErr = (runner: RunnerId, notice: string) =>
+  new AgentToolDeniedError({ runner, notice: toDenialNotice(notice) })
+const claudeOk = (body: Record<string, unknown>) =>
+  unwrapSuccess(parseClaudeCodeOutput(0, JSON.stringify(body), ""))
+const agyOk = (body: Record<string, unknown>) =>
+  unwrapSuccess(parseAntigravityOutput(0, JSON.stringify(body), ""))
+const mkClaudeProfile = (
+  extra: Partial<Omit<ClaudeCodeRunnerProfile, "runner" | "binary">> = {},
+): ClaudeCodeRunnerProfile =>
+  ClaudeCodeRunnerProfile.make({
+    runner: "claude-code",
+    binary: "claude",
+    permissionRules: [],
+    disallowedTools: [],
+    maxConcurrency: MaxConcurrency.make(1),
+    timeoutMillis: TimeoutMillis.make(1000),
+    ...extra,
+  })
+const mkAntigravityProfile = (
+  extra: Partial<Omit<AntigravityRunnerProfile, "runner" | "binary">> = {},
+): AntigravityRunnerProfile =>
+  AntigravityRunnerProfile.make({
+    runner: "antigravity",
+    binary: "agy",
+    permissionRules: [],
+    maxConcurrency: MaxConcurrency.make(1),
+    timeoutMillis: TimeoutMillis.make(1000),
+    ...extra,
+  })
+
+describe("WF-5 pure runner profiles, env/argv builders, outcome parsers, and brief builder", () => {
+  const repoRoot = AbsoluteRepoRoot.make("/workspace/repo")
+  const pkgUnit = Schema.decodeSync(CompiledWorkUnit)({
+    _tag: "PackageUnit",
+    unitId: WorkUnitId.make("pkg-infra"),
+    projectName: NxProjectName.make("harness-infra"),
+    waveIndex: WaveIndex.make(0),
+    dependsOn: [],
+    ownedRelPaths: [OwnedRelPath.make("libs/harness/infra/src/workflow/runner-profiles.ts")],
+    stubKeys: [StubSymbolKey.make("buildUnitBrief")],
+    earsKeys: [EarsRequirementKey.make("harness:SPEC-0036/REQ-4.1")],
+    packageVerifyCommand: PackageVerifyCommand.make("nx run harness-infra:verify"),
+  })
+  const sliceUnit = Schema.decodeSync(CompiledWorkUnit)({
+    _tag: "SliceUnit",
+    unitId: WorkUnitId.make("slice-wf5"),
+    branch: SliceBranchName.make("slice/wf5-runners"),
+    waveIndex: WaveIndex.make(1),
+    dependsOn: [WorkUnitId.make("pkg-infra")],
+    ownedRelPaths: [],
+    earsKeys: [],
+  })
+
+  describe("runner-profiles", () => {
+    it("exposes validated TCB profiles and resolves getRunnerProfile exhaustively", () => {
+      expect(CLAUDE_CODE_RUNNER_PROFILE).toMatchObject({
+        runner: "claude-code",
+        binary: "claude",
+        maxConcurrency: 4,
+        timeoutMillis: WORKFLOW_TIMEOUT_BUDGETS.agentRunClaudeMs,
+        maxTurns: 40,
+        model: "claude-sonnet-4-6",
+      })
+      expect(CLAUDE_CODE_RUNNER_PROFILE.disallowedTools).toEqual([
+        "Bash(pnpm harness done*)",
+        "Bash(pnpm harness workflow start*)",
+        "Bash(pnpm harness workflow resume*)",
+        "Bash(pnpm harness workflow ship*)",
+        "Bash(pnpm harness workflow abort*)",
+        "Bash(pnpm harness workflow doctor*)",
+        "Bash(alchemy deploy*)",
+        "Bash(alchemy destroy*)",
+        "Bash(rm -rf*)",
+      ])
+      expect(ANTIGRAVITY_RUNNER_PROFILE).toMatchObject({
+        runner: "antigravity",
+        binary: "agy",
+        permissionRules: [PermissionRule.make("accept-edits")],
+        maxConcurrency: 2,
+        timeoutMillis: WORKFLOW_TIMEOUT_BUDGETS.agentRunAntigravityMs,
+        model: "gemini-4-hydrogen-high",
+        antigravityMode: "accept-edits",
+      })
+      expect(getRunnerProfile("claude-code")).toBe(CLAUDE_CODE_RUNNER_PROFILE)
+      expect(getRunnerProfile("antigravity")).toBe(ANTIGRAVITY_RUNNER_PROFILE)
+      expect(RUNNER_PROFILES).toEqual({
+        "claude-code": CLAUDE_CODE_RUNNER_PROFILE,
+        antigravity: ANTIGRAVITY_RUNNER_PROFILE,
+      })
+    })
+
+    it("builds claude-code and antigravity argv without --dangerously-skip-permissions", () => {
+      const fullArgv = buildClaudeCodeArgv({
+        profile: CLAUDE_CODE_RUNNER_PROFILE,
+        promptText: BriefPrompt.make("Implement unit"),
+        mcpConfigPath: RunnerConfigFilePath.make("/tmp/mcp.json"),
+        hooksSettingsPath: RunnerConfigFilePath.make("/tmp/hooks.json"),
+      })
+      expect(fullArgv).toEqual([
+        "-p",
+        "Implement unit",
+        "--output-format",
+        "json",
+        "--strict-mcp-config",
+        "--mcp-config",
+        "/tmp/mcp.json",
+        "--setting-sources",
+        "",
+        "--settings",
+        "/tmp/hooks.json",
+        "--allowedTools",
+        "Read,Edit,Write,MultiEdit,Glob,Grep,Bash",
+        "--disallowedTools",
+        CLAUDE_CODE_RUNNER_PROFILE.disallowedTools.join(","),
+        "--permission-mode",
+        "dontAsk",
+        "--max-turns",
+        "40",
+        "--model",
+        "claude-sonnet-4-6",
+      ])
+      expect(fullArgv).not.toContain("--dangerously-skip-permissions")
+
+      const minimalArgv = buildClaudeCodeArgv({
+        profile: mkClaudeProfile(),
+        promptText: BriefPrompt.make("Minimal"),
+        mcpConfigPath: RunnerConfigFilePath.make("/tmp/m.json"),
+        hooksSettingsPath: RunnerConfigFilePath.make("/tmp/h.json"),
+      })
+      expect(minimalArgv).toEqual([
+        "-p",
+        "Minimal",
+        "--output-format",
+        "json",
+        "--strict-mcp-config",
+        "--mcp-config",
+        "/tmp/m.json",
+        "--setting-sources",
+        "",
+        "--settings",
+        "/tmp/h.json",
+        "--permission-mode",
+        "dontAsk",
+      ])
+      expect(minimalArgv).not.toContain("--dangerously-skip-permissions")
+
+      // Compile-time check: BuildClaudeCodeArgvInput rejects AntigravityRunnerProfile
+      const rejectMismatchedProfile = () =>
+        buildClaudeCodeArgv({
+          // @ts-expect-error AntigravityRunnerProfile is incompatible with BuildClaudeCodeArgvInput.profile
+          profile: ANTIGRAVITY_RUNNER_PROFILE,
+          promptText: BriefPrompt.make("Mismatch"),
+          mcpConfigPath: RunnerConfigFilePath.make("/tmp/m.json"),
+          hooksSettingsPath: RunnerConfigFilePath.make("/tmp/h.json"),
+        })
+      expect(typeof rejectMismatchedProfile).toBe("function")
+
+      const agyFull = buildAntigravityArgv({
+        profile: ANTIGRAVITY_RUNNER_PROFILE,
+        promptText: BriefPrompt.make("Solve unit"),
+      })
+      expect(agyFull).toEqual([
+        "-p",
+        "Solve unit",
+        "--output-format",
+        "json",
+        "--print-timeout",
+        "605s",
+        "--model",
+        "gemini-4-hydrogen-high",
+        "--mode",
+        "accept-edits",
+      ])
+      expect(agyFull).not.toContain("--dangerously-skip-permissions")
+
+      expect(
+        buildAntigravityArgv({
+          profile: mkAntigravityProfile({ timeoutMillis: TimeoutMillis.make(500) }),
+          promptText: BriefPrompt.make("Fast"),
+          killGraceMs: 0,
+        }),
+      ).toEqual(["-p", "Fast", "--output-format", "json", "--print-timeout", "1s"])
+      expect(
+        buildAntigravityArgv({
+          profile: mkAntigravityProfile({ timeoutMillis: TimeoutMillis.make(1500) }),
+          promptText: BriefPrompt.make("TwoSec"),
+          killGraceMs: 0,
+        }),
+      ).toEqual(["-p", "TwoSec", "--output-format", "json", "--print-timeout", "2s"])
+      expect(
+        buildAntigravityArgv({
+          profile: mkAntigravityProfile({ timeoutMillis: TimeoutMillis.make(1500) }),
+          promptText: BriefPrompt.make("FourSec"),
+          killGraceMs: 2000,
+        }),
+      ).toEqual(["-p", "FourSec", "--output-format", "json", "--print-timeout", "4s"])
+    })
+
+    it("builds Claude PreToolUse-only hooks settings with POSIX single-quoting and scoped MCP config JSON", () => {
+      const hooksRaw = buildClaudeHooksSettingsJson("/repo/worktree")
+      const hooksParsed = Schema.decodeSync(HooksJsonSchema)(hooksRaw)
+      expect(Object.keys(hooksParsed.hooks)).toEqual(["PreToolUse"])
+      const preToolUse = hooksParsed.hooks["PreToolUse"]!
+      expect(preToolUse.map((entry) => entry.matcher)).toEqual([
+        "Bash",
+        "Edit|Write|MultiEdit",
+        "Read|Grep|Glob|LS|Find",
+      ])
+      for (const entry of preToolUse) {
+        expect(entry.hooks).toEqual([
+          {
+            type: "command",
+            command:
+              "node --import '/repo/worktree/tools/node-ts-resolver.mjs' '/repo/worktree/apps/harness-cli/src/hook-entry.ts' guard || exit 2",
+            timeout: 15,
+          },
+        ])
+      }
+
+      const specialHooks = Schema.decodeSync(HooksJsonSchema)(
+        buildClaudeHooksSettingsJson("/tmp/roan's repo/work tree"),
+      )
+      expect(specialHooks.hooks["PreToolUse"]![0]!.hooks[0]!.command).toBe(
+        "node --import '/tmp/roan'\\''s repo/work tree/tools/node-ts-resolver.mjs' '/tmp/roan'\\''s repo/work tree/apps/harness-cli/src/hook-entry.ts' guard || exit 2",
+      )
+
+      const installedRoot = resolveHarnessInstallationRoot()
+      const defaultHooks = Schema.decodeSync(HooksJsonSchema)(buildClaudeHooksSettingsJson())
+      expect(defaultHooks.hooks["PreToolUse"]![0]!.hooks[0]!.command).toBe(
+        `node --import '${installedRoot}/tools/node-ts-resolver.mjs' '${installedRoot}/apps/harness-cli/src/hook-entry.ts' guard || exit 2`,
+      )
+
+      const emptyMcp = Schema.decodeSync(McpJsonSchema)(buildClaudeMcpConfigJson())
+      expect(emptyMcp).toEqual({ mcpServers: {} })
+
+      const blankMcp = Schema.decodeSync(McpJsonSchema)(buildClaudeMcpConfigJson("   "))
+      expect(blankMcp).toEqual({ mcpServers: {} })
+
+      const withHarnessMcp = Schema.decodeSync(McpJsonSchema)(
+        buildClaudeMcpConfigJson("/repo/apps/harness-mcp/src/server.ts", "/custom/harness-root"),
+      )
+      expect(withHarnessMcp).toEqual({
+        mcpServers: {
+          "harness-mcp": {
+            command: "node",
+            args: [
+              "--import",
+              "/custom/harness-root/tools/node-ts-resolver.mjs",
+              "/repo/apps/harness-mcp/src/server.ts",
+            ],
+          },
+        },
+      })
+
+      const defaultRootMcp = Schema.decodeSync(McpJsonSchema)(
+        buildClaudeMcpConfigJson("/repo/apps/harness-mcp/src/server.ts"),
+      )
+      expect(defaultRootMcp.mcpServers["harness-mcp"]!.args[1]).toBe(
+        `${installedRoot}/tools/node-ts-resolver.mjs`,
+      )
+    })
+
+    it("builds allow-listed runner env forwarding base, proxy/CA, and Claude auth/provider keys while stripping secrets", () => {
+      const baseKeys = [
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TERM",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "TMPDIR",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "NODE_OPTIONS",
+        "PNPM_HOME",
+        "COREPACK_HOME",
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        "NO_COLOR",
+        "CI",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "NODE_EXTRA_CA_CERTS",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+      ]
+      const claudeKeys = [
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+        "AWS_PROFILE",
+        "AWS_CONFIG_FILE",
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "AWS_ROLE_ARN",
+        "CLAUDE_CODE_USE_VERTEX",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "CLOUD_ML_REGION",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_PROJECT",
+      ]
+      const baseEnvValues = Object.fromEntries(baseKeys.map((k) => [k, `val-${k}`]))
+      const claudeEnvValues = Object.fromEntries(claudeKeys.map((k) => [k, `val-${k}`]))
+      const parentEnv: Readonly<Record<string, string | undefined>> = {
+        ...baseEnvValues,
+        ...claudeEnvValues,
+        ANTIGRAVITY_SESSION_ID: "nested-session",
+        AGY_TOKEN: "agy-secret",
+        CLOUDFLARE_API_TOKEN: "cf-secret",
+        CLOUDFLARE_ACCOUNT_ID: "cf-acct",
+        OMNIGRAPH_TOKEN: "og-secret",
+        HARNESS_OMNIGRAPH_AUTH_TOKEN: "og-auth",
+        HARNESS_WORKTREE_ID: "wt-1",
+        HARNESS_STATE_DIR: "/tmp/state",
+        HARNESS_UNIT_WORKER: "0",
+      }
+
+      const claudeEnv = buildRunnerEnv("claude-code", parentEnv)
+      expect(claudeEnv).toEqual({
+        ...baseEnvValues,
+        ...claudeEnvValues,
+        HARNESS_UNIT_WORKER: "1",
+      })
+      for (const secretKey of [
+        "ANTIGRAVITY_SESSION_ID",
+        "AGY_TOKEN",
+        "CLOUDFLARE_API_TOKEN",
+        "CLOUDFLARE_ACCOUNT_ID",
+        "OMNIGRAPH_TOKEN",
+        "HARNESS_OMNIGRAPH_AUTH_TOKEN",
+        "HARNESS_WORKTREE_ID",
+        "HARNESS_STATE_DIR",
+      ]) {
+        expect(claudeEnv[secretKey]).toBeUndefined()
+      }
+
+      const agyEnv = buildRunnerEnv("antigravity", parentEnv)
+      expect(agyEnv).toEqual({ ...baseEnvValues, HARNESS_UNIT_WORKER: "1" })
+      expect("ANTHROPIC_API_KEY" in agyEnv).toBe(false)
+      expect("CLAUDE_CODE_OAUTH_TOKEN" in agyEnv).toBe(false)
+      expect("ANTIGRAVITY_SESSION_ID" in agyEnv).toBe(false)
+      expect("AGY_TOKEN" in agyEnv).toBe(false)
+      expect("CLOUDFLARE_API_TOKEN" in agyEnv).toBe(false)
+      expect("OMNIGRAPH_TOKEN" in agyEnv).toBe(false)
+      expect("LOGNAME" in buildRunnerEnv("antigravity", { LOGNAME: undefined })).toBe(false)
+    })
+  })
+
+  describe("agent-runner-outcome", () => {
+    const unitId = WorkUnitId.make("unit-pure")
+    const attempt = AttemptNumber.make(2)
+
+    it("maps all 6 AgentRunnerError variants exhaustively via toOutcome and toUnitAgentDispatchResult", () => {
+      const authErr = new AgentAuthRequiredError({
+        runner: "claude-code",
+        detail: toAgentDiagnosticDetail("Run /login"),
+      })
+      expect(toOutcome(unitId, attempt, authErr)).toEqual({
+        _tag: "Escalated",
+        unitId,
+        escalation: { _tag: "AuthRequired", runner: "claude-code" },
+      })
+      expect(toUnitAgentDispatchResult(authErr)).toEqual({
+        _tag: "AuthRequired",
+        runner: "claude-code",
+      })
+
+      const nonAuthErrors = [
+        new AgentTimeoutError({ runner: "claude-code", afterMillis: TimeoutMillis.make(5000) }),
+        deniedErr("antigravity", "Bash denied"),
+        exitErr("claude-code", 2, "boom"),
+        parseErr("antigravity", "bad json"),
+        new AgentNoChangeError({ runner: "claude-code" }),
+      ] as const
+
+      for (const err of nonAuthErrors) {
+        const reason = AgentFailureReason.make(`${err._tag}: ${err.message}`)
+        expect(toOutcome(unitId, attempt, err)).toEqual({
+          _tag: "Rejected",
+          unitId,
+          attempt,
+          rejection: { _tag: "AgentFailed", reason },
+        })
+        expect(toUnitAgentDispatchResult(err)).toEqual({ _tag: "Failed", reason })
+      }
+
+      const spawnFailed = exitErr("antigravity", 1, "ENOENT", "spawn-failed")
+      expect(toUnitAgentDispatchResult(spawnFailed)).toEqual({
+        _tag: "FatalFailed",
+        reason: AgentFailureReason.make(`${spawnFailed._tag}: ${spawnFailed.message}`),
+      })
+      for (const nonFatalKind of ["exit", "signal"] as const) {
+        const nonFatal = exitErr("antigravity", 1, "terminated", nonFatalKind)
+        expect(toUnitAgentDispatchResult(nonFatal)).toEqual({
+          _tag: "Failed",
+          reason: AgentFailureReason.make(`${nonFatal._tag}: ${nonFatal.message}`),
+        })
+      }
+    })
+
+    it("parses Claude Code JSON envelopes, usage telemetry, denials, auth prompts, and error exits", () => {
+      const okStdout = JSON.stringify({
+        type: "result",
+        subtype: "success",
+        result: "Done!",
+        is_error: false,
+        num_turns: 4,
+        total_cost_usd: 0.0125,
+        duration_ms: 3420,
+        session_id: "sess-123",
+        permission_denials: [],
+        usage: {
+          input_tokens: 100,
+          output_tokens: 50,
+          cache_read_input_tokens: 200,
+          cache_creation_input_tokens: 25,
+        },
+      })
+      expect(unwrapSuccess(parseClaudeCodeOutput(0, okStdout, ""))).toEqual({
+        runner: "claude-code",
+        exit: AgentSuccessExitCode.make(0),
+        resultText: "Done!",
+        usage: {
+          _tag: "Reported",
+          inputTokens: AgentTokenCount.make(100),
+          outputTokens: AgentTokenCount.make(50),
+          totalTokens: AgentTokenCount.make(375),
+          numTurns: AgentTurnCount.make(4),
+          totalCostUsd: AgentCostUsd.make(0.0125),
+          durationMillis: AgentDurationMillis.make(3420),
+          sessionId: AgentSessionId.make("sess-123"),
+        },
+      })
+
+      expect(
+        unwrapSuccess(
+          parseClaudeCodeOutput(
+            0,
+            JSON.stringify({ type: "result", subtype: "success", result: "ok" }),
+            "",
+          ),
+        ),
+      ).toEqual({
+        runner: "claude-code",
+        exit: AgentSuccessExitCode.make(0),
+        resultText: "ok",
+        usage: { _tag: "Unavailable" },
+      })
+
+      // Clean exit-0 with auth prose in stderr must still succeed
+      for (const noisyStderr of [
+        "unauthorized",
+        "/login",
+        "Authentication required",
+        "Please run /login",
+      ]) {
+        expect(
+          unwrapSuccess(
+            parseClaudeCodeOutput(
+              0,
+              JSON.stringify({
+                type: "result",
+                subtype: "success",
+                is_error: false,
+                result: "done",
+              }),
+              noisyStderr,
+            ),
+          ),
+        ).toEqual({
+          runner: "claude-code",
+          exit: AgentSuccessExitCode.make(0),
+          resultText: "done",
+          usage: { _tag: "Unavailable" },
+        })
+      }
+
+      const overlongResult = "x".repeat(262_150)
+      const overlongSession = "s".repeat(270)
+      const bounded = unwrapSuccess(
+        parseClaudeCodeOutput(
+          0,
+          JSON.stringify({ result: overlongResult, session_id: overlongSession }),
+          "",
+        ),
+      )
+      expect(bounded.resultText.length).toBe(262_144)
+      match(bounded.usage)
+        .with({ _tag: "Reported" }, (u) => {
+          expect(u.sessionId?.length).toBe(256)
+        })
+        .with({ _tag: "Unavailable" }, () => expect.unreachable("Expected Reported usage"))
+        .exhaustive()
+
+      // Individual telemetry fields report _tag: "Reported"
+      match(claudeOk({ result: "ok", usage: { cache_read_input_tokens: 15 } }).usage)
+        .with({ _tag: "Reported" }, (u) => expect(u.totalTokens).toBe(15))
+        .with({ _tag: "Unavailable" }, () => expect.unreachable("Expected Reported usage"))
+        .exhaustive()
+      match(claudeOk({ result: "ok", usage: { cache_creation_input_tokens: 20 } }).usage)
+        .with({ _tag: "Reported" }, (u) => expect(u.totalTokens).toBe(20))
+        .with({ _tag: "Unavailable" }, () => expect.unreachable("Expected Reported usage"))
+        .exhaustive()
+      for (const env of [
+        { result: "ok", usage: { input_tokens: 10 } },
+        { result: "ok", usage: { output_tokens: 12 } },
+        { result: "ok", usage: { cache_read_input_tokens: 15 } },
+        { result: "ok", usage: { cache_creation_input_tokens: 20 } },
+        { result: "ok", num_turns: 2 },
+        { result: "ok", total_cost_usd: 0.5 },
+        { result: "ok", duration_ms: 100 },
+        { result: "ok", session_id: "only-sess" },
+      ]) {
+        expect(claudeOk(env).usage._tag).toBe("Reported")
+      }
+      expect(claudeOk({ result: "ok", session_id: "   " }).usage).toEqual({ _tag: "Unavailable" })
+    })
+
+    it("parses Claude Code denials, auth prompts, malformed envelopes, telemetry omissions, and error exits", () => {
+      const claudeDenied = unwrapFailure(
+        parseClaudeCodeOutput(
+          0,
+          JSON.stringify({
+            permission_denials: [
+              "Bash(rm -rf)",
+              { tool_name: "Write", message: "outside worktree" },
+              { tool_name: "Edit" },
+              { message: "blocked by hook" },
+              { code: 42 },
+              null,
+            ],
+          }),
+          "",
+        ),
+      )
+      match(claudeDenied)
+        .with({ _tag: "AgentToolDeniedError" }, (e) => {
+          for (const snippet of [
+            "Bash(rm -rf)",
+            "Write: outside worktree",
+            "Edit",
+            "blocked by hook",
+            '{"code":42}',
+            "null",
+          ]) {
+            expect(e.notice).toContain(snippet)
+          }
+        })
+        .with(
+          { _tag: "AgentTimeoutError" },
+          { _tag: "AgentAuthRequiredError" },
+          { _tag: "AgentExitError" },
+          { _tag: "AgentOutputParseError" },
+          { _tag: "AgentNoChangeError" },
+          (e) => expect.unreachable(`Expected AgentToolDeniedError, got ${e._tag}`),
+        )
+        .exhaustive()
+
+      // Clean success with auth prose in result must NOT trigger AgentAuthRequiredError
+      expect(
+        claudeOk({ is_error: false, result: "401 Unauthorized /login invalid api key" }),
+      ).toEqual({
+        runner: "claude-code",
+        exit: AgentSuccessExitCode.make(0),
+        resultText: "401 Unauthorized /login invalid api key",
+        usage: { _tag: "Unavailable" },
+      })
+
+      // Invalid negative or non-integer telemetry is omitted cleanly instead of clamped to 0
+      expect(
+        claudeOk({
+          result: "ok",
+          num_turns: 0,
+          total_cost_usd: 0,
+          duration_ms: 0,
+          usage: { input_tokens: 0, output_tokens: -5 },
+        }).usage,
+      ).toEqual({
+        _tag: "Reported",
+        inputTokens: AgentTokenCount.make(0),
+        totalTokens: AgentTokenCount.make(0),
+        numTurns: AgentTurnCount.make(0),
+        totalCostUsd: AgentCostUsd.make(0),
+        durationMillis: AgentDurationMillis.make(0),
+      })
+      expect(
+        claudeOk({
+          result: "ok",
+          num_turns: -1,
+          total_cost_usd: -0.2,
+          duration_ms: -10,
+          usage: { output_tokens: -5 },
+        }).usage,
+      ).toEqual({ _tag: "Unavailable" })
+      expect(
+        claudeOk({
+          result: "ok",
+          num_turns: 2.9,
+          duration_ms: 12.6,
+          usage: { input_tokens: 10.7 },
+        }).usage,
+      ).toEqual({
+        _tag: "Reported",
+        durationMillis: AgentDurationMillis.make(13),
+      })
+
+      const j = JSON.stringify
+      const claudeFailures = [
+        [0, "{}", "", parseErr("claude-code", "Missing result field in claude JSON output")],
+        [
+          0,
+          j({ type: "assistant", result: "ok" }),
+          "",
+          parseErr("claude-code", "Unexpected Claude envelope type 'assistant'"),
+        ],
+        [
+          0,
+          j({ subtype: "error_max_turns", is_error: false, num_turns: 40 }),
+          "",
+          exitErr("claude-code", 1, "Claude subtype: error_max_turns"),
+        ],
+        [1, j({ result: "ok" }), "Please run /login", authErr("claude-code", "Please run /login")],
+        [1, j({ result: "ok" }), "updated /login route", exitErr("claude-code", 1, "ok")],
+        [
+          1,
+          j({ is_error: true, result: "Invalid API key · Please run /login" }),
+          "",
+          authErr("claude-code", "Invalid API key · Please run /login"),
+        ],
+        [
+          0,
+          j({ is_error: true, result: "401 Unauthorized /login invalid api key" }),
+          "",
+          authErr("claude-code", "401 Unauthorized /login invalid api key"),
+        ],
+        [1, "", "Authentication required", authErr("claude-code", "Authentication required")],
+        [1, "Please log in", "", authErr("claude-code", "Please log in")],
+        [0, j({ is_error: true, result: "failed" }), "", exitErr("claude-code", 1, "failed")],
+        [300, j({ is_error: false }), "", exitErr("claude-code", 255)],
+        [-2, "bad json", "", exitErr("claude-code", 1, "bad json")],
+        [1, "", "", exitErr("claude-code", 1)],
+        [0, "", "", parseErr("claude-code", "Empty JSON output from claude")],
+        [0, "{not-json", "parse stderr", parseErr("claude-code", "parse stderr")],
+      ] as const
+      for (const [code, stdout, stderr, expected] of claudeFailures) {
+        expect(unwrapFailure(parseClaudeCodeOutput(code, stdout, stderr))).toEqual(expected)
+      }
+    })
+
+    it("parses Antigravity JSON envelopes, stderr soft denials, auth errors, non-SUCCESS statuses, and exit 3 startup retries", () => {
+      const okAgy = JSON.stringify({
+        conversation_id: "conv-abc",
+        status: "SUCCESS",
+        response: "WF0_PLAN_JSON_OK\n",
+        duration_seconds: 15.16,
+        num_turns: 2,
+        usage: { input_tokens: 32225, output_tokens: 42, thinking_tokens: 30, total_tokens: 32267 },
+      })
+      expect(unwrapSuccess(parseAntigravityOutput(0, okAgy, ""))).toEqual({
+        runner: "antigravity",
+        exit: AgentSuccessExitCode.make(0),
+        resultText: "WF0_PLAN_JSON_OK\n",
+        usage: {
+          _tag: "Reported",
+          inputTokens: AgentTokenCount.make(32225),
+          outputTokens: AgentTokenCount.make(42),
+          thinkingTokens: AgentTokenCount.make(30),
+          totalTokens: AgentTokenCount.make(32267),
+          numTurns: AgentTurnCount.make(2),
+          durationMillis: AgentDurationMillis.make(15160),
+          sessionId: AgentSessionId.make("conv-abc"),
+        },
+      })
+      expect(agyOk({ status: "SUCCESS", response: "ok" })).toEqual({
+        runner: "antigravity",
+        exit: AgentSuccessExitCode.make(0),
+        resultText: "ok",
+        usage: { _tag: "Unavailable" },
+      })
+      // Clean exit-0 status: "SUCCESS" with auth or denial prose in stderr must succeed cleanly
+      for (const noisyStderr of [
+        "unauthorized",
+        "/login",
+        "Authentication required",
+        "Permission denied by policy",
+        "Warning: tool call denied by policy",
+      ]) {
+        expect(
+          unwrapSuccess(
+            parseAntigravityOutput(
+              0,
+              JSON.stringify({ status: "SUCCESS", response: "done" }),
+              noisyStderr,
+            ),
+          ),
+        ).toEqual({
+          runner: "antigravity",
+          exit: AgentSuccessExitCode.make(0),
+          resultText: "done",
+          usage: { _tag: "Unavailable" },
+        })
+      }
+      expect(
+        agyOk({ status: "SUCCESS", response: "401 Unauthorized /login invalid api key" }),
+      ).toEqual({
+        runner: "antigravity",
+        exit: AgentSuccessExitCode.make(0),
+        resultText: "401 Unauthorized /login invalid api key",
+        usage: { _tag: "Unavailable" },
+      })
+      expect(agyOk({ status: "SUCCESS", response: "ok", duration_seconds: 1e307 }).usage).toEqual({
+        _tag: "Unavailable",
+      })
+      expect(
+        agyOk({
+          status: "SUCCESS",
+          response: "ok",
+          duration_seconds: 0,
+          num_turns: 0,
+          usage: { input_tokens: 0, thinking_tokens: -3 },
+        }).usage,
+      ).toEqual({
+        _tag: "Reported",
+        inputTokens: AgentTokenCount.make(0),
+        numTurns: AgentTurnCount.make(0),
+        durationMillis: AgentDurationMillis.make(0),
+      })
+      expect(
+        agyOk({
+          status: "SUCCESS",
+          response: "ok",
+          duration_seconds: 1.5004,
+          num_turns: 3.8,
+          usage: { input_tokens: 7.9 },
+        }).usage,
+      ).toEqual({
+        _tag: "Reported",
+        durationMillis: AgentDurationMillis.make(1500),
+      })
+      for (const env of [
+        { status: "SUCCESS", response: "ok", usage: { thinking_tokens: 5 } },
+        { status: "SUCCESS", response: "ok", usage: { total_tokens: 9 } },
+        { status: "SUCCESS", response: "ok", duration_seconds: 1.5 },
+        { status: "SUCCESS", response: "ok", conversation_id: "c-1" },
+      ]) {
+        expect(agyOk(env).usage._tag).toBe("Reported")
+      }
+
+      const j = JSON.stringify
+      const agyFailures = [
+        [0, "{}", "", parseErr("antigravity", "Missing status field in agy JSON output")],
+        [
+          0,
+          j({ response: "ok" }),
+          "",
+          parseErr("antigravity", "Missing status field in agy JSON output"),
+        ],
+        [
+          0,
+          j({ status: "SUCCESS" }),
+          "",
+          parseErr("antigravity", "Missing response field in agy JSON output"),
+        ],
+        [
+          1,
+          okAgy,
+          "Warning: tool call denied by policy",
+          deniedErr("antigravity", "Warning: tool call denied by policy"),
+        ],
+        [
+          0,
+          j({ status: "FAILED", response: "blocked" }),
+          "Permission denied by policy",
+          deniedErr("antigravity", "Permission denied by policy"),
+        ],
+        [
+          0,
+          "",
+          "Permission denied by policy",
+          deniedErr("antigravity", "Permission denied by policy"),
+        ],
+        [1, "", "Authentication expired", authErr("antigravity", "Authentication expired")],
+        [
+          0,
+          j({ status: "FAILED", response: "Not logged in" }),
+          "",
+          authErr("antigravity", "Not logged in"),
+        ],
+        [
+          1,
+          j({ status: "SUCCESS", response: "401 Unauthorized /login invalid api key" }),
+          "",
+          authErr("antigravity", "401 Unauthorized /login invalid api key"),
+        ],
+        [
+          1,
+          j({ status: "ERROR", response: "resp err" }),
+          "stderr err",
+          exitErr("antigravity", 1, "resp err"),
+        ],
+        [
+          1,
+          j({ status: "ERROR", response: "" }),
+          "stderr err",
+          exitErr("antigravity", 1, "stderr err"),
+        ],
+        [0, j({ status: "ERROR" }), "", exitErr("antigravity", 1, "Antigravity status: ERROR")],
+        [2, j({ status: "SUCCESS" }), "", exitErr("antigravity", 2, "Antigravity status: SUCCESS")],
+        [2, "{}", "", exitErr("antigravity", 2, "{}")],
+        [0, "", "", parseErr("antigravity", "Empty JSON output from agy")],
+        [4, "not-json", "", exitErr("antigravity", 4, "not-json")],
+      ] as const
+      for (const [code, stdout, stderr, expected] of agyFailures) {
+        expect(unwrapFailure(parseAntigravityOutput(code, stdout, stderr))).toEqual(expected)
+      }
+      match(unwrapFailure(parseAntigravityOutput(0, "invalid", "")))
+        .with({ _tag: "AgentOutputParseError" }, (e) => {
+          expect(e.runner).toBe("antigravity")
+          expect(e.detail?.length ?? 0).toBeGreaterThan(0)
+        })
+        .with(
+          { _tag: "AgentTimeoutError" },
+          { _tag: "AgentToolDeniedError" },
+          { _tag: "AgentAuthRequiredError" },
+          { _tag: "AgentExitError" },
+          { _tag: "AgentNoChangeError" },
+          (e) => expect.unreachable(`Expected AgentOutputParseError, got ${e._tag}`),
+        )
+        .exhaustive()
+
+      expect(isRetryableAntigravityStartupFailure(3, "", "schema error")).toBe(true)
+      expect(isRetryableAntigravityStartupFailure(3, "  \n\t", "schema error")).toBe(true)
+      expect(isRetryableAntigravityStartupFailure(3, "{}", "schema error")).toBe(false)
+      expect(isRetryableAntigravityStartupFailure(1, "", "other error")).toBe(false)
+      expect(isRetryableAntigravityStartupFailure(3, "", "Please run /login")).toBe(false)
+      expect(isRetryableAntigravityStartupFailure(3, "", "tool call denied by policy")).toBe(false)
+    })
+  })
+
+  describe("unit-brief-builder", () => {
+    const makeBundle = (
+      holeQualname: string,
+      estimatedTokens: number,
+      withCandidate: boolean,
+    ): TypedHoleContextBundle => ({
+      holeQualname,
+      spanName: "AgentRunner.run",
+      successTypeSignature: "AgentRunResult",
+      allowedErrorConstructors: ["AgentExitError"],
+      requiredServiceCapabilities: ["AgentRunnerPort"],
+      inhabitingCandidates: withCandidate
+        ? [
+            {
+              symbolKey: NodeKey.make("sym:runner"),
+              inhabitsChannel: "A",
+              signatureSummary: "AgentRunResult",
+              pprScore: PageRankScoreMillis.make(850),
+            },
+          ]
+        : [],
+      estimatedTokens,
+    })
+
+    it("builds deterministic PackageUnit briefs with bounded <= 1500-token holeBundles and mcpConfigPath", () => {
+      const mcpConfigPath = RunnerConfigFilePath.make("/tmp/scoped-mcp.json")
+      const brief = buildUnitBrief({
+        unit: pkgUnit,
+        attempt: AttemptNumber.make(1),
+        cwd: repoRoot,
+        mcpConfigPath,
+        holeBundles: [
+          makeBundle("holeA", 1000, true),
+          makeBundle("holeB", 500, false),
+          makeBundle("holeC", 1, false),
+        ],
+      })
+
+      expect(brief.unitId).toBe(pkgUnit.unitId)
+      expect(brief.attempt).toBe(1)
+      expect(brief.ownedRelPaths).toEqual(pkgUnit.ownedRelPaths)
+      expect(brief.packageVerifyCommand).toBe("nx run harness-infra:verify")
+      expect(brief.mcpConfigPath).toBe(mcpConfigPath)
+      expect(brief.promptText).toContain(`REPO_ROOT=${repoRoot}`)
+      expect(brief.promptText).toContain("UNIT_KIND=PackageUnit")
+      expect(brief.promptText).toContain("nx run harness-infra:verify")
+      expect(brief.promptText).toContain("Stub symbols: buildUnitBrief")
+      expect(brief.promptText).toContain("EARS requirements: harness:SPEC-0036/REQ-4.1")
+      expect(brief.promptText).toContain("HARNESS_UNIT_WORKER=1")
+      expect(brief.promptText).toContain("holeA")
+      expect(brief.promptText).toContain("<typed-hole-context>")
+      expect(brief.promptText).toContain("</typed-hole-context>")
+      expect(brief.promptText).toContain("sym:runner (A, ppr=850)")
+      expect(brief.promptText).toContain("holeB")
+      expect(brief.promptText).not.toContain("holeC")
+    })
+
+    it("builds SliceUnit briefs and formats all 4 priorRejection variants exhaustively", () => {
+      const rejections: ReadonlyArray<readonly [UnitRejection, string]> = [
+        [
+          UnitRejection.cases.WriteSetViolation.make({
+            offendingPaths: [OwnedRelPath.make("apps/harness-cli/src/index.ts")],
+          }),
+          "WriteSetViolation: Modified paths outside ownedRelPaths",
+        ],
+        [
+          UnitRejection.cases.PackageVerifyFailed.make({
+            exitCode: GateExitCode.make(1),
+            failureKind: "non-zero-exit",
+            detail: PackageVerifyFailureDetail.make("lint error"),
+          }),
+          "PackageVerifyFailed: Command failed (non-zero-exit, exit 1) (lint error)",
+        ],
+        [
+          UnitRejection.cases.PackageVerifyFailed.make({
+            exitCode: GateExitCode.make(2),
+            failureKind: "timed-out",
+          }),
+          "PackageVerifyFailed: Command failed (timed-out, exit 2).",
+        ],
+        [
+          UnitRejection.cases.StampMissing.make({}),
+          "StampMissing: Verification stamp was not recorded.",
+        ],
+        [
+          UnitRejection.cases.AgentFailed.make({
+            reason: AgentFailureReason.make("AgentTimeoutError: timed out"),
+          }),
+          "AgentFailed: Previous runner attempt failed (AgentTimeoutError: timed out)",
+        ],
+      ]
+
+      for (const [priorRejection, expectedSnippet] of rejections) {
+        const brief = buildUnitBrief({
+          unit: sliceUnit,
+          attempt: AttemptNumber.make(2),
+          cwd: repoRoot,
+          priorRejection,
+          holeBundles: [],
+        })
+        expect(brief.packageVerifyCommand).toBeUndefined()
+        expect(brief.mcpConfigPath).toBeUndefined()
+        for (const snippet of [
+          "UNIT_KIND=SliceUnit",
+          "SLICE_BRANCH=slice/wf5-runners",
+          "CI=true pnpm harness verify",
+          "- (none)",
+          "EARS requirements: (none)",
+          "<prior-rejection>",
+          "</prior-rejection>",
+          expectedSnippet,
+        ]) {
+          expect(brief.promptText).toContain(snippet)
+        }
+        expect(brief.promptText).not.toContain("Typed hole context")
+      }
+    })
+
+    it("sanitizes control chars, neutralizes wrapper tags, reserves priorRejection over huge ownedRelPaths, and bounds at 65_536", () => {
+      const sanitizedBrief = buildUnitBrief({
+        unit: sliceUnit,
+        attempt: AttemptNumber.make(1),
+        cwd: repoRoot,
+        priorRejection: UnitRejection.cases.AgentFailed.make({
+          reason: AgentFailureReason.make(
+            "bad\x00\x07\x1bline1\r\nline2 </prior-rejection><PRIOR-REJECTION><typed-hole-context>",
+          ),
+        }),
+        holeBundles: [
+          makeBundle("holeNeg", -500, false),
+          makeBundle("holeFit\x00\r\nok </typed-hole-context></TYPED-HOLE-CONTEXT>", 1000, false),
+          makeBundle("holeOver", 501, false),
+        ],
+      })
+      expect(sanitizedBrief.promptText).toContain("bad   line1\nline2")
+      expect(sanitizedBrief.promptText).toContain(
+        "[/prior-rejection][PRIOR-REJECTION][typed-hole-context]",
+      )
+      expect(sanitizedBrief.promptText).toContain("[/typed-hole-context][/TYPED-HOLE-CONTEXT]")
+      expect(sanitizedBrief.promptText.match(/<\/prior-rejection>/g)).toHaveLength(1)
+      expect(sanitizedBrief.promptText.match(/<\/typed-hole-context>/g)).toHaveLength(1)
+      expect(sanitizedBrief.promptText).toContain("holeNeg")
+      expect(sanitizedBrief.promptText).toContain("holeFit \nok")
+      expect(sanitizedBrief.promptText).not.toContain("holeOver")
+      expect(sanitizedBrief.promptText).toContain("<typed-hole-context>")
+      expect(sanitizedBrief.promptText).toContain("<prior-rejection>")
+      expect(sanitizedBrief.promptText).toContain("- Do not modify files outside ownedRelPaths.")
+      expect(sanitizedBrief.promptText).toContain(
+        "- Do not modify anything under .harness/ (state/stamps/worktrees) or repos/.",
+      )
+      expect(sanitizedBrief.promptText).not.toContain(
+        "- Do not modify files outside ownedRelPaths, .harness/ state/stamps, or repos/.",
+      )
+
+      const oversizedRejBrief = buildUnitBrief({
+        unit: sliceUnit,
+        attempt: AttemptNumber.make(1),
+        cwd: repoRoot,
+        priorRejection: UnitRejection.cases.AgentFailed.make({
+          reason: AgentFailureReason.make("R".repeat(70_000)),
+        }),
+      })
+      const oversizedHoleBrief = buildUnitBrief({
+        unit: sliceUnit,
+        attempt: AttemptNumber.make(1),
+        cwd: repoRoot,
+        holeBundles: [makeBundle("H".repeat(70_000), 100, false)],
+      })
+      for (const [brief, tag] of [
+        [oversizedRejBrief, "prior-rejection"],
+        [oversizedHoleBrief, "typed-hole-context"],
+      ] as const) {
+        expect(brief.promptText.length).toBe(65_536)
+        expect(brief.promptText).toContain(`<${tag}>`)
+        expect(brief.promptText).toContain(`... [truncated]\n</${tag}>`)
+        expect(brief.promptText).toContain("Workspace rules (HARNESS_UNIT_WORKER=1):")
+      }
+
+      const manyPaths = Array.from({ length: 200 }, (_, i) =>
+        OwnedRelPath.make(`libs/pkg-${i}/${"segment/".repeat(40)}file-${i}.ts`),
+      )
+      const hugeUnit = Schema.decodeSync(CompiledWorkUnit)({
+        _tag: "SliceUnit",
+        unitId: WorkUnitId.make("slice-huge"),
+        branch: SliceBranchName.make("slice/wf5-huge"),
+        waveIndex: WaveIndex.make(0),
+        dependsOn: [],
+        ownedRelPaths: manyPaths,
+        earsKeys: [],
+      })
+      const brief = buildUnitBrief({
+        unit: hugeUnit,
+        attempt: AttemptNumber.make(1),
+        cwd: repoRoot,
+        priorRejection: UnitRejection.cases.AgentFailed.make({
+          reason: AgentFailureReason.make("Must address failing typecheck in pkg-0"),
+        }),
+      })
+      expect(brief.promptText.length).toBeLessThanOrEqual(65_536)
+      expect(brief.promptText).toContain("Owned paths (edit ONLY within these paths):")
+      expect(brief.promptText).toContain("more owned paths truncated)")
+      expect(brief.promptText).toContain("<prior-rejection>")
+      expect(brief.promptText).toContain("Must address failing typecheck in pkg-0")
+      expect(brief.promptText).toContain("Workspace rules (HARNESS_UNIT_WORKER=1):")
+
+      const longCwd = AbsoluteRepoRoot.make(`/workspace/${"dir/".repeat(250)}repo`)
+      const extremeBrief = buildUnitBrief({
+        unit: sliceUnit,
+        attempt: AttemptNumber.make(1),
+        cwd: longCwd,
+        priorRejection: UnitRejection.cases.StampMissing.make({}),
+      })
+      expect(extremeBrief.promptText.length).toBeLessThanOrEqual(65_536)
+      expect(extremeBrief.promptText.startsWith("-")).toBe(false)
+      expect(Schema.decodeSync(BriefPrompt)(extremeBrief.promptText)).toBe(extremeBrief.promptText)
+    })
+  })
+
+  describe("property-based checks", () => {
+    const promptArb = Arbitrary.map(
+      Arbitrary.array(Arbitrary.schema(Schema.Literals(["a", "b", " ", "1", "-"])), {
+        minLength: 1,
+        maxLength: 30,
+      }),
+      (chars) => `prompt_${chars.join("")}x`,
+    )
+
+    it("satisfies argv, env isolation, and unit brief invariants across arbitrary inputs", () => {
+      const boolArb = Arbitrary.schema(Schema.Boolean)
+      const claudeArgvCheck = Effect.runSync(
+        Arbitrary.checkEffect(
+          Arbitrary.all({
+            promptText: promptArb,
+            includeRules: boolArb,
+            includeModel: boolArb,
+            turns: Arbitrary.schema(
+              Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 1, maximum: 50 }))),
+            ),
+          }),
+          ({ promptText, includeRules, includeModel, turns }) => {
+            const argv = buildClaudeCodeArgv({
+              profile: mkClaudeProfile({
+                permissionRules: includeRules ? [PermissionRule.make("Read")] : [],
+                maxTurns: AgentMaxTurns.make(turns),
+                ...(includeModel ? { model: ModelName.make("claude-sonnet-4-6") } : {}),
+              }),
+              promptText: BriefPrompt.make(promptText),
+              mcpConfigPath: RunnerConfigFilePath.make("/tmp/mcp.json"),
+              hooksSettingsPath: RunnerConfigFilePath.make("/tmp/hooks.json"),
+            })
+            return (
+              argv[0] === "-p" &&
+              argv[1] === promptText &&
+              argv.includes("--strict-mcp-config") &&
+              argv.includes("dontAsk") &&
+              !argv.includes("--dangerously-skip-permissions")
+            )
+          },
+          { runs: 40, seed: 27 },
+        ),
+      )
+      expect(claudeArgvCheck._tag).toBe("Passed")
+
+      const agyArgvCheck = Effect.runSync(
+        Arbitrary.checkEffect(
+          Arbitrary.all({
+            promptText: promptArb,
+            timeoutMs: Arbitrary.schema(
+              Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 1, maximum: 1_000_000 }))),
+            ),
+            includeMode: boolArb,
+          }),
+          ({ promptText, timeoutMs, includeMode }) => {
+            const argv = buildAntigravityArgv({
+              profile: mkAntigravityProfile({
+                timeoutMillis: TimeoutMillis.make(timeoutMs),
+                ...(includeMode ? { antigravityMode: "accept-edits" as const } : {}),
+              }),
+              promptText: BriefPrompt.make(promptText),
+            })
+            return (
+              argv[0] === "-p" &&
+              argv[1] === promptText &&
+              /^[1-9]\d*s$/.test(argv[5] ?? "") &&
+              !argv.includes("--dangerously-skip-permissions")
+            )
+          },
+          { runs: 40, seed: 27 },
+        ),
+      )
+      expect(agyArgvCheck._tag).toBe("Passed")
+
+      const envCheck = Effect.runSync(
+        Arbitrary.checkEffect(
+          Arbitrary.all({
+            runner: Arbitrary.schema(Schema.Literals(["claude-code", "antigravity"])),
+            hasPath: boolArb,
+            hasAnthropic: boolArb,
+            hasSecret: boolArb,
+          }),
+          ({ runner, hasPath, hasAnthropic, hasSecret }) => {
+            const env = buildRunnerEnv(runner, {
+              ...(hasPath ? { PATH: "/bin" } : {}),
+              ...(hasAnthropic ? { ANTHROPIC_API_KEY: "sk-1" } : {}),
+              ...(hasSecret
+                ? {
+                    CLOUDFLARE_API_TOKEN: "cf",
+                    ANTIGRAVITY_SESSION: "agy",
+                    AGY_KEY: "k",
+                    OMNIGRAPH_TOKEN: "og",
+                    HARNESS_WORKTREE_ID: "wt",
+                  }
+                : {}),
+            })
+            return (
+              env["HARNESS_UNIT_WORKER"] === "1" &&
+              env["CLOUDFLARE_API_TOKEN"] === undefined &&
+              env["ANTIGRAVITY_SESSION"] === undefined &&
+              env["AGY_KEY"] === undefined &&
+              env["OMNIGRAPH_TOKEN"] === undefined &&
+              env["HARNESS_WORKTREE_ID"] === undefined &&
+              (runner === "claude-code" || env["ANTHROPIC_API_KEY"] === undefined)
+            )
+          },
+          { runs: 40, seed: 27 },
+        ),
+      )
+      expect(envCheck._tag).toBe("Passed")
+
+      const briefCheck = Effect.runSync(
+        Arbitrary.checkEffect(
+          Arbitrary.all({
+            isPkg: boolArb,
+            attempt: Arbitrary.schema(
+              Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 1, maximum: 3 }))),
+            ),
+            hasRejection: boolArb,
+            tokens: Arbitrary.schema(
+              Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: -500, maximum: 2000 }))),
+            ),
+          }),
+          ({ isPkg, attempt, hasRejection, tokens }) => {
+            const brief = buildUnitBrief({
+              unit: isPkg ? pkgUnit : sliceUnit,
+              attempt: AttemptNumber.make(attempt),
+              cwd: repoRoot,
+              ...(hasRejection
+                ? { priorRejection: UnitRejection.cases.StampMissing.make({}) }
+                : {}),
+              holeBundles: [
+                {
+                  holeQualname: "h\x00\x1b",
+                  spanName: "span",
+                  successTypeSignature: "A",
+                  allowedErrorConstructors: [],
+                  requiredServiceCapabilities: [],
+                  inhabitingCandidates: [],
+                  estimatedTokens: tokens,
+                },
+              ],
+            })
+            const hasBadCtrl = Array.from(brief.promptText).some(
+              (ch) => ch.charCodeAt(0) <= 0x1f && ch.charCodeAt(0) !== 0x0a,
+            )
+            return (
+              brief.promptText.length <= 65_536 &&
+              !brief.promptText.startsWith("-") &&
+              brief.promptText.includes(`REPO_ROOT=${repoRoot}`) &&
+              brief.promptText.includes("Workspace rules (HARNESS_UNIT_WORKER=1):") &&
+              !hasBadCtrl
+            )
+          },
+          { runs: 40, seed: 27 },
+        ),
+      )
+      expect(briefCheck._tag).toBe("Passed")
+    })
+
+    it("kills remaining boundary/control-char/output_tokens mutants (output_tokens-only, 0x1f, bodyBudget=0, and exact 65_536 budget)", () => {
+      const outputOnlyUsage = parseClaudeCodeOutput(
+        0,
+        JSON.stringify({
+          result: "ok",
+          usage: { output_tokens: 7 },
+        }),
+        "",
+      )
+      match(outputOnlyUsage)
+        .with({ _tag: "Success" }, ({ success }) => {
+          expect(success.usage._tag).toBe("Reported")
+          match(success.usage)
+            .with({ _tag: "Reported" }, (u) => {
+              expect(u.outputTokens).toBe(AgentTokenCount.make(7))
+              expect(u.totalTokens).toBe(AgentTokenCount.make(7))
+            })
+            .with({ _tag: "Unavailable" }, () => expect.unreachable("Expected Reported usage"))
+            .exhaustive()
+        })
+        .with({ _tag: "Failure" }, ({ failure }) => {
+          expect.unreachable(`Expected Success, got ${failure._tag}`)
+        })
+        .exhaustive()
+
+      const repoRoot = AbsoluteRepoRoot.make("/workspace/repo")
+      const makeBasePkg = (relPaths: ReadonlyArray<OwnedRelPath>) =>
+        Schema.decodeSync(CompiledWorkUnit)({
+          _tag: "PackageUnit",
+          unitId: WorkUnitId.make("unit-budget-edge"),
+          waveIndex: WaveIndex.make(0),
+          dependsOn: [],
+          projectName: NxProjectName.make("harness-infra"),
+          ownedRelPaths: relPaths,
+          earsKeys: [EarsRequirementKey.make("SPEC-0036:REQ-4.4")],
+          stubKeys: [],
+          packageVerifyCommand: PackageVerifyCommand.make("pnpm --filter harness-infra verify"),
+        })
+
+      const ctrlBrief = buildUnitBrief({
+        unit: makeBasePkg([OwnedRelPath.make("libs/a.ts")]),
+        attempt: AttemptNumber.make(2),
+        cwd: repoRoot,
+        priorRejection: UnitRejection.cases.PackageVerifyFailed.make({
+          exitCode: GateExitCode.make(1),
+          failureKind: "non-zero-exit",
+          detail: PackageVerifyFailureDetail.make("bad\x1fctrl"),
+        }),
+        holeBundles: [
+          {
+            holeQualname: "Hole\x1fName",
+            spanName: "span",
+            successTypeSignature: "Effect<void, never, never>",
+            allowedErrorConstructors: [],
+            requiredServiceCapabilities: [],
+            inhabitingCandidates: [],
+            estimatedTokens: 10,
+          },
+        ],
+      })
+      expect(ctrlBrief.promptText).not.toContain("\x1f")
+      expect(ctrlBrief.promptText).toContain("Hole Name")
+      expect(ctrlBrief.promptText).toContain("bad ctrl")
+
+      const fillerPaths = Array.from({ length: 195 }, (_, i) =>
+        OwnedRelPath.make(`libs/p-${i.toString().padStart(3, "0")}/${"x".repeat(314)}.ts`),
+      )
+      const nearBaseline = buildUnitBrief({
+        unit: makeBasePkg(fillerPaths),
+        attempt: AttemptNumber.make(2),
+        cwd: repoRoot,
+      }).promptText.length
+
+      // Exact bodyBudget === 0 for holeSpec (<typed-hole-context> wrapper is 67 + 21 = 88 chars, + 2 separator = 90)
+      const zeroBodyPadLen = 65_536 - 90 - nearBaseline - 11
+      const sampleHole: TypedHoleContextBundle = {
+        holeQualname: "HoleOne",
+        spanName: "span",
+        successTypeSignature: "A",
+        allowedErrorConstructors: [],
+        requiredServiceCapabilities: [],
+        inhabitingCandidates: [],
+        estimatedTokens: 10,
+      }
+      const zeroBodyBrief = buildUnitBrief({
+        unit: makeBasePkg([
+          ...fillerPaths,
+          OwnedRelPath.make(`libs/${"z".repeat(zeroBodyPadLen)}.ts`),
+        ]),
+        attempt: AttemptNumber.make(2),
+        cwd: repoRoot,
+        holeBundles: [sampleHole],
+      })
+      expect(zeroBodyBrief.promptText).not.toContain("<typed-hole-context>")
+      expect(zeroBodyBrief.promptText).toContain("Workspace rules (HARNESS_UNIT_WORKER=1):")
+
+      const oneBodyBrief = buildUnitBrief({
+        unit: makeBasePkg([
+          ...fillerPaths,
+          OwnedRelPath.make(`libs/${"z".repeat(zeroBodyPadLen - 1)}.ts`),
+        ]),
+        attempt: AttemptNumber.make(2),
+        cwd: repoRoot,
+        holeBundles: [sampleHole],
+      })
+      expect(oneBodyBrief.promptText).toContain("<typed-hole-context>\n-\n</typed-hole-context>")
+
+      // Exact remaining === 0 keeps complete header and workspace rules without exceeding 65_536
+      const exactBudgetPadLen = 65_536 - nearBaseline - 11
+      const exactBudgetBrief = buildUnitBrief({
+        unit: makeBasePkg([
+          ...fillerPaths,
+          OwnedRelPath.make(`libs/${"y".repeat(exactBudgetPadLen)}.ts`),
+        ]),
+        attempt: AttemptNumber.make(2),
+        cwd: repoRoot,
+      })
+      expect(exactBudgetBrief.promptText.length).toBe(65_536)
+      expect(exactBudgetBrief.promptText).toContain("Workspace rules (HARNESS_UNIT_WORKER=1):")
+
+      // Huge owned paths + priorRejection preserves both <prior-rejection> and compacted owned-paths notice
+      const preservedRejBrief = buildUnitBrief({
+        unit: makeBasePkg([
+          ...fillerPaths,
+          OwnedRelPath.make(`libs/${"y".repeat(exactBudgetPadLen)}.ts`),
+        ]),
+        attempt: AttemptNumber.make(2),
+        cwd: repoRoot,
+        priorRejection: UnitRejection.cases.StampMissing.make({}),
+      })
+      expect(preservedRejBrief.promptText.length).toBeLessThanOrEqual(65_536)
+      expect(preservedRejBrief.promptText).toContain("<prior-rejection>")
+      expect(preservedRejBrief.promptText).toContain("more owned paths truncated)")
+      expect(preservedRejBrief.promptText).toContain("Workspace rules (HARNESS_UNIT_WORKER=1):")
+    })
+  })
+})

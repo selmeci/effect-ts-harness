@@ -368,7 +368,7 @@ export const assertAutomaticRunnerSupported = (
         .with("placeholder", () =>
           Effect.fail(
             validationFail(
-              "Automatic workflow mode is unavailable: WF-5 live agent runners are not yet available (manual mode only in WF-3)",
+              "Automatic workflow mode is unavailable: active UnitAgentDispatcher has runnerKind 'placeholder' (live runner required)",
             ),
           ),
         )

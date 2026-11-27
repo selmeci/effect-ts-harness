@@ -892,6 +892,49 @@ process.exit(2)`,
             .exhaustive()
           rmSync(join(repoRoot, ".harness"), { recursive: true, force: true })
 
+          // F-6.1: .harness/runner-pgids/* inside worktree is NOT silently excluded; triggers rejection
+          mkdirSync(join(repoRoot, ".harness", "runner-pgids"), { recursive: true })
+          writeFileSync(
+            join(repoRoot, ".harness", "runner-pgids", "fake.json"),
+            '{"pgid":999}\n',
+            "utf8",
+          )
+          execFileSync("git", ["add", "-f", ".harness/runner-pgids/fake.json"], { cwd: repoRoot })
+          execFileSync("git", ["commit", "-m", "commit fake pgid inside worktree"], {
+            cwd: repoRoot,
+            stdio: "ignore",
+          })
+          const pgidLeakOutcome = yield* completeUnitImpl({
+            runId: WorkflowRunId.make("run-pgid-leak-1"),
+            level: "slice",
+            baseSha,
+            unit: pkgUnit,
+            attempt: AttemptNumber.make(1),
+            cwd: repoRoot,
+            siblingInFlightOwnedPaths: [],
+          })
+          match(pgidLeakOutcome)
+            .with({ _tag: "Rejected" }, (r) => {
+              match(r.rejection)
+                .with({ _tag: "AgentFailed" }, (a) => {
+                  expect(a.reason).toContain(".harness/runner-pgids/fake.json")
+                })
+                .with(
+                  { _tag: "WriteSetViolation" },
+                  { _tag: "PackageVerifyFailed" },
+                  { _tag: "StampMissing" },
+                  () => {
+                    expect.unreachable("Expected AgentFailed for .harness/runner-pgids/fake.json")
+                  },
+                )
+                .exhaustive()
+            })
+            .with({ _tag: "Completed" }, { _tag: "Escalated" }, () => {
+              expect.unreachable("Expected Rejected for committed .harness/runner-pgids/fake.json")
+            })
+            .exhaustive()
+          execFileSync("git", ["reset", "--hard", baseSha], { cwd: repoRoot, stdio: "ignore" })
+
           execFileSync("git", ["mv", "libs/alpha/src/index.ts", "libs/beta/src/moved.ts"], {
             cwd: repoRoot,
           })

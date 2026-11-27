@@ -180,7 +180,16 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
       "utf8",
     )
 
-    const autoPlaceholderCompile = await Effect.runPromise(
+    const placeholderDispatcher = {
+      runnerKind: "placeholder" as const,
+      dispatchUnit: () => Effect.succeed(UnitAgentDispatchResult.cases.Completed.make({})),
+    }
+    const liveDispatcher = {
+      runnerKind: "live" as const,
+      dispatchUnit: () => Effect.succeed(UnitAgentDispatchResult.cases.Completed.make({})),
+    }
+
+    const autoDefaultCompile = await Effect.runPromise(
       runDeclarativeCli(
         [
           "workflow",
@@ -199,15 +208,19 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
         { repoRoot: dir, skipBackgroundDaemons: true },
       ),
     )
-    expect(autoPlaceholderCompile.exitCode).toBe(1)
-    expect(autoPlaceholderCompile.stderr).toContain("WF-5")
+    expect(autoDefaultCompile.exitCode).toBe(0)
+    const epicPlan = Schema.decodeSync(Schema.fromJsonString(CompiledPlan))(
+      autoDefaultCompile.stdout,
+    )
+    expect(epicPlan.runId).toBe(WorkflowRunId.make("wf-epic-test-01"))
+    expect(epicPlan.level).toBe("epic")
+    expect(epicPlan.mode).toEqual({
+      _tag: "Automatic",
+      runner: "claude-code",
+      maxConcurrency: 2,
+    })
 
-    const liveDispatcher = {
-      runnerKind: "live" as const,
-      dispatchUnit: () => Effect.succeed(UnitAgentDispatchResult.cases.Completed.make({})),
-    }
-
-    const autoEpicCompile = await Effect.runPromise(
+    const autoPlaceholderCompile = await Effect.runPromise(
       handleWorkflow(
         [
           "workflow",
@@ -224,17 +237,10 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
           inputPath,
         ],
         { repoRoot: dir },
-      ).pipe(Effect.provideService(UnitAgentDispatcher, liveDispatcher)),
+      ).pipe(Effect.provideService(UnitAgentDispatcher, placeholderDispatcher)),
     )
-    expect(autoEpicCompile.exitCode).toBe(0)
-    const epicPlan = Schema.decodeSync(Schema.fromJsonString(CompiledPlan))(autoEpicCompile.stdout)
-    expect(epicPlan.runId).toBe(WorkflowRunId.make("wf-epic-test-01"))
-    expect(epicPlan.level).toBe("epic")
-    expect(epicPlan.mode).toEqual({
-      _tag: "Automatic",
-      runner: "claude-code",
-      maxConcurrency: 2,
-    })
+    expect(autoPlaceholderCompile.exitCode).toBe(1)
+    expect(autoPlaceholderCompile.stderr).toContain("placeholder")
 
     // F-14.3: omitted CLI --level and --mode honor --input JSON; explicit CLI flags override JSON
     const inputWithLevelAndMode = join(dir, "plan-input-defaults.json")
@@ -275,10 +281,10 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
     const fromInputPlaceholderErr = await Effect.runPromise(
       handleWorkflow(["workflow", "compile", "--input", inputWithLevelAndMode], {
         repoRoot: dir,
-      }),
+      }).pipe(Effect.provideService(UnitAgentDispatcher, placeholderDispatcher)),
     )
     expect(fromInputPlaceholderErr.exitCode).toBe(1)
-    expect(fromInputPlaceholderErr.stderr).toContain("WF-5")
+    expect(fromInputPlaceholderErr.stderr).toContain("placeholder")
 
     const cliOverrideJson = await Effect.runPromise(
       handleWorkflow(
@@ -292,14 +298,6 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
     )
     expect(overriddenPlan.level).toBe("epic")
     expect(overriddenPlan.mode).toEqual({ _tag: "Manual" })
-
-    // F-17.1: workflow start rejects Automatic plan fail-closed when placeholder dispatcher is active
-    const autoPlanJson = JSON.stringify(Schema.encodeSync(CompiledPlan)(epicPlan))
-    const autoStartPlaceholder = await Effect.runPromise(
-      handleWorkflow(["workflow", "start"], { repoRoot: dir, stdin: autoPlanJson }),
-    )
-    expect(autoStartPlaceholder.exitCode).toBe(1)
-    expect(autoStartPlaceholder.stderr).toContain("WF-5")
 
     const manualWithRunner = await Effect.runPromise(
       handleWorkflow(["workflow", "compile", "--mode", "manual", "--runner", "claude-code"], {
@@ -332,6 +330,186 @@ describe("harness workflow CLI subcommand (SPEC-0023 REQ-3.2)", () => {
     )
     expect(badConcurrency.exitCode).toBe(1)
     expect(badConcurrency.stderr).toContain("--max-concurrency")
+  })
+
+  it("F-17.1: permits Automatic compile/start with default live dispatcher and rejects explicit placeholder fail-closed", async () => {
+    const { dir } = createTempGitRepo("harness-wf-auto-start-")
+    const inputPath = join(dir, "plan-input.json")
+    writeFileSync(
+      inputPath,
+      JSON.stringify({
+        runId: "wf-epic-test-01",
+        units: [
+          {
+            _tag: "SliceUnit",
+            unitId: "slice-a",
+            branch: "slice/alpha-unit",
+            ownedRelPaths: ["libs/alpha"],
+            earsKeys: [],
+          },
+        ],
+      }),
+      "utf8",
+    )
+
+    const compileRes = await Effect.runPromise(
+      runDeclarativeCli(
+        [
+          "workflow",
+          "compile",
+          "--level",
+          "epic",
+          "--mode",
+          "automatic",
+          "--runner",
+          "claude-code",
+          "--max-concurrency",
+          "2",
+          "--input",
+          inputPath,
+        ],
+        { repoRoot: dir, skipBackgroundDaemons: true },
+      ),
+    )
+    expect(compileRes.exitCode).toBe(0)
+    const epicPlan = Schema.decodeSync(Schema.fromJsonString(CompiledPlan))(compileRes.stdout)
+    const autoPlanJson = JSON.stringify(Schema.encodeSync(CompiledPlan)(epicPlan))
+
+    const liveDispatcher = {
+      runnerKind: "live" as const,
+      dispatchUnit: () => Effect.succeed(UnitAgentDispatchResult.cases.Completed.make({})),
+    }
+    const startedAutoPlans: Array<CompiledPlan> = []
+    const autoStartLive = await Effect.runPromise(
+      handleWorkflow(
+        ["workflow", "start", "--json"],
+        { repoRoot: dir, stdin: autoPlanJson },
+        {
+          startWorkflow: ({ plan }) => {
+            startedAutoPlans.push(plan)
+            return Effect.succeed({
+              runId: plan.runId,
+              executionId: WorkflowExecutionId.make("exec-auto-live-01"),
+              outcome: "started" as const,
+            })
+          },
+        },
+      ).pipe(Effect.provideService(UnitAgentDispatcher, liveDispatcher)),
+    )
+    expect(autoStartLive.exitCode).toBe(0)
+    expect(startedAutoPlans).toHaveLength(1)
+    expect(startedAutoPlans[0]?.mode).toEqual({
+      _tag: "Automatic",
+      runner: "claude-code",
+      maxConcurrency: 2,
+    })
+
+    const placeholderDispatcher = {
+      runnerKind: "placeholder" as const,
+      dispatchUnit: () => Effect.succeed(UnitAgentDispatchResult.cases.Completed.make({})),
+    }
+    const autoStartPlaceholder = await Effect.runPromise(
+      handleWorkflow(["workflow", "start"], { repoRoot: dir, stdin: autoPlanJson }).pipe(
+        Effect.provideService(UnitAgentDispatcher, placeholderDispatcher),
+      ),
+    )
+    expect(autoStartPlaceholder.exitCode).toBe(1)
+    expect(autoStartPlaceholder.stderr).toContain("placeholder")
+  })
+
+  it("F-4.1: fails closed on automatic compile and start when UnitAgentDispatcher is omitted from context, and succeeds when provided", async () => {
+    const { dir } = createTempGitRepo("harness-wf-f41-omitted-")
+    const inputPath = join(dir, "plan-input.json")
+    writeFileSync(
+      inputPath,
+      JSON.stringify({
+        runId: "wf-f41-test-01",
+        units: [
+          {
+            _tag: "SliceUnit",
+            unitId: "slice-a",
+            branch: "slice/alpha-unit",
+            ownedRelPaths: ["libs/alpha"],
+            earsKeys: [],
+          },
+        ],
+      }),
+      "utf8",
+    )
+
+    const omittedCompile = await Effect.runPromise(
+      handleWorkflow(
+        [
+          "compile",
+          "--level",
+          "epic",
+          "--mode",
+          "automatic",
+          "--runner",
+          "claude-code",
+          "--input",
+          inputPath,
+        ],
+        { repoRoot: dir },
+      ),
+    )
+    expect(omittedCompile.exitCode).toBe(1)
+    expect(omittedCompile.stderr).toContain(
+      "Automatic workflow mode is unavailable: active UnitAgentDispatcher has runnerKind 'placeholder'",
+    )
+
+    const liveDispatcher = {
+      runnerKind: "live" as const,
+      dispatchUnit: () => Effect.succeed(UnitAgentDispatchResult.cases.Completed.make({})),
+    }
+    const liveCompile = await Effect.runPromise(
+      handleWorkflow(
+        [
+          "compile",
+          "--level",
+          "epic",
+          "--mode",
+          "automatic",
+          "--runner",
+          "claude-code",
+          "--input",
+          inputPath,
+        ],
+        { repoRoot: dir },
+      ).pipe(Effect.provideService(UnitAgentDispatcher, liveDispatcher)),
+    )
+    expect(liveCompile.exitCode).toBe(0)
+
+    const startCalls: Array<CompiledPlan> = []
+    const startDeps: WorkflowCliDeps = {
+      startWorkflow: ({ plan }) => {
+        startCalls.push(plan)
+        return Effect.succeed({
+          runId: plan.runId,
+          executionId: WorkflowExecutionId.make("exec-f41-01"),
+          outcome: "started" as const,
+        })
+      },
+    }
+
+    const omittedStart = await Effect.runPromise(
+      handleWorkflow(["start", "--json"], { repoRoot: dir, stdin: liveCompile.stdout }, startDeps),
+    )
+    expect(omittedStart.exitCode).toBe(1)
+    expect(omittedStart.stderr).toContain(
+      "Automatic workflow mode is unavailable: active UnitAgentDispatcher has runnerKind 'placeholder'",
+    )
+    expect(startCalls).toHaveLength(0)
+
+    const liveStart = await Effect.runPromise(
+      handleWorkflow(
+        ["start", "--json"],
+        { repoRoot: dir, stdin: liveCompile.stdout },
+        startDeps,
+      ).pipe(Effect.provideService(UnitAgentDispatcher, liveDispatcher)),
+    )
+    expect(liveStart.exitCode).toBe(0)
+    expect(startCalls).toHaveLength(1)
   })
 
   it("complete enforces explicit absolute --repo-root, unambiguous --unit/--phase, rejection exit codes, and cleared friction log", async () => {

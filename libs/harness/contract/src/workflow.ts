@@ -169,6 +169,45 @@ export const AgentFailureReason = Schema.NonEmptyString.pipe(
 )
 export type AgentFailureReason = typeof AgentFailureReason.Type
 
+/** Explicit escalation discriminator carried on `AgentFailed` attempts produced from `UnitOutcome.Escalated`. */
+export const AGENT_ESCALATION_KINDS = ["AuthRequired", "MergeConflict"] as const
+export const AgentEscalationKind = Schema.Literals(AGENT_ESCALATION_KINDS)
+export type AgentEscalationKind = typeof AgentEscalationKind.Type
+
+/** MCP isolation strength requested for an automatic agent run (`"standard" | "hard"`). */
+export const MCP_ISOLATION_LEVELS = ["standard", "hard"] as const
+export const McpIsolationLevel = Schema.Literals(MCP_ISOLATION_LEVELS)
+export type McpIsolationLevel = typeof McpIsolationLevel.Type
+
+/** Policy applied when `antigravity` receives a request requiring `"hard"` MCP isolation. */
+export const MCP_FALLBACK_POLICIES = ["reject", "fallback-claude"] as const
+export const McpFallbackPolicy = Schema.Literals(MCP_FALLBACK_POLICIES)
+export type McpFallbackPolicy = typeof McpFallbackPolicy.Type
+
+const hasNoConfigPathControlChars = (value: string): boolean => {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i)
+    if (code <= 0x1f || code === 0x7f) {
+      return false
+    }
+  }
+  return true
+}
+
+/** Validated POSIX absolute path to a generated or scoped runner configuration file. */
+export const RunnerConfigFilePath = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(1024)),
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isPattern(/^(?:\/(?!\.\.?(?:\/|$))[^\\/]+)+$/)),
+  Schema.check(
+    Schema.makeFilter(hasNoConfigPathControlChars, {
+      message: "RunnerConfigFilePath must not contain ASCII control characters",
+    }),
+  ),
+  Schema.brand("RunnerConfigFilePath"),
+)
+export type RunnerConfigFilePath = typeof RunnerConfigFilePath.Type
+
 export const WorkflowCompileReason = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),
   Schema.brand("WorkflowCompileReason"),
@@ -219,7 +258,12 @@ export const FrictionLogState = Schema.Literals(["cleared"])
 export type FrictionLogState = typeof FrictionLogState.Type
 
 export const UnitMode = Schema.TaggedUnion({
-  Automatic: { runner: RunnerId, maxConcurrency: MaxConcurrency },
+  Automatic: {
+    runner: RunnerId,
+    maxConcurrency: MaxConcurrency,
+    mcpIsolation: Schema.optional(McpIsolationLevel),
+    hardMcpFallback: Schema.optional(McpFallbackPolicy),
+  },
   Manual: {},
 })
 export type UnitMode = typeof UnitMode.Type
@@ -469,7 +513,10 @@ export const UnitRejection = Schema.TaggedUnion({
     detail: Schema.optional(PackageVerifyFailureDetail),
   },
   StampMissing: {},
-  AgentFailed: { reason: AgentFailureReason },
+  AgentFailed: {
+    reason: AgentFailureReason,
+    escalationKind: Schema.optional(AgentEscalationKind),
+  },
 })
 export type UnitRejection = typeof UnitRejection.Type
 
@@ -523,6 +570,10 @@ export const UnitAgentRequest = Schema.Struct({
   attempt: AttemptNumber,
   runner: RunnerId,
   cwd: AbsoluteRepoRoot,
+  priorRejection: Schema.optional(UnitRejection),
+  mcpIsolation: Schema.optional(McpIsolationLevel),
+  hardMcpFallback: Schema.optional(McpFallbackPolicy),
+  mcpConfigPath: Schema.optional(RunnerConfigFilePath),
 })
 export type UnitAgentRequest = typeof UnitAgentRequest.Type
 
@@ -530,6 +581,7 @@ export type UnitAgentRequest = typeof UnitAgentRequest.Type
 export const UnitAgentDispatchResult = Schema.TaggedUnion({
   Completed: {},
   Failed: { reason: AgentFailureReason },
+  FatalFailed: { reason: AgentFailureReason },
   AuthRequired: { runner: RunnerId },
 })
 export type UnitAgentDispatchResult = typeof UnitAgentDispatchResult.Type
@@ -543,6 +595,7 @@ export const CompleteUnitInput = Schema.Struct({
   attempt: AttemptNumber,
   cwd: AbsoluteRepoRoot,
   siblingInFlightOwnedPaths: Schema.Array(OwnedRelPath),
+  runner: Schema.optional(RunnerId),
 })
 export type CompleteUnitInput = typeof CompleteUnitInput.Type
 

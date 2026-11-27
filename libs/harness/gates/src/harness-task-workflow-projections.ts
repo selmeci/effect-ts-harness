@@ -422,11 +422,13 @@ export const projectUnitOutcome = (
               .with({ _tag: "AuthRequired" }, (e) => ({
                 _tag: "AgentFailed" as const,
                 reason: AgentFailureReason.make(`Authentication required for runner '${e.runner}'`),
+                escalationKind: "AuthRequired" as const,
               }))
               .with({ _tag: "RetryBudgetExhausted" }, (e) => e.lastRejection)
               .with({ _tag: "MergeConflict" }, (e) => ({
                 _tag: "AgentFailed" as const,
                 reason: AgentFailureReason.make(`Merge conflict on branch '${e.branch}'`),
+                escalationKind: "MergeConflict" as const,
               }))
               .exhaustive()
             yield* readModel.upsertAttempt({

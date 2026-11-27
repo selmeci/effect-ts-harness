@@ -197,7 +197,7 @@ const replayActivityMessage = Effect.fnUntraced(function* (params: {
           .with({ _tag: "Some" }, ({ value: dispatchRes }) =>
             match(dispatchRes)
               .with({ _tag: "Completed" }, () => Effect.void)
-              .with({ _tag: "Failed" }, ({ reason }) =>
+              .with({ _tag: "Failed" }, { _tag: "FatalFailed" }, ({ reason }) =>
                 recordUnitOutcome({
                   operation,
                   runId: plan.runId,
@@ -227,6 +227,7 @@ const replayActivityMessage = Effect.fnUntraced(function* (params: {
                       reason: AgentFailureReason.make(
                         `Authentication required for runner '${authRunner}'`,
                       ),
+                      escalationKind: "AuthRequired",
                     }),
                   }),
                   nowValue: params.nowValue,

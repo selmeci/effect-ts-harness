@@ -1,22 +1,31 @@
 import { chmodSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it } from "@effect/vitest"
-import { Cause, Effect, Option } from "effect"
+import { Cause, Effect, Layer, Option } from "effect"
 import { match } from "ts-pattern"
 import {
+  AgentAuthRequiredError,
+  AgentExitError,
+  AgentNonZeroExitCode,
+  AgentResultText,
+  type AgentRunRequest,
+  AgentSuccessExitCode,
   AttemptNumber,
   MaxConcurrency,
   OwnedRelPath,
   ReviewDepth,
   RunnerId,
+  UnavailableAgentUsage,
+  UnitRejection,
   WorkflowRunId,
   WorkspaceFilePath,
 } from "@harness/contract"
 import { makeMockDecisionModelLayer } from "@harness/decision"
 import { decideSpanBudgets } from "@harness/gates"
-import { UnitAgentDispatcher, WorkflowReviewRouter } from "@harness/service"
+import { AgentRunnerPort, UnitAgentDispatcher, WorkflowReviewRouter } from "@harness/service"
 import {
   UnitAgentDispatcherLive,
+  UnitAgentDispatcherLiveFromPort,
   compileWorkflowPlanFromRepo,
   makeWorkflowReviewRouterLayer,
   routeWorkflowReviewImpl,
@@ -29,24 +38,92 @@ import {
 } from "./helpers/workflow-verifier-fixture.js"
 
 describe("WorkflowReviewRouter & UnitAgentDispatcher", () => {
-  it.live("UnitAgentDispatcherLive exposes placeholder runnerKind and returns Failed", () =>
-    withTempDir((dir) =>
-      Effect.gen(function* () {
-        const { repoRoot } = initGitRepo(dir)
-        const res = yield* Effect.gen(function* () {
-          const dispatcher = yield* UnitAgentDispatcher
-          expect(dispatcher.runnerKind).toBe("placeholder")
-          return yield* dispatcher.dispatchUnit({
-            runId: WorkflowRunId.make("run-dispatch-1"),
-            unit: makePackageUnit({ unitId: "u-1" }),
-            attempt: AttemptNumber.make(1),
-            runner: RunnerId.make("claude-code"),
-            cwd: repoRoot,
+  it.live(
+    "UnitAgentDispatcherLive exposes live runnerKind and UnitAgentDispatcherLiveFromPort dispatches via AgentRunnerPort",
+    () =>
+      withTempDir((dir) =>
+        Effect.gen(function* () {
+          const { repoRoot } = initGitRepo(dir)
+          const liveKind = yield* Effect.gen(function* () {
+            const dispatcher = yield* UnitAgentDispatcher
+            return dispatcher.runnerKind
+          }).pipe(Effect.provide(UnitAgentDispatcherLive))
+          expect(liveKind).toBe("live")
+
+          const capturedRequests: Array<AgentRunRequest> = []
+          const mockPortLayer = Layer.succeed(AgentRunnerPort, {
+            run: (request) => {
+              capturedRequests.push(request)
+              return Effect.succeed({
+                runner: request.runner,
+                exit: AgentSuccessExitCode.make(0),
+                resultText: AgentResultText.make("ok"),
+                usage: UnavailableAgentUsage.make({}),
+              })
+            },
           })
-        }).pipe(Effect.provide(UnitAgentDispatcherLive))
-        expect(res._tag).toBe("Failed")
-      }),
-    ),
+
+          const completedRes = yield* Effect.gen(function* () {
+            const dispatcher = yield* UnitAgentDispatcher
+            expect(dispatcher.runnerKind).toBe("live")
+            return yield* dispatcher.dispatchUnit({
+              runId: WorkflowRunId.make("run-dispatch-1"),
+              unit: makePackageUnit({ unitId: "u-1" }),
+              attempt: AttemptNumber.make(2),
+              runner: RunnerId.make("claude-code"),
+              cwd: repoRoot,
+              priorRejection: UnitRejection.cases.StampMissing.make({}),
+            })
+          }).pipe(
+            Effect.provide(UnitAgentDispatcherLiveFromPort.pipe(Layer.provide(mockPortLayer))),
+          )
+
+          expect(completedRes._tag).toBe("Completed")
+          expect(capturedRequests).toHaveLength(1)
+          expect(capturedRequests[0]?.brief.attempt).toBe(2)
+          expect(capturedRequests[0]?.brief.promptText).toContain(repoRoot)
+
+          const authFailLayer = Layer.succeed(AgentRunnerPort, {
+            run: (request) => Effect.fail(new AgentAuthRequiredError({ runner: request.runner })),
+          })
+          const authRes = yield* Effect.gen(function* () {
+            const dispatcher = yield* UnitAgentDispatcher
+            return yield* dispatcher.dispatchUnit({
+              runId: WorkflowRunId.make("run-dispatch-2"),
+              unit: makePackageUnit({ unitId: "u-1" }),
+              attempt: AttemptNumber.make(1),
+              runner: RunnerId.make("antigravity"),
+              cwd: repoRoot,
+            })
+          }).pipe(
+            Effect.provide(UnitAgentDispatcherLiveFromPort.pipe(Layer.provide(authFailLayer))),
+          )
+          expect(authRes).toEqual({ _tag: "AuthRequired", runner: "antigravity" })
+
+          const exitFailLayer = Layer.succeed(AgentRunnerPort, {
+            run: (request) =>
+              Effect.fail(
+                new AgentExitError({
+                  runner: request.runner,
+                  exit: AgentNonZeroExitCode.make(2),
+                }),
+              ),
+          })
+          const failedRes = yield* Effect.gen(function* () {
+            const dispatcher = yield* UnitAgentDispatcher
+            return yield* dispatcher.dispatchUnit({
+              runId: WorkflowRunId.make("run-dispatch-3"),
+              unit: makePackageUnit({ unitId: "u-1" }),
+              attempt: AttemptNumber.make(1),
+              runner: RunnerId.make("claude-code"),
+              cwd: repoRoot,
+            })
+          }).pipe(
+            Effect.provide(UnitAgentDispatcherLiveFromPort.pipe(Layer.provide(exitFailLayer))),
+          )
+          expect(failedRes._tag).toBe("Failed")
+        }),
+      ),
   )
 
   it.live(
