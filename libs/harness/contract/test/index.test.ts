@@ -499,7 +499,7 @@ describe("@harness/contract schemas", () => {
     for (let i = 1; i < ranks.length; i++) {
       expect(ranks[i]!).toBeGreaterThan(ranks[i - 1]!)
     }
-    expect(DEFAULT_REVIEW_ROUTE_TIMEOUT_MS).toBe(1500)
+    expect(DEFAULT_REVIEW_ROUTE_TIMEOUT_MS).toBe(5000)
     expect(() => ReviewTimeoutMillis.make(99)).toThrow()
     expect(() => ReviewTimeoutMillis.make(30001)).toThrow()
 

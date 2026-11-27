@@ -1,6 +1,7 @@
 import { Schema } from "effect"
 import { EnclosingSymbolName } from "./ast-and-gate-primitives.js"
 import { NxScopeTag, NxTierTag } from "./tier-topology.js"
+import { WORKFLOW_TIMEOUT_BUDGETS } from "./workflow-timeouts.js"
 import { ErrorReasonMessage } from "./workspace-and-process.js"
 
 export const SPECIALIST_REVIEWER_IDS = [
@@ -93,7 +94,9 @@ export const ReviewTimeoutMillis = Schema.Int.pipe(
 )
 export type ReviewTimeoutMillis = typeof ReviewTimeoutMillis.Type
 
-export const DEFAULT_REVIEW_ROUTE_TIMEOUT_MS: ReviewTimeoutMillis = ReviewTimeoutMillis.make(1500)
+export const DEFAULT_REVIEW_ROUTE_TIMEOUT_MS: ReviewTimeoutMillis = ReviewTimeoutMillis.make(
+  WORKFLOW_TIMEOUT_BUDGETS.decisionModelTimeoutMs,
+)
 
 export const ReviewSummaryText = Schema.String.pipe(
   Schema.check(Schema.isMaxLength(4096)),

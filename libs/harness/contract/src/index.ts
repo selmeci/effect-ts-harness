@@ -384,6 +384,8 @@ export {
   toBoundedReason,
 } from "./workflow-storage.js"
 export {
+  DEFAULT_DECISION_MODEL_TIMEOUT_MS,
+  DEFAULT_LSP_WATCHDOG_TIMEOUT_MS,
   MultiStageTimeoutBudgetInput,
   WORKFLOW_TIMEOUT_BUDGETS,
   WorkflowPollAttempts,
@@ -395,6 +397,15 @@ export {
   validateMultiStageTimeoutBudget,
   validateWorkflowTimeoutBudgets,
 } from "./workflow-timeouts.js"
+export {
+  LspCommandName,
+  LspDiagnosticHint,
+  LspDiagnosticsTimeoutError,
+  OllamaEndpointUrl,
+  OllamaModelName,
+  OllamaWarmupError,
+  OllamaWarmupStage,
+} from "./review-resilience.js"
 export {
   WORKFLOW_ACTIVITY_DECODERS,
   WORKFLOW_DEFERRED_DECODERS,
