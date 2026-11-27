@@ -598,10 +598,16 @@ export const recordKilledMutantsToCache = (input: {
               witnessTestFile,
               input.hostIo,
             )
-            const hasAllTwoTierFields =
+            const twoTierWitness =
               sourceClosureSha256 !== undefined &&
               witnessSupportSha256 !== undefined &&
               witnessTestAstDigests !== undefined
+                ? {
+                    sourceClosureSha256,
+                    witnessSupportSha256,
+                    witnessTestAstDigests,
+                  }
+                : undefined
             const mutantCacheId = MutantCacheId.make(mutant.id)
             const entryBase = {
               key,
@@ -611,13 +617,7 @@ export const recordKilledMutantsToCache = (input: {
               recordedAt,
               witnessTestFile,
               witnessClosureSha256,
-              ...(hasAllTwoTierFields
-                ? {
-                    sourceClosureSha256,
-                    witnessSupportSha256,
-                    witnessTestAstDigests,
-                  }
-                : {}),
+              ...(twoTierWitness !== undefined ? { twoTierWitness } : {}),
             }
             const mac = computeMutationEntryMac(hmacSecret, entryBase)
             input.cacheEntries[key] = { ...entryBase, mac }

@@ -27,7 +27,6 @@ import {
   type FileMutationClosureDigestResult,
   type MutationContextDigests,
   computeFileMutationClosureDigest,
-  isAppendOnlyWitnessDigestsPreserved,
   validateHarnessCacheFileSafety,
 } from "./mutation-cache.js"
 import { readSafeText, unwrapOption } from "./mutation-context-digest.js"
@@ -263,8 +262,6 @@ export const computeWitnessSupportClosureDigest = (input: {
     .with({ _tag: "Disabled" }, () => undefined)
     .exhaustive()
 
-export const isAppendOnlyWitnessPreserved = isAppendOnlyWitnessDigestsPreserved
-
 /** Resolves and memoizes Tier-2 witness closure digest for `(relFile, witnessTestFile)`. */
 export const resolveMemoizedWitnessClosureDigest = (input: {
   readonly repoRoot: string
@@ -327,10 +324,10 @@ export const prepareTwoTierLookupInputs = (input: {
       : undefined
     if (entry !== undefined && input.reachingSet.has(entry.witnessTestFile)) {
       distinctWitnessFiles.add(entry.witnessTestFile)
-      if (entry.sourceClosureSha256 !== undefined && entry.witnessTestAstDigests !== undefined) {
+      if (entry.twoTierWitness !== undefined) {
         needsSourceClosure = true
         const list = twoTierEntriesByWitness.get(entry.witnessTestFile) ?? []
-        list.push(entry.witnessTestAstDigests)
+        list.push(entry.twoTierWitness.witnessTestAstDigests)
         twoTierEntriesByWitness.set(entry.witnessTestFile, list)
       }
     }
@@ -582,9 +579,13 @@ export interface PreparedMutationTarget {
 }
 
 /** Converts a prepared target into a package batch entry. */
-export const toQueuedMutationBatchEntry = (prep: PreparedMutationTarget) => ({
+export const toQueuedMutationBatchEntry = (
+  prep: PreparedMutationTarget,
+  baselineVerified: boolean = false,
+) => ({
   pkgKey: prep.pkgKey,
   mutantKeys: prep.mutantKeys,
+  baselineVerified,
   input: {
     file: prep.file,
     originalContent: prep.originalContent,

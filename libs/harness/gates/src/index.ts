@@ -598,8 +598,10 @@ export {
   computeMutationEntryMac,
   decideMutationCacheLookup,
   emptyMutationCacheStore,
+  isAppendOnlyWitnessDigestsPreserved,
   loadMutationCache,
   loadMutationCacheWithStatus,
+  partitionMutationCacheLookup,
   saveMutationCacheAtomic,
   validateHarnessCacheFileSafety,
   verifyMutationEntryMac,
@@ -666,7 +668,6 @@ export {
 export {
   computeSourceOnlyClosureDigest,
   extractWitnessTestBlockDigests,
-  isAppendOnlyWitnessPreserved,
   readLastSurvivorIds,
   writeLastSurvivorIds,
 } from "./mutation/mutation-two-tier-cache.js"

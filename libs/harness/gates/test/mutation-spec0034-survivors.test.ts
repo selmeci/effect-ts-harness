@@ -387,6 +387,7 @@ describe("mutation-spec0034-survivors: package batch, stacked base, and baseline
         hostIo: mockIo,
         baseSubprocessEnv: {},
         allPackageTests: [testA, testB],
+        baselineVerified: true,
         files: [{ ...fileInput, mutants: [m1, m2], uncachedMutants: [m1, m2] }],
       })
       match(res)
@@ -450,6 +451,7 @@ describe("mutation-spec0034-survivors: package batch, stacked base, and baseline
         return {
           pkgKey: `demo/${pkgDir}`,
           mutantKeys: new Map(input.mutants.map((m) => [m.id, computeContentSha256(m.id)])),
+          baselineVerified: true,
           input,
         }
       }

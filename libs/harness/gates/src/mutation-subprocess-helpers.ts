@@ -310,8 +310,12 @@ export const runVitestTargetList = (
   mutatedSchemaSource: string,
   backupPath: string,
   mutantsToRun: ReadonlyArray<CodeMutant>,
-  options?: { readonly skipBaselineCheck?: boolean | undefined },
+  options?: {
+    readonly skipBaselineCheck?: boolean | undefined
+    readonly baselineVerified?: boolean | undefined
+  },
 ): MutantBatchRunResult => {
+  const baselineVerified = options?.skipBaselineCheck !== true || options?.baselineVerified === true
   const vitestCliPath = join(repoRoot, "node_modules", "vitest", "vitest.mjs")
   const batchRunnerPath = join(repoRoot, "tools", "parallel-vitest-batch.mjs")
   const useDirectVitest = hostIo.existsSync(vitestCliPath)
@@ -469,7 +473,11 @@ export const runVitestTargetList = (
     execRes: Result.Result<SyncHostExecResult, unknown>,
     explicitKillingTestFile?: AstSourceFilePath,
   ): string | undefined =>
-    match(classifyMutantSubprocessResult(mutant.id, execRes, { baselineImportClean: true }))
+    match(
+      classifyMutantSubprocessResult(mutant.id, execRes, {
+        baselineImportClean: baselineVerified,
+      }),
+    )
       .with({ kind: "abort" }, ({ diagnostic }) => diagnostic)
       .with({ kind: "outcome" }, ({ status }) => {
         match(execRes)
@@ -483,7 +491,7 @@ export const runVitestTargetList = (
                   exitCode: r.exitCode,
                   stdout: r.stdout,
                   stderr: r.stderr,
-                  baselineImportClean: true,
+                  baselineImportClean: baselineVerified,
                 })
                 if (
                   r.exitCode === 1 &&
@@ -603,7 +611,7 @@ export const runVitestTargetList = (
               }
               const mappedExec: SyncHostExecResult = toBatchHostExecResult(entryRes)
               const needsSoloRecheck = needsSoloColdRecheck(mappedExec, {
-                baselineImportClean: true,
+                baselineImportClean: baselineVerified,
               })
               const finalExecRes = needsSoloRecheck
                 ? Result.try(() =>

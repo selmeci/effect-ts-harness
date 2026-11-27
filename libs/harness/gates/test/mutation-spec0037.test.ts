@@ -32,14 +32,17 @@ import {
   computeMutationEntryMac,
   computeSourceOnlyClosureDigest,
   extractWitnessTestBlockDigests,
-  isAppendOnlyWitnessPreserved,
+  isAppendOnlyWitnessDigestsPreserved,
   isMutatedModuleInitFailure,
+  partitionMutationCacheLookup,
   readLastSurvivorIds,
+  verifyMutationEntryMac,
   writeLastSurvivorIds,
 } from "../src/index.js"
 import {
   classifyMutantSubprocessResult,
   needsSoloColdRecheck,
+  runVitestTargetList,
 } from "../src/mutation-subprocess-helpers.js"
 import {
   hydrateFileMutantCacheHits,
@@ -77,7 +80,7 @@ const DecidePropInput = Schema.Struct({
 })
 
 describe("SPEC-0037 REQ-3.1..REQ-3.4: Two-Tier Mutation Cache, Module-Init Classification & MutationCheck.run", () => {
-  it("REQ-3.1 extractWitnessTestBlockDigests and isAppendOnlyWitnessPreserved support append-only test edits and invalidate modified assertions", () => {
+  it("REQ-3.1 extractWitnessTestBlockDigests and isAppendOnlyWitnessDigestsPreserved support append-only test edits and invalidate modified assertions", () => {
     const baseTest = [
       'import { describe, expect, it } from "vitest"',
       'describe("suite", () => {',
@@ -116,10 +119,10 @@ describe("SPEC-0037 REQ-3.1..REQ-3.4: Two-Tier Mutation Cache, Module-Init Class
     const dDeleted = extractWitnessTestBlockDigests(deletedTest)
 
     expect(dBase.length).toBeGreaterThan(0)
-    expect(isAppendOnlyWitnessPreserved(dBase, dAppended)).toBe(true)
-    expect(isAppendOnlyWitnessPreserved(dBase, dModified)).toBe(false)
-    expect(isAppendOnlyWitnessPreserved(dBase, dDeleted)).toBe(false)
-    expect(isAppendOnlyWitnessPreserved([], dAppended)).toBe(false)
+    expect(isAppendOnlyWitnessDigestsPreserved(dBase, dAppended)).toBe(true)
+    expect(isAppendOnlyWitnessDigestsPreserved(dBase, dModified)).toBe(false)
+    expect(isAppendOnlyWitnessDigestsPreserved(dBase, dDeleted)).toBe(false)
+    expect(isAppendOnlyWitnessDigestsPreserved([], dAppended)).toBe(false)
   })
 
   it.effect(
@@ -183,9 +186,11 @@ describe("SPEC-0037 REQ-3.1..REQ-3.4: Two-Tier Mutation Cache, Module-Init Class
             recordedAt,
             witnessTestFile: witnessRel,
             witnessClosureSha256: oldWitnessDigest,
-            sourceClosureSha256: srcClosureRes.closureDigest,
-            witnessSupportSha256: witnessSupportDigest,
-            witnessTestAstDigests: baseAstDigests,
+            twoTierWitness: {
+              sourceClosureSha256: srcClosureRes.closureDigest,
+              witnessSupportSha256: witnessSupportDigest,
+              witnessTestAstDigests: baseAstDigests,
+            },
           }
           const mac = computeMutationEntryMac(TEST_SECRET, entryWithoutMac)
           const store = {
@@ -244,29 +249,76 @@ describe("SPEC-0037 REQ-3.1..REQ-3.4: Two-Tier Mutation Cache, Module-Init Class
           expect(missingSourceDigestsDecision.hitKeys).toEqual([])
           expect(missingSourceDigestsDecision.missKeys).toEqual([key])
 
-          // Tampering with sourceClosureSha256 invalidates MAC
-          const tamperedMacDecision = yield* MutationCache.decide({
-            candidateKeys: [key],
-            store: {
-              version: "mutation-cache-v3",
-              entries: {
-                [key]: {
-                  ...entryWithoutMac,
-                  sourceClosureSha256: computeContentSha256("tampered"),
-                  mac,
+          // Tampering with any sub-field of twoTierWitness invalidates MAC & lookup
+          const appendedAstDigests = [...extractWitnessTestBlockDigests(appendedSrc)]
+          const tamperedVariants = [
+            {
+              label: "sourceClosureSha256",
+              tamperedEntry: {
+                ...entryWithoutMac,
+                twoTierWitness: {
+                  ...entryWithoutMac.twoTierWitness,
+                  sourceClosureSha256: computeContentSha256("tampered-src"),
                 },
+                mac,
               },
+              sourceClosureSha256: computeContentSha256("tampered-src"),
+              witnessSupportSha256: witnessSupportDigest,
+              witnessTestAstDigests: appendedAstDigests,
             },
-            auth: TEST_AUTH,
-            nowMs,
-            reachingTests: [witnessRel],
-            witnessClosureDigests: { [witnessRel]: computeContentSha256("new-witness-closure") },
-            sourceClosureDigests: { [srcRel]: computeContentSha256("tampered") },
-            witnessTestAstDigests: {
-              [witnessRel]: [...extractWitnessTestBlockDigests(appendedSrc)],
+            {
+              label: "witnessSupportSha256",
+              tamperedEntry: {
+                ...entryWithoutMac,
+                twoTierWitness: {
+                  ...entryWithoutMac.twoTierWitness,
+                  witnessSupportSha256: computeContentSha256("tampered-support"),
+                },
+                mac,
+              },
+              sourceClosureSha256: srcClosureRes.closureDigest,
+              witnessSupportSha256: computeContentSha256("tampered-support"),
+              witnessTestAstDigests: appendedAstDigests,
             },
-          })
-          expect(tamperedMacDecision.hitKeys).toEqual([])
+            {
+              label: "witnessTestAstDigests",
+              tamperedEntry: {
+                ...entryWithoutMac,
+                twoTierWitness: {
+                  ...entryWithoutMac.twoTierWitness,
+                  witnessTestAstDigests: [computeContentSha256("tampered-ast")],
+                },
+                mac,
+              },
+              sourceClosureSha256: srcClosureRes.closureDigest,
+              witnessSupportSha256: witnessSupportDigest,
+              witnessTestAstDigests: [computeContentSha256("tampered-ast"), ...appendedAstDigests],
+            },
+          ] as const
+
+          for (const variant of tamperedVariants) {
+            expect(verifyMutationEntryMac(TEST_SECRET, variant.tamperedEntry), variant.label).toBe(
+              false,
+            )
+            const tamperedDecision = partitionMutationCacheLookup({
+              candidateKeys: [key],
+              store: {
+                version: "mutation-cache-v3",
+                entries: { [key]: variant.tamperedEntry },
+              },
+              auth: TEST_AUTH,
+              nowMs,
+              reachingTests: [witnessRel],
+              witnessClosureDigests: {
+                [witnessRel]: computeContentSha256("new-witness-closure"),
+              },
+              sourceClosureDigests: { [srcRel]: variant.sourceClosureSha256 },
+              witnessSupportDigests: { [witnessRel]: variant.witnessSupportSha256 },
+              witnessTestAstDigests: { [witnessRel]: variant.witnessTestAstDigests },
+            })
+            expect(tamperedDecision.hitKeys, variant.label).toEqual([])
+            expect(tamperedDecision.missKeys, variant.label).toEqual([key])
+          }
         } finally {
           rmSync(tmpDir, { recursive: true, force: true })
         }
@@ -539,8 +591,6 @@ describe("SPEC-0037 REQ-3.1..REQ-3.4: Two-Tier Mutation Cache, Module-Init Class
       recordedAt: cacheEntries[key1]!.recordedAt,
       witnessTestFile: witnessRel,
       witnessClosureSha256: cacheEntries[key1]!.witnessClosureSha256,
-      sourceClosureSha256: cacheEntries[key1]!.sourceClosureSha256,
-      witnessTestAstDigests: cacheEntries[key1]!.witnessTestAstDigests,
     }
     const twoTierStore: MutationCacheStore = {
       version: "mutation-cache-v3",
@@ -590,9 +640,15 @@ describe("SPEC-0037 REQ-3.1..REQ-3.4: Two-Tier Mutation Cache, Module-Init Class
           expect(presentAst?.length).toBeGreaterThan(0)
           expect(ctx.expectedSupport).toMatch(/^[0-9a-f]{64}$/)
           expect(ctx.dirtied).toBe(true)
-          expect(ctx.cacheEntries[ctx.key1]?.sourceClosureSha256).toMatch(/^[0-9a-f]{64}$/)
-          expect(ctx.cacheEntries[ctx.key1]?.witnessSupportSha256).toBe(ctx.expectedSupport)
-          expect(ctx.cacheEntries[ctx.key1]?.witnessTestAstDigests).toEqual(presentAst)
+          expect(ctx.cacheEntries[ctx.key1]?.twoTierWitness?.sourceClosureSha256).toMatch(
+            /^[0-9a-f]{64}$/,
+          )
+          expect(ctx.cacheEntries[ctx.key1]?.twoTierWitness?.witnessSupportSha256).toBe(
+            ctx.expectedSupport,
+          )
+          expect(ctx.cacheEntries[ctx.key1]?.twoTierWitness?.witnessTestAstDigests).toEqual(
+            presentAst,
+          )
 
           const withTwoTier = prepareTwoTierLookupInputs({
             repoRoot: ctx.tmpDir,
@@ -604,7 +660,7 @@ describe("SPEC-0037 REQ-3.1..REQ-3.4: Two-Tier Mutation Cache, Module-Init Class
             hostIo: isolatedTestHostIo,
           })
           expect(withTwoTier.sourceClosureDigests[ctx.srcRel]).toBe(
-            ctx.cacheEntries[ctx.key1]?.sourceClosureSha256,
+            ctx.cacheEntries[ctx.key1]?.twoTierWitness?.sourceClosureSha256,
           )
           expect(withTwoTier.witnessSupportDigests[ctx.witnessRel]).toBe(ctx.expectedSupport)
           expect(withTwoTier.witnessTestAstDigests[ctx.witnessRel]).toEqual(presentAst)
@@ -823,4 +879,84 @@ describe("SPEC-0037 REQ-3.1..REQ-3.4: Two-Tier Mutation Cache, Module-Init Class
         }
       }),
   )
+
+  it("F-4.1 runVitestTargetList requires verified baseline before classifying module-init SchemaError as killed", () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "harness-f41-baseline-"))
+    try {
+      mkdirSync(join(tmpDir, "libs/demo/domain/src"), { recursive: true })
+      mkdirSync(join(tmpDir, "libs/demo/domain/test"), { recursive: true })
+      const srcRel = AstSourceFilePath.make("libs/demo/domain/src/index.ts")
+      const fullPath = join(tmpDir, srcRel)
+      const originalSource = "export const ok = true\n"
+      writeFileSync(fullPath, originalSource)
+      const file: DomainFile = {
+        scope: "demo",
+        pkgDir: "domain",
+        pkgName: "@demo/domain",
+        tier: "domain",
+        relFile: srcRel,
+        fullPath,
+      }
+      const mutant = mkMutant("m-init-f41")
+      const backupPath = join(tmpDir, ".harness", "mutation-backup.json")
+      const initThrowHostIo: SyncHostIo = {
+        ...isolatedTestHostIo,
+        execFileSync: () => ({
+          _tag: "Exited",
+          exitCode: 1,
+          stdout: "",
+          stderr: "SchemaError: Invalid configuration\nTests  no tests\n",
+        }),
+      }
+
+      const unverifiedOmitted = runVitestTargetList(
+        tmpDir,
+        file,
+        initThrowHostIo,
+        {},
+        ["libs/demo/domain/test/index.test.ts"],
+        originalSource,
+        "export const ok = false\n",
+        backupPath,
+        [mutant],
+        { skipBaselineCheck: true },
+      )
+      expect(unverifiedOmitted._tag).toBe("Abort")
+
+      const unverifiedFalse = runVitestTargetList(
+        tmpDir,
+        file,
+        initThrowHostIo,
+        {},
+        ["libs/demo/domain/test/index.test.ts"],
+        originalSource,
+        "export const ok = false\n",
+        backupPath,
+        [mutant],
+        { skipBaselineCheck: true, baselineVerified: false },
+      )
+      expect(unverifiedFalse._tag).toBe("Abort")
+
+      const verifiedTrue = runVitestTargetList(
+        tmpDir,
+        file,
+        initThrowHostIo,
+        {},
+        ["libs/demo/domain/test/index.test.ts"],
+        originalSource,
+        "export const ok = false\n",
+        backupPath,
+        [mutant],
+        { skipBaselineCheck: true, baselineVerified: true },
+      )
+      match(verifiedTrue)
+        .with({ _tag: "Abort" }, ({ diagnostic }) => expect.unreachable(diagnostic))
+        .with({ _tag: "Ok" }, ({ outcomes }) => {
+          expect(outcomes).toEqual([{ mutant, status: "killed" }])
+        })
+        .exhaustive()
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
 })

@@ -82,6 +82,7 @@ const applyBatchPassOutcomes = (input: {
   readonly fileNonCacheableIds: Set<string>
   readonly witnessByMutantId: Map<string, AstSourceFilePath>
   readonly onlyUpdateOnKill: boolean
+  readonly baselineVerified: boolean
 }): string | undefined => {
   const byId = new Map<string, BatchMutantOutcomeResult>(
     input.rawEntries.map((e) => [e.id, e.result]),
@@ -92,7 +93,7 @@ const applyBatchPassOutcomes = (input: {
       return `[mutation-check] Package batch runner missing result for mutant '${mutant.id}'`
     }
     const mapped = toBatchHostExecResult(entryRes)
-    if (needsSoloColdRecheck(mapped, { baselineImportClean: true })) {
+    if (needsSoloColdRecheck(mapped, { baselineImportClean: input.baselineVerified })) {
       const soloRes = runVitestTargetList(
         input.repoRoot,
         input.fileEntry.file,
@@ -103,7 +104,10 @@ const applyBatchPassOutcomes = (input: {
         input.fileEntry.schemaSource,
         input.backupPath,
         [mutant],
-        { skipBaselineCheck: !input.onlyUpdateOnKill },
+        {
+          skipBaselineCheck: !input.onlyUpdateOnKill && input.baselineVerified,
+          baselineVerified: input.baselineVerified,
+        },
       )
       const soloDiag = match(soloRes)
         .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
@@ -133,7 +137,7 @@ const applyBatchPassOutcomes = (input: {
     }
 
     const classified = classifyMutantSubprocessResult(mutant.id, Result.succeed(mapped), {
-      baselineImportClean: true,
+      baselineImportClean: input.baselineVerified,
     })
     const abortDiag = match(classified)
       .with({ kind: "abort" }, ({ diagnostic }) => diagnostic)
@@ -147,7 +151,7 @@ const applyBatchPassOutcomes = (input: {
               exitCode: r.exitCode,
               stdout: r.stdout,
               stderr: r.stderr,
-              baselineImportClean: true,
+              baselineImportClean: input.baselineVerified,
             })
             if (
               r.exitCode === 1 &&
@@ -195,6 +199,7 @@ const processBatchFallbackStage = (input: {
   readonly fileOutcomes: Map<string, MutantOutcome>
   readonly fileNonCacheableIds: Set<string>
   readonly witnessByMutantId: Map<string, AstSourceFilePath>
+  readonly baselineVerified: boolean
 }): string | undefined => {
   const surviving = collectSurvivingMutants(input.fileEntry.uncachedMutants, input.fileOutcomes)
   if (surviving.length === 0 || input.stageTests.length === 0) return undefined
@@ -216,6 +221,7 @@ const processBatchFallbackStage = (input: {
       fileNonCacheableIds: input.fileNonCacheableIds,
       witnessByMutantId: input.witnessByMutantId,
       onlyUpdateOnKill: true,
+      baselineVerified: input.baselineVerified,
     })
     if (fbAbort !== undefined) return fbAbort
   }
@@ -259,6 +265,7 @@ const processBatchFileReport = (input: {
   readonly baseSubprocessEnv: Readonly<Record<string, string | undefined>>
   readonly fileEntry: PackageBatchFileInput
   readonly report: PackageBatchFileOutput
+  readonly baselineVerified: boolean
 }):
   | { readonly _tag: "Ok"; readonly fileResult: PackageBatchFileResult }
   | { readonly _tag: "Abort"; readonly diagnostic: string } => {
@@ -286,6 +293,7 @@ const processBatchFileReport = (input: {
     fileNonCacheableIds,
     witnessByMutantId,
     onlyUpdateOnKill: false,
+    baselineVerified: input.baselineVerified,
   })
   if (primaryAbort !== undefined) return { _tag: "Abort", diagnostic: primaryAbort }
   const scopedErr = processBatchFallbackStage({
@@ -299,6 +307,7 @@ const processBatchFileReport = (input: {
     fileOutcomes,
     fileNonCacheableIds,
     witnessByMutantId,
+    baselineVerified: input.baselineVerified,
   })
   if (scopedErr !== undefined) return { _tag: "Abort", diagnostic: scopedErr }
   const pkgFbErr = processBatchFallbackStage({
@@ -312,6 +321,7 @@ const processBatchFileReport = (input: {
     fileOutcomes,
     fileNonCacheableIds,
     witnessByMutantId,
+    baselineVerified: input.baselineVerified,
   })
   if (pkgFbErr !== undefined) return { _tag: "Abort", diagnostic: pkgFbErr }
   return {
@@ -336,10 +346,12 @@ export const runPackageMutantBatchChecked = (input: {
   readonly baseSubprocessEnv: Readonly<Record<string, string | undefined>>
   readonly allPackageTests: ReadonlyArray<string>
   readonly files: ReadonlyArray<PackageBatchFileInput>
+  readonly baselineVerified?: boolean | undefined
   readonly measuredDurationsMs?: Readonly<Record<string, number>> | undefined
   readonly maxSurvivors?: number | undefined
   readonly maxWorkerRssBytes?: number | undefined
 }): RunPackageBatchResult => {
+  const baselineVerified = input.baselineVerified === true
   const vitestCliPath = join(input.repoRoot, "node_modules", "vitest", "vitest.mjs")
   const runnerPath = join(input.repoRoot, "tools", "package-vitest-batch.mjs")
   if (!input.hostIo.existsSync(vitestCliPath) || !input.hostIo.existsSync(runnerPath)) {
@@ -416,6 +428,7 @@ export const runPackageMutantBatchChecked = (input: {
         baseSubprocessEnv: input.baseSubprocessEnv,
         fileEntry,
         report,
+        baselineVerified,
       })
       const abortDiag = match(processed)
         .with({ _tag: "Ok" }, ({ fileResult }) => {
@@ -467,6 +480,7 @@ export const runPackageMutantBatchChecked = (input: {
       baseSubprocessEnv: input.baseSubprocessEnv,
       fileEntry,
       report,
+      baselineVerified,
     })
     const abortDiag = match(processed)
       .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
@@ -533,7 +547,10 @@ export function runSingleFileVitestPass(input: {
     input.schemaSource,
     input.backupPath,
     input.uncachedMutants,
-    { skipBaselineCheck: input.pkgBaselinePassed },
+    {
+      skipBaselineCheck: input.pkgBaselinePassed,
+      baselineVerified: input.pkgBaselinePassed,
+    },
   )
   const primaryOutcomes = match(primaryRes)
     .with({ _tag: "Abort" }, ({ diagnostic }) => diagnostic)
@@ -609,6 +626,7 @@ export interface QueuedPackageEntry {
   readonly pkgKey: string
   readonly input: PackageBatchFileInput
   readonly mutantKeys: ReadonlyMap<string, ContentSha256>
+  readonly baselineVerified?: boolean | undefined
 }
 
 /** Executes queued package batches using one continuous persistent warm Vitest pool per package. */
@@ -662,7 +680,7 @@ export function executeQueuedPackageBatches(input: {
         scopedFallbackTests: only.input.scopedFallbackTests,
         packageFallbackTests: only.input.packageFallbackTests,
         cachedHitIds: only.input.cachedHitIds,
-        pkgBaselinePassed: true,
+        pkgBaselinePassed: only.baselineVerified === true,
       })
       const abortErr = match(passRes)
         .with({ _tag: "Abort" }, ({ partialResult, diagnostic }) => {
@@ -700,6 +718,7 @@ export function executeQueuedPackageBatches(input: {
       baseSubprocessEnv: input.baseSubprocessEnv,
       allPackageTests: Array.from(pkgTestSet),
       files: queuedEntries.map((q) => q.input),
+      baselineVerified: queuedEntries.every((q) => q.baselineVerified === true),
       measuredDurationsMs: input.getMeasuredDurationsRecord?.(pkgKey, queuedEntries),
       maxSurvivors: input.getRemainingSurvivorBudget?.(queuedEntries),
       maxWorkerRssBytes: input.maxWorkerRssBytes,

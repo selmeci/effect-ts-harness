@@ -587,9 +587,9 @@ export const runDomainMutationSuite = (
           .exhaustive()
   if (typeof baselinePrep === "string") return abortWith(outcomes, baselinePrep)
 
-  const queueBatchEntry = (prep: PreparedMutationTarget) => {
+  const queueBatchEntry = (prep: PreparedMutationTarget, baselineVerified: boolean) => {
     const list = queuedByPkg.get(prep.pkgKey) ?? []
-    list.push(toQueuedMutationBatchEntry(prep))
+    list.push(toQueuedMutationBatchEntry(prep, baselineVerified))
     queuedByPkg.set(prep.pkgKey, list)
   }
 
@@ -617,7 +617,7 @@ export const runDomainMutationSuite = (
       continue
     }
     if (hasPackageBatchInfra && pkgBaselinePassed && prep.uncachedMutants.length > 0) {
-      queueBatchEntry(prep)
+      queueBatchEntry(prep, pkgBaselinePassed)
       continue
     }
     const singlePass = runSingleFileVitestPass({

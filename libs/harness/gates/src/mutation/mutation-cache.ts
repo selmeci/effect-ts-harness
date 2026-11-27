@@ -105,9 +105,13 @@ export const computeMutationEntryMac = (
     p.recordedAt,
     p.witnessTestFile,
     p.witnessClosureSha256,
-    ...(p.sourceClosureSha256 !== undefined ? [`src:${p.sourceClosureSha256}`] : []),
-    ...(p.witnessSupportSha256 !== undefined ? [`sup:${p.witnessSupportSha256}`] : []),
-    ...(p.witnessTestAstDigests !== undefined ? [`ast:${p.witnessTestAstDigests.join(",")}`] : []),
+    ...(p.twoTierWitness !== undefined
+      ? [
+          `src:${p.twoTierWitness.sourceClosureSha256}`,
+          `sup:${p.twoTierWitness.witnessSupportSha256}`,
+          `ast:${p.twoTierWitness.witnessTestAstDigests.join(",")}`,
+        ]
+      : []),
   ]
   const payload = fields.map((f) => `${Buffer.byteLength(f, "utf8")}:${f}`).join("\0")
   return MutationCacheMac.make(
@@ -128,22 +132,22 @@ const matchesEntrySourceClosure = (
   entry: MutationCacheEntry,
   sourceClosureDigests: Readonly<Record<AstSourceFilePath, ContentSha256>> | undefined,
 ): boolean => {
-  if (entry.sourceClosureSha256 === undefined || sourceClosureDigests === undefined) return false
+  if (entry.twoTierWitness === undefined || sourceClosureDigests === undefined) return false
   const candidate = Object.hasOwn(sourceClosureDigests, entry.file)
     ? sourceClosureDigests[entry.file]
     : Object.hasOwn(sourceClosureDigests, entry.witnessTestFile)
       ? sourceClosureDigests[entry.witnessTestFile]
       : undefined
-  return candidate === entry.sourceClosureSha256
+  return candidate === entry.twoTierWitness.sourceClosureSha256
 }
 
 const matchesEntryWitnessSupport = (
   entry: MutationCacheEntry,
   witnessSupportDigests: Readonly<Record<AstSourceFilePath, ContentSha256>> | undefined,
 ): boolean => {
-  if (entry.witnessSupportSha256 === undefined || witnessSupportDigests === undefined) return false
+  if (entry.twoTierWitness === undefined || witnessSupportDigests === undefined) return false
   return Object.hasOwn(witnessSupportDigests, entry.witnessTestFile)
-    ? witnessSupportDigests[entry.witnessTestFile] === entry.witnessSupportSha256
+    ? witnessSupportDigests[entry.witnessTestFile] === entry.twoTierWitness.witnessSupportSha256
     : false
 }
 
@@ -180,13 +184,13 @@ export const partitionMutationCacheLookup = (
         const twoTierWitnessMatch =
           baseValid &&
           !exactWitnessMatch &&
-          entry.witnessTestAstDigests !== undefined &&
+          entry.twoTierWitness !== undefined &&
           input.witnessTestAstDigests !== undefined &&
           Object.hasOwn(input.witnessTestAstDigests, entry.witnessTestFile) &&
           matchesEntrySourceClosure(entry, input.sourceClosureDigests) &&
           matchesEntryWitnessSupport(entry, input.witnessSupportDigests) &&
           isAppendOnlyWitnessDigestsPreserved(
-            entry.witnessTestAstDigests,
+            entry.twoTierWitness.witnessTestAstDigests,
             input.witnessTestAstDigests[entry.witnessTestFile]!,
           )
         if (exactWitnessMatch || twoTierWitnessMatch) hitKeys.push(candidateKey)
