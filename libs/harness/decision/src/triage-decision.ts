@@ -1,7 +1,7 @@
 import { Cause, Effect, Option, Schema } from "effect"
 import * as Decision from "effect/ai/Decision"
 import * as DecisionModel from "effect/ai/DecisionModel"
-import { isPureInterruptCause } from "@harness/contract"
+import { WORKFLOW_TIMEOUT_BUDGETS, isPureInterruptCause } from "@harness/contract"
 import { match } from "ts-pattern"
 
 export const TriageV1 = Decision.make({
@@ -688,7 +688,7 @@ export const triageFailure = Effect.fn("Harness.triageFailure")(function* (failu
   const outcome = yield* DecisionModel.decide(TriageV1, {
     input: { failureOutput: targetOutput },
   }).pipe(
-    Effect.timeoutOption("1500 millis"),
+    Effect.timeoutOption(`${WORKFLOW_TIMEOUT_BUDGETS.decisionModelTimeoutMs} millis`),
     Effect.catchCauseIf(
       (cause) => !isPureInterruptCause(cause),
       (cause) =>

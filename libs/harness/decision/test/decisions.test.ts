@@ -1,10 +1,16 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Fiber, Layer, Logger, Tracer } from "effect"
+import { Cause, Effect, Fiber, Layer, Logger, Option, Schema, Tracer } from "effect"
 import * as DecisionModel from "effect/ai/DecisionModel"
 import { TestClock } from "effect/testing"
+import { match } from "ts-pattern"
+import { DEFAULT_DECISION_MODEL_TIMEOUT_MS } from "@harness/contract"
+import { SpanBudget, type SpanSample } from "@harness/gates"
 import { SKIP_NX_CACHE_BANNED_REASON } from "@harness/gates/hook-fastpath"
 import {
   GUARD_DECISION_TIMEOUT_MS,
+  GuardDecision,
+  type GuardModelOutcome,
+  decideGuard,
   decideGuardCommand,
   makeFailingDecisionModelLayer,
   makeMockDecisionModelLayer,
@@ -330,10 +336,11 @@ describe("Harness guard & triage decision definitions", () => {
   )
 
   it.effect(
-    "logs a 2500ms timeout warning and returns 'ask' when GuardV1 DecisionModel times out (S-4.1, REQ-1.9)",
+    "logs a 5000ms timeout warning and returns 'ask' when GuardV1 DecisionModel times out (S-4.1, REQ-1.9, SPEC-0037 REQ-2.4)",
     () =>
       Effect.gen(function* () {
-        expect(GUARD_DECISION_TIMEOUT_MS).toBe(2500)
+        expect(GUARD_DECISION_TIMEOUT_MS).toBe(5000)
+        expect(GUARD_DECISION_TIMEOUT_MS).toBe(DEFAULT_DECISION_MODEL_TIMEOUT_MS)
         const warnings: Array<string> = []
         const captureLogger = Logger.make(({ message }) => {
           warnings.push(String(message))
@@ -350,7 +357,7 @@ describe("Harness guard & triage decision definitions", () => {
           Effect.forkChild,
         )
 
-        yield* TestClock.adjust("2499 millis")
+        yield* TestClock.adjust("4999 millis")
         expect(fiber.pollUnsafe()).toBeUndefined()
 
         yield* TestClock.adjust("1 millis")
@@ -369,10 +376,10 @@ describe("Harness guard & triage decision definitions", () => {
   )
 
   it.effect(
-    "REQ-1.9: allows GuardV1 DecisionModel completing in 2000ms while timing out past 2500ms",
+    "REQ-1.9: allows GuardV1 DecisionModel completing in 4000ms while timing out past 5000ms",
     () =>
       Effect.gen(function* () {
-        const makeDelayedSafeLayer = (delay: "2000 millis" | "2600 millis") =>
+        const makeDelayedSafeLayer = (delay: "4000 millis" | "5100 millis") =>
           Layer.effect(
             DecisionModel.DecisionModel,
             DecisionModel.make({
@@ -391,23 +398,191 @@ describe("Harness guard & triage decision definitions", () => {
           )
 
         const fastEnoughFiber = yield* decideGuardCommand("curl https://unknown.example").pipe(
-          Effect.provide(makeDelayedSafeLayer("2000 millis")),
+          Effect.provide(makeDelayedSafeLayer("4000 millis")),
           Effect.forkChild,
         )
 
-        yield* TestClock.adjust("2000 millis")
+        yield* TestClock.adjust("4000 millis")
         const fastEnoughRes = yield* Fiber.join(fastEnoughFiber)
         expect(fastEnoughRes.verdict).toBe("allow")
 
         const tooSlowFiber = yield* decideGuardCommand("curl https://unknown.example").pipe(
-          Effect.provide(makeDelayedSafeLayer("2600 millis")),
+          Effect.provide(makeDelayedSafeLayer("5100 millis")),
           Effect.forkChild,
         )
 
-        yield* TestClock.adjust("2500 millis")
+        yield* TestClock.adjust("5000 millis")
         const tooSlowRes = yield* Fiber.join(tooSlowFiber)
         expect(tooSlowRes.verdict).toBe("ask")
-        expect(tooSlowRes.reason).toContain("timed out after 2500ms")
+        expect(tooSlowRes.reason).toContain("timed out after 5000ms")
+      }),
+  )
+
+  it.effect(
+    "SPEC-0037 REQ-2.4: GuardDecision.decide emits clean traced spans and triageFailure uses 5000ms timeout budget",
+    () =>
+      Effect.gen(function* () {
+        const recorded = new Map<string, SpanSample>()
+        const testTracer = Tracer.make({
+          span: (options) => {
+            const span = new Tracer.NativeSpan(options)
+            const parentSpanId = Option.match(options.parent, {
+              onNone: () => null,
+              onSome: (p) => p.spanId,
+            })
+            const startTimeMs =
+              typeof span.status.startTime === "bigint"
+                ? Number(span.status.startTime) / 1_000_000
+                : undefined
+            recorded.set(span.spanId, {
+              spanId: span.spanId,
+              name: span.name,
+              parentSpanId,
+              ...(startTimeMs !== undefined ? { startTimeMs } : {}),
+            })
+            const origEnd = span.end.bind(span)
+            span.end = (endTime, exit) => {
+              const durationMs =
+                typeof endTime === "bigint" && typeof span.status.startTime === "bigint"
+                  ? Number(endTime - span.status.startTime) / 1_000_000
+                  : undefined
+              const endTimeMs =
+                typeof endTime === "bigint" ? Number(endTime) / 1_000_000 : undefined
+              const exitTag = match(exit)
+                .with({ _tag: "Success" }, () => "Success" as const)
+                .with({ _tag: "Failure" }, ({ cause }) =>
+                  Option.match(Cause.findErrorOption(cause), {
+                    onSome: () => "Failure" as const,
+                    onNone: () => "Defect" as const,
+                  }),
+                )
+                .exhaustive()
+              recorded.set(span.spanId, {
+                spanId: span.spanId,
+                name: span.name,
+                parentSpanId,
+                ...(startTimeMs !== undefined ? { startTimeMs } : {}),
+                ...(endTimeMs !== undefined ? { endTimeMs } : {}),
+                ...(durationMs !== undefined ? { durationMs } : {}),
+                exitTag,
+                errorTag: null,
+              })
+              origEnd(endTime, exit)
+            }
+            return span
+          },
+        })
+
+        const guardRes = yield* decideGuard("curl https://unknown.example").pipe(
+          Effect.provide(
+            makeMockDecisionModelLayer({
+              destructiveProb: 0.0,
+              secretAccessProb: 0.0,
+              exfiltrationProb: 0.0,
+            }),
+          ),
+          Effect.provideService(Tracer.Tracer, testTracer),
+        )
+        expect(guardRes.verdict).toBe("allow")
+        const spans = [...recorded.values()]
+        expect(spans.some((s) => s.name === "GuardDecision.evaluate")).toBe(true)
+        expect(spans.some((s) => s.name === "Harness.decideGuardCommand")).toBe(true)
+        expect(spans.some((s) => s.name === "GuardDecision.decide")).toBe(true)
+        const budgetViolations = yield* SpanBudget.decide({ spans })
+        expect(budgetViolations).toEqual([])
+
+        const notEvaluated = yield* GuardDecision.decide({
+          command: "curl https://unknown.example",
+          fastPath: "escalate",
+          modelOutcome: { _tag: "NotEvaluated" },
+        })
+        expect(notEvaluated.verdict).toBe("ask")
+        expect(notEvaluated.reason).toContain("not evaluated")
+
+        const hangingLayer = Layer.effect(
+          DecisionModel.DecisionModel,
+          DecisionModel.make({
+            decide: () => Effect.never,
+          }),
+        )
+        const triageFiber = yield* triageFailure("AssertionError: expected 1 to equal 2").pipe(
+          Effect.provide(hangingLayer),
+          Effect.forkChild,
+        )
+        yield* TestClock.adjust("4999 millis")
+        expect(triageFiber.pollUnsafe()).toBeUndefined()
+        yield* TestClock.adjust("1 millis")
+        const triageRes = yield* Fiber.join(triageFiber)
+        expect(triageRes.kind).toBe("semantic")
+        expect(triageRes.hint).toContain("harness_tests_reaching")
+      }),
+  )
+
+  it.effect.prop(
+    "SPEC-0037 REQ-2.4 property: pure GuardDecision.decide is deterministic, fails closed on TimedOut/ModelError/NotEvaluated, and enforces probability thresholds",
+    {
+      fastPath: Schema.Literals(["allow", "deny", "ask", "escalate"]),
+      outcomeKind: Schema.Literals([
+        "NotEvaluated",
+        "TimedOut",
+        "ModelError",
+        "HighRisk",
+        "LowRisk",
+        "Ambiguous",
+      ]),
+      unitWorkerMode: Schema.Boolean,
+    },
+    ({ fastPath, outcomeKind, unitWorkerMode }) =>
+      Effect.gen(function* () {
+        const modelOutcome: GuardModelOutcome = match(outcomeKind)
+          .with("NotEvaluated", () => ({ _tag: "NotEvaluated" as const }))
+          .with("TimedOut", () => ({ _tag: "TimedOut" as const }))
+          .with("ModelError", () => ({ _tag: "ModelError" as const, detail: "offline" }))
+          .with("HighRisk", () => ({
+            _tag: "Scored" as const,
+            destructive: 0.7,
+            secretAccess: 0.1,
+            exfiltration: 0.1,
+          }))
+          .with("LowRisk", () => ({
+            _tag: "Scored" as const,
+            destructive: 0.1,
+            secretAccess: 0.1,
+            exfiltration: 0.1,
+          }))
+          .with("Ambiguous", () => ({
+            _tag: "Scored" as const,
+            destructive: 0.4,
+            secretAccess: 0.1,
+            exfiltration: 0.1,
+          }))
+          .exhaustive()
+
+        const res = yield* GuardDecision.decide({
+          command: "curl https://unknown.example",
+          fastPath,
+          unitWorkerMode,
+          modelOutcome,
+        })
+
+        match(fastPath)
+          .with("allow", () => expect(res.verdict).toBe("allow"))
+          .with("deny", () => expect(res.verdict).toBe("deny"))
+          .with("ask", () => expect(res.verdict).toBe("ask"))
+          .with("escalate", () => {
+            match(outcomeKind)
+              .with("NotEvaluated", "ModelError", "Ambiguous", () =>
+                expect(res.verdict).toBe("ask"),
+              )
+              .with("TimedOut", () => {
+                expect(res.verdict).toBe("ask")
+                expect(res.reason).toContain("5000ms")
+              })
+              .with("HighRisk", () => expect(res.verdict).toBe("deny"))
+              .with("LowRisk", () => expect(res.verdict).toBe("allow"))
+              .exhaustive()
+          })
+          .exhaustive()
       }),
   )
 

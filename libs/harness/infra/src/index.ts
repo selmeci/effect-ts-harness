@@ -34,6 +34,16 @@ import {
   type OllamaEmbeddingClientOptions,
 } from "./embedding-client-live.js"
 import { LocalDecisionModel, makeLocalDecisionModelLayer } from "./local-decision-model-live.js"
+import {
+  OllamaReadiness,
+  checkOllamaServerReadyDetailed,
+  createOllamaWarmupState,
+  ensureOllamaWarm,
+  type OllamaProbeResult,
+  type OllamaWarmupOptions,
+  type OllamaWarmupReceipt,
+  type OllamaWarmupStateHandle,
+} from "./ollama-readiness-live.js"
 import { execFileAsyncEffect, nodeSyncHostIo } from "./node-host-io.js"
 import {
   HarnessSubprocessRunnerLive,
@@ -96,6 +106,16 @@ export {
   type OllamaEmbeddingClientOptions,
 }
 export { LocalDecisionModel, makeLocalDecisionModelLayer }
+export {
+  OllamaReadiness,
+  checkOllamaServerReadyDetailed,
+  createOllamaWarmupState,
+  ensureOllamaWarm,
+  type OllamaProbeResult,
+  type OllamaWarmupOptions,
+  type OllamaWarmupReceipt,
+  type OllamaWarmupStateHandle,
+}
 export {
   resolveOrCreateMutationCacheHmacSecret,
   type ResolveMutationHmacSecretOptions,
