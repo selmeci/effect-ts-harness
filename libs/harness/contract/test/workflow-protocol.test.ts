@@ -5,6 +5,7 @@ import {
   AttemptNumber,
   EscalationOrdinal,
   MultiStageTimeoutBudgetInput,
+  SHIP_STAGE_COUNT,
   SHIP_STAGES,
   ShipAttempt,
   ShipAttemptKey,
@@ -1209,6 +1210,10 @@ describe("workflow-protocol & workflow-timeouts", () => {
         },
         { runs: 150, seed: 27 },
       ),
+    )
+    expect(SHIP_STAGE_COUNT).toBe(SHIP_STAGES.length)
+    expect(WORKFLOW_TIMEOUT_BUDGETS.shipWorkflowSettleMs).toBeGreaterThan(
+      SHIP_STAGES.length * WORKFLOW_TIMEOUT_BUDGETS.shipGateCommandMs,
     )
     expect(propCheck._tag).toBe("Passed")
   })

@@ -1,6 +1,6 @@
 ---
 id: harness:ADR-0029
-title: Review-Loop Resilience, LSP Watchdog, Mutation Efficiency, Ollama Warm-Up (5000ms Budget), Guard Fast-Path, and Telemetry Accuracy
+title: Review-Loop Resilience, LSP Watchdog, Mutation Efficiency, Ollama Warm-Up & 5000ms DecisionModel Budget, Guard Fast-Path, and Telemetry Accuracy
 status: accepted
 date: 2026-11-27
 deciders:
@@ -89,7 +89,7 @@ informs:
   - harness:SPEC-0037
 ---
 
-# ADR-0029 · Review-Loop Resilience, LSP Watchdog, Mutation Efficiency, Ollama Warm-Up (5000ms Budget), Guard Fast-Path, and Telemetry Accuracy
+# ADR-0029 · Review-Loop Resilience, LSP Watchdog, Mutation Efficiency, Ollama Warm-Up & 5000ms DecisionModel Budget, Guard Fast-Path, and Telemetry Accuracy
 
 ## Context and Problem Statement
 

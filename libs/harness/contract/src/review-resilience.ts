@@ -3,6 +3,86 @@ import { WorkspaceFilePath } from "./ast-and-gate-primitives.js"
 import { WorkflowTimeoutMs } from "./workflow-timeouts.js"
 import { ErrorReasonMessage } from "./workspace-and-process.js"
 
+/** Bounded retry attempts for interrupt-protected single-flight / warmup waiters. */
+export const DEFAULT_MAX_INTERRUPT_RETRIES = 4 as const
+
+/** Branded shell command text passed to `PolicyFastPath.decide` and `GuardDecision.decide`. */
+export const ShellCommandText = Schema.String.pipe(
+  Schema.check(Schema.isMaxLength(32_768)),
+  Schema.brand("ShellCommandText"),
+)
+export type ShellCommandText = typeof ShellCommandText.Type
+
+/** Branded trimmed non-empty explanation returned alongside guard verdicts (`1..1024` chars). */
+export const GuardReasonText = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(1024)),
+  Schema.brand("GuardReasonText"),
+)
+export type GuardReasonText = typeof GuardReasonText.Type
+
+/** Branded trimmed non-empty error summary for `GuardModelOutcome.ModelError` (`1..256` chars). */
+export const GuardModelErrorDetail = Schema.NonEmptyString.pipe(
+  Schema.check(Schema.isTrimmed()),
+  Schema.check(Schema.isMaxLength(256)),
+  Schema.brand("GuardModelErrorDetail"),
+)
+export type GuardModelErrorDetail = typeof GuardModelErrorDetail.Type
+
+/** Branded probability score in `[0, 1]` produced by `GuardV1`. */
+export const GuardRiskProbability = Schema.Number.pipe(
+  Schema.check(Schema.isFinite()),
+  Schema.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
+  Schema.brand("GuardRiskProbability"),
+)
+export type GuardRiskProbability = typeof GuardRiskProbability.Type
+
+/** Final three-way guard enforcement verdict. */
+export const GuardVerdictAction = Schema.Literals(["allow", "deny", "ask"])
+export type GuardVerdictAction = typeof GuardVerdictAction.Type
+
+/** Deterministic fast-path pre-classification verdict before optional `DecisionModel` escalation. */
+export const GuardFastPathVerdict = Schema.Literals(["allow", "deny", "ask", "escalate"])
+export type GuardFastPathVerdict = typeof GuardFastPathVerdict.Type
+
+/** Structured verdict and diagnostic reason returned by `GuardDecision.decide`. */
+export const GuardDecisionResult = Schema.Struct({
+  verdict: GuardVerdictAction,
+  reason: GuardReasonText,
+})
+export type GuardDecisionResult = typeof GuardDecisionResult.Type
+
+/** Closed union capturing the outcome of evaluating `GuardV1` via `DecisionModel`. */
+export const GuardModelOutcome = Schema.TaggedUnion({
+  NotEvaluated: {},
+  TimedOut: {},
+  ModelError: {
+    detail: GuardModelErrorDetail,
+  },
+  Scored: {
+    destructive: GuardRiskProbability,
+    secretAccess: GuardRiskProbability,
+    exfiltration: GuardRiskProbability,
+  },
+})
+export type GuardModelOutcome = typeof GuardModelOutcome.Type
+
+/** Branded input contract for `GuardDecision.decide`. */
+export const GuardDecisionInput = Schema.Struct({
+  command: ShellCommandText,
+  fastPath: GuardFastPathVerdict,
+  unitWorkerMode: Schema.optional(Schema.Boolean),
+  modelOutcome: GuardModelOutcome,
+})
+export type GuardDecisionInput = typeof GuardDecisionInput.Type
+
+/** Branded input contract for `PolicyFastPath.decide`. */
+export const PolicyFastPathInput = Schema.Struct({
+  command: ShellCommandText,
+  unitWorkerMode: Schema.optional(Schema.Boolean),
+})
+export type PolicyFastPathInput = typeof PolicyFastPathInput.Type
+
 /** Branded trimmed non-empty LSP executable or subcommand name (`1..128` chars). */
 export const LspCommandName = Schema.NonEmptyString.pipe(
   Schema.check(Schema.isTrimmed()),

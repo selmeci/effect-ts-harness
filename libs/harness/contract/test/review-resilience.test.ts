@@ -230,6 +230,7 @@ describe("SPEC-0037 review-loop resilience contracts", () => {
     const witnessTest = AstSourceFilePath.make(
       "libs/harness/contract/test/review-resilience.test.ts",
     )
+    const supportSha = computeContentSha256("witness-support")
     const mac = MutationCacheMac.make(computeContentSha256("entry-mac"))
     const secret = Redacted.make(MutationCacheHmacSecret.make("0123456789abcdef0123456789abcdef"))
 
@@ -241,15 +242,22 @@ describe("SPEC-0037 review-loop resilience contracts", () => {
       recordedAt: MutationCacheTimestamp.make("2026-11-27T09:00:00.000Z"),
       witnessTestFile: witnessTest,
       witnessClosureSha256: witnessSha,
-      sourceClosureSha256: sourceSha,
-      witnessTestAstDigests: [testAstSha1, testAstSha2],
+      twoTierWitness: {
+        sourceClosureSha256: sourceSha,
+        witnessSupportSha256: supportSha,
+        witnessTestAstDigests: [testAstSha1, testAstSha2],
+      },
       mac,
     })
 
     const encodedEntry = Schema.encodeSync(MutationCacheEntry)(entry)
     const roundTrippedEntry = Schema.decodeSync(MutationCacheEntry)(encodedEntry)
-    expect(roundTrippedEntry.sourceClosureSha256).toBe(sourceSha)
-    expect(roundTrippedEntry.witnessTestAstDigests).toEqual([testAstSha1, testAstSha2])
+    expect(roundTrippedEntry.twoTierWitness?.sourceClosureSha256).toBe(sourceSha)
+    expect(roundTrippedEntry.twoTierWitness?.witnessSupportSha256).toBe(supportSha)
+    expect(roundTrippedEntry.twoTierWitness?.witnessTestAstDigests).toEqual([
+      testAstSha1,
+      testAstSha2,
+    ])
 
     const lookupInput = Schema.decodeSync(MutationCacheLookupInput)({
       candidateKeys: [keySha],
@@ -268,24 +276,45 @@ describe("SPEC-0037 review-loop resilience contracts", () => {
       sourceClosureDigests: {
         [sourceFile]: sourceSha,
       },
+      witnessSupportDigests: {
+        [witnessTest]: supportSha,
+      },
       witnessTestAstDigests: {
         [witnessTest]: [testAstSha1, testAstSha2],
       },
     })
 
     expect(lookupInput.sourceClosureDigests?.[sourceFile]).toBe(sourceSha)
+    expect(lookupInput.witnessSupportDigests?.[witnessTest]).toBe(supportSha)
     expect(lookupInput.witnessTestAstDigests?.[witnessTest]).toEqual([testAstSha1, testAstSha2])
 
     expectDecodeFailure(
       Schema.decodeExit(MutationCacheEntry)({
         ...encodedEntry,
-        sourceClosureSha256: "not-a-sha256",
+        twoTierWitness: {
+          sourceClosureSha256: "not-a-sha256",
+          witnessSupportSha256: supportSha,
+          witnessTestAstDigests: [testAstSha1],
+        },
+      }),
+    )
+    expectDecodeFailure(
+      Schema.decodeUnknownExit(MutationCacheEntry)({
+        ...encodedEntry,
+        twoTierWitness: {
+          sourceClosureSha256: sourceSha,
+          witnessTestAstDigests: [testAstSha1],
+        },
       }),
     )
     expectDecodeFailure(
       Schema.decodeExit(MutationCacheEntry)({
         ...encodedEntry,
-        witnessTestAstDigests: ["bad-sha"],
+        twoTierWitness: {
+          sourceClosureSha256: sourceSha,
+          witnessSupportSha256: supportSha,
+          witnessTestAstDigests: ["bad-sha"],
+        },
       }),
     )
     expectDecodeFailure(

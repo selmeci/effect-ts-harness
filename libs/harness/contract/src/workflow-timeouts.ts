@@ -1,8 +1,21 @@
 import { Match, Result, Schema } from "effect"
 import { ErrorReasonMessage } from "./workspace-and-process.js"
 
-/** Canonical stage count matching `SHIP_STAGES.length` in `./workflow.js` (kept local to avoid a circular ESM import via `workflow -> review-routing -> workflow-timeouts`). */
-const SHIP_STAGE_COUNT = 6
+/** Canonical ordered stages executed by `ShipWorkflow` (`SPEC-0027`, `SPEC-0036`). */
+export const SHIP_STAGES = [
+  "format-check",
+  "gc-strict",
+  "ontology-check-strict",
+  "mutate-strict",
+  "verify",
+  "done",
+] as const
+
+export const ShipStage = Schema.Literals(SHIP_STAGES)
+export type ShipStage = typeof ShipStage.Type
+
+/** Canonical stage count derived directly from `SHIP_STAGES.length` so timeout budgets never drift. */
+export const SHIP_STAGE_COUNT = SHIP_STAGES.length
 
 const MAX_SETTLE_TIMEOUT_MS = 2_147_483_647
 

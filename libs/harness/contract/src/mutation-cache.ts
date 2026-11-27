@@ -111,6 +111,14 @@ export const RuntimeVersionTag = Schema.NonEmptyString.pipe(
 )
 export type RuntimeVersionTag = typeof RuntimeVersionTag.Type
 
+/** Grouped Tier-1/Tier-2 witness digests — all three fields must be present together. */
+export const MutationTwoTierWitness = Schema.Struct({
+  sourceClosureSha256: ContentSha256,
+  witnessSupportSha256: ContentSha256,
+  witnessTestAstDigests: Schema.Array(ContentSha256),
+})
+export type MutationTwoTierWitness = typeof MutationTwoTierWitness.Type
+
 export const MutationCacheEntry = Schema.Struct({
   key: ContentSha256,
   file: AstSourceFilePath,
@@ -122,9 +130,7 @@ export const MutationCacheEntry = Schema.Struct({
   lastAccessedAt: Schema.optional(MutationCacheTimestamp),
   witnessTestFile: AstSourceFilePath,
   witnessClosureSha256: ContentSha256,
-  sourceClosureSha256: Schema.optional(ContentSha256),
-  witnessSupportSha256: Schema.optional(ContentSha256),
-  witnessTestAstDigests: Schema.optional(Schema.Array(ContentSha256)),
+  twoTierWitness: Schema.optional(MutationTwoTierWitness),
   mac: MutationCacheMac,
 })
 export type MutationCacheEntry = typeof MutationCacheEntry.Type

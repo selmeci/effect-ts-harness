@@ -387,6 +387,7 @@ export {
   DEFAULT_DECISION_MODEL_TIMEOUT_MS,
   DEFAULT_LSP_WATCHDOG_TIMEOUT_MS,
   MultiStageTimeoutBudgetInput,
+  SHIP_STAGE_COUNT,
   WORKFLOW_TIMEOUT_BUDGETS,
   WorkflowPollAttempts,
   WorkflowPollBudget,
@@ -398,6 +399,15 @@ export {
   validateWorkflowTimeoutBudgets,
 } from "./workflow-timeouts.js"
 export {
+  DEFAULT_MAX_INTERRUPT_RETRIES,
+  GuardDecisionInput,
+  GuardDecisionResult,
+  GuardFastPathVerdict,
+  GuardModelErrorDetail,
+  GuardModelOutcome,
+  GuardReasonText,
+  GuardRiskProbability,
+  GuardVerdictAction,
   LspCommandName,
   LspDiagnosticHint,
   LspDiagnosticsTimeoutError,
@@ -405,6 +415,8 @@ export {
   OllamaModelName,
   OllamaWarmupError,
   OllamaWarmupStage,
+  PolicyFastPathInput,
+  ShellCommandText,
 } from "./review-resilience.js"
 export {
   WORKFLOW_ACTIVITY_DECODERS,
@@ -520,6 +532,7 @@ export {
   MutationCacheVersion,
   MutationEpochMillis,
   MutationMaxAgeMillis,
+  MutationTwoTierWitness,
   PackageBatchFileOutputSchema,
   type PackageBatchFileOutput,
   PackageRelKey,
