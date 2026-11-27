@@ -902,7 +902,7 @@ describe("harness-mcp daemon, LSP, ontology & knowledge tools", () => {
           surface: "mcp",
           category: "gate",
           toolName: "harness_lsp_diagnostics",
-          outcome: "fail",
+          outcome: "diagnostics_found",
           durationMs: 15,
           engineSource: "local",
         })

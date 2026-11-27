@@ -17,6 +17,10 @@ import {
   UnknownToolError,
 } from "./mcp-helpers.js"
 import { buildOntologyAndGqToolDescriptors } from "./ontology-and-gq.tools.js"
+import {
+  createMcpSingleFlightController,
+  type McpSingleFlightController,
+} from "./mcp-single-flight.js"
 import { buildRetrievalToolDescriptors } from "./retrieval.tools.js"
 import { buildWorkflowPlanToolDescriptors } from "./workflow-plan.tools.js"
 
@@ -68,9 +72,10 @@ export type McpToolHandler = (
 export const buildLiveMcpToolDescriptors = (
   options?: ServerOptions,
   lspSessionCache?: LspSessionCache,
+  singleFlightController?: McpSingleFlightController,
 ): ReadonlyArray<McpToolPluginDescriptor> => [
-  ...buildGraphNavigationToolDescriptors(options),
-  ...buildOntologyAndGqToolDescriptors(options),
+  ...buildGraphNavigationToolDescriptors(options, singleFlightController),
+  ...buildOntologyAndGqToolDescriptors(options, singleFlightController),
   ...buildLspAndTelemetryToolDescriptors(options, lspSessionCache),
   ...buildDatalogAndDpoToolDescriptors(options),
   ...buildGitDiffToolDescriptors(options),
@@ -95,7 +100,18 @@ export const makeLiveMcpToolRegistryLayer = (
             }
           }),
       )
-      return yield* buildRegistryService(buildLiveMcpToolDescriptors(options, lspSessionCache))
+      const singleFlightController = yield* Effect.acquireRelease(
+        Effect.sync(() => options?.singleFlightController ?? createMcpSingleFlightController()),
+        (controller) =>
+          Effect.sync(() => {
+            if (options?.singleFlightController === undefined) {
+              controller.clear()
+            }
+          }),
+      )
+      return yield* buildRegistryService(
+        buildLiveMcpToolDescriptors(options, lspSessionCache, singleFlightController),
+      )
     }),
   )
 
