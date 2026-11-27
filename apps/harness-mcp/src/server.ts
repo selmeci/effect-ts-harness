@@ -15,7 +15,11 @@ import {
   type HarnessDaemonServerHandle,
   startHarnessDaemonServer,
 } from "./daemon/unix-socket-daemon.js"
-import { executeManagedMcpTool, makeMcpManagedRuntime } from "./managed-runtime.js"
+import {
+  executeManagedMcpTool,
+  launchBackgroundOllamaWarmup,
+  makeMcpManagedRuntime,
+} from "./managed-runtime.js"
 import {
   attachServerCloseRuntimeDisposal,
   formatMcpToolExit,
@@ -56,9 +60,21 @@ export {
   makeMcpManagedRuntime,
 } from "./managed-runtime.js"
 export {
+  extractTs2484CycleHint,
+  LspDiagnostics,
+  type LspDiagnosticsExecutionOptions,
   type LspDiagnosticsReport,
+  resolveLspWatchdogTimeoutMs,
   runDefaultLspDiagnostics,
+  runLspDiagnosticsWithWatchdog,
 } from "./tools/lsp-and-telemetry.tools.js"
+export {
+  createMcpSingleFlightController,
+  McpSingleFlight,
+  type McpSingleFlightController,
+  type McpSingleFlightControllerOptions,
+  runMcpSingleFlight,
+} from "./tools/mcp-single-flight.js"
 export { hasValidWorkspaceRootMarker, resolveDaemonStartupRepoRoot } from "./tools/mcp-repo-root.js"
 export {
   isPathInsideRoot,
@@ -148,11 +164,13 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   const server = createServer()
   const transport = new StdioServerTransport()
   const cliRuntime = ManagedRuntime.make(NodeServices.layer)
+  const startupRepoRoot = resolveDaemonStartupRepoRoot(process.cwd())
   let daemonHandle: HarnessDaemonServerHandle | undefined = undefined
   let shuttingDown = false
+  launchBackgroundOllamaWarmup(cliRuntime, startupRepoRoot)
   const daemonStartupPromise: Promise<HarnessDaemonServerHandle | undefined> =
     process.env.HARNESS_DAEMON_SOCK !== "0"
-      ? startHarnessDaemonServer(resolveDaemonStartupRepoRoot(process.cwd()), {
+      ? startHarnessDaemonServer(startupRepoRoot, {
           workflowEngine: { mode: "auto" },
         })
           .then((handle) => {

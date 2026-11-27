@@ -48,6 +48,7 @@ import type {
   LspSessionCacheOptions,
   LspTsgoExecutor,
 } from "./lsp-session-cache.js"
+import type { McpSingleFlightController } from "./mcp-single-flight.js"
 import {
   findRepoRoot,
   hasIntermediateRepoBoundary,
@@ -119,6 +120,11 @@ export interface LspDiagnosticsReport {
     readonly warnings: number
     readonly messages: number
   }
+  readonly timedOut?: boolean | undefined
+  readonly toolError?: boolean | undefined
+  readonly errorTag?: "LspDiagnosticsTimeoutError" | undefined
+  readonly timeoutMs?: number | undefined
+  readonly cycleHint?: string | undefined
 }
 
 export interface ServerOptions {
@@ -143,6 +149,8 @@ export interface ServerOptions {
   readonly lspSessionCache?: LspSessionCache | undefined
   readonly lspSessionCacheOptions?: LspSessionCacheOptions | undefined
   readonly lspTsgoExecutor?: LspTsgoExecutor | undefined
+  readonly lspWatchdogTimeoutMs?: number | undefined
+  readonly singleFlightController?: McpSingleFlightController | undefined
 }
 
 export const shouldSuppressLiveMcpTestSideEffects = (
@@ -414,7 +422,7 @@ const formatLspFailDetail = (
   result: unknown,
 ): string | undefined => {
   const isFailOutcome = match(outcome)
-    .with("fail", () => true)
+    .with("fail", "diagnostics_found", "timeout", "tool_error", () => true)
     .with("ok", "fallback", "ask", "deny", () => false)
     .exhaustive()
   if (
@@ -499,25 +507,41 @@ export const recordMcpToolTelemetry = (
     .otherwise(() => "local" as const)
 
   const degradedReason = extractDegradedReason(result)
-  const isCleanFalseFail =
-    (toolName === "harness_lsp_diagnostics" || toolName === "harness_ontology_check") &&
+  const isLspTimedOut =
+    toolName === "harness_lsp_diagnostics" &&
     typeof result === "object" &&
     result !== null &&
-    "clean" in result &&
-    result.clean === false
+    Reflect.get(result, "timedOut") === true
+  const isLspToolError =
+    toolName === "harness_lsp_diagnostics" &&
+    typeof result === "object" &&
+    result !== null &&
+    Reflect.get(result, "toolError") === true
+  const isCleanFalse =
+    typeof result === "object" && result !== null && "clean" in result && result.clean === false
   const isMemoryFallback = match(engineSource)
     .with("memory-fallback", () => true)
     .with("omnigraph", "local", "decision-model", () => false)
     .exhaustive()
   const outcome: TelemetryOutcome =
-    degradedReason !== undefined
-      ? "fallback"
-      : (toolName === "harness_gq_query" || toolName === "harness_search_knowledge") &&
-          isMemoryFallback
+    toolName === "harness_lsp_diagnostics"
+      ? isLspTimedOut
+        ? "timeout"
+        : isLspToolError
+          ? "tool_error"
+          : degradedReason !== undefined
+            ? "fallback"
+            : isCleanFalse
+              ? "diagnostics_found"
+              : "ok"
+      : degradedReason !== undefined
         ? "fallback"
-        : isCleanFalseFail
-          ? "fail"
-          : "ok"
+        : (toolName === "harness_gq_query" || toolName === "harness_search_knowledge") &&
+            isMemoryFallback
+          ? "fallback"
+          : toolName === "harness_ontology_check" && isCleanFalse
+            ? "fail"
+            : "ok"
 
   const detail =
     degradedReason !== undefined
