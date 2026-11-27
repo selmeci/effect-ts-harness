@@ -60,6 +60,7 @@ enforced_by:
   - apps/harness-mcp/src/tools/graph-navigation.tools.ts
   - apps/harness-mcp/src/tools/lsp-and-telemetry.tools.ts
   - apps/harness-mcp/src/tools/lsp-watchdog.ts
+  - apps/harness-mcp/src/tools/lsp-watchdog-helpers.ts
   - apps/harness-mcp/src/tools/mcp-helpers.ts
   - apps/harness-mcp/src/tools/mcp-single-flight.ts
   - apps/harness-mcp/src/tools/ontology-and-gq.tools.ts
