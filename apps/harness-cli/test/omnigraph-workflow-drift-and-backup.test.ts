@@ -159,10 +159,21 @@ describe("RFC-0013 WF-2 CLI Drift, Policy, Backup, and Spans", () => {
     expect(queryDrift.action._tag).toBe("LiveClusterApply")
     writeClusterDriftReceipts(clusterDir, queryDrift.expectedStamp, configDir)
 
-    // 3. Edge @key(...) edit in workflows.schema.pg -> RequiresCleanRebuild
+    // 3. Adding a new edge in workflows.schema.pg -> LiveClusterApply, then modifying its @key(...) -> RequiresCleanRebuild
     writeFileSync(
       join(configDir, "workflows.schema.pg"),
       "node WfMessage {\n  messageKey: String @key\n  seqKey: String @index\n}\nedge WfEdge: WfMessage -> WfMessage { @key(@src, @dst, role) role: String }\n",
+      "utf8",
+    )
+    const additiveEdgeDrift = await Effect.runPromise(
+      evaluateClusterConfigDrift(clusterDir, configDir, true),
+    )
+    expect(additiveEdgeDrift.action._tag).toBe("LiveClusterApply")
+    writeClusterDriftReceipts(clusterDir, additiveEdgeDrift.expectedStamp, configDir)
+
+    writeFileSync(
+      join(configDir, "workflows.schema.pg"),
+      "node WfMessage {\n  messageKey: String @key\n  seqKey: String @index\n}\nedge WfEdge: WfMessage -> WfMessage { @key(@src, @dst) role: String }\n",
       "utf8",
     )
     const edgeKeyDrift = await Effect.runPromise(

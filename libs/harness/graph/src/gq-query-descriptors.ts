@@ -19,6 +19,8 @@ export const HARNESS_GQ_QUERY_NAMES = [
   "rank_candidate_services_for_stub",
   "policy_unverified_domain_fns",
   "policy_orphan_effect_signatures",
+  "workflow_pending_units",
+  "ears_without_completed_unit",
 ] as const
 
 export type HarnessGqQueryName = (typeof HARNESS_GQ_QUERY_NAMES)[number]
@@ -445,6 +447,53 @@ export const HARNESS_GQ_QUERIES: Readonly<Record<HarnessGqQueryName, HarnessGqQu
     $sig.callerQualname as callerQualname,
     $sig.file as file
   }
+}`,
+  },
+  workflow_pending_units: {
+    name: "workflow_pending_units",
+    description: "List pending WorkUnit projections belonging to a WorkflowRun",
+    params: ["runId"],
+    source: `query workflow_pending_units($runId: String) {
+  match {
+    $run: WorkflowRun
+    $run.runId = $runId
+    $unit: WorkUnit
+    $run playsRunUnitRole $unit
+    $unit.status = "pending"
+  }
+  return {
+    $unit.unitId as unitId,
+    $unit.waveIndex as waveIndex,
+    $unit.kind as kind
+  }
+  order { $unit.waveIndex asc, $unit.unitId asc }
+}`,
+  },
+  ears_without_completed_unit: {
+    name: "ears_without_completed_unit",
+    description:
+      "Find EarsSpec nodes linked to a WorkflowRun that lack a completed WorkUnit in that run",
+    params: ["runId"],
+    source: `query ears_without_completed_unit($runId: String) {
+  match {
+    $run: WorkflowRun
+    $run.runId = $runId
+    $memberUnit: WorkUnit
+    $spec: EarsSpec
+    $run playsRunUnitRole $memberUnit
+    $memberUnit playsUnitEarsRole $spec
+    not {
+      $unit: WorkUnit
+      $run playsRunUnitRole $unit
+      $unit playsUnitEarsRole $spec
+      $unit.status = "completed"
+    }
+  }
+  return {
+    $spec.id as specId,
+    $spec.path as path
+  }
+  order { $spec.id asc, $spec.path asc }
 }`,
   },
 }

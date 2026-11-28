@@ -105,6 +105,9 @@ const RawWorkflowTimeoutBudgets = Schema.Struct({
   decisionModelTimeoutMs: WorkflowTimeoutMs,
   lspDiagnosticsWatchdogMs: WorkflowTimeoutMs,
   ollamaWarmupProbeMs: WorkflowTimeoutMs,
+  projectorHttpTimeoutMs: WorkflowTimeoutMs,
+  projectorOccMaxAttempts: WorkflowPollAttempts,
+  projectorOccRetryBackoffMs: WorkflowTimeoutMs,
 })
 type RawWorkflowTimeoutBudgets = typeof RawWorkflowTimeoutBudgets.Type
 
@@ -144,6 +147,9 @@ const RAW_WORKFLOW_TIMEOUT_BUDGETS: RawWorkflowTimeoutBudgets = {
   decisionModelTimeoutMs: WorkflowTimeoutMs.make(5_000),
   lspDiagnosticsWatchdogMs: WorkflowTimeoutMs.make(45_000),
   ollamaWarmupProbeMs: WorkflowTimeoutMs.make(10_000),
+  projectorHttpTimeoutMs: WorkflowTimeoutMs.make(10_000),
+  projectorOccMaxAttempts: WorkflowPollAttempts.make(6),
+  projectorOccRetryBackoffMs: WorkflowTimeoutMs.make(100),
 }
 
 const findWorkflowTimeoutBudgetViolation = (
@@ -218,6 +224,17 @@ const findWorkflowTimeoutBudgetViolation = (
   }
   if (budgets.workflowIpcMs <= budgets.decisionModelTimeoutMs) {
     return `workflowIpcMs (${budgets.workflowIpcMs}) must exceed decisionModelTimeoutMs (${budgets.decisionModelTimeoutMs})`
+  }
+  const projectorOccRetryBudgetMs =
+    budgets.projectorOccRetryBackoffMs * (2 ** Math.max(0, budgets.projectorOccMaxAttempts - 1) - 1)
+  if (budgets.projectorHttpTimeoutMs <= projectorOccRetryBudgetMs) {
+    return `projectorHttpTimeoutMs (${budgets.projectorHttpTimeoutMs}) must exceed worst-case exponential OCC retry backoff sum (${projectorOccRetryBudgetMs})`
+  }
+  if (budgets.projectorHttpTimeoutMs > budgets.httpRequestTimeoutMs) {
+    return `projectorHttpTimeoutMs (${budgets.projectorHttpTimeoutMs}) must not exceed httpRequestTimeoutMs (${budgets.httpRequestTimeoutMs})`
+  }
+  if (budgets.workflowIpcMs <= budgets.projectorHttpTimeoutMs) {
+    return `workflowIpcMs (${budgets.workflowIpcMs}) must exceed projectorHttpTimeoutMs (${budgets.projectorHttpTimeoutMs})`
   }
   return undefined
 }

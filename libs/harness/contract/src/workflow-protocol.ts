@@ -22,12 +22,13 @@ export const WorkflowRunAbortTarget = Schema.TaggedUnion({
 })
 export type WorkflowRunAbortTarget = typeof WorkflowRunAbortTarget.Type
 
-/** Closed 19-variant union of canonical `HarnessTaskWorkflow` and `ShipWorkflow` activity names. */
+/** Closed 20-variant union of canonical `HarnessTaskWorkflow` and `ShipWorkflow` activity names. */
 export const WorkflowActivityTag = Schema.TaggedUnion({
   ProvisionWorktrees: {},
   ProjectRunStarted: {},
   ProjectRunWaitingLlmPhase: {},
   ProjectRunCompleted: {},
+  ProjectWaveToHarness: { waveIndex: WaveIndex },
   RouteReview: {},
   RunGate: { stage: ShipStage },
   ProjectRunAborted: { target: WorkflowRunAbortTarget },
@@ -106,6 +107,9 @@ export const encodeWorkflowActivityName = (tag: WorkflowActivityTag): WorkflowAc
           WorkflowActivityName.make(`ProjectRunAborted/merge/${waveIndex}/${escalationOrdinal}`),
         )
         .exhaustive(),
+    )
+    .with({ _tag: "ProjectWaveToHarness" }, ({ waveIndex }) =>
+      WorkflowActivityName.make(`ProjectWaveToHarness/${waveIndex}`),
     )
     .with({ _tag: "MergeSliceWave" }, ({ waveIndex, escalationOrdinal }) =>
       WorkflowActivityName.make(`MergeSliceWave/${waveIndex}${cycleSuffix(escalationOrdinal)}`),
@@ -320,6 +324,15 @@ export const WORKFLOW_ACTIVITY_DECODERS = {
   ProjectRunCompleted: makeZeroArgActivityDecoder(() =>
     WorkflowActivityTag.cases.ProjectRunCompleted.make({}),
   ),
+  ProjectWaveToHarness: (raw, segs) => {
+    if (segs.length !== 2) {
+      return failProtocol("activity", raw, "invalid ProjectWaveToHarness segment count")
+    }
+    const waveIndex = parseWaveIndexSegment(segs[1]!)
+    return waveIndex !== undefined
+      ? Result.succeed(WorkflowActivityTag.cases.ProjectWaveToHarness.make({ waveIndex }))
+      : failProtocol("activity", raw, "invalid ProjectWaveToHarness waveIndex")
+  },
   RouteReview: makeZeroArgActivityDecoder(() => WorkflowActivityTag.cases.RouteReview.make({})),
   RunGate: (raw, segs) => {
     if (segs.length !== 2) {

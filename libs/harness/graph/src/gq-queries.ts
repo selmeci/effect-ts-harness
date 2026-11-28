@@ -554,4 +554,5 @@ export const executeNamedGqQueryInMemory = (
       }
       return results
     })
+    .with("workflow_pending_units", "ears_without_completed_unit", () => [])
     .exhaustive()

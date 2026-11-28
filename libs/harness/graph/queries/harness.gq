@@ -332,3 +332,41 @@ query policy_orphan_effect_signatures() {
     $sig.file as file
   }
 }
+
+query workflow_pending_units($runId: String) {
+  match {
+    $run: WorkflowRun
+    $run.runId = $runId
+    $unit: WorkUnit
+    $run playsRunUnitRole $unit
+    $unit.status = "pending"
+  }
+  return {
+    $unit.unitId as unitId,
+    $unit.waveIndex as waveIndex,
+    $unit.kind as kind
+  }
+  order { $unit.waveIndex asc, $unit.unitId asc }
+}
+
+query ears_without_completed_unit($runId: String) {
+  match {
+    $run: WorkflowRun
+    $run.runId = $runId
+    $memberUnit: WorkUnit
+    $spec: EarsSpec
+    $run playsRunUnitRole $memberUnit
+    $memberUnit playsUnitEarsRole $spec
+    not {
+      $unit: WorkUnit
+      $run playsRunUnitRole $unit
+      $unit playsUnitEarsRole $spec
+      $unit.status = "completed"
+    }
+  }
+  return {
+    $spec.id as specId,
+    $spec.path as path
+  }
+  order { $spec.id asc, $spec.path asc }
+}

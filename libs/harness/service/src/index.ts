@@ -80,6 +80,8 @@ export {
   type WorkflowGraphBackupShape,
   WorkflowProjectionWriter,
   type WorkflowProjectionWriterShape,
+  WorkflowProjector,
+  type WorkflowProjectorShape,
   WorkflowReadModelQuery,
   type WorkflowReadModelQueryShape,
   WorkflowReviewRouter,

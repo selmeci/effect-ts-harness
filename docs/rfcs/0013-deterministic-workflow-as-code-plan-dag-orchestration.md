@@ -1,9 +1,9 @@
 ---
 rfc: RFC-0013
 title: Durable Effect v4 Workflow Orchestration of Route D Epics and Package Waves (Omnigraph-Backed Engine, Claude Code and Antigravity Runners)
-status: draft (WF-0 complete, WF-1 landed [SPEC-0017]; WF-2..WF-6 pending)
+status: accepted (WF-0..WF-6 landed [SPEC-0017, SPEC-0021, SPEC-0023, SPEC-0032, SPEC-0036, SPEC-0038])
 created: 2026-11-16
-updated: 2026-11-19
+updated: 2026-11-28
 authors:
   - "@Roman Selmeci"
 target_packages:
@@ -30,6 +30,11 @@ target_adrs:
   - "harness:ADR-0018"
 target_specs:
   - "harness:SPEC-0017"
+  - "harness:SPEC-0021"
+  - "harness:SPEC-0023"
+  - "harness:SPEC-0032"
+  - "harness:SPEC-0036"
+  - "harness:SPEC-0038"
 ---
 
 # RFC-0013: Durable Effect v4 Workflow Orchestration of Route D Epics and Package Waves

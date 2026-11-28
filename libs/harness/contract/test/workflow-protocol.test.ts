@@ -112,6 +112,7 @@ const activityTagArb: Arbitrary.Arbitrary<WorkflowActivityTag> = Arbitrary.map(
         "ProjectRunStarted",
         "ProjectRunWaitingLlmPhase",
         "ProjectRunCompleted",
+        "ProjectWaveToHarness",
         "RouteReview",
         "RunGate",
         "ProjectRunAborted",
@@ -144,6 +145,9 @@ const activityTagArb: Arbitrary.Arbitrary<WorkflowActivityTag> = Arbitrary.map(
         WorkflowActivityTag.cases.ProjectRunWaitingLlmPhase.make({}),
       )
       .with("ProjectRunCompleted", () => WorkflowActivityTag.cases.ProjectRunCompleted.make({}))
+      .with("ProjectWaveToHarness", () =>
+        WorkflowActivityTag.cases.ProjectWaveToHarness.make({ waveIndex }),
+      )
       .with("RouteReview", () => WorkflowActivityTag.cases.RouteReview.make({}))
       .with("RunGate", () => WorkflowActivityTag.cases.RunGate.make({ stage: shipStage }))
       .with("ProjectRunAborted", () =>
@@ -237,7 +241,7 @@ const deferredTagArb: Arbitrary.Arbitrary<WorkflowDeferredTag> = Arbitrary.map(
 )
 
 describe("workflow-protocol & workflow-timeouts", () => {
-  it("encodes and decodes all 19 WorkflowActivityTag variants including 'merge' WorkUnitId disambiguation", () => {
+  it("encodes and decodes all 20 WorkflowActivityTag variants including 'merge' WorkUnitId disambiguation", () => {
     const unitId = WorkUnitId.make("unit-a")
     const mergeNamedUnit = WorkUnitId.make("merge")
     const a1 = AttemptNumber.make(1)
@@ -252,6 +256,14 @@ describe("workflow-protocol & workflow-timeouts", () => {
       [WorkflowActivityTag.cases.ProjectRunStarted.make({}), "ProjectRunStarted"],
       [WorkflowActivityTag.cases.ProjectRunWaitingLlmPhase.make({}), "ProjectRunWaitingLlmPhase"],
       [WorkflowActivityTag.cases.ProjectRunCompleted.make({}), "ProjectRunCompleted"],
+      [
+        WorkflowActivityTag.cases.ProjectWaveToHarness.make({ waveIndex: w0 }),
+        "ProjectWaveToHarness/0",
+      ],
+      [
+        WorkflowActivityTag.cases.ProjectWaveToHarness.make({ waveIndex: w2 }),
+        "ProjectWaveToHarness/2",
+      ],
       [WorkflowActivityTag.cases.RouteReview.make({}), "RouteReview"],
       ...SHIP_STAGES.map(
         (stage) => [WorkflowActivityTag.cases.RunGate.make({ stage }), `RunGate/${stage}`] as const,
@@ -433,6 +445,13 @@ describe("workflow-protocol & workflow-timeouts", () => {
       "ProjectRunAborted/merge/bad/1",
       "ProjectRunAborted/merge/0/0",
       "ProjectRunAborted/merge/0/1/extra",
+      "ProjectWaveToHarness",
+      "ProjectWaveToHarness/",
+      "ProjectWaveToHarness/-1",
+      "ProjectWaveToHarness/01",
+      "ProjectWaveToHarness/abc",
+      "ProjectWaveToHarness/0/extra",
+      "ProjectWaveToHarness/9007199254740992",
       "MergeSliceWave",
       "MergeSliceWave/-1",
       "MergeSliceWave/01",
@@ -1216,5 +1235,110 @@ describe("workflow-protocol & workflow-timeouts", () => {
       SHIP_STAGES.length * WORKFLOW_TIMEOUT_BUDGETS.shipGateCommandMs,
     )
     expect(propCheck._tag).toBe("Passed")
+  })
+
+  it("validates projector timeout and OCC monotonicity invariants (projectorHttpTimeoutMs, projectorOccMaxAttempts, projectorOccRetryBackoffMs)", () => {
+    expect(WORKFLOW_TIMEOUT_BUDGETS.projectorHttpTimeoutMs).toBe(10_000)
+    expect(WORKFLOW_TIMEOUT_BUDGETS.projectorOccMaxAttempts).toBe(6)
+    expect(WORKFLOW_TIMEOUT_BUDGETS.projectorOccRetryBackoffMs).toBe(100)
+
+    const exactOccBudget =
+      WORKFLOW_TIMEOUT_BUDGETS.projectorOccRetryBackoffMs *
+      (2 ** Math.max(0, WORKFLOW_TIMEOUT_BUDGETS.projectorOccMaxAttempts - 1) - 1)
+    expect(WORKFLOW_TIMEOUT_BUDGETS.projectorHttpTimeoutMs).toBeGreaterThan(exactOccBudget)
+    expect(WORKFLOW_TIMEOUT_BUDGETS.projectorHttpTimeoutMs).toBeLessThanOrEqual(
+      WORKFLOW_TIMEOUT_BUDGETS.httpRequestTimeoutMs,
+    )
+    expect(WORKFLOW_TIMEOUT_BUDGETS.workflowIpcMs).toBeGreaterThan(
+      WORKFLOW_TIMEOUT_BUDGETS.projectorHttpTimeoutMs,
+    )
+
+    // projectorHttpTimeoutMs > worst-case exponential OCC retry backoff sum
+    const occEqualFail = validateWorkflowTimeoutBudgets({
+      ...WORKFLOW_TIMEOUT_BUDGETS,
+      projectorHttpTimeoutMs: WorkflowTimeoutMs.make(exactOccBudget),
+    })
+    match(occEqualFail)
+      .with({ _tag: "Failure" }, ({ failure }) => {
+        expect(failure).toContain("projectorHttpTimeoutMs")
+        expect(failure).toContain("worst-case exponential OCC retry backoff sum")
+      })
+      .with({ _tag: "Success" }, () =>
+        expect.unreachable("Expected projectorHttpTimeoutMs == occRetryBudgetMs to fail"),
+      )
+      .exhaustive()
+    expect(
+      Result.isSuccess(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          projectorHttpTimeoutMs: WorkflowTimeoutMs.make(exactOccBudget + 1),
+        }),
+      ),
+    ).toBe(true)
+
+    // projectorHttpTimeoutMs <= httpRequestTimeoutMs
+    expect(
+      Result.isSuccess(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          projectorHttpTimeoutMs: WORKFLOW_TIMEOUT_BUDGETS.httpRequestTimeoutMs,
+        }),
+      ),
+    ).toBe(true)
+    const httpExceedFail = validateWorkflowTimeoutBudgets({
+      ...WORKFLOW_TIMEOUT_BUDGETS,
+      projectorHttpTimeoutMs: WorkflowTimeoutMs.make(
+        WORKFLOW_TIMEOUT_BUDGETS.httpRequestTimeoutMs + 1,
+      ),
+    })
+    match(httpExceedFail)
+      .with({ _tag: "Failure" }, ({ failure }) => {
+        expect(failure).toContain("projectorHttpTimeoutMs")
+        expect(failure).toContain("httpRequestTimeoutMs")
+      })
+      .with({ _tag: "Success" }, () =>
+        expect.unreachable("Expected projectorHttpTimeoutMs > httpRequestTimeoutMs to fail"),
+      )
+      .exhaustive()
+
+    // workflowIpcMs > projectorHttpTimeoutMs
+    const equalIpcAndProjector = WORKFLOW_TIMEOUT_BUDGETS.workflowIpcMs
+    const ipcEqualFail = validateWorkflowTimeoutBudgets({
+      ...WORKFLOW_TIMEOUT_BUDGETS,
+      httpRequestTimeoutMs: equalIpcAndProjector,
+      projectorHttpTimeoutMs: equalIpcAndProjector,
+    })
+    match(ipcEqualFail)
+      .with({ _tag: "Failure" }, ({ failure }) => {
+        expect(failure).toContain("workflowIpcMs")
+        expect(failure).toContain("projectorHttpTimeoutMs")
+      })
+      .with({ _tag: "Success" }, () =>
+        expect.unreachable("Expected workflowIpcMs == projectorHttpTimeoutMs to fail"),
+      )
+      .exhaustive()
+    expect(
+      Result.isSuccess(
+        validateWorkflowTimeoutBudgets({
+          ...WORKFLOW_TIMEOUT_BUDGETS,
+          httpRequestTimeoutMs: equalIpcAndProjector,
+          projectorHttpTimeoutMs: WorkflowTimeoutMs.make(equalIpcAndProjector - 1),
+        }),
+      ),
+    ).toBe(true)
+
+    // Schema-level decode enforcement
+    const badProjectorSchemaExit = Schema.decodeExit(WorkflowTimeoutBudgets)({
+      ...WORKFLOW_TIMEOUT_BUDGETS,
+      projectorHttpTimeoutMs: WorkflowTimeoutMs.make(exactOccBudget),
+    })
+    match(badProjectorSchemaExit)
+      .with({ _tag: "Failure" }, ({ cause }) => expect(Cause.hasFails(cause)).toBe(true))
+      .with({ _tag: "Success" }, () =>
+        expect.unreachable(
+          "Expected Schema WorkflowTimeoutBudgets to reject inverted projector budget",
+        ),
+      )
+      .exhaustive()
   })
 })

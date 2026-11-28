@@ -18,6 +18,7 @@ import {
 } from "@harness/contract"
 import {
   OmnigraphClient,
+  isLoopbackOmnigraphUrl,
   readAuthTokensFromClusterDir,
   resolveGitCommonDir,
   resolveOmnigraphClusterDir,
@@ -95,7 +96,9 @@ export const decodeAbsClusterRepoRoot = (clusterRepoRoot: string): AbsoluteRepoR
     .exhaustive()
 
 export const makeWorkflowClientForCluster = (baseUrl: string, clusterRootDir: string) => {
-  const cliToken = readAuthTokensFromClusterDir(clusterRootDir, nodeSyncHostIo, "harness-cli")
+  const cliToken = isLoopbackOmnigraphUrl(baseUrl)
+    ? readAuthTokensFromClusterDir(clusterRootDir, nodeSyncHostIo, "harness-cli")
+    : undefined
   return new OmnigraphClient({
     baseUrl,
     graphId: WORKFLOW_OMNIGRAPH_GRAPH_ID,

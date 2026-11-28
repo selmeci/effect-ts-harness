@@ -10,6 +10,8 @@ import {
   EscalationOrdinal,
   GateExitCode,
   MaxConcurrency,
+  NonNegativeCount,
+  OmnigraphBranchName,
   OwnedRelPath,
   PackageVerifyFailureDetail,
   SHARED_STEP_UNIT_ID,
@@ -17,8 +19,13 @@ import {
   TaskRunAbortedError,
   type UnitAgentRequest,
   UnitOutcome,
+  WaveIndex,
   WorkUnitId,
+  WorkflowProjectionOutcome,
+  WorkflowProjectionTargetBranch,
   WorkflowRunId as WorkflowRunIdSchema,
+  WorkflowStoreFailureReason,
+  isPureInterruptCause,
 } from "@harness/contract"
 import {
   UnitAgentDispatcher,
@@ -27,6 +34,8 @@ import {
   WorkflowReviewRouter,
   WorkflowWorktreePort,
 } from "@harness/service"
+import { runWithTestTracer } from "@harness/ingest"
+import { decideSpanBudgets, type SpanSample } from "../src/span-budget.js"
 import {
   HarnessTaskWorkflow,
   HarnessTaskWorkflowLayer,
@@ -34,16 +43,20 @@ import {
   makeUnitCompletionDeferred,
   makeUnitEscalationDeferred,
 } from "../src/index.js"
+import { projectWaveToHarnessActivity } from "../src/harness-task-workflow-projections.js"
 import {
   CANONICAL_ROOT,
   BASE_SHA,
   PLAN_SHA,
+  defaultWorkflowProjectorLayer,
+  emptyFnIndex,
   makeSliceUnit,
   makePackageUnit,
   makeLlmReceipt,
   makeReviewPlan,
   makeCompletedOutcome,
   makeSpyState,
+  makeWorkflowProjectorTestLayer,
   makeWorkflowTestLayer,
 } from "./helpers/harness-task-workflow-fixture.js"
 
@@ -768,6 +781,7 @@ describe("HarnessTaskWorkflow execution, waves & merges", () => {
             upsertUnit: () => Effect.void,
             upsertAttempt: () => Effect.void,
           }),
+          defaultWorkflowProjectorLayer,
         )
         const layer = HarnessTaskWorkflowLayer.pipe(
           Layer.provide(portsLayer),
@@ -884,6 +898,7 @@ describe("HarnessTaskWorkflow execution, waves & merges", () => {
                 .exhaustive(),
             upsertAttempt: () => Effect.void,
           }),
+          defaultWorkflowProjectorLayer,
         )
         const layer = HarnessTaskWorkflowLayer.pipe(
           Layer.provide(portsLayer),
@@ -922,6 +937,318 @@ describe("HarnessTaskWorkflow execution, waves & merges", () => {
             )
             .exhaustive()
         }).pipe(Effect.provide(layer))
+      }),
+    20_000,
+  )
+
+  it.live(
+    "RFC-0013 REQ-4.5: projectWaveToHarnessActivity runs once per wave after units and L1 merge with trigger='wave' and ActiveTaskImplBranch, and memoises on replay",
+    () =>
+      Effect.gen(function* () {
+        const spy = makeSpyState()
+        const waitLlm = yield* Deferred.make<void>()
+        spy.onWaitLlm = waitLlm
+
+        const w0 = makeSliceUnit("slice-w0", "slice/epic-w0", ["libs/w0/src/index.ts"], 0)
+        const w1 = makeSliceUnit("slice-w1", "slice/epic-w1", ["libs/w1/src/index.ts"], 1, [
+          "slice-w0",
+        ])
+        const plan: CompiledPlan = {
+          runId: WorkflowRunIdSchema.make("run-wave-proj-011"),
+          level: "epic",
+          planSha: PLAN_SHA,
+          baseSha: BASE_SHA,
+          mode: {
+            _tag: "Automatic",
+            runner: "claude-code",
+            maxConcurrency: MaxConcurrency.make(2),
+          },
+          units: [w0, w1],
+          sharedStepPaths: [],
+        }
+
+        const orderedEvents: Array<string> = []
+        const layer = makeWorkflowTestLayer(spy, {
+          completeUnit: ({ unitId, attempt }) => {
+            orderedEvents.push(`unit:${unitId}`)
+            return makeCompletedOutcome(unitId, attempt)
+          },
+          mergeWave: (input) => {
+            orderedEvents.push(`merge:${input.waveIndex}`)
+            return { _tag: "Merged", mergedBranches: input.branches }
+          },
+          projectWorkflowRun: (input, callIndex) => {
+            orderedEvents.push(`projectWave:${callIndex - 1}`)
+            return Effect.succeed(
+              WorkflowProjectionOutcome.cases.Projected.make({
+                runId: input.runId,
+                branch: OmnigraphBranchName.make("impl/wave-proj-011"),
+                projectionStatus: "fresh",
+                commitId: null,
+                counts: {
+                  runsUpserted: NonNegativeCount.make(1),
+                  unitsUpserted: NonNegativeCount.make(2),
+                  attemptsUpserted: NonNegativeCount.make(2),
+                  edgesUpserted: NonNegativeCount.make(2),
+                },
+              }),
+            )
+          },
+        })
+
+        yield* Effect.gen(function* () {
+          const executionId = yield* HarnessTaskWorkflow.execute({ plan }, { discard: true })
+          yield* Deferred.await(waitLlm)
+
+          expect(orderedEvents).toEqual([
+            "unit:slice-w0",
+            "merge:0",
+            "projectWave:0",
+            "unit:slice-w1",
+            "merge:1",
+            "projectWave:1",
+          ])
+          expect(spy.waveProjectCalls).toEqual([
+            {
+              runId: plan.runId,
+              targetBranch: WorkflowProjectionTargetBranch.cases.ActiveTaskImplBranch.make({}),
+              trigger: "wave",
+              repoRoot: CANONICAL_ROOT,
+            },
+            {
+              runId: plan.runId,
+              targetBranch: WorkflowProjectionTargetBranch.cases.ActiveTaskImplBranch.make({}),
+              trigger: "wave",
+              repoRoot: CANONICAL_ROOT,
+            },
+          ])
+
+          yield* DurableDeferred.succeed(LlmPhaseDone, {
+            token: DurableDeferred.tokenFromExecutionId(LlmPhaseDone, {
+              workflow: HarnessTaskWorkflow,
+              executionId,
+            }),
+            value: makeLlmReceipt(),
+          })
+
+          const receipt = yield* HarnessTaskWorkflow.execute({ plan })
+          expect(receipt.completedUnits).toEqual([w0.unitId, w1.unitId])
+          expect(spy.waveProjectCalls).toHaveLength(2)
+
+          const replayed = yield* HarnessTaskWorkflow.execute({ plan })
+          expect(replayed).toEqual(receipt)
+          expect(spy.waveProjectCalls).toHaveLength(2)
+        }).pipe(Effect.provide(layer))
+      }),
+    20_000,
+  )
+
+  it.live(
+    "RFC-0013 REQ-4.5: HarnessTaskWorkflow completes cleanly when WorkflowProjector.project returns Stale or defects",
+    () =>
+      Effect.gen(function* () {
+        const spy = makeSpyState()
+        const waitLlm = yield* Deferred.make<void>()
+        spy.onWaitLlm = waitLlm
+
+        const p0 = makePackageUnit("pkg-w0", "@harness/w0", ["libs/w0/src/index.ts"], 0)
+        const p1 = makePackageUnit("pkg-w1", "@harness/w1", ["libs/w1/src/index.ts"], 1, ["pkg-w0"])
+        const plan: CompiledPlan = {
+          runId: WorkflowRunIdSchema.make("run-wave-nonfatal-012"),
+          level: "slice",
+          planSha: PLAN_SHA,
+          baseSha: BASE_SHA,
+          mode: {
+            _tag: "Automatic",
+            runner: "claude-code",
+            maxConcurrency: MaxConcurrency.make(1),
+          },
+          units: [p0, p1],
+          sharedStepPaths: [],
+        }
+
+        const layer = makeWorkflowTestLayer(spy, {
+          projectWorkflowRun: (input, callIndex) =>
+            callIndex === 1
+              ? Effect.succeed(
+                  WorkflowProjectionOutcome.cases.Stale.make({
+                    runId: input.runId,
+                    branch: OmnigraphBranchName.make("impl/stale"),
+                    projectionStatus: "stale",
+                    reason: WorkflowStoreFailureReason.make("omnigraph busy"),
+                  }),
+                )
+              : Effect.die(new Error("omnigraph connection refused")),
+        })
+
+        yield* Effect.gen(function* () {
+          const executionId = yield* HarnessTaskWorkflow.execute({ plan }, { discard: true })
+          yield* Deferred.await(waitLlm)
+
+          yield* DurableDeferred.succeed(LlmPhaseDone, {
+            token: DurableDeferred.tokenFromExecutionId(LlmPhaseDone, {
+              workflow: HarnessTaskWorkflow,
+              executionId,
+            }),
+            value: makeLlmReceipt(),
+          })
+
+          const receipt = yield* HarnessTaskWorkflow.execute({ plan })
+          expect(receipt.completedUnits).toEqual([p0.unitId, p1.unitId])
+          expect(spy.waveProjectCalls).toHaveLength(2)
+          expect(spy.removeCalls).toHaveLength(0)
+          expect(spy.runs.get(plan.runId)?.state).toBe("completed")
+        }).pipe(Effect.provide(layer))
+      }),
+    20_000,
+  )
+
+  it.live(
+    "RFC-0013 REQ-4.5: pure fiber interrupt inside WorkflowProjector.project propagates instead of being swallowed",
+    () =>
+      Effect.gen(function* () {
+        const plan: CompiledPlan = {
+          runId: WorkflowRunIdSchema.make("run-wave-interrupt-013"),
+          level: "slice",
+          planSha: PLAN_SHA,
+          baseSha: BASE_SHA,
+          mode: {
+            _tag: "Automatic",
+            runner: "claude-code",
+            maxConcurrency: MaxConcurrency.make(1),
+          },
+          units: [makePackageUnit("pkg-int", "@harness/int", ["libs/int/src/index.ts"], 0)],
+          sharedStepPaths: [],
+        }
+
+        const activity = projectWaveToHarnessActivity(plan, WaveIndex.make(0), CANONICAL_ROOT)
+        const instance = WorkflowEngine.WorkflowInstance.initial(
+          HarnessTaskWorkflow,
+          "exec-wave-interrupt-013",
+        )
+        // Mark suspended so Activity.make's retryOnInterrupt surfaces the interrupt immediately
+        // instead of sleeping through 10 backoff retries, proving our catchCause did not swallow it.
+        instance.suspended = true
+
+        let calls = 0
+        const projectorLayer = makeWorkflowProjectorTestLayer(() => {
+          calls += 1
+          return Effect.interrupt
+        })
+
+        const exit = yield* activity.execute.pipe(
+          Effect.provideService(WorkflowEngine.WorkflowInstance, instance),
+          Effect.provide(Layer.merge(projectorLayer, WorkflowEngine.layerMemory)),
+          Effect.exit,
+        )
+
+        expect(calls).toBe(1)
+        match(exit)
+          .with({ _tag: "Success" }, () => {
+            expect.unreachable(
+              "Expected pure interrupt from WorkflowProjector.project to propagate",
+            )
+          })
+          .with({ _tag: "Failure" }, ({ cause }) => {
+            expect(isPureInterruptCause(cause)).toBe(true)
+          })
+          .exhaustive()
+
+        // Composite Fail/Die + Interrupt cause is NOT pure interrupt, so it degrades to Stale.
+        const compositeLayer = makeWorkflowProjectorTestLayer(() =>
+          Effect.failCause(Cause.combine(Cause.die(new Error("boom")), Cause.interrupt(0))),
+        )
+
+        const compositeOutcome = yield* activity.execute.pipe(
+          Effect.provideService(WorkflowEngine.WorkflowInstance, instance),
+          Effect.provide(Layer.merge(compositeLayer, WorkflowEngine.layerMemory)),
+        )
+        expect(compositeOutcome._tag).toBe("Stale")
+      }),
+    20_000,
+  )
+
+  it.live(
+    "SPEC-0038 REQ-4.1 TraceTest: Harness.executeTaskWorkflow emits budgeted Harness.executeTaskWorkflow and WorkflowProjector.project spans",
+    () =>
+      Effect.gen(function* () {
+        const spy = makeSpyState()
+        const waitLlm = yield* Deferred.make<void>()
+        spy.onWaitLlm = waitLlm
+
+        const plan: CompiledPlan = {
+          runId: WorkflowRunIdSchema.make("run-wf6-trace-budget-014"),
+          level: "slice",
+          planSha: PLAN_SHA,
+          baseSha: BASE_SHA,
+          mode: {
+            _tag: "Automatic",
+            runner: "claude-code",
+            maxConcurrency: MaxConcurrency.make(1),
+          },
+          units: [makePackageUnit("pkg-trace", "@harness/trace", ["libs/trace/src/index.ts"], 0)],
+          sharedStepPaths: [],
+        }
+
+        const layer = makeWorkflowTestLayer(spy, {
+          completeUnit: ({ unitId, attempt }) => makeCompletedOutcome(unitId, attempt),
+          projectWorkflowRun: (input) =>
+            Effect.succeed(
+              WorkflowProjectionOutcome.cases.Projected.make({
+                runId: input.runId,
+                branch: OmnigraphBranchName.make("impl/trace-014"),
+                projectionStatus: "fresh",
+                commitId: null,
+                counts: {
+                  runsUpserted: NonNegativeCount.make(1),
+                  unitsUpserted: NonNegativeCount.make(1),
+                  attemptsUpserted: NonNegativeCount.make(1),
+                  edgesUpserted: NonNegativeCount.make(1),
+                },
+              }),
+            ).pipe(Effect.withSpan("WorkflowProjector.project")),
+        })
+
+        const { result: receipt, spans } = yield* runWithTestTracer(
+          "HarnessTaskWorkflow.SPEC-0038.REQ-4.1",
+          Effect.gen(function* () {
+            const executionId = yield* HarnessTaskWorkflow.execute({ plan }, { discard: true })
+            yield* Deferred.await(waitLlm)
+            yield* DurableDeferred.succeed(LlmPhaseDone, {
+              token: DurableDeferred.tokenFromExecutionId(LlmPhaseDone, {
+                workflow: HarnessTaskWorkflow,
+                executionId,
+              }),
+              value: makeLlmReceipt(),
+            })
+            return yield* HarnessTaskWorkflow.execute({ plan })
+          }).pipe(Effect.provide(layer)),
+          emptyFnIndex,
+        )
+
+        expect(receipt.completedUnits).toEqual([WorkUnitId.make("pkg-trace")])
+        const spanNames = spans.map((s) => s.name)
+        expect(spanNames).toContain("Harness.executeTaskWorkflow")
+        expect(spanNames).toContain("WorkflowProjector.project")
+
+        const spanSamples: ReadonlyArray<SpanSample> = spans.map((s) => ({
+          spanId: s.spanId,
+          name: s.name,
+          parentSpanId: s.parentSpanId,
+          durationMs: s.durationMs,
+          startTimeMs: s.startTimeMs,
+          endTimeMs: s.endTimeMs,
+          exitTag: match(s.exitTag)
+            .with("Success", () => "Success" as const)
+            .with("Failure", () => "Failure" as const)
+            .with("Defect", () => "Defect" as const)
+            .with("Interrupt", () => "Failure" as const)
+            .with(undefined, () => undefined)
+            .exhaustive(),
+          errorTag: s.errorTag,
+        }))
+        const violations = yield* decideSpanBudgets({ spans: spanSamples })
+        expect(violations).toEqual([])
       }),
     20_000,
   )

@@ -17,6 +17,7 @@ import {
   makeUnitAgentDispatcherLayerFromPort,
   makeUnitVerifierLayer,
   makeWorkflowProjectionWriterLayer,
+  makeWorkflowProjectorLayer,
   makeWorkflowReadModelQueryLayer,
   makeWorkflowReviewRouterLayer,
   makeWorkflowWorktreePortLayer,
@@ -33,6 +34,7 @@ import type {
   UnitAgentDispatcher,
   UnitVerifier,
   WorkflowProjectionWriter,
+  WorkflowProjector,
   WorkflowReadModelQuery,
   WorkflowReviewRouter,
   WorkflowWorktreePort,
@@ -50,6 +52,7 @@ export type WorkflowTaskServices =
   | WorkflowReviewRouter
   | WorkflowProjectionWriter
   | WorkflowReadModelQuery
+  | WorkflowProjector
 
 export type WorkflowPortsServices = WorkflowTaskServices | ShipGateRunner | ShipAttemptStore
 
@@ -82,6 +85,7 @@ export interface WorkflowEngineDaemonOptions {
   readonly reviewRouterLayer?: Layer.Layer<WorkflowReviewRouter> | undefined
   readonly projectionWriterLayer?: Layer.Layer<WorkflowProjectionWriter> | undefined
   readonly readModelQueryLayer?: Layer.Layer<WorkflowReadModelQuery> | undefined
+  readonly workflowProjectorLayer?: Layer.Layer<WorkflowProjector> | undefined
   readonly shipGateRunnerLayer?: Layer.Layer<ShipGateRunner> | undefined
   readonly shipAttemptStoreLayer?: Layer.Layer<ShipAttemptStore> | undefined
   readonly shipGateRunCommand?: ShipGateRunnerOptions["runCommand"] | undefined
@@ -150,6 +154,15 @@ export const buildWorkflowPortsLayer = (
       : dispatcherOptions !== undefined
         ? makeUnitAgentDispatcherLayer(dispatcherOptions)
         : UnitAgentDispatcherLive
+  const effectiveReadModelQueryLayer =
+    options.readModelQueryLayer ?? makeWorkflowReadModelQueryLayer(readModelOptions)
+  const effectiveProjectorLayer =
+    options.workflowProjectorLayer ??
+    makeWorkflowProjectorLayer({
+      repoRoot,
+      ...(options.hostIo !== undefined ? { hostIo: options.hostIo } : {}),
+      ...(options.env !== undefined ? { env: options.env } : {}),
+    }).pipe(Layer.provide(effectiveReadModelQueryLayer))
   let resolved: Layer.Layer<WorkflowPortsServices> =
     options.workflowPortsLayer ??
     Layer.mergeAll(
@@ -167,7 +180,8 @@ export const buildWorkflowPortsLayer = (
         options.hostIo !== undefined ? { hostIo: options.hostIo } : undefined,
       ),
       makeWorkflowProjectionWriterLayer(readModelOptions),
-      makeWorkflowReadModelQueryLayer(readModelOptions),
+      effectiveReadModelQueryLayer,
+      effectiveProjectorLayer,
       makeShipGateRunnerLayer({
         repoRoot,
         ...(options.hostIo !== undefined ? { hostIo: options.hostIo } : {}),
@@ -204,6 +218,9 @@ export const buildWorkflowPortsLayer = (
   }
   if (options.readModelQueryLayer !== undefined) {
     resolved = Layer.merge(resolved, options.readModelQueryLayer)
+  }
+  if (options.workflowProjectorLayer !== undefined) {
+    resolved = Layer.merge(resolved, options.workflowProjectorLayer)
   }
   if (options.shipGateRunnerLayer !== undefined) {
     resolved = Layer.merge(resolved, options.shipGateRunnerLayer)

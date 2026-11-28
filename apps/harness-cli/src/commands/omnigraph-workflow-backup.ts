@@ -1,22 +1,31 @@
 import { join } from "node:path"
-import { Effect, Result, Schema } from "effect"
+import { Cause, Effect, Layer, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   type BackupDirPath,
   type BackupFileHash,
+  isPureInterruptCause,
+  OmnigraphBranchName,
   toBoundedReason,
   WorkflowBackupCount,
   WorkflowBackupFilePath,
   type WorkflowBackupMode,
   type WorkflowBackupSummary,
   WorkflowBackupTimestampMs,
+  WorkflowProjectionTargetBranch,
   type WorkflowRestoreRequest,
   type WorkflowRestoreSummary,
   type WorkflowStoreUnavailableError,
   type WorkspaceFsError,
 } from "@harness/contract"
-import { makeWorkflowGraphBackupLayer, nodeSyncHostIo } from "@harness/infra/omnigraph-session"
-import { WorkflowGraphBackup } from "@harness/service"
+import { HARNESS_OMNIGRAPH_GRAPH_ID, makeOmnigraphClient } from "@harness/graph"
+import {
+  makeWorkflowGraphBackupLayer,
+  makeWorkflowProjectorLayer,
+  makeWorkflowReadModelQueryLayer,
+  nodeSyncHostIo,
+} from "@harness/infra/omnigraph-session"
+import { WorkflowGraphBackup, WorkflowProjector } from "@harness/service"
 import type { SyncHostIo } from "@harness/service/host-io"
 import { isValidLockId, probeOmnigraphServerReady } from "./omnigraph-safety-helpers.js"
 import {
@@ -219,7 +228,46 @@ export const afterRebuildWorkflowBackup = Effect.fn("OmnigraphWorkflowBackup.aft
     WorkflowGraphBackup
   > {
     const backup = yield* WorkflowGraphBackup
-    return yield* backup.restoreBackup(request)
+    const summary = yield* backup.restoreBackup(request)
+    const projectorOpt = yield* Effect.serviceOption(WorkflowProjector)
+    yield* match(projectorOpt)
+      .with({ _tag: "Some" }, ({ value: projector }) =>
+        projector
+          .projectAll({
+            targetBranch: WorkflowProjectionTargetBranch.cases.Explicit.make({
+              branch: OmnigraphBranchName.make("main"),
+            }),
+            trigger: "post-rebuild",
+          })
+          .pipe(
+            Effect.tap((outcome) =>
+              match(outcome)
+                .with({ _tag: "Projected" }, () => Effect.void)
+                .with({ _tag: "Skipped" }, () => Effect.void)
+                .with({ _tag: "Stale" }, ({ branch, reason }) =>
+                  Effect.sync(() => {
+                    process.stderr.write(
+                      `[harness:omnigraph] Warning: post-rebuild workflow projection stale on '${branch}': ${reason}\n`,
+                    )
+                  }),
+                )
+                .exhaustive(),
+            ),
+            Effect.asVoid,
+            Effect.catchCauseIf(
+              (cause) => !isPureInterruptCause(cause),
+              (cause) =>
+                Effect.sync(() => {
+                  process.stderr.write(
+                    `[harness:omnigraph] Warning: post-rebuild workflow projection failed (${toBoundedReason(Cause.pretty(cause))})\n`,
+                  )
+                }),
+            ),
+          ),
+      )
+      .with({ _tag: "None" }, () => Effect.void)
+      .exhaustive()
+    return summary
   },
 )
 
@@ -406,12 +454,26 @@ export const runWorkflowRestoreAfterRebuild = (options: {
         }
 
         const client = makeWorkflowClientForCluster(options.baseUrl, options.clusterRootDir)
+        const harnessClient = makeOmnigraphClient({
+          baseUrl: options.baseUrl,
+          repoRoot: absClusterRepoRoot,
+          graphId: HARNESS_OMNIGRAPH_GRAPH_ID,
+          actor: "harness-cli",
+          hostIo: nodeSyncHostIo,
+        })
+        const backupLayer = makeWorkflowGraphBackupLayer({ repoRoot: absClusterRepoRoot, client })
+        const projectorLayer = makeWorkflowProjectorLayer({
+          repoRoot: absClusterRepoRoot,
+          harnessClient,
+        }).pipe(
+          Layer.provide(makeWorkflowReadModelQueryLayer({ repoRoot: absClusterRepoRoot, client })),
+        )
         return yield* afterRebuildWorkflowBackup({
           backupFile,
           mode: "merge",
           expectedSha256: sha256,
         }).pipe(
-          Effect.provide(makeWorkflowGraphBackupLayer({ repoRoot: absClusterRepoRoot, client })),
+          Effect.provide(Layer.merge(backupLayer, projectorLayer)),
           Effect.map((summary) => {
             if (summary.restoredEntityCount !== entityCount) {
               process.stderr.write(

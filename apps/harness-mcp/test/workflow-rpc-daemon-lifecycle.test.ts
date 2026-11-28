@@ -57,6 +57,7 @@ import {
   createShipActiveGateController,
   doctorWorkflowViaDaemon,
   getWorkflowStatusViaDaemon,
+  makeWorkflowProjectorLayer,
   nodeSyncHostIo,
   queryUnixSocketLineDetailed,
   queryWorkflowDaemonCommand,
@@ -70,6 +71,7 @@ import {
   UnitAgentDispatcher,
   UnitVerifier,
   WorkflowProjectionWriter,
+  WorkflowProjector,
   WorkflowReadModelQuery,
   WorkflowReviewRouter,
   WorkflowWorktreePort,
@@ -784,6 +786,9 @@ describe("WF-3 Unix-socket daemon doctor, lease fencing, offline & pause lifecyc
             reviewStubLayer,
             projectionWriterLayer,
             readModelLayer,
+            makeWorkflowProjectorLayer({ repoRoot: validatedCanonical.worktreeRoot }).pipe(
+              Layer.provide(readModelLayer),
+            ),
             shipGateRunnerLayer,
             shipAttemptStoreLayer,
           )
@@ -807,6 +812,7 @@ describe("WF-3 Unix-socket daemon doctor, lease fencing, offline & pause lifecyc
             shipWorkflowContext: workflowContext,
             engine: Context.get(workflowContext, WorkflowEngine.WorkflowEngine),
             projectionWriter: Context.get(workflowContext, WorkflowProjectionWriter),
+            workflowProjector: Context.get(workflowContext, WorkflowProjector),
             readModelQuery: Context.get(workflowContext, WorkflowReadModelQuery),
             unitVerifier: Context.get(workflowContext, UnitVerifier),
             unitAgentDispatcher: Context.get(workflowContext, UnitAgentDispatcher),
@@ -935,6 +941,9 @@ describe("WF-3 Unix-socket daemon doctor, lease fencing, offline & pause lifecyc
             reviewStubLayer,
             projectionWriterLayer,
             readModelLayer,
+            makeWorkflowProjectorLayer({ repoRoot: validatedCanonical.worktreeRoot }).pipe(
+              Layer.provide(readModelLayer),
+            ),
             shipGateRunnerLayer,
             shipAttemptStoreLayer,
           )
@@ -947,6 +956,7 @@ describe("WF-3 Unix-socket daemon doctor, lease fencing, offline & pause lifecyc
             shipWorkflowContext: workflowContext,
             engine: Context.get(workflowContext, WorkflowEngine.WorkflowEngine),
             projectionWriter: Context.get(workflowContext, WorkflowProjectionWriter),
+            workflowProjector: Context.get(workflowContext, WorkflowProjector),
             readModelQuery: Context.get(workflowContext, WorkflowReadModelQuery),
             unitVerifier: Context.get(workflowContext, UnitVerifier),
             unitAgentDispatcher: Context.get(workflowContext, UnitAgentDispatcher),

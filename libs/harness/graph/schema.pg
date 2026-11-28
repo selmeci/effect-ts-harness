@@ -243,6 +243,39 @@ node GraphPolicy
   enabled: Bool @index
 }
 
+node WorkflowRun
+  @instruction("A durable workflow run (L1 EpicPlan or L2 SlicePlan) projected from engine state.")
+{
+  runId: String @key @description("WorkflowRunId")
+  level: enum(epic, slice) @index
+  planSha: String @index
+  baseSha: String
+  state: enum(running, waiting, completed, aborted) @index
+}
+
+node WorkUnit
+  @instruction("A compiled slice (L1) or package (L2) unit of a workflow run.")
+{
+  unitKey: String @key @description("runId/unitId")
+  runId: String @index
+  unitId: String @index
+  kind: enum(slice, package) @index
+  waveIndex: I32 @index
+  status: enum(pending, dispatched, completed, escalated) @index
+  ownedRelPaths: [String]
+}
+
+node UnitAttempt
+  @instruction("One attempt of a unit with its verdict.")
+{
+  attemptKey: String @key @description("runId/unitId#attempt")
+  attempt: I32
+  verdict: enum(dispatched, completed, rejected) @index
+  runner: String?
+  rejection: String?
+  packageStampHash: String?
+}
+
 edge PlaysCallerRole: EffectSignature -> EffectFn @card(0..)
   @instruction("Incidence edge from EffectSignature to the calling EffectFn.")
 {
@@ -510,5 +543,53 @@ edge PlaysMigrationVerifyingTestRole: MigrationTuple -> VitestCase @card(0..)
 {
   @key(@src, @dst, role)
   role: String @index @description("Role tag: migration-verifying-test")
+  archimateRelation: String @index
+}
+
+edge PlaysRunUnitRole: WorkflowRun -> WorkUnit @card(0..)
+  @instruction("Incidence edge from a WorkflowRun to a member WorkUnit.")
+{
+  @key(@src, @dst, role)
+  role: String @index @description("Role tag: run-unit")
+  archimateRelation: String @index
+}
+
+edge PlaysUnitAttemptRole: WorkUnit -> UnitAttempt @card(0..)
+  @instruction("Incidence edge from a WorkUnit to a UnitAttempt.")
+{
+  @key(@src, @dst, role)
+  role: String @index @description("Role tag: unit-attempt")
+  archimateRelation: String @index
+}
+
+edge PlaysUnitStubRole: WorkUnit -> EffectFn @card(0..)
+  @instruction("Incidence edge from a WorkUnit to a planned stub EffectFn.")
+{
+  @key(@src, @dst, role)
+  role: String @index @description("Role tag: unit-stub")
+  archimateRelation: String @index
+}
+
+edge PlaysUnitEarsRole: WorkUnit -> EarsSpec @card(0..)
+  @instruction("Incidence edge from a WorkUnit to a governed EarsSpec.")
+{
+  @key(@src, @dst, role)
+  role: String @index @description("Role tag: unit-ears")
+  archimateRelation: String @index
+}
+
+edge PlaysUnitTraceabilityRole: WorkUnit -> TraceabilityTuple @card(0..)
+  @instruction("Incidence edge from a WorkUnit to a TraceabilityTuple.")
+{
+  @key(@src, @dst, role)
+  role: String @index @description("Role tag: unit-traceability")
+  archimateRelation: String @index
+}
+
+edge PlaysAttemptTestRole: UnitAttempt -> VitestCase @card(0..)
+  @instruction("Incidence edge from a UnitAttempt to a verifying VitestCase.")
+{
+  @key(@src, @dst, role)
+  role: String @index @description("Role tag: attempt-test")
   archimateRelation: String @index
 }

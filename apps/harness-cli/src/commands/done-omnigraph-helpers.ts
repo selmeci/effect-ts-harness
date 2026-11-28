@@ -33,6 +33,7 @@ import {
   resolveClusterRepoRoot,
 } from "./daemon-and-omnigraph.service.js"
 import { runOmnigraphMaintenance, runVerifyOmnigraphLintCheck } from "./omnigraph-lint-gate.js"
+import { reprojectWorkflowsBeforeMerge } from "./done-workflow-projector.js"
 import {
   computeSyncEmbeddingsForGraph,
   toSyncEmbeddingOptions,
@@ -559,6 +560,12 @@ export const syncOmnigraphOnDone = (
       )
       if (doneBlobFail !== undefined) return doneBlobFail
     }
+
+    yield* reprojectWorkflowsBeforeMerge({
+      repoRoot,
+      clusterRepoRoot,
+      implBranch: taskBranches.implBranch,
+    })
 
     const verifyFailure = yield* runPreMergeOmnigraphBranchVerify(
       repoRoot,

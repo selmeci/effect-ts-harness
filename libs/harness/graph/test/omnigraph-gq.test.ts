@@ -57,6 +57,9 @@ describe("Omnigraph 0.14.0 schema.pg and queries/harness.gq", () => {
           "node TraceabilityTuple",
           "node HttpEndpointTuple",
           "node MigrationTuple",
+          "node WorkflowRun",
+          "node WorkUnit",
+          "node UnitAttempt",
         ]
         for (const nodeDecl of expectedNodes) {
           expect(schema).toContain(nodeDecl)
@@ -85,6 +88,12 @@ describe("Omnigraph 0.14.0 schema.pg and queries/harness.gq", () => {
           "edge PlaysSpecifiedRequirementRole: TraceabilityTuple -> EarsRequirement",
           "edge PlaysExercisingTestRole: TraceabilityTuple -> VitestCase",
           "edge PlaysExercisedSpanRole: TraceabilityTuple -> EffectFn",
+          "edge PlaysRunUnitRole: WorkflowRun -> WorkUnit",
+          "edge PlaysUnitAttemptRole: WorkUnit -> UnitAttempt",
+          "edge PlaysUnitStubRole: WorkUnit -> EffectFn",
+          "edge PlaysUnitEarsRole: WorkUnit -> EarsSpec",
+          "edge PlaysUnitTraceabilityRole: WorkUnit -> TraceabilityTuple",
+          "edge PlaysAttemptTestRole: UnitAttempt -> VitestCase",
         ]
         for (const edgeDecl of expectedEdges) {
           expect(schema).toContain(edgeDecl)
@@ -99,7 +108,7 @@ describe("Omnigraph 0.14.0 schema.pg and queries/harness.gq", () => {
         expect(vectorFields).toEqual(["summaryEmbedding", "searchEmbedding", "clauseEmbedding"])
 
         const edgeMatches = [...schema.matchAll(/edge\s+(Plays\w+Role):[\s\S]*?\{([\s\S]*?)\}/g)]
-        expect(edgeMatches).toHaveLength(33)
+        expect(edgeMatches).toHaveLength(39)
         for (const [, edgeName, edgeBody] of edgeMatches) {
           expect(edgeBody, `${edgeName} must declare @key(@src, @dst, role)`).toContain(
             "@key(@src, @dst, role)",
@@ -108,11 +117,11 @@ describe("Omnigraph 0.14.0 schema.pg and queries/harness.gq", () => {
       }),
   )
 
-  it.effect("declares all 20 canonical GQ queries in queries/harness.gq", () => {
+  it.effect("declares all 22 canonical GQ queries in queries/harness.gq", () => {
     return Effect.gen(function* () {
       yield* Effect.void
       const gqSource = fs.readFileSync(queriesPath, "utf8")
-      expect(HARNESS_GQ_QUERY_NAMES).toHaveLength(20)
+      expect(HARNESS_GQ_QUERY_NAMES).toHaveLength(22)
 
       for (const queryName of HARNESS_GQ_QUERY_NAMES) {
         expect(gqSource).toContain(`query ${queryName}`)
@@ -534,7 +543,7 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
       }),
   )
 
-  it.effect("falls back to memory-fallback across all 20 queries when Omnigraph is offline", () =>
+  it.effect("falls back to memory-fallback across all 22 queries when Omnigraph is offline", () =>
     Effect.gen(function* () {
       const offlineFetch: FetchLike = () =>
         Promise.resolve(
@@ -557,6 +566,7 @@ describe("Deterministic in-memory GQ query execution and fallback", () => {
             callee: "Sample.greet",
             layer: "Motivation",
             symbol: "Sample.greet",
+            runId: "wf6-run-001",
           },
         }).pipe(Effect.provide(OmnigraphSyncLive))
 
