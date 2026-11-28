@@ -504,8 +504,14 @@ export const projectWaveToHarnessActivity = (
   plan: CompiledPlan,
   waveIndex: WaveIndex,
   canonicalRepoRoot: AbsoluteRepoRoot,
-) =>
-  Activity.make({
+  explicitImplBranch?: OmnigraphBranchName,
+) => {
+  const resolvedBranch = explicitImplBranch ?? plan.implBranch
+  const targetBranch =
+    resolvedBranch !== undefined
+      ? WorkflowProjectionTargetBranch.cases.Explicit.make({ branch: resolvedBranch })
+      : WorkflowProjectionTargetBranch.cases.ActiveTaskImplBranch.make({})
+  return Activity.make({
     name: encodeProjectionActivityName(
       WorkflowActivityTag.cases.ProjectWaveToHarness.make({ waveIndex }),
     ),
@@ -514,7 +520,7 @@ export const projectWaveToHarnessActivity = (
       const projector = yield* WorkflowProjector
       return yield* projector.project({
         runId: plan.runId,
-        targetBranch: WorkflowProjectionTargetBranch.cases.ActiveTaskImplBranch.make({}),
+        targetBranch,
         trigger: "wave",
         repoRoot: canonicalRepoRoot,
       })
@@ -524,17 +530,19 @@ export const projectWaveToHarnessActivity = (
           return Effect.failCause(cause)
         }
         const reason = toBoundedReason(Cause.pretty(cause), "Wave projection failed")
-        process.stderr.write(
-          `[harness/gates] Warning: ProjectWaveToHarness wave ${waveIndex} for run '${plan.runId}' failed: ${reason}\n`,
-        )
-        return Effect.succeed(
-          WorkflowProjectionOutcome.cases.Stale.make({
-            runId: plan.runId,
-            branch: OmnigraphBranchName.make("impl/unknown"),
-            projectionStatus: "stale",
-            reason,
-          }),
+        return Effect.logWarning(
+          `[harness/gates] ProjectWaveToHarness wave ${waveIndex} for run '${plan.runId}' failed: ${reason}`,
+        ).pipe(
+          Effect.as(
+            WorkflowProjectionOutcome.cases.Stale.make({
+              runId: plan.runId,
+              branch: resolvedBranch ?? OmnigraphBranchName.make("main"),
+              projectionStatus: "stale",
+              reason,
+            }),
+          ),
         )
       }),
     ),
   })
+}

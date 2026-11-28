@@ -106,8 +106,12 @@ const RawWorkflowTimeoutBudgets = Schema.Struct({
   lspDiagnosticsWatchdogMs: WorkflowTimeoutMs,
   ollamaWarmupProbeMs: WorkflowTimeoutMs,
   projectorHttpTimeoutMs: WorkflowTimeoutMs,
+  /** Shared max attempts for projector OCC (`412`/`409`) and rate-limit (`429`) retries. */
   projectorOccMaxAttempts: WorkflowPollAttempts,
+  /** Base exponential backoff multiplier (jitter factor `0.5..1.0`) for projector OCC/rate-limit retries. */
   projectorOccRetryBackoffMs: WorkflowTimeoutMs,
+  /** Ceiling in milliseconds applied when honoring server `Retry-After` headers on `429` responses. */
+  projectorRetryAfterCapMs: WorkflowTimeoutMs,
 })
 type RawWorkflowTimeoutBudgets = typeof RawWorkflowTimeoutBudgets.Type
 
@@ -150,6 +154,7 @@ const RAW_WORKFLOW_TIMEOUT_BUDGETS: RawWorkflowTimeoutBudgets = {
   projectorHttpTimeoutMs: WorkflowTimeoutMs.make(10_000),
   projectorOccMaxAttempts: WorkflowPollAttempts.make(6),
   projectorOccRetryBackoffMs: WorkflowTimeoutMs.make(100),
+  projectorRetryAfterCapMs: WorkflowTimeoutMs.make(1_500),
 }
 
 const findWorkflowTimeoutBudgetViolation = (
@@ -225,16 +230,23 @@ const findWorkflowTimeoutBudgetViolation = (
   if (budgets.workflowIpcMs <= budgets.decisionModelTimeoutMs) {
     return `workflowIpcMs (${budgets.workflowIpcMs}) must exceed decisionModelTimeoutMs (${budgets.decisionModelTimeoutMs})`
   }
+  // Jitter in computeProjectorRetryDelayMs scales expMs by [0.5, 1.0), so max exponential OCC delay sum is 1.0 * expSum.
   const projectorOccRetryBudgetMs =
     budgets.projectorOccRetryBackoffMs * (2 ** Math.max(0, budgets.projectorOccMaxAttempts - 1) - 1)
   if (budgets.projectorHttpTimeoutMs <= projectorOccRetryBudgetMs) {
     return `projectorHttpTimeoutMs (${budgets.projectorHttpTimeoutMs}) must exceed worst-case exponential OCC retry backoff sum (${projectorOccRetryBudgetMs})`
   }
+  const projectorRateLimitMaxRetryBudgetMs =
+    Math.max(0, budgets.projectorOccMaxAttempts - 1) * budgets.projectorRetryAfterCapMs
+  const worstCaseProjectorRetrySleepMs = Math.max(
+    projectorOccRetryBudgetMs,
+    projectorRateLimitMaxRetryBudgetMs,
+  )
   if (budgets.projectorHttpTimeoutMs > budgets.httpRequestTimeoutMs) {
     return `projectorHttpTimeoutMs (${budgets.projectorHttpTimeoutMs}) must not exceed httpRequestTimeoutMs (${budgets.httpRequestTimeoutMs})`
   }
-  if (budgets.workflowIpcMs <= budgets.projectorHttpTimeoutMs) {
-    return `workflowIpcMs (${budgets.workflowIpcMs}) must exceed projectorHttpTimeoutMs (${budgets.projectorHttpTimeoutMs})`
+  if (budgets.workflowIpcMs <= budgets.projectorHttpTimeoutMs + worstCaseProjectorRetrySleepMs) {
+    return `workflowIpcMs (${budgets.workflowIpcMs}) must exceed projectorHttpTimeoutMs + worstCaseProjectorRetrySleepMs (${budgets.projectorHttpTimeoutMs + worstCaseProjectorRetrySleepMs})`
   }
   return undefined
 }

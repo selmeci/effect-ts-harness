@@ -1,7 +1,9 @@
 import { Cause, Effect, Layer, Schema } from "effect"
+import { match } from "ts-pattern"
 import { computeContentSha256, isPureInterruptCause, WorkspaceFilePath } from "@harness/contract"
 import {
   HARNESS_GQ_QUERY_NAMES,
+  type HarnessGqQueryName,
   invokeOmnigraphNamedQuery,
   makeOmnigraphSyncLayer,
   projectOntologyLayers,
@@ -102,6 +104,11 @@ export const GqQueryInputSchema = Schema.Struct({
     }),
   ),
 })
+
+const WORKFLOW_PROJECTION_GQ_QUERIES: ReadonlySet<HarnessGqQueryName> = new Set([
+  "workflow_pending_units",
+  "ears_without_completed_unit",
+])
 
 const decodeOntologyWhyInput = Schema.decodeUnknownEffect(OntologyWhyInputSchema)
 const decodeOntologyImpactInput = Schema.decodeUnknownEffect(OntologyImpactInputSchema)
@@ -300,6 +307,17 @@ export const buildOntologyAndGqToolDescriptors = (
           const degradedReason =
             degradedReasonParts.length > 0 ? degradedReasonParts.join("; ") : undefined
 
+          const warnings = match(gqResult)
+            .with({ source: "omnigraph" }, () => undefined)
+            .with({ source: "memory-fallback" }, () =>
+              WORKFLOW_PROJECTION_GQ_QUERIES.has(queryName)
+                ? [
+                    `Offline HarnessGraph snapshots do not contain workflow projection nodes (WorkflowRun/WorkUnit/UnitAttempt); empty results ([]) from offline fallback for '${queryName}' do not mean covered or empty state — an online omnigraph-server is required.`,
+                  ]
+                : undefined,
+            )
+            .exhaustive()
+
           return {
             ...gqResult,
             degraded,
@@ -307,6 +325,7 @@ export const buildOntologyAndGqToolDescriptors = (
             ...(graphStatus.evaluationError !== undefined
               ? { evaluationError: graphStatus.evaluationError }
               : {}),
+            ...(warnings !== undefined ? { warnings } : {}),
           }
         }),
     },

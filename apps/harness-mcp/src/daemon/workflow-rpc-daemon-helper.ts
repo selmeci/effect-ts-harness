@@ -4,6 +4,7 @@ import { match } from "ts-pattern"
 import {
   type CompiledPlan,
   type LeaseEpoch,
+  OmnigraphBranchName,
   SHARED_STEP_UNIT_ID,
   WORKFLOW_TIMEOUT_BUDGETS,
   WorkflowAbortRequest,
@@ -23,6 +24,8 @@ import {
   toBoundedReason,
 } from "@harness/contract"
 import { HarnessTaskWorkflow, executionIdOf, makeUnitEscalationDeferred } from "@harness/gates"
+import { resolveOmnigraphTaskBranches } from "@harness/graph"
+import { nodeSyncHostIo } from "@harness/infra"
 import {
   assertWorkflowNonTerminal,
   handleDaemonWorkflowCompleteRequest,
@@ -84,8 +87,15 @@ export const handleDaemonWorkflowStartRequest = Effect.fn("WorkflowRpcDaemon.han
       Effect.mapError((err) => toBoundedReason(err, "Invalid workflow.start request")),
       Effect.flatMap((req) =>
         Effect.gen(function* () {
-          yield* validateRpcRepoRoot(req.repoRoot, input.scope)
-          yield* match(req.plan.mode)
+          const validated = yield* validateRpcRepoRoot(req.repoRoot, input.scope)
+          const resolvedImplBranch = OmnigraphBranchName.make(
+            resolveOmnigraphTaskBranches(validated.worktreeRoot, nodeSyncHostIo).implBranch,
+          )
+          const effectivePlan: CompiledPlan = {
+            ...req.plan,
+            implBranch: req.plan.implBranch ?? resolvedImplBranch,
+          }
+          yield* match(effectivePlan.mode)
             .with({ _tag: "Manual" }, () => Effect.void)
             .with({ _tag: "Automatic" }, () =>
               runtime.unitAgentDispatcher.runnerKind === "placeholder"
@@ -98,14 +108,14 @@ export const handleDaemonWorkflowStartRequest = Effect.fn("WorkflowRpcDaemon.han
             )
             .exhaustive()
 
-          const executionId = yield* executionIdOf(req.plan)
+          const executionId = yield* executionIdOf(effectivePlan)
 
           return yield* withRunLock(
             runtime,
-            req.plan.runId,
+            effectivePlan.runId,
             Effect.gen(function* () {
               const existingRunOpt = yield* runtime.readModelQuery
-                .getRun(req.plan.runId)
+                .getRun(effectivePlan.runId)
                 .pipe(Effect.mapError(storeOrLeaseToBoundedReason))
               const polledOpt = yield* pollExecution(runtime, executionId)
 
@@ -117,12 +127,12 @@ export const handleDaemonWorkflowStartRequest = Effect.fn("WorkflowRpcDaemon.han
                   readonly ["existing" | "start", ReadonlyMap<WorkflowRunId, CompiledPlan>],
                   WorkflowStoreFailureReason
                 > => {
-                  const cachedPlan = plansMap.get(req.plan.runId)
+                  const cachedPlan = plansMap.get(effectivePlan.runId)
                   if (cachedPlan !== undefined) {
-                    if (cachedPlan.planSha !== req.plan.planSha) {
+                    if (cachedPlan.planSha !== effectivePlan.planSha) {
                       return Effect.fail(
                         toBoundedReason(
-                          `Workflow run '${req.plan.runId}' already exists with planSha '${cachedPlan.planSha}', rejecting conflicting planSha '${req.plan.planSha}'`,
+                          `Workflow run '${effectivePlan.runId}' already exists with planSha '${cachedPlan.planSha}', rejecting conflicting planSha '${effectivePlan.planSha}'`,
                         ),
                       )
                     }
@@ -135,25 +145,25 @@ export const handleDaemonWorkflowStartRequest = Effect.fn("WorkflowRpcDaemon.han
                     .exhaustive()
 
                   if (existingRunMatch !== undefined) {
-                    if (existingRunMatch.planSha !== req.plan.planSha) {
+                    if (existingRunMatch.planSha !== effectivePlan.planSha) {
                       return Effect.fail(
                         toBoundedReason(
-                          `Workflow run '${req.plan.runId}' already exists with planSha '${existingRunMatch.planSha}', rejecting conflicting planSha '${req.plan.planSha}'`,
+                          `Workflow run '${effectivePlan.runId}' already exists with planSha '${existingRunMatch.planSha}', rejecting conflicting planSha '${effectivePlan.planSha}'`,
                         ),
                       )
                     }
                     return decodePlanFromRunStrict(existingRunMatch).pipe(
                       Effect.flatMap((decodedExistingPlan) => {
-                        if (decodedExistingPlan.planSha !== req.plan.planSha) {
+                        if (decodedExistingPlan.planSha !== effectivePlan.planSha) {
                           return Effect.fail(
                             toBoundedReason(
-                              `Workflow run '${req.plan.runId}' stored planJson planSha '${decodedExistingPlan.planSha}' mismatches requested '${req.plan.planSha}'`,
+                              `Workflow run '${effectivePlan.runId}' stored planJson planSha '${decodedExistingPlan.planSha}' mismatches requested '${effectivePlan.planSha}'`,
                             ),
                           )
                         }
                         const nextMap: ReadonlyMap<WorkflowRunId, CompiledPlan> = new Map(
                           plansMap,
-                        ).set(req.plan.runId, decodedExistingPlan)
+                        ).set(effectivePlan.runId, decodedExistingPlan)
                         return Effect.succeed(["existing", nextMap] as const)
                       }),
                     )
@@ -168,8 +178,8 @@ export const handleDaemonWorkflowStartRequest = Effect.fn("WorkflowRpcDaemon.han
                   }
 
                   const nextMap: ReadonlyMap<WorkflowRunId, CompiledPlan> = new Map(plansMap).set(
-                    req.plan.runId,
-                    req.plan,
+                    effectivePlan.runId,
+                    effectivePlan,
                   )
                   return Effect.succeed(["start", nextMap] as const)
                 },
@@ -178,19 +188,22 @@ export const handleDaemonWorkflowStartRequest = Effect.fn("WorkflowRpcDaemon.han
               return yield* match(atomicDisposition)
                 .with("existing", () =>
                   Effect.succeed<WorkflowStartResponse>({
-                    runId: req.plan.runId,
+                    runId: effectivePlan.runId,
                     executionId,
                     outcome: "existing",
                   }),
                 )
                 .with("start", () =>
                   Effect.gen(function* () {
-                    yield* HarnessTaskWorkflow.execute({ plan: req.plan }, { discard: true }).pipe(
+                    yield* HarnessTaskWorkflow.execute(
+                      { plan: effectivePlan },
+                      { discard: true },
+                    ).pipe(
                       Effect.provideContext(runtime.workflowContext),
                       Effect.onError(() =>
                         SynchronizedRef.update(runtime.plansRef, (m) => {
                           const next = new Map(m)
-                          next.delete(req.plan.runId)
+                          next.delete(effectivePlan.runId)
                           return next
                         }),
                       ),
@@ -205,7 +218,7 @@ export const handleDaemonWorkflowStartRequest = Effect.fn("WorkflowRpcDaemon.han
                     )
 
                     return {
-                      runId: req.plan.runId,
+                      runId: effectivePlan.runId,
                       executionId,
                       outcome: "started",
                     } satisfies WorkflowStartResponse

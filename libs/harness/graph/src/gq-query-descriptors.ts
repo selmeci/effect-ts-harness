@@ -451,7 +451,8 @@ export const HARNESS_GQ_QUERIES: Readonly<Record<HarnessGqQueryName, HarnessGqQu
   },
   workflow_pending_units: {
     name: "workflow_pending_units",
-    description: "List pending WorkUnit projections belonging to a WorkflowRun",
+    description:
+      "List pending WorkUnit projections belonging to a WorkflowRun in the online analytical harness graph (returns [] when run offline against snapshot)",
     params: ["runId"],
     source: `query workflow_pending_units($runId: String) {
   match {
@@ -472,7 +473,7 @@ export const HARNESS_GQ_QUERIES: Readonly<Record<HarnessGqQueryName, HarnessGqQu
   ears_without_completed_unit: {
     name: "ears_without_completed_unit",
     description:
-      "Find EarsSpec nodes linked to a WorkflowRun that lack a completed WorkUnit in that run",
+      "Find EarsSpec nodes linked to a WorkflowRun lacking a completed WorkUnit in that run (online analytical harness graph; callers deduplicate by specId across multiple unfinished units)",
     params: ["runId"],
     source: `query ears_without_completed_unit($runId: String) {
   match {

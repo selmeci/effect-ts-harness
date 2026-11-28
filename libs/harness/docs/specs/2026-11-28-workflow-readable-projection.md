@@ -27,8 +27,10 @@ enforced_by:
   - libs/harness/gates/src/harness-task-workflow-projections.ts
   - libs/harness/gates/src/omnigraph-branch-verify.ts
   - libs/harness/infra/src/workflow/workflow-projector-live.ts
+  - libs/harness/infra/src/workflow/workflow-projector-runtime.ts
   - libs/harness/infra/src/workflow/workflow-projector-planner.ts
   - libs/harness/infra/src/workflow/workflow-projector-query.ts
+  - libs/harness/infra/src/workflow/workflow-projection-status-store.ts
   - libs/harness/infra/src/workflow/read-model-rebuild-journal.ts
   - libs/harness/infra/src/omnigraph-session.ts
   - libs/harness/infra/src/index.ts
@@ -93,18 +95,18 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 | ------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ | ------------ |
 | REQ-2.1 | Ubiquitous | `@harness/contract` and `@harness/service` **shall** define closed discriminated `WorkflowProjectorInput` / `WorkflowProjectionOutcome` schemas and the `WorkflowProjector` (`@harness/service/WorkflowProjector`) capability port. | `@harness/service/WorkflowProjector` | UnitTest     |
 | REQ-2.2 | Ubiquitous | `encodeWorkflowActivityName` and `decodeWorkflowActivityName` **shall** round-trip `ProjectWaveToHarness` wave projection activities symmetrically via `WorkflowActivityTag`.                                                       | —                                    | PropertyTest |
-| REQ-2.3 | Ubiquitous | `WORKFLOW_TIMEOUT_BUDGETS` **shall** declare monotonic `projectorHttpTimeoutMs`, `projectorOccMaxAttempts`, and `projectorOccRetryBackoffMs` bounds enforced by `validateWorkflowTimeoutBudgets`.                                   | —                                    | UnitTest     |
+| REQ-2.3 | Ubiquitous | `WORKFLOW_TIMEOUT_BUDGETS` **shall** declare monotonic `projectorHttpTimeoutMs`, `projectorOccMaxAttempts`, `projectorOccRetryBackoffMs`, and `projectorRetryAfterCapMs` bounds enforced by `validateWorkflowTimeoutBudgets`.       | —                                    | UnitTest     |
 
 ### 3 · Idempotent OCC Projector & Non-Fatal Staleness (`RFC-0013 §5.7.4`)
 
 **Source (`libs/harness/infra/src/workflow/workflow-projector-live.ts`, `apps/harness-mcp/src/daemon/workflow-rpc-status-helper.ts`):** `WorkflowProjectorLive` must upsert runs, units, attempts, and edges into `harness` idempotently under `ifGraphCommit` OCC as actor `harness-cli`, and surface staleness on non-interrupt failures without breaking workflow execution.
 
-| ID      | Pattern            | Requirement                                                                                                                                                                                                                                                                                                                 | Effect Symbol                        | Verification |
-| ------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ | ------------ |
-| REQ-3.1 | Event-driven       | **When** `WorkflowProjector.project` executes for a `WorkflowRunId`, `WorkflowProjector.project` **shall** read run, unit, and attempt records from `WorkflowReadModelQuery` and idempotently upsert `WorkflowRun`, `WorkUnit`, `UnitAttempt`, and matching `Plays*Role` edges into graph `harness` as actor `harness-cli`. | WorkflowProjector.project            | GraphCheck   |
-| REQ-3.2 | Event-driven       | **When** an `ifGraphCommit` conditional mutation returns HTTP `412` or `409`, `WorkflowProjector.project` **shall** re-read fresh branch commit state and retry up to `WORKFLOW_TIMEOUT_BUDGETS.projectorOccMaxAttempts` with `WORKFLOW_TIMEOUT_BUDGETS.projectorOccRetryBackoffMs` backoff.                                | WorkflowProjector.project            | UnitTest     |
-| REQ-3.3 | Unwanted behaviour | **If** readable projection fails with a non-interrupt error or defect, **then** `WorkflowProjector.project` and `WorkflowProjector.projectAll` **shall** record `"stale"` status and return `WorkflowProjectionOutcome.Stale` without failing the workflow, while pure fiber interrupts **shall** propagate unchanged.      | WorkflowProjector.projectAll         | UnitTest     |
-| REQ-3.4 | Event-driven       | **When** `WorkflowRpcDaemon.buildStatusSummary` builds `WorkflowStatusSummary`, `WorkflowRpcDaemon.buildStatusSummary` **shall** merge `WorkflowProjector.getProjectionStatus` so any recorded readable projection failure surfaces `projectionStatus: "stale"`.                                                            | WorkflowRpcDaemon.buildStatusSummary | UnitTest     |
+| ID      | Pattern            | Requirement                                                                                                                                                                                                                                                                                                                                                                                         | Effect Symbol                        | Verification |
+| ------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ | ------------ |
+| REQ-3.1 | Event-driven       | **When** `WorkflowProjector.project` executes for a `WorkflowRunId`, `WorkflowProjector.project` **shall** read run, unit, and attempt records from `WorkflowReadModelQuery` and idempotently upsert `WorkflowRun`, `WorkUnit`, `UnitAttempt`, and matching `Plays*Role` edges into graph `harness` as actor `harness-cli`.                                                                         | WorkflowProjector.project            | GraphCheck   |
+| REQ-3.2 | Event-driven       | **When** reading or mutating `harness` returns HTTP `412`, `409`, or `429` (or read-snapshot commit IDs skew), `WorkflowProjector.project` **shall** re-read fresh branch commit state, pass unconditional `ifGraphCommit` on every `og.mutate`, and retry up to `WORKFLOW_TIMEOUT_BUDGETS.projectorOccMaxAttempts` with bounded `projectorOccRetryBackoffMs` / `projectorRetryAfterCapMs` backoff. | WorkflowProjector.project            | UnitTest     |
+| REQ-3.3 | Unwanted behaviour | **If** readable projection fails with a non-interrupt error or defect, **then** `WorkflowProjector.project` and `WorkflowProjector.projectAll` **shall** record `"stale"` status and return `WorkflowProjectionOutcome.Stale` without failing the workflow, while pure fiber interrupts **shall** propagate unchanged.                                                                              | WorkflowProjector.projectAll         | UnitTest     |
+| REQ-3.4 | Event-driven       | **When** `WorkflowRpcDaemon.buildStatusSummary` builds `WorkflowStatusSummary`, `WorkflowRpcDaemon.buildStatusSummary` **shall** merge persisted and in-memory `WorkflowProjector.getProjectionStatus` state so `"stale"` and `"not-projected"` readable projection outcomes survive restarts and CLI processes.                                                                                    | WorkflowRpcDaemon.buildStatusSummary | UnitTest     |
 
 ### 4 · Wave, Pre-Merge `done`, and Post-Rebuild Hooks (`RFC-0013 REQ-4.5`)
 
@@ -119,9 +121,9 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 ## Assumptions
 
 - **REQ-1.3:** Both `workflow_pending_units` and `ears_without_completed_unit` are invoked through the existing `harness_gq_query` MCP tool (`CANONICAL_MCP_TOOL_NAMES` stays `20`). `workflow_pending_units` orders by `($unit.waveIndex asc, $unit.unitId asc)` and `ears_without_completed_unit` orders by `($spec.id asc, $spec.path asc)`; because GQ 2.1 omits `distinct`, callers deduplicate by `specId` when multiple non-completed units in the same run reference the same `EarsSpec`.
-- **REQ-3.1:** Readable projection links `WorkUnit -> EffectFn` (`PlaysUnitStubRole`), `WorkUnit -> EarsSpec` (`PlaysUnitEarsRole`), `WorkUnit -> TraceabilityTuple` (`PlaysUnitTraceabilityRole`), and `UnitAttempt -> VitestCase` (`PlaysAttemptTestRole`) only when the target entity already exists on the target branch, avoiding dangling edges.
-- **REQ-4.1 & REQ-4.2:** `ProjectWaveToHarness` projects wave-granular state using `worktrees.canonicalRepoRoot` (`ActiveTaskImplBranch`) so `sharedStep` / terminal state remains wave-granular during active execution, while `DoneWorkflowProjector.reprojectBeforeMerge` explicitly projects the caller's `impl/<task>` branch (including linked worktrees `impl/wt-<slug>`) and terminal `WorkflowRun.state` before merge.
-- **REQ-4.2:** When `graphs/harness-workflows.omni` does not exist in the cluster directory, `DoneWorkflowProjector.reprojectBeforeMerge` skips cleanly without issuing requests against `harness-workflows`.
+- **REQ-3.1:** Readable projection is upsert-only during active `wave` projections (preserving previously linked analytical nodes/edges until `done` performs `mode: "overwrite"` + `reprojectBeforeMerge`). `WorkUnit -> EffectFn` (`PlaysUnitStubRole`) matches explicit `stubKeys` or stub file containment, `WorkUnit -> EarsSpec` (`PlaysUnitEarsRole`) matches `earsKeys` or `enforcedByFiles` overlap, `WorkUnit -> TraceabilityTuple` (`PlaysUnitTraceabilityRole`) joins matched specs/functions, and `UnitAttempt -> VitestCase` (`PlaysAttemptTestRole`) prefers `exercisingTestIds` and directly owned test files before falling back to package-directory matching only when a unit has neither. Missing target entities never create dangling edges, and malformed or truncated query responses fail into `"stale"` rather than inserting duplicates.
+- **REQ-4.1 & REQ-4.2:** Per-trigger branch resolution distinguishes `Explicit` (fail/skip cleanly when absent rather than silently substituting `main` on `post-rebuild`, while creating from `main` on `wave` only for verified `Explicit` branches) vs. `ActiveTaskImplBranch` (falling back to `main` on `post-rebuild` if `impl/<task>` is absent). `ProjectWaveToHarness` prefers `worktrees.implBranch ?? plan.implBranch` as `Explicit` so linked worktrees (`impl/wt-<slug>`) project onto the same branch later reloaded and merged by `DoneWorkflowProjector.reprojectBeforeMerge`.
+- **REQ-4.2:** When `graphs/harness-workflows.omni` does not exist in the cluster directory, `DoneWorkflowProjector.reprojectBeforeMerge` logs the skip condition and returns without issuing requests against `harness-workflows`.
 
 ## Out of scope
 
@@ -131,16 +133,16 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 ## Known residual risks
 
 - Because `done` overwrites `impl/<task>` before re-projecting, any pre-existing historical runs no longer present in `harness-workflows` will not reappear on `main` after `done` merges `impl/<task>` into `main`.
-- `WorkflowProjector`'s `statusRef` tracks readable projection staleness in-memory for the active daemon lifetime; restarting the daemon clears prior in-memory `"stale"` indicators until the next wave, `done-pre-merge`, or `post-rebuild` projection executes.
+- `WorkflowProjector` persists readable projection freshness under `<git-common-dir>/harness/workflow-projection-status.json` alongside its in-memory `Ref`; deleting `.harness/` or `<git-common-dir>/harness/` resets cached projection freshness until the next projection runs.
 
 ## Acceptance criteria
 
-- All `GraphCheck`, `UnitTest`, `PropertyTest`, and `TraceTest` suites across `@harness/contract`, `@harness/graph`, `@harness/gates`, `@harness/infra`, `harness-mcp`, and `harness-cli` pass cleanly with 100% mutant kill on pure modules.
+- All `GraphCheck`, `UnitTest`, `PropertyTest`, and `TraceTest` suites across `@harness/contract`, `@harness/graph`, `@harness/gates`, `@harness/infra`, `harness-mcp`, and `harness-cli` pass without skipped or relaxed assertions.
 - `pnpm harness plan-check`, `pnpm harness learn --clear`, `pnpm harness gc --strict`, `pnpm harness ontology check --strict`, `pnpm harness mutate --strict`, `CI=true pnpm harness verify`, and `CI=true pnpm harness done --cli` pass after setting `status: accepted`.
 
 ## Verified Plan Topology Graph
 
-Verified via `pnpm harness plan-check --mermaid` (exit 0):
+Verified via `pnpm harness plan-check --mermaid`:
 
 ```mermaid
 flowchart TD
@@ -161,6 +163,6 @@ flowchart TD
 
 ## Adversarial Plan Lens
 
-- **Idempotency & OCC Conflict Recovery:** `WorkflowProjectorLive` resolves target branch entities via `@key`, skips mutations when the computed diff is a no-op, and executes conditional `og.mutate(..., { ifGraphCommit })` with bounded `412`/`409`/`429` re-read retries (`WORKFLOW_TIMEOUT_BUDGETS.projectorOccMaxAttempts` / `projectorOccRetryBackoffMs`).
-- **Non-Fatal Failure & Interrupt Preservation:** Non-interrupt errors/defects record `"stale"` in the instance-scoped `Ref` and return `WorkflowProjectionOutcome.Stale` without failing workflows, `done`, or rebuild restores, while `isPureInterruptCause` always propagates pure fiber interrupts.
-- **Line-Budget & TCB Isolation:** Wave projection lives in `harness-task-workflow-projections.ts` (`harness-task-workflow.ts <= 800`), pre-merge projection lives in `done-workflow-projector.ts` (`done-omnigraph-helpers.ts <= 650`), and `computeProjectionStatus` moves to `workflow-rpc-shared.ts` (`workflow-rpc-status-helper.ts <= 650`).
+- **Idempotency & OCC Conflict Recovery:** `WorkflowProjectorLive` resolves target branch entities via `@key`, fails closed on malformed or truncated query envelopes, skips mutations on empty diffs, and executes unconditional `og.mutate(..., { ifGraphCommit })` with bounded `412`/`409`/`429` re-read retries (`WORKFLOW_TIMEOUT_BUDGETS.projectorOccMaxAttempts` / `projectorOccRetryBackoffMs` / `projectorRetryAfterCapMs`).
+- **Non-Fatal Failure & Interrupt Preservation:** Non-interrupt errors/defects persist `"stale"` (or `"not-projected"` on skip) cleanly across daemon restarts and CLI hooks and return `WorkflowProjectionOutcome.Stale` without failing workflows, `done`, or rebuild restores, while `isPureInterruptCause` always propagates pure fiber interrupts.
+- **Line-Budget & TCB Isolation:** Wave projection lives in `harness-task-workflow-projections.ts`, pre-merge projection lives in `done-workflow-projector.ts`, and `computeProjectionStatus` lives in `workflow-rpc-shared.ts` to keep TCB hooks modular and strictly reviewable.

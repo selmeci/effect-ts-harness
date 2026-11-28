@@ -1104,7 +1104,110 @@ describe("HarnessTaskWorkflow execution, waves & merges", () => {
   )
 
   it.live(
-    "RFC-0013 REQ-4.5: pure fiber interrupt inside WorkflowProjector.project propagates instead of being swallowed",
+    "F-1.1: forwards worktrees.implBranch ?? plan.implBranch as Explicit targetBranch to WorkflowProjector.project",
+    () =>
+      Effect.gen(function* () {
+        // 1. plan.implBranch set, worktrees.implBranch unset -> uses plan.implBranch as Explicit
+        const planSpy = makeSpyState()
+        const planWaitLlm = yield* Deferred.make<void>()
+        planSpy.onWaitLlm = planWaitLlm
+        const explicitPlanBranch = OmnigraphBranchName.make("impl/wt-explicit-plan")
+        const planWithBranch: CompiledPlan = {
+          runId: WorkflowRunIdSchema.make("run-wave-explicit-plan-015"),
+          level: "slice",
+          planSha: PLAN_SHA,
+          baseSha: BASE_SHA,
+          implBranch: explicitPlanBranch,
+          mode: {
+            _tag: "Automatic",
+            runner: "claude-code",
+            maxConcurrency: MaxConcurrency.make(1),
+          },
+          units: [makePackageUnit("pkg-exp-1", "@harness/exp1", ["libs/exp1/src/index.ts"], 0)],
+          sharedStepPaths: [],
+        }
+
+        const planLayer = makeWorkflowTestLayer(planSpy)
+        yield* Effect.gen(function* () {
+          const executionId = yield* HarnessTaskWorkflow.execute(
+            { plan: planWithBranch },
+            { discard: true },
+          )
+          yield* Deferred.await(planWaitLlm)
+          expect(planSpy.waveProjectCalls).toEqual([
+            {
+              runId: planWithBranch.runId,
+              targetBranch: WorkflowProjectionTargetBranch.cases.Explicit.make({
+                branch: explicitPlanBranch,
+              }),
+              trigger: "wave",
+              repoRoot: CANONICAL_ROOT,
+            },
+          ])
+          yield* DurableDeferred.succeed(LlmPhaseDone, {
+            token: DurableDeferred.tokenFromExecutionId(LlmPhaseDone, {
+              workflow: HarnessTaskWorkflow,
+              executionId,
+            }),
+            value: makeLlmReceipt(),
+          })
+          yield* HarnessTaskWorkflow.execute({ plan: planWithBranch })
+        }).pipe(Effect.provide(planLayer))
+
+        // 2. worktrees.implBranch overrides plan.implBranch when both are present
+        const wtSpy = makeSpyState()
+        const wtWaitLlm = yield* Deferred.make<void>()
+        wtSpy.onWaitLlm = wtWaitLlm
+        const worktreeImplBranch = OmnigraphBranchName.make("impl/wt-receipt-override")
+        const planWithBoth: CompiledPlan = {
+          ...planWithBranch,
+          runId: WorkflowRunIdSchema.make("run-wave-explicit-wt-016"),
+          units: [makePackageUnit("pkg-exp-2", "@harness/exp2", ["libs/exp2/src/index.ts"], 0)],
+        }
+        const wtLayer = makeWorkflowTestLayer(wtSpy, {
+          provisionWorktrees: (p) =>
+            Effect.succeed({
+              runId: p.runId,
+              canonicalRepoRoot: CANONICAL_ROOT,
+              implBranch: worktreeImplBranch,
+              entries: p.units.map((u) => ({
+                unitId: u.unitId,
+                cwd: CANONICAL_ROOT,
+                worktreeKind: "canonical" as const,
+              })),
+            }),
+        })
+        yield* Effect.gen(function* () {
+          const executionId = yield* HarnessTaskWorkflow.execute(
+            { plan: planWithBoth },
+            { discard: true },
+          )
+          yield* Deferred.await(wtWaitLlm)
+          expect(wtSpy.waveProjectCalls).toEqual([
+            {
+              runId: planWithBoth.runId,
+              targetBranch: WorkflowProjectionTargetBranch.cases.Explicit.make({
+                branch: worktreeImplBranch,
+              }),
+              trigger: "wave",
+              repoRoot: CANONICAL_ROOT,
+            },
+          ])
+          yield* DurableDeferred.succeed(LlmPhaseDone, {
+            token: DurableDeferred.tokenFromExecutionId(LlmPhaseDone, {
+              workflow: HarnessTaskWorkflow,
+              executionId,
+            }),
+            value: makeLlmReceipt(),
+          })
+          yield* HarnessTaskWorkflow.execute({ plan: planWithBoth })
+        }).pipe(Effect.provide(wtLayer))
+      }),
+    20_000,
+  )
+
+  it.live(
+    "RFC-0013 REQ-4.5 & F-5.1: pure fiber interrupt propagates while fail/defect falls back to Stale without impl/unknown",
     () =>
       Effect.gen(function* () {
         const plan: CompiledPlan = {
@@ -1154,6 +1257,32 @@ describe("HarnessTaskWorkflow execution, waves & merges", () => {
           })
           .exhaustive()
 
+        // Pure defect without explicit branch returns Stale on "main" (never "impl/unknown").
+        const dieLayer = makeWorkflowProjectorTestLayer(() =>
+          Effect.die(new Error("omnigraph unavailable")),
+        )
+        const dieOutcome = yield* activity.execute.pipe(
+          Effect.provideService(WorkflowEngine.WorkflowInstance, instance),
+          Effect.provide(Layer.merge(dieLayer, WorkflowEngine.layerMemory)),
+        )
+        expect(dieOutcome._tag).toBe("Stale")
+        expect(dieOutcome.branch).toBe(OmnigraphBranchName.make("main"))
+
+        // Explicit branch passed to projectWaveToHarnessActivity is preserved on Stale fallback.
+        const explicitBranch = OmnigraphBranchName.make("impl/wt-fallback")
+        const explicitActivity = projectWaveToHarnessActivity(
+          plan,
+          WaveIndex.make(0),
+          CANONICAL_ROOT,
+          explicitBranch,
+        )
+        const explicitDieOutcome = yield* explicitActivity.execute.pipe(
+          Effect.provideService(WorkflowEngine.WorkflowInstance, instance),
+          Effect.provide(Layer.merge(dieLayer, WorkflowEngine.layerMemory)),
+        )
+        expect(explicitDieOutcome._tag).toBe("Stale")
+        expect(explicitDieOutcome.branch).toBe(explicitBranch)
+
         // Composite Fail/Die + Interrupt cause is NOT pure interrupt, so it degrades to Stale.
         const compositeLayer = makeWorkflowProjectorTestLayer(() =>
           Effect.failCause(Cause.combine(Cause.die(new Error("boom")), Cause.interrupt(0))),
@@ -1164,6 +1293,7 @@ describe("HarnessTaskWorkflow execution, waves & merges", () => {
           Effect.provide(Layer.merge(compositeLayer, WorkflowEngine.layerMemory)),
         )
         expect(compositeOutcome._tag).toBe("Stale")
+        expect(compositeOutcome.branch).toBe(OmnigraphBranchName.make("main"))
       }),
     20_000,
   )

@@ -1,63 +1,103 @@
-import { Schema } from "effect"
+import { Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
+  AttemptNumber,
   CompiledPlan,
+  GitCommitSha,
   NonNegativeCount,
+  OwnedRelPath,
+  PackageStampHash,
+  PlanSha256,
+  RejectionJsonPayload,
+  RunnerId,
   UnitRejection,
-  type WorkUnitId,
+  WaveIndex,
+  WorkUnitId,
+  WorkflowAttemptKey,
   type WorkflowAttemptRecord,
-  type WorkflowProjectionCounts,
+  WorkflowAttemptVerdict,
+  WorkflowLevel,
+  WorkflowProjectionCounts,
+  WorkflowRunId,
   type WorkflowRunRecord,
+  WorkflowRunState,
+  WorkflowStoreFailureReason,
+  WorkflowUnitKey,
+  WorkflowUnitKind,
   type WorkflowUnitRecord,
+  WorkflowUnitStatus,
   compareCodeUnits,
+  toBoundedReason,
 } from "@harness/contract"
+import { decodeJsonFieldSafely } from "./workflow-store-codec.js"
 
-const CompiledPlanFromJsonSchema = Schema.fromJsonString(CompiledPlan)
-const decodeCompiledPlanOption = Schema.decodeUnknownOption(CompiledPlanFromJsonSchema)
 const encodeRejectionJson = Schema.encodeSync(Schema.fromJsonString(UnitRejection))
 
-export type ProjectedEdgeType =
-  | "PlaysRunUnitRole"
-  | "PlaysUnitAttemptRole"
-  | "PlaysUnitStubRole"
-  | "PlaysUnitEarsRole"
-  | "PlaysUnitTraceabilityRole"
-  | "PlaysAttemptTestRole"
+export const ProjectedEdgeType = Schema.Literals([
+  "PlaysRunUnitRole",
+  "PlaysUnitAttemptRole",
+  "PlaysUnitStubRole",
+  "PlaysUnitEarsRole",
+  "PlaysUnitTraceabilityRole",
+  "PlaysAttemptTestRole",
+])
+export type ProjectedEdgeType = typeof ProjectedEdgeType.Type
 
-export interface ExistingProjectedRun {
-  readonly runId: string
-  readonly level: string
-  readonly planSha: string
-  readonly baseSha: string
-  readonly state: string
-}
+export const ProjectedEdgeRole = Schema.Literals([
+  "run-unit",
+  "unit-attempt",
+  "unit-stub",
+  "unit-ears",
+  "unit-traceability",
+  "attempt-test",
+])
+export type ProjectedEdgeRole = typeof ProjectedEdgeRole.Type
 
-export interface ExistingProjectedUnit {
-  readonly unitKey: string
-  readonly runId: string
-  readonly unitId: string
-  readonly kind: string
-  readonly waveIndex: number
-  readonly status: string
-  readonly ownedRelPaths: ReadonlyArray<string>
-}
+export const ProjectedArchimateRelation = Schema.Literals([
+  "Composition",
+  "Realization",
+  "Association",
+])
+export type ProjectedArchimateRelation = typeof ProjectedArchimateRelation.Type
 
-export interface ExistingProjectedAttempt {
-  readonly attemptKey: string
-  readonly attempt: number
-  readonly verdict: string
-  readonly runner: string | null
-  readonly rejection: string | null
-  readonly packageStampHash: string | null
-}
+export const ExistingProjectedRun = Schema.Struct({
+  runId: WorkflowRunId,
+  level: WorkflowLevel,
+  planSha: PlanSha256,
+  baseSha: GitCommitSha,
+  state: WorkflowRunState,
+})
+export type ExistingProjectedRun = typeof ExistingProjectedRun.Type
 
-export interface ExistingProjectedEdge {
-  readonly edgeType: ProjectedEdgeType
-  readonly from: string
-  readonly to: string
-  readonly role: string
-  readonly archimateRelation: string
-}
+export const ExistingProjectedUnit = Schema.Struct({
+  unitKey: WorkflowUnitKey,
+  runId: WorkflowRunId,
+  unitId: WorkUnitId,
+  kind: WorkflowUnitKind,
+  waveIndex: WaveIndex,
+  status: WorkflowUnitStatus,
+  ownedRelPaths: Schema.Array(OwnedRelPath),
+})
+export type ExistingProjectedUnit = typeof ExistingProjectedUnit.Type
+
+export const ExistingProjectedAttempt = Schema.Struct({
+  attemptKey: WorkflowAttemptKey,
+  attempt: AttemptNumber,
+  verdict: WorkflowAttemptVerdict,
+  runner: Schema.NullOr(RunnerId),
+  rejection: Schema.NullOr(RejectionJsonPayload),
+  packageStampHash: Schema.NullOr(PackageStampHash),
+})
+export type ExistingProjectedAttempt = typeof ExistingProjectedAttempt.Type
+
+export const ExistingProjectedEdge = Schema.Struct({
+  edgeType: ProjectedEdgeType,
+  from: Schema.NonEmptyString,
+  to: Schema.NonEmptyString,
+  role: ProjectedEdgeRole,
+  archimateRelation: ProjectedArchimateRelation,
+})
+export type ExistingProjectedEdge = typeof ExistingProjectedEdge.Type
 
 export interface ProjectedEffectFn {
   readonly qualname: string
@@ -100,12 +140,20 @@ export interface WorkflowProjectionTargetState {
   readonly vitestCases: ReadonlyArray<ProjectedVitestCase>
 }
 
-export interface WorkflowProjectionPlan {
-  readonly noOp: boolean
-  readonly query: string
-  readonly params: Readonly<Record<string, unknown>>
-  readonly counts: WorkflowProjectionCounts
-}
+export const WorkflowProjectionPlan = Schema.TaggedUnion({
+  NoOp: {
+    counts: WorkflowProjectionCounts,
+  },
+  Mutate: {
+    query: Schema.String,
+    params: Schema.Record(Schema.String, Schema.Unknown),
+    counts: WorkflowProjectionCounts,
+  },
+  InvalidPlanJson: {
+    reason: WorkflowStoreFailureReason,
+  },
+})
+export type WorkflowProjectionPlan = typeof WorkflowProjectionPlan.Type
 
 interface PlanUnitHints {
   readonly stubKeys: ReadonlySet<string>
@@ -175,13 +223,15 @@ const arraysEqual = (a: ReadonlyArray<string>, b: ReadonlyArray<string>): boolea
 
 const extractPlanUnitHints = (
   planJson: string | undefined,
-): ReadonlyMap<WorkUnitId, PlanUnitHints> => {
+): Result.Result<ReadonlyMap<WorkUnitId, PlanUnitHints>, WorkflowStoreFailureReason> => {
   if (planJson === undefined) {
-    return new Map()
+    return Result.succeed(new Map<WorkUnitId, PlanUnitHints>())
   }
-  return match(decodeCompiledPlanOption(planJson))
-    .with({ _tag: "None" }, () => new Map<WorkUnitId, PlanUnitHints>())
-    .with({ _tag: "Some" }, ({ value: plan }) => {
+  return match(decodeJsonFieldSafely(planJson, CompiledPlan))
+    .with({ _tag: "Failure" }, ({ failure }) =>
+      Result.fail(toBoundedReason(`Corrupt CompiledPlan JSON in run.planJson: ${failure}`)),
+    )
+    .with({ _tag: "Success" }, ({ success: plan }) => {
       const hints = new Map<WorkUnitId, PlanUnitHints>()
       for (const unit of plan.units) {
         match(unit)
@@ -199,14 +249,16 @@ const extractPlanUnitHints = (
           })
           .exhaustive()
       }
-      return hints
+      return Result.succeed(hints)
     })
     .exhaustive()
 }
 
-const encodeAttemptRejection = (attempt: WorkflowAttemptRecord): string | null =>
+const encodeAttemptRejection = (attempt: WorkflowAttemptRecord): RejectionJsonPayload | null =>
   match(attempt)
-    .with({ verdict: "rejected" }, ({ rejection }) => encodeRejectionJson(rejection))
+    .with({ verdict: "rejected" }, ({ rejection }) =>
+      RejectionJsonPayload.make(encodeRejectionJson(rejection)),
+    )
     .with({ verdict: "dispatched" }, { verdict: "completed" }, () => null)
     .exhaustive()
 
@@ -365,12 +417,32 @@ const appendAttemptStatement = (
  * Pure deterministic diff & GQ 2.1 mutation planner projecting `WorkflowRunRecord`,
  * `WorkflowUnitRecord`, `WorkflowAttemptRecord`, and all 6 keyed `Plays*Role` edges
  * into graph `harness` without dangling references (`SPEC-0038`).
+ *
+ * Wave projection is explicitly upsert-only: it inserts missing nodes/edges and updates
+ * drifted node properties, never deleting stale/extra existing edges until `done`
+ * (`mode: "overwrite"`) rebuilds the branch.
  */
 const planWorkflowProjection = (
   source: WorkflowProjectionSource,
   targetState: WorkflowProjectionTargetState,
+): WorkflowProjectionPlan =>
+  match(extractPlanUnitHints(source.run.planJson))
+    .with({ _tag: "Failure" }, ({ failure }) => ({
+      _tag: "InvalidPlanJson" as const,
+      reason: failure,
+    }))
+    .with({ _tag: "Success" }, ({ success: hintsByUnitId }) =>
+      planWorkflowProjectionWithHints(source, targetState, hintsByUnitId),
+    )
+    .exhaustive()
+
+const planWorkflowProjectionWithHints = (
+  source: WorkflowProjectionSource,
+  targetState: WorkflowProjectionTargetState,
+  hintsByUnitId: ReadonlyMap<WorkUnitId, PlanUnitHints>,
 ): WorkflowProjectionPlan => {
   const { run } = source
+
   const sortedUnits = [...source.units]
     .filter((u) => u.runId === run.runId)
     .sort((a, b) => compareCodeUnits(a.unitKey, b.unitKey))
@@ -390,7 +462,6 @@ const planWorkflowProjection = (
     dedupedAttempts.set(attempt.attemptKey, attempt)
   }
 
-  const hintsByUnitId = extractPlanUnitHints(run.planJson)
   const existingUnitsByKey = new Map(targetState.existingUnits.map((u) => [u.unitKey, u]))
   const existingAttemptsByKey = new Map(targetState.existingAttempts.map((a) => [a.attemptKey, a]))
   const existingEdgeKeys = new Set(
@@ -519,22 +590,25 @@ const planWorkflowProjection = (
       archimateRelation: "Composition",
     })
     const exercisingTestIds = exercisingTestIdsByUnitId.get(unit.unitId) ?? new Set<string>()
-    for (const testCase of targetState.vitestCases) {
-      const matchesTest =
-        unit.ownedRelPaths.some(
-          (owned) =>
-            relPathsOverlap(testCase.testFile, owned) ||
-            sharesPackageDirPrefix(testCase.testFile, owned),
-        ) || exercisingTestIds.has(testCase.testId)
-      if (matchesTest) {
-        addDesiredEdge({
-          edgeType: "PlaysAttemptTestRole",
-          from: attempt.attemptKey,
-          to: testCase.testId,
-          role: "attempt-test",
-          archimateRelation: "Association",
-        })
-      }
+    const directMatchedTests = targetState.vitestCases.filter(
+      (testCase) =>
+        exercisingTestIds.has(testCase.testId) ||
+        unit.ownedRelPaths.some((owned) => relPathsOverlap(testCase.testFile, owned)),
+    )
+    const matchedTests =
+      directMatchedTests.length > 0
+        ? directMatchedTests
+        : targetState.vitestCases.filter((testCase) =>
+            unit.ownedRelPaths.some((owned) => sharesPackageDirPrefix(testCase.testFile, owned)),
+          )
+    for (const testCase of matchedTests) {
+      addDesiredEdge({
+        edgeType: "PlaysAttemptTestRole",
+        from: attempt.attemptKey,
+        to: testCase.testId,
+        role: "attempt-test",
+        archimateRelation: "Association",
+      })
     }
   }
 
@@ -560,16 +634,14 @@ const planWorkflowProjection = (
 
   if (statements.length === 0) {
     return {
-      noOp: true,
-      query: "",
-      params: {},
+      _tag: "NoOp",
       counts,
     }
   }
 
   const query = `query project_workflow_run(\n  ${builder.declarations.join(",\n  ")}\n) {\n${statements.join("\n")}\n}`
   return {
-    noOp: false,
+    _tag: "Mutate",
     query,
     params: builder.params,
     counts,

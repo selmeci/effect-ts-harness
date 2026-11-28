@@ -2,51 +2,40 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync 
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Cause, Effect, Fiber, Layer, Option, Ref, Schema } from "effect"
+import { afterAll, beforeAll, describe, expect, it } from "@effect/vitest"
+import { Cause, Effect, Fiber, Layer, Option, Ref } from "effect"
+import { TestClock } from "effect/testing"
 import { match } from "ts-pattern"
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import {
   AbsoluteRepoRoot,
   AttemptNumber,
-  CompiledPlan,
-  EarsRequirementKey,
-  GitCommitSha,
-  MaxConcurrency,
-  NxProjectName,
   OmnigraphBranchName,
   OwnedRelPath,
-  PackageStampHash,
-  PackageVerifyCommand,
   PlanJsonPayload,
-  PlanSha256,
   RunnerId,
-  StubSymbolKey,
   WORKFLOW_TIMEOUT_BUDGETS,
   WaveIndex,
   WorkUnitId,
-  WorkflowAttemptRecord,
   WorkflowExecutionId,
   WorkflowProjectionStatus,
   WorkflowRunId,
-  WorkflowRunRecord,
   WorkflowStoreOperation,
   WorkflowStoreUnavailableError,
   WorkflowTimestampMs,
-  WorkflowUnitRecord,
   isPureInterruptCause,
   makeWorkflowAttemptKey,
   makeWorkflowUnitKey,
   toBoundedReason,
 } from "@harness/contract"
-import { HARNESS_OMNIGRAPH_GRAPH_ID, OmnigraphClient, makeOmnigraphClient } from "@harness/graph"
+import { HARNESS_OMNIGRAPH_GRAPH_ID, makeOmnigraphClient } from "@harness/graph"
 import {
   WorkflowProjector,
   WorkflowProjectionWriter,
   WorkflowReadModelQuery,
-  type WorkflowReadModelQueryShape,
 } from "@harness/service"
 import {
   WorkflowProjectorLive,
+  computeProjectorRetryDelayMs,
   makeWorkflowProjectionWriterLayer,
   makeWorkflowProjectorLayer,
   makeWorkflowReadModelQueryLayer,
@@ -56,90 +45,23 @@ import {
 } from "../src/index.js"
 import { readTargetStateSnapshot } from "../src/workflow/workflow-projector-query.js"
 import {
-  type Omnigraph,
+  BASE_SHA,
+  NOW_MS,
+  PLAN_SHA,
+  STAMP_HASH,
+  encodeCompiledPlan,
+  expectStaleOutcome,
+  makeAlphaPlan,
+  makeHangingBranchesClient,
+  makeRunRecord,
+  makeSingleRunReadModelLayer,
+  makeStubReadModelLayer,
+  wrapHarnessClient,
+} from "./helpers/workflow-projector-test-helpers.js"
+import {
   runWithTestTracer,
   startWorkflowReadModelServerHarness,
 } from "./helpers/workflow-read-model-fixture.js"
-
-const encodeCompiledPlan = Schema.encodeSync(Schema.fromJsonString(CompiledPlan))
-
-const BASE_SHA = GitCommitSha.make("a".repeat(40))
-const PLAN_SHA = PlanSha256.make("b".repeat(64))
-const STAMP_HASH = PackageStampHash.make("c".repeat(64))
-const NOW_MS = WorkflowTimestampMs.make(1_700_000_000_000)
-
-const wrapHarnessClient = (
-  client: Omnigraph,
-  overrides: {
-    readonly onMutate?: (
-      orig: typeof client.mutate,
-      input: Parameters<typeof client.mutate>[0],
-      opts?: Parameters<typeof client.mutate>[1],
-    ) => ReturnType<typeof client.mutate>
-    readonly onQuery?: (
-      orig: typeof client.query,
-      input: Parameters<typeof client.query>[0],
-      opts?: Parameters<typeof client.query>[1],
-    ) => ReturnType<typeof client.query>
-    readonly onBranchesList?: (
-      orig: typeof client.branches.list,
-      opts?: Parameters<typeof client.branches.list>[0],
-    ) => ReturnType<typeof client.branches.list>
-  },
-): Omnigraph =>
-  new Proxy(client, {
-    get(target, prop, receiver) {
-      if (prop === "mutate" && overrides.onMutate !== undefined) {
-        const fn = overrides.onMutate
-        return (
-          input: Parameters<typeof target.mutate>[0],
-          opts?: Parameters<typeof target.mutate>[1],
-        ) => fn(target.mutate.bind(target), input, opts)
-      }
-      if (prop === "query" && overrides.onQuery !== undefined) {
-        const fn = overrides.onQuery
-        return (
-          input: Parameters<typeof target.query>[0],
-          opts?: Parameters<typeof target.query>[1],
-        ) => fn(target.query.bind(target), input, opts)
-      }
-      if (prop === "branches" && overrides.onBranchesList !== undefined) {
-        const fn = overrides.onBranchesList
-        return new Proxy(target.branches, {
-          get(bTarget, bProp, bReceiver) {
-            if (bProp === "list") {
-              return (opts?: Parameters<typeof target.branches.list>[0]) =>
-                fn(bTarget.list.bind(bTarget), opts)
-            }
-            return Reflect.get(bTarget, bProp, bReceiver)
-          },
-        })
-      }
-      return Reflect.get(target, prop, receiver)
-    },
-  })
-
-const makeStubReadModelLayer = (data: {
-  readonly runs: ReadonlyMap<WorkflowRunId, WorkflowRunRecord>
-  readonly unitsByRun: ReadonlyMap<WorkflowRunId, ReadonlyArray<WorkflowUnitRecord>>
-  readonly attemptsByRun: ReadonlyMap<WorkflowRunId, ReadonlyArray<WorkflowAttemptRecord>>
-  readonly failOnGetRun?: WorkflowStoreUnavailableError | undefined
-}): Layer.Layer<WorkflowReadModelQuery> => {
-  const shape: WorkflowReadModelQueryShape = {
-    getRun: (runId) =>
-      data.failOnGetRun !== undefined
-        ? Effect.fail(data.failOnGetRun)
-        : Effect.succeed(Option.fromUndefinedOr(data.runs.get(runId))),
-    listRuns:
-      data.failOnGetRun !== undefined
-        ? Effect.fail(data.failOnGetRun)
-        : Effect.succeed(Array.from(data.runs.values())),
-    listUnits: (runId) => Effect.succeed(data.unitsByRun.get(runId) ?? []),
-    listAttempts: (runId) => Effect.succeed(data.attemptsByRun.get(runId) ?? []),
-    probeAvailability: Effect.succeed("ready" as const),
-  }
-  return Layer.succeed(WorkflowReadModelQuery, shape)
-}
 
 describe("WF-6 WorkflowProjectorLive & OCC projection", () => {
   const harness = startWorkflowReadModelServerHarness("wf6-projector-")
@@ -156,19 +78,9 @@ describe("WF-6 WorkflowProjectorLive & OCC projection", () => {
 
   beforeAll(async () => {
     await harness.start()
-    // Extract baseUrl from workflow client transport by probing via a small helper branch op or reading server via repoRoot
-    // Actually makeWorkflowOmnigraphClient sets baseUrl from serverBaseUrl inside harness; capture it from a fetch hook:
     const wfClient = createWorkflowClient()
-    const baseClient = new OmnigraphClient({
-      baseUrl: "http://127.0.0.1:1",
-      graphId: HARNESS_OMNIGRAPH_GRAPH_ID,
-    })
-    void baseClient
-    // Inspect resolved url via fetch proxy on wfClient? Simpler: startWorkflowReadModelServerHarness doesn't expose baseUrl directly,
-    // so read it from a quick Request passed to fetch or pass custom fetch? Even simpler:
     const branchList = await wfClient.branches.list()
     expect(branchList).toContain("main")
-    // Read baseUrl from wfClient's transport via Reflect (internal property on Transport) or add nothing outside infra/test:
     const transport = Reflect.get(wfClient, "t") as { readonly baseUrl?: string } | undefined
     serverBaseUrl = transport?.baseUrl ?? ""
     expect(serverBaseUrl.startsWith("http://127.0.0.1:")).toBe(true)
@@ -176,32 +88,6 @@ describe("WF-6 WorkflowProjectorLive & OCC projection", () => {
 
   afterAll(async () => {
     await harness.stop()
-  })
-
-  const makeAlphaPlan = (runId: WorkflowRunId, unitId: WorkUnitId): CompiledPlan => ({
-    runId,
-    level: "slice",
-    planSha: PLAN_SHA,
-    baseSha: BASE_SHA,
-    mode: {
-      _tag: "Automatic",
-      runner: RunnerId.make("claude-code"),
-      maxConcurrency: MaxConcurrency.make(2),
-    },
-    units: [
-      {
-        _tag: "PackageUnit",
-        unitId,
-        projectName: NxProjectName.make("@harness/alpha"),
-        waveIndex: WaveIndex.make(0),
-        dependsOn: [],
-        ownedRelPaths: [OwnedRelPath.make("libs/alpha/src")],
-        stubKeys: [StubSymbolKey.make("libs/alpha/src/index.ts#alphaFn")],
-        earsKeys: [EarsRequirementKey.make("harness:SPEC-0038::REQ-3.1")],
-        packageVerifyCommand: PackageVerifyCommand.make("pnpm nx run @harness/alpha:verify"),
-      },
-    ],
-    sharedStepPaths: [],
   })
 
   it("projects run/units/attempts and all 6 Plays*Role edges idempotently into real omnigraph-server (second run is no-op)", async () => {
@@ -481,7 +367,7 @@ describe("WF-6 WorkflowProjectorLive & OCC projection", () => {
     await Effect.runPromise(harness.cleanupRunsAndJournal(wfClient, [runId]))
   })
 
-  it("auto-creates missing branch on 'wave', falls back to 'main' on 'post-rebuild', and skips on 'done-pre-merge'", async () => {
+  it("auto-creates missing Explicit branch on 'wave', skips absent ActiveTaskImplBranch on 'wave', falls back to 'main' only for ActiveTaskImplBranch on 'post-rebuild', and skips on 'done-pre-merge'", async () => {
     const wfClient = createWorkflowClient()
     const ogHarness = createHarnessCliClient()
     const repoRoot = harness.getRepoRoot()
@@ -495,6 +381,7 @@ describe("WF-6 WorkflowProjectorLive & OCC projection", () => {
     const projectorLayer = makeWorkflowProjectorLayer({
       repoRoot,
       harnessClient: ogHarness,
+      env: { HARNESS_GIT_BRANCH: "feat/missing-task-branch" },
     }).pipe(Layer.provide(readModelLayer))
     const fullLayer = Layer.mergeAll(writerLayer, readModelLayer, projectorLayer)
 
@@ -532,33 +419,55 @@ describe("WF-6 WorkflowProjectorLive & OCC projection", () => {
           trigger: "done-pre-merge",
           repoRoot,
         })
+        const skippedAbsentActiveWave = yield* projector.project({
+          runId,
+          targetBranch: { _tag: "ActiveTaskImplBranch" },
+          trigger: "wave",
+          repoRoot,
+        })
         const createdWave = yield* projector.project({
           runId,
           targetBranch: { _tag: "Explicit", branch: missingWaveBranch },
           trigger: "wave",
           repoRoot,
         })
-        const fallbackMain = yield* projector.project({
+        const skippedExplicitRebuild = yield* projector.project({
           runId,
           targetBranch: { _tag: "Explicit", branch: missingRebuildBranch },
           trigger: "post-rebuild",
           repoRoot,
         })
-        return { skippedDone, createdWave, fallbackMain }
+        const fallbackActiveMain = yield* projector.project({
+          runId,
+          targetBranch: { _tag: "ActiveTaskImplBranch" },
+          trigger: "post-rebuild",
+          repoRoot,
+        })
+        return {
+          skippedDone,
+          skippedAbsentActiveWave,
+          createdWave,
+          skippedExplicitRebuild,
+          fallbackActiveMain,
+        }
       }).pipe(Effect.provide(fullLayer)),
     )
 
     expect(outcomes.skippedDone._tag).toBe("Skipped")
+    expect(outcomes.skippedAbsentActiveWave._tag).toBe("Skipped")
+    expect(outcomes.skippedExplicitRebuild._tag).toBe("Skipped")
+    const postBranches = await ogHarness.branches.list()
+    expect(postBranches).not.toContain("impl/branch-feat_missing-task-branch")
     match(outcomes.createdWave)
       .with({ _tag: "Projected" }, (p) => expect(p.branch).toBe(missingWaveBranch))
       .with({ _tag: "Skipped" }, { _tag: "Stale" }, () =>
         expect.unreachable("expected wave create"),
       )
       .exhaustive()
-    match(outcomes.fallbackMain)
+    match(outcomes.fallbackActiveMain)
       .with({ _tag: "Projected" }, (p) => expect(p.branch).toBe("main"))
       .with({ _tag: "Skipped" }, { _tag: "Stale" }, () =>
-        expect.unreachable("expected post-rebuild fallback to main"),
+        expect.unreachable("expected post-rebuild fallback to main for ActiveTaskImplBranch"),
       )
       .exhaustive()
 
@@ -568,7 +477,6 @@ describe("WF-6 WorkflowProjectorLive & OCC projection", () => {
   it("retries on 412/409 OCC conflicts with fresh graphCommitId re-read and succeeds on retry 2", async () => {
     const ogHarness = createHarnessCliClient()
     const runId = WorkflowRunId.make("run-wf6-occ-03")
-    const execId = WorkflowExecutionId.make("exec-wf6-occ-03")
     const unitId = WorkUnitId.make("unit-occ")
     const unitKey = makeWorkflowUnitKey(runId, unitId)
     const branch = OmnigraphBranchName.make("impl/wf6-occ-03")
@@ -598,39 +506,19 @@ describe("WF-6 WorkflowProjectorLive & OCC projection", () => {
       },
     })
 
-    const readModelLayer = makeStubReadModelLayer({
-      runs: new Map([
-        [
+    const readModelLayer = makeSingleRunReadModelLayer(runId, {
+      units: [
+        {
+          unitKey,
           runId,
-          {
-            runId,
-            executionId: execId,
-            level: "slice",
-            planSha: PLAN_SHA,
-            baseSha: BASE_SHA,
-            state: "running",
-            updatedMs: NOW_MS,
-          },
-        ],
-      ]),
-      unitsByRun: new Map([
-        [
-          runId,
-          [
-            {
-              unitKey,
-              runId,
-              unitId,
-              kind: "package",
-              waveIndex: WaveIndex.make(0),
-              status: "pending",
-              ownedRelPaths: [OwnedRelPath.make("libs/alpha")],
-              updatedMs: NOW_MS,
-            },
-          ],
-        ],
-      ]),
-      attemptsByRun: new Map(),
+          unitId,
+          kind: "package",
+          waveIndex: WaveIndex.make(0),
+          status: "pending",
+          ownedRelPaths: [OwnedRelPath.make("libs/alpha")],
+          updatedMs: NOW_MS,
+        },
+      ],
     })
 
     const projectorLayer = makeWorkflowProjectorLayer({
@@ -709,28 +597,8 @@ describe("WF-6 WorkflowProjectorLive & OCC projection", () => {
   it("records 'stale' and returns Stale without failing on exhausted OCC or unreachable server, and propagates pure interrupts", async () => {
     const ogHarness = createHarnessCliClient()
     const runId = WorkflowRunId.make("run-wf6-stale-04")
-    const execId = WorkflowExecutionId.make("exec-wf6-stale-04")
     const branch = OmnigraphBranchName.make("main")
-
-    const runs = new Map<WorkflowRunId, WorkflowRunRecord>([
-      [
-        runId,
-        {
-          runId,
-          executionId: execId,
-          level: "slice",
-          planSha: PLAN_SHA,
-          baseSha: BASE_SHA,
-          state: "running",
-          updatedMs: NOW_MS,
-        },
-      ],
-    ])
-    const readModelLayer = makeStubReadModelLayer({
-      runs,
-      unitsByRun: new Map(),
-      attemptsByRun: new Map(),
-    })
+    const readModelLayer = makeSingleRunReadModelLayer(runId)
 
     // 1. Exhausted OCC (412 every attempt)
     let occMutateCount = 0
@@ -937,7 +805,7 @@ describe("WF-6 WorkflowProjectorLive & OCC projection", () => {
           res.end(JSON.stringify({ branches: ["main"] }))
           return
         }
-        if (capturedUrl.endsWith("/mutate")) {
+        if (capturedUrl.endsWith("/mutate") || capturedUrl.endsWith("/mutate/if-graph-commit")) {
           res.writeHead(200, {
             "content-type": "application/json",
             "Omnigraph-Http-Api": "0.14",
@@ -1049,7 +917,6 @@ describe("WF-6 WorkflowProjectorLive & OCC projection", () => {
   it("exercises WorkflowProjector.projectAll and WorkflowProjector.readTargetState directly with trace spans", async () => {
     const ogHarness = createHarnessCliClient()
     const runId = WorkflowRunId.make("run-wf6-direct-06")
-    const execId = WorkflowExecutionId.make("exec-wf6-direct-06")
     const unitId = WorkUnitId.make("unit-direct")
     const unitKey = makeWorkflowUnitKey(runId, unitId)
     const branch = OmnigraphBranchName.make("impl/wf6-direct-06")
@@ -1122,39 +989,19 @@ describe("WF-6 WorkflowProjectorLive & OCC projection", () => {
       }`,
     })
 
-    const readModelLayer = makeStubReadModelLayer({
-      runs: new Map([
-        [
+    const readModelLayer = makeSingleRunReadModelLayer(runId, {
+      units: [
+        {
+          unitKey,
           runId,
-          {
-            runId,
-            executionId: execId,
-            level: "slice",
-            planSha: PLAN_SHA,
-            baseSha: BASE_SHA,
-            state: "running",
-            updatedMs: NOW_MS,
-          },
-        ],
-      ]),
-      unitsByRun: new Map([
-        [
-          runId,
-          [
-            {
-              unitKey,
-              runId,
-              unitId,
-              kind: "package",
-              waveIndex: WaveIndex.make(0),
-              status: "pending",
-              ownedRelPaths: [OwnedRelPath.make("libs/direct")],
-              updatedMs: NOW_MS,
-            },
-          ],
-        ],
-      ]),
-      attemptsByRun: new Map(),
+          unitId,
+          kind: "package",
+          waveIndex: WaveIndex.make(0),
+          status: "pending",
+          ownedRelPaths: [OwnedRelPath.make("libs/direct")],
+          updatedMs: NOW_MS,
+        },
+      ],
     })
 
     const tracedAll = await Effect.runPromise(
@@ -1226,8 +1073,6 @@ describe("WF-6 WorkflowProjectorLive & OCC projection", () => {
     const runOk = WorkflowRunId.make("run-wf6-edge-ok")
     const runFail = WorkflowRunId.make("run-wf6-edge-fail")
     const missingRun = WorkflowRunId.make("run-wf6-edge-missing")
-    const execOk = WorkflowExecutionId.make("exec-wf6-edge-ok")
-    const execFail = WorkflowExecutionId.make("exec-wf6-edge-fail")
     const branch = OmnigraphBranchName.make("impl/wf6-edge-07")
     await ogHarness.branches.create({ name: branch, from: "main" })
 
@@ -1271,24 +1116,7 @@ describe("WF-6 WorkflowProjectorLive & OCC projection", () => {
     const noMainClient = wrapHarnessClient(ogHarness, {
       onBranchesList: async () => ["other-branch"],
     })
-    const oneRunReadModel = makeStubReadModelLayer({
-      runs: new Map([
-        [
-          runOk,
-          {
-            runId: runOk,
-            executionId: execOk,
-            level: "slice",
-            planSha: PLAN_SHA,
-            baseSha: BASE_SHA,
-            state: "running",
-            updatedMs: NOW_MS,
-          },
-        ],
-      ]),
-      unitsByRun: new Map(),
-      attemptsByRun: new Map(),
-    })
+    const oneRunReadModel = makeSingleRunReadModelLayer(runOk)
     const noMainLayer = makeWorkflowProjectorLayer({
       repoRoot: harness.getRepoRoot(),
       harnessClient: noMainClient,
@@ -1321,30 +1149,8 @@ describe("WF-6 WorkflowProjectorLive & OCC projection", () => {
     // Mixed Projected + Stale in projectAll
     const twoRunReadModel = makeStubReadModelLayer({
       runs: new Map([
-        [
-          runOk,
-          {
-            runId: runOk,
-            executionId: execOk,
-            level: "slice",
-            planSha: PLAN_SHA,
-            baseSha: BASE_SHA,
-            state: "running",
-            updatedMs: NOW_MS,
-          },
-        ],
-        [
-          runFail,
-          {
-            runId: runFail,
-            executionId: execFail,
-            level: "slice",
-            planSha: PLAN_SHA,
-            baseSha: BASE_SHA,
-            state: "running",
-            updatedMs: NOW_MS,
-          },
-        ],
+        [runOk, makeRunRecord(runOk)],
+        [runFail, makeRunRecord(runFail)],
       ]),
       unitsByRun: new Map(),
       attemptsByRun: new Map(),
@@ -1407,4 +1213,280 @@ describe("WF-6 WorkflowProjectorLive & OCC projection", () => {
     expect(Ref.getUnsafe(statusRef).get(runOk)).toBe("stale")
     expect(Ref.getUnsafe(statusRef).get(runFail)).toBe("stale")
   })
+
+  it("F-3.1 & F-3.2: fresh WorkflowProjector instance reads persisted fresh/not-projected/stale across restarts and Skipped updates memory + disk", async () => {
+    const ogHarness = createHarnessCliClient()
+    const tmpRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "wf6-restart-status-")))
+    try {
+      const repoRoot = AbsoluteRepoRoot.make(tmpRoot)
+      const runFresh = WorkflowRunId.make("run-restart-fresh")
+      const runMissing = WorkflowRunId.make("run-restart-missing")
+      const runSkipBranch = WorkflowRunId.make("run-restart-skip-branch")
+      const runStale = WorkflowRunId.make("run-restart-stale")
+      const readModelLayer = makeStubReadModelLayer({
+        runs: new Map([
+          [runFresh, makeRunRecord(runFresh)],
+          [runSkipBranch, makeRunRecord(runSkipBranch)],
+          [runStale, makeRunRecord(runStale)],
+        ]),
+        unitsByRun: new Map(),
+        attemptsByRun: new Map(),
+      })
+      const failStaleClient = wrapHarnessClient(ogHarness, {
+        onMutate: async (orig, input, opts) => {
+          if (Object.values(input.params ?? {}).includes(runStale)) {
+            throw Object.assign(new Error("Restart stale error"), { status: 500 })
+          }
+          return orig(input, opts)
+        },
+      })
+      const memRef = Ref.makeUnsafe<ReadonlyMap<WorkflowRunId, WorkflowProjectionStatus>>(new Map())
+      const writerLayer = makeWorkflowProjectorLayer({
+        repoRoot,
+        harnessClient: failStaleClient,
+        statusRef: memRef,
+      }).pipe(Layer.provide(readModelLayer))
+
+      const mainTarget = { _tag: "Explicit", branch: OmnigraphBranchName.make("main") } as const
+      const absentTarget = {
+        _tag: "Explicit",
+        branch: OmnigraphBranchName.make("impl/absent-skip-restart"),
+      } as const
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const p = yield* WorkflowProjector
+          const outFresh = yield* p.project({
+            runId: runFresh,
+            targetBranch: mainTarget,
+            trigger: "wave",
+          })
+          const outMiss = yield* p.project({
+            runId: runMissing,
+            targetBranch: mainTarget,
+            trigger: "wave",
+          })
+          const outSkip = yield* p.project({
+            runId: runSkipBranch,
+            targetBranch: absentTarget,
+            trigger: "done-pre-merge",
+          })
+          const outStale = yield* p.project({
+            runId: runStale,
+            targetBranch: mainTarget,
+            trigger: "wave",
+          })
+          expect(outFresh._tag).toBe("Projected")
+          expect(outMiss._tag).toBe("Skipped")
+          expect(outSkip._tag).toBe("Skipped")
+          expect(outStale._tag).toBe("Stale")
+        }).pipe(Effect.provide(writerLayer)),
+      )
+      expect(Ref.getUnsafe(memRef).get(runMissing)).toBe("not-projected")
+      expect(Ref.getUnsafe(memRef).get(runSkipBranch)).toBe("not-projected")
+
+      const restartedLayer = makeWorkflowProjectorLayer({
+        repoRoot,
+        harnessClient: ogHarness,
+      }).pipe(Layer.provide(readModelLayer))
+      const statuses = await Effect.runPromise(
+        Effect.gen(function* () {
+          const p = yield* WorkflowProjector
+          return {
+            fresh: yield* p.getProjectionStatus(runFresh),
+            missing: yield* p.getProjectionStatus(runMissing),
+            skipBranch: yield* p.getProjectionStatus(runSkipBranch),
+            stale: yield* p.getProjectionStatus(runStale),
+          }
+        }).pipe(Effect.provide(restartedLayer)),
+      )
+      expect(Option.getOrUndefined(statuses.fresh)).toBe("fresh")
+      expect(Option.getOrUndefined(statuses.missing)).toBe("not-projected")
+      expect(Option.getOrUndefined(statuses.skipBranch)).toBe("not-projected")
+      expect(Option.getOrUndefined(statuses.stale)).toBe("stale")
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("F-8.1, F-12.1, F-12.3, F-12.4: covers ActiveTaskImplBranch, branchOverride, malformed rows, retry delay bounds, and 429 exhaustion", async () => {
+    const ogHarness = createHarnessCliClient()
+    const runId = WorkflowRunId.make("run-wf6-12x")
+    const readModelLayer = makeSingleRunReadModelLayer(runId)
+
+    const activeBranch = OmnigraphBranchName.make("impl/branch-feat_12-1")
+    const overrideBranch = OmnigraphBranchName.make("impl/wf6-override-12-1")
+    await ogHarness.branches.create({ name: activeBranch, from: "main" })
+    await ogHarness.branches.create({ name: overrideBranch, from: "main" })
+
+    const activeOut = await Effect.runPromise(
+      projectWorkflowRunImpl(
+        { runId, targetBranch: { _tag: "ActiveTaskImplBranch" }, trigger: "wave" },
+        {
+          repoRoot: harness.getRepoRoot(),
+          harnessClient: ogHarness,
+          env: { HARNESS_GIT_BRANCH: "feat/12-1" },
+        },
+      ).pipe(Effect.provide(readModelLayer)),
+    )
+    match(activeOut)
+      .with({ _tag: "Projected" }, (p) => expect(p.branch).toBe(activeBranch))
+      .with({ _tag: "Skipped" }, { _tag: "Stale" }, () => expect.unreachable("expected Projected"))
+      .exhaustive()
+
+    const overrideOut = await Effect.runPromise(
+      projectWorkflowRunImpl(
+        { runId, targetBranch: { _tag: "ActiveTaskImplBranch" }, trigger: "wave" },
+        {
+          repoRoot: harness.getRepoRoot(),
+          harnessClient: ogHarness,
+          branchOverride: overrideBranch,
+        },
+      ).pipe(Effect.provide(readModelLayer)),
+    )
+    match(overrideOut)
+      .with({ _tag: "Projected" }, (p) => expect(p.branch).toBe(overrideBranch))
+      .with({ _tag: "Skipped" }, { _tag: "Stale" }, () => expect.unreachable("expected Projected"))
+      .exhaustive()
+
+    const malformedClient = wrapHarnessClient(ogHarness, {
+      onQuery: async (orig, input, opts) => {
+        const res = await orig(input, opts)
+        return input.query.includes("q_units(")
+          ? { ...res, rows: [{ unitKey: 123, waveIndex: "bad" }] }
+          : res
+      },
+    })
+    const malformedOut = await Effect.runPromise(
+      projectWorkflowRunImpl(
+        { runId, targetBranch: { _tag: "Explicit", branch: overrideBranch }, trigger: "wave" },
+        { repoRoot: harness.getRepoRoot(), harnessClient: malformedClient },
+      ).pipe(Effect.provide(readModelLayer)),
+    )
+    expectStaleOutcome(malformedOut)
+
+    expect(computeProjectorRetryDelayMs(0, { retryAfter: "60" }, 100)).toBe(
+      WORKFLOW_TIMEOUT_BUDGETS.projectorRetryAfterCapMs,
+    )
+    expect(computeProjectorRetryDelayMs(0, { retryAfter: "0.001" }, 100)).toBe(5)
+    expect(computeProjectorRetryDelayMs(0, { retryAfter: "0.25" }, 100)).toBe(250)
+    const expDelay = computeProjectorRetryDelayMs(2, new Error("429"), 100)
+    expect(expDelay).toBeGreaterThanOrEqual(200)
+    expect(expDelay).toBeLessThanOrEqual(400)
+    expect(computeProjectorRetryDelayMs(0, new Error("429"), 1)).toBe(5)
+
+    const run429 = WorkflowRunId.make("run-wf6-429-exhaust")
+    const client429 = wrapHarnessClient(ogHarness, {
+      onMutate: async () => {
+        throw Object.assign(new Error("Too Many Requests: custom-429-detail"), {
+          status: 429,
+          retryAfter: "0.001",
+        })
+      },
+    })
+    const out429 = await Effect.runPromise(
+      projectWorkflowRunImpl(
+        {
+          runId: run429,
+          targetBranch: { _tag: "Explicit", branch: overrideBranch },
+          trigger: "wave",
+        },
+        { repoRoot: harness.getRepoRoot(), harnessClient: client429 },
+      ).pipe(Effect.provide(makeSingleRunReadModelLayer(run429))),
+    )
+    expectStaleOutcome(out429, "custom-429-detail")
+    expectStaleOutcome(out429, "exhausted")
+  })
+
+  it("F-12.5: projectAll returns Projected with mixed Projected+Skipped children and propagates pure Fiber.interrupt", async () => {
+    const ogHarness = createHarnessCliClient()
+    const runOk = WorkflowRunId.make("run-wf6-mixed-ok")
+    const runVanished = WorkflowRunId.make("run-wf6-mixed-vanished")
+    const branch = OmnigraphBranchName.make("main")
+    const okRecord = makeRunRecord(runOk)
+    const mixedReadModelLayer = Layer.succeed(WorkflowReadModelQuery, {
+      getRun: (id) => Effect.succeed(id === runOk ? Option.some(okRecord) : Option.none()),
+      listRuns: Effect.succeed([okRecord, makeRunRecord(runVanished)]),
+      listUnits: () => Effect.succeed([]),
+      listAttempts: () => Effect.succeed([]),
+      probeAvailability: Effect.succeed("ready" as const),
+    })
+    const mixedOutcome = await Effect.runPromise(
+      projectAllWorkflowRunsImpl(
+        {
+          targetBranch: { _tag: "Explicit", branch },
+          trigger: "wave",
+          repoRoot: harness.getRepoRoot(),
+        },
+        { repoRoot: harness.getRepoRoot(), harnessClient: ogHarness },
+      ).pipe(Effect.provide(mixedReadModelLayer)),
+    )
+    match(mixedOutcome)
+      .with({ _tag: "Projected" }, (p) => {
+        expect(p.projectionStatus).toBe("fresh")
+        expect(p.outcomes.map((o) => o._tag)).toEqual(["Projected", "Skipped"])
+      })
+      .with({ _tag: "Skipped" }, { _tag: "Stale" }, () => expect.unreachable("expected Projected"))
+      .exhaustive()
+
+    const hangingClient = makeHangingBranchesClient(ogHarness)
+    const interruptExit = await Effect.runPromise(
+      Effect.gen(function* () {
+        const fiber = yield* projectAllWorkflowRunsImpl(
+          {
+            targetBranch: { _tag: "Explicit", branch },
+            trigger: "post-rebuild",
+            repoRoot: harness.getRepoRoot(),
+          },
+          { repoRoot: harness.getRepoRoot(), harnessClient: hangingClient },
+        ).pipe(Effect.provide(mixedReadModelLayer), Effect.forkChild)
+        yield* Effect.sleep("20 millis")
+        yield* Fiber.interrupt(fiber)
+        return yield* Fiber.await(fiber)
+      }),
+    )
+    match(interruptExit)
+      .with({ _tag: "Failure" }, ({ cause }) => {
+        expect(isPureInterruptCause(cause)).toBe(true)
+        expect(Cause.hasFails(cause)).toBe(false)
+      })
+      .with({ _tag: "Success" }, () => expect.unreachable("expected pure interrupt"))
+      .exhaustive()
+  })
+
+  it.effect(
+    "F-12.2: TestClock verifies workflowIpcMs on project() and workflowCompleteIpcMs on projectAll() return Stale",
+    () =>
+      Effect.gen(function* () {
+        const ogHarness = createHarnessCliClient()
+        const runId = WorkflowRunId.make("run-wf6-testclock-timeout")
+        const branch = OmnigraphBranchName.make("main")
+        const readModelLayer = makeSingleRunReadModelLayer(runId)
+        const hangingClient = makeHangingBranchesClient(ogHarness)
+
+        const projectFiber = yield* projectWorkflowRunImpl(
+          {
+            runId,
+            targetBranch: { _tag: "Explicit", branch },
+            trigger: "wave",
+            repoRoot: harness.getRepoRoot(),
+          },
+          { repoRoot: harness.getRepoRoot(), harnessClient: hangingClient },
+        ).pipe(Effect.provide(readModelLayer), Effect.forkChild)
+        yield* TestClock.adjust("1 millis")
+        yield* TestClock.adjust(`${WORKFLOW_TIMEOUT_BUDGETS.workflowIpcMs} millis`)
+        expectStaleOutcome(yield* Fiber.join(projectFiber), "aggregate timeout")
+
+        const projectAllFiber = yield* projectAllWorkflowRunsImpl(
+          {
+            targetBranch: { _tag: "Explicit", branch },
+            trigger: "post-rebuild",
+            repoRoot: harness.getRepoRoot(),
+          },
+          { repoRoot: harness.getRepoRoot(), harnessClient: hangingClient },
+        ).pipe(Effect.provide(readModelLayer), Effect.forkChild)
+        yield* TestClock.adjust("1 millis")
+        yield* TestClock.adjust(`${WORKFLOW_TIMEOUT_BUDGETS.workflowCompleteIpcMs} millis`)
+        expectStaleOutcome(yield* Fiber.join(projectAllFiber), "aggregate timeout")
+      }),
+  )
 })

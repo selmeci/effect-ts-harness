@@ -227,7 +227,8 @@ export class ShipAttemptStore extends Context.Service<ShipAttemptStore, ShipAtte
 
 /**
  * Projects durable workflow runs, units, and attempts into the analytical `harness` graph
- * (`impl/<task>`) as a non-fatal readable convenience (`SPEC-0038`, `RFC-0013 REQ-4.5`).
+ * (`impl/<task>`, `main`, or another explicit target branch) as a non-fatal readable
+ * convenience (`SPEC-0038`, `RFC-0013 REQ-4.5`).
  */
 export interface WorkflowProjectorShape {
   readonly project: (input: WorkflowProjectorInput) => Effect.Effect<WorkflowProjectionOutcome>

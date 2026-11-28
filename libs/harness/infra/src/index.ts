@@ -341,7 +341,16 @@ export {
   type WorkflowShipRpcOptions,
 } from "./workflow/ship-daemon-client.js"
 export {
+  WORKFLOW_PROJECTION_STATUS_STORE_VERSION,
+  WorkflowProjectionStatusStoreData,
+  readWorkflowProjectionStatuses,
+  resolveWorkflowProjectionStatusPath,
+  type ResolvedWorkflowProjectionStatusPath,
+  writeWorkflowProjectionStatus,
+} from "./workflow/workflow-projection-status-store.js"
+export {
   WorkflowProjectorLive,
+  computeProjectorRetryDelayMs,
   getWorkflowProjectionStatusImpl,
   makeWorkflowProjectorLayer,
   projectAllWorkflowRunsImpl,

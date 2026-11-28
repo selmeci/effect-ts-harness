@@ -735,7 +735,12 @@ export const executeTaskWorkflow = Effect.fn("Harness.executeTaskWorkflow")(func
       .with("slice", () => Effect.void)
       .exhaustive()
 
-    yield* projectWaveToHarnessActivity(plan, wave.waveIndex, worktrees.canonicalRepoRoot)
+    yield* projectWaveToHarnessActivity(
+      plan,
+      wave.waveIndex,
+      worktrees.canonicalRepoRoot,
+      worktrees.implBranch ?? plan.implBranch,
+    )
   }
 
   if (plan.sharedStepPaths.length > 0) {

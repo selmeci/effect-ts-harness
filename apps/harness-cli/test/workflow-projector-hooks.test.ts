@@ -3,10 +3,10 @@ import { createServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { Deferred, Effect, type Exit, Fiber, Layer } from "effect"
 import { match } from "ts-pattern"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   AbsoluteRepoRoot,
   BackupDirPath,
@@ -19,6 +19,8 @@ import {
   WorkflowBackupTimestampMs,
   WorkflowProjectAllOutcome,
   WorkflowProjectionTargetBranch,
+  WorkflowStoreOperation,
+  WorkflowStoreUnavailableError,
   type WorkflowProjectAllInput,
   type WorkflowProjectorInput,
 } from "@harness/contract"
@@ -38,6 +40,7 @@ import {
   evaluateClusterConfigDrift,
   extractSchemaEdgeKeys,
   hasBreakingSchemaEdgeKeyChange,
+  parseSchemaEdgeKeys,
   writeClusterDriftReceipts,
 } from "../src/commands/omnigraph-auth-and-drift.js"
 import {
@@ -106,6 +109,22 @@ const makeStubProjector = (options: {
   projectAll: options.onProjectAll,
   getProjectionStatus: () => Effect.succeedNone,
 })
+
+const captureStderr = async <A>(
+  run: () => Promise<A>,
+): Promise<{ readonly result: A; readonly stderr: string }> => {
+  const chunks: Array<string> = []
+  const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+    chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"))
+    return true
+  })
+  try {
+    const result = await run()
+    return { result, stderr: chunks.join("") }
+  } finally {
+    spy.mockRestore()
+  }
+}
 
 const expectPureInterruptExit = <A, E>(exit: Exit.Exit<A, E>): void => {
   match(exit)
@@ -360,22 +379,18 @@ describe("WF-6 CLI schema drift, done pre-merge projection, and post-rebuild res
     const clusterDir = join(repoRoot, ".harness", "omnigraph-cluster")
     mkdirSync(join(clusterDir, "graphs", "harness.omni"), { recursive: true })
 
-    const realSchemaPath = join(process.cwd(), "libs", "harness", "graph", "schema.pg")
-    const fullWf6Schema = existsSync(realSchemaPath)
-      ? readFileSync(realSchemaPath, "utf8")
-      : [
-          readFileSync(join(configDir, "schema.pg"), "utf8"),
-          "node WorkflowRun { runId: String @key }",
-          "node WorkUnit { unitKey: String @key }",
-          "node UnitAttempt { attemptKey: String @key }",
-          "edge PlaysRunUnitRole: WorkflowRun -> WorkUnit @card(0..) { @key(@src, @dst, role) role: String }",
-          "edge PlaysUnitAttemptRole: WorkUnit -> UnitAttempt @card(0..) { @key(@src, @dst, role) role: String }",
-          "edge PlaysUnitStubRole: WorkUnit -> EffectFn @card(0..) { @key(@src, @dst, role) role: String }",
-          "edge PlaysUnitEarsRole: WorkUnit -> EarsSpec @card(0..) { @key(@src, @dst, role) role: String }",
-          "edge PlaysUnitTraceabilityRole: WorkUnit -> TraceabilityTuple @card(0..) { @key(@src, @dst, role) role: String }",
-          "edge PlaysAttemptTestRole: UnitAttempt -> VitestCase @card(0..) { @key(@src, @dst, role) role: String }",
-          "",
-        ].join("\n")
+    const realSchemaPath = resolve(
+      import.meta.dirname,
+      "..",
+      "..",
+      "..",
+      "libs",
+      "harness",
+      "graph",
+      "schema.pg",
+    )
+    expect(existsSync(realSchemaPath)).toBe(true)
+    const fullWf6Schema = readFileSync(realSchemaPath, "utf8")
 
     const wf6Edges = [
       "PlaysRunUnitRole",
@@ -385,10 +400,12 @@ describe("WF-6 CLI schema drift, done pre-merge projection, and post-rebuild res
       "PlaysUnitTraceabilityRole",
       "PlaysAttemptTestRole",
     ]
-    const firstWf6Idx = fullWf6Schema.indexOf("node WorkflowRun")
+    const wfNodesStart = fullWf6Schema.indexOf("node WorkflowRun")
+    const firstEdgeStart = fullWf6Schema.indexOf("edge PlaysCallerRole:")
+    const wfEdgesStart = fullWf6Schema.indexOf("edge PlaysRunUnitRole:")
     const preWf6Schema =
-      firstWf6Idx >= 0
-        ? fullWf6Schema.slice(0, firstWf6Idx)
+      wfNodesStart >= 0 && firstEdgeStart > wfNodesStart && wfEdgesStart > firstEdgeStart
+        ? `${fullWf6Schema.slice(0, wfNodesStart)}${fullWf6Schema.slice(firstEdgeStart, wfEdgesStart)}`
         : readFileSync(join(configDir, "schema.pg"), "utf8")
 
     const preKeys = extractSchemaEdgeKeys(preWf6Schema)
@@ -554,10 +571,14 @@ describe("WF-6 CLI schema drift, done pre-merge projection, and post-rebuild res
     )
     expectPureInterruptExit(interruptExit)
 
+    let defectCalls = 0
     const defectProjector = makeStubProjector({
-      onProjectAll: () => Effect.die(new Error("boom-defect")),
+      onProjectAll: () => {
+        defectCalls += 1
+        return Effect.die(new Error("boom-defect"))
+      },
     })
-    await expect(
+    const defectRun = await captureStderr(() =>
       Effect.runPromise(
         reprojectWorkflowsBeforeMerge({
           repoRoot,
@@ -566,20 +587,27 @@ describe("WF-6 CLI schema drift, done pre-merge projection, and post-rebuild res
           workflowProjector: defectProjector,
         }),
       ),
-    ).resolves.toBeUndefined()
+    )
+    expect(defectRun.result).toBeUndefined()
+    expect(defectCalls).toBe(1)
+    expect(defectRun.stderr).toContain("failed during projection")
+    expect(defectRun.stderr).toContain("boom-defect")
 
+    let staleCalls = 0
     const staleProjector = makeStubProjector({
-      onProjectAll: () =>
-        Effect.succeed(
+      onProjectAll: () => {
+        staleCalls += 1
+        return Effect.succeed(
           WorkflowProjectAllOutcome.cases.Stale.make({
             branch: OmnigraphBranchName.make("impl/wf6"),
             projectionStatus: "stale",
             outcomes: [],
             reason: toBoundedReason("stale-test"),
           }),
-        ),
+        )
+      },
     })
-    await expect(
+    const staleRun = await captureStderr(() =>
       Effect.runPromise(
         reprojectWorkflowsBeforeMerge({
           repoRoot,
@@ -588,7 +616,233 @@ describe("WF-6 CLI schema drift, done pre-merge projection, and post-rebuild res
           workflowProjector: staleProjector,
         }),
       ),
-    ).resolves.toBeUndefined()
+    )
+    expect(staleRun.result).toBeUndefined()
+    expect(staleCalls).toBe(1)
+    expect(staleRun.stderr).toContain("stale on 'impl/wf6': stale-test")
+  })
+
+  it("reprojectWorkflowsBeforeMerge emits explicit diagnostics on absent graph, Skipped outcome, invalid inputs, and setup/projection layer failures", async () => {
+    const repoRoot = makeTempWorkflowRepo("harness-wf6-done-skips-")
+    const clusterDir = resolveOmnigraphClusterDir(repoRoot, nodeSyncHostIo)
+    const missingGraphDir = join(clusterDir, "graphs", "harness-workflows.omni")
+
+    // F-6.1: absent harness-workflows.omni logs informational skip notice
+    const missingRun = await captureStderr(() =>
+      Effect.runPromise(
+        reprojectWorkflowsBeforeMerge({
+          repoRoot,
+          clusterRepoRoot: repoRoot,
+          implBranch: "impl/wf6",
+        }),
+      ),
+    )
+    expect(missingRun.result).toBeUndefined()
+    expect(missingRun.stderr).toContain(
+      `[harness:done] Info: skipping pre-merge workflow projection (${missingGraphDir} absent)`,
+    )
+
+    // F-6.2: Skipped outcome logs branch and reason
+    const skippedProjector = makeStubProjector({
+      onProjectAll: () =>
+        Effect.succeed(
+          WorkflowProjectAllOutcome.cases.Skipped.make({
+            branch: OmnigraphBranchName.make("impl/wf6"),
+            projectionStatus: "not-projected",
+            reason: toBoundedReason("no-workflow-runs"),
+          }),
+        ),
+    })
+    const skippedRun = await captureStderr(() =>
+      Effect.runPromise(
+        reprojectWorkflowsBeforeMerge({
+          repoRoot,
+          clusterRepoRoot: repoRoot,
+          implBranch: "impl/wf6",
+          workflowProjector: skippedProjector,
+        }),
+      ),
+    )
+    expect(skippedRun.result).toBeUndefined()
+    expect(skippedRun.stderr).toContain(
+      "[harness:done] Info: pre-merge workflow projection skipped on 'impl/wf6': no-workflow-runs",
+    )
+
+    // F-6.3: invalid clusterRepoRoot & implBranch report field name and SchemaError parse reason
+    const badRootRun = await captureStderr(() =>
+      Effect.runPromise(
+        reprojectWorkflowsBeforeMerge({
+          repoRoot,
+          clusterRepoRoot: "",
+          implBranch: "impl/wf6",
+          workflowProjector: skippedProjector,
+        }),
+      ),
+    )
+    expect(badRootRun.result).toBeUndefined()
+    expect(badRootRun.stderr).toContain("invalid clusterRepoRoot")
+    expect(badRootRun.stderr).toContain("Expected")
+
+    const badBranchRun = await captureStderr(() =>
+      Effect.runPromise(
+        reprojectWorkflowsBeforeMerge({
+          repoRoot,
+          clusterRepoRoot: repoRoot,
+          implBranch: "   ",
+          workflowProjector: skippedProjector,
+        }),
+      ),
+    )
+    expect(badBranchRun.result).toBeUndefined()
+    expect(badBranchRun.stderr).toContain("invalid implBranch")
+    expect(badBranchRun.stderr).toContain("Expected")
+
+    // F-6.4: setup stage layer failure logs stage + cause, while setup interrupt propagates
+    const failingLayer = Layer.effect(
+      WorkflowProjector,
+      Effect.fail(
+        new WorkflowStoreUnavailableError({
+          operation: WorkflowStoreOperation.make("WorkflowReadModelQuery.listRuns"),
+          reason: toBoundedReason("read-model layer init failed"),
+        }),
+      ),
+    )
+    const setupFailRun = await captureStderr(() =>
+      Effect.runPromise(
+        reprojectWorkflowsBeforeMerge({
+          repoRoot,
+          clusterRepoRoot: repoRoot,
+          implBranch: "impl/wf6",
+          workflowProjectorLayer: failingLayer,
+        }),
+      ),
+    )
+    expect(setupFailRun.result).toBeUndefined()
+    expect(setupFailRun.stderr).toContain("failed during setup")
+    expect(setupFailRun.stderr).toContain("read-model layer init failed")
+
+    const setupStarted = Deferred.makeUnsafe<void>()
+    const interruptingLayer = Layer.effect(
+      WorkflowProjector,
+      Effect.gen(function* () {
+        yield* Deferred.succeed(setupStarted, void 0)
+        return yield* Effect.never
+      }),
+    )
+    const setupInterruptExit = await Effect.runPromise(
+      Effect.gen(function* () {
+        const fiber = yield* reprojectWorkflowsBeforeMerge({
+          repoRoot,
+          clusterRepoRoot: repoRoot,
+          implBranch: "impl/wf6",
+          workflowProjectorLayer: interruptingLayer,
+        }).pipe(Effect.forkChild)
+        yield* Deferred.await(setupStarted)
+        yield* Fiber.interrupt(fiber)
+        return yield* Fiber.await(fiber)
+      }),
+    )
+    expectPureInterruptExit(setupInterruptExit)
+  })
+
+  it("fails closed on unparseable @key edge blocks, truncated/empty legacy .config-stamp, and uses .config-stamp fallback for workflows.schema.pg", async () => {
+    // Commented-out edge is ignored; unparseable @key in edge block returns Unparseable + triggers RequiresCleanRebuild
+    const commentOnlySchema = [
+      "// edge CommentedEdge: A -> B { @key(@src, @dst }",
+      "node EffectFn { qualname: String @key }",
+      "edge ValidEdge: EffectFn -> EffectFn { @key(@src, @dst, role) role: String }",
+      "",
+    ].join("\n")
+    expect(parseSchemaEdgeKeys(commentOnlySchema)).toEqual({
+      _tag: "Parsed",
+      edgeKeys: { ValidEdge: "@key(@src, @dst, role)" },
+    })
+
+    const malformedKeySchema = [
+      "node EffectFn { qualname: String @key }",
+      "edge BrokenEdge: EffectFn -> EffectFn { @key(@src, @dst }",
+      "",
+    ].join("\n")
+    expect(parseSchemaEdgeKeys(malformedKeySchema)._tag).toBe("Unparseable")
+    expect(hasBreakingSchemaEdgeKeyChange({}, extractSchemaEdgeKeys(malformedKeySchema))).toBe(true)
+
+    const repoRoot = makeTempWorkflowRepo("harness-wf6-failclosed-drift-")
+    const configDir = join(repoRoot, "libs", "harness", "graph")
+    const clusterDir = join(repoRoot, ".harness", "omnigraph-cluster")
+    mkdirSync(join(clusterDir, "graphs", "harness.omni"), { recursive: true })
+
+    const initDrift = await Effect.runPromise(
+      evaluateClusterConfigDrift(clusterDir, configDir, false),
+    )
+    writeClusterDriftReceipts(clusterDir, initDrift.expectedStamp, configDir)
+
+    // Unparseable @key in schema.pg -> RequiresCleanRebuild
+    writeFileSync(join(configDir, "schema.pg"), malformedKeySchema, "utf8")
+    const malformedDrift = await Effect.runPromise(
+      evaluateClusterConfigDrift(clusterDir, configDir, true),
+    )
+    expect(malformedDrift.action._tag).toBe("RequiresCleanRebuild")
+
+    // Restore valid schema.pg & re-stamp
+    const repoRoot2 = makeTempWorkflowRepo("harness-wf6-legacy-wfschema-")
+    const configDir2 = join(repoRoot2, "libs", "harness", "graph")
+    const clusterDir2 = join(repoRoot2, ".harness", "omnigraph-cluster")
+    mkdirSync(join(clusterDir2, "graphs", "harness.omni"), { recursive: true })
+    const baseDrift2 = await Effect.runPromise(
+      evaluateClusterConfigDrift(clusterDir2, configDir2, false),
+    )
+    writeClusterDriftReceipts(clusterDir2, baseDrift2.expectedStamp, configDir2)
+
+    // Legacy .config-digests.json without workflows.schema.pg@edgeKeys, complete .config-stamp
+    const digestsPath2 = join(clusterDir2, ".config-digests.json")
+    const legacyDigests2 = JSON.parse(readFileSync(digestsPath2, "utf8")) as Record<string, unknown>
+    delete legacyDigests2["workflows.schema.pg@edgeKeys"]
+    writeFileSync(digestsPath2, JSON.stringify(legacyDigests2, null, 2), "utf8")
+
+    // Additive edit to workflows.schema.pg (adding a new edge) -> LiveClusterApply via .config-stamp fallback
+    writeFileSync(
+      join(configDir2, "workflows.schema.pg"),
+      "node WfMessage {\n  messageKey: String @key\n  seqKey: String @index\n}\nedge WfLink: WfMessage -> WfMessage { @key(@src, @dst, role) role: String }\n",
+      "utf8",
+    )
+    const wfAdditiveDrift = await Effect.runPromise(
+      evaluateClusterConfigDrift(clusterDir2, configDir2, true),
+    )
+    expect(wfAdditiveDrift.action._tag).toBe("LiveClusterApply")
+
+    // Update stamp/digests with WfLink (still omitting workflows.schema.pg@edgeKeys), then modify @key -> RequiresCleanRebuild
+    const wfWithEdgeDrift = await Effect.runPromise(
+      evaluateClusterConfigDrift(clusterDir2, configDir2, false),
+    )
+    writeFileSync(join(clusterDir2, ".config-stamp"), wfWithEdgeDrift.expectedStamp, "utf8")
+    legacyDigests2["workflows.schema.pg"] = wfWithEdgeDrift.digests["workflows.schema.pg"]
+    legacyDigests2["workflows.schema.pg@keys"] = wfWithEdgeDrift.digests["workflows.schema.pg@keys"]
+    writeFileSync(digestsPath2, JSON.stringify(legacyDigests2, null, 2), "utf8")
+
+    writeFileSync(
+      join(configDir2, "workflows.schema.pg"),
+      "node WfMessage {\n  messageKey: String @key\n  seqKey: String @index\n}\nedge WfLink: WfMessage -> WfMessage { @key(@src, @dst) role: String }\n",
+      "utf8",
+    )
+    const wfBreakingDrift = await Effect.runPromise(
+      evaluateClusterConfigDrift(clusterDir2, configDir2, true),
+    )
+    expect(wfBreakingDrift.action._tag).toBe("RequiresCleanRebuild")
+
+    // Truncated / empty legacy .config-stamp when @edgeKeys are absent -> RequiresCleanRebuild (fail-closed)
+    delete legacyDigests2["schema.pg@edgeKeys"]
+    writeFileSync(digestsPath2, JSON.stringify(legacyDigests2, null, 2), "utf8")
+    writeFileSync(join(clusterDir2, ".config-stamp"), "", "utf8")
+    const emptyStampDrift = await Effect.runPromise(
+      evaluateClusterConfigDrift(clusterDir2, configDir2, true),
+    )
+    expect(emptyStampDrift.action._tag).toBe("RequiresCleanRebuild")
+
+    writeFileSync(join(clusterDir2, ".config-stamp"), "name: test\n---\n", "utf8")
+    const truncatedStampDrift = await Effect.runPromise(
+      evaluateClusterConfigDrift(clusterDir2, configDir2, true),
+    )
+    expect(truncatedStampDrift.action._tag).toBe("RequiresCleanRebuild")
   })
 
   it("afterRebuildWorkflowBackup triggers post-rebuild WorkflowProjector non-fatally and propagates pure interrupts", async () => {

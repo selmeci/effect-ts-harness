@@ -680,10 +680,15 @@ describe("workflow-protocol & workflow-timeouts", () => {
     const exactAbortBudget =
       WORKFLOW_TIMEOUT_BUDGETS.abortSettleMaxAttempts *
       WORKFLOW_TIMEOUT_BUDGETS.abortSettleIntervalMs
+    const smallProjectorOverrides = {
+      projectorHttpTimeoutMs: WorkflowTimeoutMs.make(4_000),
+      projectorRetryAfterCapMs: WorkflowTimeoutMs.make(100),
+    }
     expect(
       Result.isFailure(
         validateWorkflowTimeoutBudgets({
           ...WORKFLOW_TIMEOUT_BUDGETS,
+          ...smallProjectorOverrides,
           workflowIpcMs: WorkflowTimeoutMs.make(exactAbortBudget),
         }),
       ),
@@ -692,6 +697,7 @@ describe("workflow-protocol & workflow-timeouts", () => {
       Result.isSuccess(
         validateWorkflowTimeoutBudgets({
           ...WORKFLOW_TIMEOUT_BUDGETS,
+          ...smallProjectorOverrides,
           workflowIpcMs: WorkflowTimeoutMs.make(exactAbortBudget + 1),
         }),
       ),
@@ -1237,20 +1243,25 @@ describe("workflow-protocol & workflow-timeouts", () => {
     expect(propCheck._tag).toBe("Passed")
   })
 
-  it("validates projector timeout and OCC monotonicity invariants (projectorHttpTimeoutMs, projectorOccMaxAttempts, projectorOccRetryBackoffMs)", () => {
+  it("validates projector timeout, Retry-After cap, and OCC monotonicity invariants", () => {
     expect(WORKFLOW_TIMEOUT_BUDGETS.projectorHttpTimeoutMs).toBe(10_000)
     expect(WORKFLOW_TIMEOUT_BUDGETS.projectorOccMaxAttempts).toBe(6)
     expect(WORKFLOW_TIMEOUT_BUDGETS.projectorOccRetryBackoffMs).toBe(100)
+    expect(WORKFLOW_TIMEOUT_BUDGETS.projectorRetryAfterCapMs).toBe(1_500)
 
     const exactOccBudget =
       WORKFLOW_TIMEOUT_BUDGETS.projectorOccRetryBackoffMs *
       (2 ** Math.max(0, WORKFLOW_TIMEOUT_BUDGETS.projectorOccMaxAttempts - 1) - 1)
+    const rateLimitMaxRetryBudget =
+      Math.max(0, WORKFLOW_TIMEOUT_BUDGETS.projectorOccMaxAttempts - 1) *
+      WORKFLOW_TIMEOUT_BUDGETS.projectorRetryAfterCapMs
+    const worstCaseRetrySleepMs = Math.max(exactOccBudget, rateLimitMaxRetryBudget)
     expect(WORKFLOW_TIMEOUT_BUDGETS.projectorHttpTimeoutMs).toBeGreaterThan(exactOccBudget)
     expect(WORKFLOW_TIMEOUT_BUDGETS.projectorHttpTimeoutMs).toBeLessThanOrEqual(
       WORKFLOW_TIMEOUT_BUDGETS.httpRequestTimeoutMs,
     )
     expect(WORKFLOW_TIMEOUT_BUDGETS.workflowIpcMs).toBeGreaterThan(
-      WORKFLOW_TIMEOUT_BUDGETS.projectorHttpTimeoutMs,
+      WORKFLOW_TIMEOUT_BUDGETS.projectorHttpTimeoutMs + worstCaseRetrySleepMs,
     )
 
     // projectorHttpTimeoutMs > worst-case exponential OCC retry backoff sum
@@ -1301,20 +1312,22 @@ describe("workflow-protocol & workflow-timeouts", () => {
       )
       .exhaustive()
 
-    // workflowIpcMs > projectorHttpTimeoutMs
+    // workflowIpcMs > projectorHttpTimeoutMs + worstCaseProjectorRetrySleepMs
     const equalIpcAndProjector = WORKFLOW_TIMEOUT_BUDGETS.workflowIpcMs
     const ipcEqualFail = validateWorkflowTimeoutBudgets({
       ...WORKFLOW_TIMEOUT_BUDGETS,
       httpRequestTimeoutMs: equalIpcAndProjector,
-      projectorHttpTimeoutMs: equalIpcAndProjector,
+      projectorHttpTimeoutMs: WorkflowTimeoutMs.make(equalIpcAndProjector - worstCaseRetrySleepMs),
     })
     match(ipcEqualFail)
       .with({ _tag: "Failure" }, ({ failure }) => {
         expect(failure).toContain("workflowIpcMs")
-        expect(failure).toContain("projectorHttpTimeoutMs")
+        expect(failure).toContain("worstCaseProjectorRetrySleepMs")
       })
       .with({ _tag: "Success" }, () =>
-        expect.unreachable("Expected workflowIpcMs == projectorHttpTimeoutMs to fail"),
+        expect.unreachable(
+          "Expected workflowIpcMs == projectorHttpTimeoutMs + worstCaseProjectorRetrySleepMs to fail",
+        ),
       )
       .exhaustive()
     expect(
@@ -1322,7 +1335,9 @@ describe("workflow-protocol & workflow-timeouts", () => {
         validateWorkflowTimeoutBudgets({
           ...WORKFLOW_TIMEOUT_BUDGETS,
           httpRequestTimeoutMs: equalIpcAndProjector,
-          projectorHttpTimeoutMs: WorkflowTimeoutMs.make(equalIpcAndProjector - 1),
+          projectorHttpTimeoutMs: WorkflowTimeoutMs.make(
+            equalIpcAndProjector - worstCaseRetrySleepMs - 1,
+          ),
         }),
       ),
     ).toBe(true)

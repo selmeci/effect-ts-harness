@@ -95,6 +95,11 @@ export const decodeAbsClusterRepoRoot = (clusterRepoRoot: string): AbsoluteRepoR
     .with({ _tag: "None" }, () => undefined)
     .exhaustive()
 
+/**
+ * Builds an `OmnigraphClient` bound to `harness-workflows`, gating local CLI bearer token
+ * attachment behind `isLoopbackOmnigraphUrl(baseUrl)` so secrets read from `auth-tokens.json`
+ * are never attached or leaked to non-loopback / remote endpoints.
+ */
 export const makeWorkflowClientForCluster = (baseUrl: string, clusterRootDir: string) => {
   const cliToken = isLoopbackOmnigraphUrl(baseUrl)
     ? readAuthTokensFromClusterDir(clusterRootDir, nodeSyncHostIo, "harness-cli")

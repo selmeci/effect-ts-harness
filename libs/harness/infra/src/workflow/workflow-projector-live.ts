@@ -1,249 +1,48 @@
 import { Cause, Effect, Layer, Option, Ref, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
-  AbsoluteRepoRoot,
-  NonNegativeCount,
-  OmnigraphBranchName,
+  type AbsoluteRepoRoot,
+  type OmnigraphBranchName,
   OmnigraphCommitId,
   WORKFLOW_TIMEOUT_BUDGETS,
   type WorkflowProjectAllInput,
   WorkflowProjectAllOutcome,
-  type WorkflowProjectionCounts,
+  type WorkflowProjectionNonStaleOutcome,
   WorkflowProjectionOutcome,
   WorkflowProjectionStatus,
   type WorkflowProjectorInput,
-  type WorkflowProjectorTrigger,
   type WorkflowRunId,
-  WorkflowStoreFailureReason,
+  type WorkflowStoreFailureReason,
   isPureInterruptCause,
   projectionStatusOfOutcome,
   toBoundedReason,
 } from "@harness/contract"
 import {
-  HARNESS_OMNIGRAPH_GRAPH_ID,
-  type OmnigraphClient,
-  isOmnigraphPreconditionOrConflictError,
-  isOmnigraphTooManyRequestsError,
-  makeOmnigraphClient,
-  resolveOmnigraphTaskBranches,
-} from "@harness/graph"
-import {
   WorkflowProjector,
   type WorkflowProjectorShape,
   WorkflowReadModelQuery,
 } from "@harness/service"
-import { type SyncHostIo } from "@harness/service/host-io"
 import { nodeSyncHostIo } from "../node-host-io.js"
+import { readWorkflowProjectionStatuses } from "./workflow-projection-status-store.js"
 import { planWorkflowProjection } from "./workflow-projector-planner.js"
 import {
   WorkflowProjectorCallError,
   readTargetStateSnapshot,
   runTimedOmnigraphCall,
 } from "./workflow-projector-query.js"
-
-type Omnigraph = InstanceType<typeof OmnigraphClient>
-
-export interface WorkflowProjectorOptions {
-  readonly repoRoot?: AbsoluteRepoRoot | undefined
-  readonly harnessClient?: Omnigraph | undefined
-  readonly hostIo?: SyncHostIo | undefined
-  readonly env?: Readonly<Record<string, string | undefined>> | undefined
-  readonly branchOverride?: string | undefined
-  readonly statusRef?: Ref.Ref<ReadonlyMap<WorkflowRunId, WorkflowProjectionStatus>> | undefined
-}
-
-const ZERO_PROJECTION_COUNTS: WorkflowProjectionCounts = {
-  runsUpserted: NonNegativeCount.make(0),
-  unitsUpserted: NonNegativeCount.make(0),
-  attemptsUpserted: NonNegativeCount.make(0),
-  edgesUpserted: NonNegativeCount.make(0),
-}
+import {
+  type WorkflowProjectorOptions,
+  computeProjectorRetryDelayMs,
+  isRetryableProjectionError,
+  makeHarnessActorClient,
+  recordProjectionStatus,
+  resolveFallbackBranch,
+  resolveRepoRoot,
+  resolveTargetBranchName,
+  resolveWritableTargetBranch,
+} from "./workflow-projector-runtime.js"
 
 const decodeCommitIdOption = Schema.decodeUnknownOption(OmnigraphCommitId)
-const decodeRepoRootOption = Schema.decodeOption(AbsoluteRepoRoot)
-
-const resolveRepoRoot = (
-  inputRepoRoot: AbsoluteRepoRoot | undefined,
-  options?: WorkflowProjectorOptions,
-): AbsoluteRepoRoot => {
-  if (inputRepoRoot !== undefined) {
-    return inputRepoRoot
-  }
-  if (options?.repoRoot !== undefined) {
-    return options.repoRoot
-  }
-  return match(decodeRepoRootOption(process.cwd()))
-    .with({ _tag: "Some" }, ({ value }) => value)
-    .with({ _tag: "None" }, () => AbsoluteRepoRoot.make("/"))
-    .exhaustive()
-}
-
-const resolveTargetBranchName = (
-  targetBranch: WorkflowProjectorInput["targetBranch"],
-  repoRoot: AbsoluteRepoRoot,
-  hostIo: SyncHostIo,
-  env: Readonly<Record<string, string | undefined>> | undefined,
-  options?: WorkflowProjectorOptions,
-): OmnigraphBranchName => {
-  if (options?.branchOverride !== undefined) {
-    return OmnigraphBranchName.make(options.branchOverride)
-  }
-  return match(targetBranch)
-    .with({ _tag: "Explicit" }, ({ branch }) => branch)
-    .with({ _tag: "ActiveTaskImplBranch" }, () =>
-      OmnigraphBranchName.make(resolveOmnigraphTaskBranches(repoRoot, hostIo, env).implBranch),
-    )
-    .exhaustive()
-}
-
-const BranchResolution = Schema.TaggedUnion({
-  Resolved: { branch: OmnigraphBranchName },
-  Missing: { reason: WorkflowStoreFailureReason },
-})
-type BranchResolution = typeof BranchResolution.Type
-
-const isRetryableProjectionError = (cause: unknown): boolean =>
-  isOmnigraphPreconditionOrConflictError(cause) || isOmnigraphTooManyRequestsError(cause)
-
-const computeProjectorRetryDelayMs = (
-  attempt: number,
-  cause: unknown,
-  baseBackoffMs: number,
-): number => {
-  if (typeof cause === "object" && cause !== null) {
-    const retryAfter = Reflect.get(cause, "retryAfter")
-    if (typeof retryAfter === "string") {
-      const parsedSeconds = Number(retryAfter.trim())
-      if (Number.isFinite(parsedSeconds) && parsedSeconds > 0) {
-        return Math.min(2_000, Math.max(5, Math.ceil(parsedSeconds * 1_000)))
-      }
-    }
-  }
-  const expMs = baseBackoffMs * 2 ** attempt
-  const jitter = 0.5 + Math.random() * 0.5
-  return Math.max(5, Math.floor(expMs * jitter))
-}
-
-const runTimedWithRateLimitRetry = <A>(
-  fn: (signal: AbortSignal) => Promise<A>,
-): Effect.Effect<A, WorkflowProjectorCallError> =>
-  Effect.gen(function* () {
-    const maxAttempts = WORKFLOW_TIMEOUT_BUDGETS.projectorOccMaxAttempts
-    const baseBackoffMs = WORKFLOW_TIMEOUT_BUDGETS.projectorOccRetryBackoffMs
-    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      const attemptRes = yield* runTimedOmnigraphCall(fn).pipe(
-        Effect.map((value) => ({ _tag: "Ok" as const, value })),
-        Effect.catch((err) => Effect.succeed({ _tag: "Err" as const, err })),
-      )
-      const resolved = yield* match(attemptRes)
-        .with({ _tag: "Ok" }, ({ value }) => Effect.succeedSome(value))
-        .with({ _tag: "Err" }, ({ err }) =>
-          Effect.gen(function* () {
-            if (attempt + 1 < maxAttempts && isOmnigraphTooManyRequestsError(err.cause)) {
-              const delayMs = computeProjectorRetryDelayMs(attempt, err.cause, baseBackoffMs)
-              yield* Effect.sleep(`${delayMs} millis`)
-              return Option.none<A>()
-            }
-            return yield* err
-          }),
-        )
-        .exhaustive()
-      const resolvedValue = Option.getOrUndefined(resolved)
-      if (resolvedValue !== undefined) {
-        return resolvedValue
-      }
-    }
-    return yield* new WorkflowProjectorCallError({
-      cause: "Omnigraph rate-limit retry exhausted",
-    })
-  })
-
-const resolveWritableTargetBranch = Effect.fnUntraced(function* (
-  og: Omnigraph,
-  targetBranch: OmnigraphBranchName,
-  trigger: WorkflowProjectorTrigger,
-): Effect.fn.Return<BranchResolution, WorkflowProjectorCallError> {
-  const branches = yield* runTimedWithRateLimitRetry((signal) => og.branches.list({ signal }))
-  if (branches.includes(targetBranch)) {
-    return BranchResolution.cases.Resolved.make({ branch: targetBranch })
-  }
-  const hasMain = branches.includes("main")
-  return yield* match(trigger)
-    .with("post-rebuild", () =>
-      hasMain
-        ? Effect.succeed<BranchResolution>(
-            BranchResolution.cases.Resolved.make({ branch: OmnigraphBranchName.make("main") }),
-          )
-        : Effect.succeed<BranchResolution>(
-            BranchResolution.cases.Missing.make({
-              reason: toBoundedReason(
-                `Target branch '${targetBranch}' and fallback 'main' are absent on graph '${HARNESS_OMNIGRAPH_GRAPH_ID}'`,
-              ),
-            }),
-          ),
-    )
-    .with("wave", () =>
-      hasMain
-        ? runTimedWithRateLimitRetry((signal) =>
-            og.branches.create({ name: targetBranch, from: "main" }, { signal }),
-          ).pipe(
-            Effect.catchIf(
-              (err) => isOmnigraphPreconditionOrConflictError(err.cause),
-              () => Effect.void,
-            ),
-            Effect.as<BranchResolution>(
-              BranchResolution.cases.Resolved.make({ branch: targetBranch }),
-            ),
-          )
-        : Effect.succeed<BranchResolution>(
-            BranchResolution.cases.Missing.make({
-              reason: toBoundedReason(
-                `Target branch '${targetBranch}' and base 'main' are absent on graph '${HARNESS_OMNIGRAPH_GRAPH_ID}'`,
-              ),
-            }),
-          ),
-    )
-    .with("done-pre-merge", () =>
-      Effect.succeed<BranchResolution>(
-        BranchResolution.cases.Missing.make({
-          reason: toBoundedReason(
-            `Target branch '${targetBranch}' is absent on graph '${HARNESS_OMNIGRAPH_GRAPH_ID}'`,
-          ),
-        }),
-      ),
-    )
-    .exhaustive()
-})
-
-const recordProjectionStatus = (
-  statusRef: Ref.Ref<ReadonlyMap<WorkflowRunId, WorkflowProjectionStatus>> | undefined,
-  runId: WorkflowRunId,
-  status: WorkflowProjectionStatus,
-): Effect.Effect<void> =>
-  statusRef === undefined
-    ? Effect.void
-    : Ref.update(statusRef, (prev) => {
-        const next = new Map(prev)
-        next.set(runId, status)
-        return next
-      })
-
-const makeHarnessActorClient = (
-  repoRoot: AbsoluteRepoRoot,
-  options?: WorkflowProjectorOptions,
-): Omnigraph => {
-  if (options?.harnessClient !== undefined) {
-    return options.harnessClient
-  }
-  const hostIo = options?.hostIo ?? nodeSyncHostIo
-  return makeOmnigraphClient({
-    repoRoot,
-    graphId: HARNESS_OMNIGRAPH_GRAPH_ID,
-    actor: "harness-cli",
-    hostIo,
-    ...(options?.env !== undefined ? { env: options.env } : {}),
-  })
-}
 
 const extractProjectionErrorReason = (cause: Cause.Cause<unknown>, fallback: string) => {
   const errOpt = Cause.findErrorOption(cause)
@@ -262,28 +61,41 @@ export const projectWorkflowRunImpl = Effect.fn("WorkflowProjector.project")(fun
   options?: WorkflowProjectorOptions,
 ): Effect.fn.Return<WorkflowProjectionOutcome, never, WorkflowReadModelQuery> {
   const hostIo = options?.hostIo ?? nodeSyncHostIo
-  const repoRoot = resolveRepoRoot(input.repoRoot, options)
-  const targetBranch = resolveTargetBranchName(
-    input.targetBranch,
-    repoRoot,
-    hostIo,
-    options?.env,
-    options,
-  )
+  let resolvedRepoRoot: AbsoluteRepoRoot | undefined = input.repoRoot ?? options?.repoRoot
+  let reportedBranch: OmnigraphBranchName = resolveFallbackBranch(input.targetBranch, options)
 
   return yield* Effect.gen(function* () {
+    const repoRoot = yield* resolveRepoRoot(input.repoRoot, options)
+    resolvedRepoRoot = repoRoot
+    const targetBranch = yield* resolveTargetBranchName(
+      input.targetBranch,
+      repoRoot,
+      hostIo,
+      options?.env,
+      options,
+    )
+    reportedBranch = targetBranch
+
     const readModel = yield* WorkflowReadModelQuery
     const runOpt = yield* readModel.getRun(input.runId)
     return yield* match(runOpt)
       .with({ _tag: "None" }, () =>
-        Effect.succeed<WorkflowProjectionOutcome>(
-          WorkflowProjectionOutcome.cases.Skipped.make({
+        Effect.gen(function* () {
+          const skippedOutcome = WorkflowProjectionOutcome.cases.Skipped.make({
             runId: input.runId,
             branch: targetBranch,
             projectionStatus: "not-projected",
             reason: toBoundedReason(`Workflow run '${input.runId}' does not exist in read model`),
-          }),
-        ),
+          })
+          yield* recordProjectionStatus(
+            repoRoot,
+            hostIo,
+            options?.statusRef,
+            input.runId,
+            projectionStatusOfOutcome(skippedOutcome),
+          )
+          return skippedOutcome
+        }),
       )
       .with({ _tag: "Some" }, ({ value: run }) =>
         Effect.gen(function* () {
@@ -294,24 +106,34 @@ export const projectWorkflowRunImpl = Effect.fn("WorkflowProjector.project")(fun
           const branchResolution = yield* resolveWritableTargetBranch(
             og,
             targetBranch,
+            input.targetBranch,
             input.trigger,
           )
           return yield* match(branchResolution)
             .with({ _tag: "Missing" }, ({ reason }) =>
-              Effect.succeed<WorkflowProjectionOutcome>(
-                WorkflowProjectionOutcome.cases.Skipped.make({
+              Effect.gen(function* () {
+                const skippedOutcome = WorkflowProjectionOutcome.cases.Skipped.make({
                   runId: input.runId,
                   branch: targetBranch,
                   projectionStatus: "not-projected",
                   reason: toBoundedReason(reason),
-                }),
-              ),
+                })
+                yield* recordProjectionStatus(
+                  repoRoot,
+                  hostIo,
+                  options?.statusRef,
+                  input.runId,
+                  projectionStatusOfOutcome(skippedOutcome),
+                )
+                return skippedOutcome
+              }),
             )
             .with({ _tag: "Resolved" }, ({ branch: effectiveBranch }) =>
               Effect.gen(function* () {
                 const attemptKeys = attempts.map((a) => a.attemptKey)
                 const maxAttempts = WORKFLOW_TIMEOUT_BUDGETS.projectorOccMaxAttempts
                 const baseBackoffMs = WORKFLOW_TIMEOUT_BUDGETS.projectorOccRetryBackoffMs
+                let lastCause: unknown = "Workflow projection OCC loop exhausted"
 
                 for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
                   const attemptOutcome = yield* Effect.gen(function* () {
@@ -322,54 +144,81 @@ export const projectWorkflowRunImpl = Effect.fn("WorkflowProjector.project")(fun
                       attemptKeys,
                     )
                     const plan = planWorkflowProjection({ run, units, attempts }, targetState)
-                    if (plan.noOp) {
-                      const noOpOutcome = WorkflowProjectionOutcome.cases.Projected.make({
-                        runId: input.runId,
-                        branch: effectiveBranch,
-                        projectionStatus: "fresh",
-                        commitId: null,
-                        counts: ZERO_PROJECTION_COUNTS,
-                      })
-                      yield* recordProjectionStatus(
-                        options?.statusRef,
-                        input.runId,
-                        projectionStatusOfOutcome(noOpOutcome),
+                    return yield* match(plan)
+                      .with({ _tag: "InvalidPlanJson" }, ({ reason }) =>
+                        Effect.fail(new WorkflowProjectorCallError({ cause: reason })),
                       )
-                      return noOpOutcome
-                    }
+                      .with({ _tag: "NoOp" }, ({ counts }) =>
+                        Effect.gen(function* () {
+                          const noOpOutcome = WorkflowProjectionOutcome.cases.Projected.make({
+                            runId: input.runId,
+                            branch: effectiveBranch,
+                            projectionStatus: "fresh",
+                            commitId: null,
+                            counts,
+                          })
+                          yield* recordProjectionStatus(
+                            repoRoot,
+                            hostIo,
+                            options?.statusRef,
+                            input.runId,
+                            projectionStatusOfOutcome(noOpOutcome),
+                          )
+                          return noOpOutcome
+                        }),
+                      )
+                      .with({ _tag: "Mutate" }, ({ query, params, counts }) =>
+                        Effect.gen(function* () {
+                          const change = yield* runTimedOmnigraphCall((signal) =>
+                            og.mutate(
+                              {
+                                branch: effectiveBranch,
+                                query,
+                                params,
+                              },
+                              {
+                                ifGraphCommit: graphCommitId,
+                                signal,
+                              },
+                            ),
+                          )
 
-                    const change = yield* runTimedOmnigraphCall((signal) =>
-                      og.mutate(
-                        {
-                          branch: effectiveBranch,
-                          query: plan.query,
-                          params: plan.params,
-                        },
-                        {
-                          ...(graphCommitId !== undefined ? { ifGraphCommit: graphCommitId } : {}),
-                          signal,
-                        },
-                      ),
-                    )
+                          const rawCommitId = change.commit?.graphCommitId
+                          if (rawCommitId === undefined || rawCommitId === null) {
+                            return yield* new WorkflowProjectorCallError({
+                              cause:
+                                "Omnigraph mutate response missing commit.graphCommitId on non-noop mutation",
+                            })
+                          }
+                          const commitId = yield* match(decodeCommitIdOption(rawCommitId))
+                            .with({ _tag: "Some" }, ({ value }) => Effect.succeed(value))
+                            .with({ _tag: "None" }, () =>
+                              Effect.fail(
+                                new WorkflowProjectorCallError({
+                                  cause: `Omnigraph mutate response returned invalid commit.graphCommitId: ${JSON.stringify(rawCommitId)}`,
+                                }),
+                              ),
+                            )
+                            .exhaustive()
 
-                    const rawCommitId = change.commit?.graphCommitId
-                    const commitId =
-                      rawCommitId === undefined || rawCommitId === null
-                        ? null
-                        : Option.getOrNull(decodeCommitIdOption(rawCommitId))
-                    const projectedOutcome = WorkflowProjectionOutcome.cases.Projected.make({
-                      runId: input.runId,
-                      branch: effectiveBranch,
-                      projectionStatus: "fresh",
-                      commitId,
-                      counts: plan.counts,
-                    })
-                    yield* recordProjectionStatus(
-                      options?.statusRef,
-                      input.runId,
-                      projectionStatusOfOutcome(projectedOutcome),
-                    )
-                    return projectedOutcome
+                          const projectedOutcome = WorkflowProjectionOutcome.cases.Projected.make({
+                            runId: input.runId,
+                            branch: effectiveBranch,
+                            projectionStatus: "fresh",
+                            commitId,
+                            counts,
+                          })
+                          yield* recordProjectionStatus(
+                            repoRoot,
+                            hostIo,
+                            options?.statusRef,
+                            input.runId,
+                            projectionStatusOfOutcome(projectedOutcome),
+                          )
+                          return projectedOutcome
+                        }),
+                      )
+                      .exhaustive()
                   }).pipe(
                     Effect.map((outcome) => ({ _tag: "Ok" as const, outcome })),
                     Effect.catch((err) => Effect.succeed({ _tag: "Err" as const, err })),
@@ -379,14 +228,20 @@ export const projectWorkflowRunImpl = Effect.fn("WorkflowProjector.project")(fun
                     .with({ _tag: "Ok" }, ({ outcome }) => Effect.succeedSome(outcome))
                     .with({ _tag: "Err" }, ({ err }) =>
                       Effect.gen(function* () {
-                        if (attempt + 1 < maxAttempts && isRetryableProjectionError(err.cause)) {
-                          const delayMs = computeProjectorRetryDelayMs(
-                            attempt,
-                            err.cause,
-                            baseBackoffMs,
-                          )
-                          yield* Effect.sleep(`${delayMs} millis`)
-                          return Option.none<WorkflowProjectionOutcome>()
+                        lastCause = err.cause
+                        if (isRetryableProjectionError(err.cause)) {
+                          if (attempt + 1 < maxAttempts) {
+                            const delayMs = computeProjectorRetryDelayMs(
+                              attempt,
+                              err.cause,
+                              baseBackoffMs,
+                            )
+                            yield* Effect.sleep(`${delayMs} millis`)
+                            return Option.none<WorkflowProjectionOutcome>()
+                          }
+                          return yield* new WorkflowProjectorCallError({
+                            cause: `Workflow projection OCC loop exhausted after ${maxAttempts} attempts: ${toBoundedReason(lastCause)}`,
+                          })
                         }
                         return yield* err
                       }),
@@ -400,7 +255,7 @@ export const projectWorkflowRunImpl = Effect.fn("WorkflowProjector.project")(fun
                 }
 
                 return yield* new WorkflowProjectorCallError({
-                  cause: "Workflow projection OCC loop exhausted",
+                  cause: `Workflow projection OCC loop exhausted after ${maxAttempts} attempts: ${toBoundedReason(lastCause)}`,
                 })
               }),
             )
@@ -430,15 +285,17 @@ export const projectWorkflowRunImpl = Effect.fn("WorkflowProjector.project")(fun
       }
       const reason = extractProjectionErrorReason(cause, "Workflow projection failed")
       process.stderr.write(
-        `[harness/infra] Warning: workflow projection stale for '${input.runId}' on '${targetBranch}': ${reason}\n`,
+        `[harness/infra] Warning: workflow projection stale for '${input.runId}' on '${reportedBranch}': ${reason}\n`,
       )
       const staleOutcome = WorkflowProjectionOutcome.cases.Stale.make({
         runId: input.runId,
-        branch: targetBranch,
+        branch: reportedBranch,
         projectionStatus: "stale",
         reason,
       })
       return recordProjectionStatus(
+        resolvedRepoRoot,
+        hostIo,
         options?.statusRef,
         input.runId,
         projectionStatusOfOutcome(staleOutcome),
@@ -453,18 +310,22 @@ export const projectAllWorkflowRunsImpl = Effect.fn("WorkflowProjector.projectAl
   options?: WorkflowProjectorOptions,
 ): Effect.fn.Return<WorkflowProjectAllOutcome, never, WorkflowReadModelQuery> {
   const hostIo = options?.hostIo ?? nodeSyncHostIo
-  const repoRoot = resolveRepoRoot(input.repoRoot, options)
-  const targetBranch = resolveTargetBranchName(
-    input.targetBranch,
-    repoRoot,
-    hostIo,
-    options?.env,
-    options,
-  )
-
+  let resolvedRepoRoot: AbsoluteRepoRoot | undefined = input.repoRoot ?? options?.repoRoot
+  let reportedBranch: OmnigraphBranchName = resolveFallbackBranch(input.targetBranch, options)
   let knownRunIds: ReadonlyArray<WorkflowRunId> = []
 
   return yield* Effect.gen(function* () {
+    const repoRoot = yield* resolveRepoRoot(input.repoRoot, options)
+    resolvedRepoRoot = repoRoot
+    const targetBranch = yield* resolveTargetBranchName(
+      input.targetBranch,
+      repoRoot,
+      hostIo,
+      options?.env,
+      options,
+    )
+    reportedBranch = targetBranch
+
     const readModel = yield* WorkflowReadModelQuery
     const runs = yield* readModel.listRuns
     knownRunIds = runs.map((run) => run.runId)
@@ -477,22 +338,38 @@ export const projectAllWorkflowRunsImpl = Effect.fn("WorkflowProjector.projectAl
     }
 
     const og = makeHarnessActorClient(repoRoot, options)
-    const branchResolution = yield* resolveWritableTargetBranch(og, targetBranch, input.trigger)
+    const branchResolution = yield* resolveWritableTargetBranch(
+      og,
+      targetBranch,
+      input.targetBranch,
+      input.trigger,
+    )
     return yield* match(branchResolution)
       .with({ _tag: "Missing" }, ({ reason }) =>
-        Effect.succeed<WorkflowProjectAllOutcome>(
-          WorkflowProjectAllOutcome.cases.Skipped.make({
-            branch: targetBranch,
-            projectionStatus: "not-projected",
-            reason: toBoundedReason(reason),
-          }),
+        Effect.forEach(knownRunIds, (runId) =>
+          recordProjectionStatus(
+            repoRoot,
+            hostIo,
+            options?.statusRef,
+            runId,
+            WorkflowProjectionStatus.make("not-projected"),
+          ),
+        ).pipe(
+          Effect.as<WorkflowProjectAllOutcome>(
+            WorkflowProjectAllOutcome.cases.Skipped.make({
+              branch: targetBranch,
+              projectionStatus: "not-projected",
+              reason: toBoundedReason(reason),
+            }),
+          ),
         ),
       )
       .with({ _tag: "Resolved" }, ({ branch: effectiveBranch }) =>
         Effect.gen(function* () {
           const outcomes: Array<WorkflowProjectionOutcome> = []
-          let firstStaleReason: ReturnType<typeof toBoundedReason> | undefined
-          let firstSkippedReason: ReturnType<typeof toBoundedReason> | undefined
+          const nonStaleOutcomes: Array<WorkflowProjectionNonStaleOutcome> = []
+          let firstStaleReason: WorkflowStoreFailureReason | undefined
+          let firstSkippedReason: WorkflowStoreFailureReason | undefined
           let allSkipped = true
 
           for (const run of runs) {
@@ -513,13 +390,15 @@ export const projectAllWorkflowRunsImpl = Effect.fn("WorkflowProjector.projectAl
                   firstStaleReason = reason
                 }
               })
-              .with({ _tag: "Skipped" }, ({ reason }) => {
+              .with({ _tag: "Skipped" }, (skipped) => {
+                nonStaleOutcomes.push(skipped)
                 if (firstSkippedReason === undefined) {
-                  firstSkippedReason = reason
+                  firstSkippedReason = skipped.reason
                 }
               })
-              .with({ _tag: "Projected" }, () => {
+              .with({ _tag: "Projected" }, (projected) => {
                 allSkipped = false
+                nonStaleOutcomes.push(projected)
               })
               .exhaustive()
           }
@@ -546,7 +425,7 @@ export const projectAllWorkflowRunsImpl = Effect.fn("WorkflowProjector.projectAl
           return WorkflowProjectAllOutcome.cases.Projected.make({
             branch: effectiveBranch,
             projectionStatus: "fresh",
-            outcomes,
+            outcomes: nonStaleOutcomes,
           })
         }),
       )
@@ -573,16 +452,22 @@ export const projectAllWorkflowRunsImpl = Effect.fn("WorkflowProjector.projectAl
       }
       const reason = extractProjectionErrorReason(cause, "Workflow projectAll failed")
       process.stderr.write(
-        `[harness/infra] Warning: workflow projectAll stale on '${targetBranch}': ${reason}\n`,
+        `[harness/infra] Warning: workflow projectAll stale on '${reportedBranch}': ${reason}\n`,
       )
       const staleAllOutcome = WorkflowProjectAllOutcome.cases.Stale.make({
-        branch: targetBranch,
+        branch: reportedBranch,
         projectionStatus: "stale",
         outcomes: [],
         reason,
       })
       return Effect.forEach(knownRunIds, (runId) =>
-        recordProjectionStatus(options?.statusRef, runId, WorkflowProjectionStatus.make("stale")),
+        recordProjectionStatus(
+          resolvedRepoRoot,
+          hostIo,
+          options?.statusRef,
+          runId,
+          WorkflowProjectionStatus.make("stale"),
+        ),
       ).pipe(Effect.as(staleAllOutcome))
     }),
   )
@@ -594,12 +479,35 @@ export const getWorkflowProjectionStatusImpl = Effect.fn("WorkflowProjector.getP
     runId: WorkflowRunId,
     options?: WorkflowProjectorOptions,
   ): Effect.fn.Return<Option.Option<WorkflowProjectionStatus>> {
-    if (options?.statusRef === undefined) {
-      return Option.none<WorkflowProjectionStatus>()
-    }
-    const map = yield* Ref.get(options.statusRef)
-    const found = map.get(runId)
-    return found === undefined ? Option.none<WorkflowProjectionStatus>() : Option.some(found)
+    const hostIo = options?.hostIo ?? nodeSyncHostIo
+    const repoRootOpt = yield* resolveRepoRoot(undefined, options).pipe(Effect.option)
+    const persistedOpt = yield* match(repoRootOpt)
+      .with({ _tag: "None" }, () => Effect.succeed(Option.none<WorkflowProjectionStatus>()))
+      .with({ _tag: "Some" }, ({ value: repoRoot }) =>
+        readWorkflowProjectionStatuses(repoRoot, hostIo).pipe(
+          Effect.catch((err) =>
+            Effect.sync(() => {
+              process.stderr.write(
+                `[harness/infra] Warning: failed to read projection status for '${runId}': ${err.reason}\n`,
+              )
+              return new Map<WorkflowRunId, WorkflowProjectionStatus>()
+            }),
+          ),
+          Effect.map((statuses) => Option.fromUndefinedOr(statuses.get(runId))),
+        ),
+      )
+      .exhaustive()
+
+    return yield* match(persistedOpt)
+      .with({ _tag: "Some" }, () => Effect.succeed(persistedOpt))
+      .with({ _tag: "None" }, () =>
+        options?.statusRef === undefined
+          ? Effect.succeed(Option.none<WorkflowProjectionStatus>())
+          : Ref.get(options.statusRef).pipe(
+              Effect.map((map) => Option.fromUndefinedOr(map.get(runId))),
+            ),
+      )
+      .exhaustive()
   },
 )
 
@@ -637,4 +545,5 @@ const makeWorkflowProjectorLayer = (
 const WorkflowProjectorLive: Layer.Layer<WorkflowProjector, never, WorkflowReadModelQuery> =
   makeWorkflowProjectorLayer()
 
-export { makeWorkflowProjectorLayer, WorkflowProjectorLive }
+export type { WorkflowProjectorOptions }
+export { computeProjectorRetryDelayMs, makeWorkflowProjectorLayer, WorkflowProjectorLive }

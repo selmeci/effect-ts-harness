@@ -341,6 +341,7 @@ export {
   WorkflowProjectAllInput,
   WorkflowProjectAllOutcome,
   WorkflowProjectionCounts,
+  WorkflowProjectionNonStaleOutcome,
   WorkflowProjectionOutcome,
   WorkflowProjectionTargetBranch,
   WorkflowProjectorInput,

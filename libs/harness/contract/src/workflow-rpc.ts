@@ -1,4 +1,5 @@
 import { Schema } from "effect"
+import { OmnigraphBranchName } from "./omnigraph.js"
 import { AbsoluteRepoRoot, GitCommitSha } from "./repo-identity.js"
 import { ReviewRoutingPlan } from "./review-routing.js"
 import {
@@ -115,6 +116,7 @@ export type WorktreeUnitMapping = typeof WorktreeUnitMapping.Type
 export const WorktreeProvisionReceipt = Schema.Struct({
   runId: WorkflowRunId,
   canonicalRepoRoot: AbsoluteRepoRoot,
+  implBranch: Schema.optional(OmnigraphBranchName),
   entries: Schema.Array(WorktreeUnitMapping),
 })
 export type WorktreeProvisionReceipt = typeof WorktreeProvisionReceipt.Type

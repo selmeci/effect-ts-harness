@@ -5,6 +5,7 @@ import {
   WorkflowProjectAllInput,
   WorkflowProjectAllOutcome,
   WorkflowProjectionCounts,
+  WorkflowProjectionNonStaleOutcome,
   WorkflowProjectionOutcome,
   WorkflowProjectionStatus,
   WorkflowProjectionTargetBranch,
@@ -246,11 +247,15 @@ describe("workflow-projection contracts & status helpers", () => {
       ),
     ).toBe(true)
 
+    const nonStaleProjected = Schema.decodeUnknownSync(WorkflowProjectionNonStaleOutcome)(
+      projectedWithCommit,
+    )
+    const nonStaleSkipped = Schema.decodeUnknownSync(WorkflowProjectionNonStaleOutcome)(skipped)
     const allProjected = Schema.decodeSync(WorkflowProjectAllOutcome)({
       _tag: "Projected",
       branch,
       projectionStatus: "fresh",
-      outcomes: [projectedWithCommit, skipped],
+      outcomes: [nonStaleProjected, nonStaleSkipped],
     })
     const allSkipped = Schema.decodeSync(WorkflowProjectAllOutcome)({
       _tag: "Skipped",
@@ -269,6 +274,16 @@ describe("workflow-projection contracts & status helpers", () => {
     for (const allOutcome of [allProjected, allSkipped, allStale]) {
       expect(Schema.decodeSync(WorkflowProjectAllOutcome)(allOutcome)).toEqual(allOutcome)
     }
+    expect(
+      Result.isFailure(
+        Schema.decodeUnknownResult(WorkflowProjectAllOutcome)({
+          _tag: "Projected",
+          branch,
+          projectionStatus: "fresh",
+          outcomes: [projectedWithCommit, stale],
+        }),
+      ),
+    ).toBe(true)
     expect(
       Result.isFailure(
         Schema.decodeUnknownResult(WorkflowProjectAllOutcome)({
@@ -321,32 +336,32 @@ describe("workflow-projection contracts & status helpers", () => {
   })
 
   it("merges readModelStatus and readableStatus exhaustively via mergeWorkflowProjectionStatus", () => {
-    const statuses: ReadonlyArray<WorkflowProjectionStatus> = [
-      WorkflowProjectionStatus.make("not-projected"),
-      WorkflowProjectionStatus.make("fresh"),
-      WorkflowProjectionStatus.make("stale"),
-    ]
+    const staleStatus = WorkflowProjectionStatus.make("stale")
+    const freshStatus = WorkflowProjectionStatus.make("fresh")
+    const notProjectedStatus = WorkflowProjectionStatus.make("not-projected")
 
-    for (const readModelStatus of statuses) {
+    // readModelStatus === "stale" always remains "stale" regardless of readableStatus
+    for (const readable of [
+      Option.none<WorkflowProjectionStatus>(),
+      Option.some(freshStatus),
+      Option.some(notProjectedStatus),
+      Option.some(staleStatus),
+    ]) {
+      expect(mergeWorkflowProjectionStatus(staleStatus, readable)).toBe(staleStatus)
+    }
+
+    // readModelStatus in {"fresh", "not-projected"}: None/fresh keeps readModelStatus; not-projected & stale propagate
+    for (const readModelStatus of [notProjectedStatus, freshStatus]) {
       expect(mergeWorkflowProjectionStatus(readModelStatus, Option.none())).toBe(readModelStatus)
-      expect(
-        mergeWorkflowProjectionStatus(
-          readModelStatus,
-          Option.some(WorkflowProjectionStatus.make("fresh")),
-        ),
-      ).toBe(readModelStatus)
-      expect(
-        mergeWorkflowProjectionStatus(
-          readModelStatus,
-          Option.some(WorkflowProjectionStatus.make("not-projected")),
-        ),
-      ).toBe(readModelStatus)
-      expect(
-        mergeWorkflowProjectionStatus(
-          readModelStatus,
-          Option.some(WorkflowProjectionStatus.make("stale")),
-        ),
-      ).toBe(WorkflowProjectionStatus.make("stale"))
+      expect(mergeWorkflowProjectionStatus(readModelStatus, Option.some(freshStatus))).toBe(
+        readModelStatus,
+      )
+      expect(mergeWorkflowProjectionStatus(readModelStatus, Option.some(notProjectedStatus))).toBe(
+        notProjectedStatus,
+      )
+      expect(mergeWorkflowProjectionStatus(readModelStatus, Option.some(staleStatus))).toBe(
+        staleStatus,
+      )
     }
   })
 })

@@ -22,7 +22,7 @@ export const WorkflowRunAbortTarget = Schema.TaggedUnion({
 })
 export type WorkflowRunAbortTarget = typeof WorkflowRunAbortTarget.Type
 
-/** Closed 20-variant union of canonical `HarnessTaskWorkflow` and `ShipWorkflow` activity names. */
+/** Closed union of canonical `HarnessTaskWorkflow` and `ShipWorkflow` activity names. */
 export const WorkflowActivityTag = Schema.TaggedUnion({
   ProvisionWorktrees: {},
   ProjectRunStarted: {},
@@ -71,7 +71,7 @@ export const WorkflowActivityTag = Schema.TaggedUnion({
 })
 export type WorkflowActivityTag = typeof WorkflowActivityTag.Type
 
-/** Closed 4-variant union of canonical `HarnessTaskWorkflow` durable deferred names. */
+/** Closed union of canonical `HarnessTaskWorkflow` durable deferred names. */
 export const WorkflowDeferredTag = Schema.TaggedUnion({
   LlmPhaseDone: {},
   InterruptSignal: {},

@@ -1,16 +1,17 @@
-import { Data, Effect, Schema } from "effect"
+import { Data, Effect, Option, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   type OmnigraphBranchName,
+  OmnigraphCommitId,
   WORKFLOW_TIMEOUT_BUDGETS,
   type WorkflowRunId,
 } from "@harness/contract"
 import { type OmnigraphClient } from "@harness/graph"
 import {
-  type ExistingProjectedAttempt,
-  type ExistingProjectedEdge,
-  type ExistingProjectedRun,
-  type ExistingProjectedUnit,
+  ExistingProjectedAttempt,
+  ExistingProjectedEdge,
+  ExistingProjectedRun,
+  ExistingProjectedUnit,
   type ProjectedEarsSpec,
   type ProjectedEdgeType,
   type ProjectedEffectFn,
@@ -29,8 +30,50 @@ export class WorkflowProjectorCallError extends Data.TaggedError("WorkflowProjec
 const RowsEnvelopeSchema = Schema.Struct({
   rows: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
   graphCommitId: Schema.optional(Schema.NullOr(Schema.String)),
+  truncated: Schema.optional(Schema.NullOr(Schema.Boolean)),
+  hasMore: Schema.optional(Schema.NullOr(Schema.Boolean)),
+  nextCursor: Schema.optional(Schema.NullOr(Schema.String)),
 })
 const decodeRowsEnvelopeOption = Schema.decodeUnknownOption(RowsEnvelopeSchema)
+const decodeCommitIdOption = Schema.decodeUnknownOption(OmnigraphCommitId)
+
+const decodeExistingRunOption = Schema.decodeUnknownOption(ExistingProjectedRun)
+const decodeExistingUnitOption = Schema.decodeUnknownOption(ExistingProjectedUnit)
+const decodeExistingAttemptOption = Schema.decodeUnknownOption(ExistingProjectedAttempt)
+const decodeExistingEdgeOption = Schema.decodeUnknownOption(ExistingProjectedEdge)
+
+const EffectFnRowSchema = Schema.Struct({
+  qualname: Schema.NonEmptyString,
+  spanName: Schema.NonEmptyString,
+  file: Schema.NonEmptyString,
+  isStub: Schema.optional(Schema.NullOr(Schema.Boolean)),
+})
+const decodeEffectFnRowOption = Schema.decodeUnknownOption(EffectFnRowSchema)
+
+const EarsSpecRowSchema = Schema.Struct({
+  id: Schema.NonEmptyString,
+  enforcedByFiles: Schema.Array(Schema.String),
+})
+const decodeEarsSpecRowOption = Schema.decodeUnknownOption(EarsSpecRowSchema)
+
+const TraceabilityTupleRowSchema = Schema.Struct({
+  relationId: Schema.NonEmptyString,
+  earsSpecId: Schema.optional(Schema.NullOr(Schema.String)),
+  targetSymbolQualname: Schema.NonEmptyString,
+})
+const decodeTraceabilityTupleRowOption = Schema.decodeUnknownOption(TraceabilityTupleRowSchema)
+
+const VitestCaseRowSchema = Schema.Struct({
+  testId: Schema.NonEmptyString,
+  testFile: Schema.NonEmptyString,
+})
+const decodeVitestCaseRowOption = Schema.decodeUnknownOption(VitestCaseRowSchema)
+
+const ExercisingTestRowSchema = Schema.Struct({
+  qualname: Schema.NonEmptyString,
+  testId: Schema.NonEmptyString,
+})
+const decodeExercisingTestRowOption = Schema.decodeUnknownOption(ExercisingTestRowSchema)
 
 const QUERY_EXISTING_RUN = `query q_run($runId: String) {
   match {
@@ -224,35 +267,28 @@ const QUERY_EXERCISING_TESTS = `query q_exercising_tests() {
   }
 }`
 
-const asString = (value: unknown): string | undefined =>
-  typeof value === "string" ? value : undefined
-
-const asNullableString = (value: unknown): string | null =>
-  typeof value === "string" ? value : null
-
-const asStringArray = (value: unknown): ReadonlyArray<string> =>
-  Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []
-
-const decodeExistingEdges = (
-  edgeType: ProjectedEdgeType,
+const decodeRowsOrCountDropped = <A>(
+  entityKind: string,
   rows: ReadonlyArray<Readonly<Record<string, unknown>>>,
-): ReadonlyArray<ExistingProjectedEdge> => {
-  const edges: Array<ExistingProjectedEdge> = []
+  decodeRow: (row: Readonly<Record<string, unknown>>) => Option.Option<A>,
+  droppedByKind: Map<string, number>,
+): Array<A> => {
+  const decoded: Array<A> = []
+  let dropped = 0
   for (const row of rows) {
-    const from = asString(row.from)
-    const to = asString(row.to)
-    const role = asString(row.role)
-    const archimateRelation = asString(row.archimateRelation)
-    if (
-      from !== undefined &&
-      to !== undefined &&
-      role !== undefined &&
-      archimateRelation !== undefined
-    ) {
-      edges.push({ edgeType, from, to, role, archimateRelation })
-    }
+    match(decodeRow(row))
+      .with({ _tag: "Some" }, ({ value }) => {
+        decoded.push(value)
+      })
+      .with({ _tag: "None" }, () => {
+        dropped += 1
+      })
+      .exhaustive()
   }
-  return edges
+  if (dropped > 0) {
+    droppedByKind.set(entityKind, (droppedByKind.get(entityKind) ?? 0) + dropped)
+  }
+  return decoded
 }
 
 const runTimedOmnigraphCall = <A>(
@@ -277,7 +313,7 @@ const queryBranchRows = (
 ): Effect.Effect<
   {
     readonly rows: ReadonlyArray<Readonly<Record<string, unknown>>>
-    readonly graphCommitId: string | undefined
+    readonly graphCommitId: OmnigraphCommitId
   },
   WorkflowProjectorCallError
 > =>
@@ -293,16 +329,40 @@ const queryBranchRows = (
   ).pipe(
     Effect.flatMap((raw) =>
       match(decodeRowsEnvelopeOption(raw))
-        .with({ _tag: "Some" }, ({ value }) =>
-          Effect.succeed({
-            rows: value.rows,
-            graphCommitId: value.graphCommitId ?? undefined,
-          }),
-        )
+        .with({ _tag: "Some" }, ({ value }) => {
+          if (
+            value.truncated === true ||
+            value.hasMore === true ||
+            (value.nextCursor !== undefined && value.nextCursor !== null)
+          ) {
+            return Effect.fail(
+              new WorkflowProjectorCallError({
+                cause: new Error(
+                  `Omnigraph query response truncated or paginated (truncated=${String(value.truncated)}, hasMore=${String(value.hasMore)}, nextCursor=${String(value.nextCursor)})`,
+                ),
+              }),
+            )
+          }
+          return match(decodeCommitIdOption(value.graphCommitId))
+            .with({ _tag: "Some" }, ({ value: graphCommitId }) =>
+              Effect.succeed({
+                rows: value.rows,
+                graphCommitId,
+              }),
+            )
+            .with({ _tag: "None" }, () =>
+              Effect.fail(
+                new WorkflowProjectorCallError({
+                  cause: new Error("Omnigraph query response missing or malformed graphCommitId"),
+                }),
+              ),
+            )
+            .exhaustive()
+        })
         .with({ _tag: "None" }, () =>
           Effect.fail(
             new WorkflowProjectorCallError({
-              cause: "Omnigraph query response missing rows envelope",
+              cause: new Error("Omnigraph query response missing or malformed rows envelope"),
             }),
           ),
         )
@@ -319,9 +379,18 @@ export const readTargetStateSnapshot = Effect.fn("WorkflowProjector.readTargetSt
   branch: OmnigraphBranchName,
   runId: WorkflowRunId,
   attemptKeys: ReadonlyArray<string>,
-) {
-  const emptyEnvelope = {
-    rows: [] as ReadonlyArray<Readonly<Record<string, unknown>>>,
+): Effect.fn.Return<
+  {
+    readonly targetState: WorkflowProjectionTargetState
+    readonly graphCommitId: OmnigraphCommitId
+  },
+  WorkflowProjectorCallError
+> {
+  const emptyEnvelope: {
+    readonly rows: ReadonlyArray<Readonly<Record<string, unknown>>>
+    readonly graphCommitId: OmnigraphCommitId | undefined
+  } = {
+    rows: [],
     graphCommitId: undefined,
   }
 
@@ -379,10 +448,15 @@ export const readTargetStateSnapshot = Effect.fn("WorkflowProjector.readTargetSt
     traceTuplesRes.graphCommitId,
     vitestCasesRes.graphCommitId,
     exercisingRes.graphCommitId,
-  ].filter((id): id is string => id !== undefined)
+  ].filter((id): id is OmnigraphCommitId => id !== undefined)
 
   const commitId = observedCommitIds[0]
-  if (commitId !== undefined && observedCommitIds.some((id) => id !== commitId)) {
+  if (commitId === undefined) {
+    return yield* new WorkflowProjectorCallError({
+      cause: new Error("Missing graphCommitId during snapshot read"),
+    })
+  }
+  if (observedCommitIds.some((id) => id !== commitId)) {
     return yield* new WorkflowProjectorCallError({
       cause: Object.assign(new Error("Concurrent graph commit detected during snapshot read"), {
         status: 412,
@@ -390,140 +464,131 @@ export const readTargetStateSnapshot = Effect.fn("WorkflowProjector.readTargetSt
     })
   }
 
-  const firstRunRow = runRes.rows[0]
-  let existingRun: ExistingProjectedRun | undefined
-  if (firstRunRow !== undefined) {
-    const rId = asString(firstRunRow.runId)
-    const level = asString(firstRunRow.level)
-    const planSha = asString(firstRunRow.planSha)
-    const baseSha = asString(firstRunRow.baseSha)
-    const state = asString(firstRunRow.state)
-    if (
-      rId !== undefined &&
-      level !== undefined &&
-      planSha !== undefined &&
-      baseSha !== undefined &&
-      state !== undefined
-    ) {
-      existingRun = { runId: rId, level, planSha, baseSha, state }
-    }
-  }
+  const droppedByKind = new Map<string, number>()
 
-  const existingUnits: Array<ExistingProjectedUnit> = []
-  for (const row of unitsRes.rows) {
-    const unitKey = asString(row.unitKey)
-    const uRunId = asString(row.runId)
-    const unitId = asString(row.unitId)
-    const kind = asString(row.kind)
-    const waveIndex = parseFiniteNumberOrString(row.waveIndex)
-    const status = asString(row.status)
-    if (
-      unitKey !== undefined &&
-      uRunId !== undefined &&
-      unitId !== undefined &&
-      kind !== undefined &&
-      waveIndex !== undefined &&
-      status !== undefined
-    ) {
-      existingUnits.push({
-        unitKey,
-        runId: uRunId,
-        unitId,
-        kind,
-        waveIndex,
-        status,
-        ownedRelPaths: asStringArray(row.ownedRelPaths),
-      })
-    }
-  }
+  const existingRuns = decodeRowsOrCountDropped(
+    "WorkflowRun",
+    runRes.rows,
+    (row) => decodeExistingRunOption(row),
+    droppedByKind,
+  )
+  const existingRun: ExistingProjectedRun | undefined = existingRuns[0]
 
-  const existingAttempts: Array<ExistingProjectedAttempt> = []
-  for (const row of attemptsRes.rows) {
-    const attemptKey = asString(row.attemptKey)
-    const attemptNum = parseFiniteNumberOrString(row.attempt)
-    const verdict = asString(row.verdict)
-    if (attemptKey !== undefined && attemptNum !== undefined && verdict !== undefined) {
-      existingAttempts.push({
-        attemptKey,
-        attempt: attemptNum,
-        verdict,
-        runner: asNullableString(row.runner),
-        rejection: asNullableString(row.rejection),
-        packageStampHash: asNullableString(row.packageStampHash),
-      })
-    }
-  }
+  const existingUnits = decodeRowsOrCountDropped(
+    "WorkUnit",
+    unitsRes.rows,
+    (row) =>
+      decodeExistingUnitOption({
+        ...row,
+        waveIndex: parseFiniteNumberOrString(row.waveIndex),
+      }),
+    droppedByKind,
+  )
+
+  const existingAttempts = decodeRowsOrCountDropped(
+    "UnitAttempt",
+    attemptsRes.rows,
+    (row) =>
+      decodeExistingAttemptOption({
+        ...row,
+        attempt: parseFiniteNumberOrString(row.attempt),
+        runner: row.runner ?? null,
+        rejection: row.rejection ?? null,
+        packageStampHash: row.packageStampHash ?? null,
+      }),
+    droppedByKind,
+  )
+
+  const decodeEdgeRows = (
+    edgeType: ProjectedEdgeType,
+    rows: ReadonlyArray<Readonly<Record<string, unknown>>>,
+  ): ReadonlyArray<ExistingProjectedEdge> =>
+    decodeRowsOrCountDropped(
+      edgeType,
+      rows,
+      (row) =>
+        decodeExistingEdgeOption({
+          edgeType,
+          from: row.from,
+          to: row.to,
+          role: row.role,
+          archimateRelation: row.archimateRelation,
+        }),
+      droppedByKind,
+    )
 
   const existingEdges: ReadonlyArray<ExistingProjectedEdge> = [
-    ...decodeExistingEdges("PlaysRunUnitRole", runUnitEdgesRes.rows),
-    ...decodeExistingEdges("PlaysUnitAttemptRole", unitAttemptEdgesRes.rows),
-    ...decodeExistingEdges("PlaysUnitStubRole", unitStubEdgesRes.rows),
-    ...decodeExistingEdges("PlaysUnitEarsRole", unitEarsEdgesRes.rows),
-    ...decodeExistingEdges("PlaysUnitTraceabilityRole", unitTraceEdgesRes.rows),
-    ...decodeExistingEdges("PlaysAttemptTestRole", attemptTestEdgesRes.rows),
+    ...decodeEdgeRows("PlaysRunUnitRole", runUnitEdgesRes.rows),
+    ...decodeEdgeRows("PlaysUnitAttemptRole", unitAttemptEdgesRes.rows),
+    ...decodeEdgeRows("PlaysUnitStubRole", unitStubEdgesRes.rows),
+    ...decodeEdgeRows("PlaysUnitEarsRole", unitEarsEdgesRes.rows),
+    ...decodeEdgeRows("PlaysUnitTraceabilityRole", unitTraceEdgesRes.rows),
+    ...decodeEdgeRows("PlaysAttemptTestRole", attemptTestEdgesRes.rows),
   ]
 
+  const exercisingRows = decodeRowsOrCountDropped(
+    "ExercisingTest",
+    exercisingRes.rows,
+    (row) => decodeExercisingTestRowOption(row),
+    droppedByKind,
+  )
   const exercisingTestsByFn = new Map<string, Array<string>>()
-  for (const row of exercisingRes.rows) {
-    const qualname = asString(row.qualname)
-    const testId = asString(row.testId)
-    if (qualname !== undefined && testId !== undefined) {
-      const list = exercisingTestsByFn.get(qualname)
-      if (list !== undefined) {
-        list.push(testId)
-      } else {
-        exercisingTestsByFn.set(qualname, [testId])
-      }
+  for (const row of exercisingRows) {
+    const list = exercisingTestsByFn.get(row.qualname)
+    if (list !== undefined) {
+      list.push(row.testId)
+    } else {
+      exercisingTestsByFn.set(row.qualname, [row.testId])
     }
   }
 
-  const effectFns: Array<ProjectedEffectFn> = []
-  for (const row of effectFnsRes.rows) {
-    const qualname = asString(row.qualname)
-    const spanName = asString(row.spanName)
-    const file = asString(row.file)
-    if (qualname !== undefined && spanName !== undefined && file !== undefined) {
-      effectFns.push({
-        qualname,
-        spanName,
-        file,
-        isStub: row.isStub === true,
-        exercisingTestIds: exercisingTestsByFn.get(qualname),
-      })
-    }
-  }
+  const effectFns: Array<ProjectedEffectFn> = decodeRowsOrCountDropped(
+    "EffectFn",
+    effectFnsRes.rows,
+    (row) =>
+      Option.map(decodeEffectFnRowOption(row), (parsed) => ({
+        qualname: parsed.qualname,
+        spanName: parsed.spanName,
+        file: parsed.file,
+        isStub: parsed.isStub === true,
+        exercisingTestIds: exercisingTestsByFn.get(parsed.qualname),
+      })),
+    droppedByKind,
+  )
 
-  const earsSpecs: Array<ProjectedEarsSpec> = []
-  for (const row of earsSpecsRes.rows) {
-    const id = asString(row.id)
-    if (id !== undefined) {
-      earsSpecs.push({
-        id,
-        enforcedByFiles: asStringArray(row.enforcedByFiles),
-      })
-    }
-  }
+  const earsSpecs: Array<ProjectedEarsSpec> = decodeRowsOrCountDropped(
+    "EarsSpec",
+    earsSpecsRes.rows,
+    (row) => decodeEarsSpecRowOption(row),
+    droppedByKind,
+  )
 
-  const traceabilityTuples: Array<ProjectedTraceabilityTuple> = []
-  for (const row of traceTuplesRes.rows) {
-    const relationId = asString(row.relationId)
-    const targetSymbolQualname = asString(row.targetSymbolQualname)
-    if (relationId !== undefined && targetSymbolQualname !== undefined) {
-      traceabilityTuples.push({
-        relationId,
-        earsSpecId: asNullableString(row.earsSpecId),
-        targetSymbolQualname,
-      })
-    }
-  }
+  const traceabilityTuples: Array<ProjectedTraceabilityTuple> = decodeRowsOrCountDropped(
+    "TraceabilityTuple",
+    traceTuplesRes.rows,
+    (row) =>
+      Option.map(decodeTraceabilityTupleRowOption(row), (parsed) => ({
+        relationId: parsed.relationId,
+        earsSpecId: parsed.earsSpecId ?? null,
+        targetSymbolQualname: parsed.targetSymbolQualname,
+      })),
+    droppedByKind,
+  )
 
-  const vitestCases: Array<ProjectedVitestCase> = []
-  for (const row of vitestCasesRes.rows) {
-    const testId = asString(row.testId)
-    const testFile = asString(row.testFile)
-    if (testId !== undefined && testFile !== undefined) {
-      vitestCases.push({ testId, testFile })
-    }
+  const vitestCases: Array<ProjectedVitestCase> = decodeRowsOrCountDropped(
+    "VitestCase",
+    vitestCasesRes.rows,
+    (row) => decodeVitestCaseRowOption(row),
+    droppedByKind,
+  )
+
+  if (droppedByKind.size > 0) {
+    const summary = [...droppedByKind.entries()]
+      .map(([kind, count]) => `${kind}: ${count}`)
+      .join(", ")
+    return yield* new WorkflowProjectorCallError({
+      cause: new Error(`Malformed graph rows dropped during snapshot read (${summary})`),
+    })
   }
 
   const targetState: WorkflowProjectionTargetState = {

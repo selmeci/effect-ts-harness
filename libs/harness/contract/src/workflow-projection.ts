@@ -68,12 +68,19 @@ export const WorkflowProjectionOutcome = Schema.TaggedUnion({
 })
 export type WorkflowProjectionOutcome = typeof WorkflowProjectionOutcome.Type
 
+/** Narrowed non-stale outcome union allowed as children of `WorkflowProjectAllOutcome.Projected`. */
+export const WorkflowProjectionNonStaleOutcome = Schema.Union([
+  WorkflowProjectionOutcome.cases.Projected,
+  WorkflowProjectionOutcome.cases.Skipped,
+])
+export type WorkflowProjectionNonStaleOutcome = typeof WorkflowProjectionNonStaleOutcome.Type
+
 /** Closed discriminated outcome union returned by `WorkflowProjector.projectAll`. */
 export const WorkflowProjectAllOutcome = Schema.TaggedUnion({
   Projected: {
     branch: OmnigraphBranchName,
     projectionStatus: Schema.Literal("fresh"),
-    outcomes: Schema.Array(WorkflowProjectionOutcome),
+    outcomes: Schema.Array(WorkflowProjectionNonStaleOutcome),
   },
   Skipped: {
     branch: OmnigraphBranchName,
@@ -101,18 +108,25 @@ export const projectionStatusOfOutcome = (
 
 /**
  * Combines read-model freshness with readable `harness` projection freshness so any
- * readable projection failure surfaces `"stale"` in `workflow status` / `harness_workflow_plan`.
+ * readable projection failure surfaces `"stale"` and skipped readable projection surfaces
+ * `"not-projected"` in `workflow status` / `harness_workflow_plan`.
  */
 export const mergeWorkflowProjectionStatus = (
   readModelStatus: WorkflowProjectionStatus,
   readableStatus: Option.Option<WorkflowProjectionStatus>,
 ): WorkflowProjectionStatus =>
-  match(readableStatus)
-    .with({ _tag: "None" }, () => readModelStatus)
-    .with({ _tag: "Some" }, ({ value }) =>
-      match(value)
-        .with("stale", () => WorkflowProjectionStatus.make("stale"))
-        .with("fresh", "not-projected", () => readModelStatus)
+  match(readModelStatus)
+    .with("stale", () => WorkflowProjectionStatus.make("stale"))
+    .with("fresh", "not-projected", () =>
+      match(readableStatus)
+        .with({ _tag: "None" }, () => readModelStatus)
+        .with({ _tag: "Some" }, ({ value }) =>
+          match(value)
+            .with("stale", () => WorkflowProjectionStatus.make("stale"))
+            .with("not-projected", () => WorkflowProjectionStatus.make("not-projected"))
+            .with("fresh", () => readModelStatus)
+            .exhaustive(),
+        )
         .exhaustive(),
     )
     .exhaustive()
