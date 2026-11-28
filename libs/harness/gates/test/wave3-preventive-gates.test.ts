@@ -244,7 +244,7 @@ export const fnOpen = (mode: string) => (mode === "a" ? 1 : 0)`,
       ts.forEachChild(n, visit)
     }
     visit(sf)
-    expect(CANONICAL_CLOSED_LITERAL_TYPES.size).toBe(101)
+    expect(CANONICAL_CLOSED_LITERAL_TYPES.size).toBe(102)
     expect(Array.from(jsTypes).sort()).toEqual(Array.from(CANONICAL_CLOSED_LITERAL_TYPES).sort())
   })
 

@@ -13,7 +13,9 @@ import {
   LlmPhaseReceipt,
   type MergeSliceWaveInput,
   MergeSliceWaveOutcome,
+  NonNegativeCount,
   NxProjectName,
+  OmnigraphBranchName,
   OwnedRelPath,
   PackageStampHash,
   PackageVerifyCommand,
@@ -31,6 +33,9 @@ import {
   WaveIndex,
   WorkUnitId,
   type WorkflowAttemptRecord,
+  WorkflowProjectAllOutcome,
+  WorkflowProjectionOutcome,
+  type WorkflowProjectorInput,
   type WorkflowRunId,
   type WorkflowRunRecord,
   WorkflowStoreUnavailableError,
@@ -45,6 +50,7 @@ import {
   UnitAgentDispatcher,
   UnitVerifier,
   WorkflowProjectionWriter,
+  WorkflowProjector,
   WorkflowReviewRouter,
   WorkflowWorktreePort,
 } from "@harness/service"
@@ -138,6 +144,7 @@ export interface SpyState {
   upsertRunCalls: number
   upsertUnitCalls: number
   upsertAttemptCalls: number
+  waveProjectCalls: Array<WorkflowProjectorInput>
   runs: Map<WorkflowRunId, WorkflowRunRecord>
   units: Map<string, WorkflowUnitRecord>
   attempts: Map<string, WorkflowAttemptRecord>
@@ -160,6 +167,7 @@ export const makeSpyState = (): SpyState => ({
   upsertRunCalls: 0,
   upsertUnitCalls: 0,
   upsertAttemptCalls: 0,
+  waveProjectCalls: [],
   runs: new Map(),
   units: new Map(),
   attempts: new Map(),
@@ -195,7 +203,45 @@ export interface FakeHandlers {
     readonly attempt: AttemptNumber
   }) => UnitOutcome
   readonly completeSharedStep?: (attempt: AttemptNumber) => UnitOutcome
+  readonly projectWorkflowRun?: (
+    input: WorkflowProjectorInput,
+    callIndex: number,
+  ) => Effect.Effect<WorkflowProjectionOutcome>
 }
+
+const defaultProjectedOutcome = (runId: WorkflowRunId): WorkflowProjectionOutcome =>
+  WorkflowProjectionOutcome.cases.Projected.make({
+    runId,
+    branch: OmnigraphBranchName.make("impl/test-task"),
+    projectionStatus: "fresh",
+    commitId: null,
+    counts: {
+      runsUpserted: NonNegativeCount.make(1),
+      unitsUpserted: NonNegativeCount.make(1),
+      attemptsUpserted: NonNegativeCount.make(1),
+      edgesUpserted: NonNegativeCount.make(0),
+    },
+  })
+
+export const makeWorkflowProjectorTestLayer = (
+  onProject: (input: WorkflowProjectorInput) => Effect.Effect<WorkflowProjectionOutcome>,
+) =>
+  Layer.succeed(WorkflowProjector, {
+    project: onProject,
+    projectAll: () =>
+      Effect.succeed(
+        WorkflowProjectAllOutcome.cases.Projected.make({
+          branch: OmnigraphBranchName.make("impl/test-task"),
+          projectionStatus: "fresh",
+          outcomes: [],
+        }),
+      ),
+    getProjectionStatus: () => Effect.succeedNone,
+  })
+
+export const defaultWorkflowProjectorLayer = makeWorkflowProjectorTestLayer((input) =>
+  Effect.succeed(defaultProjectedOutcome(input.runId)),
+)
 
 export const makeWorkflowTestLayer = (spy: SpyState, handlers: FakeHandlers = {}) => {
   const worktreeLayer = Layer.succeed(WorkflowWorktreePort, {
@@ -370,12 +416,23 @@ export const makeWorkflowTestLayer = (spy: SpyState, handlers: FakeHandlers = {}
       }),
   })
 
+  const workflowProjectorLayer = makeWorkflowProjectorTestLayer((input) =>
+    Effect.gen(function* () {
+      spy.waveProjectCalls.push(input)
+      if (handlers.projectWorkflowRun !== undefined) {
+        return yield* handlers.projectWorkflowRun(input, spy.waveProjectCalls.length)
+      }
+      return defaultProjectedOutcome(input.runId)
+    }),
+  )
+
   const portsLayer = Layer.mergeAll(
     worktreeLayer,
     dispatcherLayer,
     verifierLayer,
     reviewLayer,
     projectionWriterLayer,
+    workflowProjectorLayer,
   )
 
   return HarnessTaskWorkflowLayer.pipe(

@@ -8,6 +8,7 @@ import {
   EscalationOrdinal,
   EscalationResolution,
   type LeaseEpoch,
+  type TaskRunReceipt,
   type UnitEscalation,
   UnitOutcome,
   type UnitRejection,
@@ -16,6 +17,7 @@ import {
   type WorkflowAttemptRecord,
   type WorkflowDaemonCapability,
   type WorkflowExecutionId,
+  type WorkflowProjectionStatus,
   type WorkflowRpcErrorEnvelope,
   WorkflowRpcRequestId,
   type WorkflowRpcResult,
@@ -529,3 +531,43 @@ export const resolveRunTarget = Effect.fn("WorkflowRpcDaemon.resolveRunTarget")(
 
   return yield* Effect.fail(toBoundedReason("No workflow run found"))
 })
+
+/** Computes read-model projection freshness from `WorkflowRunRecord` and workflow engine poll result. */
+export const computeProjectionStatus = (
+  run: WorkflowRunRecord | undefined,
+  polledOpt: Option.Option<
+    | { readonly _tag: "Suspended" }
+    | { readonly _tag: "Complete"; readonly exit: Exit.Exit<TaskRunReceipt, unknown> }
+  >,
+): WorkflowProjectionStatus => {
+  if (run === undefined) {
+    return "not-projected"
+  }
+  return match(polledOpt)
+    .with({ _tag: "None" }, () => "fresh" as const)
+    .with({ _tag: "Some" }, ({ value: wfResult }) =>
+      match(wfResult)
+        .with({ _tag: "Suspended" }, () =>
+          match(run.state)
+            .with("completed", () => "stale" as const)
+            .with("running", "waiting", "aborted", () => "fresh" as const)
+            .exhaustive(),
+        )
+        .with({ _tag: "Complete" }, ({ exit }) =>
+          Exit.match(exit, {
+            onSuccess: () =>
+              match(run.state)
+                .with("completed", () => "fresh" as const)
+                .with("running", "waiting", "aborted", () => "stale" as const)
+                .exhaustive(),
+            onFailure: () =>
+              match(run.state)
+                .with("aborted", () => "fresh" as const)
+                .with("running", "waiting", "completed", () => "stale" as const)
+                .exhaustive(),
+          }),
+        )
+        .exhaustive(),
+    )
+    .exhaustive()
+}

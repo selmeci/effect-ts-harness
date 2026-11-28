@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto"
 import { dirname, join, resolve } from "node:path"
-import { Effect, Result, Schema } from "effect"
+import { Effect, Option, Result, Schema } from "effect"
 import { match } from "ts-pattern"
 import {
   OmnigraphActorToken,
@@ -66,11 +66,13 @@ const ConfigDigestsSchema = Schema.fromJsonString(
     "cluster.yaml": Schema.String,
     "schema.pg": Schema.String,
     "schema.pg@keys": Schema.optional(Schema.String),
+    "schema.pg@edgeKeys": Schema.optional(Schema.Record(Schema.String, Schema.String)),
     "queries/harness.gq": Schema.String,
     "graph.policy.yaml": Schema.String,
     "cluster.policy.yaml": Schema.String,
     "workflows.schema.pg": Schema.optional(Schema.String),
     "workflows.schema.pg@keys": Schema.optional(Schema.String),
+    "workflows.schema.pg@edgeKeys": Schema.optional(Schema.Record(Schema.String, Schema.String)),
     "workflow-queries/workflows.gq": Schema.optional(Schema.String),
     "workflows.policy.yaml": Schema.optional(Schema.String),
   }),
@@ -103,28 +105,192 @@ export const resolveOmnigraphConfigDir = (
     : canonicalConfigDir
 }
 
-export const computeOmnigraphConfigStamp = (configDir: string): string => {
-  const baseFiles = ["cluster.yaml", "schema.pg", "queries/harness.gq"]
-  const optionalConfigFiles = [
-    "graph.policy.yaml",
-    "cluster.policy.yaml",
-    "workflows.schema.pg",
-    "workflow-queries/workflows.gq",
-    "workflows.policy.yaml",
-  ].filter((f) => nodeSyncHostIo.existsSync(join(configDir, f)))
-  return [...baseFiles, ...optionalConfigFiles]
+export const computeOmnigraphConfigStamp = (configDir: string): string =>
+  [
+    ...CONFIG_DIGEST_FILES.slice(0, 3),
+    ...CONFIG_DIGEST_FILES.slice(3).filter((f) => nodeSyncHostIo.existsSync(join(configDir, f))),
+  ]
     .map((f) => {
       const p = join(configDir, f)
       return nodeSyncHostIo.existsSync(p) ? nodeSyncHostIo.readTextSync(p) : ""
     })
     .join("\n---\n")
+
+export const UNPARSEABLE_SCHEMA_EDGE_KEYS_MARKER = "__unparseable_edge_keys__"
+
+export type SchemaEdgeKeysParseResult =
+  | { readonly _tag: "Parsed"; readonly edgeKeys: Readonly<Record<string, string>> }
+  | { readonly _tag: "Unparseable"; readonly reason: string }
+
+const stripPgCommentsAndMaskStrings = (content: string): string =>
+  content.replace(/"(?:\\.|[^"\\])*"|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (tok) =>
+    tok.startsWith('"') ? `"${" ".repeat(Math.max(0, tok.length - 2))}"` : "",
+  )
+
+const scanBalancedEnd = (s: string, openPos: number, openCh: string, closeCh: string): number => {
+  let depth = 1
+  let pos = openPos + 1
+  while (pos < s.length && depth > 0) {
+    depth += match(s[pos])
+      .with(openCh, () => 1)
+      .with(closeCh, () => -1)
+      .otherwise(() => 0)
+    pos += 1
+  }
+  return depth === 0 ? pos : -1
+}
+
+const parseEdgeKeyFromDecl = (edgeName: string, declSlice: string): string | undefined | Error => {
+  const keyMatches = Array.from(declSlice.matchAll(/@key\b/g))
+  if (keyMatches.length > 1) return new Error(`Multiple @key declarations in edge ${edgeName}`)
+  const idx = keyMatches[0]?.index
+  if (idx === undefined) return undefined
+  const offset = declSlice.slice(idx + 4).search(/\S/)
+  const openPos = offset >= 0 ? idx + 4 + offset : -1
+  if (openPos < 0 || declSlice[openPos] !== "(") {
+    return new Error(`Malformed @key without '(' in edge ${edgeName}`)
+  }
+  const closeParen = scanBalancedEnd(declSlice, openPos, "(", ")")
+  if (closeParen < 0) return new Error(`Unclosed @key(...) in edge ${edgeName}`)
+  const normalized = declSlice.slice(idx, closeParen).replace(/\s+/g, " ").trim()
+  return normalized.slice(normalized.indexOf("(") + 1, -1).trim().length === 0
+    ? new Error(`Empty @key() in edge ${edgeName}`)
+    : normalized
+}
+
+const findDeclEnd = (clean: string, start: number, label: string): number | Error => {
+  let parenDepth = 0
+  for (let i = start; i < clean.length; i += 1) {
+    const ch = clean[i]
+    parenDepth += match(ch)
+      .with("(", () => 1)
+      .with(")", () => -1)
+      .otherwise(() => 0)
+    if (parenDepth < 0) return new Error(`Unbalanced ')' in ${label}`)
+    if (parenDepth === 0 && ch === "{") {
+      const end = scanBalancedEnd(clean, i, "{", "}")
+      return end < 0 ? new Error(`Unclosed brace in ${label}`) : end
+    }
+    if (
+      parenDepth === 0 &&
+      !/[A-Za-z0-9_]/.test(clean[i - 1] ?? "") &&
+      /^(?:node|edge)\b/.test(clean.slice(i))
+    ) {
+      return i
+    }
+  }
+  return parenDepth === 0 ? clean.length : new Error(`Unclosed parenthesis in ${label}`)
+}
+
+export const parseSchemaEdgeKeys = (schemaContent: string): SchemaEdgeKeysParseResult => {
+  const clean = stripPgCommentsAndMaskStrings(schemaContent)
+  const edgeKeys: Record<string, string> = {}
+  const declStartRe = /\b(?:node|edge)\b/g
+  let pos = 0
+  while (pos < clean.length) {
+    declStartRe.lastIndex = pos
+    const matchDecl = declStartRe.exec(clean)
+    if (matchDecl === null) break
+    const kw = matchDecl[0]
+    const nameMatch = /^\s+([A-Za-z_][A-Za-z0-9_]*)/.exec(clean.slice(matchDecl.index + kw.length))
+    if (nameMatch?.[1] === undefined) {
+      return { _tag: "Unparseable", reason: `Malformed ${kw} declaration missing identifier` }
+    }
+    const declName = nameMatch[1]
+    const declEnd = findDeclEnd(
+      clean,
+      matchDecl.index + kw.length + nameMatch[0].length,
+      `${kw} ${declName}`,
+    )
+    if (declEnd instanceof Error) return { _tag: "Unparseable", reason: declEnd.message }
+    if (kw === "edge") {
+      const keyOrErr = parseEdgeKeyFromDecl(declName, clean.slice(matchDecl.index, declEnd))
+      if (keyOrErr instanceof Error) return { _tag: "Unparseable", reason: keyOrErr.message }
+      if (keyOrErr !== undefined) edgeKeys[declName] = keyOrErr
+    }
+    pos = declEnd
+  }
+  return { _tag: "Parsed", edgeKeys }
 }
 
 export const extractSchemaEdgeKeyDigest = (schemaContent: string): string => {
-  const keys = Array.from(schemaContent.matchAll(/@key\s*\([^)]*\)/g))
+  const keys = Array.from(
+    stripPgCommentsAndMaskStrings(schemaContent).matchAll(/@key\s*\([^)]*\)/g),
+  )
     .map((m) => m[0].replace(/\s+/g, " ").trim())
     .sort()
   return createHash("sha256").update(keys.join("\n")).digest("hex")
+}
+
+export const extractSchemaEdgeKeys = (schemaContent: string): Readonly<Record<string, string>> =>
+  match(parseSchemaEdgeKeys(schemaContent))
+    .with({ _tag: "Parsed" }, ({ edgeKeys }) => edgeKeys)
+    .with({ _tag: "Unparseable" }, ({ reason }) => ({
+      [UNPARSEABLE_SCHEMA_EDGE_KEYS_MARKER]: reason,
+    }))
+    .exhaustive()
+
+const hasOwn = (obj: Readonly<Record<string, string>>, key: string): boolean =>
+  Object.prototype.hasOwnProperty.call(obj, key)
+
+export const hasBreakingSchemaEdgeKeyChange = (
+  prevEdgeKeys: Readonly<Record<string, string>>,
+  currEdgeKeys: Readonly<Record<string, string>>,
+): boolean => {
+  if (
+    hasOwn(prevEdgeKeys, UNPARSEABLE_SCHEMA_EDGE_KEYS_MARKER) ||
+    hasOwn(currEdgeKeys, UNPARSEABLE_SCHEMA_EDGE_KEYS_MARKER)
+  ) {
+    return true
+  }
+  return Object.entries(prevEdgeKeys).some(
+    ([edgeName, prevKey]) => !hasOwn(currEdgeKeys, edgeName) || currEdgeKeys[edgeName] !== prevKey,
+  )
+}
+
+const isSchemaEdgeKeyBreaking = (
+  key: "schema.pg" | "workflows.schema.pg",
+  prevDigests: ConfigDigests,
+  currDigests: ConfigDigests,
+  prevLegacySchemaContent: string | undefined,
+  requirePriorStamp: boolean,
+): boolean => {
+  const currEdgeKeys = currDigests[`${key}@edgeKeys`] ?? {}
+  if (hasOwn(currEdgeKeys, UNPARSEABLE_SCHEMA_EDGE_KEYS_MARKER)) return true
+  const prevEdgeKeys = prevDigests[`${key}@edgeKeys`]
+  if (prevEdgeKeys !== undefined) return hasBreakingSchemaEdgeKeyChange(prevEdgeKeys, currEdgeKeys)
+  if (prevLegacySchemaContent !== undefined && prevLegacySchemaContent.trim().length > 0) {
+    return hasBreakingSchemaEdgeKeyChange(
+      extractSchemaEdgeKeys(prevLegacySchemaContent),
+      currEdgeKeys,
+    )
+  }
+  const hasContent = (digest: string | undefined): boolean =>
+    digest !== undefined && digest !== EMPTY_CONTENT_SHA256
+  if (requirePriorStamp || hasContent(prevDigests[key]) || hasContent(prevDigests[`${key}@keys`])) {
+    return true
+  }
+  return hasContent(currDigests[key]) && Object.keys(currEdgeKeys).length > 0
+}
+
+const extractPrevWorkflowsSchemaContent = (
+  prevStampSegments: ReadonlyArray<string>,
+  configDir: string,
+): string | undefined => {
+  if (prevStampSegments.length < 3) return undefined
+  const optionalConfigFiles = CONFIG_DIGEST_FILES.slice(3).filter((f) =>
+    nodeSyncHostIo.existsSync(join(configDir, f)),
+  )
+  const wfSchemaIdx = optionalConfigFiles.indexOf("workflows.schema.pg")
+  const optionalSegments = prevStampSegments.slice(3)
+  if (wfSchemaIdx >= 0 && prevStampSegments.length === 3 + optionalConfigFiles.length) {
+    return optionalSegments[wfSchemaIdx]
+  }
+  return optionalSegments.find(
+    (seg) =>
+      !/^\s*(?:version:|query\s+)/m.test(seg) &&
+      /^[ \t]*(?:node|edge)[ \t]+(?:Wf[A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*)/m.test(seg),
+  )
 }
 
 const EMPTY_CONTENT_SHA256 = createHash("sha256").update("").digest("hex")
@@ -142,11 +308,13 @@ export const computeConfigDigests = (configDir: string): ConfigDigests => {
     "cluster.yaml": hashContent(readFileOrEmpty(CONFIG_DIGEST_FILES[0])),
     "schema.pg": hashContent(schemaContent),
     "schema.pg@keys": extractSchemaEdgeKeyDigest(schemaContent),
+    "schema.pg@edgeKeys": extractSchemaEdgeKeys(schemaContent),
     "queries/harness.gq": hashContent(readFileOrEmpty(CONFIG_DIGEST_FILES[2])),
     "graph.policy.yaml": hashContent(readFileOrEmpty(CONFIG_DIGEST_FILES[3])),
     "cluster.policy.yaml": hashContent(readFileOrEmpty(CONFIG_DIGEST_FILES[4])),
     "workflows.schema.pg": hashContent(workflowsSchemaContent),
     "workflows.schema.pg@keys": extractSchemaEdgeKeyDigest(workflowsSchemaContent),
+    "workflows.schema.pg@edgeKeys": extractSchemaEdgeKeys(workflowsSchemaContent),
     "workflow-queries/workflows.gq": hashContent(readFileOrEmpty(CONFIG_DIGEST_FILES[6])),
     "workflows.policy.yaml": hashContent(readFileOrEmpty(CONFIG_DIGEST_FILES[7])),
   }
@@ -181,20 +349,21 @@ export const evaluateClusterConfigDrift = (
       : ""
     const epochMatches = currentEpoch === CLUSTER_SCHEMA_EPOCH
 
-    const prevDigestsOpt = nodeSyncHostIo.existsSync(digestsPath)
-      ? Schema.decodeOption(ConfigDigestsSchema)(nodeSyncHostIo.readTextSync(digestsPath))
+    const prevDigests = nodeSyncHostIo.existsSync(digestsPath)
+      ? Option.getOrUndefined(
+          Schema.decodeOption(ConfigDigestsSchema)(nodeSyncHostIo.readTextSync(digestsPath)),
+        )
       : undefined
-    const prevDigests =
-      prevDigestsOpt !== undefined
-        ? match(prevDigestsOpt)
-            .with({ _tag: "Some" }, ({ value }) => value)
-            .with({ _tag: "None" }, () => undefined)
-            .exhaustive()
-        : undefined
 
     const currentStamp = nodeSyncHostIo.existsSync(stampPath)
       ? nodeSyncHostIo.readTextSync(stampPath)
       : ""
+    const prevStampSegments = currentStamp.length > 0 ? currentStamp.split("\n---\n") : []
+    const prevMainSchemaContent = prevStampSegments.length >= 3 ? prevStampSegments[1] : undefined
+    const prevWorkflowsSchemaContent = extractPrevWorkflowsSchemaContent(
+      prevStampSegments,
+      configDir,
+    )
     const stampChanged = currentStamp !== expectedStamp
 
     const queriesChanged =
@@ -217,10 +386,14 @@ export const evaluateClusterConfigDrift = (
           digests["cluster.policy.yaml"] !== prevDigests["cluster.policy.yaml"] ||
           digests["workflows.policy.yaml"] !==
             (prevDigests["workflows.policy.yaml"] ?? EMPTY_CONTENT_SHA256) ||
-          (prevDigests["schema.pg@keys"] !== undefined &&
-            digests["schema.pg@keys"] !== prevDigests["schema.pg@keys"]) ||
-          (prevDigests["workflows.schema.pg@keys"] !== undefined &&
-            digests["workflows.schema.pg@keys"] !== prevDigests["workflows.schema.pg@keys"])
+          isSchemaEdgeKeyBreaking("schema.pg", prevDigests, digests, prevMainSchemaContent, true) ||
+          isSchemaEdgeKeyBreaking(
+            "workflows.schema.pg",
+            prevDigests,
+            digests,
+            prevWorkflowsSchemaContent,
+            false,
+          )
         : stampChanged)
 
     const driftKind: OmnigraphConfigDriftKind = policyBundleOrEdgeKeyChanged

@@ -338,6 +338,18 @@ export {
   WorktreeUnitMapping,
 } from "./workflow-rpc.js"
 export {
+  WorkflowProjectAllInput,
+  WorkflowProjectAllOutcome,
+  WorkflowProjectionCounts,
+  WorkflowProjectionNonStaleOutcome,
+  WorkflowProjectionOutcome,
+  WorkflowProjectionTargetBranch,
+  WorkflowProjectorInput,
+  WorkflowProjectorTrigger,
+  mergeWorkflowProjectionStatus,
+  projectionStatusOfOutcome,
+} from "./workflow-projection.js"
+export {
   BackupDirPath,
   BackupFileHash,
   DaemonHandshakeRequest,

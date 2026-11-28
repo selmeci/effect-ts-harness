@@ -121,7 +121,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 
 ## Out of scope
 
-- Live `WorkflowProjector` sync into analytical Omnigraph graph `harness` (`impl/<task>`) on `done` pre-merge hooks (deferred to WF-6).
+- Live `WorkflowProjector` sync into analytical Omnigraph graph `harness` (`impl/<task>`) on wave, `done` pre-merge, and post-rebuild hooks (implemented in WF-6 via `harness:SPEC-0038`).
 - Automated CI execution against paid live `claude` or `agy` API endpoints (covered by optional manual smoke runs).
 
 ## Known residual risks

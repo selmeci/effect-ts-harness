@@ -136,7 +136,7 @@ Requirements follow EARS syntax. Each requirement is a single sentence with bold
 ## Out of scope
 
 - Live LLM/agent runner profiles (`runner-profiles.ts`), `AgentRunnerError`, and automatic `HARNESS_UNIT_WORKER=1` subprocess spawning (deferred to WF-5 so `@harness/contract` incurs zero `[dead-tagged-error]` diagnostics in WF-4).
-- `WorkflowProjector` live sync into the main analytical graph (deferred to WF-6).
+- `WorkflowProjector` live sync into the main analytical graph (implemented in WF-6 via `harness:SPEC-0038`).
 
 ## Known residual risks
 

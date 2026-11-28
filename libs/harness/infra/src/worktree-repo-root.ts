@@ -16,6 +16,7 @@ import {
   WorkflowStoreOperation,
   WorkflowStoreUnavailableError,
   WorkUnitId,
+  WorkspaceFilePath,
   type WorktreePathKind,
 } from "@harness/contract"
 import { resolveGitCommonDir } from "@harness/graph/cluster-resolver"
@@ -109,17 +110,22 @@ export interface WorkflowRuntimePaths {
   readonly socketPath: DaemonSocketPath
   readonly lockFilePath: LeaseFilePath
   readonly backupDirPath: BackupDirPath
+  readonly projectionStatusPath: WorkspaceFilePath
 }
 
 /**
  * Derives canonical workflow daemon runtime paths inside `<git-common-dir>/harness/`
  * so all linked worktrees share one socket (`daemon.sock`), writer lock (`daemon.lock`),
- * and pre-rebuild backup directory (`workflow-backups`).
+ * pre-rebuild backup directory (`workflow-backups`), and projection status store
+ * (`workflow-projection-status.json`).
  */
 const resolveWorkflowRuntimePaths = (commonGitDir: GitCommonDirPath): WorkflowRuntimePaths => ({
   socketPath: DaemonSocketPath.make(join(commonGitDir, "harness", "daemon.sock")),
   lockFilePath: LeaseFilePath.make(join(commonGitDir, "harness", "daemon.lock")),
   backupDirPath: BackupDirPath.make(join(commonGitDir, "harness", "workflow-backups")),
+  projectionStatusPath: WorkspaceFilePath.make(
+    join(commonGitDir, "harness", "workflow-projection-status.json"),
+  ),
 })
 
 /**

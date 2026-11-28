@@ -41,6 +41,7 @@ import {
   UnitAgentDispatcher,
   UnitVerifier,
   type WorkflowProjectionWriter,
+  type WorkflowProjector,
   WorkflowReviewRouter,
   WorkflowWorktreePort,
 } from "@harness/service"
@@ -53,6 +54,7 @@ import {
   projectUnitAttemptDispatched,
   projectUnitEscalated,
   projectUnitOutcome,
+  projectWaveToHarnessActivity,
   resolveUnitCwd,
   siblingOwnedPathsForUnit,
   unitKindForLevel,
@@ -673,6 +675,7 @@ export const executeTaskWorkflow = Effect.fn("Harness.executeTaskWorkflow")(func
   | WorkflowWorktreePort
   | WorkflowReviewRouter
   | WorkflowProjectionWriter
+  | WorkflowProjector
 > {
   const instance = yield* WorkflowEngine.WorkflowInstance
   const executionId = WorkflowExecutionId.make(instance.executionId)
@@ -731,6 +734,13 @@ export const executeTaskWorkflow = Effect.fn("Harness.executeTaskWorkflow")(func
       )
       .with("slice", () => Effect.void)
       .exhaustive()
+
+    yield* projectWaveToHarnessActivity(
+      plan,
+      wave.waveIndex,
+      worktrees.canonicalRepoRoot,
+      worktrees.implBranch ?? plan.implBranch,
+    )
   }
 
   if (plan.sharedStepPaths.length > 0) {

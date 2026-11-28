@@ -10,6 +10,7 @@ import {
   GitCommitSha,
   LlmPhaseReceipt,
   NxProjectName,
+  OmnigraphBranchName,
   OwnedRelPath,
   PackageStampHash,
   PackageVerifyCommand,
@@ -24,17 +25,21 @@ import {
   WorkUnitId,
   type WorkflowAttemptRecord,
   WorkflowExecutionId,
+  WorkflowProjectAllOutcome,
+  WorkflowProjectionOutcome,
   type WorkflowRunId,
   type WorkflowRunRecord,
   type WorkflowUnitRecord,
   WorkspaceTreeHash,
   compareCodeUnits,
+  toBoundedReason,
 } from "@harness/contract"
 import { HarnessTaskWorkflow, HarnessTaskWorkflowLayer, LlmPhaseDone } from "@harness/gates"
 import { OmnigraphClient as OmnigraphClientClass } from "@harness/graph"
 import {
   UnitAgentDispatcher,
   UnitVerifier,
+  WorkflowProjector,
   WorkflowReadModelQuery,
   WorkflowReviewRouter,
   WorkflowWorktreePort,
@@ -999,10 +1004,31 @@ export const makeDiffStack = (
       runnerKind: "live" as const,
       dispatchUnit: () => Effect.succeed({ _tag: "Completed" as const }),
     })
+  const projectorStubLayer = Layer.succeed(WorkflowProjector, {
+    project: (input) =>
+      Effect.succeed(
+        WorkflowProjectionOutcome.cases.Skipped.make({
+          runId: input.runId,
+          branch: OmnigraphBranchName.make("impl/replay-fixture"),
+          projectionStatus: "not-projected",
+          reason: toBoundedReason("replay fixture stub"),
+        }),
+      ),
+    projectAll: () =>
+      Effect.succeed(
+        WorkflowProjectAllOutcome.cases.Skipped.make({
+          branch: OmnigraphBranchName.make("impl/replay-fixture"),
+          projectionStatus: "not-projected",
+          reason: toBoundedReason("replay fixture stub"),
+        }),
+      ),
+    getProjectionStatus: () => Effect.succeedNone,
+  })
   const baseServices = Layer.mergeAll(
     engineLayer,
     projectionWriterLayer,
     readModelLayer,
+    projectorStubLayer,
     layers.worktreeLayer,
     layers.verifierLayer,
     dispatcherLayer,

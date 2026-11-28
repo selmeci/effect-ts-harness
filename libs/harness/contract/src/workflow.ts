@@ -1,5 +1,6 @@
 import { Match, Option, Schema } from "effect"
 import { compareCodeUnits } from "./ast-and-gate-primitives.js"
+import { OmnigraphBranchName } from "./omnigraph.js"
 import { AbsoluteRepoRoot, GitCommitSha } from "./repo-identity.js"
 import { ReviewRoutingPlan } from "./review-routing.js"
 import { SHIP_STAGES, ShipStage } from "./workflow-timeouts.js"
@@ -470,6 +471,7 @@ export const CompiledPlan = Schema.Struct({
   level: WorkflowLevel,
   planSha: PlanSha256,
   baseSha: GitCommitSha,
+  implBranch: Schema.optional(OmnigraphBranchName),
   mode: UnitMode,
   units: Schema.Array(CompiledWorkUnit),
   sharedStepPaths: Schema.Array(OwnedRelPath),

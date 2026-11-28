@@ -26,7 +26,7 @@ export const CANONICAL_CLOSED_LITERAL_TYPES: ReadonlySet<string> = new Set(
     "SpanBudgetRuleId SpanBudgetViolationKind StageLatencyStatus StandardRoleName StdinReadErrorKind SubprocessFailureKind",
     "TelemetryCategory TelemetryEngineSource TelemetryOutcome TelemetrySurface TierTopologyRuleId VerificationStatus",
     "ViolationRule WorkflowAttemptVerdict WorkflowBackupMode WorkflowDoctorCheckStatus WorkflowDoctorMode WorkflowGqQueryName",
-    "WorkflowLevel WorkflowProjectionStatus WorkflowRunState WorkflowStartOutcome WorkflowStoreAvailabilityState",
+    "WorkflowLevel WorkflowProjectionStatus WorkflowProjectorTrigger WorkflowRunState WorkflowStartOutcome WorkflowStoreAvailabilityState",
     "WorkflowUnitKind WorkflowUnitStatus WorkspaceFsOperation WorktreePathKind",
   ]
     .join(" ")

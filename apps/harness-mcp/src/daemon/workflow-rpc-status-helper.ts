@@ -10,7 +10,6 @@ import {
   SHARED_STEP_UNIT_ID,
   type SliceBranchName,
   TaskRunAbortedError,
-  type TaskRunReceipt,
   type UnitEscalation,
   type UnitOutcome,
   type UnitRejection,
@@ -22,7 +21,6 @@ import {
   WorkflowDeferredTag,
   type WorkflowExecutionId,
   WorkflowPendingDeferred,
-  WorkflowProjectionStatus,
   type WorkflowRpcEnvelope,
   type WorkflowRunId,
   type WorkflowRunRecord,
@@ -39,6 +37,7 @@ import {
   encodeWorkflowDeferredName,
   isPureInterruptCause,
   makeWorkflowAttemptKey,
+  mergeWorkflowProjectionStatus,
   toBoundedReason,
   wavesOf,
 } from "@harness/contract"
@@ -59,6 +58,7 @@ import { handleDaemonWorkflowDoctorRequest } from "./workflow-rpc-doctor-helper.
 import {
   type WorkflowRpcHandlerInput,
   checkDeferredResult,
+  computeProjectionStatus,
   extractLastRejection,
   findExplicitEscalation,
   hasAttemptVerdict,
@@ -313,45 +313,6 @@ const discoverPendingDeferreds = Effect.fn("WorkflowRpcDaemon.discoverPendingDef
   },
 )
 
-const computeProjectionStatus = (
-  run: WorkflowRunRecord | undefined,
-  polledOpt: Option.Option<
-    | { readonly _tag: "Suspended" }
-    | { readonly _tag: "Complete"; readonly exit: Exit.Exit<TaskRunReceipt, unknown> }
-  >,
-): WorkflowProjectionStatus => {
-  if (run === undefined) {
-    return "not-projected"
-  }
-  return match(polledOpt)
-    .with({ _tag: "None" }, () => "fresh" as const)
-    .with({ _tag: "Some" }, ({ value: wfResult }) =>
-      match(wfResult)
-        .with({ _tag: "Suspended" }, () =>
-          match(run.state)
-            .with("completed", () => "stale" as const)
-            .with("running", "waiting", "aborted", () => "fresh" as const)
-            .exhaustive(),
-        )
-        .with({ _tag: "Complete" }, ({ exit }) =>
-          Exit.match(exit, {
-            onSuccess: () =>
-              match(run.state)
-                .with("completed", () => "fresh" as const)
-                .with("running", "waiting", "aborted", () => "stale" as const)
-                .exhaustive(),
-            onFailure: () =>
-              match(run.state)
-                .with("aborted", () => "fresh" as const)
-                .with("running", "waiting", "completed", () => "stale" as const)
-                .exhaustive(),
-          }),
-        )
-        .exhaustive(),
-    )
-    .exhaustive()
-}
-
 /** Classifies a terminal workflow failure `Cause` into a typed `WorkflowTerminalError` union. */
 export const classifyWorkflowTerminalError = (
   cause: Cause.Cause<unknown>,
@@ -474,7 +435,13 @@ export const buildStatusSummaryForRuntime = Effect.fn("WorkflowRpcDaemon.buildSt
           const shipAttemptsField =
             shipAttempts.length > 0 ? { shipAttempts: [...shipAttempts] } : {}
 
-          const projectionStatus = computeProjectionStatus(target.runRecord, polledOpt)
+          const readableStatusOpt = yield* runtime.workflowProjector.getProjectionStatus(
+            effectiveRun.runId,
+          )
+          const projectionStatus = mergeWorkflowProjectionStatus(
+            computeProjectionStatus(target.runRecord, polledOpt),
+            readableStatusOpt,
+          )
 
           const terminalOutcome = match(polledOpt)
             .with({ _tag: "None" }, () => undefined)

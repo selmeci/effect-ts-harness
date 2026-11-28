@@ -1,4 +1,4 @@
-import { Clock, Effect, Schedule, Schema } from "effect"
+import { Cause, Clock, Effect, Schedule, Schema } from "effect"
 import { Activity, type WorkflowEngine } from "effect/workflow"
 import { match } from "ts-pattern"
 import {
@@ -10,6 +10,7 @@ import {
   ErrorReasonMessage,
   type EscalationOrdinal,
   NxProjectName,
+  OmnigraphBranchName,
   type OwnedRelPath,
   PackageVerifyCommand,
   PlanJsonPayload,
@@ -25,6 +26,8 @@ import {
   WorkflowActivityTag,
   type WorkflowExecutionId,
   type WorkflowLevel,
+  WorkflowProjectionOutcome,
+  WorkflowProjectionTargetBranch,
   WorkflowStoreUnavailableError,
   WorkflowTimestampMs,
   type WorkflowUnitKind,
@@ -35,11 +38,13 @@ import {
   WorkspaceFsOperation,
   WriterLeaseHeldError,
   encodeWorkflowActivityName,
+  isPureInterruptCause,
   makeWorkflowAttemptKey,
   makeWorkflowUnitKey,
+  toBoundedReason,
   wavesOf,
 } from "@harness/contract"
-import { type UnitVerifier, WorkflowProjectionWriter } from "@harness/service"
+import { type UnitVerifier, WorkflowProjectionWriter, WorkflowProjector } from "@harness/service"
 
 const SHARED_STEP_SLICE_BRANCH: SliceBranchName = SliceBranchName.make("slice/shared-step")
 const SHARED_STEP_PROJECT_NAME: NxProjectName = NxProjectName.make("shared-step")
@@ -493,3 +498,51 @@ export const projectUnitEscalated = (
       }),
     ),
   })
+
+/** Non-fatal durable activity projecting the wave state into the analytical `harness` graph. */
+export const projectWaveToHarnessActivity = (
+  plan: CompiledPlan,
+  waveIndex: WaveIndex,
+  canonicalRepoRoot: AbsoluteRepoRoot,
+  explicitImplBranch?: OmnigraphBranchName,
+) => {
+  const resolvedBranch = explicitImplBranch ?? plan.implBranch
+  const targetBranch =
+    resolvedBranch !== undefined
+      ? WorkflowProjectionTargetBranch.cases.Explicit.make({ branch: resolvedBranch })
+      : WorkflowProjectionTargetBranch.cases.ActiveTaskImplBranch.make({})
+  return Activity.make({
+    name: encodeProjectionActivityName(
+      WorkflowActivityTag.cases.ProjectWaveToHarness.make({ waveIndex }),
+    ),
+    success: WorkflowProjectionOutcome,
+    execute: Effect.gen(function* () {
+      const projector = yield* WorkflowProjector
+      return yield* projector.project({
+        runId: plan.runId,
+        targetBranch,
+        trigger: "wave",
+        repoRoot: canonicalRepoRoot,
+      })
+    }).pipe(
+      Effect.catchCause((cause) => {
+        if (isPureInterruptCause(cause)) {
+          return Effect.failCause(cause)
+        }
+        const reason = toBoundedReason(Cause.pretty(cause), "Wave projection failed")
+        return Effect.logWarning(
+          `[harness/gates] ProjectWaveToHarness wave ${waveIndex} for run '${plan.runId}' failed: ${reason}`,
+        ).pipe(
+          Effect.as(
+            WorkflowProjectionOutcome.cases.Stale.make({
+              runId: plan.runId,
+              branch: resolvedBranch ?? OmnigraphBranchName.make("main"),
+              projectionStatus: "stale",
+              reason,
+            }),
+          ),
+        )
+      }),
+    ),
+  })
+}

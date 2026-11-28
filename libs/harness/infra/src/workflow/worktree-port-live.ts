@@ -6,6 +6,7 @@ import {
   type CompiledPlan,
   type MergeSliceWaveInput,
   MergeSliceWaveOutcome,
+  OmnigraphBranchName,
   SliceBranchName,
   WorkspaceFilePath,
   WorkspaceFsError,
@@ -15,15 +16,17 @@ import {
   isPureInterruptCause,
   toErrorReasonMessage,
 } from "@harness/contract"
+import { resolveOmnigraphTaskBranches } from "@harness/graph"
 import { WorkflowWorktreePort, type WorkflowWorktreePortShape } from "@harness/service"
 import type { ExtendedHostIo, SyncHostExecResult } from "@harness/service/host-io"
 import { nodeSyncHostIo } from "../node-host-io.js"
 import { resolveWorkflowWorktreeDir, validateWorktreeRepoRoot } from "../worktree-repo-root.js"
 
-/** Optional host I/O and repository root overrides for `WorkflowWorktreePortLive`. */
+/** Optional host I/O, repository root, and environment overrides for `WorkflowWorktreePortLive`. */
 export interface WorkflowWorktreePortOptions {
   readonly hostIo?: ExtendedHostIo | undefined
   readonly repoRoot?: AbsoluteRepoRoot | undefined
+  readonly env?: Readonly<Record<string, string | undefined>> | undefined
 }
 
 const toWorktreeFsError = (
@@ -300,11 +303,18 @@ export const provisionWorkflowWorktreesImpl = Effect.fn("Harness.provisionWorkfl
       )
       .exhaustive()
 
+    const implBranch =
+      plan.implBranch ??
+      OmnigraphBranchName.make(
+        resolveOmnigraphTaskBranches(validated.worktreeRoot, hostIo, options?.env).implBranch,
+      )
+
     return yield* match(plan.level)
       .with("slice", () =>
         Effect.succeed<WorktreeProvisionReceipt>({
           runId: plan.runId,
           canonicalRepoRoot,
+          implBranch,
           entries: plan.units.map((unit) => ({
             unitId: unit.unitId,
             cwd: canonicalRepoRoot,
@@ -412,6 +422,7 @@ export const provisionWorkflowWorktreesImpl = Effect.fn("Harness.provisionWorkfl
           return {
             runId: plan.runId,
             canonicalRepoRoot,
+            implBranch,
             entries,
           } satisfies WorktreeProvisionReceipt
         }).pipe(

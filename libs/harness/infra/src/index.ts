@@ -340,6 +340,23 @@ export {
   shipWorkflowViaDaemon,
   type WorkflowShipRpcOptions,
 } from "./workflow/ship-daemon-client.js"
+export {
+  WORKFLOW_PROJECTION_STATUS_STORE_VERSION,
+  WorkflowProjectionStatusStoreData,
+  readWorkflowProjectionStatuses,
+  resolveWorkflowProjectionStatusPath,
+  type ResolvedWorkflowProjectionStatusPath,
+  writeWorkflowProjectionStatus,
+} from "./workflow/workflow-projection-status-store.js"
+export {
+  WorkflowProjectorLive,
+  computeProjectorRetryDelayMs,
+  getWorkflowProjectionStatusImpl,
+  makeWorkflowProjectorLayer,
+  projectAllWorkflowRunsImpl,
+  projectWorkflowRunImpl,
+  type WorkflowProjectorOptions,
+} from "./workflow/workflow-projector-live.js"
 
 export const TsCompilerOverlayServiceLive: Layer.Layer<TsCompilerOverlayService> =
   makeTsCompilerOverlayLayer(nodeSyncHostIo)

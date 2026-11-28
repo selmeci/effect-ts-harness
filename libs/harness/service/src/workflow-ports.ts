@@ -24,6 +24,11 @@ import type {
   UpdateShipAttemptStatusInput,
   WorkflowAttemptRecord,
   WorkflowBackupSummary,
+  WorkflowProjectAllInput,
+  WorkflowProjectAllOutcome,
+  WorkflowProjectionOutcome,
+  WorkflowProjectionStatus,
+  WorkflowProjectorInput,
   WorkflowRestoreRequest,
   WorkflowRestoreSummary,
   WorkflowRouteReviewInput,
@@ -218,4 +223,21 @@ export interface ShipAttemptStoreShape {
 
 export class ShipAttemptStore extends Context.Service<ShipAttemptStore, ShipAttemptStoreShape>()(
   "@harness/service/ShipAttemptStore",
+) {}
+
+/**
+ * Projects durable workflow runs, units, and attempts into the analytical `harness` graph
+ * (`impl/<task>`, `main`, or another explicit target branch) as a non-fatal readable
+ * convenience (`SPEC-0038`, `RFC-0013 REQ-4.5`).
+ */
+export interface WorkflowProjectorShape {
+  readonly project: (input: WorkflowProjectorInput) => Effect.Effect<WorkflowProjectionOutcome>
+  readonly projectAll: (input: WorkflowProjectAllInput) => Effect.Effect<WorkflowProjectAllOutcome>
+  readonly getProjectionStatus: (
+    runId: WorkflowRunId,
+  ) => Effect.Effect<Option.Option<WorkflowProjectionStatus>>
+}
+
+export class WorkflowProjector extends Context.Service<WorkflowProjector, WorkflowProjectorShape>()(
+  "@harness/service/WorkflowProjector",
 ) {}

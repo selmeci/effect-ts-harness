@@ -55,6 +55,8 @@ import {
   type UnixSocketDaemonPortShape,
   WorkflowProjectionWriter,
   type WorkflowProjectionWriterShape,
+  WorkflowProjector,
+  type WorkflowProjectorShape,
   WorkflowReadModelQuery,
   type WorkflowReadModelQueryShape,
   WorkflowReviewRouter,
@@ -110,6 +112,7 @@ export interface WorkflowDaemonRuntime {
   readonly shipWorkflowContext: Context.Context<WorkflowDaemonServices>
   readonly engine: WorkflowEngine.WorkflowEngine["Service"]
   readonly projectionWriter: WorkflowProjectionWriterShape
+  readonly workflowProjector: WorkflowProjectorShape
   readonly readModelQuery: WorkflowReadModelQueryShape
   readonly unitVerifier: UnitVerifierShape
   readonly unitAgentDispatcher: UnitAgentDispatcherShape
@@ -318,6 +321,7 @@ const acquireLeaseAndBuildEngineInScope = (input: {
       shipWorkflowContext: workflowContext,
       engine: Context.get(workflowContext, WorkflowEngine.WorkflowEngine),
       projectionWriter: Context.get(workflowContext, WorkflowProjectionWriter),
+      workflowProjector: Context.get(workflowContext, WorkflowProjector),
       readModelQuery: Context.get(workflowContext, WorkflowReadModelQuery),
       unitVerifier: Context.get(workflowContext, UnitVerifier),
       unitAgentDispatcher: Context.get(workflowContext, UnitAgentDispatcher),
